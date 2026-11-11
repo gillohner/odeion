@@ -67,6 +67,11 @@ fn pubky() -> Pubky {
 }
 
 fn node(dir: &std::path::Path) -> Arc<NodeState> {
+    node_with_token(dir, None)
+}
+
+/// [`node`] with an API token, so owner browser sessions and device sign-ins are checked.
+fn node_with_token(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
     let db = dir.join("node.sqlite");
     NodeState::new(
         NodeSettings {
@@ -77,7 +82,7 @@ fn node(dir: &std::path::Path) -> Arc<NodeState> {
             art_dir: dir.join("art"),
             mirror_dir: dir.join("homeserver"),
             pipeline: PipelineConfig::default(),
-            token: None,
+            token: token.map(str::to_string),
             subsonic_user: "pubky".into(),
             pubky: Default::default(),
             public_url: "http://127.0.0.1:7788".into(),
@@ -874,4 +879,836 @@ async fn a_take_of_the_vaults_copy_that_doesnt_go_through_keeps_the_nodes_record
         r["details"][0]["reason"], "stale",
         "the record of the newest copy seen is back: {r}"
     );
+}
+
+/// A sign-in that replaces this node's while a vault pass runs for the old one ends the pass
+/// before its next write: nothing of the old identity's sign-ins lands on the node, and the old
+/// identity's vault (its device list, its sign-ins) is left as it was.
+#[tokio::test]
+async fn a_sign_in_switch_ends_the_old_vault_pass() {
+    use pm_pubky::vault::VaultStoreError;
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let info = admin_call(&a, reqwest::Method::GET, "/info", None).await;
+    let hs = PublicKey::try_from(info["public_key"].as_str().unwrap()).unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let sign_up = |ids: Vec<&'static str>| {
+        let (a, hs, homeserver) = (a.clone(), hs.clone(), homeserver.clone());
+        async move {
+            let token = admin_call(
+                &a,
+                reqwest::Method::POST,
+                "/generate_signup_token",
+                Some(json!({"storage_quota_mb": "unlimited"})),
+            )
+            .await;
+            let signer = pubky().signer(Keypair::random());
+            signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
+            let mut sessions = Vec::new();
+            for id in ids {
+                let flow = homeserver.start_login(id).unwrap();
+                signer.approve_auth(flow.url()).await.unwrap();
+                sessions.push(flow.await_approval().await.unwrap());
+            }
+            sessions
+        }
+    };
+    let mut a_sessions = sign_up(vec!["node.pubky.music", "phone.pubky.music"]).await;
+    let mut b_sessions = sign_up(vec!["node.pubky.music"]).await;
+    let phone_session = a_sessions.pop().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path());
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        a_sessions.pop().unwrap(),
+    ))));
+    let app = router(n.clone());
+    let (st, v) = call(&app, "POST", "/v1/vault/register").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // A's phone signed in to TIDAL for every device of A's
+    let phone_key = ClientSecret::generate();
+    let phone = Vault::new(&phone_session, &phone_key);
+    phone.register("Phone").await.unwrap();
+    let tidal: SignIn = serde_json::from_value(json!({"service": "tidal", "way": "app",
+        "tokens": {"access_token": "never-shown", "refresh_token": "never-shown-either"}}))
+    .unwrap();
+    phone.write_shared("tidal", &tidal).await.unwrap();
+    let index_before = serde_json::to_value(phone.index().await.unwrap()).unwrap();
+    let blob_before = phone.envelope("tidal").await.unwrap().unwrap();
+    // The node's pass for A starts as B signs in on the node
+    let sync_a = n.sync.lock().unwrap().clone().expect("signed in as A");
+    let key = pm_pubky::vault::load_or_create_client_secret(&n.data_dir().join("vault").join("client.key"))
+        .unwrap();
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        b_sessions.pop().unwrap(),
+    ))));
+    assert!(sync_a.is_retired());
+    let vault = Vault::new(sync_a.session(), &key).device("node");
+    let r = pm_api::vault_cache::pass(&n, &vault, None, &|| !sync_a.is_retired()).await;
+    assert!(matches!(r, Err(VaultStoreError::Replaced)), "{r:?}");
+    let get = |k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
+    assert_eq!(get("tidal.user"), None, "A's sign-in landed on the node");
+    assert_eq!(
+        serde_json::to_value(phone.index().await.unwrap()).unwrap(),
+        index_before,
+        "A's device list was written"
+    );
+    assert_eq!(phone.envelope("tidal").await.unwrap().unwrap(), blob_before);
+    // B's own pass runs: B has no sign-ins, nothing to take; the node is registered with B
+    let (st, v) = call(&app, "POST", "/v1/vault/register").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, r) = call(&app, "POST", "/v1/vault/sync").await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["pulled"], json!([]), "{r}");
+    assert_eq!(get("tidal.user"), None);
+}
+
+/// Identities on the test homeserver, each with sessions for `ids` (client ids).
+async fn identities_with_sessions(n: usize, ids: &[&str]) -> Option<Vec<Vec<pubky::PubkySession>>> {
+    let a = admin()?;
+    let info = admin_call(&a, reqwest::Method::GET, "/info", None).await;
+    let hs = PublicKey::try_from(info["public_key"].as_str().unwrap()).unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let token = admin_call(
+            &a,
+            reqwest::Method::POST,
+            "/generate_signup_token",
+            Some(json!({"storage_quota_mb": "unlimited"})),
+        )
+        .await;
+        let signer = pubky().signer(Keypair::random());
+        signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
+        let mut sessions = Vec::new();
+        for id in ids {
+            let flow = homeserver.start_login(id).unwrap();
+            signer.approve_auth(flow.url()).await.unwrap();
+            sessions.push(flow.await_approval().await.unwrap());
+        }
+        out.push(sessions);
+    }
+    Some(out)
+}
+
+fn bookmark(n: &NodeState, i: u32) -> String {
+    let uri = pm_model::MusicUri::parse(&format!(
+        "https://musicbrainz.org/recording/00000000-0000-4000-8000-{i:012}"
+    ))
+    .unwrap();
+    n.library
+        .lock()
+        .unwrap()
+        .add_bookmark(
+            &pm_pubky::Bookmark::id_for(&uri),
+            &uri.to_url(),
+            1_700_000_000_000_000,
+        )
+        .unwrap();
+    uri.to_url()
+}
+
+/// A sign-in that replaces the node's in the middle of a sync pass (after its reads, before its
+/// writes: the test stops the pass there) ends the pass at its next write: nothing of the old
+/// identity's lands in the library and nothing of the node's goes to the old identity's
+/// homeserver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_in_switch_mid_sync_writes_nothing_more() {
+    use pm_api::sync::SyncError;
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music", "phone.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let mut b = ids.pop().unwrap();
+    let mut a = ids.pop().unwrap();
+    let (a_phone, a_node) = (a.pop().unwrap(), a.pop().unwrap());
+    let homeserver = NodeHomeserver::new(network()).unwrap();
+    // A's other device put a bookmark on A's homeserver
+    let d_other = tempfile::tempdir().unwrap();
+    let other = node(d_other.path());
+    let theirs = bookmark(&other, 1);
+    let sync_other = Arc::new(PubkySync::from_session(homeserver.clone(), a_phone));
+    other.set_sync(Some(sync_other.clone()));
+    assert_eq!(sync_other.sync(&other.library).await.unwrap().pushed, 1);
+    // The node, signed in as A with a bookmark queued, starts a pass; it stops after its reads
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let mine = bookmark(&n, 2);
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a_node.clone()));
+    n.set_sync(Some(sync_a.clone()));
+    let (reached, release) = pm_api::test_hooks::arm(&format!("sync.after_reads:{}", sync_a.z32()));
+    let pass = {
+        let (sync_a, library) = (sync_a.clone(), n.library.clone());
+        tokio::spawn(async move { sync_a.sync(&library).await })
+    };
+    reached.await.unwrap();
+    // B signs in now, mid-pass
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        homeserver.clone(),
+        b.pop().unwrap(),
+    ))));
+    let _ = release.send(());
+    let r = pass.await.unwrap();
+    assert!(matches!(r, Err(SyncError::Replaced)), "{r:?}");
+    let urls: Vec<String> = n
+        .library
+        .lock()
+        .unwrap()
+        .list_bookmarks()
+        .unwrap()
+        .into_iter()
+        .map(|b| b.uri)
+        .collect();
+    assert_eq!(urls, [mine], "A's bookmark landed on the node");
+    let on_a: Vec<String> = homeserver
+        .read_v1_bookmarks_except(&a_node, &std::collections::HashMap::new())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, url, _)| url)
+        .collect();
+    assert_eq!(on_a, [theirs], "the node's bookmark went to A's homeserver");
+}
+
+/// The same for a vault pass, on a sign-in a node can take: another node of A's put its TIDAL
+/// sign-in in A's vault; a node of A's that runs its pass undisturbed takes it (the control), while
+/// the node whose pass is stopped right after it read the sign-in, and replaced by B's sign-in
+/// there, takes nothing and writes nothing to A's vault.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_in_switch_mid_vault_pass_writes_nothing_more() {
+    use pm_pubky::vault::VaultStoreError;
+    let Some(mut ids) = identities_with_sessions(
+        2,
+        &["node.pubky.music", "kitchen.pubky.music", "bedroom.pubky.music"],
+    )
+    .await
+    else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let mut b = ids.pop().unwrap();
+    let mut a = ids.pop().unwrap();
+    let (a_control, a_writer, a_node) = (a.pop().unwrap(), a.pop().unwrap(), a.pop().unwrap());
+    let make = |session: pubky::PubkySession| {
+        let d = tempfile::tempdir().unwrap();
+        let n = node(d.path());
+        n.set_sync(Some(Arc::new(PubkySync::from_session(
+            NodeHomeserver::new(network()).unwrap(),
+            session,
+        ))));
+        (d, n)
+    };
+    let (_dn, n) = make(a_node);
+    let (_dw, writer) = make(a_writer);
+    let (_dc, control) = make(a_control);
+    // The node and the control join A's vault first, so the sign-in is wrapped to them
+    for x in [&n, &control] {
+        let (st, v) = call(&router(x.clone()), "POST", "/v1/vault/register").await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    let tidal =
+        r#"{"access_token":"at-1","refresh_token":"rt-1","expires_at":1000,"user_id":"7","country":"CH"}"#;
+    writer
+        .library
+        .lock()
+        .unwrap()
+        .set_setting("tidal.user", tidal)
+        .unwrap();
+    let (_, r) = call(&router(writer.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(r["migrated"], json!(["tidal"]), "{r}");
+    // Undisturbed, a node of A's takes it
+    let (_, r) = call(&router(control.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pulled"], json!(["tidal"]), "the control takes it: {r}");
+    let (s1, k1) = node_vault_parts(&writer);
+    let v_writer = Vault::new(s1.session(), &k1);
+    let index_before = serde_json::to_value(v_writer.index().await.unwrap()).unwrap();
+    let blob_before = v_writer.envelope("tidal").await.unwrap().unwrap();
+    // The node's pass, stopped after its read of TIDAL; B signs in there
+    let (sync_a, key) = node_vault_parts(&n);
+    let vault = Vault::new(sync_a.session(), &key).device("node");
+    let (reached, release) = pm_api::test_hooks::arm(&format!("vault.after_read:{}:tidal", vault.owner()));
+    let pass = {
+        let (n, sync_a) = (n.clone(), sync_a.clone());
+        tokio::spawn(async move {
+            let vault = Vault::new(sync_a.session(), &key).device("node");
+            pm_api::vault_cache::pass(&n, &vault, None, &|| !sync_a.is_retired()).await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .expect("the pass reached its pause")
+        .unwrap();
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        b.pop().unwrap(),
+    ))));
+    let _ = release.send(());
+    let r = pass.await.unwrap();
+    assert!(matches!(r, Err(VaultStoreError::Replaced)), "{r:?}");
+    let get = |k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
+    assert_eq!(get("tidal.user"), None, "A's sign-in landed on the node");
+    assert_eq!(
+        serde_json::to_value(v_writer.index().await.unwrap()).unwrap(),
+        index_before
+    );
+    assert_eq!(v_writer.envelope("tidal").await.unwrap().unwrap(), blob_before);
+}
+
+/// A replaced first sync leaves the new sign-in's activity alone: whatever it set running is reset
+/// when the session is replaced (here while the first sync is stopped mid-pass), it never writes
+/// the activity afterwards, and the node's storage save, which skips while a sync runs, saves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replaced_first_sync_leaves_no_sync_running() {
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let mut b = ids.pop().unwrap();
+    let mut a = ids.pop().unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a.pop().unwrap()));
+    n.set_sync(Some(sync_a.clone()));
+    let (reached, release) = pm_api::test_hooks::arm(&format!("sync.after_reads:{}", sync_a.z32()));
+    pm_api::sync::first_sync_in_background(&n, sync_a.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .expect("the first sync reached its pause")
+        .unwrap();
+    assert!(n.sync_activity.lock().unwrap().running, "the first sync runs");
+    // Replaced there (what a restore with a session in it, or a new sign-in, does)
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        homeserver.clone(),
+        b.pop().unwrap(),
+    ))));
+    assert!(
+        !n.sync_activity.lock().unwrap().running,
+        "reset at the replacement"
+    );
+    let _ = release.send(());
+    // The retired first sync ends; it never sets anything running again
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!n.sync_activity.lock().unwrap().running);
+    }
+    let (st, v) = call(&router(n.clone()), "POST", "/v1/storage/save").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v["saving"]["last_saved_at"].is_number(), "the save ran: {v}");
+}
+
+/// The settings backup of a session replaced while it read the old identity's settings copy
+/// doesn't adopt that identity's history delete: the node's listens and its delete time stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replaced_settings_backup_adopts_no_history_delete() {
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let mut b = ids.pop().unwrap();
+    let mut a = ids.pop().unwrap();
+    let a_node = a.pop().unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
+    // A's settings copy says A deleted its history just now
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    homeserver
+        .write_node_settings(
+            &a_node,
+            &json!({"version": 1, "saved_at": 0, "node": "elsewhere",
+                "settings": {"listens.cleared_before": now_us.to_string()}}),
+        )
+        .await
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a_node));
+    n.set_sync(Some(sync_a.clone()));
+    let (reached, release) = pm_api::test_hooks::arm(&format!("sync.backup_after_read:{}", sync_a.z32()));
+    let backup = {
+        let (n, sync_a) = (n.clone(), sync_a.clone());
+        tokio::spawn(async move { sync_a.backup_settings(&n).await })
+    };
+    reached.await.unwrap();
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        homeserver.clone(),
+        b.pop().unwrap(),
+    ))));
+    let _ = release.send(());
+    backup.await.unwrap();
+    assert_eq!(
+        n.library
+            .lock()
+            .unwrap()
+            .get_setting("listens.cleared_before")
+            .unwrap(),
+        None,
+        "A's history delete was adopted"
+    );
+}
+
+/// The settings backup checks the session after it has the library: a replacement made while it
+/// waited for the lock (another task held it) is seen, and the old identity's history delete is
+/// not adopted, so the node's listens stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replacement_while_the_backup_waits_for_the_library_adopts_nothing() {
+    let Some(mut ids) = identities_with_sessions(1, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let mut a = ids.pop().unwrap();
+    let a_node = a.pop().unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    homeserver
+        .write_node_settings(
+            &a_node,
+            &json!({"version": 1, "saved_at": 0, "node": "elsewhere",
+                "settings": {"listens.cleared_before": now_us.to_string()}}),
+        )
+        .await
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    // A listen of the node's, written before A's delete time
+    let listen_id = pm_pubky::ids::timestamp_id(now_us - 10_000_000);
+    n.library
+        .lock()
+        .unwrap()
+        .upsert_music_post(&pm_library::MusicPostRow {
+            id: listen_id.clone(),
+            kind: "pubky.music/activity".into(),
+            visibility: "private".into(),
+            json: "{}".into(),
+            created_at: now_us - 10_000_000,
+            updated_at: now_us - 10_000_000,
+            synced_at: None,
+            deleted: false,
+        })
+        .unwrap();
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a_node));
+    n.set_sync(Some(sync_a.clone()));
+    let (reached, release) = pm_api::test_hooks::arm(&format!("sync.backup_after_read:{}", sync_a.z32()));
+    let backup = {
+        let (n, sync_a) = (n.clone(), sync_a.clone());
+        tokio::spawn(async move { sync_a.backup_settings(&n).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .expect("the backup reached its pause")
+        .unwrap();
+    // Another task holds the library; the backup goes on and waits for it
+    let held = n.library.lock().unwrap();
+    let _ = release.send(());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // The session is replaced while the backup waits (only the flag: the library is held here)
+    sync_a.retire();
+    drop(held);
+    backup.await.unwrap();
+    let lib = n.library.lock().unwrap();
+    assert_eq!(
+        lib.get_setting("listens.cleared_before").unwrap(),
+        None,
+        "A's delete adopted"
+    );
+    let row = lib.get_music_post(&listen_id).unwrap().unwrap();
+    assert!(
+        !row.deleted,
+        "the node's listen was deleted by A's history delete"
+    );
+}
+
+/// A successful remote clear still cleans the captured local sign-ins if another identity
+/// replaces its session before cleanup. A genuinely new sign-in with identical bytes survives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_accepted_clear_does_not_migrate_old_sign_ins_to_a_replacement_identity() {
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let mut b = ids.pop().unwrap();
+    let mut a = ids.pop().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync_a = Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        a.pop().unwrap(),
+    ));
+    n.set_sync(Some(sync_a.clone()));
+    let tidal = r#"{"access_token":"fixture-at","refresh_token":"fixture-rt","user_id":"7"}"#;
+    {
+        let lib = n.library.lock().unwrap();
+        lib.set_setting("tidal.user", tidal).unwrap();
+        lib.set_setting("listenbrainz.account", r#"{"token":"fixture-lb","user":"owner"}"#)
+            .unwrap();
+        pm_api::vault_cache::new_sign_in(&lib, "tidal");
+        pm_api::vault_cache::new_sign_in(&lib, "listenbrainz");
+    }
+    let (status, before) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    assert!(
+        before["migrated"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("listenbrainz")),
+        "{before}"
+    );
+    let (reached, release) = pm_api::test_hooks::arm(&format!("vault.after_wipe:{}", sync_a.z32()));
+    let clear = {
+        let n = n.clone();
+        tokio::spawn(async move { call(&router(n), "POST", "/v1/vault/sign-out-everywhere").await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        b.pop().unwrap(),
+    ))));
+    {
+        let lib = n.library.lock().unwrap();
+        // Same contents, but a new interactive sign-in, after the clear was accepted.
+        lib.set_setting("tidal.user", tidal).unwrap();
+        pm_api::vault_cache::new_sign_in(&lib, "tidal");
+    }
+    let _ = release.send(());
+    let (status, result) = clear.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["signed_out_here"], json!(["listenbrainz"]));
+    {
+        let lib = n.library.lock().unwrap();
+        assert_eq!(lib.get_setting("listenbrainz.account").unwrap(), None);
+        assert_eq!(lib.get_setting("tidal.user").unwrap().as_deref(), Some(tidal));
+        assert_eq!(lib.get_setting("vault.pending_local_clear").unwrap(), None);
+    }
+    let (status, result) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (sync_b, key) = node_vault_parts(&n);
+    assert!(Vault::new(sync_b.session(), &key)
+        .envelope("listenbrainz")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// Replaying the equal-newest signed envelope and old index after an accepted clear must
+/// not reactivate the sign-in, including when a new NodeState reloads the durable records.
+#[tokio::test]
+async fn accepted_clear_remembers_its_owner_marker_before_any_later_sync() {
+    use pm_appdata::vault::{blob_path, INDEX_PATH};
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let other = ids.pop().unwrap().pop().unwrap();
+    let session = ids.pop().unwrap().pop().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync = Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        session,
+    ));
+    n.set_sync(Some(sync.clone()));
+    {
+        let lib = n.library.lock().unwrap();
+        lib.set_setting("listenbrainz.account", r#"{"token":"fixture","user":"owner"}"#)
+            .unwrap();
+        pm_api::vault_cache::new_sign_in(&lib, "listenbrainz");
+    }
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["migrated"], json!(["listenbrainz"]));
+    let (_, key) = node_vault_parts(&n);
+    let vault = Vault::new(sync.session(), &key);
+    let saved_index = vault.index().await.unwrap();
+    let saved_blob = vault.envelope("listenbrainz").await.unwrap().unwrap();
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sign-out-everywhere").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["signed_out_here"], json!(["listenbrainz"]));
+    assert!(r["cache_error"].is_null(), "{r}");
+    let marks = n.data_dir().join("vault/marks.json");
+    assert!(Vault::new(sync.session(), &key)
+        .keep_marks(&marks)
+        .marker(&saved_index)
+        .unwrap()
+        .is_some());
+    // The same machine file must not apply A's newly written marker to B.
+    assert_eq!(
+        Vault::new(&other, &key)
+            .keep_marks(&marks)
+            .marker(&saved_index)
+            .unwrap(),
+        None
+    );
+    sync.session()
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&saved_index).unwrap())
+        .await
+        .unwrap();
+    let path = blob_path("listenbrainz").unwrap();
+    sync.session()
+        .storage()
+        .put(path.as_str(), serde_json::to_vec(&saved_blob).unwrap())
+        .await
+        .unwrap();
+    let reloaded = node(d.path());
+    reloaded.set_sync(Some(sync));
+    let (status, r) = call(&router(reloaded.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["not_usable"], json!(["listenbrainz"]), "{r}");
+    assert_eq!(
+        reloaded
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("listenbrainz.account")
+            .unwrap(),
+        None
+    );
+}
+
+/// A new identical-content sign-in after the wipe belongs to a new lineage even on the
+/// same owner; the next complete sync must preserve it and publish it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepted_clear_preserves_new_same_owner_lineage_through_next_sync() {
+    let Some(mut ids) = identities_with_sessions(1, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync = Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        ids.pop().unwrap().pop().unwrap(),
+    ));
+    n.set_sync(Some(sync.clone()));
+    let account = r#"{"token":"fixture","user":"owner"}"#;
+    {
+        let lib = n.library.lock().unwrap();
+        lib.set_setting("listenbrainz.account", account).unwrap();
+        pm_api::vault_cache::new_sign_in(&lib, "listenbrainz");
+    }
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    let (reached, release) = pm_api::test_hooks::arm(&format!("vault.after_wipe:{}", sync.z32()));
+    let clear = {
+        let n = n.clone();
+        tokio::spawn(async move { call(&router(n), "POST", "/v1/vault/sign-out-everywhere").await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, key) = node_vault_parts(&n);
+    let vault = Vault::new(sync.session(), &key);
+    let wipe = Vault::signed_out_everywhere_at(&vault.index().await.unwrap()).unwrap();
+    {
+        let lib = n.library.lock().unwrap();
+        lib.set_setting("listenbrainz.account", account).unwrap();
+        lib.set_setting("vault.lineage.listenbrainz", &format!("{}-new-fixture", wipe + 1))
+            .unwrap();
+    }
+    let _ = release.send(());
+    let (status, r) = clear.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["signed_out_here"], json!([]), "{r}");
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["pushed"], json!(["listenbrainz"]), "{r}");
+    assert_eq!(
+        n.library
+            .lock()
+            .unwrap()
+            .get_setting("listenbrainz.account")
+            .unwrap()
+            .as_deref(),
+        Some(account)
+    );
+    assert!(vault.envelope("listenbrainz").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn failed_wipe_marker_persistence_keeps_local_clear_intent() {
+    let Some(mut ids) = identities_with_sessions(1, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        ids.pop().unwrap().pop().unwrap(),
+    ))));
+    n.library
+        .lock()
+        .unwrap()
+        .set_setting("listenbrainz.account", r#"{"token":"fixture","user":"owner"}"#)
+        .unwrap();
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    // Only this fixture's marks path is made unwritable as a file.
+    let marks = n.data_dir().join("vault/marks.json");
+    std::fs::rename(&marks, marks.with_extension("saved")).unwrap();
+    std::fs::create_dir(&marks).unwrap();
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sign-out-everywhere").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{r}");
+    let lib = n.library.lock().unwrap();
+    assert!(lib.get_setting("vault.pending_local_clear").unwrap().is_some());
+    assert!(lib.get_setting("listenbrainz.account").unwrap().is_some());
+}
+
+/// Suspend A-to-B after publication, then complete B-to-C before A-to-B's trailing cleanup.
+/// Every predecessor must already be retired when its replacement can be observed, and the
+/// trailing cleanup keeps C's browser session and device sign-in made meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlapping_identity_swaps_retire_before_publication() {
+    let Some(mut ids) = identities_with_sessions(3, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let make = |session| {
+        Arc::new(PubkySync::from_session(
+            NodeHomeserver::new(network()).unwrap(),
+            session,
+        ))
+    };
+    let c = make(ids.pop().unwrap().pop().unwrap());
+    let b = make(ids.pop().unwrap().pop().unwrap());
+    let a = make(ids.pop().unwrap().pop().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let n = node_with_token(dir.path(), Some("api-fixture"));
+    n.set_sync(Some(a.clone()));
+    let (reached, release) = pm_api::test_hooks::arm(&format!("sync.after_swap:{}", a.id()));
+    let first = {
+        let n = n.clone();
+        let b = b.clone();
+        tokio::task::spawn_blocking(move || n.set_sync(Some(b)))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(a.is_retired(), "A must retire before B becomes visible");
+    assert!(Arc::ptr_eq(&n.sync_handle().unwrap(), &b));
+    n.set_sync(Some(c.clone()));
+    assert!(a.is_retired() && b.is_retired() && !c.is_retired());
+    // C's owner signs in from a browser and from the app while A-to-B's cleanup is still held
+    let browser = pm_api::accounts::mint_owner(&n, c.z32()).unwrap();
+    let device = pm_api::accounts::mint_device(&n, c.z32()).unwrap();
+    {
+        let mut activity = n.sync_activity.lock().unwrap();
+        activity.owner = Some(c.id());
+        activity.running = true;
+        activity.step = Some("C owns this activity".into());
+    }
+    let _ = release.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(10), first)
+        .await
+        .unwrap()
+        .unwrap();
+    {
+        let activity = n.sync_activity.lock().unwrap();
+        assert_eq!(activity.owner, Some(c.id()));
+        assert!(activity.running);
+        assert_eq!(activity.step.as_deref(), Some("C owns this activity"));
+    }
+    let c_key = c.z32().trim_start_matches("pubky").to_string();
+    for (what, token) in [("browser session", &browser), ("device sign-in", &device)] {
+        let who = pm_api::accounts::caller(&n, Some(token.as_str()));
+        assert!(
+            who.as_ref().is_some_and(
+                |w| w.role == pm_api::accounts::Role::Owner && w.key.as_deref() == Some(c_key.as_str())
+            ),
+            "C's {what} survives A-to-B's trailing cleanup: {:?}",
+            who.map(|w| w.key)
+        );
+    }
+}
+
+/// Exercise the actual synchronous completion boundary with success, ordinary failure and
+/// 507 outcomes held until a different identity has replaced the captured sender.
+#[tokio::test]
+async fn stale_storage_completions_preserve_replacement_status_and_quota() {
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let make = |session| {
+        Arc::new(PubkySync::from_session(
+            NodeHomeserver::new(network()).unwrap(),
+            session,
+        ))
+    };
+    let b = make(ids.pop().unwrap().pop().unwrap());
+    let a = make(ids.pop().unwrap().pop().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path());
+    n.set_sync(Some(a.clone()));
+    n.set_sync(Some(b.clone()));
+    let full = format!("{}:123", b.z32());
+    n.library
+        .lock()
+        .unwrap()
+        .set_setting("storage.full_at", &full)
+        .unwrap();
+    {
+        let mut st = n.storage_save.lock().unwrap();
+        st.error = Some("B's existing failure".into());
+        st.last_saved_at = Some(123);
+    }
+    let outcomes = || {
+        [
+            Ok(pm_api::types::SyncReport::default()),
+            Ok(pm_api::types::SyncReport {
+                errors: vec!["507 Insufficient Storage".into()],
+                ..Default::default()
+            }),
+            Err(pm_api::sync::SyncError::Store("ordinary read failure".into())),
+            Err(pm_api::sync::SyncError::Store("507 Insufficient Storage".into())),
+        ]
+    };
+    for result in outcomes() {
+        assert!(pm_api::storage::complete_save_for_test(&n, &a, result).is_ok());
+        let st = n.storage_save.lock().unwrap();
+        assert_eq!(st.error.as_deref(), Some("B's existing failure"));
+        assert_eq!(st.last_saved_at, Some(123));
+        drop(st);
+        assert_eq!(
+            n.library
+                .lock()
+                .unwrap()
+                .get_setting("storage.full_at")
+                .unwrap()
+                .as_deref(),
+            Some(full.as_str())
+        );
+    }
+    // A current owner still receives its own ordinary error and its own quota attribution.
+    assert!(pm_api::storage::complete_save_for_test(
+        &n,
+        &b,
+        Err(pm_api::sync::SyncError::Store("507 Insufficient Storage".into()))
+    )
+    .is_err());
+    assert!(n
+        .library
+        .lock()
+        .unwrap()
+        .get_setting("storage.full_at")
+        .unwrap()
+        .unwrap()
+        .starts_with(&format!("{}:", b.z32())));
+    assert!(pm_api::storage::complete_save_for_test(&n, &b, Ok(Default::default())).is_ok());
+    let st = n.storage_save.lock().unwrap();
+    assert!(st.error.is_none());
+    assert!(st.last_saved_at.is_some());
 }

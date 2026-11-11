@@ -931,6 +931,10 @@ impl NodeState {
     /// Set the contact at runtime: validated, saved in the library settings,
     /// and discovery (Pinakes, Nexus) is built from it.
     pub fn set_contact(&self, contact: &str) -> Result<(), String> {
+        self.set_contact_if(contact, &|| true)
+    }
+
+    pub(crate) fn set_contact_if(&self, contact: &str, still: &dyn Fn() -> bool) -> Result<(), String> {
         let contact = contact.trim().to_string();
         pm_pubky::config::validate_contact(&contact)?;
         let mut cfg = self.pubky.clone();
@@ -943,10 +947,11 @@ impl NodeState {
             (Err(e), _) => return Err(format!("pinakes client: {e}")),
             (_, Err(e)) => return Err(format!("nexus client: {e}")),
         };
-        self.library
-            .lock()
-            .expect("library poisoned")
-            .set_setting(CONTACT_KEY, &contact)
+        let lib = self.library.lock().expect("library poisoned");
+        if !still() {
+            return Err("another sign-in replaced this session".into());
+        }
+        lib.set_setting(CONTACT_KEY, &contact)
             .map_err(|e| e.to_string())?;
         *self.contact.write().expect("contact lock") = contact;
         *self.discovery.write().expect("discovery lock") = discovery;
@@ -2260,18 +2265,40 @@ impl NodeState {
 
     pub fn set_sync(&self, sync: Option<Arc<crate::sync::PubkySync>>) {
         let derived = sync.as_ref().map(|s| profile_url(s.z32()));
-        let z32 = sync.as_ref().map(|s| s.z32().to_string());
+        let loads = sync.is_some();
         // Usage insights (usage.rs) end and nothing let in before changes anything: whichever
         // identity, also none, and whatever the cleanup below does. Swapped under their lock; the
         // old handle is dropped after
-        let old = self
-            .usage
-            .revoke_all_across(|| std::mem::replace(&mut *self.sync.lock().expect("sync lock"), sync));
+        let old = self.usage.revoke_all_across(|| {
+            let mut current = self.sync.lock().expect("sync lock");
+            // No reader or overlapping swap can observe the replacement while its
+            // predecessor still passes retirement checks.
+            if let Some(old) = current.as_ref() {
+                old.retire();
+            }
+            std::mem::replace(&mut *current, sync)
+        });
+        // A pass of the old session still running writes nothing more, to the library or to its
+        // homeserver, and its background loops stop (sync.rs, vault_cache.rs)
+        if let Some(old) = &old {
+            crate::test_hooks::pause_blocking(|| format!("sync.after_swap:{}", old.id()));
+            // What the replaced session's first sync left running is the new one's to start: reset,
+            // or the page shows a sync forever and storage saves wait on it (they skip while running)
+            let mut a = self.sync_activity.lock().expect("sync activity");
+            if a.owner == Some(old.id()) {
+                a.running = false;
+                a.step = None;
+                a.owner = None;
+                a.finished_at = Some(pm_library::db::now_unix());
+            }
+        }
         drop(old);
         // The owner's browser sessions belong to this identity from now on (Kimi review of #209).
-        // After the swap: a session minted meanwhile was checked against the identity then
-        if let Some(z32) = z32 {
-            if let Err(e) = crate::accounts::keep_owner_sessions_of(self, &z32) {
+        // After the swap: a session minted meanwhile was checked against the identity then. By the
+        // identity loaded when the lists change, not this call's: a later swap may have finished
+        // in between, and its identity's sessions stay
+        if loads {
+            if let Err(e) = crate::accounts::keep_current_owner_sessions(self) {
                 tracing::warn!("ending another identity's browser sessions failed: {}", e.message);
             }
         }

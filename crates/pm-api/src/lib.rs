@@ -3095,7 +3095,7 @@ async fn settings_restore_now(State(s): State<Arc<NodeState>>) -> ApiResult<sync
     let r = sync
         .restore_settings(&s, false)
         .await
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?
+        .map_err(sync_error)?
         .ok_or_else(|| ApiError::not_found("no settings backup on the homeserver yet"))?;
     s.notify_library();
     Ok(Json(r))
@@ -3822,6 +3822,15 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
 }
 
 /// Push local changes to the private homeserver folder and pull what is missing.
+/// A sync error as an answer: a session another sign-in replaced meanwhile is a conflict (409),
+/// not a homeserver failure.
+fn sync_error(e: sync::SyncError) -> ApiError {
+    match e {
+        sync::SyncError::Replaced => ApiError::new(StatusCode::CONFLICT, e.to_string()),
+        e => ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()),
+    }
+}
+
 async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
     let Some(sync) = s.sync_handle() else {
         return Err(ApiError::new(
@@ -3829,10 +3838,7 @@ async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
             "no Pubky session: set `pubky.session_secret_file` in the node config",
         ));
     };
-    let report = sync
-        .sync(&s.library)
-        .await
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let report = sync.sync(&s.library).await.map_err(sync_error)?;
     sync.backup_settings(&s).await;
     if report.pulled > 0 {
         s.notify_library();
@@ -26427,5 +26433,16 @@ exec sleep 300
             "none dropped before it was tried"
         );
         assert!(waiting_scrobbles(&s).is_empty());
+    }
+
+
+    /// A sync or a settings restore whose session another sign-in replaced answers 409, not 502.
+    #[test]
+    fn a_replaced_sync_is_a_conflict() {
+        assert_eq!(sync_error(sync::SyncError::Replaced).status, StatusCode::CONFLICT);
+        assert_eq!(
+            sync_error(sync::SyncError::Store("x".into())).status,
+            StatusCode::BAD_GATEWAY
+        );
     }
 }

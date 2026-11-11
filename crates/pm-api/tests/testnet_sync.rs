@@ -2859,3 +2859,95 @@ async fn a_capped_listing_lists_what_the_sdk_lists() {
         assert_eq!(ours, sdk, "{root}");
     }
 }
+
+
+/// A sign-in that replaces this node's while a sync runs ends that sync before its next write:
+/// nothing of the old identity's lands in the library, nothing of the node's is pushed to the old
+/// identity's homeserver, and the new sign-in's own sync takes over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_in_switch_ends_the_old_sessions_sync() {
+    use pm_api::sync::SyncError;
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    // Identity A, with a session for this node and one for another device of A's
+    let signer_a = pubky.signer(Keypair::random());
+    signer_a.signup(&hs, None).await.unwrap();
+    let session_a = signer_a
+        .signin_blocking(ClientId::new("pm-api-switch-node").unwrap())
+        .await
+        .unwrap();
+    let session_a2 = signer_a
+        .signin_blocking(ClientId::new("pm-api-switch-other").unwrap())
+        .await
+        .unwrap();
+    let (session_b, _, _) = identity(&pubky, "pm-api-switch-b").await;
+    let dir = tempfile::tempdir().unwrap();
+    let bookmark = |n: &NodeState, i: u32| {
+        let uri = pm_model::MusicUri::parse(&format!(
+            "https://musicbrainz.org/recording/00000000-0000-4000-8000-{i:012}"
+        ))
+        .unwrap();
+        n.library
+            .lock()
+            .unwrap()
+            .add_bookmark(
+                &pm_pubky::Bookmark::id_for(&uri),
+                &uri.to_url(),
+                1_700_000_000_000_000,
+            )
+            .unwrap();
+        uri.to_url()
+    };
+    // A's other device put a bookmark on A's homeserver
+    let other = node(dir.path(), "other");
+    let theirs = bookmark(&other, 1);
+    let sync_other = Arc::new(PubkySync::from_session(homeserver.clone(), session_a2));
+    other.set_sync(Some(sync_other.clone()));
+    let r = sync_other.sync(&other.library).await.unwrap();
+    assert_eq!(r.pushed, 1, "{r:?}");
+    // This node, signed in as A with a bookmark of its own queued, starts a sync; B signs in
+    // before it gets anywhere
+    let n = node(dir.path(), "n");
+    let mine = bookmark(&n, 2);
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), session_a.clone()));
+    n.set_sync(Some(sync_a.clone()));
+    let pass = {
+        let (sync_a, library) = (sync_a.clone(), n.library.clone());
+        tokio::spawn(async move { sync_a.sync(&library).await })
+    };
+    let sync_b = Arc::new(PubkySync::from_session(homeserver.clone(), session_b));
+    n.set_sync(Some(sync_b.clone()));
+    assert!(sync_a.is_retired());
+    let r = pass.await.unwrap();
+    assert!(matches!(r, Err(SyncError::Replaced)), "{r:?}");
+    // Nothing of A's here, nothing of the node's there
+    let urls: Vec<String> = n
+        .library
+        .lock()
+        .unwrap()
+        .list_bookmarks()
+        .unwrap()
+        .into_iter()
+        .map(|b| b.uri)
+        .collect();
+    assert_eq!(urls, [mine], "A's bookmark landed on the node");
+    let on_a: Vec<String> = homeserver
+        .read_v1_bookmarks_except(&session_a, &std::collections::HashMap::new())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, url, _)| url)
+        .collect();
+    assert_eq!(on_a, [theirs], "the node's bookmark went to A's homeserver");
+    // B's own sync is the one that runs now: the node's bookmark goes to B
+    let r = sync_b.sync(&n.library).await.unwrap();
+    assert_eq!((r.pushed, r.pulled), (1, 0), "{r:?}");
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    // A sync of the retired session, started later, writes nothing either
+    assert!(matches!(sync_a.sync(&n.library).await, Err(SyncError::Replaced)));
+}

@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-11
 
+- **Signing in as another Pubky identity ends the old one's sync at once.** A sync or a vault pass still running for the identity signed out used to finish: it could bring that identity's playlists, bookmarks or sign-ins onto the node and push the node's changes to the old identity's homeserver. It now stops before its next write, on either side, and the new sign-in's own sync takes over.
+
 - **A restore that fails on the way leaves the library as it was.** Everything the restored library is to hold (this node's own settings, the sign-ins, listeners' own, invites and parties) is put together in a staged copy first; the live library is replaced in one step at the very end, so an error before it changes nothing, instead of leaving the restored library with this node's settings half carried over.
 - **A listen is sent to Last.fm and ListenBrainz once.** Two plays ending together each took the whole backlog of listens waiting to be sent and sent it, so the backlog went out twice and the later one's failures could drop the other's. A sender now takes the waiting listens for itself, and only what it couldn't send goes back to wait. A full backlog of 1000 and a new listen are all sent before the oldest that failed make room, and a listen the library couldn't store when it was played, and that didn't get through, is stored once the library takes writes again (until then it waits in memory for the same account).
 
