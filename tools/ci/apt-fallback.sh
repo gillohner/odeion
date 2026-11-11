@@ -15,9 +15,11 @@ codename=${VERSION_CODENAME:?}
 
 if [ "$(dpkg --print-architecture)" = amd64 ]; then
   hosts="azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com"
+  pattern='https?://([a-z0-9.-]+\.)?(archive|security)\.ubuntu\.com/ubuntu'
   mirrors="http://mirrors.edge.kernel.org/ubuntu http://mirror.leaseweb.net/ubuntu http://mirrors.ocf.berkeley.edu/ubuntu"
 else
   hosts="ports.ubuntu.com"
+  pattern='https?://ports\.ubuntu\.com/ubuntu-ports'
   mirrors="http://mirror.leaseweb.net/ubuntu-ports http://mirrors.ocf.berkeley.edu/ubuntu-ports http://ftp.tu-chemnitz.de/pub/linux/ubuntu-ports"
 fi
 
@@ -46,7 +48,6 @@ fi
 
 # The runner image lists its mirrors in apt-mirrors.txt (used through mirror+file:); the Ubuntu
 # sources name the archive hosts directly. Only Ubuntu archive URLs change; other repos stay.
-pattern='https?://([a-z0-9.-]+\.)?(archive|security|ports)\.ubuntu\.com/ubuntu(-ports)?'
 for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
   [ -f "$f" ] || continue
   sudo sed -E -i -e "s#mirror\+file:/etc/apt/apt-mirrors\.txt#$mirror#g" -e "s#$pattern#$mirror#g" "$f"

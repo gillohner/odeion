@@ -58,7 +58,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.meta.outputs.sha }}
-      - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck nftables
+      - run: if [ -f tools/ci/apt-fallback.sh ]; then bash tools/ci/apt-fallback.sh; fi && sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck nftables
       - name: shellcheck
         run: |
           shellcheck deploy/iso/build-iso.sh deploy/iso/test-qemu.sh
@@ -92,7 +92,7 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
       - name: tools and KVM
         run: |
-          bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
+          if [ -f tools/ci/apt-fallback.sh ]; then bash tools/ci/apt-fallback.sh; fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xorriso debian-keyring gpgv qemu-system-x86 qemu-utils openssl
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -139,7 +139,7 @@ jobs:
           ref: ${{ needs.meta.outputs.sha }}
       - name: tools
         run: |
-          bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
+          if [ -f tools/ci/apt-fallback.sh ]; then bash tools/ci/apt-fallback.sh; fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xorriso debian-keyring gpgv
       - name: build
