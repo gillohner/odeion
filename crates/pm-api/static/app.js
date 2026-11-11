@@ -259,7 +259,8 @@
     try { out = fn(); } catch (e) { console.error(e); toast((e && e.message) || 'That didn’t work; try again.', 'error'); return undefined; } finally { inHandler--; }
     if (!out || typeof out.then !== 'function') return out;
     // (until it settles, a redraw it makes is the press's: usage insights count its reads)
-    pressing++; { const settled = () => { pressing--; }; out.then(settled, settled); }
+    // (at most 10 s: a press that never settles doesn't make every later redraw its own)
+    pressing++; { let left = false; const settled = () => { if (!left) { left = true; pressing--; } }; out.then(settled, settled); setTimeout(settled, 10000); }
     const failed = (e) => { if (!e || e.name !== 'AbortError') toast((e && e.message) || 'That didn’t work; try again.', 'error'); };
     if (!el) { out.catch(failed); return out; }
     // Several actions on one control at once (the same click reaching its row's handler, or changes in a
@@ -351,7 +352,7 @@
   const SHARED_PARTIAL = "Some of their posts couldn't be read, so this list may miss some.";
   const api = (method, path, body, opts = {}) => {
     // Usage insights (usage.js) count only requests a press or a page the person opened made
-    if (opts.usage === undefined) opts = { ...opts, usage: inHandler > 0 || !!opts.navRead };
+    if (opts.usage === undefined) opts = { ...opts, usage: inHandler > 0 || pressing > 0 || !!opts.navRead };
     if (method === 'GET') return apiSend(method, path, body, opts);
     // The body as it is now (a queued change sends what was asked, even if the object changes meanwhile)
     let sent; let snap; try { sent = body === undefined ? '' : JSON.stringify(body); snap = sent ? JSON.parse(sent) : body; } catch { return apiSend(method, path, body, opts); }
