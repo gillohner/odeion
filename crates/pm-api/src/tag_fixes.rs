@@ -151,6 +151,22 @@ pub(crate) async fn apply(
             // One ID writer at a time, and a match written only while it is still the song's (a
             // correction made meanwhile wins)
             let _one = crate::identify::id_writes();
+            // ... and the file what it was when listed (a rescan meanwhile: listed again)
+            let now = st
+                .library
+                .lock()
+                .expect("library poisoned")
+                .file_by_path(&t.file.path)
+                .ok()
+                .flatten();
+            if !now.is_some_and(|r| r.size_bytes == t.file.size_bytes && r.mtime_unix == t.file.mtime_unix) {
+                report.skipped.push(crate::identify::WriteSkip {
+                    track_id: id,
+                    path: t.file.path.display().to_string(),
+                    reason: "the file changed meanwhile".into(),
+                });
+                continue;
+            }
             if let Some(ids) = &f.ids {
                 if !crate::identify::still_matched(&st, id, &ids.recording) {
                     report.skipped.push(crate::identify::WriteSkip {

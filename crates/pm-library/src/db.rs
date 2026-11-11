@@ -179,6 +179,43 @@ pub enum SuggestionCheck {
     Changed,
 }
 
+/// An automatic pick to store ([`Library::settle_auto`]), with the evidence it was decided on.
+#[derive(Debug, Clone, Copy)]
+pub struct AutoPick<'a> {
+    pub recording: &'a Mbid,
+    pub release: Option<&'a Mbid>,
+    pub score: f32,
+    /// How, in a word or two (kept with the state).
+    pub detail: &'a str,
+    /// What the song's file and tags were when its evidence was read
+    /// ([`Library::input_generations`]); `None`: its file is gone.
+    pub read: Option<&'a str>,
+    /// Its open options as they were read ([`options_signature`]).
+    pub options: &'a str,
+    /// The folder's release the pick went by: the folder, and the release (its votes counted
+    /// again at the write).
+    pub folder: Option<(&'a Path, &'a str)>,
+}
+
+/// What a song's open options are, in one line (each recording, source, score and release, in
+/// order): the evidence an automatic pick was decided on, compared at the write.
+pub fn options_signature(rows: &[SuggestionRow]) -> String {
+    let mut parts: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            format!(
+                "{}|{}|{:.4}|{}",
+                r.recording_mbid,
+                r.source,
+                r.score,
+                r.release_mbid.as_deref().unwrap_or_default()
+            )
+        })
+        .collect();
+    parts.sort();
+    parts.join(";")
+}
+
 /// What [`Library::settle_auto`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoSettle {
@@ -2707,12 +2744,16 @@ fn insert_suggestions(
                    score = CASE
                      WHEN identify_suggestions.source = excluded.source THEN MAX(identify_suggestions.score, excluded.score)
                      WHEN excluded.source = 'fingerprint' THEN excluded.score
-                     WHEN identify_suggestions.source = 'fingerprint' THEN identify_suggestions.score
-                     ELSE MAX(identify_suggestions.score, excluded.score) END,
-                   source = CASE WHEN excluded.source = 'fingerprint' THEN excluded.source ELSE identify_suggestions.source END,
-                   release_mbid = COALESCE(excluded.release_mbid, release_mbid),
-                   title = COALESCE(excluded.title, title), artist = COALESCE(excluded.artist, artist),
-                   release_title = COALESCE(excluded.release_title, release_title)",
+                     ELSE identify_suggestions.score END,
+                   release_mbid = CASE WHEN identify_suggestions.source = excluded.source OR excluded.source = 'fingerprint'
+                     THEN COALESCE(excluded.release_mbid, identify_suggestions.release_mbid) ELSE identify_suggestions.release_mbid END,
+                   title = CASE WHEN identify_suggestions.source = excluded.source OR excluded.source = 'fingerprint'
+                     THEN COALESCE(excluded.title, identify_suggestions.title) ELSE identify_suggestions.title END,
+                   artist = CASE WHEN identify_suggestions.source = excluded.source OR excluded.source = 'fingerprint'
+                     THEN COALESCE(excluded.artist, identify_suggestions.artist) ELSE identify_suggestions.artist END,
+                   release_title = CASE WHEN identify_suggestions.source = excluded.source OR excluded.source = 'fingerprint'
+                     THEN COALESCE(excluded.release_title, identify_suggestions.release_title) ELSE identify_suggestions.release_title END,
+                   source = CASE WHEN excluded.source = 'fingerprint' THEN excluded.source ELSE identify_suggestions.source END",
                 params![
                     track,
                     c.recording.to_string(),
@@ -3460,25 +3501,35 @@ impl Library {
 
     /// An automatic pick for a song waiting for review (`Confidence::Auto`), stored only when it
     /// still holds: the song without an identity, not left as it is, its file there and what the
-    /// caller read (`read`, from [`Self::input_generations`]), `recording` one of its open options,
-    /// and no recording rejected for it. Its options stay (the "Wrong match?" view lists them);
-    /// its IDs are not written into the file. What happened ([`AutoSettle`]).
-    #[allow(clippy::too_many_arguments)]
-    pub fn settle_auto(
-        &self,
-        track: i64,
-        recording: &Mbid,
-        release: Option<&Mbid>,
-        score: f32,
-        detail: &str,
-        read: Option<&str>,
-    ) -> Result<AutoSettle> {
+    /// caller read ([`AutoPick::read`]), `recording` one of its open options (or one the kept
+    /// AcoustID answer names surely), no recording rejected for it, and the evidence it was
+    /// decided on unchanged (its options, [`options_signature`]; the folder's release,
+    /// [`AutoPick::folder`]). Its options stay (the "Wrong match?" view lists them); its IDs are
+    /// not written into the file. What happened ([`AutoSettle`]).
+    pub fn settle_auto(&self, track: i64, pick: &AutoPick) -> Result<AutoSettle> {
+        let AutoPick {
+            recording,
+            release,
+            score,
+            detail,
+            read,
+            options,
+            folder,
+        } = *pick;
         immediately(&mut self.lock(), |conn| {
             let Some(read) = read else {
                 return Ok(AutoSettle::NoFile);
             };
             if identify_input_by_track(conn, track)?.as_deref() != Some(read) {
                 return Ok(AutoSettle::Changed);
+            }
+            if options_signature(&suggestions_of(conn, track)?) != options {
+                return Ok(AutoSettle::Changed);
+            }
+            if let Some((dir, was)) = folder {
+                if folder_release_on(conn, dir)?.as_deref() != Some(was) {
+                    return Ok(AutoSettle::Changed);
+                }
             }
             let rec = recording.to_string();
             let (open, state, present, offered, turned_down): (Option<bool>, Option<String>, bool, bool, bool) = conn.query_row(
@@ -3548,12 +3599,17 @@ impl Library {
     /// the song without an identity and out of later runs, as "Leave as is" does. A song whose
     /// file's tags name a recording is changed only with `tags_follow` (the caller rewrites the
     /// file's IDs): else the next scan would read the old one back.
+    ///
+    /// `rewritten`: the node rewrote the file's ID tags for this correction (its path, and size and
+    /// time as the scan will find them now), noted in the same step, so the rewrite is no change of
+    /// the song's at the next scan and the owner's choice stands.
     pub fn rematch(
         &self,
         track: i64,
         expect: Option<&str>,
         choice: Option<(&Mbid, Option<&Mbid>)>,
         tags_follow: bool,
+        rewritten: Option<(&Path, u64, i64)>,
     ) -> Result<Rematch> {
         immediately(&mut self.lock(), |conn| {
             let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
@@ -3642,6 +3698,22 @@ impl Library {
                     )?;
                 }
             }
+            if let Some((path, size, mtime)) = rewritten {
+                tx.execute(
+                    "UPDATE files SET size_bytes = ?3, mtime_unix = ?4 WHERE track_id = ?1 AND path = ?2",
+                    params![track, path.to_string_lossy(), size as i64, mtime],
+                )?;
+                tx.execute(
+                    "UPDATE tracks SET recording_mbid = ?2 WHERE id = ?1",
+                    params![track, chosen],
+                )?;
+                if chosen.is_some() {
+                    tx.execute(
+                        "UPDATE identify_state SET detail = 'written into the file' WHERE track_id = ?1",
+                        params![track],
+                    )?;
+                }
+            }
             tx.commit()?;
             Ok(Rematch::Done { old: current })
         })
@@ -3694,29 +3766,6 @@ impl Library {
             let from_tags = tagged || matches!(source.as_deref(), Some("tagged_mbid" | "tagged_isrc"));
             (current, from_tags)
         }))
-    }
-
-    /// After the node rewrote a song's ID tags itself (a correction): the file as the scan will
-    /// find it now (its size and time, so the rewrite is no change of the song's), and the
-    /// recording its tags name now. What the owner chose (a match, or none) stands.
-    pub fn note_rewritten(
-        &self,
-        track: i64,
-        path: &Path,
-        size: u64,
-        mtime: i64,
-        recording: Option<&Mbid>,
-    ) -> Result<()> {
-        let conn = self.lock();
-        conn.execute(
-            "UPDATE files SET size_bytes = ?3, mtime_unix = ?4 WHERE track_id = ?1 AND path = ?2",
-            params![track, path.to_string_lossy(), size as i64, mtime],
-        )?;
-        conn.execute(
-            "UPDATE tracks SET recording_mbid = ?2 WHERE id = ?1",
-            params![track, recording.map(|m| m.to_string())],
-        )?;
-        Ok(())
     }
 
     /// Whether the folder's own fit (the album lane's option) offers `recording` on `release` for
@@ -4296,6 +4345,56 @@ fn reject_on(conn: &Connection, id: i64) -> Result<bool> {
         )?;
     }
     Ok(true)
+}
+
+/// A song's open options, in the caller's transaction.
+fn suggestions_of(conn: &Connection, track: i64) -> Result<Vec<SuggestionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, track_id, recording_mbid, release_mbid, title, artist, release_title, score, source
+         FROM identify_suggestions WHERE track_id = ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![track], |r| {
+            Ok(SuggestionRow {
+                id: r.get(0)?,
+                track_id: r.get(1)?,
+                recording_mbid: r.get(2)?,
+                release_mbid: r.get(3)?,
+                title: r.get(4)?,
+                artist: r.get(5)?,
+                release_title: r.get(6)?,
+                score: r.get::<_, f64>(7)? as f32,
+                source: r.get(8)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The release a folder is on as the automatic settling counts it
+/// ([`crate::auto_settle::folder_release`]): each song's vote is its release when a run, its tags
+/// or the owner identified it (never an automatic pick), else the release its album's tags name.
+fn folder_release_on(conn: &Connection, dir: &Path) -> Result<Option<String>> {
+    let prefix = format!("{}/", dir.to_string_lossy().trim_end_matches('/'));
+    let mut stmt = conn.prepare(
+        "SELECT CASE WHEN t.canonical_uri IS NOT NULL AND COALESCE(t.canonical_confidence_source, '') <> 'auto'
+                       AND s.release_mbid IS NOT NULL THEN s.release_mbid ELSE a.release_mbid END
+         FROM files f JOIN tracks t ON t.id = f.track_id
+           LEFT JOIN identify_state s ON s.track_id = t.id LEFT JOIN albums a ON a.id = t.album_id
+         WHERE f.path LIKE ?1 ESCAPE '\\' AND instr(substr(f.path, ?2), '/') = 0",
+    )?;
+    let votes: Vec<Option<String>> = stmt
+        .query_map(
+            params![
+                format!("{}%", like_escape(&prefix)),
+                prefix.chars().count() as i64 + 1
+            ],
+            |r| r.get(0),
+        )?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(crate::auto_settle::folder_release(
+        votes.iter().flatten().map(String::as_str),
+    ))
 }
 
 /// Whether the AcoustID answer kept for a song's file (by its content key) names `recording` at

@@ -944,11 +944,17 @@ async fn wrong_match_rewrites_the_file_only_with_write_ids_on() {
         let lib = s.library.lock().unwrap();
         let was = lib.input_generations().unwrap().get(&c).cloned();
         assert!(was.is_some());
-        assert_eq!(
-            lib.settle_auto(c, &mbid(&rec(9)), None, 0.95, "auto: R1", was.as_deref())
-                .unwrap(),
-            pm_library::AutoSettle::Stored
-        );
+        let options = pm_library::db::options_signature(&lib.suggestions_for(c).unwrap());
+        let pick = pm_library::db::AutoPick {
+            recording: &mbid(&rec(9)),
+            release: None,
+            score: 0.95,
+            detail: "auto: R1",
+            read: was.as_deref(),
+            options: &options,
+            folder: None,
+        };
+        assert_eq!(lib.settle_auto(c, &pick).unwrap(), pm_library::AutoSettle::Stored);
     }
     let (st, b) = set(c, serde_json::json!({"recording_mbid": rec(9), "expect": rec(9)})).await;
     assert_eq!(st, StatusCode::OK, "{b}");
@@ -1884,4 +1890,87 @@ async fn with_automatic_matching_off_unsure_songs_wait_for_the_owner() {
     .await;
     recheck_run(&s).await;
     assert_eq!(recording_of(&s, id), Some(rec(1)));
+}
+
+/// Kimi review r2: no correction while a library scan goes (a scan that read the file before
+/// could store the old recording after it); a pick whose evidence changed since the settling read
+/// it isn't stored; one source's evidence is never folded into another's.
+#[tokio::test]
+async fn corrections_wait_for_scans_and_picks_for_their_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let app = router(s.clone());
+    // A correction while a scan holds the library: refused, nothing changed
+    let id = waiting(&s, dir.path(), "U", "Song U", &[fp(1, "Song U", "Band", 0.6)]);
+    assert!(s.begin_scan());
+    let (st, b) = call(
+        &app,
+        "POST",
+        &format!("/v1/library/tracks/{id}/match"),
+        Some(serde_json::json!({"recording_mbid": rec(2)})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{b}");
+    assert!(canonical(&s, id).is_none());
+    s.end_scan();
+    let (st, b) = call(
+        &app,
+        "POST",
+        &format!("/v1/library/tracks/{id}/match"),
+        Some(serde_json::json!({"recording_mbid": rec(2)})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert!(!s.is_scanning(), "the slot is given back");
+    // A pick decided on options that changed meanwhile (a search added one): not stored
+    let other = waiting(&s, dir.path(), "V", "Song V", &[fp(3, "Song V", "Band", 0.95)]);
+    let lib = s.library.lock().unwrap();
+    let was = lib.input_generations().unwrap().get(&other).cloned();
+    let options = pm_library::db::options_signature(&lib.suggestions_for(other).unwrap());
+    let mut search = fp(4, "Song V", "Band", 0.9);
+    search.source = "search".into();
+    lib.add_suggestions(other, &[search]).unwrap();
+    let pick = pm_library::db::AutoPick {
+        recording: &mbid(&rec(3)),
+        release: None,
+        score: 0.95,
+        detail: "auto: R1",
+        read: was.as_deref(),
+        options: &options,
+        folder: None,
+    };
+    assert_eq!(
+        lib.settle_auto(other, &pick).unwrap(),
+        pm_library::AutoSettle::Changed
+    );
+    // ... and one whose folder's release isn't the one it went by
+    let options = pm_library::db::options_signature(&lib.suggestions_for(other).unwrap());
+    let folder = dir.path().join("music/V");
+    let pick = pm_library::db::AutoPick {
+        options: &options,
+        folder: Some((folder.as_path(), REL)),
+        ..pick
+    };
+    assert_eq!(
+        lib.settle_auto(other, &pick).unwrap(),
+        pm_library::AutoSettle::Changed
+    );
+    // A search's option and the folder's of one recording: each keeps its own evidence
+    let mut search = fp(5, "Song V", "Band", 0.8);
+    search.source = "search".into();
+    let mut album = fp(5, "Song V", "Band", 0.95);
+    album.source = "album".into();
+    album.release = Some(mbid(REL));
+    lib.add_suggestions(other, &[search]).unwrap();
+    lib.add_suggestions(other, &[album]).unwrap();
+    let row = lib
+        .suggestions_for(other)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.recording_mbid == rec(5))
+        .unwrap();
+    assert_eq!(
+        (row.source.as_str(), row.score, row.release_mbid),
+        ("search", 0.8, None)
+    );
 }

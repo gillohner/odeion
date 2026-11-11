@@ -1709,10 +1709,13 @@ pub async fn auto_settle_pass(s: &NodeState) -> Result<SettleReport, ApiError> {
         })
         .collect();
     let mut options: HashMap<i64, Vec<Opt>> = HashMap::new();
+    let mut stored_rows: HashMap<i64, Vec<SuggestionRow>> = HashMap::new();
     for r in &rows {
         options.entry(r.track_id).or_default().push(Opt::from(r));
     }
-    drop(rows);
+    for r in rows {
+        stored_rows.entry(r.track_id).or_default().push(r);
+    }
     for t in &waiting {
         let id = t.id.map(|i| i.0).unwrap_or_default();
         let mut opts = options.remove(&id).unwrap_or_default();
@@ -1768,10 +1771,20 @@ pub async fn auto_settle_pass(s: &NodeState) -> Result<SettleReport, ApiError> {
             continue;
         };
         let detail = format!("auto: {}", rule.name());
-        let stored = write_waiting(s, |lib| {
-            lib.settle_auto(id, &recording, release.as_ref(), score, &detail, Some(was))
-        })
-        .await?;
+        // The evidence it was decided on, checked again where it is stored
+        let signature =
+            pm_library::db::options_signature(stored_rows.get(&id).map(Vec::as_slice).unwrap_or_default());
+        let dir = folder_of(t);
+        let pick = pm_library::db::AutoPick {
+            recording: &recording,
+            release: release.as_ref(),
+            score,
+            detail: &detail,
+            read: Some(was),
+            options: &signature,
+            folder: fr.as_deref().map(|r| (dir.as_path(), r)),
+        };
+        let stored = write_waiting(s, |lib| lib.settle_auto(id, &pick)).await?;
         if stored == pm_library::AutoSettle::Stored {
             report.settled += 1;
             *report.by_rule.entry(rule.name().to_string()).or_default() += 1;
@@ -2276,7 +2289,12 @@ fn rank_hits(
             })
         })
         .collect();
-    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    // Best first, ties by recording id: which five are kept never follows MusicBrainz's order
+    out.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.recording.cmp(&b.recording))
+    });
     // One choice per title, artist and release: identical-looking rows only confuse
     let mut seen = std::collections::HashSet::new();
     out.retain(|c| {
@@ -3035,6 +3053,22 @@ fn correct(
 ) -> Result<serde_json::Value, ApiError> {
     use pm_library::Rematch;
     let _one = id_writes();
+    // No scan alongside it: a scan that read the file before could store the old recording after
+    // the correction (the library folders' scan slot is held; WebDAV and drive scans are waited
+    // out by the caller trying again)
+    if s.side_scans.load(std::sync::atomic::Ordering::SeqCst) > 0 || !s.begin_scan() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "A library scan is going; nothing was changed. Try again when it is done.",
+        ));
+    }
+    struct Slot<'a>(&'a NodeState);
+    impl Drop for Slot<'_> {
+        fn drop(&mut self) {
+            self.0.end_scan();
+        }
+    }
+    let _slot = Slot(s);
     let (track, now, release_kept, choice) = {
         let lib = s.library.lock().expect("library poisoned");
         // A release only when the folder's own fit names it (the album lane's option): a search
@@ -3085,11 +3119,26 @@ fn correct(
             Err(e) => skipped = Some(e.to_string()),
         }
     }
+    // The rewritten file as the scan will find it, noted in the correction's own step: the
+    // rewrite is no change of the song's, so the owner's choice (a match, or none) stands
+    let stamp = backup.as_ref().and_then(|_| {
+        let path = &track.file.path;
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            .max(pm_library::lyrics::sidecar_mtime(path).unwrap_or(0));
+        Some((path.as_path(), meta.len(), mtime))
+    });
     let done = s.library.lock().expect("library poisoned").rematch(
         id,
         expect.as_deref(),
         choice.as_ref().map(|(r, rel)| (r, rel.as_ref())),
         follow,
+        stamp,
     );
     let old = match done {
         Ok(Rematch::Done { old }) => old,
@@ -3115,28 +3164,6 @@ fn correct(
             });
         }
     };
-    if backup.is_some() {
-        // The file as the scan will find it: the rewrite is no change of the song's, so the
-        // owner's choice (a match, or none) stands through the next scan
-        let path = track.file.path.clone();
-        if let Ok(meta) = std::fs::metadata(&path) {
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-                .max(pm_library::lyrics::sidecar_mtime(&path).unwrap_or(0));
-            let lib = s.library.lock().expect("library poisoned");
-            if let Err(e) = lib.note_rewritten(id, &path, meta.len(), mtime, choice.as_ref().map(|(r, _)| r))
-            {
-                tracing::warn!("identify: a rewritten file not noted: {e}");
-            }
-            if choice.is_some() {
-                let _ = lib.set_identify_state(id, "identified", Some("written into the file"));
-            }
-        }
-    }
     let track = s
         .library
         .lock()
