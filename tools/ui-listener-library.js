@@ -114,11 +114,13 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       assert.match(txt, /My streaming accounts/i); assert.match(txt, /Signed in as ann-spot/); assert.match(txt, /Qobuz[\s\S]*Not signed in/);
       assert.doesNotMatch(txt, /Service apps|Device client ID|App ID and secret/, 'never the node’s own apps');
       await shot('settings-listener');
-      // TIDAL: their own sign-in ways; the node's device client is the owner's to set
+      // TIDAL: their own sign-in (one action, the rest under Other ways); the node's device client is
+      // the owner's to set, so no device client way at all for a listener
       await page.locator('details[data-svc="tidal"] > summary').click();
-      await page.locator('details[data-svc="tidal"] .way').first().waitFor();
+      await page.locator('details[data-svc="tidal"] [data-sg="action"], details[data-svc="tidal"] [data-sg="none"]').first().waitFor();
+      assert.match(await page.locator('details[data-svc="tidal"]').innerText(), /Sign in with a code/);
       assert.equal(await page.locator('#tfclient').count(), 0, 'no device client form for a listener');
-      assert.match(await page.locator('details[data-svc="tidal"]').innerText(), /set up by whoever runs this node/);
+      assert.doesNotMatch(await page.locator('details[data-svc="tidal"]').textContent(), /device client/i, 'no device client way for a listener, also under Other ways');
       await shot('settings-tidal');
       // Spotify: their own sign-in; the node's app (its client id, Change, Forget) stays the owner's
       await page.locator('details[data-svc="spotify"] > summary').click();

@@ -277,19 +277,22 @@ in use or yours, and what the service limits.
   import need an app of your own, because Spotify allows no shared one (an app in development mode lets in 25 people).
   Sources › Spotify walks you through it; see [Advanced: use your own app](STREAMING-PROVIDERS.md#advanced-use-your-own-app).
 - **Spotify on this machine (Soloist):** Spotify's official headless player, run by the node (Linux, macOS). It needs a
-  Soloist API key of your own (see Advanced). Then under Sources › Spotify › Play on this machine press Download
+  Soloist API key of your own (see Advanced). Then under Sources › Spotify › Other ways to play press Download
   Soloist (from Spotify's own servers; Spotify forbids us to ship it), switch it on, and pick the device in a Spotify
   app. It plays on the machine's PipeWire or PulseAudio output, not on the node's zones. `[spotify] soloist` (or
-  `PM_SOLOIST`) names an install of your own. In Docker it needs the host's audio socket, which the image doesn't set up.
+  `PM_SOLOIST`) names an install of your own. In Docker it needs the host's audio socket, which the image doesn't set up;
+  on Linux the tab shows Soloist only when a local PipeWire or PulseAudio socket accepts a bounded connection (`PULSE_SERVER`,
+  `PIPEWIRE_REMOTE`, `$PIPEWIRE_RUNTIME_DIR`, the sockets in `$XDG_RUNTIME_DIR`, or `/run/pulse/native`). Remote
+  PulseAudio addresses are conservatively excluded from this setup check; a reachable socket is not a playback test.
 - **Spotify through librespot (unofficial):** install librespot yourself (`cargo install librespot` or your
-  distribution's package; it has no ready-made builds), then switch it on under Sources › Spotify › librespot. It can
+  distribution's package; it has no ready-made builds), then switch it on under Sources › Spotify › Other ways to play
+  (it shows there once installed). It can
   play on the machine's sound or into one of the node's zones.
-- **TIDAL full tracks (unofficial):** Sources › TIDAL › Sign in › **Sign in with TIDAL** (Recommended): sign in at TIDAL
+- **TIDAL full tracks (unofficial):** Sources › TIDAL › Sign in › **Sign in with TIDAL**: sign in at TIDAL
   in a new tab and paste the address of the page you land on; lossless and hi-res. **Sign in with a code** is the
   fallback (TIDAL may send it AAC only). A release build carries both clients; a build from source without them has
-  neither: Sign in with TIDAL is then unavailable and the code sign-in needs a device client of your own (Advanced ›
-  Your own device client, or `[tidal] unofficial_client_id/secret`; an app from TIDAL's developer site is not a device
-  client). See [the guide](guides/tidal-full-tracks.md).
+  neither: neither sign-in is offered then, and the code sign-in needs a device client of your own in the config
+  (`[tidal] unofficial_client_id/secret`; an app from TIDAL's developer site is not a device client). See [the guide](guides/tidal-full-tracks.md).
 - **SoundCloud (unofficial):** off by default. The node has no built-in client; you enter a SoundCloud web client ID
   you are allowed to use under Sources › SoundCloud, and, for your likes and playlists, your own sign-in token.
 - **Bandcamp (unofficial):** off by default. Search and streams need nothing; to download what you bought, paste the

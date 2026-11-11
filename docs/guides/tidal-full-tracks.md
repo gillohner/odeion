@@ -3,24 +3,28 @@
 TIDAL has several sign-ins on this node, in **Sources › TIDAL › Sign in**. Each person signs in to
 their own TIDAL account; one person's sign-in never plays for another.
 
-- **Sign in with TIDAL** (Recommended; full tracks, unofficial): you sign in at TIDAL in your
+- **Sign in with TIDAL** (the main one; full tracks, unofficial): you sign in at TIDAL in your
   browser and paste back the address of the page you land on. It is the only sign-in TIDAL serves
   **lossless and hi-res FLAC** to (up to 24-bit/192 kHz). Nothing to set up: a release build
   carries the client it needs.
 - **Sign in with a code** (the fallback; full tracks, unofficial): the way TIDAL's own devices
   sign in, with a code you enter at link.tidal.com. TIDAL may send this sign-in **AAC only** (lossy),
   so use it only when the browser sign-in doesn't work for you.
-- Under **Advanced**: the official app (the project's, or your own from TIDAL's developer site:
-  search, albums, your collection and playlist imports; TIDAL plays **30-second previews** to
-  apps on its third-party developer tier), **Your own device client** for the code sign-in, and
-  **Paste a token** from another app. **A sign-in from another app on this machine** shows up only
-  when the node finds one.
+- Under **Other ways to sign in** (closed; a line each, **Use this** opens one): the code sign-in,
+  the official app (the project's, or your own from TIDAL's developer site: search, albums, your
+  collection and playlist imports; TIDAL plays **30-second previews** to apps on its third-party
+  developer tier) and **Paste a token** from another app. **A sign-in from another app on this
+  machine** shows up only when the node finds one, **Your own device client** only once one is set.
+
+The page shows only the ways this node can use: one this build can't (no client for it) is not
+listed at all. Signed in, one row says who and what it gives, with **Change** (the other ways) and
+**Sign out**.
 
 TIDAL has not approved the unofficial sign-ins for other apps: they can stop working at any time,
 and they use your TIDAL account. Full tracks need a paid TIDAL plan.
 
-The **Full tracks** status at the top of the Sign in group says where you are: Needs sign-in,
-Waiting, Working, AAC only, Off, Problem, or (a build without its clients) Needs client.
+A **Full tracks** status line shows above it only when there is more to say: Waiting, AAC only,
+Off, Problem, or (a build without its clients) Not in this build.
 
 ## Sign in with TIDAL
 
@@ -30,7 +34,7 @@ Waiting, Working, AAC only, Off, Problem, or (a build without its clients) Needs
    `https://tidal.com/` and has `?code=` in it), paste it into the field on the node's page and
    press **Done**. The code alone works too.
 
-The status turns **Working** and TIDAL plays full tracks, up to 24-bit/192 kHz (the **Quality**
+The page says **Signed in** and TIDAL plays full tracks, up to 24-bit/192 kHz (the **Quality**
 setting can cap it at 16-bit/44.1 kHz). The page says what went wrong in plain words: an address
 that isn't TIDAL's (only `https://` addresses on tidal.com are read), one without a code, a code
 TIDAL didn't accept (a code works once and only for a few minutes), or a sign-in that waited longer
@@ -40,7 +44,8 @@ No password goes through the node. It keeps the tokens TIDAL gives it and renews
 
 ## Sign in with a code
 
-Pick **Sign in with a code** and press the button. The page shows a code, big, and **Open
+Open **Sign in with a code** (under Other ways to sign in, or the main one when this build can't
+do the browser sign-in) and press the button. The page shows a code, big, and **Open
 link.tidal.com**: on a phone or a computer that is signed in to TIDAL, that button opens the page
 with the code filled in; confirm it there. If the code isn't filled in, type it, or use **Copy**.
 The code is good for about five minutes; the time left is under the button. The page notices when
@@ -50,13 +55,14 @@ new one.
 TIDAL often sends this sign-in AAC instead of FLAC. The TIDAL page then says **Sign in with TIDAL
 again for lossless**, with the button; signing in that way replaces the code sign-in.
 
-### Advanced: your own device client
+### Your own device client
 
 A release build carries a device client for the code sign-in. A build from source without it
-lists the code sign-in as unavailable until the owner adds one under **Advanced › Your own device
-client**. A client entered there replaces the built-in one for everyone on the node, even if TIDAL
-later refuses it (the node never switches clients by itself). Enter a device client you are
-allowed to use.
+doesn't offer the code sign-in; TIDAL hands out no device clients, so the page doesn't ask for
+one. An owner who has one they are allowed to use sets it in the node config (below); one saved on
+the page before shows under **Other ways to sign in › Your own device client**, to change or
+forget it. A client set there replaces the built-in one for everyone on the node, even if TIDAL
+later refuses it (the node never switches clients by itself).
 
 An app from TIDAL's developer site is **not** a device client: TIDAL refuses it for the code sign-in.
 That one goes in **Settings › This node › Service apps** and becomes your official app.

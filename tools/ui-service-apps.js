@@ -1,6 +1,8 @@
 // Settings › This node › Service apps (TASK-service-apps-builtin.md): each service says whether
-// it is built in or your own, with its limits in plain words; "Advanced: use your own app" sets
-// the admin's own app, the secret never comes back, and "Use built-in" returns to the build's.
+// it is built in or your own, with its limits in plain words; "Use your own app" sets the
+// admin's own app, the secret never comes back, and "Use built-in" returns to the build's. Only
+// what can be done here is listed (owner, 2026-11-08): no row for an app with nothing to set and
+// none in use, no own-app form for Qobuz or TIDAL's device clients (one saved before keeps Remove).
 // Run against a disposable fixture node (it changes the node's TIDAL app and sets it back):
 //   node tools/ui-service-apps.js <api token> <node URL>
 const assert = require('node:assert/strict');
@@ -25,11 +27,18 @@ const get = async () => (await fetch(`${BASE}/v1/node/apps`, { headers: { author
       assert.match(await tidal.textContent(), /30-second previews/, 'TIDAL says what it limits');
       const spotify = panel.locator('.set-row', { has: page.locator('.set-name', { hasText: /^Spotify$/ }) });
       assert.match(await spotify.textContent(), /25\s+people/, 'Spotify says its 25-person limit');
-      // A console link is only under Advanced
+      // A console link is only under "Use your own app"
       for (const a of await panel.locator('a[href*="developer"], a[href*="console."]').all()) {
-        assert.ok(await a.evaluate((el) => !!el.closest('details.app-adv')), `${await a.getAttribute('href')} sits under Advanced`);
+        assert.ok(await a.evaluate((el) => !!el.closest('details.app-adv')), `${await a.getAttribute('href')} sits under Use your own app`);
       }
-      await tidal.locator('summary', { hasText: 'Advanced: use your own app' }).click();
+      assert.ok(!/Advanced/.test(await panel.textContent()), 'no "Advanced" wording');
+      // Nothing to do, nothing listed: an app with no form and none in use, Qobuz's app (Qobuz hands none out)
+      const listed = await panel.locator('.set-row .set-name').allTextContents();
+      for (const a of await get()) {
+        const doable = a.configured || !!a.page || (!!a.set && !['qobuz', 'tidal-full'].includes(a.id));
+        assert.equal(listed.includes(a.name), doable, `${a.name} ${doable ? 'is' : 'is not'} listed`);
+      }
+      await tidal.locator('summary', { hasText: 'Use your own app' }).click();
       const form = tidal.locator('form[data-appform="tidal"]');
       await form.locator('input[name=client_id]').fill(`ui-check-tidal-${width}`);
       await form.locator('input[name=client_secret]').fill('ui-check-secret');
@@ -54,5 +63,5 @@ const get = async () => (await fetch(`${BASE}/v1/node/apps`, { headers: { author
   } finally {
     await browser.close();
   }
-  console.log('service apps: built in or your own, limits, Advanced form, secret kept back, reset');
+  console.log('service apps: only what can be done, built in or your own, limits, own-app form, secret kept back, reset');
 })().catch((e) => { console.error(e); process.exit(1); });

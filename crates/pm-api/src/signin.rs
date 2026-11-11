@@ -322,19 +322,42 @@ pub(crate) async fn import(
     Ok(Json(src.describe(&s, &who, Some(&headers))))
 }
 
-/// `DELETE /v1/sources/{source}/signin`: sign out of the way in use. The picked way stays
-/// remembered.
+#[derive(Debug, Default, Deserialize)]
+pub struct SignOutQuery {
+    /// Sign out of this way, in use or not (Spotify's librespot while the app is the one in use).
+    #[serde(default)]
+    pub way: Option<String>,
+}
+
+/// `DELETE /v1/sources/{source}/signin[?way=…]`: sign out of the way in use, or of the way named.
+/// The picked way stays remembered.
 pub(crate) async fn sign_out(
     State(s): State<Arc<NodeState>>,
     axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Path(source): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SignOutQuery>,
     headers: HeaderMap,
 ) -> ApiResult<SignIn> {
     let who = Who::of(&caller);
     let src = find_for(&source, &who)?;
     let si = src.describe(&s, &who, Some(&headers));
-    if let Some(u) = &si.in_use {
-        src.sign_out_of(&s, &who, &u.way)?;
+    match q.way.as_deref().filter(|w| !w.is_empty()) {
+        Some(way) if si.ways.iter().any(|w| w.id == way) => src.sign_out_of(&s, &who, way)?,
+        Some(way) => {
+            return Err(ApiError::bad_request(format!(
+                "no such way: {way}; one of {}",
+                si.ways
+                    .iter()
+                    .map(|w| w.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+        }
+        None => {
+            if let Some(u) = &si.in_use {
+                src.sign_out_of(&s, &who, &u.way)?;
+            }
+        }
     }
     Ok(Json(src.describe(&s, &who, Some(&headers))))
 }
