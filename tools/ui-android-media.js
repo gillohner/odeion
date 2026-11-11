@@ -58,7 +58,7 @@ const calls = (page) => page.evaluate(() => window.__calls.slice());
 const slider = (page) => page.evaluate(() => { const s = document.querySelector('#vol'); return s ? { min: +s.min, max: +s.max, value: +s.value, text: s.getAttribute('aria-valuetext'), unknown: s.classList.contains('unknown') } : null; });
 const gain = (page) => page.evaluate(() => document.querySelector('audio#browser').volume);
 const setSlider = (page, v) => page.evaluate((v) => { const s = document.querySelector('#vol'); s.value = String(v); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); }, v);
-const pick = async (page, id) => { await page.click('#zonebtn'); await sleep(300); await page.click(`#zonepop [data-zone="${id}"]`); await sleep(400); };
+const pick = async (page, id) => { await page.$eval('#zonebtn', (b) => b.click()); await sleep(300); await page.click(`#zonepop [data-zone="${id}"]`); await sleep(400); };
 
 (async () => {
   const browser = await chromium.launch();

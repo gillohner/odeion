@@ -46,6 +46,8 @@ const open = async (browser, desktop, w = 390) => {
   return run;
 };
 const text = (page, sel) => page.$eval(sel, (el) => el.innerText || el.textContent || '').catch(() => '');
+// Close Now playing whole: on a phone, Escape first closes its open sheet (More, Up next), then the page
+const closeNp = async (page) => { for (let i = 0; i < 4 && await page.$('#nowplaying:not([hidden])'); i++) { await page.keyboard.press('Escape'); await sleep(300); } };
 const hasBrowser = (t) => /\bbrowser\b/i.test(t);
 
 (async () => {
@@ -111,7 +113,7 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     if (tag === 'android') {
       // The app registered its player, a USB DAC on it: the DAC's name, and the zone to play on instead
       state.fixtures['/outputs'] = { body: [{ ...outputs[0], device: { name: 'FiiO KA17', kind: 'usb_dac', mode: 'shared', modes: ['shared'], confirmed: false } }] };
-      await page.keyboard.press('Escape'); await sleep(200);
+      await closeNp(page);
       await page.evaluate((id) => { window.pmDesktop.outputs = [id]; window.pmDesktop.output = id; window.dispatchEvent(new Event('pmdesktop:output')); }, outputs[0].id);
       // With the page's player paused, the bar moves to the phone's own zone, the path that reaches
       // the DAC unchanged, and says so (once per DAC)
@@ -119,7 +121,7 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
       for (let i = 0; i < 30 && !(await moved()); i++) await sleep(100);
       check(await moved(), `${at}: a DAC on the app's output moves the paused bar to ${zone.name}, with a note (${(await text(page, '#zonename')).trim()})`);
       // Chosen again, "This phone" stays (the move is once per DAC): its Output line names the DAC and that zone
-      await page.click('#zonebtn'); await page.waitForSelector('#zonepop:not([hidden])'); await sleep(200);
+      await page.$eval('#zonebtn', (b) => b.click()); await page.waitForSelector('#zonepop:not([hidden])'); await sleep(200);
       await page.click('#zonepop [data-zone="browser"]'); await page.waitForSelector('#npart', { timeout: 5000 }); await sleep(500);
       check((await text(page, '#zonename')).trim() === name, `${at}: "${name}" chosen again stays chosen (${(await text(page, '#zonename')).trim()})`);
       await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
@@ -129,7 +131,7 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
       await page.locator('#nowplaying .np-output').scrollIntoViewIfNeeded();
       await page.screenshot({ path: path.join(SHOTS, `nowplaying-${tag}-own-zone.png`) });
     }
-    await page.keyboard.press('Escape'); await sleep(200);
+    await closeNp(page);
     const where = seen.map((t) => (t.match(/[^.\n]*\bbrowser\b[^.\n]*/i) || [''])[0]).filter(Boolean);
     if (inApp) check(!seen.some(hasBrowser), `${at}: no "browser" on the bar, the picker, the Sound panel, the Queue and Zones pages or Now playing${where.length ? ': ' + where.slice(0, 2).join(' | ') : ''}`);
     else check(seen.some(hasBrowser), `${at}: the web UI still says browser`);

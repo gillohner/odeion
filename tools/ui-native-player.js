@@ -23,6 +23,8 @@ fs.mkdirSync(SHOTS, { recursive: true });
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Close Now playing whole: on a phone, Escape first closes its open sheet (More, Up next), then the page
+const closeNp = async (page) => { for (let i = 0; i < 4 && await page.$('#nowplaying:not([hidden])'); i++) { await page.keyboard.press('Escape'); await sleep(300); } };
 
 const f16 = { kind: 'pcm', rate_hz: 44100, bits: 16, channels: 2 };
 const tracks = [1, 2, 3].map((id) => ({ ...fx.track, id, title: `Song ${id}`, duration_ms: 240000 }));
@@ -133,10 +135,10 @@ const saidAndPaused = async (page, re, ms = 8000) => {
   }
 };
 const queue = (n) => tracks.slice(0, n).map((t) => ({ uri: `track:${t.id}`, track_id: t.id, title: t.title, artist: 'Sefa', album: 'Journey', duration_ms: 240000 }));
-// Now playing › Details › Output (the Details tab on wide screens; always there on phones)
+// Now playing › Details › Output (the Details tab on wide screens; in More on phones)
 const detailsOutput = async (page) => {
   await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
-  if (await page.evaluate(() => { const b = !document.querySelector('#nowplaying .np-output') && document.querySelector('#nowplaying [data-npsheet="details"]'); if (b) b.click(); return !!b; })) await sleep(400);
+  if (await page.evaluate(() => { const b = !document.querySelector('#nowplaying .np-output') && document.querySelector('#nowplaying .np-tabs [data-npsheet="details"], #nowplaying .np-dock [data-npsheet="more"]'); if (b) b.click(); return !!b; })) await sleep(400);
   return page.evaluate(() => { const d = document.querySelector('#nowplaying .np-output'); return d ? d.textContent : null; });
 };
 const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture-owner`;
@@ -247,7 +249,7 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
     const outLine = await detailsOutput(page);
     check(outLine === 'Bit-perfect · FiiO KA17 · 44.1 kHz / 16 bit', `${at}: Details › Output reads the DAC line ("${outLine}")`);
     await page.screenshot({ path: path.join(SHOTS, `details-native-${w}.png`) });
-    await page.keyboard.press('Escape'); await sleep(300);
+    await closeNp(page);
     // Repeat one: the same song is handed ahead
     await page.evaluate(() => { localStorage.setItem('pm.repeat', 'one'); }); await sleep(700);
     const last = (await calls(page, 'native_ahead')).pop(); const cur = (await now(page)).src;
@@ -260,7 +262,7 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
     const bar = await page.evaluate(() => document.querySelector('#np').innerText);
     check(n.paused && /the node plays on this device/.test(bar), `${at}: taken by the node: paused, and the bar says why`);
     // The phone's own zone is not a second entry
-    await page.click('#zonebtn'); await sleep(300);
+    await page.$eval('#zonebtn', (b) => b.click()); await sleep(300);
     const entries = await page.evaluate(() => [...document.querySelectorAll('#zonepop [data-zone]')].map((b) => b.dataset.zone));
     check(entries.includes('browser') && !entries.includes(ownZone.id), `${at}: the phone's picker has one This phone (${entries.join(', ')})`);
     await page.keyboard.press('Escape'); await sleep(200);
@@ -274,7 +276,7 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
     await page.screenshot({ path: path.join(SHOTS, `refused-${w}.png`) });
     const outLine2 = await detailsOutput(page).catch((e) => `(${e.message.split('\n')[0]})`);
     check(!!outLine2 && /^Android mixer/.test(outLine2) && /can’t play this stream itself/.test(outLine2), `${at}: Details says Android mixer for it ("${outLine2}")`);
-    await page.keyboard.press('Escape');
+    await closeNp(page);
     check(!state.errors.length, `${at}: no page errors (${state.errors.join(' | ')})`);
     await run.context.close();
 
