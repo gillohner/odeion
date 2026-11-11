@@ -252,11 +252,14 @@
   // second click. A mark made without an event (a menu's action on its ⋯) only shows the progress.
   const BUSY = new WeakMap();
   let inHandler = 0; // a press's handler is running (its reads are its own, not a page's: navApiFor)
+  let pressing = 0; // a press's handler that returned a promise has not settled yet
   const busy = (el, fn, ev = null) => {
     let out;
     inHandler++;
     try { out = fn(); } catch (e) { console.error(e); toast((e && e.message) || 'That didn’t work; try again.', 'error'); return undefined; } finally { inHandler--; }
     if (!out || typeof out.then !== 'function') return out;
+    // (until it settles, a redraw it makes is the press's: usage insights count its reads)
+    pressing++; { const settled = () => { pressing--; }; out.then(settled, settled); }
     const failed = (e) => { if (!e || e.name !== 'AbortError') toast((e && e.message) || 'That didn’t work; try again.', 'error'); };
     if (!el) { out.catch(failed); return out; }
     // Several actions on one control at once (the same click reaching its row's handler, or changes in a
@@ -5910,7 +5913,7 @@
   // usage insights count only the reads of a page opened or redrawn by a press)
   let lastDrawing = null; let fromNav = false;
   const render = () => {
-    const drawing = { on: true, nav: fromNav || inHandler > 0 }; lastDrawing = drawing; // (or a press redraws it)
+    const drawing = { on: true, nav: fromNav || inHandler > 0 || pressing > 0 }; lastDrawing = drawing; // (or a press redraws it)
     // A page opened by a press is the page's own reading, not the press's
     const outer = inHandler; inHandler = 0; let p;
     try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }

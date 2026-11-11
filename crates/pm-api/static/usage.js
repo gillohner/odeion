@@ -277,10 +277,11 @@
     // (Stop holds on this page at once, even before or without the node's answer)
     const was = me; if (!share) { fresh(); if (me) me = { ...me, sharing: false }; }
     const t = token;
-    const r = await request('PUT', '/usage/me', share ? { share: true, choice: was ? was.choice : 0 } : { share: false }, { token: t });
+    // Another sign-in meanwhile: nothing of this answer (or failure) is its, and nothing is said as if it were
+    const stale = () => { const e = new Error('Another sign-in started meanwhile: nothing changed for it.'); e.stale = true; return e; };
+    let r; try { r = await request('PUT', '/usage/me', share ? { share: true, choice: was ? was.choice : 0 } : { share: false }, { token: t }); } catch (e) { throw t !== token ? stale() : e; }
     const j = await answer(r);
-    // Another sign-in meanwhile: nothing of this answer is its, and nothing is said as if it were
-    if (t !== token) { const e = new Error('Another sign-in started meanwhile: nothing changed for it.'); e.stale = true; throw e; }
+    if (t !== token) throw stale();
     if (!r.ok) { const e = new Error(r.status === 409 ? 'Usage insights changed since this page showed them. Look again.' : 'The node didn’t take that; try again.'); e.status = r.status; if (r.status === 409) await readMe(); throw e; }
     if (share) fresh();
     apply(j); return j;
@@ -322,7 +323,7 @@
       + row('What is recorded', esc(WHAT), '')
       + row('Clear mine', esc(`Deletes the raw events still linked to you. ${keep} Clear does not stop, and Stop does not clear.`), '<button class="btn ghost" data-usage="clear">Clear mine</button>'));
     const btn = (k) => el.querySelector(`[data-usage="${k}"]`);
-    const go = (k, fn) => { const b = btn(k); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { say(el, e.message, true); b.disabled = false; b.focus(); return; } refocus(el, `[data-usage="${{ stop: 'share', share: 'stop' }[k] || k}"]`); }; };
+    const go = (k, fn) => { const b = btn(k); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { if (e.stale) return; say(el, e.message, true); b.disabled = false; b.focus(); return; } refocus(el, `[data-usage="${{ stop: 'share', share: 'stop' }[k] || k}"]`); }; };
     go('stop', async () => { await choose(false); await renderPersonal(el); say(el, 'Stopped for you. Nothing more of yours is recorded.'); });
     go('share', async () => { await choose(true); await renderPersonal(el); say(el, 'Sharing again from your next page.'); });
     go('clear', async () => {
