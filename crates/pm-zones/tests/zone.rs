@@ -2815,7 +2815,6 @@ async fn an_audible_member_that_refuses_its_correction_is_not_hidden() {
     );
 }
 
-
 /// The playing item's place follows the queue while its track plays on (no new start reads it
 /// again): after shuffle off, `now_playing.index` is where the item went back to, and after an
 /// earlier item is moved after it, one place up; always `queue_index`, the same item.

@@ -25080,7 +25080,6 @@ exec sleep 300
     // Automatic matching, automatic settling and "Wrong match?" (their own file)
     mod identify_auto;
 
-
     /// An 8-item queue playing on the null output with repeat one, `index` current; the zone.
     async fn looping_queue(
         n: usize,
@@ -25262,7 +25261,6 @@ exec sleep 300
         assert_eq!(same_place(&z), title);
         assert_eq!(z["queue_index"].as_u64(), Some(at as u64 - 1));
     }
-
 
     /// Progress changes made at once, from many devices, are all kept: the progress document is
     /// one setting, read and written under one lock.
@@ -25625,7 +25623,6 @@ exec sleep 300
             "this folder's lock went with its holders"
         );
     }
-
 
     /// Two plays ending together, with listens waiting from before: each listen reaches
     /// ListenBrainz once (the waiting ones are taken by one sender), and when ListenBrainz can't
@@ -26434,7 +26431,6 @@ exec sleep 300
         );
         assert!(waiting_scrobbles(&s).is_empty());
     }
-
 
     /// A sync or a settings restore whose session another sign-in replaced answers 409, not 502.
     #[test]

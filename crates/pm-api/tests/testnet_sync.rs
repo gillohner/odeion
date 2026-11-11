@@ -2860,7 +2860,6 @@ async fn a_capped_listing_lists_what_the_sdk_lists() {
     }
 }
 
-
 /// A sign-in that replaces this node's while a sync runs ends that sync before its next write:
 /// nothing of the old identity's lands in the library, nothing of the node's is pushed to the old
 /// identity's homeserver, and the new sign-in's own sync takes over.
