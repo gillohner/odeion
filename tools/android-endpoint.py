@@ -445,19 +445,49 @@ def diagnose(what):
     (out / f"media-{what}.txt").write_text("\n".join(lines[-80:]))
 
 
+def open_picker():
+    """Open the page's zone picker. The phone layout (under 600 px, as on the emulator) has no zone
+    button on the bar: there Now playing's zone chip ("…: choose another zone") opens the same
+    picker, so the mini player opens Now playing first. Returns whether Now playing was opened."""
+    bar = find(lambda n: "choose where to play" in n)
+    if bar and center(bar) != (0, 0):
+        tap(lambda n: "choose where to play" in n, "the zone button")
+        return False
+    opened = False
+    if not find(lambda n: "choose another zone" in n):
+        tap(lambda n: "Open Now playing" in n or 'content-desc="Now playing"' in n, "the mini player")
+        opened = True
+    tap(lambda n: "choose another zone" in n, "Now playing's zone")
+    return opened
+
+
+def close_now_playing():
+    node = find(lambda n: "Close Now playing" in n)
+    if node and center(node) != (0, 0):
+        x, y = center(node)
+        adb("shell", "input", "tap", str(x), str(y))
+        log("closed Now playing")
+        time.sleep(1)
+
+
 def pick(name, what):
     """Choose a zone in the page's picker. The WebView's accessibility dump can lag behind
     the screen: the picker is closed and opened again (three tries) before giving up."""
+    opened = False
     for attempt in range(3):
-        tap(lambda n: "choose where to play" in n, "the zone button")
+        opened = open_picker() or opened
         end = time.time() + 20
         while time.time() < end:
-            node = next((n for n in ui_nodes() if name in n), None)
+            # (not the zone buttons themselves: their labels name the zone the page is on)
+            node = next((n for n in ui_nodes() if name in n and "choose another zone" not in n and "choose where to play" not in n), None)
             if node:
                 x, y = center(node)
                 if (x, y) != (0, 0):
                     adb("shell", "input", "tap", str(x), str(y))
                     log(f"tapped {what} at {x},{y}")
+                    if opened:
+                        time.sleep(1)
+                        close_now_playing()
                     return
                 adb("shell", "input", "swipe", "500", "1400", "500", "700", "300")
             time.sleep(2)
