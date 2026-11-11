@@ -106,8 +106,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const saved = await waitFor(rp, () => (document.querySelector('#ratingval') || {}).textContent === '3½ of 5', null, 10000).then(() => true).catch(() => false);
     await rp.click('[data-rate="7"]');
     const cleared = await waitFor(rp, () => (document.querySelector('#ratingval') || {}).textContent === '', null, 10000).then(() => true).catch(() => false);
-    console.log('rating: hover', fills, '| saved 3½', saved, '| cleared', cleared);
-    if (fills !== 'f2,f2,f2,f1,f0' || !saved || !cleared) errors.push('half-star rating');
+    // The row sits in the top card, under the actions; the old section below the page is gone
+    const inHero = await rp.evaluate(() => { const h = document.querySelector('#main .item-hero'); const s = document.querySelector('#stars'); return !!(h && s && h.contains(s)) && !document.querySelector('#ireview'); });
+    console.log('rating: hover', fills, '| saved 3½', saved, '| cleared', cleared, '| in the hero', inHero);
+    if (fills !== 'f2,f2,f2,f1,f0' || !saved || !cleared || !inHero) errors.push('half-star rating');
   } else console.log('rating: skipped (no rating row on this node)');
   // ---- back closes an open menu and stays on the page ----
   if (await rp.$('#imore')) {

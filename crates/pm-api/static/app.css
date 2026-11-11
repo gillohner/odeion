@@ -682,7 +682,10 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .star .half.r { right: 0; border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .star .half:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .ratingval { color: var(--muted); font-size: var(--fs-sm); margin-right: 8px; min-width: 4.5em; }
-.notes { flex-basis: 100%; color: var(--fg-2); white-space: pre-wrap; max-width: 560px; }
+.notes { flex-basis: 100%; color: var(--fg-2); white-space: pre-wrap; max-width: 560px; overflow-wrap: anywhere; }
+.notes.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.notes[hidden] { display: none; }
+.notes-more { margin-top: -6px; }
 .notes-edit { flex-basis: 100%; max-width: 560px; }
 .notes-edit textarea { resize: vertical; font: inherit; }
 
@@ -2185,7 +2188,7 @@ html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.eyebrow,
 html[data-shell="phone"] #main > .hero.item-hero h1 { font-size: var(--fs-xl); line-height: 1.2; overflow-wrap: anywhere; }
 html[data-shell="phone"] #main > .hero.item-hero .sub { font-size: var(--fs-md); }
 html[data-shell="phone"] #main > .hero.item-hero .eyebrow { font-size: var(--fs-2xs); }
-html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.htags, .actions, .hmatch-slot, .also-icons, .hero-tags) { grid-column: 1 / -1; }
+html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.htags, .actions, .reviewrow, .hmatch-slot, .also-icons, .hero-tags) { grid-column: 1 / -1; }
 html[data-shell="phone"] #main > .hero.item-hero .actions { margin-top: 12px !important; gap: 8px; flex-wrap: wrap; }
 /* (Also on and Open in: a row of their own under Play and the icons) */
 html[data-shell="phone"] #main > .hero.item-hero .actions > .also-icons { order: 4; flex: 1 0 100%; margin: 0; }
