@@ -48,7 +48,7 @@ const openNp = async (browser, w, h, opts = {}) => {
   await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); });
   await fx.go(page, '/albums'); await page.waitForSelector('#np'); await sleep(500);
   await page.click(w < 600 ? '#np' : '#npart'); await page.waitForSelector('#nowplaying:not([hidden]) .np-player'); await sleep(300);
-  if (w >= 600) { await page.click('.np-sheet-tabs [data-npsheet="lyrics"]'); await sleep(300); }
+  await page.click(w >= 600 ? '.np-sheet-tabs [data-npsheet="lyrics"]' : '.np-dock [data-npsheet="lyrics"]'); await sleep(300);
   await page.waitForSelector('#nplyrics .lyric-line.on', { timeout: 8000 }); await sleep(900);
   return { page, context, state };
 };
@@ -87,22 +87,24 @@ const settledLyricsScroll = (page) => page.$eval('#nplyrics .lyric-lines', (box)
     await page.screenshot({ path: path.join(SHOTS, `lyrics-${w}.png`) });
     // A tap on a line seeks there (the node is asked for position = the line's time)
     const hits0 = state.hits.length;
+    // (a line far enough down that the phone's taller lyrics sheet can still put it at its bottom)
+    const TAP = w < 600 ? 50000 : 20000;
     // (the line is put at the very bottom of the box first, outside the band the follower keeps, and
     // clicked where it is: so the follow after the seek is what moves it)
-    await page.$eval('#nplyrics .lyric-line[data-ms="20000"]', (ln) => { const box = ln.closest('.lyric-lines'); box.dataset.auto = '1'; box.scrollTop += ln.getBoundingClientRect().bottom - box.getBoundingClientRect().bottom + 2; setTimeout(() => { delete box.dataset.auto; }, 50); });
+    await page.$eval(`#nplyrics .lyric-line[data-ms="${TAP}"]`, (ln) => { const box = ln.closest('.lyric-lines'); box.dataset.auto = '1'; box.scrollTop += ln.getBoundingClientRect().bottom - box.getBoundingClientRect().bottom + 2; setTimeout(() => { delete box.dataset.auto; }, 50); });
     await sleep(120);
-    const placed = await page.$eval('#nplyrics .lyric-line[data-ms="20000"]', (ln) => { const b = ln.closest('.lyric-lines').getBoundingClientRect(); const o = ln.getBoundingClientRect(); return (o.top - b.top + o.height / 2) / b.height; });
+    const placed = await page.$eval(`#nplyrics .lyric-line[data-ms="${TAP}"]`, (ln) => { const b = ln.closest('.lyric-lines').getBoundingClientRect(); const o = ln.getBoundingClientRect(); return (o.top - b.top + o.height / 2) / b.height; });
     check(placed > 0.7, `${at}: the line to tap sits low in the box before the tap (${Math.round(placed * 100)}%)`);
     // (a real tap where the line is: its touch sets the hold the seek must end)
-    const lr = await page.$eval('#nplyrics .lyric-line[data-ms="20000"]', (ln) => { const r = ln.getBoundingClientRect(); return { x: r.left + Math.min(40, r.width / 2), y: r.top + r.height / 2 }; });
+    const lr = await page.$eval(`#nplyrics .lyric-line[data-ms="${TAP}"]`, (ln) => { const r = ln.getBoundingClientRect(); return { x: r.left + Math.min(40, r.width / 2), y: r.top + r.height / 2 }; });
     if (w < 600) await page.touchscreen.tap(lr.x, lr.y); else await page.mouse.click(lr.x, lr.y);
     await sleep(400);
-    const seek = state.hits.slice(hits0).find((x) => /\/zones\/linn\/transport|\/zones\/linn\/seek/.test(x.v) && x.body && /20000/.test(x.body));
+    const seek = state.hits.slice(hits0).find((x) => /\/zones\/linn\/transport|\/zones\/linn\/seek/.test(x.v) && x.body && x.body.includes(String(TAP)));
     check(!!seek, `${at}: a tap on a line asks the node to play from its time (${seek ? seek.v : 'no seek sent'})`);
     // …and once the node is there, the panel follows that line at once (the tap's own hold is over)
-    state.send({ ...zone, now_playing: { ...np, position_ms: 20500 } }); await sleep(1000);
+    state.send({ ...zone, now_playing: { ...np, position_ms: TAP + 500 } }); await sleep(1000);
     const followed = await page.evaluate(() => { const box = document.querySelector('#nplyrics .lyric-lines'); const on = box.querySelector('.lyric-line.on'); const b = box.getBoundingClientRect(); const o = on && on.getBoundingClientRect(); return { ms: on && on.dataset.ms, frac: on ? (o.top - b.top + o.height / 2) / b.height : null }; });
-    check(followed.ms === '20000' && followed.frac != null && followed.frac > 0.15 && followed.frac < 0.55, `${at}: the tapped line is followed at once (${followed.ms}, ${followed.frac != null ? Math.round(followed.frac * 100) : '?'}% down the panel)`);
+    check(followed.ms === String(TAP) && followed.frac != null && followed.frac > 0.15 && followed.frac < 0.55, `${at}: the tapped line is followed at once (${followed.ms}, ${followed.frac != null ? Math.round(followed.frac * 100) : '?'}% down the panel)`);
     state.send({ ...zone, now_playing: { ...np, position_ms: 61000 } });
     await page.waitForFunction(() => {
       const box = document.querySelector('#nplyrics .lyric-lines');
@@ -176,7 +178,8 @@ const settledLyricsScroll = (page) => page.$eval('#nplyrics .lyric-lines', (box)
     await sleep(1000);
     const later = await page.evaluate(() => document.querySelector('#main').classList.contains('view-in'));
     check(!later, `${w}: the page's entrance is over after a second (so what arrives later doesn't move)`);
-    await page.click('#zonebtn'); await sleep(50);
+    // (a phone's bar has no zone button: Now playing's zone label presses it)
+    if (w < 600) await page.$eval('#zonebtn', (b) => b.click()); else await page.click('#zonebtn'); await sleep(50);
     const pop = await page.evaluate(() => getComputedStyle(document.querySelector('#zonepop')).animationName);
     check(pop === (w < 600 ? 'sheetin' : 'popin-rise'), `${w}: Play to rises in (${pop})`);
     await context.close();

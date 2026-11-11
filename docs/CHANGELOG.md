@@ -6,6 +6,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-11
 
+- The strict Android phone UI tour now also requires populated Album and Confirm matches captures from the installed APK, with deterministic local candidates and native screenshot checks.
+
+- **The phone UI emulator check fails on any unfinished gesture tour.** Its fixture node is reached through an explicit ADB connection at the emulator's LAN address, checked from Android before the app starts, including refusal of an absent API token. This avoids relying on the emulator's host alias for the test connection; the app still signs in through its form, registers its LAN player on the first launch, and must play, restart and recover from a crash. Connection failures retain the complete redacted screen diagnostics.
+- **A simpler phone UI with swipes** (owner: "too cramped make ui simpler … scroll feels weird … use swipe gestures"). The mini player is the cover, the song on the full width and one play/pause, with a thin progress line on top; swipe it left for the next song, right for the previous one, up (or tap) for Now playing. Now playing is one screen that doesn't scroll, with Up next, Lyrics and More (details, sources, tags) as sheets that open from three buttons or a swipe up and close with a swipe down or Back; swipe the cover for the next or previous song. Song lists have one row style: a tap plays, ⋯ has the rest, a long press selects, and the playing song is marked. The album page header is compact, with "Not matched · Match" as a small line under Play. Confirm matches shows its header and rows at once, and the file name on one line. Messages appear at the bottom, above the bars and the keyboard, and the loading spinner is one centred ring everywhere (it was cut to a dash in some places).
+
 - **Sorting keeps your library filter.** Change the sort order in Albums or Artists without entering your filter again. Keyboard focus stays on Sort unless you move elsewhere while the list loads, including opening Search and then dismissing it.
 - **Lyrics scrolling checks use real wheel input.** They verify that the panel stays exactly where you scroll and follows the song again afterward, without artificial scroll jumps causing false failures.
 

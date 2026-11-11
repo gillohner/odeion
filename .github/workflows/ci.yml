@@ -620,6 +620,7 @@ jobs:
           ui-android-first.js android-first-shots
           ui-phone-dialog-actions.js phone-dialog-shots
           ui-nowplaying-phone.js nowplaying-phone-shots
+          ui-phone-simplify.js phone-simplify-shots
           ui-motion.js motion-shots
           ui-redesign.js redesign-shots
           ui-item-about.js item-about-shots
