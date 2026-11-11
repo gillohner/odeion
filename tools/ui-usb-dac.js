@@ -42,6 +42,8 @@ fs.mkdirSync(SHOTS, { recursive: true });
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Close Now playing whole: on a phone, Escape first closes its open sheet (More, Up next), then the page
+const closeNp = async (page) => { for (let i = 0; i < 4 && await page.$('#nowplaying:not([hidden])'); i++) { await page.keyboard.press('Escape'); await sleep(300); } };
 
 const OUT = 'net:192.168.1.20:7790/cpal:Speaker or headphones';
 const src = { kind: 'pcm', rate_hz: 96000, bits: 24, channels: 2 };
@@ -180,8 +182,8 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
       const VOL = 'Android 13: bit-perfect needs Android 14. Exclusive USB needs Android\'s permission for the DAC: tap Allow Exclusive USB in Settings > This phone';
       const detailsOutput = async () => {
         await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
-        // the Details tab on wide screens (one scroll on phones, where Details is always there)
-        if (await page.evaluate(() => { const b = !document.querySelector('#nowplaying .np-output') && document.querySelector('#nowplaying [data-npsheet="details"]'); if (b) b.click(); return !!b; })) await sleep(400);
+        // the Details tab on wide screens, or More on a phone (where Details lives in its sheet)
+        if (await page.evaluate(() => { const b = !document.querySelector('#nowplaying .np-output') && document.querySelector('#nowplaying .np-tabs [data-npsheet="details"], #nowplaying .np-dock [data-npsheet="more"]'); if (b) b.click(); return !!b; })) await sleep(400);
         const t = await page.evaluate(() => { const d = document.querySelector('#nowplaying .np-output'); return d ? d.textContent : null; });
         return t;
       };
@@ -189,7 +191,7 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
       const o1 = await detailsOutput();
       check(o1 === `Shared · FiiO KA17 · ${VOL}`, `${at}: Details' Output line, shared with the phone's reason: "${o1}"`);
       await page.screenshot({ path: path.join(SHOTS, `details-output-shared-${w}.png`) });
-      await page.keyboard.press('Escape'); await sleep(300);
+      await closeNp(page);
       await nodePlug(run, BP);
       const o2 = await detailsOutput();
       check(o2 === 'Bit-perfect · FiiO KA17 · 96 kHz / 24 bit', `${at}: Details' Output line, confirmed: "${o2}"`);
@@ -202,7 +204,7 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
       await nodePlug(run, null);
       await page.waitForFunction(() => !document.querySelector('#nowplaying .np-output'));
       check(true, `${at}: open Details drops the DAC claim when the output disappears`);
-      await page.keyboard.press('Escape'); await sleep(300);
+      await closeNp(page);
       await setZone(run, zone); await nodePlug(run, KA17);
     }
 
