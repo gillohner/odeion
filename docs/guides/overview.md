@@ -140,10 +140,10 @@ Details: [Backups and updates](backup-and-update.md).
 
 ## Where it stands
 
-As of November 2026. The last numbered release is **0.2.2** (30 October 2026), still under the
-project's old name. **Edge** is built from every change to the code.
+As of November 2026. The last numbered release is **0.2.3** (11 November 2026), the first under
+the name Odeion. **Edge** is built from every change to the code.
 
-**Live in release 0.2.2**
+**Live in release 0.2.3**
 
 - Library: folder scans, tags, covers, artist pages, search, play history, lyrics.
 - Playback to every speaker kind listed above, grouped zones, per-zone EQ and other sound
@@ -152,9 +152,6 @@ project's old name. **Edge** is built from every change to the code.
 - Streaming sources, the desktop and Android app, Subsonic apps, Home Assistant.
 - Pubky sign-in with Pubky Ring, playlists and favourites in your account, the bundle with its own
   homeserver, remote access through the app.
-
-**Live on edge, not in a release yet**
-
 - The Odeion name and logo, and the web page as an installable app.
 - The USB-stick installer for an Odeion box.
 - Each person signs in to their own TIDAL, Qobuz and Spotify; the node's owner chooses whose
@@ -164,17 +161,20 @@ project's old name. **Edge** is built from every change to the code.
 - Android app: keeps playing in the background, updates itself, and plays bit-perfect to a USB DAC
   (Android 14 and later, or with its own USB driver on older phones). The USB DAC modes are still
   being tested on real phones.
-- Now playing on a phone as one screen, with the mini player on the tabs.
+- Now playing on a phone as one screen, with the mini player on the tabs, a simpler mini player
+  and list rows, and more swipes.
 - Quicker song identification, and reviewing its matches is optional.
 - Songs are matched automatically after each scan, and the node's owner corrects a match with
   **Wrong match?** in a song's or album's ⋯ menu. An album whose files name no release takes the
-  one its matched songs agree on. All three come with the next release.
+  one its matched songs agree on.
 - Copying library folders to your homeserver in the background.
 - Tags in the top card of song, album and artist pages, drawn as in pubky.app.
 - Usage insights for the owner, the node's part: the switch, storage and the summary (off by
   default).
 - **?** in the top bar: **Report a problem…** sends the node's owner a problem, an idea or a
   question, and **My reports** shows what became of yours.
+- Images under the name `ghcr.io/gillohner/odeion`, and the same images under the old name
+  `ghcr.io/gillohner/pubky-music-node` for installs from before the rename.
 
 **Proposed** (being built)
 
@@ -182,19 +182,16 @@ project's old name. **Edge** is built from every change to the code.
   controls and volume keys.
 - Android: picking songs, albums and playlists to keep on the phone from their ⋯ menu, a storage
   screen, and playing them through the app's own player with no network.
-- A simpler mini player and list rows on phones, with more swipes.
 - Simpler sign-in pages for streaming services.
 - Usage insights, the browser part: the notice, its Settings pages and the recording itself
   (until then nothing is recorded). [How it works](usage-insights.md).
-- Release images under the name `ghcr.io/gillohner/odeion` (until then releases are
-  `ghcr.io/gillohner/pubky-music-node` and edge is `ghcr.io/gillohner/odeion:edge`), and the
-  desktop app's installed name, which is still the old one.
+- The desktop app's installed name, which is still the old one.
 
 What changed and when: [CHANGELOG](../CHANGELOG.md).
 
 ## Downloads
 
-| | Latest release (0.2.2) | Edge (newest code) |
+| | Latest release (0.2.3) | Edge (newest code) |
 | :-- | :-- | :-- |
 | All files | [releases/latest](https://github.com/gillohner/odeion/releases/latest) | [releases/tag/edge](https://github.com/gillohner/odeion/releases/tag/edge) |
 | macOS (universal) | [.dmg](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-macos-universal.dmg) | [.dmg](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-macos-universal.dmg) |
@@ -202,9 +199,9 @@ What changed and when: [CHANGELOG](../CHANGELOG.md).
 | Linux x86_64 | [.AppImage](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-linux-x86_64.AppImage), [.deb](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-linux-x86_64.deb) | [.AppImage](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-linux-x86_64.AppImage), [.deb](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-linux-x86_64.deb) |
 | Linux arm64 | [.AppImage](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-linux-arm64.AppImage), [.deb](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-linux-arm64.deb) | [.AppImage](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-linux-arm64.AppImage), [.deb](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-linux-arm64.deb) |
 | Android and Google TV | [arm64 .apk](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-android-arm64.apk) | [arm64 .apk](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-android-arm64.apk) |
-| Odeion box installer | not in a release yet | [odeion-edge-amd64.iso](https://github.com/gillohner/odeion/releases/download/edge/odeion-edge-amd64.iso) |
+| Odeion box installer | [odeion-v0.2.3-amd64.iso](https://github.com/gillohner/odeion/releases/download/v0.2.3/odeion-v0.2.3-amd64.iso) | [odeion-edge-amd64.iso](https://github.com/gillohner/odeion/releases/download/edge/odeion-edge-amd64.iso) |
 | The node, without Docker | `pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz`, `…-windows-x86_64.zip`, `…-macos-arm64.tar.gz` | the same names under edge |
-| Docker image | `ghcr.io/gillohner/pubky-music-node:latest` | `ghcr.io/gillohner/odeion:edge` |
+| Docker image | `ghcr.io/gillohner/odeion:latest` (also as `ghcr.io/gillohner/pubky-music-node:latest`) | `ghcr.io/gillohner/odeion:edge` |
 
 Every release has a `SHA256SUMS` file to check downloads against.
 

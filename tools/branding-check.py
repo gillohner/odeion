@@ -214,8 +214,10 @@ for g in ("install-linux.md", "remote-access.md", "desktop-app.md"):
 has("docs/guides/install-linux.md", "odeiond.service", "the Linux guide installs odeiond.service")
 has("docs/branding-compatibility.md", "# Odeion branding and compatibility", "the compatibility inventory exists")
 cl = text("docs/CHANGELOG.md")
-unreleased = cl.split("\n## ", 2)[1] if cl.count("\n## ") >= 1 else ""
-check(unreleased.startswith("Unreleased") and "Odeion" in unreleased, "CHANGELOG's Unreleased section has the Odeion entry")
+# The rename's entry: under Unreleased, or once released under the newest version (0.2.3)
+sections = cl.split("\n## ")[1:]
+check(bool(sections) and sections[0].startswith("Unreleased") and "Odeion" in "\n".join(sections[:2]),
+      "CHANGELOG's Unreleased section or the newest release has the Odeion entry")
 
 # ---------------------------------------------------------------- 2. compatibility identities kept
 check(tauri.get("identifier") == "to.synonym.pubkymusic", "the app identifier (Android application id) is unchanged")

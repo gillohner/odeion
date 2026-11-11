@@ -57,8 +57,8 @@ all fits together, Pubky and Pinakes, and what works today: [Overview](docs/guid
 
 ## Downloads
 
-The app and the node for the latest release and for edge (newest code), and the Odeion box
-installer (edge only): [Downloads](docs/guides/overview.md#downloads), or
+The app, the node and the Odeion box installer, for the latest release and for edge (newest
+code): [Downloads](docs/guides/overview.md#downloads), or
 [GitHub releases](https://github.com/gillohner/odeion/releases).
 
 ## Help and feedback
@@ -66,8 +66,7 @@ installer (edge only): [Downloads](docs/guides/overview.md#downloads), or
 - Something not working: [Troubleshooting](docs/guides/troubleshooting.md). Away from home:
   [Remote access](docs/guides/remote-access.md). Updates and backups:
   [Backups and updates](docs/guides/backup-and-update.md).
-- Using someone else's node: tell its owner with **?** › **Report a problem…** in the top bar
-  (edge).
+- Using someone else's node: tell its owner with **?** › **Report a problem…** in the top bar.
 - Questions, bug reports and ideas: [GitHub issues](https://github.com/gillohner/odeion/issues).
 
 ## For developers

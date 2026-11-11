@@ -3813,7 +3813,7 @@ dependencies = [
 
 [[package]]
 name = "pm-api"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3883,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "pm-appdata"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305 0.11.0",
@@ -3900,7 +3900,7 @@ dependencies = [
 
 [[package]]
 name = "pm-audio"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "base64 0.22.1",
  "ebur128",
@@ -3921,7 +3921,7 @@ dependencies = [
 
 [[package]]
 name = "pm-client"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "futures-util",
  "hound",
@@ -3945,7 +3945,7 @@ dependencies = [
 
 [[package]]
 name = "pm-discovery"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "if-addrs 0.15.0",
  "mdns-sd",
@@ -3956,7 +3956,7 @@ dependencies = [
 
 [[package]]
 name = "pm-endpoint"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -3972,7 +3972,7 @@ dependencies = [
 
 [[package]]
 name = "pm-library"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "blake3",
  "calamine",
@@ -3996,7 +3996,7 @@ dependencies = [
 
 [[package]]
 name = "pm-model"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4007,7 +4007,7 @@ dependencies = [
 
 [[package]]
 name = "pm-node"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -4035,7 +4035,7 @@ dependencies = [
 
 [[package]]
 name = "pm-offline"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -4051,7 +4051,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-airplay"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "mdns-sd",
@@ -4064,7 +4064,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-bluos"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "mdns-sd",
@@ -4077,7 +4077,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-cast"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "mdns-sd",
@@ -4093,7 +4093,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-local"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "alsa",
  "alsa-sys",
@@ -4115,7 +4115,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-mpd"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "pm-model",
@@ -4127,7 +4127,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-net"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "hound",
@@ -4144,7 +4144,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-slimproto"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "pm-model",
@@ -4156,7 +4156,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-snapcast"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "pm-model",
@@ -4169,7 +4169,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-upnp"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "if-addrs 0.13.4",
@@ -4186,7 +4186,7 @@ dependencies = [
 
 [[package]]
 name = "pm-pubky"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "axum",
  "base32",
@@ -4213,7 +4213,7 @@ dependencies = [
 
 [[package]]
 name = "pm-remote"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "iroh",
@@ -4224,7 +4224,7 @@ dependencies = [
 
 [[package]]
 name = "pm-renderer"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -4240,7 +4240,7 @@ dependencies = [
 
 [[package]]
 name = "pm-stream"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "pm-model",
  "pm-zones",
@@ -4252,7 +4252,7 @@ dependencies = [
 
 [[package]]
 name = "pm-usb-audio"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "libc",
  "serde",
@@ -4260,7 +4260,7 @@ dependencies = [
 
 [[package]]
 name = "pm-zones"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "form_urlencoded",

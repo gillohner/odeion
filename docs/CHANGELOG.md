@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+## 0.2.3
+
 ### 2026-11-11
 
 - The strict Android phone UI tour now also requires populated Album and Confirm matches captures from the installed APK, with deterministic local candidates and native screenshot checks.
