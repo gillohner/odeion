@@ -65,7 +65,9 @@ async function scrollLeftByHand(page) {
   await page.waitForFunction(() => window.scopeWheeled && document.querySelector('#scopechips').scrollLeft === 0);
 }
 const noOwnerReads = run => {
-  if (run.state.role === 'listener') assert.deepEqual(run.state.hits.filter(r => ['/sources', '/play-order', '/favourites', '/playlists'].includes(r.v)), [], 'listeners never read owner metadata');
+  // (/favourites and /playlists answer a listener with their own bookmarks and collections, from
+  // their homeserver: the page may read those)
+  if (run.state.role === 'listener') assert.deepEqual(run.state.hits.filter(r => ['/sources', '/play-order'].includes(r.v)), [], 'listeners never read owner metadata');
   assert.ok(run.requests.every(r => r.token === `Bearer ${run.state.token}`), 'searches keep the current caller token');
   assert.deepEqual(run.state.errors, []);
 };
