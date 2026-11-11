@@ -218,21 +218,60 @@ fn lineage_key(service: &str) -> String {
     format!("vault.lineage.{service}")
 }
 
+/// The latest "Sign out everywhere" this node knows of (its own, or one read from the device
+/// list; Unix seconds), while it is this second or the next: a sign-in made then gets an id
+/// from the second after it. Whole seconds: without it, a sign-in right after "Sign out
+/// everywhere" would count as older than the wipe and go aside on the next pass. Only that
+/// moment counts: a marker further ahead (another device's clock, or this one's before it was
+/// corrected) is neither kept nor used, so it can't date sign-ins after later wipes.
+const WIPE_FLOOR: &str = "vault.wipe_floor";
+
+fn now_secs() -> u64 {
+    u64::try_from(pm_library::db::now_unix()).unwrap_or(0)
+}
+
+/// Remember a sign-out everywhere at `at` (the latest is kept; see [`WIPE_FLOOR`]).
+pub(crate) fn note_wipe(lib: &Library, at: u64) {
+    let now = now_secs();
+    if at > now.saturating_add(1) {
+        return;
+    }
+    let floor = wipe_floor(lib).filter(|f| *f <= now.saturating_add(1));
+    if floor.is_none_or(|f| f < at) {
+        let _ = lib.set_setting(WIPE_FLOOR, &at.to_string());
+    }
+}
+
+fn wipe_floor(lib: &Library) -> Option<u64> {
+    lib.get_setting(WIPE_FLOOR)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+}
+
 /// A source signed in interactively (not a refresh): its sign-in gets a new id, so the vault can
 /// tell it from a refresh of the old one.
 pub fn new_sign_in(lib: &Library, service: &str) {
-    let _ = lib.set_setting(&lineage_key(service), &new_lineage(service));
+    let _ = lib.set_setting(&lineage_key(service), &new_lineage_in(lib, service));
 }
 
-/// Generate a lineage separately when its setting belongs to an atomic account update.
-pub(crate) fn new_lineage(service: &str) -> String {
+/// A new sign-in id, also when its setting belongs to an atomic account update: after a sign-out
+/// everywhere this node noted in this second or the next ([`WIPE_FLOOR`]).
+pub(crate) fn new_lineage_in(lib: &Library, service: &str) -> String {
+    lineage_after(service, wipe_floor(lib), now_secs())
+}
+
+fn lineage_after(service: &str, floor: Option<u64>, now: u64) -> String {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let id = blake3::hash(format!("{t}.{n}.{}.{service}", std::process::id()).as_bytes()).to_hex();
-    let at = pm_library::db::now_unix().max(0);
+    let at = match floor {
+        Some(f) if f >= now && f <= now.saturating_add(1) => f + 1,
+        _ => now,
+    };
     format!("{at}-{}", &id.as_str()[..16])
 }
 
@@ -826,6 +865,14 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
         },
         (Some(m), Some(t)) => {
             if m.hash == t.side.hash {
+                // The same bytes, but a new sign-in here while the vault still has the one both
+                // had (its removal failed, say): this one goes out with its own id; the vault's
+                // old id doesn't take it over (and a wipe's checks above saw the new one)
+                let new_here =
+                    seen.is_some_and(|s| !s.conflict && !same_sign_in(m, s) && same_sign_in(&t.side, s));
+                if new_here && m.lineage.is_some() {
+                    return push(m, Some(t), true);
+                }
                 return Do::InStep;
             }
             // A conflict when the person signed out everywhere since: this node's side goes too
@@ -986,6 +1033,9 @@ pub(crate) fn prepare_local_clear(s: &NodeState, still: &dyn Fn() -> bool) -> Re
         return Err(VaultStoreError::Replaced);
     }
     reconcile_clear(&lib)?;
+    // A sign-in from now on is after the wipe about to be written (its marker is this second or
+    // the next; the handler notes the exact one once written)
+    note_wipe(&lib, now_secs().saturating_add(1));
     let mut originals = Vec::new();
     for b in BRIDGES {
         if let Some(value) = carried(&lib, b).map_err(local_error)? {
@@ -1089,7 +1139,12 @@ pub(crate) async fn sync_held(
     let ix = vault.index().await;
     current()?;
     let marker = match ix.and_then(|ix| vault.marker(&ix)) {
-        Ok(m) => m,
+        Ok(m) => {
+            if let Some(at) = m {
+                note_wipe(&s.library.lock().expect("library poisoned"), at);
+            }
+            m
+        }
         Err(e) => {
             tracing::warn!("vault: the device list can't be read, not synced this time: {e}");
             report.failed = BRIDGES.iter().map(|b| b.service.to_string()).collect();
@@ -1661,6 +1716,70 @@ mod tests {
 
     fn lib() -> Library {
         Library::open_in_memory().unwrap()
+    }
+
+    /// A sign-in made in the same second as a sign-out everywhere this node knows of (or the next,
+    /// the marker's clock a little ahead) is newer than it: it isn't moved aside on the next pass.
+    /// A marker further ahead dates no sign-in, so a later wipe still catches it.
+    #[test]
+    fn a_sign_in_right_after_a_wipe_counts_as_after_it() {
+        let lib = lib();
+        let wipe = now_secs() + 1;
+        note_wipe(&lib, wipe);
+        note_wipe(&lib, wipe - 10);
+        assert_eq!(wipe_floor(&lib), Some(wipe), "the latest is kept");
+        new_sign_in(&lib, "tidal");
+        let l = lib.get_setting(&lineage_key("tidal")).unwrap().unwrap();
+        assert!(lineage_at(&l) > wipe, "{l} after {wipe}");
+        let w = Wipe {
+            now: false,
+            at: Some(wipe),
+            since_seen: true,
+        };
+        let m = lin(side("h", "7"), &l);
+        assert_eq!(decide(None, Some(&m), None, &w), Do::Push);
+        // Ten minutes ahead (another device's clock): not kept, and not used if it was
+        let lib = Library::open_in_memory().unwrap();
+        note_wipe(&lib, now_secs() + 600);
+        assert_eq!(wipe_floor(&lib), None);
+        lib.set_setting(WIPE_FLOOR, &(now_secs() + 600).to_string())
+            .unwrap();
+        let before = now_secs();
+        assert!(lineage_at(&new_lineage_in(&lib, "tidal")) <= before + 1);
+        note_wipe(&lib, before);
+        assert_eq!(
+            wipe_floor(&lib),
+            Some(before),
+            "a real wipe replaces one far ahead"
+        );
+        assert_eq!(lineage_at(&lineage_after("tidal", Some(100), 100)), 101);
+        assert_eq!(lineage_at(&lineage_after("tidal", Some(101), 100)), 102);
+        assert_eq!(lineage_at(&lineage_after("tidal", Some(99), 100)), 100);
+        assert_eq!(lineage_at(&lineage_after("tidal", Some(700), 100)), 100);
+    }
+
+    /// Identical credentials signed in again here while the vault still holds the old sign-in
+    /// (its removal failed): the new id goes out, the old one isn't adopted.
+    #[test]
+    fn a_new_sign_in_with_the_same_bytes_keeps_its_own_id() {
+        let mut synced = seen("h1", "7");
+        synced.lineage = Some("100-old".into());
+        let w = Wipe::default();
+        let mine = lin(side("h1", "7"), "200-new");
+        let theirs = vlin(vside("h1", "7"), "100-old");
+        assert_eq!(decide(Some(&synced), Some(&mine), Some(&theirs), &w), Do::Push);
+        // The vault's copy is the new one (made elsewhere, same bytes): taken in step
+        let theirs_new = vlin(vside("h1", "7"), "300-elsewhere");
+        let mine_old = lin(side("h1", "7"), "100-old");
+        assert_eq!(
+            decide(Some(&synced), Some(&mine_old), Some(&theirs_new), &w),
+            Do::InStep
+        );
+        // The same sign-in on both sides: in step
+        assert_eq!(
+            decide(Some(&synced), Some(&mine_old), Some(&theirs), &w),
+            Do::InStep
+        );
     }
 
     #[test]

@@ -26552,6 +26552,107 @@ exec sleep 300
         assert!(waiting_scrobbles(&s).is_empty());
     }
 
+    fn lastfm_session(key: &str) -> lastfm::Session {
+        lastfm::Session {
+            key: key.into(),
+            user: "listener".into(),
+            submit: true,
+            problem: None,
+            from: None,
+        }
+    }
+
+    /// A play that started under one Last.fm sign-in and counts after another sign-in (another
+    /// account, or the same session key signed in again) isn't scrobbled for the new one; one of
+    /// the sign-in now is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lastfm_play_from_before_another_sign_in_is_not_sent_for_it() {
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let LastfmMock { gate, got, .. } = gated_lastfm(&s).await;
+        gate.add_permits(100);
+        let a = lastfm::current_owner(&s).expect("signed in");
+        lastfm::signed_in(&s.library.lock().unwrap(), &lastfm_session("other-account"));
+        lastfm::send_scrobbles_for(&s, Some(a), vec![a_scrobble(1)]).await;
+        let b = lastfm::current_owner(&s).unwrap();
+        lastfm::signed_in(&s.library.lock().unwrap(), &lastfm_session("other-account"));
+        lastfm::send_scrobbles_for(&s, Some(b), vec![a_scrobble(2)]).await;
+        assert!(got.lock().unwrap().is_empty(), "{:?}", got.lock().unwrap());
+        assert!(waiting_scrobbles(&s).is_empty(), "{:?}", waiting_scrobbles(&s));
+        let now = lastfm::current_owner(&s).unwrap();
+        lastfm::send_scrobbles_for(&s, Some(now), vec![a_scrobble(3)]).await;
+        assert_eq!(*got.lock().unwrap(), ["T3"]);
+    }
+
+    /// Settings' sign-out forgets the scrobbles only memory had, and one a sender still had in
+    /// hand (it holds it again for its own sign-in) isn't sent when the same session key signs
+    /// in again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lastfm_sign_out_forgets_held_scrobbles_also_for_the_same_key_again() {
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let LastfmMock {
+            gate,
+            got,
+            refuse,
+            entered,
+        } = gated_lastfm(&s).await;
+        lastfm::signed_in(&s.library.lock().unwrap(), &lastfm_session("sess-key-xyz"));
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let db = refuse_writes_of(dir.path(), "lastfm.pending");
+        let send = lastfm::send_scrobbles(&s, vec![a_scrobble(7)]);
+        let drive = async {
+            entered.acquire().await.unwrap().forget();
+            // Settings' sign-out (the sign-in source's), not `DELETE /v1/lastfm`
+            use crate::signin::SignInSource as _;
+            lastfm::LastfmSignIn
+                .sign_out_of(&s, &crate::accounts::Who::Owner, "browser")
+                .unwrap();
+            gate.add_permits(1);
+        };
+        tokio::join!(send, drive);
+        writes_work_again(&db);
+        refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        lastfm::signed_in(&s.library.lock().unwrap(), &lastfm_session("sess-key-xyz"));
+        gate.add_permits(100);
+        lastfm::send_scrobbles(&s, vec![a_scrobble(8)]).await;
+        assert_eq!(
+            *got.lock().unwrap(),
+            ["T8"],
+            "the old sign-in's scrobble stays unsent"
+        );
+        assert!(waiting_scrobbles(&s).is_empty());
+    }
+
+    /// A late "sign in again" answer to a call of an older sign-in doesn't mark the newer one
+    /// broken; one for the sign-in now does.
+    #[tokio::test]
+    async fn a_late_lastfm_refusal_for_an_old_sign_in_leaves_the_new_one_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        lastfm::signed_in(&s.library.lock().unwrap(), &lastfm_session("old"));
+        let old = lastfm::current_owner(&s).unwrap();
+        lastfm::signed_in(&s.library.lock().unwrap(), &lastfm_session("new"));
+        let problem = |s: &NodeState| -> serde_json::Value {
+            let j = s
+                .library
+                .lock()
+                .unwrap()
+                .get_setting(lastfm::SESSION_KEY)
+                .unwrap()
+                .unwrap();
+            serde_json::from_str::<serde_json::Value>(&j).unwrap()["problem"].clone()
+        };
+        let refused = lastfm::CallError::Session("error 9".into());
+        lastfm::note_problem(&s, &refused, &old);
+        assert_eq!(problem(&s), serde_json::Value::Null);
+        let new = lastfm::current_owner(&s).unwrap();
+        lastfm::note_problem(&s, &refused, &new);
+        assert_eq!(problem(&s), serde_json::json!("error 9"));
+    }
+
     /// A sync or a settings restore whose session another sign-in replaced answers 409, not 502.
     #[test]
     fn a_replaced_sync_is_a_conflict() {
