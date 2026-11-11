@@ -1,4 +1,5 @@
-"""The phone UI with a finger, on the Android emulator (android-endpoint.py runs it with PM_UI_TOUR=strict).
+"""The phone UI with a finger, on the Android emulator (android-endpoint.py runs it with PM_UI_TOUR=strict;
+PM_UI_TOUR=play-to stops after the page plays to the phone's zone).
 
 The app is connected to the node and its own zone registered. Three songs are queued on that zone and
 the page is pointed at it (Zones, its card's Play to). Then everything goes as a finger does it
@@ -11,8 +12,9 @@ the page is pointed at it (Zones, its card's Play to). Then everything goes as a
 
 The WebView's accessibility tree, which `uiautomator` reads, is not kept up to date after the page
 changes by itself (Chrome turns its accessibility off again when no service uses it), so it is read
-only on the first screen: the places of the mini player and the Home and Zones tabs. Play to is
-tapped where the Zones page has it with the CI's two zones (its card first). What the gestures did is
+only on the first screen: the places of the mini player and the Home and Zones tabs. Play to (on
+the phone's card, the first) is found by reading the Zones screenshot (OCR, play_to_spot): its
+place differs between WebViews. What the gestures did is
 checked with the node (its queue moves on and back) and on the screen itself, comparing raw
 screenshots of the part that must change (or must not). Each
 step's screenshot is ui-*.png; the gesture run is recorded in ui-tour.mp4 when the emulator can.
@@ -22,12 +24,46 @@ Confirm matches pages at 360x800 dp, restoring the emulator's original display a
 Not a module of its own: android-endpoint.py passes its helpers in (`h`), so it runs inside that
 script's node, app and adb session.
 """
+import csv
+import io
+import os
 import re
 import importlib.util
 import struct
 import subprocess
 import time
 from pathlib import Path
+
+
+# Tesseract's page modes, tried in turn: at the emulator's 320x640 px no single mode reads the
+# small outlined "Play to" on both the dark (API 30) and the light (API 35) Zones page.
+PLAY_TO_PSMS = ("11", "3", "6", "12")
+
+
+def play_to_spot(png):
+    """The centre (x, y) of the topmost "Play to" on a screenshot of the Zones page, in screen
+    pixels, or None. Read from the picture (OCR): the WebView's accessibility tree is stale by now,
+    and the button's place depends on the WebView (API 30's wraps it under the transport row, at
+    the card's left; API 35's keeps it at the right of the volume line)."""
+    found = []
+    for psm in PLAY_TO_PSMS:
+        try:
+            tsv = subprocess.run(["tesseract", str(png), "stdout", "--psm", psm, "tsv"],
+                                 capture_output=True, text=True, timeout=60, check=True).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        words = [r for r in csv.DictReader(io.StringIO(tsv), delimiter="\t", quoting=csv.QUOTE_NONE)
+                 if r.get("level") == "5" and (r.get("text") or "").strip()]
+        for a, b in zip(words, words[1:]):
+            line = lambda r: (r["block_num"], r["par_num"], r["line_num"])  # noqa: E731
+            if a["text"].strip() == "Play" and b["text"].strip().lower() == "to" and line(a) == line(b):
+                left, top = int(a["left"]), min(int(a["top"]), int(b["top"]))
+                right = int(b["left"]) + int(b["width"])
+                bottom = max(int(a["top"]) + int(a["height"]), int(b["top"]) + int(b["height"]))
+                found.append(((left + right) // 2, (top + bottom) // 2))
+        if found:
+            break
+    return min(found, key=lambda p: (p[1], p[0])) if found else None
 
 
 def run(h):
@@ -108,7 +144,14 @@ def run(h):
         adb("shell", "input", "tap", str(zones[0]), str(zones[1]))
         time.sleep(3)
         shot("ui-0-zones")
-        adb("shell", "input", "tap", str(W * 644 // 1000), str(H * 556 // 1000))
+        spot = play_to_spot(out / "ui-0-zones.png")
+        if spot is None:
+            # (where the API 35 image has it with the CI's two zones)
+            spot = (W * 644 // 1000, H * 556 // 1000)
+            log(f"Play to not read on the Zones page; tapping its usual place {spot}")
+        else:
+            log(f"Play to read on the Zones page at {spot}")
+        adb("shell", "input", "tap", str(spot[0]), str(spot[1]))
         time.sleep(2)
         adb("shell", "input", "tap", str(home[0]), str(home[1]))
         time.sleep(3)
@@ -117,6 +160,10 @@ def run(h):
         shot("ui-1-mini-player")
         assert picked > 0.02, f"the mini player doesn't show the phone's zone after Play to ({picked:.3f} of its words changed); see ui-0-zones.png"
         log(f"the page plays to the phone's zone ({picked:.3f} of the mini player's words changed)")
+        if os.environ.get("PM_UI_TOUR") == "play-to":
+            # (an emulator WebView too old for the rest of the page's CSS: android.yml says which)
+            log("PASS: the phone UI tour up to Play to (PM_UI_TOUR=play-to)")
+            return
         # Swipe left on it: the next song (the node's queue moves on)
         i0 = qi()
         swipe(W * 7 // 8, cy, W // 8, cy, settle=2.5)

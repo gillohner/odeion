@@ -115,6 +115,21 @@ if not select.select([0], [], [], .1)[0]:
                 self.assertFalse(ep.reverse_installed)
                 self.assertEqual(adb.call_count, 1, "no reverse mapping on an invalid route")
 
+    def test_route_waits_for_the_emulator_network(self):
+        down = RuntimeError("adb shell ip -4 route get 10.0.2.2: RTNETLINK answers: Network is unreachable")
+        with patch.object(ep, "adb", side_effect=[down, down, self.route]) as adb, patch.object(ep, "log"), \
+                patch.object(ep.time, "sleep"):
+            self.assertEqual(ep.emulator_route(), self.route)
+        self.assertEqual(adb.call_count, 3)
+        with patch.object(ep, "adb", side_effect=down), patch.object(ep, "log"), patch.object(ep.time, "sleep"), \
+                patch.object(ep.time, "monotonic", side_effect=[0, 50, 91]):
+            with self.assertRaisesRegex(RuntimeError, "Network is unreachable"):
+                ep.emulator_route()
+        with patch.object(ep, "adb", side_effect=RuntimeError("adb: device offline")) as adb, patch.object(ep, "log"):
+            with self.assertRaisesRegex(RuntimeError, "device offline"):
+                ep.emulator_route()
+        self.assertEqual(adb.call_count, 1, "only an unreachable network is waited for")
+
     def test_cleanup_removes_only_this_runs_mapping(self):
         with patch.object(ep, "adb") as adb:
             ep.cleanup_node_transport()
