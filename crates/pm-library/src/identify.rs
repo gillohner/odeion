@@ -277,14 +277,15 @@ fn strong_fitting<'a>(
         .filter(move |rec| duration_fits(rec, facts))
 }
 
-/// Bump when identification's decisions change enough that "not found" songs and songs waiting for
-/// review are worth checking again (part of [`input_key`], and [`RULES_VERSION`]).
+/// Bump when identification's decisions change enough that "not found" songs are worth checking
+/// again (part of [`input_key`]; songs waiting for review go by [`RULES_VERSION`]).
 pub const INPUT_VERSION: u32 = 2;
 
 /// The version of identification's rules a song was last checked by (kept with its state): a song
 /// left waiting for review by older rules is checked again once, by the run the node starts on its
-/// own or by "Identify again". The same number as [`INPUT_VERSION`], which a song's input key holds.
-pub const RULES_VERSION: u32 = INPUT_VERSION;
+/// own or by "Identify again". Version 3 settles unsure songs whose evidence is clear on its own
+/// ([`crate::auto_settle`]); [`INPUT_VERSION`] stays, so "not found" songs aren't all checked again.
+pub const RULES_VERSION: u32 = 3;
 
 /// What a song looked like to identification: its file (path, size, time), the tags it is matched
 /// by, and the node's services as the caller describes them (`services`: their addresses, whether

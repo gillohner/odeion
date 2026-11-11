@@ -518,12 +518,19 @@ pub struct NewShare {
 
 fn start_scan(s: &Arc<NodeState>, share: Share) {
     let s2 = s.clone();
-    tokio::task::spawn_blocking(move || match scan_share(&s2, &share) {
-        Ok(r) => {
-            tracing::info!(share = %share.name, added = r.files_added, updated = r.files_updated, removed = r.files_removed, errors = r.errors.len(), "WebDAV scan done");
-            s2.notify_library();
+    tokio::task::spawn_blocking(move || {
+        use std::sync::atomic::Ordering::SeqCst;
+        s2.side_scans.fetch_add(1, SeqCst);
+        let scanned = scan_share(&s2, &share);
+        s2.side_scans.fetch_sub(1, SeqCst);
+        match scanned {
+            Ok(r) => {
+                tracing::info!(share = %share.name, added = r.files_added, updated = r.files_updated, removed = r.files_removed, errors = r.errors.len(), "WebDAV scan done");
+                s2.notify_library();
+                crate::identify::after_scan(&s2, r.files_added + r.files_updated);
+            }
+            Err(e) => tracing::warn!(share = %share.name, "WebDAV scan failed: {e}"),
         }
-        Err(e) => tracing::warn!(share = %share.name, "WebDAV scan failed: {e}"),
     });
 }
 

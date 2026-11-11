@@ -249,6 +249,12 @@ pub struct NodeState {
     pub nominatim_base: std::sync::RwLock<String>,
     /// The library identification job's progress.
     pub identify: Mutex<crate::identify::IdentifyProgress>,
+    /// An automatic run waits for a scan or a run to end ([`crate::identify::after_scan`]): one
+    /// waiter at a time.
+    pub(crate) identify_waiting: std::sync::atomic::AtomicBool,
+    /// WebDAV and drive scans going (they don't take the library folders' scan slot): an automatic
+    /// run waits for them too.
+    pub(crate) side_scans: std::sync::atomic::AtomicUsize,
     /// Pinakes cards for any link: by-uri, then paced resolves, cached.
     pub pinakes_reader: crate::pinakes_reader::PinakesReader,
     /// Deezer API origin (tests point it at a mock).
@@ -530,6 +536,8 @@ impl NodeState {
             mb_base: std::sync::RwLock::new("https://musicbrainz.org/ws/2".into()),
             nominatim_base: std::sync::RwLock::new("https://nominatim.openstreetmap.org".into()),
             identify: Mutex::new(Default::default()),
+            identify_waiting: Default::default(),
+            side_scans: Default::default(),
             pinakes_reader: Default::default(),
             presence: Default::default(),
             search_answers: Default::default(),
@@ -835,8 +843,11 @@ impl NodeState {
                 tracing::error!("scan: {e}");
             }
             summary.finished_at = time::OffsetDateTime::now_utc().unix_timestamp();
+            let changed = summary.added + summary.updated;
             *state.last_scan.lock().expect("last scan lock") = Some(summary);
             state.end_scan();
+            // New or changed songs are matched on their own ("Match new songs automatically")
+            crate::identify::after_scan(&state, changed);
         });
         Ok(true)
     }

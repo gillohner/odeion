@@ -174,6 +174,62 @@ pub fn preview(path: &Path, f: &Fixes) -> Result<Vec<Change>, WriteError> {
 /// Write `f` into the file at `path`, after saving a backup under `backup_dir` (only the keys
 /// it touches; the audio is never rewritten). Returns the backup's path.
 pub fn write_fixes(path: &Path, f: &Fixes, backup_dir: &Path) -> Result<PathBuf, WriteError> {
+    write_with(path, f, None, backup_dir)
+}
+
+/// The owner corrected a match ("Wrong match?"): the file's recording, release and AcoustID IDs
+/// are taken out, then `ids` written (none: "Not matched", the IDs are only removed), after the
+/// same backup as [`write_ids`]. Returns the backup's path.
+///
+/// Every recording id the scanner reads goes (Picard's `MUSICBRAINZ_TRACKID` and
+/// `MUSICBRAINZ_RECORDINGID`), with the release and AcoustID ids; `drop_isrc` takes the ISRC too
+/// (a song left without a match that its ISRC would name again), which only FLAC allows here.
+pub fn replace_ids(
+    path: &Path,
+    ids: Option<&Ids>,
+    drop_isrc: bool,
+    backup_dir: &Path,
+) -> Result<PathBuf, WriteError> {
+    can_replace(path, drop_isrc)?;
+    let f = Fixes {
+        ids: ids.cloned(),
+        ..Fixes::default()
+    };
+    write_with(path, &f, Some(drop_isrc), backup_dir)
+}
+
+/// Whether [`replace_ids`] can do its work on this file: a format it writes, there and writable,
+/// and (`drop_isrc`) an ISRC it can take out. Checked before anything is changed.
+pub fn can_replace(path: &Path, drop_isrc: bool) -> Result<(), WriteError> {
+    let format = format_of(path).ok_or_else(|| WriteError::Unsupported(path.display().to_string()))?;
+    let meta = std::fs::metadata(path).map_err(|e| failed(path, e))?;
+    if meta.permissions().readonly() {
+        return Err(failed(path, "the file is read-only"));
+    }
+    if drop_isrc && format != "flac" {
+        return Err(failed(path, "its ISRC can't be taken out of this format here"));
+    }
+    Ok(())
+}
+
+/// What a correction clears in FLAC: every recording id the scanner reads, the release, AcoustID.
+const CLEAR_FLAC: [&str; 4] = [
+    "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ_RECORDINGID",
+    "MUSICBRAINZ_ALBUMID",
+    "ACOUSTID_ID",
+];
+/// The same as ID3 `TXXX` frames.
+const CLEAR_TXXX: [&str; 4] = [
+    "MusicBrainz Track Id",
+    "MusicBrainz Recording Id",
+    "MusicBrainz Album Id",
+    "Acoustid Id",
+];
+
+/// [`write_fixes`]; `clear` (a correction) takes the ids [`CLEAR_FLAC`] / [`CLEAR_TXXX`] out first,
+/// and the ISRC too when it holds `true`.
+fn write_with(path: &Path, f: &Fixes, clear: Option<bool>, backup_dir: &Path) -> Result<PathBuf, WriteError> {
     let format = format_of(path).ok_or_else(|| WriteError::Unsupported(path.display().to_string()))?;
     std::fs::create_dir_all(backup_dir).map_err(|e| failed(backup_dir, e))?;
     let vals = values(f);
@@ -196,6 +252,14 @@ pub fn write_fixes(path: &Path, f: &Fixes, backup_dir: &Path) -> Result<PathBuf,
                 }
             }
             let bpath = save_backup(&backup, backup_dir)?;
+            if let Some(drop_isrc) = clear {
+                for k in CLEAR_FLAC {
+                    tag.remove_vorbis(k);
+                }
+                if drop_isrc {
+                    tag.remove_vorbis("ISRC");
+                }
+            }
             for (k, v) in FLAC_KEYS.iter().zip(vals.iter()) {
                 if !v.is_empty() {
                     tag.set_vorbis(*k, v.clone());
@@ -213,14 +277,25 @@ pub fn write_fixes(path: &Path, f: &Fixes, backup_dir: &Path) -> Result<PathBuf,
                 Err(e) if matches!(e.kind, id3::ErrorKind::NoTag) => id3::Tag::new(),
                 Err(e) => return Err(failed(path, e)),
             };
-            for d in TXXX_KEYS {
+            // (a correction clears one more: it is kept in the backup as well)
+            let extra: &[&str] = if clear.is_some() {
+                &["MusicBrainz Recording Id"]
+            } else {
+                &[]
+            };
+            for d in TXXX_KEYS.iter().chain(extra) {
                 let cur = tag
                     .extended_texts()
-                    .find(|t| t.description == d)
+                    .find(|t| t.description == *d)
                     .map(|t| t.value.clone());
                 backup.txxx.push((d.to_string(), cur));
             }
             let bpath = save_backup(&backup, backup_dir)?;
+            if clear.is_some() {
+                for d in CLEAR_TXXX {
+                    tag.remove_extended_text(Some(d), None);
+                }
+            }
             for (d, v) in TXXX_KEYS.iter().zip(vals.iter()) {
                 if !v.is_empty() {
                     tag.remove_extended_text(Some(d), None);
@@ -256,10 +331,16 @@ pub fn restore(backup: &Backup) -> Result<(), WriteError> {
     match backup.format.as_str() {
         "flac" => {
             let mut tag = metaflac::Tag::read_from_path(path).map_err(|e| failed(path, e))?;
-            for k in FLAC_KEYS {
+            // (the backup holds every comment: a correction's keys come back too)
+            let keys: Vec<&str> = FLAC_KEYS
+                .iter()
+                .copied()
+                .chain(["MUSICBRAINZ_RECORDINGID", "ISRC"])
+                .collect();
+            for k in &keys {
                 tag.remove_vorbis(k);
             }
-            for k in FLAC_KEYS {
+            for k in keys {
                 let vs: Vec<String> = backup
                     .vorbis
                     .iter()
@@ -335,6 +416,67 @@ mod tests {
             out.extend(v);
         }
         out
+    }
+
+    /// A correction ("Wrong match?") takes out every recording id the scanner reads (Picard's
+    /// `MUSICBRAINZ_RECORDINGID` too), the release and AcoustID ids, and the ISRC when asked;
+    /// the backup brings them all back. A file it can't change is refused before anything is.
+    #[test]
+    fn a_correction_clears_every_id_the_scan_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.flac");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/ietf-60-mono-audio.flac"
+            ),
+            &f,
+        )
+        .unwrap();
+        {
+            let mut tag = metaflac::Tag::read_from_path(&f).unwrap();
+            tag.set_vorbis("MUSICBRAINZ_RECORDINGID", vec![MB]);
+            tag.set_vorbis("MUSICBRAINZ_TRACKID", vec![MB]);
+            tag.set_vorbis("ISRC", vec!["USQX91300108"]);
+            tag.save().unwrap();
+        }
+        let (_, before) = crate::probe_and_read(&f).unwrap();
+        assert_eq!(before.recording_mbid.map(|m| m.to_string()).as_deref(), Some(MB));
+        assert!(before.isrc.is_some());
+        let backups = dir.path().join("backups");
+        let other = Mbid::parse("0383dadf-2a4e-4d10-a46a-e9e041da8eb3").unwrap();
+        replace_ids(
+            &f,
+            Some(&Ids {
+                recording: other,
+                release: None,
+                acoustid: None,
+            }),
+            false,
+            &backups,
+        )
+        .unwrap();
+        let (_, now) = crate::probe_and_read(&f).unwrap();
+        assert_eq!(
+            now.recording_mbid,
+            Some(other),
+            "no older recording id left to win"
+        );
+        assert!(now.isrc.is_some(), "kept unless asked");
+        let backup = replace_ids(&f, None, true, &backups).unwrap();
+        let (_, none) = crate::probe_and_read(&f).unwrap();
+        assert_eq!((none.recording_mbid, none.isrc), (None, None));
+        let b: Backup = serde_json::from_slice(&std::fs::read(backup).unwrap()).unwrap();
+        restore(&b).unwrap();
+        let (_, back) = crate::probe_and_read(&f).unwrap();
+        assert_eq!(back.recording_mbid, Some(other));
+        assert!(back.isrc.is_some());
+        // Refused before anything changes: a missing file, an ISRC this format can't drop here
+        assert!(can_replace(&dir.path().join("gone.flac"), false).is_err());
+        let w = dir.path().join("a.wav");
+        std::fs::write(&w, b"RIFF").unwrap();
+        assert!(can_replace(&w, false).is_ok());
+        assert!(can_replace(&w, true).is_err());
     }
 
     #[test]
