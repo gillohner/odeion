@@ -2286,8 +2286,23 @@ impl NodeState {
         self.token_file.get().map(PathBuf::as_path)
     }
 
+    /// A WebDAV or drive scan going, counted until the guard goes (also when the scan panics).
+    pub(crate) fn side_scan(&self) -> SideScan<'_> {
+        self.side_scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        SideScan(&self.side_scans)
+    }
+
     pub fn is_scanning(&self) -> bool {
         *self.scanning.lock().expect("scan flag poisoned")
+    }
+}
+
+/// [`NodeState::side_scan`]'s guard.
+pub(crate) struct SideScan<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for SideScan<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

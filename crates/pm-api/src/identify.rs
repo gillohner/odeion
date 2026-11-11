@@ -391,22 +391,7 @@ pub fn write_found_ids(s: &NodeState, only: Option<&[i64]>) -> Result<WriteRepor
         // One writer at a time, and the song still what it was when listed (a correction made
         // meanwhile wins)
         let _one = id_writes();
-        let still = s
-            .library
-            .lock()
-            .expect("library poisoned")
-            .get_track(pm_model::TrackId(id))
-            .ok()
-            .flatten()
-            .and_then(|now| now.canonical)
-            .is_some_and(|(u, c)| {
-                u == MusicUri::Recording { mbid }
-                    && !matches!(
-                        c,
-                        Confidence::Auto { .. } | Confidence::TaggedMbid | Confidence::TaggedIsrc
-                    )
-            });
-        if !still {
+        if !still_matched(s, id, &mbid) {
             continue;
         }
         let ids = pm_library::tagwrite::Ids {
@@ -1052,8 +1037,14 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
     );
     let identified_now = found.found.into_inner().expect("found lock");
     // Songs waiting for review whose stored evidence is clear on its own (this run's and earlier
-    // ones'): settled as `auto`, never written into the files here
-    match auto_settle_pass(s).await {
+    // ones'): settled as `auto`, never written into the files here; only with "Match new songs
+    // automatically" on (off, the owner decides every unsure song)
+    let settling = if auto_match_on(s) {
+        auto_settle_pass(s).await
+    } else {
+        Ok(SettleReport::default())
+    };
+    match settling {
         Ok(r) if r.settled > 0 => {
             tracing::info!(settled = r.settled, by = ?r.by_rule, "identify: unsure songs settled automatically");
             let mut p = s.identify.lock().expect("identify lock");
@@ -2991,8 +2982,27 @@ pub(crate) async fn set_match(
 /// the other one replaced.
 static ID_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn id_writes() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn id_writes() -> std::sync::MutexGuard<'static, ()> {
     ID_WRITES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether a song's match is still `recording`, found by identification or the owner (not an
+/// automatic pick, not its tags): checked by every ID writer right before it writes.
+pub(crate) fn still_matched(s: &NodeState, id: i64, recording: &Mbid) -> bool {
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .get_track(pm_model::TrackId(id))
+        .ok()
+        .flatten()
+        .and_then(|now| now.canonical)
+        .is_some_and(|(u, c)| {
+            u == MusicUri::Recording { mbid: *recording }
+                && !matches!(
+                    c,
+                    Confidence::Auto { .. } | Confidence::TaggedMbid | Confidence::TaggedIsrc
+                )
+        })
 }
 
 /// What a correction answers when the song's match is not what the page showed, or can't be
@@ -3025,12 +3035,19 @@ fn correct(
 ) -> Result<serde_json::Value, ApiError> {
     use pm_library::Rematch;
     let _one = id_writes();
-    let (track, now, release_kept) = {
+    let (track, now, release_kept, choice) = {
         let lib = s.library.lock().expect("library poisoned");
+        // A release only when the folder's own fit names it (the album lane's option): a search
+        // hit's first release is MusicBrainz's answer order, no evidence of the edition
+        let choice = match choice {
+            Some((r, Some(rel))) if !lib.folder_fit_names(id, &r, &rel)? => Some((r, None)),
+            c => c,
+        };
         (
             lib.get_track(pm_model::TrackId(id))?,
             lib.match_now(id)?,
             lib.identify_release(id)?,
+            choice,
         )
     };
     let (Some(track), Some((current, from_tags))) = (track, now) else {

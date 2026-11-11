@@ -127,7 +127,11 @@ pub fn with_answer(
             }
             match options.iter_mut().find(|o| o.recording == rec.id) {
                 Some(o) if o.source == "fingerprint" => o.score = o.score.max(r.score),
-                Some(_) => {}
+                // A search's or the folder's option the audio names surely: a sure option too
+                Some(o) => {
+                    o.source = "fingerprint".into();
+                    o.score = r.score;
+                }
                 None => options.push(Opt {
                     recording: rec.id.clone(),
                     release: None,
@@ -313,21 +317,15 @@ fn release_says_other_version(tags: &FileTags, o: &Opt) -> bool {
     marks_in(rt).iter().any(|m| !file.contains(m))
 }
 
-/// The settled group's recording: one of the song's stored options first, then on the folder's
-/// release, then on a release named like the file's album, then the lowest id. Its release when the folder names it (the folder's release,
+/// The settled group's recording: on the folder's release, then on a release named like the
+/// file's album, then the lowest id, over the whole group (stored options and the kept answer's
+/// alike: which recordings a run kept as options follows AcoustID's answer order). Its release when the folder names it (the folder's release,
 /// or the folder's own fit of the album lane).
 fn pick<'a>(tags: &FileTags, pool: &[&'a Opt], folder: Option<&str>) -> Option<(&'a Opt, Option<String>)> {
     fn on_folder(o: &Opt, folder: Option<&str>) -> bool {
         folder.is_some() && o.release.as_deref() == folder
     }
-    let key = |o: &'a Opt| {
-        (
-            !o.stored,
-            !on_folder(o, folder),
-            !named(o, tags),
-            o.recording.as_str(),
-        )
-    };
+    let key = |o: &'a Opt| (!on_folder(o, folder), !named(o, tags), o.recording.as_str());
     let best: &'a Opt = pool.iter().copied().min_by(|a, b| key(a).cmp(&key(b)))?;
     let release = if on_folder(best, folder) || best.source == "album" {
         best.release.clone()
@@ -430,6 +428,16 @@ pub fn decide_why(song: &Song) -> (Verdict, Option<String>) {
         } else {
             Rule::R2
         };
+        // R2: the tags' song must score at least as well as every other sure option (a tie, the
+        // tags decide); outscored, it stays
+        let others = near
+            .iter()
+            .filter(|o| !agreeing.iter().any(|a| a.recording == o.recording))
+            .map(|o| o.score)
+            .fold(0.0f32, f32::max);
+        if rule == Rule::R2 && best_score(&agreeing) < others {
+            return stay(Stay::DifferentSongs, Some("outscored".into()));
+        }
         // The audio's recordings: the folder's own option may be another recording of the song
         return settle_group(tags, &agreeing, song.folder_release, rule);
     }
@@ -685,6 +693,7 @@ pub const WHY_WORDS: &[&str] = &[
     "gt30s",
     "rel2",
     "relgt2",
+    "outscored",
     "input",
     "no_file",
     "identified",
@@ -840,11 +849,11 @@ fn artist_match(file: &str, credit: &str) -> ArtistMatch {
     ArtistMatch::Different
 }
 
-/// Settle on one of a group of the file's song's recordings (R1, R1b, R2). An album that names
-/// a version needs one on a release named so. Only a recording whose length is known to fit can
-/// be picked (as a run's own rule for one audio under several recordings requires), never one
-/// only on live releases for a file that isn't live, nor one on a release whose name says
-/// another version: those are left out, and when none is left the song stays.
+/// Settle on one of a group of the file's song's recordings (R1, R1b, R2, R4, R5). An album that
+/// names a version needs one on a release named so. A group with another take in it (only on
+/// live releases for a file that isn't live, on a release whose name says another version) stays.
+/// Only a recording whose length is known to fit can be picked (as a run's own rule for one audio
+/// under several recordings requires).
 fn settle_group(
     tags: &FileTags,
     group: &[&Opt],
@@ -859,34 +868,26 @@ fn settle_group(
         return (Verdict::Stay(Stay::AlbumVersion), Some(format!("album:{m}")));
     }
     let live_file = file_is_live(tags) || live_album;
-    let mut why = "no_length";
-    let pool: Vec<&Opt> = group
-        .iter()
-        .copied()
-        .filter(|o| {
-            if !length_fits(o, tags) {
-                return false;
-            }
-            if o.live_only == Some(true) && !live_file {
-                why = "live_only";
-                return false;
-            }
-            if release_says_other_version(tags, o) {
-                why = "release_version";
-                return false;
-            }
-            let live = o.live_only == Some(true)
-                || o.title
-                    .as_deref()
-                    .is_some_and(|t| version_marks(t).contains(&"live"))
-                || named(o, tags);
-            if live_album && !live {
-                why = "studio_only";
-                return false;
-            }
-            true
-        })
-        .collect();
+    // One recording of the group that is another take (only on live releases for a file that
+    // isn't live, on a release named as another version, a studio one on a live album) makes
+    // the group a question: which take the file is, its recordings don't agree on
+    for o in group {
+        if o.live_only == Some(true) && !live_file {
+            return (Verdict::Stay(Stay::Version), Some("live_only".into()));
+        }
+        if release_says_other_version(tags, o) {
+            return (Verdict::Stay(Stay::Version), Some("release_version".into()));
+        }
+        let live = o.live_only == Some(true)
+            || o.title
+                .as_deref()
+                .is_some_and(|t| version_marks(t).contains(&"live"))
+            || named(o, tags);
+        if live_album && !live {
+            return (Verdict::Stay(Stay::AlbumVersion), Some("album:live".into()));
+        }
+    }
+    let pool: Vec<&Opt> = group.iter().copied().filter(|o| length_fits(o, tags)).collect();
     match pick(tags, &pool, folder) {
         Some((o, release)) => (
             Verdict::Pick {
@@ -897,9 +898,7 @@ fn settle_group(
             },
             None,
         ),
-        None if why == "no_length" => (Verdict::Stay(Stay::LengthUnknown), Some(why.into())),
-        None if why == "studio_only" => (Verdict::Stay(Stay::AlbumVersion), Some("album:live".into())),
-        None => (Verdict::Stay(Stay::Version), Some(why.into())),
+        None => (Verdict::Stay(Stay::LengthUnknown), Some("no_length".into())),
     }
 }
 
@@ -1227,12 +1226,13 @@ mod tests {
             run(&t, &[fp(1, "Song", "Band", 0.95), close], None),
             Verdict::Pick { .. }
         ));
-        // Only on live releases (the kept answer's release kinds), for a studio file: never picked
+        // Only on live releases (the kept answer's release kinds), for a studio file: one in the
+        // group makes it a question (review r2: which take the file is, they don't agree on)
         let mut on_live = fp(0, "Song", "Band", 0.95);
         on_live.live_only = Some(true);
         assert_eq!(
-            picked(&run(&t, &[fp(1, "Song", "Band", 0.95), on_live.clone()], None)).0,
-            rec(1)
+            run(&t, &[fp(1, "Song", "Band", 0.95), on_live.clone()], None),
+            Verdict::Stay(Stay::Version)
         );
         let (v, why) = decide_why(&Song {
             tags: &t,
@@ -1567,12 +1567,13 @@ mod tests {
         let mut unknown = search(3, 0.95);
         unknown.duration_secs = None;
         assert_eq!(why(&[unknown]).0, Verdict::Stay(Stay::Weak));
-        // A stored option before one only the kept answer names (lower id or not)
+        // Review r2: stored or only in the kept answer, the lowest id (which recordings a run kept
+        // as options follows AcoustID's answer order)
         let mut only_answer = fp(0, "Song", "Band", 0.95);
         only_answer.stored = false;
         assert_eq!(
             picked(&why(&[only_answer.clone(), fp(1, "Song", "Band", 0.95)]).0).0,
-            rec(1)
+            rec(0)
         );
         // ... the answer's when it is the only one that fits
         let mut no_len = fp(1, "Song", "Band", 0.95);
@@ -1621,6 +1622,56 @@ mod tests {
             answer: true,
         });
         assert_eq!(d.as_deref(), Some("title:mix:tag:len_fit"));
+    }
+
+    /// Review r2 (final review): R2 only when the tags' song scores at least as well as the
+    /// other sure options; a sure recording kept as a search's or the folder's option is sure.
+    #[test]
+    fn review_r2_final() {
+        let t = tags("Song", "Band", "Album");
+        let run2 = |opts: &[Opt]| {
+            decide_why(&Song {
+                tags: &t,
+                options: opts,
+                folder_release: None,
+                rejected: false,
+                answer: true,
+            })
+        };
+        // The other song outscores the tags' song: stays
+        let (v, d) = run2(&[fp(1, "Song", "Band", 0.91), fp(2, "Another Song", "Band", 0.99)]);
+        assert_eq!(
+            (v, d.as_deref()),
+            (Verdict::Stay(Stay::DifferentSongs), Some("outscored"))
+        );
+        // A tie: the tags decide
+        assert_eq!(
+            picked(&run2(&[fp(1, "Song", "Band", 0.95), fp(2, "Another Song", "Band", 0.95)]).0),
+            (rec(1), None, Rule::R2)
+        );
+        // ... also between artists
+        let (v, d) = run2(&[fp(1, "Song", "Band", 0.9), fp(2, "Song", "Other Band", 0.97)]);
+        assert_eq!(
+            (v, d.as_deref()),
+            (Verdict::Stay(Stay::DifferentSongs), Some("outscored"))
+        );
+        // A search's option the kept answer names surely is a sure option: a live take of the
+        // song through it is a question
+        let answer: Vec<crate::identify::AcoustIdResult> = serde_json::from_value(serde_json::json!([
+            {"id": "a", "score": 0.95, "recordings": [
+                {"id": rec(1), "title": "Song", "duration": 200.0, "artists": [{"name": "Band"}]},
+                {"id": rec(2), "title": "Song (Live)", "duration": 201.0, "artists": [{"name": "Band"}]}
+            ]}
+        ]))
+        .unwrap();
+        let searched = src(fp(2, "Song (Live)", "Band", 0.8), "search");
+        let merged = with_answer(
+            vec![fp(1, "Song", "Band", 0.95), searched],
+            &answer,
+            &|_: &str| false,
+        );
+        assert!(merged.iter().all(|o| o.source == "fingerprint"));
+        assert_eq!(run2(&merged).0, Verdict::Stay(Stay::Version));
     }
 
     #[test]

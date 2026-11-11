@@ -202,12 +202,12 @@ async fn an_automatic_run_waits_for_the_run_going_and_runs_once() {
     // Review r1: a WebDAV or drive scan going (no library-folder scan slot): the run waits for it
     let t = untagged_track(dir.path().join("music/Band/Album/02 More.flac"), "More", "Band");
     s.library.lock().unwrap().upsert_track(&t).unwrap();
-    s.side_scans.fetch_add(1, SeqCst);
+    let scan = s.side_scan();
     identify::after_scan(&s, 1);
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let unchecked = || s.library.lock().unwrap().identity_counts().unwrap().unchecked;
     assert_eq!(unchecked(), 1, "the run waits for the scan");
-    s.side_scans.fetch_sub(1, SeqCst);
+    drop(scan);
     until("the automatic run", || {
         unchecked() == 0 && !s.identify.lock().unwrap().running
     })
@@ -911,7 +911,10 @@ async fn wrong_match_rewrites_the_file_only_with_write_ids_on() {
     );
     let (_, tags) = pm_library::probe_and_read(&path_of(b2)).unwrap();
     assert_eq!(tags.recording_mbid.map(|m| m.to_string()), Some(rec(6)));
-    assert_eq!(tags.release_mbid.map(|m| m.to_string()).as_deref(), Some(REL2));
+    // Review r2: the release a search hit came with is no evidence of the edition: none is kept or
+    // written (only the folder's own fit names one)
+    assert_eq!(tags.release_mbid, None);
+    assert_eq!(s.library.lock().unwrap().identify_release(b2).unwrap(), None);
     // Not matched: the IDs come out of the file
     let (st, b) = set(b2, serde_json::json!({"none": true, "expect": rec(6)})).await;
     assert_eq!(st, StatusCode::OK, "{b}");
@@ -1133,11 +1136,11 @@ async fn identify_replay_resettle() {
     )
     .await
     .unwrap();
-    let p = s2.identify.lock().unwrap().clone();
-    // Why the rest stays: the settling once more over what is left (it settles nothing more)
+    // (automatic matching is off in the copy: the settling, as the run's end would do it)
+    let pass2 = identify::auto_settle_pass(&s2).await.unwrap();
     let again = identify::auto_settle_pass(&s2).await.unwrap();
     assert_eq!(again.settled, 0, "one pass settles all it can");
-    let recheck = replay_counts(&s2, dir2.path(), &p.settled, &again.stay);
+    let recheck = replay_counts(&s2, dir2.path(), &pass2.by_rule, &pass2.stay);
     let took = t0.elapsed().as_secs_f64();
     let out = serde_json::json!({
         "rows": rows.len(),
@@ -1156,6 +1159,7 @@ async fn identify_replay_resettle() {
 async fn replay_library(rows: &[serde_json::Value]) -> (tempfile::TempDir, Arc<NodeState>, usize) {
     let dir = tempfile::tempdir().unwrap();
     let s = state(dir.path(), None).await;
+    replay_safe(&s);
     let mut ids: std::collections::HashMap<i64, i64> = Default::default();
     let mut options: std::collections::BTreeMap<i64, Vec<pm_library::identify::Candidate>> =
         Default::default();
@@ -1406,6 +1410,7 @@ async fn replay_copy(
     let dir = tempfile::tempdir().unwrap();
     std::fs::copy(path, dir.path().join("lib.sqlite")).unwrap();
     let s = state(dir.path(), None).await;
+    replay_safe(&s);
     s.set_contact("replay@example.org").unwrap();
     *s.mb_base.write().unwrap() = "http://127.0.0.1:9/ws/2".into();
     *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
@@ -1434,6 +1439,22 @@ async fn replay_copy(
     }
     private.retain(|p| p.chars().count() >= 4);
     (dir, s, private)
+}
+
+/// A replay library never writes into music files (a copy of a node's library names the node's
+/// files) and settles only when the replay asks: Write IDs and automatic matching off, checked.
+fn replay_safe(s: &NodeState) {
+    let lib = s.library.lock().unwrap();
+    lib.set_setting("library.write_ids", "false").unwrap();
+    lib.set_setting("identify.auto", "false").unwrap();
+    assert_eq!(
+        lib.get_setting("library.write_ids").unwrap().as_deref(),
+        Some("false")
+    );
+    assert_eq!(
+        lib.get_setting("identify.auto").unwrap().as_deref(),
+        Some("false")
+    );
 }
 
 /// A replay library's counts.
@@ -1494,9 +1515,11 @@ async fn replay_db(path: &std::path::Path) -> (serde_json::Value, std::collectio
     .await
     .unwrap();
     let p = s2.identify.lock().unwrap().clone();
+    // (automatic matching is off in the copy: the settling, as the run's end would do it)
+    let pass2 = identify::auto_settle_pass(&s2).await.unwrap();
     let again = identify::auto_settle_pass(&s2).await.unwrap();
     assert_eq!(again.settled, 0, "one pass settles all it can");
-    let mut recheck = replay_after(&s2, dir2.path(), &p.settled, &again.stay, &again.why);
+    let mut recheck = replay_after(&s2, dir2.path(), &pass2.by_rule, &pass2.stay, &pass2.why);
     recheck["rechecked"] = p.total.into();
     recheck["errors"] = p.errors.into();
     let out = serde_json::json!({
@@ -1817,4 +1840,48 @@ fn every_reason_the_settling_can_give_is_listed() {
             assert!(replay_listed(&key), "not listed: {key}");
         }
     }
+}
+
+/// Review r2: with "Match new songs automatically" off, a run settles nothing on its own: every
+/// unsure song waits for the owner. On again, the next run settles the clear ones.
+#[tokio::test]
+async fn with_automatic_matching_off_unsure_songs_wait_for_the_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let app = router(s.clone());
+    let id = waiting(
+        &s,
+        dir.path(),
+        "T",
+        "Song T",
+        &[fp(1, "Song T", "Band", 0.95), fp(2, "Song T", "Band", 0.95)],
+    );
+    answered(
+        &s,
+        id,
+        0.95,
+        &[
+            (1, "Song T", "Band", Some(10.0)),
+            (2, "Song T", "Band", Some(10.0)),
+        ],
+    );
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/library/identify/settings",
+        Some(serde_json::json!({"auto_match": false})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    recheck_run(&s).await;
+    assert!(canonical(&s, id).is_none(), "nothing settled with it off");
+    call(
+        &app,
+        "PUT",
+        "/v1/library/identify/settings",
+        Some(serde_json::json!({"auto_match": true})),
+    )
+    .await;
+    recheck_run(&s).await;
+    assert_eq!(recording_of(&s, id), Some(rec(1)));
 }

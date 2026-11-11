@@ -134,6 +134,7 @@ pub(crate) async fn apply(
 ) -> ApiResult<crate::identify::WriteReport> {
     let all = candidates(&s)?;
     let dir = crate::identify::backup_dir(&s);
+    let st = s.clone();
     let report = tokio::task::spawn_blocking(move || {
         let mut report = crate::identify::WriteReport {
             backup_dir: dir.display().to_string(),
@@ -146,6 +147,19 @@ pub(crate) async fn apply(
             }
             if matches!(pm_library::tagwrite::preview(&t.file.path, &f), Ok(c) if c.is_empty()) {
                 continue;
+            }
+            // One ID writer at a time, and a match written only while it is still the song's (a
+            // correction made meanwhile wins)
+            let _one = crate::identify::id_writes();
+            if let Some(ids) = &f.ids {
+                if !crate::identify::still_matched(&st, id, &ids.recording) {
+                    report.skipped.push(crate::identify::WriteSkip {
+                        track_id: id,
+                        path: t.file.path.display().to_string(),
+                        reason: "its match changed meanwhile".into(),
+                    });
+                    continue;
+                }
             }
             match pm_library::tagwrite::write_fixes(&t.file.path, &f, &dir) {
                 Ok(_) => report.written += 1,

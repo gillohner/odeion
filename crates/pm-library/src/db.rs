@@ -3719,6 +3719,17 @@ impl Library {
         Ok(())
     }
 
+    /// Whether the folder's own fit (the album lane's option) offers `recording` on `release` for
+    /// the song: the only release a correction takes from an option.
+    pub fn folder_fit_names(&self, track: i64, recording: &Mbid, release: &Mbid) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "SELECT EXISTS (SELECT 1 FROM identify_suggestions WHERE track_id = ?1 AND recording_mbid = ?2
+               AND release_mbid = ?3 AND source = 'album')",
+            params![track, recording.to_string(), release.to_string()],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The release identification stored for a song, when one was singled out.
     pub fn identify_release(&self, track: i64) -> Result<Option<String>> {
         Ok(self

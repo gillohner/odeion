@@ -182,7 +182,8 @@ pub fn write_fixes(path: &Path, f: &Fixes, backup_dir: &Path) -> Result<PathBuf,
 /// same backup as [`write_ids`]. Returns the backup's path.
 ///
 /// Every recording id the scanner reads goes (Picard's `MUSICBRAINZ_TRACKID` and
-/// `MUSICBRAINZ_RECORDINGID`), with the release and AcoustID ids; `drop_isrc` takes the ISRC too
+/// `MUSICBRAINZ_RECORDINGID`), with the AcoustID id; the album's release id is kept unless `ids`
+/// names a release (then it is written); `drop_isrc` takes the ISRC too
 /// (a song left without a match that its ISRC would name again), which only FLAC allows here.
 pub fn replace_ids(
     path: &Path,
@@ -212,20 +213,12 @@ pub fn can_replace(path: &Path, drop_isrc: bool) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// What a correction clears in FLAC: every recording id the scanner reads, the release, AcoustID.
-const CLEAR_FLAC: [&str; 4] = [
-    "MUSICBRAINZ_TRACKID",
-    "MUSICBRAINZ_RECORDINGID",
-    "MUSICBRAINZ_ALBUMID",
-    "ACOUSTID_ID",
-];
+/// What a correction clears in FLAC: every recording id the scanner reads, and AcoustID's. The
+/// album's release id stays (the album was right; it is replaced only when the owner names a
+/// release): taking it out would move the song out of its album at the next scan.
+const CLEAR_FLAC: [&str; 3] = ["MUSICBRAINZ_TRACKID", "MUSICBRAINZ_RECORDINGID", "ACOUSTID_ID"];
 /// The same as ID3 `TXXX` frames.
-const CLEAR_TXXX: [&str; 4] = [
-    "MusicBrainz Track Id",
-    "MusicBrainz Recording Id",
-    "MusicBrainz Album Id",
-    "Acoustid Id",
-];
+const CLEAR_TXXX: [&str; 3] = ["MusicBrainz Track Id", "MusicBrainz Recording Id", "Acoustid Id"];
 
 /// [`write_fixes`]; `clear` (a correction) takes the ids [`CLEAR_FLAC`] / [`CLEAR_TXXX`] out first,
 /// and the ISRC too when it holds `true`.
@@ -438,6 +431,7 @@ mod tests {
             tag.set_vorbis("MUSICBRAINZ_RECORDINGID", vec![MB]);
             tag.set_vorbis("MUSICBRAINZ_TRACKID", vec![MB]);
             tag.set_vorbis("ISRC", vec!["USQX91300108"]);
+            tag.set_vorbis("MUSICBRAINZ_ALBUMID", vec![REL]);
             tag.save().unwrap();
         }
         let (_, before) = crate::probe_and_read(&f).unwrap();
@@ -466,6 +460,8 @@ mod tests {
         let backup = replace_ids(&f, None, true, &backups).unwrap();
         let (_, none) = crate::probe_and_read(&f).unwrap();
         assert_eq!((none.recording_mbid, none.isrc), (None, None));
+        // Review r2: the album was right, its release id stays (the song stays in its album)
+        assert_eq!(none.release_mbid.map(|m| m.to_string()).as_deref(), Some(REL));
         let b: Backup = serde_json::from_slice(&std::fs::read(backup).unwrap()).unwrap();
         restore(&b).unwrap();
         let (_, back) = crate::probe_and_read(&f).unwrap();

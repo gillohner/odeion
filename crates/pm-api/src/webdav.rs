@@ -519,10 +519,10 @@ pub struct NewShare {
 fn start_scan(s: &Arc<NodeState>, share: Share) {
     let s2 = s.clone();
     tokio::task::spawn_blocking(move || {
-        use std::sync::atomic::Ordering::SeqCst;
-        s2.side_scans.fetch_add(1, SeqCst);
-        let scanned = scan_share(&s2, &share);
-        s2.side_scans.fetch_sub(1, SeqCst);
+        let scanned = {
+            let _scan = s2.side_scan();
+            scan_share(&s2, &share)
+        };
         match scanned {
             Ok(r) => {
                 tracing::info!(share = %share.name, added = r.files_added, updated = r.files_updated, removed = r.files_removed, errors = r.errors.len(), "WebDAV scan done");
