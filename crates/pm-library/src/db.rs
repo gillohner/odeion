@@ -179,13 +179,63 @@ pub enum SuggestionCheck {
     Changed,
 }
 
+/// What [`Library::settle_auto`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoSettle {
+    Stored,
+    /// The song's file or tags changed since the caller read them.
+    Changed,
+    /// Its file is gone.
+    NoFile,
+    /// It got an identity meanwhile.
+    Identified,
+    /// The owner left it as it is.
+    Left,
+    /// The recording is no longer one of its options.
+    NotOffered,
+    /// The owner rejected a recording for it.
+    Rejected,
+}
+
+impl AutoSettle {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stored => "stored",
+            Self::Changed => "input",
+            Self::NoFile => "no_file",
+            Self::Identified => "identified",
+            Self::Left => "left",
+            Self::NotOffered => "not_offered",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// What [`Library::rematch`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rematch {
+    /// Stored; `old` is the recording the song had (now rejected for it unless kept).
+    Done { old: Option<String> },
+    /// The song's recording is no longer the one the caller saw: nothing changed.
+    Changed,
+    /// The song's file's tags name a recording, and they won't be rewritten: nothing changed.
+    FromTags,
+    /// No such song.
+    Gone,
+}
+
 /// How much of the library has a canonical identity.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IdentityCounts {
     pub total: u64,
     pub identified: u64,
-    /// Tracks with suggestions to confirm (not those the owner left as they are).
+    /// Tracks with suggestions to confirm (not those the owner left as they are), whose file is
+    /// there (as on the review page).
     pub suggested: u64,
+    /// Tracks with suggestions whose file is gone or hidden (a share offline, a folder moved):
+    /// not in `suggested`.
+    #[serde(default)]
+    pub suggested_missing: u64,
     /// Tracks identification found nothing for (or failed on).
     pub unknown: u64,
     /// Tracks identification has not looked at yet.
@@ -214,6 +264,10 @@ pub struct IdentifiedBy {
     /// By a search of their exact title, artist and length.
     #[serde(default)]
     pub title_artist: u64,
+    /// Settled without review from the evidence a run stored (`Confidence::Auto`); their IDs
+    /// are not written into the files until the owner confirms them.
+    #[serde(default)]
+    pub auto: u64,
 }
 
 /// A bookmark as stored locally (a social v1 bookmark of a canonical music URL).
@@ -628,12 +682,13 @@ impl Library {
             Some(id) => {
                 tx.execute(
                     // A rescan of a file without IDs in its tags keeps what identification
-                    // found (fingerprint, release match, folder match, the owner's confirmation).
+                    // found (fingerprint, release match, folder match, an automatic pick, the
+                    // owner's confirmation).
                     "UPDATE tracks SET title=?2, album_id=?3, track_no=?4, disc_no=?5, duration_ms=?6, recording_mbid=?7, isrc=?8,
                      acoustid=COALESCE(?9, acoustid),
-                     canonical_uri=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','tag_match','confirmed_by_user') THEN canonical_uri ELSE ?10 END,
-                     canonical_confidence_score=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','tag_match','confirmed_by_user') THEN canonical_confidence_score ELSE ?12 END,
-                     canonical_confidence_source=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','tag_match','confirmed_by_user') THEN canonical_confidence_source ELSE ?11 END,
+                     canonical_uri=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','tag_match','auto','confirmed_by_user') THEN canonical_uri ELSE ?10 END,
+                     canonical_confidence_score=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','tag_match','auto','confirmed_by_user') THEN canonical_confidence_score ELSE ?12 END,
+                     canonical_confidence_source=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','tag_match','auto','confirmed_by_user') THEN canonical_confidence_source ELSE ?11 END,
                      replaygain_track_gain_db=?13, replaygain_album_gain_db=?14
                      WHERE id=?1",
                     params![
@@ -2637,7 +2692,13 @@ fn insert_suggestions(
         conn.execute(
                 "INSERT INTO identify_suggestions(track_id, recording_mbid, release_mbid, title, artist, release_title, score, source, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(track_id, recording_mbid) DO UPDATE SET score = MAX(score, excluded.score),
+                 ON CONFLICT(track_id, recording_mbid) DO UPDATE SET
+                   score = CASE
+                     WHEN identify_suggestions.source = excluded.source THEN MAX(identify_suggestions.score, excluded.score)
+                     WHEN excluded.source = 'fingerprint' THEN excluded.score
+                     WHEN identify_suggestions.source = 'fingerprint' THEN identify_suggestions.score
+                     ELSE MAX(identify_suggestions.score, excluded.score) END,
+                   source = CASE WHEN excluded.source = 'fingerprint' THEN excluded.source ELSE identify_suggestions.source END,
                    release_mbid = COALESCE(excluded.release_mbid, release_mbid),
                    title = COALESCE(excluded.title, title), artist = COALESCE(excluded.artist, artist),
                    release_title = COALESCE(excluded.release_title, release_title)",
@@ -3274,11 +3335,13 @@ impl Library {
         track: Option<i64>,
         recording: Option<&str>,
     ) -> Result<SuggestionCheck> {
-        let check = check_suggestion_on(&self.lock(), id, track, recording)?;
-        if check == SuggestionCheck::Holds {
-            self.reject_suggestion(id)?;
-        }
-        Ok(check)
+        immediately(&mut self.lock(), |conn| {
+            let check = check_suggestion_on(conn, id, track, recording)?;
+            if check == SuggestionCheck::Holds {
+                reject_on(conn, id)?;
+            }
+            Ok(check)
+        })
     }
 
     /// Whether a song has a canonical identity (tags, a run, the owner).
@@ -3302,32 +3365,7 @@ impl Library {
     /// Drop one suggestion; when it was the last for its track, the track is
     /// "unknown" until the next retry.
     pub fn reject_suggestion(&self, id: i64) -> Result<bool> {
-        let conn = self.lock();
-        let track: Option<i64> = conn
-            .query_row(
-                "SELECT track_id FROM identify_suggestions WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(track) = track else { return Ok(false) };
-        // Remembered: a later run, a retry or a cached answer never brings it back
-        conn.execute(
-            "INSERT OR IGNORE INTO identify_rejections(track_id, recording_mbid, rejected_at)
-             SELECT track_id, recording_mbid, ?2 FROM identify_suggestions WHERE id = ?1",
-            params![id, now_unix()],
-        )?;
-        conn.execute("DELETE FROM identify_suggestions WHERE id = ?1", params![id])?;
-        let left: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM identify_suggestions WHERE track_id = ?1",
-            params![track],
-            |r| r.get(0),
-        )?;
-        drop(conn);
-        if left == 0 {
-            self.set_identify_state(track, "unknown", Some("suggestions rejected"))?;
-        }
-        Ok(true)
+        immediately(&mut self.lock(), |conn| reject_on(conn, id))
     }
 
     /// How identified the library is.
@@ -3339,9 +3377,12 @@ impl Library {
         Ok(IdentityCounts {
             total: q("SELECT COUNT(*) FROM tracks")?,
             identified: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL")?,
-            suggested: q(
-                "SELECT COUNT(DISTINCT s.track_id) FROM identify_suggestions s JOIN tracks t ON t.id = s.track_id WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped')",
-            )?,
+            suggested: q(&format!(
+                "SELECT COUNT(DISTINCT s.track_id) FROM identify_suggestions s JOIN tracks t ON t.id = s.track_id WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped') AND {TRACK_PRESENT}"
+            ))?,
+            suggested_missing: q(&format!(
+                "SELECT COUNT(DISTINCT s.track_id) FROM identify_suggestions s JOIN tracks t ON t.id = s.track_id WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped') AND NOT {TRACK_PRESENT}"
+            ))?,
             skipped: q(
                 "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id WHERE t.canonical_uri IS NULL AND s.state = 'skipped'",
             )?,
@@ -3365,6 +3406,7 @@ impl Library {
                 fingerprint: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release')")?,
                 you: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'confirmed_by_user'")?,
                 title_artist: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'tag_match'")?,
+                auto: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'auto'")?,
             },
         })
     }
@@ -3375,6 +3417,318 @@ impl Library {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    // ---- automatic settling and corrections ("Wrong match?") ----
+
+    /// The release each song identified by a run, its tags' IDs or the owner is on (not an
+    /// automatic pick: those are never evidence for another), by track: the folder evidence of
+    /// automatic settling.
+    pub fn identified_releases(&self) -> Result<std::collections::HashMap<i64, String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT s.track_id, s.release_mbid FROM identify_state s JOIN tracks t ON t.id = s.track_id
+             WHERE t.canonical_uri IS NOT NULL AND s.release_mbid IS NOT NULL
+               AND COALESCE(t.canonical_confidence_source, '') <> 'auto'",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Songs the owner rejected any recording for.
+    pub fn tracks_with_rejections(&self) -> Result<std::collections::HashSet<i64>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT DISTINCT track_id FROM identify_rejections")?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// An automatic pick for a song waiting for review (`Confidence::Auto`), stored only when it
+    /// still holds: the song without an identity, not left as it is, its file there and what the
+    /// caller read (`read`, from [`Self::input_generations`]), `recording` one of its open options,
+    /// and no recording rejected for it. Its options stay (the "Wrong match?" view lists them);
+    /// its IDs are not written into the file. What happened ([`AutoSettle`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn settle_auto(
+        &self,
+        track: i64,
+        recording: &Mbid,
+        release: Option<&Mbid>,
+        score: f32,
+        detail: &str,
+        read: Option<&str>,
+    ) -> Result<AutoSettle> {
+        immediately(&mut self.lock(), |conn| {
+            let Some(read) = read else {
+                return Ok(AutoSettle::NoFile);
+            };
+            if identify_input_by_track(conn, track)?.as_deref() != Some(read) {
+                return Ok(AutoSettle::Changed);
+            }
+            let rec = recording.to_string();
+            let (open, state, present, offered, turned_down): (Option<bool>, Option<String>, bool, bool, bool) = conn.query_row(
+                "SELECT (SELECT canonical_uri IS NULL FROM tracks WHERE id = ?1),
+                        (SELECT state FROM identify_state WHERE track_id = ?1),
+                        EXISTS (SELECT 1 FROM files f WHERE f.track_id = ?1 AND f.missing = 0),
+                        EXISTS (SELECT 1 FROM identify_suggestions o WHERE o.track_id = ?1 AND o.recording_mbid = ?2),
+                        EXISTS (SELECT 1 FROM identify_rejections WHERE track_id = ?1)",
+                params![track, rec],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+            let why = match () {
+                _ if open != Some(true) => Some(AutoSettle::Identified),
+                _ if state.as_deref() == Some("skipped") => Some(AutoSettle::Left),
+                _ if !present => Some(AutoSettle::NoFile),
+                _ if !offered => Some(AutoSettle::NotOffered),
+                // Any recording the owner rejected for the song leaves it to them
+                _ if turned_down => Some(AutoSettle::Rejected),
+                _ => None,
+            };
+            if let Some(why) = why {
+                return Ok(why);
+            }
+            let tx = conn.savepoint()?;
+            let confidence = Confidence::Auto { score };
+            tx.execute(
+                "UPDATE tracks SET canonical_uri = ?2, canonical_confidence_source = 'auto', canonical_confidence_score = ?3
+                 WHERE id = ?1 AND canonical_uri IS NULL",
+                params![
+                    track,
+                    MusicUri::Recording { mbid: *recording }.to_url(),
+                    confidence.score() as f64
+                ],
+            )?;
+            // (a song with open options whatever its stored state: a failed check, an older run's)
+            tx.execute(
+                "INSERT INTO identify_state(track_id, state, detail, checked_at, release_mbid, rules) VALUES (?1, 'identified', ?2, ?3, ?4, ?5)
+                 ON CONFLICT(track_id) DO UPDATE SET state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at,
+                   release_mbid = excluded.release_mbid, rules = excluded.rules",
+                params![
+                    track,
+                    detail,
+                    now_unix(),
+                    release.map(|r| r.to_string()),
+                    crate::identify::RULES_VERSION
+                ],
+            )?;
+            tx.commit()?;
+            Ok(AutoSettle::Stored)
+        })
+    }
+
+    /// The owner corrects a song's match ("Wrong match?"): `choice` another recording (and its
+    /// release when the owner picked one), the current one (an automatic pick becomes theirs), or
+    /// `None`, "Not matched". Done only while the song's recording is still `expect` (what the
+    /// page showed; `None`: no identity). The recording replaced or taken away is rejected for
+    /// the song, so no later run, retry or automatic settling brings it back; the chosen one is
+    /// the owner's (`confirmed_by_user`), an earlier rejection of it lifted. "Not matched" leaves
+    /// the song without an identity and out of later runs, as "Leave as is" does. A song whose
+    /// file's tags name a recording is changed only with `tags_follow` (the caller rewrites the
+    /// file's IDs): else the next scan would read the old one back.
+    pub fn rematch(
+        &self,
+        track: i64,
+        expect: Option<&str>,
+        choice: Option<(&Mbid, Option<&Mbid>)>,
+        tags_follow: bool,
+    ) -> Result<Rematch> {
+        immediately(&mut self.lock(), |conn| {
+            let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT t.canonical_uri, t.canonical_confidence_source,
+                       COALESCE(t.recording_mbid, (SELECT 'written' FROM identify_state s WHERE s.track_id = t.id AND s.detail = 'written into the file'))
+                     FROM tracks t WHERE t.id = ?1",
+                    params![track],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((uri, source, tagged)) = row else {
+                return Ok(Rematch::Gone);
+            };
+            let current = uri.as_deref().map(|u| match MusicUri::parse(u) {
+                Ok(MusicUri::Recording { mbid }) => mbid.to_string(),
+                _ => u.to_string(),
+            });
+            if current.as_deref() != expect {
+                return Ok(Rematch::Changed);
+            }
+            let from_tags =
+                tagged.is_some() || matches!(source.as_deref(), Some("tagged_mbid" | "tagged_isrc"));
+            if from_tags && !tags_follow {
+                return Ok(Rematch::FromTags);
+            }
+            let tx = conn.savepoint()?;
+            let now = now_unix();
+            let chosen = choice.map(|(r, _)| r.to_string());
+            if let Some(old) = current.as_deref().filter(|o| Some(*o) != chosen.as_deref()) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO identify_rejections(track_id, recording_mbid, rejected_at) VALUES (?1, ?2, ?3)",
+                    params![track, old, now],
+                )?;
+                tx.execute(
+                    "DELETE FROM identify_suggestions WHERE track_id = ?1 AND recording_mbid = ?2",
+                    params![track, old],
+                )?;
+            }
+            match choice {
+                Some((rec, release)) => {
+                    let same = current.as_deref() == Some(rec.to_string().as_str());
+                    tx.execute(
+                        "DELETE FROM identify_rejections WHERE track_id = ?1 AND recording_mbid = ?2",
+                        params![track, rec.to_string()],
+                    )?;
+                    tx.execute(
+                        "UPDATE tracks SET canonical_uri = ?2, canonical_confidence_source = 'confirmed_by_user', canonical_confidence_score = ?3
+                         WHERE id = ?1",
+                        params![
+                            track,
+                            MusicUri::Recording { mbid: *rec }.to_url(),
+                            Confidence::ConfirmedByUser.score() as f64
+                        ],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM identify_suggestions WHERE track_id = ?1",
+                        params![track],
+                    )?;
+                    // The same recording keeps its release unless the owner named one
+                    tx.execute(
+                        "INSERT INTO identify_state(track_id, state, detail, checked_at, release_mbid, rules) VALUES (?1, 'identified', 'confirmed_by_user', ?2, ?3, ?4)
+                         ON CONFLICT(track_id) DO UPDATE SET state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at,
+                           release_mbid = CASE WHEN ?5 THEN COALESCE(excluded.release_mbid, identify_state.release_mbid) ELSE excluded.release_mbid END,
+                           rules = excluded.rules",
+                        params![
+                            track,
+                            now,
+                            release.map(|r| r.to_string()),
+                            crate::identify::RULES_VERSION,
+                            same
+                        ],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "UPDATE tracks SET canonical_uri = NULL, canonical_confidence_source = NULL, canonical_confidence_score = NULL
+                         WHERE id = ?1",
+                        params![track],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO identify_state(track_id, state, detail, checked_at, release_mbid, rules) VALUES (?1, 'skipped', 'not matched by you', ?2, NULL, ?3)
+                         ON CONFLICT(track_id) DO UPDATE SET state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at,
+                           release_mbid = NULL, rules = excluded.rules",
+                        params![track, now, crate::identify::RULES_VERSION],
+                    )?;
+                }
+            }
+            tx.commit()?;
+            Ok(Rematch::Done { old: current })
+        })
+    }
+
+    /// A song's match as a correction sees it: its recording (`None`: no match), and whether its
+    /// file's tags name a recording (read by the scan, or written there by "Write IDs").
+    pub fn match_now(&self, track: i64) -> Result<Option<(Option<String>, bool)>> {
+        let row: Option<(Option<String>, Option<String>, bool)> = self
+            .lock()
+            .query_row(
+                "SELECT t.canonical_uri, t.canonical_confidence_source,
+                   t.recording_mbid IS NOT NULL OR EXISTS (SELECT 1 FROM identify_state s WHERE s.track_id = t.id AND s.detail = 'written into the file')
+                 FROM tracks t WHERE t.id = ?1",
+                params![track],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(uri, source, tagged)| {
+            let current = uri.as_deref().map(|u| match MusicUri::parse(u) {
+                Ok(MusicUri::Recording { mbid }) => mbid.to_string(),
+                _ => u.to_string(),
+            });
+            let from_tags = tagged || matches!(source.as_deref(), Some("tagged_mbid" | "tagged_isrc"));
+            (current, from_tags)
+        }))
+    }
+
+    /// After the node rewrote a song's ID tags itself (a correction): the file as the scan will
+    /// find it now (its size and time, so the rewrite is no change of the song's), and the
+    /// recording its tags name now. What the owner chose (a match, or none) stands.
+    pub fn note_rewritten(
+        &self,
+        track: i64,
+        path: &Path,
+        size: u64,
+        mtime: i64,
+        recording: Option<&Mbid>,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE files SET size_bytes = ?3, mtime_unix = ?4 WHERE track_id = ?1 AND path = ?2",
+            params![track, path.to_string_lossy(), size as i64, mtime],
+        )?;
+        conn.execute(
+            "UPDATE tracks SET recording_mbid = ?2 WHERE id = ?1",
+            params![track, recording.map(|m| m.to_string())],
+        )?;
+        Ok(())
+    }
+
+    /// The release identification stored for a song, when one was singled out.
+    pub fn identify_release(&self, track: i64) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT release_mbid FROM identify_state WHERE track_id = ?1",
+                params![track],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// "Not found" songs (nothing found, or the check failed) last checked before `before`, with
+    /// their file present, oldest first, at most `limit`: the weekly retry's songs.
+    pub fn stale_not_found(&self, before: i64, limit: usize) -> Result<Vec<i64>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT t.id FROM tracks t JOIN identify_state s ON s.track_id = t.id
+             WHERE t.canonical_uri IS NULL AND s.state IN ('unknown','error') AND s.checked_at < ?1 AND {TRACK_PRESENT}
+             ORDER BY s.checked_at, t.id LIMIT ?2"
+        ))?;
+        let rows = stmt
+            .query_map(params![before, limit as i64], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// AcoustID's answer kept for the file at `path` (by its last content key), without reading
+    /// the file: the automatic settling's look at lengths and release kinds.
+    pub fn lookup_for_path(&self, path: &Path) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT f.lookup_json FROM identify_file_keys k JOIN fingerprints f ON f.file_key = k.file_key
+                 WHERE k.path = ?1",
+                params![path.to_string_lossy()],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// When AcoustID's answer kept for a file key was asked (`None`: none kept, or before this was
+    /// recorded).
+    pub fn lookup_time(&self, key: &str) -> Result<Option<i64>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT looked_up_at FROM fingerprints WHERE file_key = ?1 AND lookup_json IS NOT NULL",
+                params![key],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     // ---- content hashes (files on the homeserver) ----
@@ -3839,6 +4193,55 @@ fn check_suggestion_on(
     })
 }
 
+/// "Not this" for suggestion `id`, in the caller's transaction: remembered (no later run, retry
+/// or cached answer brings it back), the option dropped. A song left with none is "unknown"; an
+/// automatic pick of that very recording (settled meanwhile from its kept options) is taken back,
+/// the song waiting again with what is left.
+fn reject_on(conn: &Connection, id: i64) -> Result<bool> {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT track_id, recording_mbid FROM identify_suggestions WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((track, recording)) = row else {
+        return Ok(false);
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO identify_rejections(track_id, recording_mbid, rejected_at) VALUES (?1, ?2, ?3)",
+        params![track, recording, now_unix()],
+    )?;
+    conn.execute("DELETE FROM identify_suggestions WHERE id = ?1", params![id])?;
+    let url = recording_uri(&recording).map(|u| u.to_url()).unwrap_or_default();
+    let taken_back = conn.execute(
+        "UPDATE tracks SET canonical_uri = NULL, canonical_confidence_source = NULL, canonical_confidence_score = NULL
+         WHERE id = ?1 AND canonical_uri = ?2 AND canonical_confidence_source = 'auto'",
+        params![track, url],
+    )? > 0;
+    let (left, open): (i64, bool) = conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM identify_suggestions WHERE track_id = ?1),
+                COALESCE((SELECT canonical_uri IS NULL FROM tracks WHERE id = ?1), 0)",
+        params![track],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    // (an identified song's kept options, an automatic pick's, leave its state as it is)
+    if open && (left == 0 || taken_back) {
+        let (state, detail) = if left == 0 {
+            ("unknown", Some("suggestions rejected"))
+        } else {
+            ("suggested", None)
+        };
+        conn.execute(
+            "INSERT INTO identify_state(track_id, state, detail, checked_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(track_id) DO UPDATE SET state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at,
+               release_mbid = NULL",
+            params![track, state, detail, now_unix()],
+        )?;
+    }
+    Ok(true)
+}
+
 fn rejected(conn: &Connection, track: i64, recording: &str) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM identify_rejections WHERE track_id = ?1 AND recording_mbid = ?2)",
@@ -3924,6 +4327,7 @@ fn confidence_source(c: &Confidence) -> &'static str {
         Confidence::AlbumFit { .. } => "album_fit",
         Confidence::ConfirmedByUser => "confirmed_by_user",
         Confidence::TagMatch { .. } => "tag_match",
+        Confidence::Auto { .. } => "auto",
         Confidence::Fuzzy { .. } => "fuzzy",
     }
 }
@@ -3937,6 +4341,7 @@ fn confidence_from(source: &str, score: f64) -> Result<Confidence> {
         "album_fit" => Confidence::AlbumFit { score: score as f32 },
         "confirmed_by_user" => Confidence::ConfirmedByUser,
         "tag_match" => Confidence::TagMatch { score: score as f32 },
+        "auto" => Confidence::Auto { score: score as f32 },
         "fuzzy" => Confidence::Fuzzy { score: score as f32 },
         other => {
             return Err(LibraryError::Corrupt {

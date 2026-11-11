@@ -558,6 +558,7 @@ const NEUTRAL_WORDS: &[&str] = &[
     "anniversary",
     "bonus",
     "track",
+    "main",
     "the",
     "a",
 ];
@@ -579,9 +580,17 @@ fn neutral(words: &[&str]) -> bool {
         .all(|w| NEUTRAL_WORDS.contains(w) || year(w) || ordinal(w))
         && (!has("mix") || has("original"))
         && (!has("version")
-            || ["album", "single", "lp", "original", "remaster", "remastered"]
-                .iter()
-                .any(|x| has(x)))
+            || [
+                "album",
+                "single",
+                "lp",
+                "original",
+                "main",
+                "remaster",
+                "remastered",
+            ]
+            .iter()
+            .any(|x| has(x)))
 }
 
 /// Whether a qualifier only names a featured artist: "feat. Carol" always; "with Carol" only

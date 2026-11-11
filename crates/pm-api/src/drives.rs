@@ -959,12 +959,21 @@ pub struct NewRoot {
 
 fn start_scan(s: &Arc<NodeState>, root: Root) {
     let s2 = s.clone();
-    tokio::task::spawn_blocking(move || match scan_root(&s2, &root) {
-        Ok(r) => {
-            tracing::info!(drive = root.provider.name(), folder = %root.name, added = r.files_added, removed = r.files_removed, errors = r.errors.len(), "drive scan done");
-            s2.notify_library();
+    tokio::task::spawn_blocking(move || {
+        use std::sync::atomic::Ordering::SeqCst;
+        s2.side_scans.fetch_add(1, SeqCst);
+        let scanned = scan_root(&s2, &root);
+        s2.side_scans.fetch_sub(1, SeqCst);
+        match scanned {
+            Ok(r) => {
+                tracing::info!(drive = root.provider.name(), folder = %root.name, added = r.files_added, removed = r.files_removed, errors = r.errors.len(), "drive scan done");
+                s2.notify_library();
+                crate::identify::after_scan(&s2, r.files_added + r.files_updated);
+            }
+            Err(e) => {
+                tracing::warn!(drive = root.provider.name(), folder = %root.name, "drive scan failed: {e}")
+            }
         }
-        Err(e) => tracing::warn!(drive = root.provider.name(), folder = %root.name, "drive scan failed: {e}"),
     });
 }
 
