@@ -1158,7 +1158,7 @@ impl Store {
             }
             // The count may need a page of its own (a new day's row) when no page came free yet:
             // then it is undone and the next oldest go too
-            let sp = tx.savepoint().map_err(storage)?;
+            let mut sp = tx.savepoint().map_err(storage)?;
             sp.execute(
                 "INSERT INTO daily (day, metric, key, n) VALUES (?1, 'dropped', 'evicted', ?2)
                  ON CONFLICT(day, metric, key) DO UPDATE SET n = n + ?2",
@@ -3982,8 +3982,15 @@ mod tests {
         all::<Viewport>("VIEWPORTS", &list("VIEWPORTS"));
         all::<ErrorClass>("ERROR_CLASSES", &list("ERROR_CLASSES"));
         let kinds = list("KINDS");
-        assert_eq!(kinds, ["nav", "load", "api", "action", "exception"], "S2 sends these kinds only");
-        assert!(js.contains(&format!("'{SCHEMA}'")), "usage.js names the schema it speaks");
+        assert_eq!(
+            kinds,
+            ["nav", "load", "api", "action", "exception"],
+            "S2 sends these kinds only"
+        );
+        assert!(
+            js.contains(&format!("'{SCHEMA}'")),
+            "usage.js names the schema it speaks"
+        );
     }
 
     /// Every page app.js draws is a page the schema can name, and every Settings tab is a
@@ -4020,7 +4027,10 @@ mod tests {
             .match_indices("['")
             .filter_map(|(i, m)| tabs[i + m.len()..].split('\'').next())
             .collect();
-        assert!(keys.len() > 12 && keys.contains("privacy") && keys.contains("usage"), "{keys:?}");
+        assert!(
+            keys.len() > 12 && keys.contains("privacy") && keys.contains("usage"),
+            "{keys:?}"
+        );
         for k in &keys {
             let k = if *k == "nodehome" { "node_home" } else { k };
             serde_json::from_value::<Control>(serde_json::Value::String(format!("settings_{k}")))

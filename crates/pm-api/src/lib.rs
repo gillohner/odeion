@@ -18902,13 +18902,22 @@ exec sleep 300
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(std::str::from_utf8(&body).unwrap().contains("window.PM_USAGE"));
         let page = include_str!("../static/index.html");
-        let usage = page.find(r#"<script src="/usage.js"></script>"#).expect("index.html loads usage.js");
+        let usage = page
+            .find(r#"<script src="/usage.js"></script>"#)
+            .expect("index.html loads usage.js");
         let app_js = page.find(r#"<script src="/app.js"></script>"#).unwrap();
         assert!(usage < app_js, "usage.js loads before app.js");
-        assert!(page.contains(r#"<div id="usagenotice" hidden></div>"#), "the notice's slot");
+        assert!(
+            page.contains(r#"<div id="usagenotice" hidden></div>"#),
+            "the notice's slot"
+        );
         let sw = include_str!("../static/sw.js");
         for list in ["const FILES = [", "const BLOCKING = ["] {
-            let l = sw.split_once(list).and_then(|(_, r)| r.split_once(']')).unwrap().0;
+            let l = sw
+                .split_once(list)
+                .and_then(|(_, r)| r.split_once(']'))
+                .unwrap()
+                .0;
             assert!(l.contains("'/usage.js'"), "sw.js {list} keeps /usage.js");
         }
         // The party page has no part of it yet (guests: a later slice)
