@@ -3,6 +3,9 @@
 //!
 //! Needs the homeserver's admin API in `PM_BUNDLED_HS_ADMIN` and `PM_BUNDLED_HS_PASSWORD` (CI's
 //! `bundle` job); skipped otherwise. A test signer stands in for Pubky Ring.
+// The sync future a test spawns (`tokio::spawn`, which needs it Send) nests deeper than the
+// default limit of 128 lets the compiler check
+#![recursion_limit = "256"]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
