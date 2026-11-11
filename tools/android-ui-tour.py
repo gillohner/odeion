@@ -1,4 +1,5 @@
-"""The phone UI with a finger, on the Android emulator (android-endpoint.py runs it with PM_UI_TOUR=strict).
+"""The phone UI with a finger, on the Android emulator (android-endpoint.py runs it with PM_UI_TOUR=strict;
+PM_UI_TOUR=play-to stops after the page plays to the phone's zone).
 
 The app is connected to the node and its own zone registered. Three songs are queued on that zone and
 the page is pointed at it (Zones, its card's Play to). Then everything goes as a finger does it
@@ -25,6 +26,7 @@ script's node, app and adb session.
 """
 import csv
 import io
+import os
 import re
 import importlib.util
 import struct
@@ -158,6 +160,10 @@ def run(h):
         shot("ui-1-mini-player")
         assert picked > 0.02, f"the mini player doesn't show the phone's zone after Play to ({picked:.3f} of its words changed); see ui-0-zones.png"
         log(f"the page plays to the phone's zone ({picked:.3f} of the mini player's words changed)")
+        if os.environ.get("PM_UI_TOUR") == "play-to":
+            # (an emulator WebView too old for the rest of the page's CSS: android.yml says which)
+            log("PASS: the phone UI tour up to Play to (PM_UI_TOUR=play-to)")
+            return
         # Swipe left on it: the next song (the node's queue moves on)
         i0 = qi()
         swipe(W * 7 // 8, cy, W // 8, cy, settle=2.5)
