@@ -783,6 +783,9 @@ pub(crate) async fn play(
     let queued = items.len();
     zone.enqueue(items, Insert::End);
     if replace {
+        // With shuffle on it plays shuffled, the playlist's order kept as the original one (as a
+        // queue replaced through `POST /v1/zones/{id}/queue`)
+        zone.shuffle_replacement();
         zone.play_index(0);
     }
     Ok(Json(PlayedPlaylist { queued, missing }))
