@@ -167,8 +167,8 @@ project's old name. **Edge** is built from every change to the code.
 - Now playing on a phone as one screen, with the mini player on the tabs.
 - Quicker song identification, and reviewing its matches is optional.
 - Songs are matched automatically after each scan, and the node's owner corrects a match with
-  **Wrong match?** in a song's or album's ⋯ menu. An album takes the release its matched songs
-  agree on. It comes with the next release.
+  **Wrong match?** in a song's or album's ⋯ menu. An album whose files name no release takes the
+  one its matched songs agree on. All three come with the next release.
 - Copying library folders to your homeserver in the background.
 - Tags in the top card of song, album and artist pages, drawn as in pubky.app.
 - Usage insights for the owner, the node's part: the switch, storage and the summary (off by
