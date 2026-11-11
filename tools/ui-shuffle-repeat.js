@@ -241,6 +241,21 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         check(await until(async () => asked('POST', /\/zones\/z1\/load$/).length === tl0 + 1), `${T} Tracks › Play all loads the zone's queue`);
         const tl = asked('POST', /\/zones\/z1\/load$/)[tl0];
         check(!!tl && tl.body.shuffle === false && tl.body.index === 0 && tl.body.items.map((x) => x.uri).join() === inOrder.join(), `${T} …in its order with shuffle off, though the zone had shuffle on (${tl && JSON.stringify({ shuffle: tl.body.shuffle, index: tl.body.index })})`);
+        // Queue › Clear while a page's Play is on its way: it waits its turn, so the load can't undo it
+        await fx.go(page, '/smart/s1'); await page.waitForSelector('#smplay'); await sleep(200);
+        let qrel; loadGate = new Promise((r) => { qrel = r; });
+        const qc0 = sent.length;
+        await page.click('#smplay');
+        check(await until(async () => sent.slice(qc0).some((x) => /\/load$/.test(x.v)), 8000), `${T} a page's Play: its load goes out (held)`);
+        await page.evaluate(() => document.querySelector('[data-view="queue"]').click());
+        await page.waitForSelector('#qclear', { state: 'attached' });
+        await page.evaluate(() => document.querySelector('#qclear').click()); await sleep(400);
+        const cleared = () => sent.slice(qc0).some((x) => x.m === 'DELETE' && /\/queue$/.test(x.v));
+        check(!cleared(), `${T} …Queue › Clear waits while that load is on its way`);
+        loadGate = null; qrel();
+        check(await until(async () => cleared(), 8000), `${T} …and goes once it has landed`);
+        const qco = sent.slice(qc0).filter((x) => /\/load$/.test(x.v) || (x.m === 'DELETE' && /\/queue$/.test(x.v))).map((x) => `${x.m} ${x.v.split('/').pop()}`);
+        check(qco.join() === 'POST load,DELETE queue', `${T} …the load first, then the clear (${qco.join(', ')})`);
 
         // Loads and toggles, one after another in the order asked
         await fx.go(page, '/smart/s1'); await page.waitForSelector('#smplay'); await sleep(200);

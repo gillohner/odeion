@@ -7598,8 +7598,10 @@
             }
             const it = q[i]; if (!it) return;
             try {
-              if (op === 'rm') await api('DELETE', `/zones/${encodeURIComponent(state.zone)}/queue/${it.id}`);
-              else { const j = op === 'to' ? to : op === 'up' ? i - 1 : i + 1; if (j === i) return; await api('PUT', `/zones/${encodeURIComponent(state.zone)}/queue/${it.id}`, { to_index: j }); }
+              // (in the zone's turn: a load on its way goes first, so it can't undo the edit afterwards)
+              const zid = state.zone; const j = op === 'rm' ? null : op === 'to' ? to : op === 'up' ? i - 1 : i + 1; if (j === i) return;
+              await zoneOp(zid, (t) => op === 'rm' ? api('DELETE', `/zones/${encodeURIComponent(zid)}/queue/${it.id}`, undefined, { signal: t.signal })
+                : api('PUT', `/zones/${encodeURIComponent(zid)}/queue/${it.id}`, { to_index: j }, { signal: t.signal }));
               refreshQueue();
             } catch (e) { toast(e.message, 'error'); }
           };
@@ -7655,7 +7657,7 @@
             const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: state.zone };
             try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); }
           };
-          const qc = $('#qclear'); if (qc) qc.onclick = async () => { try { await api('DELETE', `/zones/${state.zone}/queue`); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
+          const qc = $('#qclear'); if (qc) qc.onclick = async () => { const zid = state.zone; try { await zoneOp(zid, (t) => api('DELETE', `/zones/${encodeURIComponent(zid)}/queue`, undefined, { signal: t.signal })); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
           break;
         }
         case 'zones': {
