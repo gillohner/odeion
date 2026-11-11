@@ -3993,11 +3993,12 @@
     { const t = toItem(v, arg); if (t) { v = 'item'; arg = t; } }
     if (v === 'discover') { if (arg && arg.tag) { v = 'tag'; arg = arg.tag; } else { v = 'home'; arg = undefined; } }
     // A section of its own starts with an empty search box (second review: "queen" stayed after leaving Search)
+    const asked = v; // (usage insights: a page sent elsewhere below is a redirect)
     if (isListener() && LISTENER_VIEWS_OFF.has(v)) { v = 'albums'; arg = undefined; }
     if (isOffline() && !OFFLINE_VIEWS.has(v)) { v = 'downloads'; arg = undefined; }
     { const sb = document.getElementById('search'); if (sb && NAV_VIEWS.includes(v) && document.activeElement !== sb) sb.value = ''; }
     // (on Back or Forward, history.state is already the entry being shown; on a reload it is the page's own)
-    const fromEntry = how === 'pop' || !tabsBooted; tabsBooted = true;
+    const firstPage = !tabsBooted; const fromEntry = how === 'pop' || !tabsBooted; tabsBooted = true;
     const tab = tabFor(v, fromEntry ? history.state && history.state.tab : state.tab, arg);
     if (how !== 'pop') {
       const path = pathFor(v, arg) || location.pathname + location.search;
@@ -4013,7 +4014,9 @@
     }
     // Another page (not a new query on the search page): its skeleton shows if it is slow to draw
     const fresh = v !== 'search' && (v !== state.view || JSON.stringify(arg ?? null) !== JSON.stringify(state.viewArg ?? null));
-    if (window.PM_USAGE) PM_USAGE.nav(v, state.view ? how : 'initial'); // usage insights: which page, never its argument
+    // Usage insights: which page, never its argument; the page a load starts on, a page this sent
+    // elsewhere, Back or Forward, else opened (a tab or query inside a page too)
+    if (window.PM_USAGE) PM_USAGE.nav(v, firstPage ? 'initial' : v !== asked ? 'redirect' : how === 'pop' ? 'pop' : 'push');
     state.view = v; state.viewArg = arg; state.tab = tab;
     if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
     markTabs();
@@ -5887,16 +5890,17 @@
     // Settles when the page has drawn its content (not when its slower extras arrive), when its code is
     // done, when a newer navigation takes over, or after 15 s at the most: the control that started it
     // (a sidebar place) and the bar never stay busy for good
-    let mo = null; let cap = 0; let drawing = null;
+    let mo = null; let cap = 0; let capped = false; let drawing = null;
     // A fresh page comes in with a short rise (and its first tiles and rows after one another); the
     // class goes after that, so what arrives later on the page doesn't move
     const pageIn = () => { if (!fresh) return; clearTimeout(main.viewInT); main.classList.remove('view-in'); void main.offsetWidth; main.classList.add('view-in'); main.viewInT = setTimeout(() => main.classList.remove('view-in'), 900); };
-    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
+    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(() => { capped = true; res(); }, 15000); });
     const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
     const t0 = performance.now(); const shown = state.view;
     const rendering = render(); navRendering = rendering; drawing = lastDrawing;
-    // Usage insights: how this page went (drawn or its code failed); a newer page first says nothing
-    if (window.PM_USAGE) Promise.race([rendering.then(() => 'ok', () => 'failed'), superseded.then(() => null), drawn.then(() => 'ok')]).then((o) => { if (o) PM_USAGE.loaded(shown, o, performance.now() - t0); });
+    // Usage insights: how this page went (drawn, or its code failed or it never drew in 15 s); a
+    // newer page first says nothing
+    if (window.PM_USAGE) Promise.race([rendering.then(() => 'ok', () => 'failed'), superseded.then(() => null), drawn.then(() => (capped ? 'failed' : 'ok'))]).then((o) => { if (o) PM_USAGE.loaded(shown, o, performance.now() - t0); });
     return Promise.race([rendering, superseded, drawn]).finally(end);
   };
 

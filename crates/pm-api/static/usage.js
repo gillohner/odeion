@@ -113,14 +113,15 @@
   const openAlias = async (g) => {
     if (alias && alias.gen === g) return alias;
     if (!opening) {
-      opening = (async () => {
+      const p = (async () => {
         const r = await request('POST', '/usage/sessions', { viewport: viewport(), generation: me.generation, choice: me.choice });
         const j = await answer(r);
         if (g !== gen) return null;
         if (!r.ok) { await refused(r.status, j, 0); return null; }
         alias = { id: j.alias, max: Math.max(1, Math.min(50, j.max_batch || 50)), gen: g, token };
         return alias;
-      })().catch(() => null).finally(() => { opening = null; });
+      })().catch(() => null);
+      opening = p; p.finally(() => { if (opening === p) opening = null; });
     }
     return opening;
   };
@@ -129,14 +130,15 @@
     if (!live() || !queue.length || (sending && !leaving)) return;
     clearTimeout(timer); timer = 0;
     const g = gen; const t = token;
-    const a = leaving ? (alias && alias.gen === g ? alias : null) : await openAlias(g);
-    if (!a || g !== gen || t !== token || a.token !== t) return;
-    const events = queue.splice(0, a.max);
-    let body = { alias: a.id, events, ...(dropped ? { dropped } : {}) };
-    while (JSON.stringify(body).length > MAX_BODY && body.events.length > 1) queue.unshift(body.events.pop());
-    const sentDropped = dropped; dropped = 0;
+    // (one send at a time from here: a timer and a hidden page never both send or open an alias)
     const ctl = new AbortController(); const me1 = { ctl };
     if (!leaving) sending = me1;
+    const a = leaving ? (alias && alias.gen === g ? alias : null) : await openAlias(g);
+    if (!a || g !== gen || t !== token || a.token !== t) { if (sending === me1) sending = null; return; }
+    const events = queue.splice(0, a.max);
+    const body = { alias: a.id, events, ...(dropped ? { dropped } : {}) };
+    while (JSON.stringify(body).length > MAX_BODY && body.events.length > 1) queue.unshift(body.events.pop());
+    const sentDropped = dropped; dropped = 0;
     let r; let j = null;
     try { r = await request('POST', '/usage/events', body, { keepalive: leaving, signal: leaving ? undefined : ctl.signal, token: t }); if (!r.ok) j = await answer(r); } catch { r = null; }
     if (sending === me1) sending = null;
@@ -210,7 +212,7 @@
 
   // ---- the hooks app.js calls ----
   const SHORTCUTS = { search: 'key_search', toggle: 'key_toggle', prev: 'key_prev', next: 'key_next', now_playing: 'key_now_playing', help: 'key_help', escape: 'key_escape' };
-  const nav = (v, how) => { const view = viewOf(v); if (!view) return; record({ kind: 'nav', view, how: has(HOWS, how) ? how : how === 'replace' ? 'redirect' : 'push' }); };
+  const nav = (v, how) => { const view = viewOf(v); if (!view || view === 'dashboard') return; record({ kind: 'nav', view, how: has(HOWS, how) ? how : how === 'replace' ? 'redirect' : 'push' }); };
   const loaded = (v, outcome, t) => { const view = viewOf(v); if (!view || !['ok', 'failed'].includes(outcome)) return; record({ kind: 'load', view, outcome, ms: ms(t) }); };
   const apiDone = (method, path, status, t) => {
     if (typeof path !== 'string' || status < 0) return;
@@ -241,10 +243,15 @@
     if (!n.hidden && n.firstChild) return;
     n.innerHTML = `<div class="usage-notice notice" role="region" aria-label="Usage insights"><p>This node records which buttons and pages are used, never what you type, search, play or name, to improve the app. Only the node’s owner can read them, on this node; nothing goes to anyone else or leaves the node automatically. Party guests are not covered yet.</p><div class="usage-notice-actions"><button class="btn sm ghost" data-usage="more">What’s collected</button><button class="btn sm ghost" data-usage="stop">Turn off for me</button><button class="btn sm" data-usage="dismiss">OK</button></div></div>`;
     n.hidden = false;
-    const seen = async () => { hideNotice(); const g = gen; try { const r = await request('POST', '/usage/me/notice', { version: me.notice_version }); const j = await answer(r); if (r.ok && g === gen && j && j.schema === SCHEMA) apply(j); } catch { /* shown again next time */ } };
+    const seen = async () => { const had = n.contains(document.activeElement); hideNotice(); if (had) { const m = document.getElementById('main'); if (m) m.focus({ preventScroll: true }); } const g = gen; try { const r = await request('POST', '/usage/me/notice', { version: me.notice_version }); const j = await answer(r); if (r.ok && g === gen && j && j.schema === SCHEMA) apply(j); } catch { /* shown again next time */ } };
     n.querySelector('[data-usage="dismiss"]').onclick = seen;
     n.querySelector('[data-usage="more"]').onclick = () => { seen(); if (ctx && ctx.open) ctx.open(); };
-    n.querySelector('[data-usage="stop"]').onclick = async () => { try { await choose(false); } catch { if (ctx && ctx.open) ctx.open(); return; } seen(); };
+    n.querySelector('[data-usage="stop"]').onclick = async (e) => {
+      const b = e.currentTarget; b.disabled = true;
+      // (a Stop the node didn't take still holds on this page; the notice says so and stays)
+      try { await choose(false); } catch (err) { const p = n.querySelector('p'); if (p) { p.textContent = `${err.message || 'That didn’t work.'} Nothing more is recorded on this page; try again, or open Settings › Privacy.`; p.setAttribute('role', 'alert'); } b.disabled = false; return; }
+      seen();
+    };
   };
 
   // ---- Stop for me, share again, Clear mine ----
@@ -254,7 +261,7 @@
     const was = me; if (!share) { fresh(); if (me) me = { ...me, sharing: false }; }
     const r = await request('PUT', '/usage/me', share ? { share: true, choice: was ? was.choice : 0 } : { share: false });
     const j = await answer(r);
-    if (!r.ok) { const e = new Error(r.status === 409 ? 'Usage insights changed since this page showed them. Look again.' : (j && j.error) || 'That didn’t work; try again.'); e.status = r.status; if (r.status === 409) await readMe(); throw e; }
+    if (!r.ok) { const e = new Error(r.status === 409 ? 'Usage insights changed since this page showed them. Look again.' : 'The node didn’t take that; try again.'); e.status = r.status; if (r.status === 409) await readMe(); throw e; }
     if (share) fresh();
     apply(j); return j;
   };
@@ -266,6 +273,16 @@
   };
   const row = (name, help, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${name}</div>${help ? `<p class="set-help">${help}</p>` : ''}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
   const WHAT = 'Which page (never which album, search or person), whether pages and requests worked and roughly how long they took, which kind of button was used and how, a script error’s kind, phone, tablet or desktop, and whether you are the node’s owner or a listener. Never anything you type, names, links, ids, error messages or your key.';
+  // Draws a Settings panel and keeps its status line (so it is announced) and the focus on its button
+  const draw = (el, html) => {
+    const msg = el.querySelector(':scope > .usage-msg') || Object.assign(document.createElement('p'), { className: 'usage-msg set-help' });
+    msg.setAttribute('role', 'status');
+    const focused = el.contains(document.activeElement) && document.activeElement.matches('[data-usage], [data-usage-node]');
+    el.innerHTML = html; el.appendChild(msg);
+    if (focused) { const b = el.querySelector('[data-usage]:not([disabled]), [data-usage-node]:not([disabled])'); if (b) b.focus(); }
+  };
+  // After a redraw the pressed button is gone: focus goes to the panel's new one, unless it moved on
+  const refocus = (el) => { const a = document.activeElement; if (el.isConnected && (!a || a === document.body || !a.isConnected)) { const b = el.querySelector('[data-usage]:not([disabled]), [data-usage-node]:not([disabled])'); if (b) b.focus(); } };
   const say = (el, text, bad) => { const m = el.querySelector('.usage-msg'); if (m) { m.textContent = text; m.classList.toggle('warn-text', !!bad); } };
   const ask = (title, text, label) => (ctx && ctx.ask ? ctx.ask(title, text, label) : Promise.resolve(window.confirm(`${title}\n\n${text}`)));
   const renderPersonal = async (el) => {
@@ -280,12 +297,11 @@
     const keep = `Raw events are kept ${L.raw_retention_days || 14} days, daily counts ${L.aggregate_retention_days || 90} days. Only the node’s owner can read them, on this node; nothing leaves it automatically.`;
     const state = !j.node_on ? 'Off on this node: nothing is recorded.' : j.sharing ? 'On: this browser sends which pages and buttons you use.' : 'You stopped usage insights for yourself: nothing of yours is recorded, on any of your browsers.';
     const unsaved = j.saved ? '' : ' The node couldn’t save your choice yet; it applies now and is saved as soon as it can.';
-    el.innerHTML = row('Usage insights', esc(state + unsaved), j.node_on ? (j.sharing ? '<button class="btn" data-usage="stop">Stop for me</button>' : '<button class="btn" data-usage="share">Share again</button>') : '')
+    draw(el, row('Usage insights', esc(state + unsaved), j.node_on ? (j.sharing ? '<button class="btn" data-usage="stop">Stop for me</button>' : '<button class="btn" data-usage="share">Share again</button>') : '')
       + row('What is recorded', esc(WHAT), '')
-      + row('Clear mine', esc(`Deletes the raw events still linked to you. ${keep} Clear does not stop, and Stop does not clear.`), '<button class="btn ghost" data-usage="clear">Clear mine</button>')
-      + '<p class="usage-msg set-help" role="status"></p>';
+      + row('Clear mine', esc(`Deletes the raw events still linked to you. ${keep} Clear does not stop, and Stop does not clear.`), '<button class="btn ghost" data-usage="clear">Clear mine</button>'));
     const btn = (k) => el.querySelector(`[data-usage="${k}"]`);
-    const go = (k, fn) => { const b = btn(k); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { say(el, e.message, true); b.disabled = false; return; } }; };
+    const go = (k, fn) => { const b = btn(k); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { say(el, e.message, true); b.disabled = false; b.focus(); return; } refocus(el); }; };
     go('stop', async () => { await choose(false); await renderPersonal(el); say(el, 'Stopped for you. Nothing more of yours is recorded.'); });
     go('share', async () => { await choose(true); await renderPersonal(el); say(el, 'Sharing again from your next page.'); });
     go('clear', async () => {
@@ -298,16 +314,15 @@
     if (!el) return;
     el.classList.add('usage-slot');
     if (!ctx || !token) { el.innerHTML = row('Usage insights', 'Usage insights need a sign-in.', ''); return; }
-    const g = gen; let r; let s = null;
+    let r; let s = null;
     try { r = await request('GET', '/node/usage'); s = await answer(r); } catch { r = null; }
-    if (!el.isConnected || g !== gen) return;
+    if (!el.isConnected) return; // (the node's switch doesn't depend on this page's own generation)
     if (!r || !r.ok || !s) { el.innerHTML = row('Usage insights', 'The node can’t say right now.', ''); return; }
     const cov = s.coverage && s.coverage.guests === 'not instrumented' ? ' Party guests are not covered yet.' : '';
-    el.innerHTML = row('Usage insights', esc(s.enabled ? `On: every signed-in browser, yours and listeners’, records which pages and buttons are used. Each person is told, and can stop for themselves.${cov}` : `Off: nothing is recorded on this node.${cov}`) + (s.saved ? '' : ' <span class="warn-text">Not saved yet: a restart before the node can save it would forget it.</span>'),
+    draw(el, row('Usage insights', esc(s.enabled ? `On: every signed-in browser, yours and listeners’, records which pages and buttons are used. Each person is told, and can stop for themselves.${cov}` : `Off: nothing is recorded on this node.${cov}`) + (s.saved ? '' : ' <span class="warn-text">Not saved yet: a restart before the node can save it would forget it.</span>'),
       `<button class="btn ${s.enabled ? '' : 'primary'}" data-usage-node="${s.enabled ? 'off' : 'on'}">${s.enabled ? 'Turn off' : 'Turn on'}</button>`)
-      + row('Stored', esc(`${s.events || 0} events from ${s.aliases || 0} open browsers. Raw events go after ${(s.limits && s.limits.raw_retention_days) || 14} days, daily counts after ${(s.limits && s.limits.aggregate_retention_days) || 90}. The summary: odeiond usage summary on the node.`), '<button class="btn ghost" data-usage-node="clear">Clear all</button>')
-      + '<p class="usage-msg set-help" role="status"></p>';
-    const go = (k, fn) => { const b = el.querySelector(`[data-usage-node="${k}"]`); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { say(el, e.message, true); b.disabled = false; } }; };
+      + row('Stored', esc(`${s.events || 0} events from ${s.aliases || 0} open browsers. Raw events go after ${(s.limits && s.limits.raw_retention_days) || 14} days, daily counts after ${(s.limits && s.limits.aggregate_retention_days) || 90}. The summary: odeiond usage summary on the node.`), '<button class="btn ghost" data-usage-node="clear">Clear all</button>'));
+    const go = (k, fn) => { const b = el.querySelector(`[data-usage-node="${k}"]`); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { say(el, e.message, true); b.disabled = false; b.focus(); return; } refocus(el); }; };
     const put = async (body) => { const x = await request('PUT', '/node/usage', body); const j = await answer(x); if (!x.ok) throw new Error(x.status === 409 ? 'Usage insights changed since this page showed them. Look again.' : (j && j.error) || 'That didn’t work; try again.'); };
     go('on', async () => {
       if (!await ask('Turn on usage insights?', 'Every signed-in browser on this node, yours and listeners’, then records which pages and buttons are used: never what anyone types, plays or names. Each person sees a notice and can stop for themselves.', 'Turn on')) { await renderNode(el); return; }

@@ -1176,10 +1176,14 @@ impl Store {
             // Undone on purpose, and said so when it can't be: a count left half in would be
             // counted again by the next step
             #[cfg(test)]
-            if FAIL_COUNT_ROLLBACK.with(|f| f.get()) {
-                return Err(Refusal::Storage);
-            }
-            sp.rollback().map_err(storage)?;
+            let undone = if FAIL_COUNT_ROLLBACK.with(|f| f.get()) {
+                Err(rusqlite::Error::InvalidQuery)
+            } else {
+                sp.rollback()
+            };
+            #[cfg(not(test))]
+            let undone = sp.rollback();
+            undone.map_err(storage)?;
             sp.finish().map_err(storage)?;
         }
         tx.commit().map_err(storage)?;

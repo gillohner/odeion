@@ -132,6 +132,8 @@ const noOverlap = (page) => page.evaluate(() => {
         check(before > 0 && after === before, `a page's own el.click() records nothing; real presses did (${before} → ${after})`);
         const kinds = new Set(u.events.map((e) => e.kind));
         check(kinds.has('nav') && kinds.has('action') && kinds.has('api'), `pages, presses and requests are recorded (${[...kinds].join(', ')})`);
+        const navs0 = u.events.filter((e) => e.kind === 'nav');
+        check(navs0.filter((e) => e.how === 'initial').length === 1 && navs0[0].how === 'initial' && navs0.some((e) => e.how === 'push' && e.view === 'albums'), `the page a load starts on is "initial", a page opened is "push" (${navs0.map((e) => `${e.view}:${e.how}`).join(' ')})`);
         const bad = u.events.filter((e) => !closed(e));
         check(bad.length === 0, `every event is closed-list values only (${JSON.stringify(bad.slice(0, 2))})`);
         const sessions = usageReq(u, '/usage/sessions');
@@ -253,6 +255,10 @@ const noOverlap = (page) => page.evaluate(() => {
       await fx.go(page, '/settings'); await page.waitForSelector('#usageme [data-usage="stop"]', { timeout: 6000 }).catch(() => {});
       check(await page.locator('#usageme [data-usage="stop"]').count() === 1 && await page.locator('#usageme [data-usage="clear"]').count() === 1, 'a listener has Stop for me and Clear mine in Settings');
       check(usageReq(u, '/node/usage').length === 0 && !(await page.$('#usagenode')), 'a listener never sees or reads the node switch');
+      await page.focus('#usageme [data-usage="stop"]'); await page.keyboard.press('Enter');
+      await page.waitForSelector('#usageme [data-usage="share"]');
+      check(await page.evaluate(() => document.activeElement && document.activeElement.matches('[data-usage="share"]')), 'after Stop for me the focus is on Share again (not lost)');
+      check(/Stopped for you/.test(await page.$eval('#usageme .usage-msg', (m) => m.textContent)), 'and the status line says it');
       await page.screenshot({ path: path.join(SHOTS, 'listener-settings-390.png'), fullPage: true });
       await context.close();
     }
