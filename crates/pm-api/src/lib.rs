@@ -23428,6 +23428,166 @@ exec sleep 300
         assert_eq!(s.zones.list().len(), zones);
     }
 
+    /// An AirPlay receiver and a BluOS player that were off at the start get their zones from the
+    /// mDNS watch, without a rescan, each with the queue it had saved; found again on every pass, or
+    /// by two registrations at once, each is registered once (no `-2` zone).
+    #[tokio::test]
+    async fn speakers_switched_on_after_the_start_get_their_zones_and_queues() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let air = || pm_out_airplay::Device {
+            id: "90568261365F".into(),
+            name: "ecofriday".into(),
+            model: Some("PULSE FLEX 2i".into()),
+            addr: "127.0.0.1:9".parse().unwrap(),
+            encryption: vec!["0".into(), "4".into()],
+            codecs: vec!["0".into(), "1".into()],
+        };
+        let blu = || pm_out_bluos::Player {
+            id: "90568261365f".into(),
+            name: "ecofriday".into(),
+            host: "127.0.0.1".into(),
+            port: 9,
+            model: Some("PULSE FLEX 2i".into()),
+        };
+        let zones_of = |s: &Arc<NodeState>, outs: &[OutputId]| -> Vec<String> {
+            let mut z: Vec<String> = s
+                .zones
+                .list()
+                .iter()
+                .filter(|z| outs.contains(&z.output))
+                .map(|z| z.id.to_string())
+                .collect();
+            z.sort();
+            z
+        };
+        let titles = |z: &serde_json::Value| -> Vec<String> {
+            z["queue"]
+                .as_array()
+                .map(|q| {
+                    q.iter()
+                        .map(|i| i["title"].as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("short.wav");
+        write_wav(&wav, 441);
+
+        // Before the restart: both speakers had zones, each with its queue (saved)
+        let (outs, zids) = {
+            let s = state(dir.path(), None).await;
+            let app = router(s.clone());
+            let mut outs = s.register_airplay(vec![air()]);
+            outs.extend(s.register_bluos(vec![blu()]));
+            assert_eq!(outs.len(), 2, "{outs:?}");
+            let zids = zones_of(&s, &outs);
+            assert_eq!(zids.len(), 2, "{zids:?}");
+            for zid in &zids {
+                let items: Vec<_> = (0..3)
+                    .map(|i| serde_json::json!({"uri": wav.to_string_lossy(), "title": format!("{zid} {i}")}))
+                    .collect();
+                let (st, _) = call(
+                    &app,
+                    "POST",
+                    &format!("/v1/zones/{zid}/queue"),
+                    Some(serde_json::json!({"items": items})),
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK);
+                let key = format!("queue.{zid}");
+                let want = format!("{zid} 2");
+                let saved = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    while !s
+                        .library
+                        .lock()
+                        .unwrap()
+                        .get_setting(&key)
+                        .unwrap()
+                        .is_some_and(|j| j.contains(&want))
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                })
+                .await;
+                assert!(saved.is_ok(), "{zid}'s queue was not saved");
+            }
+            (outs, zids)
+        };
+
+        // The start: both speakers are off. They answer from the watch's third pass on
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        assert!(zones_of(&s, &outs).is_empty(), "no zone while they are off");
+        let passes = Arc::new(AtomicUsize::new(0));
+        let n = passes.clone();
+        let browse: crate::state::MdnsBrowse = Arc::new(move || {
+            if n.fetch_add(1, Ordering::SeqCst) < 2 {
+                (Vec::new(), Vec::new())
+            } else {
+                (vec![air()], vec![blu()])
+            }
+        });
+        s.spawn_mdns_passes(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(300),
+            browse,
+        );
+        let mut waited = 0;
+        while passes.load(Ordering::SeqCst) < 2 && waited < 100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            waited += 1;
+        }
+        assert!(zones_of(&s, &outs).is_empty(), "still off: no zone");
+        let mut waited = 0;
+        while zones_of(&s, &outs).len() < 2 && waited < 100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            waited += 1;
+        }
+        assert_eq!(
+            zones_of(&s, &outs),
+            zids,
+            "both came back, under their own ids, without a rescan"
+        );
+        for zid in &zids {
+            let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+            let want: Vec<String> = (0..3).map(|i| format!("{zid} {i}")).collect();
+            assert_eq!(titles(&z), want, "{zid}'s saved queue is back");
+        }
+        // Found again on later passes: nothing more
+        let seen = passes.load(Ordering::SeqCst);
+        let mut waited = 0;
+        while passes.load(Ordering::SeqCst) < seen + 2 && waited < 1500 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            waited += 1;
+        }
+        assert!(
+            passes.load(Ordering::SeqCst) >= seen + 2,
+            "the watch keeps looking"
+        );
+        assert_eq!(zones_of(&s, &outs), zids, "one zone each, no -2");
+
+        // Two registrations of the same speakers at once (a rescan during a pass): one zone each
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let both = |s: &Arc<NodeState>| {
+            let s = s.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut new = s.register_airplay(vec![air()]);
+                new.extend(s.register_bluos(vec![blu()]));
+                new
+            })
+        };
+        let (a, b) = tokio::join!(both(&s), both(&s));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a.len() + b.len(), 2, "{a:?} {b:?}");
+        assert_eq!(zones_of(&s, &outs).len(), 2);
+        assert!(
+            s.zones.list().iter().all(|z| !z.id.to_string().ends_with("-2")),
+            "no -2 zone"
+        );
+    }
+
     /// A renderer that had a zone comes back at a start whose SSDP search missed it, described at
     /// its last URL (once: one with its zone isn't described again); one that answers only later
     /// gets its zone from the next pass, without a rescan; another device now at a known URL gets
