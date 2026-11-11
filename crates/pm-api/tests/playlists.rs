@@ -1438,6 +1438,7 @@ async fn a_playlist_played_with_shuffle_on_plays_shuffled() {
             break;
         }
     }
+    assert_eq!(played.len(), sent.len(), "the zone holds the whole playlist");
     assert_ne!(played, sent, "plays shuffled");
     let order = zone.shuffle_order().expect("shuffled");
     let original: Vec<String> = order.iter().map(|i| played[*i].clone()).collect();

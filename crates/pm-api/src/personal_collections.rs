@@ -1666,7 +1666,7 @@ pub(crate) async fn play(
     }
     crate::listens::zone_changed_by(&s, &body.zone, false);
     let queued = items.len();
-    playlists::queue_into(&zone, items, body.replace);
+    playlists::queue_into(&zone, items, body.replace).await;
     Ok(Json(PlayedPlaylist { queued, missing }))
 }
 

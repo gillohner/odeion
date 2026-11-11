@@ -813,7 +813,7 @@ pub(crate) async fn play(
         ));
     }
     let queued = items.len();
-    queue_into(&zone, items, body.replace);
+    queue_into(&zone, items, body.replace).await;
     Ok(Json(PlayedPlaylist { queued, missing }))
 }
 
@@ -840,7 +840,12 @@ pub(crate) fn library_queue(lib: &Library, p: &Playlist) -> (Vec<pm_zones::Queue
 }
 
 /// Queue `items` into `zone`: in place of its queue, started (`replace`, the default), or after it.
-pub(crate) fn queue_into(zone: &pm_zones::Zone, items: Vec<pm_zones::QueueItem>, replace: Option<bool>) {
+/// Returns once the engine has applied it (bounded), so a read right after sees the new queue.
+pub(crate) async fn queue_into(
+    zone: &pm_zones::Zone,
+    items: Vec<pm_zones::QueueItem>,
+    replace: Option<bool>,
+) {
     let replace = replace.unwrap_or(true);
     if replace {
         zone.stop();
@@ -853,6 +858,7 @@ pub(crate) fn queue_into(zone: &pm_zones::Zone, items: Vec<pm_zones::QueueItem>,
         zone.shuffle_replacement();
         zone.play_index(0);
     }
+    crate::settle(zone).await;
 }
 
 /// A library song as a queue item.

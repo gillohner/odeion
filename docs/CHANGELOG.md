@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 - **Last.fm scrobbles stay with the sign-in they were played under.** A play that started before another Last.fm account (or the same one again) signed in is not scrobbled to the new sign-in. Signing out in Settings also drops the scrobbles that were only waiting in memory, and a late "sign in again" answer for an older sign-in no longer marks the current one as broken.
 - **Signing in right after "Sign out everywhere" sticks.** A sign-in made in the same second as the sign-out is no longer treated as older than it and moved aside on the next sync. Signing in again with the same credentials while the vault still holds the old sign-in keeps the new one. What this node has seen of a vault is now kept per identity, so after switching identity the other identity's copies are not refused as stale.
+- Playing a playlist or collection on a zone answers once the zone holds the new queue, as replacing a queue already did. A read of the zone right after no longer shows the old or an empty queue.
 
 ## 0.2.3
 
