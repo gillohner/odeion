@@ -260,6 +260,17 @@ pub struct NodeState {
     /// correction can't store what it read after it. Scans wait for it; a correction waits a
     /// while ([`crate::identify`]).
     pub(crate) scan_gate: Mutex<()>,
+    /// A backup restore or a folder move going (they replace the library or move its paths):
+    /// match corrections are refused meanwhile ([`Self::no_corrections`]).
+    pub(crate) corrections_held: std::sync::atomic::AtomicUsize,
+    /// Match corrections going, counted from before they look at [`Self::corrections_held`].
+    pub(crate) correcting: std::sync::atomic::AtomicUsize,
+    /// Settling left songs because a scan held the gate: the next scan's end settles again, also
+    /// when it changed nothing ([`crate::identify::after_scan`]).
+    pub(crate) settle_again: std::sync::atomic::AtomicBool,
+    /// Tests: called by the library folders' scan with each file read, before its write.
+    #[cfg(test)]
+    pub(crate) scan_read_hook: Mutex<Option<pm_library::scan::AfterRead>>,
     /// Pinakes cards for any link: by-uri, then paced resolves, cached.
     pub pinakes_reader: crate::pinakes_reader::PinakesReader,
     /// Deezer API origin (tests point it at a mock).
@@ -544,6 +555,11 @@ impl NodeState {
             identify_waiting: Default::default(),
             side_scans: Default::default(),
             scan_gate: Mutex::new(()),
+            corrections_held: Default::default(),
+            correcting: Default::default(),
+            settle_again: Default::default(),
+            #[cfg(test)]
+            scan_read_hook: Mutex::new(None),
             pinakes_reader: Default::default(),
             presence: Default::default(),
             search_answers: Default::default(),
@@ -820,6 +836,11 @@ impl NodeState {
             let result = (|| -> Result<(), pm_library::LibraryError> {
                 let lib = pm_library::Library::open(&state.db_path)?;
                 let scanner = pm_library::Scanner::new(&lib).with_art_dir(&state.art_dir);
+                #[cfg(test)]
+                let scanner = match state.scan_read_hook.lock().expect("hook").clone() {
+                    Some(hook) => scanner.with_after_read(hook),
+                    None => scanner,
+                };
                 for root in &folders {
                     lib.add_folder(root)?;
                     match scanner.scan(root) {
@@ -2307,8 +2328,31 @@ impl NodeState {
         self.scan_gate.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// No match correction from now until the guard goes (a backup restore, a folder move): new
+    /// ones are refused, and the ones going are waited out.
+    pub(crate) async fn no_corrections(self: &Arc<Self>) -> NoCorrections {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.corrections_held.fetch_add(1, SeqCst);
+        let held = NoCorrections(self.clone());
+        while self.correcting.load(SeqCst) > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        held
+    }
+
     pub fn is_scanning(&self) -> bool {
         *self.scanning.lock().expect("scan flag poisoned")
+    }
+}
+
+/// [`NodeState::no_corrections`]'s guard.
+pub(crate) struct NoCorrections(Arc<NodeState>);
+
+impl Drop for NoCorrections {
+    fn drop(&mut self) {
+        self.0
+            .corrections_held
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

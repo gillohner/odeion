@@ -101,6 +101,44 @@ fn track_id_by_name(s: &NodeState, name: &str) -> i64 {
         .unwrap()
 }
 
+/// A lock held on a thread of its own until dropped (no guard held across an `.await`): `hold`
+/// takes it, then calls `wait`, which returns once the [`Held`] is dropped.
+fn held(hold: impl FnOnce(&dyn Fn()) + Send + 'static) -> Held {
+    let (taken, got) = std::sync::mpsc::channel::<()>();
+    let (go, release) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::spawn(move || {
+        hold(&|| {
+            let _ = taken.send(());
+            let _ = release.recv();
+        })
+    });
+    got.recv().expect("the lock is taken");
+    Held(Some(go), Some(thread))
+}
+
+struct Held(
+    Option<std::sync::mpsc::Sender<()>>,
+    Option<std::thread::JoinHandle<()>>,
+);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        drop(self.0.take());
+        if let Some(t) = self.1.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// The scan gate, held as a scan holds it.
+fn gate_held(s: &Arc<NodeState>) -> Held {
+    let s = s.clone();
+    held(move |wait| {
+        let _gate = s.scan_gate();
+        wait();
+    })
+}
+
 /// B1: a scan that adds a song starts a run for it on its own (on by default, said in the
 /// status), and the song is identified; with "Match new songs automatically" off, a scan adds a
 /// song and nothing runs.
@@ -1915,7 +1953,7 @@ async fn corrections_wait_for_scans_and_picks_for_their_evidence() {
             .await
         })
     };
-    let gate = s.scan_gate();
+    let gate = gate_held(&s);
     let waiting_one = correct(id, 2);
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(!waiting_one.is_finished(), "it waits for the scan");
@@ -1926,7 +1964,7 @@ async fn corrections_wait_for_scans_and_picks_for_their_evidence() {
     assert_eq!(recording_of(&s, id), Some(rec(2)));
     // ... a scan that goes on longer than it waits: refused, nothing changed
     let other_song = waiting(&s, dir.path(), "W", "Song W", &[fp(1, "Song W", "Band", 0.6)]);
-    let gate = s.scan_gate();
+    let gate = gate_held(&s);
     let refused = correct(other_song, 3);
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     drop(gate);
@@ -1937,7 +1975,7 @@ async fn corrections_wait_for_scans_and_picks_for_their_evidence() {
     let music = dir.path().join("music/New");
     std::fs::create_dir_all(&music).unwrap();
     tone_wav(&music.join("01 New.wav"), 1);
-    let gate = s.scan_gate();
+    let gate = gate_held(&s);
     assert!(s.start_scan(vec![music.clone()]).unwrap(), "not dropped");
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(s.is_scanning());
@@ -2110,7 +2148,10 @@ async fn a_correction_keeps_the_folders_release_and_tag_fixes_check_again() {
             },
         )
         .unwrap();
-    let writes = identify::id_writes();
+    let writes = held(|wait| {
+        let _one = identify::id_writes();
+        wait();
+    });
     let app2 = app.clone();
     let fixes = tokio::spawn(async move {
         call(
@@ -2149,4 +2190,164 @@ async fn a_correction_keeps_the_folders_release_and_tag_fixes_check_again() {
     );
     let (_, tags) = pm_library::probe_and_read(&dir.path().join("music/Z/01 Z.wav")).unwrap();
     assert_eq!(tags.recording_mbid, None, "nothing written over the correction");
+}
+
+/// Claude review r4: a correction made while a library scan has read a song's file and not yet
+/// stored it waits for the scan, then lands: the file's old IDs the scan read never bring the old
+/// recording back.
+#[tokio::test]
+async fn a_correction_during_a_scans_read_lands_after_its_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let app = router(s.clone());
+    let music = dir.path().join("music");
+    let album = music.join("Band/Album");
+    std::fs::create_dir_all(&album).unwrap();
+    let path = album.join("01 R.wav");
+    tone_wav(&path, 1);
+    let ids = |acoustid: Option<&str>| pm_library::tagwrite::Ids {
+        recording: mbid(&rec(20)),
+        release: Some(mbid(REL)),
+        acoustid: acoustid.map(str::to_string),
+    };
+    pm_library::tagwrite::write_ids(&path, &ids(None), &dir.path().join("first-ids")).unwrap();
+    assert!(s.start_scan(vec![music.clone()]).unwrap());
+    until("the first scan", || !s.is_scanning()).await;
+    let id = track_id_by_name(&s, "01 R.wav");
+    assert_eq!(recording_of(&s, id), Some(rec(20)));
+    call(
+        &app,
+        "PUT",
+        "/v1/library/identify/settings",
+        Some(serde_json::json!({"write_ids": true})),
+    )
+    .await;
+    // The file changes (the next scan reads it again), and that scan stops once it has read it
+    pm_library::tagwrite::write_ids(
+        &path,
+        &ids(Some("9ff43b6a-4f16-427c-93c2-92307ca505e0")),
+        &dir.path().join("more-ids"),
+    )
+    .unwrap();
+    // (a later time too: the scan sees a change whatever the size)
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(10))
+        .unwrap();
+    let (reached, read) = std::sync::mpsc::channel::<()>();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let pause = std::sync::Mutex::new((reached, wait));
+    *s.scan_read_hook.lock().unwrap() = Some(Arc::new(move |p: &std::path::Path| {
+        if p.ends_with("01 R.wav") {
+            let pause = pause.lock().unwrap();
+            let _ = pause.0.send(());
+            let _ = pause.1.recv();
+        }
+    }));
+    assert!(s.start_scan(vec![music.clone()]).unwrap());
+    until("the scan's read", || read.try_recv().is_ok()).await;
+    let app2 = app.clone();
+    let correction = tokio::spawn(async move {
+        call(
+            &app2,
+            "POST",
+            &format!("/v1/library/tracks/{id}/match"),
+            Some(serde_json::json!({"recording_mbid": rec(21), "expect": rec(20)})),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!correction.is_finished(), "it waits for the scan");
+    go.send(()).unwrap();
+    let (st, b) = correction.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{b}");
+    until("the scan", || !s.is_scanning()).await;
+    assert_eq!(recording_of(&s, id), Some(rec(21)), "the owner's choice stands");
+    let (_, tags) = pm_library::probe_and_read(&path).unwrap();
+    assert_eq!(tags.recording_mbid.map(|m| m.to_string()), Some(rec(21)));
+    *s.scan_read_hook.lock().unwrap() = None;
+}
+
+/// Claude review r4: songs the settling left while a scan held the gate are settled when that
+/// scan ends, also when it changed nothing.
+#[tokio::test]
+async fn songs_left_for_a_scan_settle_when_it_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    identify::AUTO_RUNS_FOR.lock().unwrap().push(Arc::downgrade(&s));
+    let id = waiting(
+        &s,
+        dir.path(),
+        "S",
+        "Song S",
+        &[fp(1, "Song S", "Band", 0.95), fp(2, "Song S", "Band", 0.95)],
+    );
+    answered(
+        &s,
+        id,
+        0.95,
+        &[
+            (1, "Song S", "Band", Some(10.0)),
+            (2, "Song S", "Band", Some(10.0)),
+        ],
+    );
+    let gate = gate_held(&s);
+    recheck_run(&s).await;
+    assert!(canonical(&s, id).is_none(), "left while the scan holds the gate");
+    drop(gate);
+    let empty = dir.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    assert!(s.start_scan(vec![empty]).unwrap());
+    until("the settling after the scan", || canonical(&s, id).is_some()).await;
+    assert!(matches!(
+        canonical(&s, id),
+        Some((_, pm_model::Confidence::Auto { .. }))
+    ));
+}
+
+/// Claude review r4: no correction while a backup restore or a folder move goes (it would write
+/// a file, then a library being replaced); one going is waited for first.
+#[tokio::test]
+async fn corrections_wait_out_a_restore_or_folder_move() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let app = router(s.clone());
+    let id = waiting(&s, dir.path(), "M", "Song M", &[fp(1, "Song M", "Band", 0.6)]);
+    let correct = |recording: u32| {
+        let app = app.clone();
+        let id = id;
+        async move {
+            call(
+                &app,
+                "POST",
+                &format!("/v1/library/tracks/{id}/match"),
+                Some(serde_json::json!({"recording_mbid": rec(recording)})),
+            )
+            .await
+        }
+    };
+    let restore = s.no_corrections().await;
+    let (st, b) = correct(1).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{b}");
+    assert!(b.to_string().contains("restore"), "{b}");
+    assert!(canonical(&s, id).is_none());
+    drop(restore);
+    // A correction going (waiting for a scan): a restore waits for it to end
+    let gate = gate_held(&s);
+    let going = tokio::spawn(correct(1));
+    until("the correction", || s.correcting.load(SeqCst) == 1).await;
+    let s2 = s.clone();
+    let restore = tokio::spawn(async move {
+        let held = s2.no_corrections().await;
+        drop(held);
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!restore.is_finished(), "it waits for the correction");
+    drop(gate);
+    let (st, b) = going.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{b}");
+    restore.await.unwrap();
+    assert_eq!(recording_of(&s, id), Some(rec(1)));
 }

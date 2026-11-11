@@ -707,7 +707,10 @@ pub async fn restore(
             "a scan is running; restore when it is done",
         ));
     }
+    // No match correction meanwhile (it would write a file, then a library being replaced)
+    let held = s.no_corrections().await;
     let result = restore_locked(s, &parsed, secrets).await;
+    drop(held);
     s.end_scan();
     // The sign-in stores may have been replaced: read again
     crate::accounts::sign_ins_changed();

@@ -3287,11 +3287,14 @@ async fn move_folder(
             "a scan is running; try again when it is done",
         ));
     }
+    // No match correction meanwhile (it would write a file under paths being moved)
+    let held = s.no_corrections().await;
     let moved = s
         .library
         .lock()
         .expect("library poisoned")
         .move_folder(std::path::Path::new(m.from.trim()), &to);
+    drop(held);
     s.end_scan();
     let moved = moved?;
     s.unwatch(std::path::Path::new(m.from.trim()));

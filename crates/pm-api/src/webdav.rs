@@ -401,6 +401,8 @@ impl pm_library::tags::RemoteRead for RangeReader {
 /// Scans one share into the library (blocking).
 fn scan_share(s: &NodeState, share: &Share) -> Result<pm_library::scan::ScanReport, String> {
     let entries = list_files(share)?;
+    // Listed without it; held while files are read and written (no match correction in between)
+    let _gate = s.scan_gate();
     let lib = pm_library::Library::open(&s.db_path).map_err(|e| e.to_string())?;
     let scanner = pm_library::Scanner::new(&lib).with_art_dir(&s.art_dir);
     let open = |e: &pm_library::scan::RemoteEntry| -> std::io::Result<Box<dyn pm_library::tags::RemoteRead>> {
@@ -521,10 +523,7 @@ fn start_scan(s: &Arc<NodeState>, share: Share) {
     // Counted before it is spawned: an automatic run or a correction never misses it
     let scan = s.side_scan();
     tokio::task::spawn_blocking(move || {
-        let scanned = {
-            let _gate = s2.scan_gate();
-            scan_share(&s2, &share)
-        };
+        let scanned = scan_share(&s2, &share);
         drop(scan);
         match scanned {
             Ok(r) => {

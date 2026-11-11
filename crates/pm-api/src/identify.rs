@@ -682,7 +682,8 @@ pub(crate) static AUTO_RUNS_FOR: std::sync::Mutex<Vec<std::sync::Weak<NodeState>
 /// or tags changed, nothing else. One waiter at a time; scans that end while it waits are covered
 /// by its run, and one that ends after its run started gets a run of its own after it.
 pub fn after_scan(s: &Arc<NodeState>, changed: u64) {
-    if changed == 0 {
+    // (a scan that changed nothing still ends one that held songs from the settling)
+    if changed == 0 && !s.settle_again.load(std::sync::atomic::Ordering::SeqCst) {
         return;
     }
     #[cfg(test)]
@@ -716,7 +717,22 @@ pub(crate) async fn run_after_scan(s: &Arc<NodeState>, poll: std::time::Duration
         }
         // From here a scan that ends starts a waiter of its own
         s.identify_waiting.store(false, SeqCst);
-        if !auto_match_on(s) || s.contact().trim().is_empty() || !plain_run_has_work(s) {
+        if !auto_match_on(s) {
+            return false;
+        }
+        if s.contact().trim().is_empty() || !plain_run_has_work(s) {
+            // Nothing to check: the songs the settling left while a scan held the gate are
+            // settled now (no service is asked)
+            if s.settle_again.load(SeqCst) {
+                match auto_settle_pass(s).await {
+                    Ok(r) if r.settled > 0 => {
+                        tracing::info!(settled = r.settled, by = ?r.by_rule, "identify: unsure songs settled automatically after a scan");
+                        let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("identify: settling after a scan: {}", e.message),
+                }
+            }
             return false;
         }
         if launch(s, RunOptions::new(false)) {
@@ -1669,6 +1685,8 @@ pub async fn auto_settle_pass(s: &NodeState) -> Result<SettleReport, ApiError> {
         looked: waiting.len(),
         ..Default::default()
     };
+    // Set again below when a scan holds a song back
+    s.settle_again.store(false, std::sync::atomic::Ordering::SeqCst);
     if waiting.is_empty() {
         return Ok(report);
     }
@@ -1791,6 +1809,9 @@ pub async fn auto_settle_pass(s: &NodeState) -> Result<SettleReport, ApiError> {
             _ => lib.settle_auto(id, &pick),
         })
         .await?;
+        if stored == pm_library::AutoSettle::Scanning {
+            s.settle_again.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         if stored == pm_library::AutoSettle::Stored {
             report.settled += 1;
             *report.by_rule.entry(rule.name().to_string()).or_default() += 1;
@@ -3065,7 +3086,24 @@ fn correct(
     follow: bool,
 ) -> Result<serde_json::Value, ApiError> {
     use pm_library::Rematch;
+    use std::sync::atomic::Ordering::SeqCst;
     let _one = id_writes();
+    // Not while a backup restore or a folder move goes (counted first: one that starts after this
+    // waits for it to end)
+    struct Correcting<'a>(&'a NodeState);
+    impl Drop for Correcting<'_> {
+        fn drop(&mut self) {
+            self.0.correcting.fetch_sub(1, SeqCst);
+        }
+    }
+    s.correcting.fetch_add(1, SeqCst);
+    let _going = Correcting(s);
+    if s.corrections_held.load(SeqCst) > 0 {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "A backup restore or a folder move is going; nothing was changed. Try again when it is done.",
+        ));
+    }
     // No scan alongside it: a scan that read the file before could store the old recording after
     // the correction. It waits for the scan gate a while; scans wait for it in turn
     let _gate = {
