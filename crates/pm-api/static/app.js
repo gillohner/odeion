@@ -5543,6 +5543,23 @@
   };
   const listPref = (kind) => { try { return JSON.parse(localStorage.getItem(`pm.list.${kind}`) || '{}'); } catch { return {}; } };
   const setListPref = (kind, p) => { try { localStorage.setItem(`pm.list.${kind}`, JSON.stringify(p)); } catch { /* no storage */ } };
+  // Sorting changes the order of the current matches, keeping the filter and keyboard position.
+  const renderSortedList = async (control) => {
+    const query = $('#filter')?.value; let focused = document.activeElement === control;
+    const gen = navGen;
+    // Removing Sort during loading leaves focus on body. Any later focus transfer cancels
+    // restoration, even if the person then dismisses that control (Search followed by Escape).
+    const moved = () => { focused = false; };
+    document.addEventListener('focusin', moved, { capture: true, once: true, signal: navCtl.signal });
+    try {
+      const rendered = render(); const drawing = lastDrawing;
+      await rendered;
+      if (gen !== navGen || drawing !== lastDrawing) return;
+      const filter = $('#filter');
+      if (filter && query != null) { filter.value = query; filter.oninput?.(); }
+      if (focused && document.activeElement === document.body) $('[data-lsort]', main)?.focus({ preventScroll: true });
+    } finally { document.removeEventListener('focusin', moved, true); }
+  };
   const albumFav = (a) => !!(a.release_mbid && state.favUris && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`));
   const sortList = (kind, list, how) => {
     const by = (f) => [...list].sort((a, b) => String(f(a) || '').localeCompare(String(f(b) || ''), undefined, { sensitivity: 'base', numeric: true }));
@@ -5894,7 +5911,7 @@
           const letters = (lp.sort || 'name') === 'name' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.title)))] : (lp.sort === 'artist' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.album_artist)))] : []);
           main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums') : '') + (isOwner() ? `<button class="btn" data-addmusic>${icon('plus')} Add music</button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; render(); });
-          const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); render(); };
+          const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); return renderSortedList(ls); };
           const lf = $('[data-lfav]', main); if (lf) lf.onclick = () => { setListPref('albums', { ...lp, fav: !lp.fav }); render(); };
           const grid = $('#albumgrid');
           if (grid) {
@@ -5927,7 +5944,7 @@
             const draw = (list) => { stop(); alist.innerHTML = ''; stop = growItems(alist, list, (part) => part.map(row).join(''), bindRows, 150); };
             draw(artistsSorted);
             $$('[data-az]', main).forEach((b) => b.onclick = () => { const i = artistsSorted.findIndex((a) => firstLetter(a.name) === b.dataset.az); if (i >= 0) { draw(artistsSorted.slice(i)); $$('[data-az]', main).forEach((x) => x.classList.toggle('on', x === b)); } });
-            const als = $('[data-lsort]', main); if (als) als.onchange = () => { setListPref('artists', { ...alp, sort: als.value }); render(); };
+            const als = $('[data-lsort]', main); if (als) als.onchange = () => { setListPref('artists', { ...alp, sort: als.value }); return renderSortedList(als); };
             const f = $('#filter');
             if (f) {
               f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? artistsSorted.filter((a) => a.name.toLowerCase().includes(q)) : artistsSorted; draw(list); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };

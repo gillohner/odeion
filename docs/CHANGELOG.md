@@ -6,6 +6,9 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-11
 
+- **Sorting keeps your library filter.** Change the sort order in Albums or Artists without entering your filter again. Keyboard focus stays on Sort unless you move elsewhere while the list loads, including opening Search and then dismissing it.
+- **Lyrics scrolling checks use real wheel input.** They verify that the panel stays exactly where you scroll and follows the song again afterward, without artificial scroll jumps causing false failures.
+
 - **Dialog buttons are easier to tap on phones.** Cancel, Save and other footer actions have targets at least 44 px tall. Crowded actions wrap onto another row, keeping “Back to the file’s tags” fully visible on small screens and with larger text. When the window shrinks or text grows, the focused action stays in view without losing keyboard focus.
 
 - **Search keeps its source when you reopen it.** Reloading or opening a saved search keeps Library, Pubky or the selected service from its link, so you no longer have to select it again. The selected service stays visible on phones and remains a choice for listeners after switching sources. Result updates preserve focus and manual scrolling in the source row. Links without a source still search Everywhere. Going Back while a song page is still loading keeps the restored results visible.
