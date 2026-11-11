@@ -44,6 +44,7 @@ const mockUsage = async (context, u) => {
     u.log.push({ p, m, url: req.url(), body, auth: req.headers().authorization || '' });
     if (u.force && u.force[p]) { const f = u.force[p]; if (!f.once || !f.used) { f.used = true; return j(r, { error: f.error }, f.status); } }
     if (p === '/usage/me' && m === 'GET') return j(r, me());
+    if (p === '/usage/me' && m === 'PUT' && u.delayPut) await new Promise((res) => setTimeout(res, u.delayPut));
     if (p === '/usage/me' && m === 'PUT') { const b = JSON.parse(body); if (b.share && b.choice !== u.choice) return j(r, { error: 'usage insights changed since; look again' }, 409); u.sharing = !!b.share; u.choice += 1; return j(r, me()); }
     if (p === '/usage/me/notice') { u.noticeSeen = 1; return j(r, me()); }
     if (p === '/usage/me/clear') { u.cleared += 1; return j(r, { cleared: u.events.length }); }
@@ -174,12 +175,17 @@ const noOverlap = (page) => page.evaluate(() => {
         await page.click('.nav-item[data-view="albums"]'); await sleep(200); // waits in the queue
         await fx.go(page, '/settings/privacy').catch(() => {}); await page.waitForSelector('[data-usage="stop"]');
         const sent = u.events.length; const batches = u.batches.length;
+        // The node is slow to answer the Stop: the page holds it at once all the same
+        u.delayPut = 1500;
         await page.click('[data-usage="stop"]');
+        for (const v of ['albums', 'artists']) { await page.click(`.nav-item[data-view="${v}"]`); await sleep(150); }
+        await hide(page);
         check(await until(() => u.sharing === false), 'Stop for me tells the node');
-        await page.waitForSelector('[data-usage="share"]');
+        u.delayPut = 0;
+        await fx.go(page, '/settings/privacy'); await page.waitForSelector('[data-usage="share"]');
         for (const v of ['albums', 'artists']) { await page.click(`.nav-item[data-view="${v}"]`); await sleep(200); }
         await hide(page); await sleep(500);
-        check(u.batches.length === batches && u.events.length === sent, `after Stop nothing more is sent (${batches} → ${u.batches.length} batches)`);
+        check(u.batches.length === batches && u.events.length === sent, `after Stop nothing more is sent, also before the node answered (${batches} → ${u.batches.length} batches)`);
         check(state.errors.length === 0, `no page errors (${state.errors.join(' | ')})`);
         await context.close();
       }
