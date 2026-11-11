@@ -1,6 +1,9 @@
 //! Playlist sync against a local Pubky testnet. Needs `pubky-testnet`
 //! running on the default ports (`cargo install pubky-testnet && pubky-testnet`)
 //! and `PM_TESTNET=1`; skipped otherwise, so CI stays hermetic.
+// The sync future a test spawns (`tokio::spawn`, which needs it Send) nests deeper than the
+// default limit of 128 lets the compiler check
+#![recursion_limit = "256"]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
