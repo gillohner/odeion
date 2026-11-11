@@ -61,6 +61,10 @@ const open = async (browser, w, touch) => {
     }
     // Focus from the keyboard: the control's own radius stays, and the ring's radius is not a square's
     for (const [sel, name] of ROUND(phone)) {
+      // (a phone's Now playing covers the page, which is out of reach meanwhile: the account button is
+      // probed with Now playing closed, then it opens again for the rest)
+      const behind = phone && sel.startsWith('.me-btn');
+      if (behind) { await page.keyboard.press('Escape'); await page.waitForSelector('#nowplaying', { state: 'hidden' }); await sleep(200); }
       // Focus from the keyboard for real: land on the control, step back and forward with Tab
       const found = await page.evaluate((sel) => { const el = [...document.querySelectorAll(sel)].find((e) => e.getClientRects().length); if (!el) return null; el.dataset.tapProbe = '1'; return getComputedStyle(el).borderRadius; }, sel);
       if (found == null) { check(false, `${at}: ${name} is on the page (${sel})`); continue; }
@@ -75,6 +79,7 @@ const open = async (browser, w, touch) => {
       }
       r = r || { before: found, after: '?', outline: 'none', focused: false, fv: false };
       check(r.focused && r.fv && r.outline !== 'none' && r.after === r.before, `${at}: ${name} keeps its radius with a keyboard focus ring (${r.before} → ${r.after}${r.focused ? '' : ', focus went elsewhere'}${r.fv ? '' : ', not focus-visible'})`);
+      if (behind) { await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])'); await sleep(300); }
     }
     // Keyboard focus on the play button really draws the ring (Tab from the previous button)
     const [from, to] = TAB_FROM(phone);

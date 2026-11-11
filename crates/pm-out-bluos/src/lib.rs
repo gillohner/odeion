@@ -418,6 +418,21 @@ impl Output for BluosGroup {
         }
         Ok(())
     }
+
+    /// Per player, each by its own level ([`pm_zones::unmute_each`]): a player that unmuted
+    /// before another refused counts, and none is raised to the group's level.
+    async fn unmute_held(
+        &self,
+        level: Volume,
+        max: f32,
+        last: pm_zones::LastLevel<'_>,
+        _sole: bool,
+        safety: &pm_zones::UnmuteSafety,
+    ) -> pm_zones::Unmuted {
+        let mut players: Vec<&dyn Output> = vec![self.lead.as_ref() as &dyn Output];
+        players.extend(self.members.iter().map(|m| m.as_ref() as &dyn Output));
+        pm_zones::unmute_each(&players, level, max, last, safety).await
+    }
 }
 
 struct BluosSink {

@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 struct Seen {
     plays: Vec<Value>,
     hearts_off: Vec<String>,
+    /// Hearts set (`PUT /v1/favourites` bodies).
+    hearts_on: Vec<Value>,
     ranges: Vec<(i64, Option<String>)>,
     manifests: Vec<Value>,
     devices: Vec<Value>,
@@ -175,6 +177,18 @@ fn fake_node(f: Fake) -> Router {
             "/v1/favourites",
             get(|| async {
                 Json(json!({"tracks": [{"id": 1}], "albums": [], "artists": [], "other": [], "uris": []}))
+            })
+            // A listener's homeserver that will never take song 777: the node answers 422
+            .put(|State(f): State<Fake>, Json(b): Json<Value>| async move {
+                if b["track_id"] == 777 {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({"error": "never taken"})),
+                    )
+                        .into_response();
+                }
+                f.lock().unwrap().hearts_on.push(b);
+                Json(json!({"favourite": true})).into_response()
             })
             .delete(|State(f): State<Fake>, uri: axum::http::Uri| async move {
                 f.lock()
@@ -385,6 +399,39 @@ async fn an_unreachable_node_keeps_the_queue() {
         Err(pm_offline::SyncError::Unreachable(_))
     ));
     assert_eq!(store.queued().len(), 1);
+}
+
+#[tokio::test]
+async fn a_change_the_node_refuses_for_good_is_dropped_and_the_rest_go_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .push(Event::Favourite {
+            track_id: 777,
+            on: true,
+            at: 5,
+        })
+        .unwrap();
+    store.push(Event::Play { track_id: 1, at: 6 }).unwrap();
+    store
+        .push(Event::Favourite {
+            track_id: 8,
+            on: true,
+            at: 7,
+        })
+        .unwrap();
+    let seen: Fake = Arc::default();
+    let base = start_node(seen.clone()).await;
+    let node = Node::new(&base, "tok").unwrap();
+    pm_offline::sync(&store, &node, &opts()).await.unwrap();
+    assert!(
+        store.queued().is_empty(),
+        "the refused heart went, the rest were sent"
+    );
+    let s = seen.lock().unwrap();
+    assert_eq!(s.plays.len(), 1, "the play after it was sent");
+    assert_eq!(s.hearts_on.len(), 1, "and the heart after it");
+    assert_eq!(s.hearts_on[0]["track_id"], 8);
 }
 
 fn opts() -> SyncOptions {

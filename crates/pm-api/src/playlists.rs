@@ -89,16 +89,27 @@ pub(crate) fn load_playlist(s: &NodeState, id: &str) -> Result<Playlist, ApiErro
 }
 
 fn summary(row: &MusicPostRow, p: &Playlist) -> PlaylistSummary {
+    summary_of(
+        &row.id,
+        p,
+        &row.visibility,
+        row.synced_at.is_some_and(|s| s >= row.updated_at),
+    )
+}
+
+/// A collection's summary: `visibility` is `private` or `public`; `synced` says it is on the
+/// homeserver as it is.
+pub(crate) fn summary_of(id: &str, p: &Playlist, visibility: &str, synced: bool) -> PlaylistSummary {
     PlaylistSummary {
-        id: row.id.clone(),
+        id: id.to_string(),
         name: p.name.clone(),
         description: p.description.clone(),
         image: p.image.clone(),
         items: p.items.len(),
         created_at: p.created_at,
         updated_at: p.updated_at,
-        visibility: row.visibility.clone(),
-        synced: row.synced_at.is_some_and(|s| s >= row.updated_at),
+        visibility: visibility.to_string(),
+        synced,
         covers: Vec::new(),
         layout: p.layout.clone().unwrap_or_else(|| "list".into()),
         tracks_only: p.is_tracks_only(),
@@ -151,6 +162,11 @@ pub(crate) fn entries(lib: &Library, p: &Playlist) -> Vec<CollectionEntry> {
 
 /// The first four distinct album covers among a playlist's songs in the library (its mosaic).
 fn covers(lib: &Library, row_id: &str, p: &Playlist) -> Vec<String> {
+    covers_with(lib, p, &local_tracks(lib, row_id))
+}
+
+/// The mosaic of a collection with these node-only songs after its items.
+fn covers_with(lib: &Library, p: &Playlist, local: &[Track]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let albums = p
         .items
@@ -160,11 +176,7 @@ fn covers(lib: &Library, row_id: &str, p: &Playlist) -> Vec<String> {
             Some(ItemKind::Album) => library_album(lib, &it.uri).and_then(|a| a.id),
             _ => resolve(lib, it).and_then(|t| t.album.and_then(|a| a.id)),
         })
-        .chain(
-            local_tracks(lib, row_id)
-                .into_iter()
-                .filter_map(|t| t.album.and_then(|a| a.id)),
-        );
+        .chain(local.iter().filter_map(|t| t.album.as_ref().and_then(|a| a.id)));
     for a in albums {
         let u = format!("/v1/library/albums/{a}/cover");
         if !out.contains(&u) {
@@ -272,7 +284,7 @@ fn local_tracks(lib: &Library, id: &str) -> Vec<Track> {
 }
 
 /// Items from URIs: music URLs, links to public Pubky posts, or web links.
-fn parse_uris(uris: &[String]) -> Result<Vec<PlaylistItem>, ApiError> {
+pub(crate) fn parse_uris(uris: &[String]) -> Result<Vec<PlaylistItem>, ApiError> {
     uris.iter()
         .map(|u| {
             let uri = pm_pubky::schemas::item_uri(u).map_err(|e| {
@@ -286,7 +298,7 @@ fn parse_uris(uris: &[String]) -> Result<Vec<PlaylistItem>, ApiError> {
 }
 
 /// A layout as given: `list`, `grid` or `visual`; empty means the default list.
-fn checked_layout(layout: &str) -> Result<Option<String>, ApiError> {
+pub(crate) fn checked_layout(layout: &str) -> Result<Option<String>, ApiError> {
     let l = layout.trim().to_ascii_lowercase();
     if l.is_empty() {
         return Ok(None);
@@ -304,6 +316,31 @@ fn checked_layout(layout: &str) -> Result<Option<String>, ApiError> {
 fn resolve(lib: &Library, item: &PlaylistItem) -> Option<Track> {
     let uri = MusicUri::parse(&item.uri).ok()?;
     lib.tracks_by_canonical(&uri).ok()?.into_iter().next()
+}
+
+/// A listener's own collection (personal_collections.rs) in a list.
+pub(crate) fn own_summary(
+    lib: &Library,
+    id: &str,
+    p: &Playlist,
+    public: bool,
+    synced: bool,
+) -> PlaylistSummary {
+    let mut summary = summary_of(id, p, if public { "public" } else { "private" }, synced);
+    summary.covers = covers_with(lib, p, &[]);
+    summary
+}
+
+/// A listener's own collection (personal_collections.rs) as the page shows one: no node-only
+/// songs (those are the owner's).
+pub(crate) fn detail_of(lib: &Library, id: &str, p: &Playlist, public: bool, synced: bool) -> PlaylistDetail {
+    PlaylistDetail {
+        summary: own_summary(lib, id, p, public, synced),
+        playlist: p.clone(),
+        tracks: p.items.iter().map(|it| resolve(lib, it)).collect(),
+        entries: entries(lib, p),
+        local_tracks: Vec::new(),
+    }
 }
 
 fn detail(lib: &Library, row: &MusicPostRow, p: &Playlist) -> PlaylistDetail {
@@ -775,17 +812,47 @@ pub(crate) async fn play(
             "none of the playlist's items plays on this node's connected services",
         ));
     }
-    let replace = body.replace.unwrap_or(true);
+    let queued = items.len();
+    queue_into(&zone, items, body.replace);
+    Ok(Json(PlayedPlaylist { queued, missing }))
+}
+
+/// What of a listener's collection plays here: its songs and albums in the library, in order
+/// (nothing through the owner's streaming accounts), and what doesn't (`missing`).
+pub(crate) fn library_queue(lib: &Library, p: &Playlist) -> (Vec<pm_zones::QueueItem>, Vec<String>) {
+    let mut items = Vec::new();
+    let mut missing = Vec::new();
+    for it in &p.items {
+        let tracks = match it.kind() {
+            Some(ItemKind::Track) => resolve(lib, it).into_iter().collect(),
+            Some(ItemKind::Album) => library_album(lib, &it.uri)
+                .and_then(|a| a.id)
+                .and_then(|a| lib.album_tracks(a).ok())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if tracks.is_empty() {
+            missing.push(it.uri.clone());
+        }
+        items.extend(tracks.iter().map(local_queue_item));
+    }
+    (items, missing)
+}
+
+/// Queue `items` into `zone`: in place of its queue, started (`replace`, the default), or after it.
+pub(crate) fn queue_into(zone: &pm_zones::Zone, items: Vec<pm_zones::QueueItem>, replace: Option<bool>) {
+    let replace = replace.unwrap_or(true);
     if replace {
         zone.stop();
         zone.clear();
     }
-    let queued = items.len();
     zone.enqueue(items, Insert::End);
     if replace {
+        // With shuffle on it plays shuffled, the playlist's order kept as the original one (as a
+        // queue replaced through `POST /v1/zones/{id}/queue`)
+        zone.shuffle_replacement();
         zone.play_index(0);
     }
-    Ok(Json(PlayedPlaylist { queued, missing }))
 }
 
 /// A library song as a queue item.

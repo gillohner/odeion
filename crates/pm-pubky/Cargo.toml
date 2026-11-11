@@ -28,6 +28,8 @@ url = { workspace = true }
 zeroize = "1"
 
 [dev-dependencies]
+# A fake pkarr relay for the records tests
+axum = { workspace = true }
 # The vault client key must be the Noise static key pubky-noise derives from the same secret
 pubky-noise = "=0.1.0"
 tempfile = "3"

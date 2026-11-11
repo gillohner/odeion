@@ -81,6 +81,8 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 const NODE_OWN: &[&str] = &[
     "stream.secret",
     "node.id",
+    // Restoring an older backup must not revive a delayed pre-disconnect sender.
+    "listenbrainz.send_generation",
     SCHEDULE_KEY,
     crate::accounts::OWNER_SESSIONS_TOKEN,
     crate::accounts::OWNER_SESSIONS,
@@ -347,17 +349,19 @@ const CARRIED: &[&str] = &[
 /// For a restore that replaces the database file (`odeiond restore`), into the `staged` copy
 /// before it goes in: this node's own settings (`NODE_OWN`) from `here`, as the web restore
 /// keeps them; and each sign-in, the people list, the signup token and parties that `staged`
-/// doesn't hold (a plain copy carries none), from `here`. What `staged` holds stays.
+/// doesn't hold (a plain copy carries none), from `here`. What `staged` holds stays, except report
+/// memberships: those follow the current roster, never an older grant from the backup.
 /// For a restore that replaces the database file when there is no node to keep anything from
 /// (an empty data folder, or a current database that can't be read): none of a node's own
 /// settings (`NODE_OWN`) goes in from the backup. A backup made before they were left out
 /// still holds them, and the owner's browser sessions and device sign-ins among them would come
-/// back; the node makes its own id, stream key and the rest afresh.
+/// back; the node makes its own id, stream key and the rest afresh. Without a readable current
+/// roster, restored music access gets fresh report memberships too.
 pub fn forget_node_own(staged: &Library) -> Result<(), pm_library::LibraryError> {
     for key in NODE_OWN {
         staged.delete_setting(key)?;
     }
-    Ok(())
+    crate::people::restore_report_memberships(staged, None)
 }
 
 pub fn keep_this_nodes(here: &Library, staged: &Library) -> Result<(), pm_library::LibraryError> {
@@ -383,7 +387,8 @@ pub fn keep_this_nodes(here: &Library, staged: &Library) -> Result<(), pm_librar
             staged.set_setting(&key, &v)?;
         }
     }
-    merge_carried(staged, &carried_of(here)?)
+    merge_carried(staged, &carried_of(here)?)?;
+    crate::people::restore_report_memberships(staged, here.get_setting(crate::people::SETTING)?.as_deref())
 }
 
 /// This node's [`CARRIED`] settings as they are now: what a restore keeps where the backup brings
@@ -698,14 +703,17 @@ pub async fn restore(
         (Some(_), _, None) if !skip_secrets => return Err(BackupError::NeedsPassphrase.into()),
         _ => None,
     };
-    if !s.begin_scan() {
+    let Some(slot) = s.scan_slot() else {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "a scan is running; restore when it is done",
         ));
-    }
+    };
+    // No match correction meanwhile (it would write a file, then a library being replaced)
+    let held = s.no_corrections().await;
     let result = restore_locked(s, &parsed, secrets).await;
-    s.end_scan();
+    drop(held);
+    drop(slot);
     // The sign-in stores may have been replaced: read again
     crate::accounts::sign_ins_changed();
     let mut report = result?;
@@ -740,6 +748,27 @@ pub async fn restore(
     Ok(report)
 }
 
+/// A fault a test injects between the merge into the staged copy and the swap (a marker file
+/// in the node's data folder, so it touches that node only): the live library must come through
+/// unchanged.
+/// Only in this crate's own tests (cargo feature `test-hooks`): a release build has no fault point.
+#[cfg(feature = "test-hooks")]
+pub const FAIL_BEFORE_SWAP_MARKER: &str = ".fail-restore-before-swap";
+
+#[cfg(feature = "test-hooks")]
+fn fail_before_swap_for_tests(s: &NodeState) -> Result<(), BackupError> {
+    if s.data_dir().join(FAIL_BEFORE_SWAP_MARKER).is_file() {
+        return Err(BackupError::NotABackup("test fault before the swap".into()));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "test-hooks"))]
+#[inline(always)]
+fn fail_before_swap_for_tests(_: &NodeState) -> Result<(), BackupError> {
+    Ok(())
+}
+
 async fn restore_locked(
     s: &Arc<NodeState>,
     parsed: &Parsed,
@@ -771,72 +800,80 @@ async fn restore_locked(
     };
     // The people list is replaced and merged below: no roster change runs meanwhile
     // (`people::update`), so none is lost or made to an older copy
-    let roster = s.roster.lock().await;
+    let roster = crate::people::roster_for_restore(s).await;
+    crate::people::restored_access(s);
+    // Everything the restored library is to hold is put together in the staged copy first: this
+    // node's own settings, the sign-ins (the sealed part's, else the ones made here), listeners'
+    // own, the carried keys. The live library is replaced in one step at the very end, so an
+    // error anywhere before it leaves the library exactly as it was (never a mixed one)
     let done = (|| -> Result<(), BackupError> {
         let lib = s.library.lock().expect("library poisoned");
-        let keep: Vec<(&str, Option<String>)> = NODE_OWN
-            .iter()
-            .map(|k| Ok((*k, lib.get_setting(k)?)))
-            .collect::<Result<_, BackupError>>()?;
-        let signins_here: Vec<(&str, Option<String>)> = SECRET_SETTINGS
-            .iter()
-            .map(|(k, _)| Ok((*k, lib.get_setting(k)?)))
-            .collect::<Result<_, BackupError>>()?;
-        let people_here = person_signins(&lib)?;
-        let carried_here = carried_of(&lib)?;
-        lib.restore_from(&staged)?;
-        for (k, v) in keep {
-            match v {
-                Some(v) => lib.set_setting(k, &v)?,
+        let copy = Library::open(&staged)?;
+        for k in NODE_OWN {
+            match lib.get_setting(k)? {
+                Some(v) => copy.set_setting(k, &v)?,
                 None => {
-                    lib.delete_setting(k)?;
+                    copy.delete_setting(k)?;
                 }
             }
         }
         for (key, name) in SECRET_SETTINGS {
             match secrets.as_ref().and_then(|x| x.settings.get(*key)) {
                 Some(v) => {
-                    lib.set_setting(key, v)?;
+                    copy.set_setting(key, v)?;
                     report.signed_in.push((*name).to_string());
                 }
                 None => {
                     // A sign-in made on this node before the restore stays
-                    if let Some((_, Some(v))) = signins_here.iter().find(|(k, _)| k == key) {
-                        lib.set_setting(key, v)?;
+                    if let Some(v) = lib.get_setting(key)? {
+                        copy.set_setting(key, &v)?;
                     }
                 }
             }
         }
         // Listeners' own, each as the owner's: from the sealed backup, else the one made here
         // before the restore (a listener signed in only here keeps it)
-        for (k, v) in &people_here {
-            lib.set_setting(k, v)?;
+        for (k, v) in person_signins(&lib)? {
+            copy.set_setting(&k, &v)?;
         }
         for (k, v) in secrets
             .iter()
             .flat_map(|x| x.settings.iter())
             .filter(|(k, _)| is_person_signin(k))
         {
-            lib.set_setting(k, v)?;
+            copy.set_setting(k, v)?;
         }
         // Invites with their links, the signup token and parties: from the locked part, else as
         // they were here (a plain backup restored on this node keeps the links it handed out)
+        let carried_here = carried_of(&lib)?;
         let mut kept = Vec::new();
-        for (key, now) in carried_here {
-            match secrets.as_ref().and_then(|x| x.settings.get(key)) {
-                Some(v) => lib.set_setting(key, v)?,
-                None => kept.push((key, now)),
+        for (key, now) in &carried_here {
+            match secrets.as_ref().and_then(|x| x.settings.get(*key)) {
+                Some(v) => copy.set_setting(key, v)?,
+                None => kept.push((*key, now.clone())),
             }
         }
-        merge_carried(&lib, &kept)?;
-        lib.drop_missing_art()?;
-        report.restored = counts_of(&lib)?;
-        report.missing_folders = lib
+        merge_carried(&copy, &kept)?;
+        // Report memberships follow the current roster, never an older grant from the backup:
+        // reconciled in the copy, before it replaces the live library. The roster lock keeps
+        // `here` current throughout; no inbox connection or report text enters this backup path.
+        let here = carried_here
+            .iter()
+            .find(|(key, _)| *key == crate::people::SETTING)
+            .and_then(|(_, value)| value.as_deref());
+        crate::people::restore_report_memberships(&copy, here)?;
+        copy.drop_missing_art()?;
+        report.restored = counts_of(&copy)?;
+        report.missing_folders = copy
             .list_folders()?
             .into_iter()
             .filter(|(p, _)| !p.is_dir())
             .map(|(p, _)| p.to_string_lossy().into_owned())
             .collect();
+        drop(copy);
+        fail_before_swap_for_tests(s)?;
+        // The one step that changes the live library (SQLite's backup API: all or nothing)
+        lib.restore_from(&staged)?;
         Ok(())
     })();
     drop(roster);
@@ -1014,10 +1051,11 @@ pub struct ScheduleView {
 }
 
 fn load_schedule(s: &NodeState) -> Schedule {
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .get_setting(SCHEDULE_KEY)
+    load_schedule_in(&s.library.lock().expect("library poisoned"))
+}
+
+fn load_schedule_in(lib: &Library) -> Schedule {
+    lib.get_setting(SCHEDULE_KEY)
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_str(&v).ok())
@@ -1028,13 +1066,37 @@ fn load_schedule(s: &NodeState) -> Schedule {
         })
 }
 
-fn save_schedule(s: &NodeState, sch: &Schedule) -> Result<(), ApiError> {
-    s.library.lock().expect("library poisoned").set_setting(
+fn save_schedule_in(lib: &Library, sch: &Schedule) -> Result<(), ApiError> {
+    lib.set_setting(
         SCHEDULE_KEY,
         &serde_json::to_string(sch).expect("schedule serializes"),
     )?;
     Ok(())
 }
+
+/// What a run leaves in the schedule: when it ran and how it went, set on the schedule as it is
+/// now (read and written under one lock), never the folder, passphrase or interval the run
+/// started with, which the owner may have changed meanwhile.
+fn note_run(s: &NodeState, made: &Result<String, String>) {
+    let lib = s.library.lock().expect("library poisoned");
+    let mut sch = load_schedule_in(&lib);
+    sch.last_at = Some(time::OffsetDateTime::now_utc().unix_timestamp());
+    match made {
+        Ok(name) => {
+            sch.last_file = Some(name.clone());
+            sch.last_error = None;
+        }
+        Err(e) => sch.last_error = Some(e.clone()),
+    }
+    let _ = save_schedule_in(&lib, &sch);
+}
+
+/// Said when a scheduled backup is asked for while one is being written.
+pub const RUN_BUSY: &str = "a scheduled backup is being written; wait for it";
+
+/// A test holds a run here (a marker file in the node's data folder), between writing the file
+/// and noting the run, so a schedule change meanwhile can be checked.
+pub const HOLD_RUN_MARKER: &str = ".hold-scheduled-backup";
 
 const FILE_PREFIX: &str = "pubky-music-";
 const FILE_EXT: &str = ".pmbackup";
@@ -1077,42 +1139,61 @@ fn file_name(now: time::OffsetDateTime) -> String {
     )
 }
 
-/// Write one scheduled backup now (and prune).
+/// Write one scheduled backup now (and prune). One at a time: a second run asked for while
+/// one is being written is refused ([`RUN_BUSY`]), not started alongside.
 pub async fn run_scheduled(s: &Arc<NodeState>) -> Result<String, String> {
-    let mut sch = load_schedule(s);
+    let Ok(one) = s.backup_run.clone().try_lock_owned() else {
+        return Err(RUN_BUSY.into());
+    };
+    // The run is a task of its own holding the lock to its end: a caller that goes away (the
+    // page closed, the request dropped) doesn't end the lock while the backup is still being
+    // written, and the run's result is still noted
+    let s = s.clone();
+    tokio::spawn(async move {
+        let _one = one;
+        run_held(&s).await
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn run_held(s: &Arc<NodeState>) -> Result<String, String> {
+    let sch = load_schedule(s);
     if sch.folder.trim().is_empty() {
         return Err("no backup folder set".into());
     }
     let folder = PathBuf::from(sch.folder.trim());
     let st = s.clone();
     let pass = sch.passphrase.clone();
-    let made = tokio::task::spawn_blocking(move || -> Result<String, String> {
-        std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
-        let (bytes, _) = make(&st, pass.as_deref()).map_err(|e| e.to_string())?;
-        let name = file_name(time::OffsetDateTime::now_utc());
-        let tmp = folder.join(format!(".{name}.part"));
-        let _ = std::fs::remove_file(&tmp);
-        write_private(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, folder.join(&name)).map_err(|e| e.to_string())?;
-        Ok(name)
+    let made = tokio::task::spawn_blocking({
+        let folder = folder.clone();
+        move || -> Result<String, String> {
+            std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+            let (bytes, _) = make(&st, pass.as_deref()).map_err(|e| e.to_string())?;
+            let name = file_name(time::OffsetDateTime::now_utc());
+            // A name of this run's own: another process writing to the same folder (a second
+            // node, a manual run during the timer's) never shares its half-written file
+            let tmp = folder.join(format!(".{name}.{}.part", std::process::id()));
+            let _ = std::fs::remove_file(&tmp);
+            write_private(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            std::fs::rename(&tmp, folder.join(&name)).map_err(|e| e.to_string())?;
+            Ok(name)
+        }
     })
     .await
     .map_err(|e| e.to_string())
     .and_then(|r| r);
-    sch.last_at = Some(time::OffsetDateTime::now_utc().unix_timestamp());
+    if s.data_dir().join(HOLD_RUN_MARKER).is_file() {
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    }
     match &made {
         Ok(name) => {
-            sch.last_file = Some(name.clone());
-            sch.last_error = None;
-            let removed = prune(Path::new(sch.folder.trim()), sch.keep as usize);
+            let removed = prune(&folder, sch.keep as usize);
             tracing::info!(file = %name, removed = removed.len(), "scheduled backup written");
         }
-        Err(e) => {
-            sch.last_error = Some(e.clone());
-            tracing::warn!("scheduled backup failed: {e}");
-        }
+        Err(e) => tracing::warn!("scheduled backup failed: {e}"),
     }
-    let _ = save_schedule(s, &sch);
+    note_run(s, &made);
     made
 }
 
@@ -1258,7 +1339,6 @@ pub(crate) async fn put_schedule(
     State(s): State<Arc<NodeState>>,
     Json(u): Json<ScheduleUpdate>,
 ) -> ApiResult<ScheduleView> {
-    let mut sch = load_schedule(&s);
     let folder = u.folder.trim().to_string();
     if !folder.is_empty() {
         let p = Path::new(&folder);
@@ -1269,21 +1349,33 @@ pub(crate) async fn put_schedule(
         }
         std::fs::create_dir_all(p).map_err(|e| ApiError::bad_request(format!("{folder}: {e}")))?;
     }
-    sch.folder = folder;
-    sch.every_hours = u.every_hours.unwrap_or(sch.every_hours).clamp(1, 24 * 30);
-    sch.keep = u.keep.unwrap_or(sch.keep).clamp(1, 365);
-    match u.passphrase {
-        Some(p) if p.is_empty() => sch.passphrase = None,
-        Some(p) => sch.passphrase = Some(p),
-        None => {}
+    // Read, changed and written under one guard: a run noting its result meanwhile
+    // (`note_run`) is never written over with the copy read before it
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        let mut sch = load_schedule_in(&lib);
+        sch.folder = folder;
+        sch.every_hours = u.every_hours.unwrap_or(sch.every_hours).clamp(1, 24 * 30);
+        sch.keep = u.keep.unwrap_or(sch.keep).clamp(1, 365);
+        match u.passphrase {
+            Some(p) if p.is_empty() => sch.passphrase = None,
+            Some(p) => sch.passphrase = Some(p),
+            None => {}
+        }
+        save_schedule_in(&lib, &sch)?;
     }
-    save_schedule(&s, &sch)?;
     get_schedule(State(s)).await
 }
 
 /// `POST /v1/backup/schedule/run`: one scheduled backup now.
 pub(crate) async fn run_schedule(State(s): State<Arc<NodeState>>) -> ApiResult<ScheduleView> {
-    run_scheduled(&s).await.map_err(ApiError::bad_request)?;
+    run_scheduled(&s).await.map_err(|e| {
+        if e == RUN_BUSY {
+            ApiError::new(StatusCode::CONFLICT, e)
+        } else {
+            ApiError::bad_request(e)
+        }
+    })?;
     get_schedule(State(s)).await
 }
 

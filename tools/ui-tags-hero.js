@@ -7,7 +7,8 @@
 //     has the border; up to 4 tagger faces then "+N", which list who tagged it;
 //   * many tags fold to about two rows and "+N more"; loading, empty and error states; keyboard;
 //   * an album with no MusicBrainz match says so in the hero and leads to the matches to confirm;
-//   * the tag page, Genres' "Your Pubky tags" and Home's tags use the same chip and colours.
+//   * the tag page (one tag and two: only this one, ×), search's Tags, Genres' "Your Pubky tags" and
+//     Home's tags use the same chip and colours (the now-playing tags share tagChip, unchecked here).
 // The node's /v1/item, /v1/tags, /v1/discover/uri and /v1/profiles are mocked here.
 //   node tools/ui-tags-hero.js <api token> <node URL> [screenshot dir]
 //   PM_STATIC_DIR=crates/pm-api/static serves the page from those files instead of the node's
@@ -34,6 +35,8 @@ const block = /\n  const TAG_COLOURS = [\s\S]*?\n  const tagRgba = [^\n]*\n/.exe
 // Without them (before this change) the page checks still run, and fail on the page itself
 const { tagColour, tagRgba } = block ? new Function(`${block[0]}\nreturn { tagColour, tagRgba };`)() : { tagColour: () => null, tagRgba: () => 'no tagColour in app.js' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A chip's colour as drawn: asked again while a redraw has it detached for a moment (computed styles are empty then)
+const bgOf = async (loc) => { for (let i = 0; i < 30; i++) { const v = await loc.evaluate((e) => (e.isConnected ? getComputedStyle(e).backgroundColor : '')).catch(() => ''); if (v) return v; await sleep(150); } return ''; };
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGO4VmEDRwzEcQCKMhih3mIObwAAAABJRU5ErkJggg==', 'base64'); // 4×4, orange
 const MIME = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 
@@ -58,19 +61,23 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
         });
       }
       // ---- the mocked node ----
-      let pages = {}; let own = {}; let pub = {}; let uris = {}; let failPut = null; let pubHold = null; let pubFail = false; let me = null; let ownFail = null;
+      let pages = {}; let own = {}; let pub = {}; let uris = {}; let failPut = null; let pubHold = null; let pubFail = false; let me = null; let ownFail = null; let putHold = null;
       const writes = []; const asked = [];
+      // Every change asked for, counted as it arrives (refused ones and ones held back too)
+      const tries = [];
       await page.route(/\/v1\/item\/(album|song|artist)\/[^/?]+(\?.*)?$/, (r) => { const m = /\/v1\/item\/(\w+)\/([^/?]+)/.exec(r.request().url()); const pg = pages[`${m[1]}/${m[2]}`]; return pg ? r.fulfill({ json: pg }) : r.fallback(); });
       await page.route(/\/v1\/item\/[^?]+\/extras(\?.*)?$/, (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
       await page.route(/\/v1\/comments(\?.*)?$/, (r) => r.fulfill({ json: { comments: [], indexed: true } }));
       await page.route(/\/v1\/reviews(\?.*)?$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { reviews: [] } }) : r.fallback()));
       const keyOf = (q) => q.uri || (q.track_id ? `track:${q.track_id}` : q.album_id ? `album:${q.album_id}` : q.artist_id ? `artist:${q.artist_id}` : '');
-      await page.route(/\/v1\/tags(\?.*)?$/, (r) => {
+      await page.route(/\/v1\/tags(\?.*)?$/, async (r) => {
         const req = r.request(); const m = req.method(); const q = Object.fromEntries(new URL(req.url()).searchParams);
         if (m === 'GET' && !keyOf(q)) return r.fulfill({ json: { tags: Object.entries(own).flatMap(([u, ts]) => (Array.isArray(ts) ? ts.map((t) => ({ uri: u, ...t })) : [])) } });
         const b = m === 'PUT' ? req.postDataJSON() : q; const k = keyOf(b);
+        if (m !== 'GET') tries.push({ m, k, label: b.label });
         if (m === 'GET' && k === ownFail) return r.fulfill({ status: 500, json: { error: 'database is locked' } });
         if (own[k] === 'needs_match') return m === 'GET' ? r.fulfill({ json: { needs_match: true, tags: [] } }) : r.fulfill({ status: 422, json: { error: 'no canonical identity' } });
+        if (m === 'PUT' && putHold) await putHold;
         if (m === 'PUT' && k === failPut) return r.fulfill({ status: 502, json: { error: 'homeserver: 502' } });
         if (m === 'PUT') { writes.push({ m, k, label: b.label }); own[k] = [...(own[k] || []).filter((t) => t.label !== b.label), { label: b.label, synced: false }]; }
         if (m === 'DELETE') { writes.push({ m, k, label: b.label }); own[k] = (own[k] || []).filter((t) => t.label !== b.label); }
@@ -120,7 +127,7 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       const fc = chip('song', 'frenchcore').locator('.ptag');
       assert.equal(await fc.locator('.ptag-l').textContent(), 'frenchcore');
       assert.equal(await fc.locator('.ptag-n').textContent(), '7');
-      assert.equal(await fc.evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('frenchcore'), 0.3));
+      assert.equal(await bgOf(fc), tagRgba(tagColour('frenchcore'), 0.3));
       const mine = chip('song', 'shared').locator('.ptag');
       assert.ok(await mine.evaluate((e) => e.classList.contains('own')), 'your tag is marked');
       assert.equal(await mine.evaluate((e) => getComputedStyle(e).borderTopColor), tagRgba(tagColour('shared'), 0.5));
@@ -144,6 +151,7 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       await chip('song', 'frenchcore').locator('.tagfaces').click();
       menu = (await page.locator('.popover.menu').innerText()).replace(/\s+/g, ' ');
       assert.match(menu, /and 1 more/i, 'the people not listed are counted');
+      assert.ok(await page.locator('.popover.menu .pop-item .face').count() >= 6, 'each person with their face');
       await page.locator('.popover.menu .pop-item').filter({ hasText: 'Bo' }).click();
       await page.waitForURL(/\/person\//); await page.goBack(); await page.locator('#htags .tagitem').first().waitFor(); await sleep(300);
       await shot('album-both');
@@ -189,7 +197,7 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
         await expandAll();
         for (const sel of ['[data-htag-del]', '[data-htag-move]']) {
           const bb = await page.locator(`#htags ${sel}`).first().evaluate((e) => e.getBoundingClientRect());
-          assert.ok(bb.height >= 36 && bb.width >= 40, `${sel} is 40 px to touch at ${width} (${bb.width}×${bb.height})`);
+          assert.ok(bb.height >= 40 && bb.width >= 40, `${sel} is 40 px to touch at ${width} (${bb.width}×${bb.height})`);
         }
       }
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth) <= 0, `no sideways scroll at ${width}`);
@@ -212,14 +220,73 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       // ---- C: loading, then the public tags fill in; D: Pubky doesn't answer; E: no tags ----
       let release; pubHold = new Promise((r) => { release = r; });
       pub[CANON] = { tags: [['frenchcore', 7]], taggers: 7, faces: { frenchcore: [P[1]] } };
-      own[CANON] = [{ label: 'mine-first', synced: true }];
+      own[CANON] = [{ label: 'mine-first', synced: true }, { label: 'constructor', synced: true }, { label: 'hasownproperty', synced: false }];
       await go('/song/tidal-a');
       await chip('song', 'mine-first').waitFor({ timeout: 5000 });
+      assert.equal(await chip('song', 'constructor').count(), 1, 'a tag named like Object\'s own is a tag');
+      assert.equal(await chip('song', 'constructor').locator('.tagfaces').count(), 0, 'and has no people of Object\'s');
       assert.ok(await group('song').locator('.tag-skel').count() > 0, 'a quiet placeholder while Pubky answers');
       await shot('album-loading');
       release(); pubHold = null;
       await chip('song', 'frenchcore').waitFor();
       assert.equal(await group('song').locator('.tag-skel').count(), 0);
+      assert.equal(await chip('song', 'constructor').count(), 1);
+      // An add on its way when Pubky answers: the input stays as it is (no second send), and after a
+      // refusal it is back, enabled, with what was typed. The other group's half-typed tag stays too,
+      // whichever input is the one being sent
+      let releaseDiscover; pubHold = new Promise((r) => { releaseDiscover = r; });
+      let releasePut; putHold = new Promise((r) => { releasePut = r; }); failPut = CANON;
+      await go('/song/tidal-a'); await chip('song', 'mine-first').waitFor();
+      await group('link').locator('[data-htag-plus]').click();
+      await group('link').locator('input[data-htag-add]').fill('linkdraft');
+      await group('song').locator('[data-htag-plus]').click();
+      const held = group('song').locator('input[data-htag-add]');
+      const before = tries.length;
+      await held.fill('slowtag'); await held.press('Enter'); await sleep(200);
+      assert.ok(await held.isDisabled(), 'sending');
+      releaseDiscover(); pubHold = null; await sleep(400);
+      assert.ok(await group('song').locator('input[data-htag-add]').isDisabled(), 'still sending after Pubky answered');
+      assert.equal(await group('link').locator('input[data-htag-add]').inputValue(), 'linkdraft', 'the other group keeps what was typed');
+      await group('song').locator('input[data-htag-add]').press('Enter'); await sleep(200);
+      releasePut(); putHold = null; await sleep(500);
+      assert.deepEqual(tries.slice(before), [{ m: 'PUT', k: CANON, label: 'slowtag' }], 'one send only');
+      const back = group('song').locator('input[data-htag-add]');
+      assert.ok(!(await back.isDisabled()), 'enabled again after the refusal');
+      assert.equal(await back.inputValue(), 'slowtag');
+      assert.equal(await group('link').locator('input[data-htag-add]').inputValue(), 'linkdraft', 'and the other group’s draft is still there');
+      // The mirror: the second group's add on its way (the link's), the first group's half typed
+      const addIn = async (scope) => { const i = group(scope).locator('input[data-htag-add]'); if (!(await i.count())) await group(scope).locator('[data-htag-plus]').click(); return group(scope).locator('input[data-htag-add]'); };
+      failPut = LINK;
+      let releaseDiscover2; pubHold = new Promise((r) => { releaseDiscover2 = r; });
+      let releasePut2; putHold = new Promise((r) => { releasePut2 = r; });
+      await go('/song/tidal-a'); await chip('song', 'mine-first').waitFor();
+      await (await addIn('song')).fill('songdraft');
+      const held2 = await addIn('link');
+      const before2 = tries.length;
+      await held2.fill('slowlink'); await held2.press('Enter'); await sleep(200);
+      releaseDiscover2(); pubHold = null; await sleep(400);
+      assert.ok(await group('link').locator('input[data-htag-add]').isDisabled(), 'the second group’s add is still on its way after Pubky answered');
+      assert.equal(await group('song').locator('input[data-htag-add]').inputValue(), 'songdraft');
+      await group('link').locator('input[data-htag-add]').press('Enter'); await sleep(200);
+      releasePut2(); putHold = null; await sleep(500);
+      assert.deepEqual(tries.slice(before2), [{ m: 'PUT', k: LINK, label: 'slowlink' }], 'one send only, the second group too');
+      assert.ok(!(await group('link').locator('input[data-htag-add]').isDisabled()));
+      assert.equal(await group('link').locator('input[data-htag-add]').inputValue(), 'slowlink');
+      assert.equal(await group('song').locator('input[data-htag-add]').inputValue(), 'songdraft');
+      failPut = null;
+      // A tag that lands draws the page again: the other group's half-typed tag stays
+      await group('link').locator('input[data-htag-add]').fill('keepme');
+      await group('song').locator('input[data-htag-add]').fill('quicktag'); await group('song').locator('input[data-htag-add]').press('Enter');
+      await chip('song', 'quicktag').waitFor({ state: 'attached' }); await sleep(300);
+      assert.equal(await group('link').locator('input[data-htag-add]').inputValue(), 'keepme', 'kept when the other group’s tag landed');
+      assert.equal(await group('song').locator('input[data-htag-add]').count(), 0, 'the one that landed is closed');
+      // Escape closes it and forgets it: the next tag that lands doesn't bring it back
+      await group('link').locator('input[data-htag-add]').press('Escape');
+      await (await addIn('song')).fill('quicktwo'); await group('song').locator('input[data-htag-add]').press('Enter');
+      await chip('song', 'quicktwo').waitFor({ state: 'attached' }); await sleep(300);
+      assert.equal(await page.locator('#htags input[data-htag-add]').count(), 0, 'nothing left open on the page');
+      own[CANON] = (own[CANON] || []).filter((t) => !['quicktag', 'quicktwo'].includes(t.label));
+      failPut = null;
       pubFail = true;
       await go('/song/tidal-a'); await chip('song', 'mine-first').waitFor(); await sleep(400);
       assert.match(await page.locator('#htags').innerText(), /Pubky tags didn.t load/);
@@ -261,26 +328,30 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       // ---- G: the screenshot's case: a library album with no MusicBrainz match ----
       pages['album/lib-137'] = item('album', 'lib-137', { target: { album_id: 137 }, songs: [{ id: 'lib-501', track_id: 501, title: 'Track one', artist: 'Various', duration_ms: 200000, no: 1 }], on_pubky: { uri: GUESS, indexed: true, tags: [['guessed', 9]], taggers: 9 } });
       own = { 'album:137': 'needs_match' }; pub = { 'album:137': 422 }; uris = {};
-      await go('/album/lib-137'); await page.locator('#htags').waitFor(); await sleep(400);
+      await go('/album/lib-137'); await page.locator('#hmatch [data-htag-match]').waitFor(); await sleep(400);
       assert.doesNotMatch(await page.locator('#htags').innerText(), /guessed/, 'a guessed identity\'s tags never show');
       assert.equal(await page.locator('#htags [data-htag-plus], #htags input[data-htag-add]').count(), 0, 'no tag goes to a guessed identity');
-      assert.match(await page.locator('#htags').innerText(), /Match this album to tag it/);
+      // (one small row under Play since TASK-phone-ui-simplify-1108: "Not matched to MusicBrainz · Match")
+      assert.match(await page.locator('#hmatch').innerText(), /Not matched to MusicBrainz/);
+      assert.match(await page.locator('#hmatch [data-htag-match]').getAttribute('aria-label'), /Match this album to tag it/);
       assert.equal(await page.locator('#itags').count(), 0);
       await shot('album-unmatched');
-      await page.locator('#htags [data-htag-match]').click();
+      await page.locator('#hmatch [data-htag-match]').click();
       await page.locator('#main h1, #main h2').filter({ hasText: /Confirm matches/ }).first().waitFor();
       await page.waitForFunction(() => document.activeElement && document.activeElement.closest && !!document.activeElement.closest('.idalbum'), null, { timeout: 5000 }).catch(() => {});
       assert.equal(await page.evaluate(() => { const a = document.activeElement; const sec = a && a.closest('.idalbum'); return sec ? sec.querySelector('[data-track]').dataset.track : null; }), '501', 'straight to this album\'s folder');
       // Once only: a redraw of the list (here: back and forward) stays put and says nothing more
       await page.evaluate(() => { document.querySelector('#toast').textContent = ''; window.scrollTo(0, 0); });
-      await page.goBack(); await page.locator('#htags [data-htag-match]').waitFor(); await page.goForward();
+      await page.goBack(); await page.locator('#hmatch [data-htag-match]').waitFor(); await page.goForward();
       await page.locator('#main h1, #main h2').filter({ hasText: /Confirm matches/ }).first().waitFor(); await sleep(500);
-      assert.equal(await page.locator('#toast').textContent(), '', 'no second jump or message');
+      assert.equal(await page.locator('#toast').textContent(), '', 'no second message');
+      assert.equal(await page.evaluate(() => !!(document.activeElement && document.activeElement.closest && document.activeElement.closest('.idalbum'))), false, 'no second jump to the folder');
       // Its folder further down the list: the page says how to get there
       folders = [folder('a', 300), folder('b', 400)];
-      await go('/album/lib-137'); await page.locator('#htags [data-htag-match]').click();
+      await go('/album/lib-137'); await page.locator('#hmatch [data-htag-match]').click();
       await page.locator('#main h1, #main h2').filter({ hasText: /Confirm matches/ }).first().waitFor(); await sleep(400);
-      assert.match(await page.locator('#toast').textContent(), /Show more/);
+      // (said on the page, at the top of the list: a toast floated over the rows)
+      assert.match(await page.locator('#main .idnote').textContent(), /Show more/);
       folders = null;
       // A matched library album: the node's URI for its tags, and on_pubky about exactly that one (no second lookup)
       pages['album/lib-7'] = item('album', 'lib-7', { target: { album_id: 7 }, on_pubky: { uri: RELEASE, indexed: true, tags: [['gabber', 5]], taggers: 5, faces: { gabber: [P[2]] } } });
@@ -312,14 +383,28 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       me = null;
 
       // ---- I: the same chip and colours elsewhere ----
-      await page.route(/\/v1\/home\/tag\?/, (r) => r.fulfill({ json: { items: [], tags: [['frenchcore', 9], ['hardcore', 4]] } }));
+      await page.route(/\/v1\/home\/tag\?/, (r) => r.fulfill({ json: { items: [], tags: [['frenchcore', 9], ['hardcore', 4], ['gabber', 2]] } }));
       await page.goto(BASE + '/tag/frenchcore'); await page.locator('#tagcotags .ptag').first().waitFor();
       const co = page.locator('#tagcotags .ptag').first();
-      assert.equal(await co.evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('hardcore'), 0.3));
+      assert.equal(await bgOf(co), tagRgba(tagColour('hardcore'), 0.3));
       assert.doesNotMatch(await co.innerText(), /#/);
+      await page.goto(BASE + '/tag/frenchcore,hardcore'); await page.locator('#tagcotags [data-tag-solo]').first().waitFor();
+      assert.equal(await page.locator('#tagcotags [data-tag-rm]').count(), 2, 'each chosen tag has ×');
+      assert.equal(await page.locator('#tagcotags span.ptag.own').count(), 0, 'chosen tags are a filter, not yours');
+      await page.locator('#tagcotags [data-tag-rm="hardcore"]').click(); await page.waitForURL(/\/tag\/frenchcore$/);
+      await page.goto(BASE + '/tag/frenchcore,hardcore'); await page.locator('#tagcotags [data-tag-solo="hardcore"]').click(); await page.waitForURL(/\/tag\/hardcore$/);
+      await page.route(/\/v1\/search\/tags\?/, (r) => r.fulfill({ json: { mine: [{ label: 'frenchcore', count: 3 }], others: ['frenchtek'] } }));
+      await page.goto(BASE + '/search?q=frenc'); await page.locator('#stags .ptag').first().waitFor({ timeout: 20000 });
+      assert.equal(await bgOf(page.locator('#stags .ptag.own').first()), tagRgba(tagColour('frenchcore'), 0.3));
+      assert.equal(await bgOf(page.locator('#stags .ptag:not(.own)').first()), tagRgba(tagColour('frenchtek'), 0.3));
+      await page.route(/\/v1\/me\/prefs$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { saved_on: 'node', home_layout: { value: { order: ['tags'], hidden: [] }, applies: 'yours' } } }) : r.fallback()));
+      await page.route(/\/v1\/home\/layout$/, (r) => r.fulfill({ json: { order: ['tags'], hidden: [] } }));
+      await page.route(/\/v1\/home\/tags(\?.*)?$/, (r) => r.fulfill({ json: { section: 'tags', items: [], tags: [['gabber', 12]] } }));
+      await page.goto(BASE + '/'); await page.locator('#main .ptag[data-tag-open="gabber"]').waitFor({ timeout: 20000 });
+      assert.equal(await bgOf(page.locator('#main .ptag[data-tag-open="gabber"]')), tagRgba(tagColour('gabber'), 0.3));
       own = { [CANON]: [{ label: 'frenchcore', synced: true }] };
       await page.goto(BASE + '/genres'); await page.locator('[data-mytag]').first().waitFor();
-      assert.equal(await page.locator('[data-mytag]').first().evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('frenchcore'), 0.3));
+      assert.equal(await bgOf(page.locator('[data-mytag]').first()), tagRgba(tagColour('frenchcore'), 0.3));
       if (width < 1100) assert.ok((await page.locator('[data-mytag]').first().boundingBox()).height >= 40);
 
       assert.deepEqual(errors, []);

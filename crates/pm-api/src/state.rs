@@ -178,16 +178,29 @@ pub struct NodeState {
         Option<Arc<dyn crate::copy_guard::Room>>,
     )>,
     /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`, for
-    /// a device of the owner's).
+    /// a device of the owner's, the music access revision when it started).
+    #[allow(clippy::type_complexity)]
     pub controller_logins: tokio::sync::Mutex<
         std::collections::HashMap<
             String,
-            (pm_pubky::homeserver::LoginFlow, std::time::Instant, String, bool),
+            (
+                pm_pubky::homeserver::LoginFlow,
+                std::time::Instant,
+                String,
+                bool,
+                u64,
+            ),
         >,
     >,
+    /// When a controller log in last warmed the homeserver records (`lib::controller_login_start`,
+    /// a route that needs no token): its lookups run one at a time and at most every
+    /// `lib::CONTROLLER_WARM_EVERY`.
+    pub controller_warmed: tokio::sync::Mutex<Option<std::time::Instant>>,
     /// Renewal codes the owner's page got for its next Pubky Ring log in (`POST
     /// /v1/auth/pubky/renewal`): code → when. Good until a renewal succeeds.
     pub renewals: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// Listeners' homeservers as a test stands them in (personal.rs); none: their grants.
+    personal_homeserver: Mutex<Option<Arc<dyn crate::personal::PersonalHomeserver>>>,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
     pub events: crate::events::EventBus,
@@ -196,6 +209,8 @@ pub struct NodeState {
     /// Held across one sync of the node's sign-ins with the vault (`vault_cache`), and across
     /// "Sign out everywhere", so two never interleave.
     pub vault_pass: tokio::sync::Mutex<()>,
+    /// One scheduled backup at a time (`backup::run_scheduled`).
+    pub backup_run: Arc<tokio::sync::Mutex<()>>,
     /// Folder watcher, kept alive here.
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
     /// Sleep timers: the zone pauses when its deadline passes.
@@ -203,8 +218,17 @@ pub struct NodeState {
     /// Pull outputs by stream name (they are also in `outputs`).
     pub pulls: Mutex<HashMap<String, Arc<pm_zones::outputs::PullOutput>>>,
     /// Held while the people roster is read, changed and stored (`people::update`), so no change
-    /// is made to a copy older than one stored meanwhile.
-    pub(crate) roster: tokio::sync::Mutex<()>,
+    /// is made to a copy older than one stored meanwhile. Public so tests can stand for a change
+    /// under way.
+    pub roster: tokio::sync::Mutex<()>,
+    /// Removals whose roster change has landed but whose cleanup is still running. Restore
+    /// waits for these without holding the roster lock, so it cannot re-add someone midway.
+    pub(crate) removing_people: Mutex<std::collections::HashSet<String>>,
+    pub(crate) people_access: Mutex<crate::people::AccessRevisions>,
+    /// Each listener's homeserver operations, and their membership changes, one at a time
+    /// (personal.rs `person_lock`, `membership_lock`).
+    pub(crate) person_locks: crate::personal::PersonLocks,
+    pub(crate) membership_locks: crate::personal::PersonLocks,
     /// How to find outputs again (local devices, endpoints); set by the binary.
     #[allow(clippy::type_complexity)]
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
@@ -231,6 +255,28 @@ pub struct NodeState {
     pub nominatim_base: std::sync::RwLock<String>,
     /// The library identification job's progress.
     pub identify: Mutex<crate::identify::IdentifyProgress>,
+    /// An automatic run waits for a scan or a run to end ([`crate::identify::after_scan`]): one
+    /// waiter at a time.
+    pub(crate) identify_waiting: std::sync::atomic::AtomicBool,
+    /// WebDAV and drive scans going (they don't take the library folders' scan slot): an automatic
+    /// run waits for them too.
+    pub(crate) side_scans: std::sync::atomic::AtomicUsize,
+    /// Held by every scan while it reads and writes the library (the folders', the watcher's, a
+    /// WebDAV share's, a drive's) and by a match correction: a scan that read a file before a
+    /// correction can't store what it read after it. Scans wait for it; a correction waits a
+    /// while ([`crate::identify`]).
+    pub(crate) scan_gate: Mutex<()>,
+    /// A backup restore or a folder move going (they replace the library or move its paths):
+    /// match corrections are refused meanwhile ([`Self::no_corrections`]).
+    pub(crate) corrections_held: std::sync::atomic::AtomicUsize,
+    /// Match corrections going, counted from before they look at [`Self::corrections_held`].
+    pub(crate) correcting: std::sync::atomic::AtomicUsize,
+    /// Settling left songs because a scan held the gate: the next scan's end settles again, also
+    /// when it changed nothing ([`crate::identify::after_scan`]).
+    pub(crate) settle_again: std::sync::atomic::AtomicBool,
+    /// Tests: called by the library folders' scan with each file read, before its write.
+    #[cfg(test)]
+    pub(crate) scan_read_hook: Mutex<Option<pm_library::scan::AfterRead>>,
     /// Pinakes cards for any link: by-uri, then paced resolves, cached.
     pub pinakes_reader: crate::pinakes_reader::PinakesReader,
     /// Deezer API origin (tests point it at a mock).
@@ -288,6 +334,10 @@ const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
 /// Each UPnP renderer that had a zone: its UDN → its description URL, so a start whose SSDP
 /// search misses it (a lost datagram, a device slow to answer) still finds it.
 const UPNP_KNOWN_KEY: &str = "outputs.upnp_known";
+
+/// One mDNS look for AirPlay receivers and BluOS players ([`NodeState::spawn_mdns_passes`]). Blocking.
+pub(crate) type MdnsBrowse =
+    Arc<dyn Fn() -> (Vec<pm_out_airplay::Device>, Vec<pm_out_bluos::Player>) + Send + Sync>;
 
 /// Where a UPnP renderer that had a zone was described, and when (Unix seconds) it was last seen.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -470,7 +520,9 @@ impl NodeState {
             contact: std::sync::RwLock::new(contact),
             login: tokio::sync::Mutex::new(None),
             controller_logins: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            controller_warmed: tokio::sync::Mutex::new(None),
             renewals: Default::default(),
+            personal_homeserver: Mutex::new(None),
             upload_jobs: Default::default(),
             pinakes_caps: Default::default(),
             copy_seams: Default::default(),
@@ -479,9 +531,14 @@ impl NodeState {
             sources_off,
             sync: Mutex::new(None),
             vault_pass: tokio::sync::Mutex::new(()),
+            backup_run: Arc::new(tokio::sync::Mutex::new(())),
             watcher: Mutex::new(None),
             sleep: Mutex::new(HashMap::new()),
             roster: tokio::sync::Mutex::new(()),
+            removing_people: Mutex::new(Default::default()),
+            people_access: Mutex::new(Default::default()),
+            person_locks: Default::default(),
+            membership_locks: Default::default(),
             discover: Mutex::new(None),
             endpoint_keys: Mutex::new(None),
             pulls: Mutex::new(HashMap::new()),
@@ -507,6 +564,14 @@ impl NodeState {
             mb_base: std::sync::RwLock::new("https://musicbrainz.org/ws/2".into()),
             nominatim_base: std::sync::RwLock::new("https://nominatim.openstreetmap.org".into()),
             identify: Mutex::new(Default::default()),
+            identify_waiting: Default::default(),
+            side_scans: Default::default(),
+            scan_gate: Mutex::new(()),
+            corrections_held: Default::default(),
+            correcting: Default::default(),
+            settle_again: Default::default(),
+            #[cfg(test)]
+            scan_read_hook: Mutex::new(None),
             pinakes_reader: Default::default(),
             presence: Default::default(),
             search_answers: Default::default(),
@@ -778,9 +843,16 @@ impl NodeState {
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
             let mut summary = crate::types::LastScan::default();
+            // While it reads and writes: no match correction in between
+            let gate = state.scan_gate();
             let result = (|| -> Result<(), pm_library::LibraryError> {
                 let lib = pm_library::Library::open(&state.db_path)?;
                 let scanner = pm_library::Scanner::new(&lib).with_art_dir(&state.art_dir);
+                #[cfg(test)]
+                let scanner = match state.scan_read_hook.lock().expect("hook").clone() {
+                    Some(hook) => scanner.with_after_read(hook),
+                    None => scanner,
+                };
                 for root in &folders {
                     lib.add_folder(root)?;
                     match scanner.scan(root) {
@@ -808,12 +880,16 @@ impl NodeState {
                 }
                 Ok(())
             })();
+            drop(gate);
             if let Err(e) = result {
                 tracing::error!("scan: {e}");
             }
             summary.finished_at = time::OffsetDateTime::now_utc().unix_timestamp();
+            let changed = summary.added + summary.updated;
             *state.last_scan.lock().expect("last scan lock") = Some(summary);
             state.end_scan();
+            // New or changed songs are matched on their own ("Match new songs automatically")
+            crate::identify::after_scan(&state, changed);
         });
         Ok(true)
     }
@@ -860,6 +936,10 @@ impl NodeState {
     /// Set the contact at runtime: validated, saved in the library settings,
     /// and discovery (Pinakes, Nexus) is built from it.
     pub fn set_contact(&self, contact: &str) -> Result<(), String> {
+        self.set_contact_if(contact, &|| true)
+    }
+
+    pub(crate) fn set_contact_if(&self, contact: &str, still: &dyn Fn() -> bool) -> Result<(), String> {
         let contact = contact.trim().to_string();
         pm_pubky::config::validate_contact(&contact)?;
         let mut cfg = self.pubky.clone();
@@ -872,10 +952,11 @@ impl NodeState {
             (Err(e), _) => return Err(format!("pinakes client: {e}")),
             (_, Err(e)) => return Err(format!("nexus client: {e}")),
         };
-        self.library
-            .lock()
-            .expect("library poisoned")
-            .set_setting(CONTACT_KEY, &contact)
+        let lib = self.library.lock().expect("library poisoned");
+        if !still() {
+            return Err("another sign-in replaced this session".into());
+        }
+        lib.set_setting(CONTACT_KEY, &contact)
             .map_err(|e| e.to_string())?;
         *self.contact.write().expect("contact lock") = contact;
         *self.discovery.write().expect("discovery lock") = discovery;
@@ -1534,6 +1615,66 @@ impl NodeState {
         });
     }
 
+    /// AirPlay receivers and BluOS players switched on after the start (asleep, unplugged) get their
+    /// zones without a rescan: an mDNS pass `first` after the start and one every `every`, each a
+    /// short browse of the services that are on. What is new is registered as a rescan does it (saved
+    /// queue restored; one already there is left as it is). Call from inside the runtime.
+    pub fn spawn_mdns_watch(self: &Arc<Self>, first: std::time::Duration, every: std::time::Duration) {
+        let st = Arc::downgrade(self);
+        let browse: MdnsBrowse = Arc::new(move || {
+            let Some(st) = st.upgrade() else {
+                return (Vec::new(), Vec::new());
+            };
+            let on = |f: &std::sync::atomic::AtomicBool| f.load(std::sync::atomic::Ordering::Relaxed);
+            let wait = std::time::Duration::from_millis(1500);
+            let airplay = if on(&st.airplay) {
+                pm_out_airplay::discover(wait)
+            } else {
+                Vec::new()
+            };
+            let bluos = if on(&st.bluos) {
+                pm_out_bluos::discover(wait)
+            } else {
+                Vec::new()
+            };
+            (airplay, bluos)
+        });
+        self.spawn_mdns_passes(first, every, browse);
+    }
+
+    /// [`Self::spawn_mdns_watch`] with its browse given (tests pass what the network "answers").
+    pub(crate) fn spawn_mdns_passes(
+        self: &Arc<Self>,
+        first: std::time::Duration,
+        every: std::time::Duration,
+        browse: MdnsBrowse,
+    ) {
+        // (the watch holds the state weakly: a node that is shut down, or a test's, isn't kept alive)
+        let st = Arc::downgrade(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(first).await;
+            loop {
+                let Some(s) = st.upgrade() else { return };
+                let browse = browse.clone();
+                let new = tokio::task::spawn_blocking(move || {
+                    let (airplay, bluos) = browse();
+                    let mut new = s.register_airplay(airplay);
+                    new.extend(s.register_bluos(bluos));
+                    new
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("AirPlay/BluOS pass failed: {e}");
+                    Vec::new()
+                });
+                if !new.is_empty() {
+                    tracing::info!(count = new.len(), "AirPlay/BluOS speakers found after the start");
+                }
+                tokio::time::sleep(every).await;
+            }
+        });
+    }
+
     /// Renderers the owner added by address (another subnet, VLAN, or a
     /// device that ignores multicast); kept in the library settings.
     pub fn upnp_addresses(&self) -> Vec<String> {
@@ -1907,8 +2048,14 @@ impl NodeState {
         if !self.bluos.load(std::sync::atomic::Ordering::Relaxed) {
             return Vec::new();
         }
+        self.register_bluos(pm_out_bluos::discover(timeout))
+    }
+
+    /// BluOS players found (by the start, a rescan or the watch): each one not registered yet becomes
+    /// an output with a zone (its saved queue restored); one already there is left as it is.
+    pub(crate) fn register_bluos(self: &Arc<Self>, players: Vec<pm_out_bluos::Player>) -> Vec<OutputId> {
         let mut new = Vec::new();
-        for p in pm_out_bluos::discover(timeout) {
+        for p in players {
             let name = format!(
                 "bluos-{}",
                 p.id.chars()
@@ -1951,10 +2098,28 @@ impl NodeState {
         if !self.airplay.load(std::sync::atomic::Ordering::Relaxed) {
             return Vec::new();
         }
+        self.register_airplay(pm_out_airplay::discover(timeout))
+    }
+
+    /// AirPlay receivers found (by the start, a rescan or the watch): each one the node can play to and
+    /// hasn't registered yet becomes an output with a zone (its saved queue restored).
+    pub(crate) fn register_airplay(self: &Arc<Self>, devices: Vec<pm_out_airplay::Device>) -> Vec<OutputId> {
         let mut new = Vec::new();
-        for d in pm_out_airplay::discover(timeout) {
+        for d in devices {
             if let Some(why) = d.unsupported() {
-                tracing::info!(receiver = %d.name, "AirPlay receiver skipped: {why}");
+                // (said once per receiver: the watch finds it again every minute)
+                static SAID: Mutex<std::collections::BTreeSet<String>> =
+                    Mutex::new(std::collections::BTreeSet::new());
+                // (kept to MAX_FOUND_OUTPUTS: a network announcing endless receivers isn't remembered)
+                let first = {
+                    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+                    !said.contains(&d.id) && said.len() < MAX_FOUND_OUTPUTS && said.insert(d.id.clone())
+                };
+                if first {
+                    tracing::info!(receiver = %d.name, "AirPlay receiver skipped: {why}");
+                } else {
+                    tracing::debug!(receiver = %d.name, "AirPlay receiver skipped: {why}");
+                }
                 continue;
             }
             let out = Arc::new(
@@ -2097,20 +2262,48 @@ impl NodeState {
         let _ = self.events.send(ApiEvent::LibraryChanged);
     }
 
+    /// [`Self::begin_scan`] for a request that awaits while it holds the slot: given back when the
+    /// guard goes, also when the request is dropped midway (a client gone, a proxy's timeout).
+    pub(crate) fn scan_slot(self: &Arc<Self>) -> Option<ScanSlot> {
+        self.begin_scan().then(|| ScanSlot(self.clone()))
+    }
+
     pub fn set_sync(&self, sync: Option<Arc<crate::sync::PubkySync>>) {
         let derived = sync.as_ref().map(|s| profile_url(s.z32()));
-        let z32 = sync.as_ref().map(|s| s.z32().to_string());
+        let loads = sync.is_some();
         // Usage insights (usage.rs) end and nothing let in before changes anything: whichever
         // identity, also none, and whatever the cleanup below does. Swapped under their lock; the
         // old handle is dropped after
-        let old = self
-            .usage
-            .revoke_all_across(|| std::mem::replace(&mut *self.sync.lock().expect("sync lock"), sync));
+        let old = self.usage.revoke_all_across(|| {
+            let mut current = self.sync.lock().expect("sync lock");
+            // No reader or overlapping swap can observe the replacement while its
+            // predecessor still passes retirement checks.
+            if let Some(old) = current.as_ref() {
+                old.retire();
+            }
+            std::mem::replace(&mut *current, sync)
+        });
+        // A pass of the old session still running writes nothing more, to the library or to its
+        // homeserver, and its background loops stop (sync.rs, vault_cache.rs)
+        if let Some(old) = &old {
+            crate::test_hooks::pause_blocking(|| format!("sync.after_swap:{}", old.id()));
+            // What the replaced session's first sync left running is the new one's to start: reset,
+            // or the page shows a sync forever and storage saves wait on it (they skip while running)
+            let mut a = self.sync_activity.lock().expect("sync activity");
+            if a.owner == Some(old.id()) {
+                a.running = false;
+                a.step = None;
+                a.owner = None;
+                a.finished_at = Some(pm_library::db::now_unix());
+            }
+        }
         drop(old);
         // The owner's browser sessions belong to this identity from now on (Kimi review of #209).
-        // After the swap: a session minted meanwhile was checked against the identity then
-        if let Some(z32) = z32 {
-            if let Err(e) = crate::accounts::keep_owner_sessions_of(self, &z32) {
+        // After the swap: a session minted meanwhile was checked against the identity then. By the
+        // identity loaded when the lists change, not this call's: a later swap may have finished
+        // in between, and its identity's sessions stay
+        if loads {
+            if let Err(e) = crate::accounts::keep_current_owner_sessions(self) {
                 tracing::warn!("ending another identity's browser sessions failed: {}", e.message);
             }
         }
@@ -2127,6 +2320,15 @@ impl NodeState {
                 }
             }
         }
+    }
+
+    /// Listeners' homeservers through something else than their grants: a test's fake.
+    pub fn set_personal_homeserver(&self, h: Arc<dyn crate::personal::PersonalHomeserver>) {
+        *self.personal_homeserver.lock().expect("personal lock") = Some(h);
+    }
+
+    pub(crate) fn personal_override(&self) -> Option<Arc<dyn crate::personal::PersonalHomeserver>> {
+        self.personal_homeserver.lock().expect("personal lock").clone()
     }
 
     pub fn sync_handle(&self) -> Option<Arc<crate::sync::PubkySync>> {
@@ -2243,8 +2445,63 @@ impl NodeState {
         self.token_file.get().map(PathBuf::as_path)
     }
 
+    /// A WebDAV or drive scan going, counted from before it is spawned until the guard goes (also
+    /// when the scan panics).
+    pub(crate) fn side_scan(self: &Arc<Self>) -> SideScan {
+        self.side_scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        SideScan(self.clone())
+    }
+
+    /// The scan gate ([`Self::scan_gate`]), waited for.
+    pub(crate) fn scan_gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.scan_gate.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// No match correction from now until the guard goes (a backup restore, a folder move): new
+    /// ones are refused, and the ones going are waited out.
+    pub(crate) async fn no_corrections(self: &Arc<Self>) -> NoCorrections {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.corrections_held.fetch_add(1, SeqCst);
+        let held = NoCorrections(self.clone());
+        while self.correcting.load(SeqCst) > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        held
+    }
+
     pub fn is_scanning(&self) -> bool {
         *self.scanning.lock().expect("scan flag poisoned")
+    }
+}
+
+/// [`NodeState::scan_slot`]'s guard.
+pub(crate) struct ScanSlot(Arc<NodeState>);
+
+impl Drop for ScanSlot {
+    fn drop(&mut self) {
+        self.0.end_scan();
+    }
+}
+
+/// [`NodeState::no_corrections`]'s guard.
+pub(crate) struct NoCorrections(Arc<NodeState>);
+
+impl Drop for NoCorrections {
+    fn drop(&mut self) {
+        self.0
+            .corrections_held
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// [`NodeState::side_scan`]'s guard.
+pub(crate) struct SideScan(Arc<NodeState>);
+
+impl Drop for SideScan {
+    fn drop(&mut self) {
+        self.0
+            .side_scans
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

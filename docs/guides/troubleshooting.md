@@ -4,7 +4,9 @@ First look at the node's log; most problems are named there.
 
 | Install | Log |
 | :-- | :-- |
+| Odeion box (USB stick) | on its screen, logged in as `odeion`: `sudo odeion-compose logs --tail 200 music` |
 | Docker | `docker logs --tail 200 pubky-music` |
+| Docker bundle | in `deploy/bundle`: `docker compose logs --tail 200 music` |
 | Linux without Docker | `journalctl -u odeiond -n 200` (`-u pubky-music-node` on an install from before Odeion) |
 
 ## The web page doesn't open
@@ -25,6 +27,7 @@ its first start and keeps it in the `api-token` file in its data folder. Where i
 | :-- | :-- |
 | Docker | `docker exec pubky-music cat /data/api-token`, or `PM_TOKEN` if you set one |
 | Docker bundle | `PM_TOKEN` in `deploy/bundle/.env` |
+| Odeion box (USB stick) | on its screen, logged in as `odeion`: `sudo sed -n 's/^PM_TOKEN=//p' /opt/odeion/.env` |
 | Linux without Docker | `token` in `/etc/pubky-music/node.toml` |
 
 - The Log in screen says the node isn't linked to a Pubky identity yet: use the token the first
@@ -124,6 +127,12 @@ None of these needs to be open to the internet. Away from home, use
 
 Discover needs a contact: enter an email or website in **Settings › Discover**. MusicBrainz,
 Wikipedia and the Pubky music index ask every app for one.
+
+## A song or album has the wrong match
+
+Songs are matched to MusicBrainz on their own after each scan (**Your library › Node library ›
+Identify**, Match new songs automatically); a wrong one is fixed from the song's or album's ⋯ menu
+› **Wrong match?**: pick the right recording, search MusicBrainz, or choose **Not matched**.
 
 ## macOS or Windows won't open the app
 

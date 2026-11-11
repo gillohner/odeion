@@ -10,11 +10,13 @@
 //!
 //! `/v1/bookmarks` is the API; `/v1/favourites` answers the same for one release (deprecated).
 
+use crate::accounts::{Caller, Role};
 use crate::state::NodeState;
 use crate::types::*;
 use crate::{ApiError, ApiResult};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use pm_library::{BookmarkRow, Library};
 use pm_model::{MusicUri, TrackId};
@@ -44,15 +46,17 @@ pub(crate) fn canonical_for(lib: &Library, r: &ItemRef) -> Result<MusicUri, ApiE
         let a = lib
             .get_album(id)?
             .ok_or_else(|| ApiError::not_found(format!("album {id}")))?;
-        return a
-            .release_mbid
-            .map(|mbid| MusicUri::Release { mbid })
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    format!("“{}” has no MusicBrainz release id yet", a.title),
-                )
-            });
+        // Its tags' release, else the one its identified songs agree on
+        let release = match a.release_mbid {
+            Some(m) => Some(m),
+            None => lib.agreed_release(id)?,
+        };
+        return release.map(|mbid| MusicUri::Release { mbid }).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("“{}” has no MusicBrainz release id yet", a.title),
+            )
+        });
     }
     if let Some(id) = r.artist_id {
         let a = lib
@@ -308,13 +312,20 @@ pub(crate) fn collect(lib: &Library) -> Result<Bookmarks, ApiError> {
             out.artists.push(a);
         }
     }
-    for row in lib.list_bookmarks()? {
-        out.uris.push(row.uri.clone());
-        let Ok(uri) = MusicUri::parse(&row.uri) else {
-            if pm_pubky::schemas::post_uri(&row.uri).is_some() {
-                out.posts.push(row.uri);
+    join(lib, lib.list_bookmarks()?.into_iter().map(|r| r.uri), &mut out)?;
+    Ok(out)
+}
+
+/// Bookmarked URIs (their stored form) joined to the library where it has them: songs, albums
+/// and artists; posts and the rest by their URI.
+fn join(lib: &Library, uris: impl Iterator<Item = String>, out: &mut Bookmarks) -> Result<(), ApiError> {
+    for stored in uris {
+        out.uris.push(stored.clone());
+        let Ok(uri) = MusicUri::parse(&stored) else {
+            if pm_pubky::schemas::post_uri(&stored).is_some() {
+                out.posts.push(stored);
             } else {
-                out.other.push(row.uri);
+                out.other.push(stored);
             }
             continue;
         };
@@ -322,25 +333,51 @@ pub(crate) fn collect(lib: &Library) -> Result<Bookmarks, ApiError> {
             MusicUri::Recording { .. } | MusicUri::Isrc { .. } | MusicUri::Service(_) => {
                 match lib.tracks_by_canonical(&uri)?.into_iter().next() {
                     Some(t) => out.tracks.push(t),
-                    None => out.other.push(row.uri),
+                    None => out.other.push(stored),
                 }
             }
             MusicUri::Release { mbid } => match lib.album_by_release_mbid(*mbid)? {
                 Some(a) => out.albums.push(a),
-                None => out.other.push(row.uri),
+                None => out.other.push(stored),
             },
             MusicUri::Artist { mbid } => match lib.artist_by_mbid(*mbid)? {
                 Some(a) => out.artists.push(a),
-                None => out.other.push(row.uri),
+                None => out.other.push(stored),
             },
-            MusicUri::ReleaseGroup { .. } => out.other.push(row.uri),
+            MusicUri::ReleaseGroup { .. } => out.other.push(stored),
         }
     }
-    Ok(out)
+    Ok(())
 }
 
-/// `GET /v1/bookmarks` (and the deprecated `/v1/favourites`).
-pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Bookmarks> {
+/// What a listener's bookmark keeps: a post's link or the canonical URL. A song, album or artist
+/// not identified yet can't be one (node-only bookmarks belong to the owner's library): 422.
+fn listener_uri(lib: &Library, r: &ItemRef) -> Result<String, ApiError> {
+    if let Some(post) = r.uri.as_deref().and_then(pm_pubky::schemas::post_uri) {
+        return Ok(post);
+    }
+    Ok(canonical_for(lib, r)?.to_url())
+}
+
+/// A listener's caller key, when the request is a listener's.
+fn listener(c: &Caller) -> Option<&str> {
+    (c.role == Role::Listener).then_some(c.key.as_deref()).flatten()
+}
+
+/// `GET /v1/bookmarks` (and the deprecated `/v1/favourites`): the caller's own. A listener's
+/// come from their homeserver (personal.rs), with `homeserver` saying where they stand.
+pub(crate) async fn list(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<Caller>,
+) -> ApiResult<Bookmarks> {
+    if let Some(key) = listener(&c) {
+        let (uris, state) = crate::personal::bookmark_uris(&s, key).await?;
+        let lib = s.library.lock().expect("library poisoned");
+        let mut out = Bookmarks::default();
+        join(&lib, uris.into_iter(), &mut out)?;
+        out.homeserver = Some(state);
+        return Ok(Json(out));
+    }
     let lib = s.library.lock().expect("library poisoned");
     Ok(Json(collect(&lib)?))
 }
@@ -348,19 +385,29 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Bookmarks
 /// `PUT /v1/bookmarks {uri | track_id | album_id | artist_id}`.
 pub(crate) async fn put(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<Caller>,
     Json(r): Json<ItemRef>,
-) -> ApiResult<BookmarkChanged> {
-    let (uri, on) = set_at(&s.library.lock().expect("library poisoned"), &r, true, r.at)?;
-    s.notify_library();
-    Ok(Json(BookmarkChanged::new(uri, on)))
+) -> Result<Response, ApiError> {
+    change(&s, &c, &r, true).await
 }
 
 /// `DELETE /v1/bookmarks?uri=|track_id=|album_id=|artist_id=`.
 pub(crate) async fn delete(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<Caller>,
     Query(r): Query<ItemRef>,
-) -> ApiResult<BookmarkChanged> {
-    let (uri, on) = set_at(&s.library.lock().expect("library poisoned"), &r, false, r.at)?;
+) -> Result<Response, ApiError> {
+    change(&s, &c, &r, false).await
+}
+
+/// A bookmark set or cleared: on the owner's (the library, then their sync), or on a
+/// listener's own homeserver.
+async fn change(s: &Arc<NodeState>, c: &Caller, r: &ItemRef, on: bool) -> Result<Response, ApiError> {
+    if let Some(key) = listener(c) {
+        let uri = listener_uri(&s.library.lock().expect("library poisoned"), r)?;
+        return crate::personal::set_bookmark(s, key, uri, on, r.at).await;
+    }
+    let (uri, on) = set_at(&s.library.lock().expect("library poisoned"), r, on, r.at)?;
     s.notify_library();
-    Ok(Json(BookmarkChanged::new(uri, on)))
+    Ok(Json(BookmarkChanged::new(uri, on)).into_response())
 }

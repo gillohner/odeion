@@ -272,6 +272,14 @@ pub fn parse_feed(url: &str, xml: &str) -> Result<Feed, String> {
 
 // ---- storage ----
 
+/// Held across every read-modify-write of the feed and progress documents (whole documents in
+/// one setting each), so a change made while another is written isn't lost: the handlers, the
+/// background writer, the refresh and the gPodder sync all take it. Never held across an await.
+pub(crate) fn documents() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub(crate) fn load<T: for<'de> Deserialize<'de> + Default>(s: &NodeState, key: &str) -> T {
     let lib = s.library.lock().expect("library poisoned");
     lib.get_setting(key)
@@ -631,11 +639,14 @@ pub(crate) async fn subscribe(
     crate::streaming::ensure_on(&s, SOURCE_ID)?;
     let url = feed_from_show_id(&b.feed).unwrap_or_else(|| b.feed.trim().to_string());
     let f = fetch_feed(&s, &url).await?;
-    let mut all = feeds(&s);
-    all.retain(|x| x.id != f.id);
-    all.insert(0, f.clone());
-    store(&s, FEEDS, &all)?;
-    crate::gpodder::note_subscribed(&s, &f.url);
+    {
+        let _docs = documents();
+        let mut all = feeds(&s);
+        all.retain(|x| x.id != f.id);
+        all.insert(0, f.clone());
+        store(&s, FEEDS, &all)?;
+        crate::gpodder::note_subscribed(&s, &f.url);
+    }
     tracing::info!(feed = %f.url, episodes = f.episodes.len(), "podcast subscribed");
     Ok(Json(summary(&f, &progress(&s))))
 }
@@ -646,12 +657,16 @@ pub(crate) async fn unsubscribe(
     Path(id): Path<String>,
 ) -> ApiResult<Subscriptions> {
     crate::streaming::ensure_on(&s, SOURCE_ID)?;
-    let mut all = feeds(&s);
-    let Some(gone) = all.iter().position(|f| f.id == id).map(|i| all.remove(i)) else {
-        return Err(ApiError::not_found(format!("no subscription {id}")));
+    let all = {
+        let _docs = documents();
+        let mut all = feeds(&s);
+        let Some(gone) = all.iter().position(|f| f.id == id).map(|i| all.remove(i)) else {
+            return Err(ApiError::not_found(format!("no subscription {id}")));
+        };
+        store(&s, FEEDS, &all)?;
+        crate::gpodder::note_unsubscribed(&s, &gone.url);
+        all
     };
-    store(&s, FEEDS, &all)?;
-    crate::gpodder::note_unsubscribed(&s, &gone.url);
     let prog = progress(&s);
     Ok(Json(Subscriptions {
         subscriptions: all.iter().map(|f| summary(f, &prog)).collect(),
@@ -765,9 +780,10 @@ pub async fn refresh_all(s: &NodeState) {
         }
     }
     // Keep subscriptions made or dropped meanwhile.
-    let now_ids: Vec<String> = feeds(s).into_iter().map(|f| f.id).collect();
-    fresh.retain(|f| now_ids.contains(&f.id));
-    for f in feeds(s) {
+    let _docs = documents();
+    let now = feeds(s);
+    fresh.retain(|f| now.iter().any(|n| n.id == f.id));
+    for f in now {
         if !fresh.iter().any(|x| x.id == f.id) {
             fresh.push(f);
         }
@@ -850,6 +866,7 @@ pub(crate) async fn set_progress(
 ) -> ApiResult<Progress> {
     crate::streaming::ensure_on(&s, SOURCE_ID)?;
     find_episode(&s, &id).ok_or_else(|| ApiError::not_found(format!("no episode {id}")))?;
+    let _docs = documents();
     let mut prog = progress(&s);
     let p = prog.entry(id).or_default();
     if let Some(ms) = b.position_ms {
@@ -905,6 +922,7 @@ fn record_positions(s: &NodeState) {
     if playing.is_empty() {
         return;
     }
+    let _docs = documents();
     let all = feeds(s);
     let by_url: HashMap<&str, &Episode> = all
         .iter()

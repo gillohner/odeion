@@ -164,9 +164,10 @@ pub struct SyncReport {
     pub failed: Vec<(i64, String)>,
 }
 
-/// Is this refusal for good (drop the event) rather than "try again later"?
+/// Is this refusal for good (drop the event) rather than "try again later"? A 409 waits: a
+/// listener's heart before they connect their homeserver (`needs_connect`) lands once they do.
 fn refused_for_good(e: &SyncError) -> bool {
-    matches!(e, SyncError::Status(c, _) if (400..500).contains(c) && ![401, 403, 408, 429].contains(c))
+    matches!(e, SyncError::Status(c, _) if (400..500).contains(c) && ![401, 403, 408, 409, 429].contains(c))
 }
 
 /// The node's id from its `/v1/info`. A store that has none yet becomes this node's; a store
@@ -645,7 +646,16 @@ mod tests {
         assert!(refused_for_good(&SyncError::Status(404, String::new())));
         assert!(refused_for_good(&SyncError::Status(400, String::new())));
         assert!(!refused_for_good(&SyncError::Status(401, String::new())));
+        assert!(
+            !refused_for_good(&SyncError::Status(409, String::new())),
+            "a listener not connected yet"
+        );
         assert!(!refused_for_good(&SyncError::Status(503, String::new())));
+        assert!(
+            refused_for_good(&SyncError::Status(422, String::new())),
+            "a listener's homeserver won't take it"
+        );
+        assert!(!refused_for_good(&SyncError::Status(502, String::new())));
         assert!(!refused_for_good(&SyncError::Unreachable(String::new())));
     }
 }

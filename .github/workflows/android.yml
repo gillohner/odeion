@@ -93,6 +93,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: emulator harness regression checks
+        run: |
+          python3 -I tools/android-endpoint-test.py
+          python3 -I tools/android-native-pages-test.py
       - id: pick
         env:
           EVENT: ${{ github.event_name }}
@@ -115,7 +119,7 @@ jobs:
             if [ "$all" = true ]; then echo true; return; fi
             if printf '%s\n' "$files" | grep -Eq "^(\.github/workflows/android\.yml$|$1)"; then echo true; else echo false; fi
           }
-          zone=$(covers 'crates/(pm-desktop|pm-endpoint|pm-stream|pm-out-net|pm-out-local|pm-usb-audio|pm-api|pm-zones|pm-node)/|Cargo\.(toml|lock)$|tools/android-endpoint\.py$|tools/release/android-patch\.py$|tools/release/android/')
+          zone=$(covers 'crates/(pm-desktop|pm-endpoint|pm-stream|pm-out-net|pm-out-local|pm-usb-audio|pm-api|pm-zones|pm-node)/|Cargo\.(toml|lock)$|tools/android-(endpoint|ui-tour|native-pages)(-test)?\.py$|tools/release/android-patch\.py$|tools/release/android/')
           ring=$(covers 'crates/(pm-desktop|pm-pubky)/|tools/android-ring-probe\.py$|tools/release/android-patch\.py$')
           update=$(covers 'crates/pm-desktop/|tools/android-update-probe\.py$|tools/release/(android-patch\.py|android/|updater-manifest\.py|aab-check\.py|android-sign\.sh)|\.github/workflows/release\.yml$')
           background=$(covers 'crates/pm-desktop/|tools/release/android/|tools/release/android-patch\.py$|tools/android-background-probe\.py$|tools/android-endpoint\.py$')
@@ -362,6 +366,8 @@ jobs:
         with:
           name: android-node
       - run: tar -xzf node.tgz && rm node.tgz
+      - name: native screenshot text recognition
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr
       - name: enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -372,6 +378,9 @@ jobs:
         env:
           # No sound card on the runner: the emulator's audio is consumed in real time and dropped.
           QEMU_AUDIO_DRV: none
+          # Then the phone UI with a finger (tools/android-ui-tour.py): swipes, sheets, Back, with
+          # screenshots and a recording; every assertion must pass
+          PM_UI_TOUR: strict
         with:
           api-level: ${{ matrix.api }}
           arch: x86_64
@@ -392,6 +401,8 @@ jobs:
             /tmp/ae/*.png
             /tmp/ae/*.txt
             /tmp/ae/*.log
+            /tmp/ae/*.mp4
+            /tmp/ae/ui-native-pages.json
           if-no-files-found: ignore
 
   ring-transport:

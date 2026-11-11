@@ -160,6 +160,13 @@ pub trait Pending: Sized {
     fn poll(&self) -> impl std::future::Future<Output = Result<Option<Self::Done>, Failed>> + Send + '_;
     /// The same sign-in listening again on its relay inbox (a fresh client).
     fn resume(&self) -> Result<Self, String>;
+    /// The app is back on screen with the network answering, before the poll that may exchange
+    /// the grant: the records the exchange routes on are asked for anew (network-first), the
+    /// ones held from before the app went away may be behind.
+    /// An error ends the sign-in there, before any poll could spend Ring's approval.
+    fn returned(&self) -> impl std::future::Future<Output = Result<(), String>> + Send + '_ {
+        async { Ok(()) }
+    }
 }
 
 /// How long a sign-in waits for Pubky Ring before it gives up.
@@ -254,6 +261,21 @@ pub async fn until_ready(
 /// A relay listener that stopped before it read an approval listens again once per trip away
 /// (the network was cut), and once if the relay answered 5xx. Nothing is retried after a grant
 /// was sent.
+/// `fut`, unless the sign-in is cancelled or runs out of time first (checked every 250 ms).
+async fn unless_stopped<T>(stop: &Stop, fut: impl std::future::Future<Output = T>) -> Result<T, String> {
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            r = &mut fut => return Ok(r),
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if let Some(r) = stop.reason() {
+                    return Err(r.to_string());
+                }
+            }
+        }
+    }
+}
+
 pub async fn approval<F: Pending>(
     mut flow: F,
     since_trip: u64,
@@ -269,6 +291,10 @@ pub async fn approval<F: Pending>(
     // The trip after which the network was last seen answering: checked once per return, not
     // before every poll.
     let mut ready_after: Option<u64> = None;
+    // The records the exchange routes on are asked for anew before the poll that may exchange:
+    // after each return to the screen, and for each new flow (a resumed one runs on a fresh
+    // client with an empty cache)
+    let mut fresh_due = false;
     loop {
         if let Some(r) = stop.reason() {
             return Err(r.to_string());
@@ -280,6 +306,13 @@ pub async fn approval<F: Pending>(
                 .await
                 .map_err(str::to_string)?;
             ready_after = Some(trips());
+            fresh_due = true;
+        }
+        if fresh_due {
+            fresh_due = false;
+            unless_stopped(&stop, flow.returned()).await??;
+            // Cancel, the deadline, the screen and a trip away are all checked again before the poll
+            continue;
         }
         match flow.poll().await {
             Ok(Some(done)) => return Ok(done),
@@ -288,6 +321,7 @@ pub async fn approval<F: Pending>(
                 tracing::info!("Ring: the relay poll stopped while the app was away; listening again");
                 flow = flow.resume()?;
                 listening_since = trips();
+                fresh_due = true;
             }
             Err(Failed::Relay { server: true, error }) if !resumed_after_5xx => {
                 tracing::info!("Ring: the relay answered {error}; listening again once");
@@ -301,6 +335,7 @@ pub async fn approval<F: Pending>(
                 }
                 flow = flow.resume()?;
                 resumed_after_5xx = true;
+                fresh_due = true;
             }
             Err(Failed::Relay { error, .. } | Failed::Final(error)) => return Err(explain(&error)),
         }
@@ -384,6 +419,10 @@ mod tests {
         generation: usize,
         polls: std::sync::Arc<Mutex<Vec<bool>>>,
         fails: Vec<Failed>,
+        /// `fresh <generation>` and `poll <generation>`, in order.
+        events: std::sync::Arc<Mutex<Vec<String>>>,
+        /// How long `returned` takes.
+        fresh_for: Duration,
     }
 
     impl Fake {
@@ -392,6 +431,8 @@ mod tests {
                 generation: 0,
                 polls: polls.clone(),
                 fails,
+                events: Default::default(),
+                fresh_for: Duration::ZERO,
             }
         }
     }
@@ -400,6 +441,10 @@ mod tests {
         type Done = usize;
         async fn poll(&self) -> Result<Option<usize>, Failed> {
             self.polls.lock().unwrap().push(on_screen());
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("poll {}", self.generation));
             match self.fails.get(self.generation) {
                 Some(f) => Err(f.clone()),
                 None => Ok(Some(self.generation)),
@@ -410,8 +455,67 @@ mod tests {
                 generation: self.generation + 1,
                 polls: self.polls.clone(),
                 fails: self.fails.clone(),
+                events: self.events.clone(),
+                fresh_for: self.fresh_for,
             })
         }
+        async fn returned(&self) -> Result<(), String> {
+            tokio::time::sleep(self.fresh_for).await;
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("fresh {}", self.generation));
+            Ok(())
+        }
+    }
+
+    /// The flow that exchanges the grant has its records asked for anew before its poll: also a
+    /// flow resumed after the relay poll died while the app was away (a fresh, empty client).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resumed_flow_is_freshened_before_it_may_exchange() {
+        let _one = SERIAL.lock().await;
+        let port = relay_port().await;
+        let polls = std::sync::Arc::new(Mutex::new(Vec::<bool>::new()));
+        let since = trips();
+        left();
+        let flow = Fake::new(&polls, vec![dns()]);
+        let events = flow.events.clone();
+        let task = tokio::spawn(approval(flow, since, "127.0.0.1", port, soon(), |_| {}));
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        back();
+        let r = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r, Ok(1));
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events, ["fresh 0", "poll 0", "fresh 1", "poll 1"], "{events:?}");
+    }
+
+    /// Cancel while the records are asked for: the wait ends there, and nothing is polled (no
+    /// grant exchanged after the user cancelled).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_during_the_freshen_ends_the_wait_before_any_poll() {
+        let _one = SERIAL.lock().await;
+        let port = relay_port().await;
+        let polls = std::sync::Arc::new(Mutex::new(Vec::<bool>::new()));
+        let mut flow = Fake::new(&polls, vec![]);
+        flow.fresh_for = Duration::from_secs(5);
+        let events = flow.events.clone();
+        let task = tokio::spawn(approval(flow, trips(), "127.0.0.1", port, soon(), |_| {}));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        cancel();
+        let r = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("ends without waiting for the freshen")
+            .unwrap();
+        assert_eq!(r, Err(CANCELLED.to_string()));
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "nothing polled: {:?}",
+            events.lock().unwrap()
+        );
+        assert!(polls.lock().unwrap().is_empty());
     }
 
     fn dns() -> Failed {

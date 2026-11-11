@@ -124,9 +124,13 @@ done
 trap 'echo "restore: stopped half-way. To start over: docker compose down -v (this install only), empty HOMESERVER_DATA and POSTGRES_DATA if .env sets them, then ./restore.sh again" >&2' ERR
 untar() { docker run --rm -i -v "$1:/v" "$ALPINE" tar xzf - -C /v "${@:3}" < "$2"; }
 untar "$HS_DATA" "$B/homeserver/data.tar.gz"
-# Usage insights are never restored: a backup made before they were left out may hold them
+# Usage insights, problem reports and listeners' homeserver grants are never restored: a backup made
+# before they were left out may hold them (and a listener may have disconnected since: the grant
+# stays gone)
 untar "$NODE_DATA" "$B/node/data.tar.gz" --exclude ./usage.sqlite --exclude ./usage.sqlite-journal \
-  --exclude ./usage.sqlite-wal --exclude ./usage.sqlite-shm
+  --exclude ./usage.sqlite-wal --exclude ./usage.sqlite-shm --exclude ./feedback.sqlite \
+  --exclude ./feedback.sqlite-journal --exclude ./feedback.sqlite-wal --exclude ./feedback.sqlite-shm \
+  --exclude ./grants --exclude './grants/*'
 docker run --rm -i -v "$NODE_DATA:/v" "$ALPINE" sh -c 'cat > /v/library.db && chown "$(stat -c %u:%g /v)" /v/library.db' \
   < "$B/node/library.db"
 [ -z "$TUNNEL" ] || [ ! -f "$B/node/tunnel.tar.gz" ] || untar "$TUNNEL" "$B/node/tunnel.tar.gz"

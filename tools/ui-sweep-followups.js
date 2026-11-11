@@ -87,7 +87,9 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
       const vis = (sel) => p.$eval(sel, (e) => !!e.offsetParent).catch(() => false);
       if (w < 600) check(await vis('.pagebar .back'), `${w}: the album has its back link`);
       check(await vis('.pagebar .crumbs') === (w >= 600), `${w}: the trail shows ${w < 600 ? 'nowhere on a phone' : 'in the desktop layout'}`);
-      await p.click('[data-ssong="0"]'); await until(async () => /\/song\//.test(p.url()), 8000);
+      // (a phone's song row is one tap target that plays: its song page is in ⋯)
+      if (w < 600) { await p.click('[data-smore="0"]'); await p.click('.popover.menu:not([hidden]) >> text=Go to song page'); } else await p.click('[data-ssong="0"]');
+      await until(async () => /\/song\//.test(p.url()), 8000);
       await p.waitForSelector('#iabout', { timeout: 20000 });
       const backText = (await p.textContent('.pagebar .back').catch(() => '')).trim();
       check(/\/song\//.test(p.url()) && backText !== 'Same Name' && (w >= 600 || backText === 'Back'), `${w}: Back from the album of the same name says Back, never the title again ("${backText}")`);

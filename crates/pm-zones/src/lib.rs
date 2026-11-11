@@ -32,9 +32,9 @@ pub use registry::OutputRegistry;
 pub use sink::{
     amplitude_percent, AudioSink, BufferLevel, ClockSource, Describe, DeviceKind, DeviceMode, DeviceSettings,
     DsdKind, MemberStatus, Output, OutputDevice, OutputId, OutputInfo, PreferredMode, SinkError, SyncClass,
-    TrackMeta, UsbIds, GONE,
+    TrackMeta, Unmuted, UsbIds, GONE,
 };
-pub use sink::{caps_for_source, DeviceFormat};
+pub use sink::{caps_for_source, unmute_each, DeviceFormat, LastLevel, UnmuteSafety};
 pub use source::{
     FrameSource, Processor, ReplayGain, SkipFrames, SourceError, SourceFactory, StreamInfo, WithReplayGain,
 };

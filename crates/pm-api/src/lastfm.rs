@@ -449,21 +449,48 @@ async fn count_once(s: &Arc<NodeState>, key: &PlayKey) {
     send_scrobbles(s, vec![scrobble]).await;
 }
 
-/// Send scrobbles with any that waited; keep them all when Last.fm can't take them.
-async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
+/// Send scrobbles with any that waited ([`crate::send_queue`]): `new` joins the waiting list on
+/// disk first, then one sender at a time sends the list and removes what Last.fm took. What it
+/// couldn't take, and anything added meanwhile, waits for the next send; not connected, they
+/// wait for the owner to sign in again.
+pub(crate) async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
+    // Not stored (the library refused the write): sent from memory with the rest all the same
+    let unstored = match crate::send_queue::enqueue(
+        &s.library.lock().expect("library poisoned"),
+        PENDING_KEY,
+        new,
+        PENDING_MAX,
+    ) {
+        Ok(()) => Vec::new(),
+        Err((e, new)) => {
+            tracing::warn!("lastfm: the new ones couldn't be stored ({e}); sending them now");
+            new
+        }
+    };
     let Some((app, sess)) = ready(s) else {
-        // Not connected (any more): keep them for when the owner signs in again
-        let lib = s.library.lock().expect("library poisoned");
-        let mut all = pending(&lib);
-        all.extend(new);
-        let skip = all.len().saturating_sub(PENDING_MAX);
-        set_pending(&lib, &all[skip..]);
         return;
     };
-    let mut all = pending(&s.library.lock().expect("library poisoned"));
-    all.extend(new);
-    let mut left: Vec<Value> = Vec::new();
-    for chunk in all.chunks(BATCH) {
+    // The account a scrobble is kept for in memory while the library refuses it: this session
+    let who = (s.node_id.as_str(), "lastfm", sess.key.as_str());
+    let _one = crate::send_queue::sender(&s.node_id, "lastfm").await;
+    let current = |lib: &pm_library::Library| {
+        session_of(lib)
+            .filter(|x| x.submit && x.problem.is_none())
+            .is_some_and(|c| c.key == sess.key)
+    };
+    // The session and the list together, under the library's lock: a sender that waited while
+    // the owner signed in to another account sends nothing (the list is that account's now; what
+    // only memory had waits there for its own session)
+    let batch = {
+        let lib = s.library.lock().expect("library poisoned");
+        if !current(&lib) {
+            crate::send_queue::hold(who.0, who.1, who.2, unstored, PENDING_MAX);
+            return;
+        }
+        crate::send_queue::batch(&lib, PENDING_KEY, PENDING_MAX, who, unstored)
+    };
+    let mut sent: Vec<Value> = Vec::new();
+    for chunk in batch.all().chunks(BATCH) {
         let mut params: Vec<(String, String)> = Vec::new();
         for (i, sc) in chunk.iter().enumerate() {
             if let Some(m) = sc.as_object() {
@@ -480,16 +507,19 @@ async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
                 if ignored > 0 {
                     tracing::debug!(ignored, "lastfm ignored some scrobbles");
                 }
+                sent.extend_from_slice(chunk);
             }
             Err(e) => {
                 tracing::debug!("lastfm: {e}; keeping {} scrobbles for later", chunk.len());
                 note_problem(s, &e);
-                left.extend_from_slice(chunk);
             }
         }
     }
-    let skip = left.len().saturating_sub(PENDING_MAX);
-    set_pending(&s.library.lock().expect("library poisoned"), &left[skip..]);
+    // Still this session's list (a refusal just now may have marked a problem: the scrobbles are
+    // still its own)
+    let lib = s.library.lock().expect("library poisoned");
+    let owns = session_of(&lib).is_some_and(|c| c.key == sess.key);
+    crate::send_queue::settle(&lib, PENDING_KEY, PENDING_MAX, who, owns, batch, &sent);
 }
 
 // ---- similar artists ---------------------------------------------------------------------------
@@ -682,6 +712,8 @@ pub(crate) async fn disconnect(State(s): State<Arc<NodeState>>) -> ApiResult<Las
     let lib = s.library.lock().expect("library poisoned");
     save_session(&lib, None);
     set_pending(&lib, &[]);
+    // What waited in memory goes too: a later sign-in to the same account doesn't send it
+    crate::send_queue::forget_held(&s.node_id, "lastfm");
     drop(lib);
     Ok(Json(view(&s)))
 }

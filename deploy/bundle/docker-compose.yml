@@ -95,7 +95,7 @@ services:
     # the token, where empty is never valid and counts as unset. Works the same on Compose v2 and v5.
     # The node itself still gets the PM_ names below, which every image version reads
     # (docs/branding-compatibility.md).
-    image: ${ODEION_IMAGE:-${PM_IMAGE:-ghcr.io/gillohner/pubky-music-node}}:${ODEION_TAG:-${PM_TAG:-edge}}
+    image: ${ODEION_IMAGE:-${PM_IMAGE:-ghcr.io/gillohner/odeion}}:${ODEION_TAG:-${PM_TAG:-edge}}
     restart: unless-stopped
     network_mode: host
     environment:

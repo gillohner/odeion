@@ -1,151 +1,75 @@
 # Odeion
 
-Your own music server for the whole home. It runs on a computer that is always on: a NAS, a mini
-PC or a Raspberry Pi. It reads your music folder and plays it on the speakers you
-already have. That includes network streamers, Chromecast, AirPlay, Sonos, a DAC on a Raspberry
-Pi, and your computer or phone. You control it from a web page, the Odeion app, or Subsonic
-apps on your phone. Playlists, favourites and tags can be kept in your own Pubky account, so
-they follow you to a new node.
+<p align="center">
+  <img src="docs/brand/odeion/odeion-app-icon.svg" alt="Odeion logo: an O cut into three sound grooves" width="96">
+</p>
 
-It is for people who are comfortable installing an app on a NAS and following a few
-steps. You don't need to be a developer.
+**Your own music server for the whole home.**
+
+Odeion runs on a computer at home that stays on, such as a NAS, a mini PC or a Raspberry Pi. It
+plays your music files and the streaming services you use (TIDAL, Qobuz, Spotify, internet radio
+and more) on the speakers you already have, room by room, and on your phone or computer. With a
+Pubky account your playlists, favourites and tags are kept in your own storage, and you see what
+people on Pubky play and tag and where else a song can be found. You don't need to be a developer.
+
+<table>
+  <tr>
+    <td><img src="docs/images/readme/desktop-home.webp" alt="Home on a desktop: songs and albums trending on Pubky this week, with covers and the service each is from" width="420"><br><b>Home:</b> what people on Pubky play</td>
+    <td><img src="docs/images/readme/desktop-song.webp" alt="A song from the library on a desktop: its cover, tags on Pubky with the initials of who tagged them, and a link to the same song on TIDAL" width="420"><br><b>A song you have:</b> its tags on Pubky, and where else it is</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/readme/desktop-playlist.webp" alt="A playlist on a desktop, public on Pubky and synced to the homeserver: twelve songs from the library and TIDAL" width="420"><br><b>A shared playlist,</b> kept on your homeserver</td>
+    <td><img src="docs/images/readme/desktop-now-playing.webp" alt="Now playing on a desktop: Mr. Brightside by The Killers, paused, with the next songs in the queue" width="420"><br><b>Now playing,</b> with the queue</td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td><img src="docs/images/readme/phone-song.webp" alt="A song from the library on a phone: Mr. Brightside, also on TIDAL and three more services, with a few lines from Wikipedia" width="240"><br>A song you have, also on TIDAL and three more</td>
+    <td><img src="docs/images/readme/phone-tags.webp" alt="A TIDAL song on a phone: tags people on Pubky gave its link, each with the initials of who tagged it" width="240"><br>Tags from people on Pubky</td>
+    <td><img src="docs/images/readme/phone-now-playing.webp" alt="Now playing on a phone: cover, seek bar, play controls and volume" width="240"><br>Now playing on a phone</td>
+  </tr>
+</table>
+
+Screenshots from a real library on the newest build (November 2026).
+
+## Get started
+
+| You have | Guide |
+| :-- | :-- |
+| A spare PC or mini PC to make an Odeion box (it erases its disk) | [Install from a USB stick](docs/guides/install-iso.md) |
+| A NAS or server with Docker (Synology, QNAP, Unraid, TrueNAS, any Linux) | [Install with Docker](docs/guides/install-docker.md) |
+| A Raspberry Pi or Linux machine without Docker | [Install on Linux](docs/guides/install-linux.md) |
+| A phone or computer to listen on and control it | [The app](docs/guides/desktop-app.md) or [the web app](docs/guides/install-web-app.md) |
+
+Then: [first steps after installing](docs/guides/overview.md#first-steps-after-installing). How it
+all fits together, Pubky and Pinakes, and what works today: [Overview](docs/guides/overview.md).
 
 ## What you need
 
-- **A computer that stays on**, on your home network: a NAS, a mini PC, a
-  Raspberry Pi 4 or 5 (64-bit), or any Linux machine. Docker makes it easiest.
-- **Your music as files** (FLAC, ALAC, WAV, AIFF, DSD, MP3, AAC, Ogg) in a folder that computer
-  can read: a local disk, a USB drive, or a network share mounted on it.
-- **Something to play on**: see [Speakers](docs/guides/speakers.md). A web browser works too.
-- Optional: the **Pubky Ring** app on your phone, to sign in with your Pubky account and to reach
-  the node away from home.
-
-## Choose how to run it
-
-| You have | Use | Guide |
-| :-- | :-- | :-- |
-| A spare PC or mini PC to make an Odeion box (it erases its disk) | the installer ISO on a USB stick | [Install an Odeion box from a USB stick](docs/guides/install-iso.md) |
-| A NAS or server with Docker (Synology, QNAP, Unraid, TrueNAS, any Linux) | the Docker image | [Install with Docker](docs/guides/install-docker.md) |
-| A Raspberry Pi or Linux machine without Docker | the release download and a system service | [Install on Linux without Docker](docs/guides/install-linux.md) |
-| A Mac, Windows PC, Linux desktop or Android phone | the Odeion app, to control a node and play on that device | [The desktop and Android app](docs/guides/desktop-app.md) |
-| A Raspberry Pi with a DAC, as a speaker for your node | squeezelite | [Speakers](docs/guides/speakers.md#a-raspberry-pi-with-a-dac-squeezelite) |
-| A phone, tablet or computer with just a browser | the web app, installed from your node's page | [Install the web app](docs/guides/install-web-app.md) |
-
-The app and squeezelite don't run a node themselves: install the node with Docker or on Linux,
-then connect them to it. Umbrel isn’t supported right now; use Docker or the Linux install.
-
-## First steps after installing
-
-1. **Open the web page.** In a browser on the same network, go to `http://<node address>:7788`
-   (for example `http://192.168.1.10:7788`).
-2. **Enter the access token.** Click **Or paste the API token**, paste it and press **Connect**.
-   Where the token is:
-   - Docker: `docker exec pubky-music cat /data/api-token`, the token the node made (unless
-     you set `PM_TOKEN`).
-   - Linux without Docker: the token the install printed, also in `/etc/pubky-music/node.toml`.
-
-   The browser remembers it. Sign-in with Pubky Ring works once the node itself is signed in
-   (step 5).
-   Home's **Get started** card lists what is left to do on this node, and only that. It goes
-   when those steps are done; **Hide these steps** hides it for everyone, and **Settings › Home
-   for everyone** shows it again.
-3. **Add your music.** With Docker, the node reads your music folder (`/music`) by
-   itself when it starts. Otherwise, in **Your library › Node library** (or on the Get started
-   card), type the music folder's path and press **Add folder**. The node keeps watching its
-   folders: new files show up about 15 seconds after they land.
-4. **Pick a speaker.** Speakers on your network show up by themselves under **Settings › Zones and
-   outputs**. Choose one with the zone button at the bottom right of the player bar (it says
-   **This browser** at first, which plays in the browser you are using), then press play. If a
-   speaker is missing, see [Speakers](docs/guides/speakers.md).
-5. **Optional:**
-   - Sign the node in to Pubky in **Settings › My accounts › Sign in with Pubky**, using the Pubky
-     Ring app. This keeps your playlists, favourites and tags in your Pubky account, and lets
-     the Odeion app find the node from anywhere.
-   - Add an email address or website in **Settings › Discover**. MusicBrainz, Wikipedia and the
-     Pubky music index ask every app for a way to reach whoever runs it. This also turns on
-     Discover.
-   - Connect streaming services under **Sources** (TIDAL, Spotify, Internet Archive, Audius and
-     more) and internet radio under **Radio**.
-
-## Away from home
-
-The Odeion app reaches your node from anywhere once the node is signed in to Pubky. Nothing
-to open on your router. For a browser or Subsonic apps away from home, use Tailscale or a
-Cloudflare Tunnel. See [Remote access](docs/guides/remote-access.md).
-
-## Updating and backups
-
-- **Update:** Docker: pull the new image and recreate the container. The desktop app asks when a new version is out (a `.deb` is updated by installing the new one).
-- **Back up:** **Settings › Backup** makes one file with your library, playlists, favourites,
-  history and settings (never your music files), and can do it every day or week to a folder.
-  With the node's own homeserver, `deploy/bundle/backup.sh` backs up the node and the homeserver
-  together, and `restore.sh` puts them back.
-
-Details: [Backups and updates](docs/guides/backup-and-update.md).
+- **A computer that stays on**, on your home network. Docker makes it easiest (amd64 and arm64);
+  the node also runs on Linux, macOS and Windows without Docker.
+- **Your music** as files (FLAC, ALAC, WAV, AIFF, DSD, MP3, AAC, Ogg), streaming accounts, or both.
+- **Something to play on**, on the same network: see [Speakers](docs/guides/speakers.md). A web
+  browser works too.
+- **Optional:** the Pubky Ring app for your Pubky account, and [external resources](docs/guides/overview.md#pinakes)
+  (Pinakes, MusicBrainz, Wikipedia) for the social side, covers and facts.
 
 ## Downloads
 
-| | Latest release | Edge (newest code, every change to `main`) |
-| :-- | :-- | :-- |
-| All files | [releases/latest](https://github.com/gillohner/pubky-music-node/releases/latest) | [releases/tag/edge](https://github.com/gillohner/pubky-music-node/releases/tag/edge) |
-| macOS (universal) | [.dmg](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-macos-universal.dmg) | [.dmg](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-macos-universal.dmg) |
-| Windows | [setup .exe](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-windows-x86_64-setup.exe) | [setup .exe](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-windows-x86_64-setup.exe) |
-| Linux x86_64 | [.AppImage](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-linux-x86_64.AppImage), [.deb](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-linux-x86_64.deb) | [.AppImage](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-linux-x86_64.AppImage), [.deb](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-linux-x86_64.deb) |
-| Linux arm64 | [.AppImage](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-linux-arm64.AppImage), [.deb](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-linux-arm64.deb) | [.AppImage](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-linux-arm64.AppImage), [.deb](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-linux-arm64.deb) |
-| Android and Google TV | [arm64 .apk](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-android-arm64.apk) | [arm64 .apk](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-android-arm64.apk) |
-| The node, without Docker | `pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz`, `…-windows-x86_64.zip`, `…-macos-arm64.tar.gz` | same names under edge |
-| Docker image | `ghcr.io/gillohner/pubky-music-node:latest` (amd64, arm64) | `…:edge` |
+The app, the node and the Odeion box installer, for the latest release and for edge (newest
+code): [Downloads](docs/guides/overview.md#downloads), or
+[GitHub releases](https://github.com/gillohner/odeion/releases).
 
-Every release has a `SHA256SUMS` file to check downloads against.
+## Help and feedback
 
-## Help
-
-- Something not working: [Troubleshooting](docs/guides/troubleshooting.md).
-- Questions and bug reports: [GitHub issues](https://github.com/gillohner/pubky-music-node/issues).
-  Include how you installed it, the version (**Settings › About and updates**) and the node's log
-  (`docker logs pubky-music`, or `journalctl -u odeiond`).
-
-## What it does
-
-- **Library:** scans folders, reads tags (MusicBrainz ids, ReplayGain, embedded art, lyrics),
-  watches for new files, fetches covers and artist pages, full-text search, play history.
-- **Playback:** bit-perfect by default, with every conversion shown in the signal path. Gapless
-  zones, grouped zones kept in sync, per-zone EQ and other DSP, queues that survive restarts,
-  internet radio.
-- **Sources:** your files, internet radio, the Internet Archive, Audius and Jamendo without an
-  account, TIDAL and Spotify with yours, and more. [Streaming services](docs/STREAMING-PROVIDERS.md).
-- **Controls:** the web page (works on phones; add it to the home screen), the Odeion app,
-  any OpenSubsonic app (Symfonium, Feishin, Amperfy: user `pubky`, the token as password), and
-  Home Assistant ([guide](docs/home-assistant.md)).
-- **People:** invite others to play your music with their own Pubky sign-in, or start a party
-  link for guests (**Settings › People**).
-- **Pubky:** playlists, favourites, tags and listening history kept in your Pubky account; Discover
-  shows what people on Pubky play.
+- Something not working: [Troubleshooting](docs/guides/troubleshooting.md). Away from home:
+  [Remote access](docs/guides/remote-access.md). Updates and backups:
+  [Backups and updates](docs/guides/backup-and-update.md).
+- Using someone else's node: tell its owner with **?** › **Report a problem…** in the top bar.
+- Questions, bug reports and ideas: [GitHub issues](https://github.com/gillohner/odeion/issues).
 
 ## For developers
 
-- Building and running from source, every config option and all deployment shapes (including the
-  bundle with its own Pubky homeserver): [docs/deploy.md](docs/deploy.md).
-- HTTP and WebSocket API: [docs/api.md](docs/api.md). Connection and discovery details:
-  [docs/CONNECTION.md](docs/CONNECTION.md). Zones and outputs: [docs/ZONES.md](docs/ZONES.md).
-- Design decisions: [docs/adr/](docs/adr/). Status by milestone: [docs/STATUS.md](docs/STATUS.md).
-  What changed when: [docs/CHANGELOG.md](docs/CHANGELOG.md). Releases:
-  [docs/RELEASING.md](docs/RELEASING.md).
-- The app: [crates/pm-desktop/README.md](crates/pm-desktop/README.md).
-- Odeion was called Pubky Music before; what kept its old name and why (compat: pre-Odeion names):
-  [docs/branding-compatibility.md](docs/branding-compatibility.md).
-
-```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo build --release -p pm-node --features alsa   # needs libasound2-dev; builds odeiond and pm-node
-```
-
-The workspace is Rust: the `pm-node` package builds the node, `odeiond` (and `pm-node`, its
-pre-Odeion name, the same program), `pm-api` the HTTP API and web UI, `pm-library`
-the library, `pm-zones` and `pm-audio` playback, `pm-out-*` the speaker protocols, `pm-pubky` the
-Pubky side, `pm-desktop` the app (outside the workspace).
-
-Every outbound request names the node and its contact; MusicBrainz is called at most once per
-second, and Pinakes lookups are batched. No copyrighted audio is ever written under a public
-`/pub/` path.
+The node is `odeiond`, a Rust workspace. Build, config, API and design notes:
+[For developers](docs/guides/overview.md#for-developers).
