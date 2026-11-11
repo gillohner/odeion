@@ -134,6 +134,9 @@ jobs:
       - run: python3 -I tools/bundle-settings-check.py
       - run: python3 -I tools/units-check.py
       - run: python3 -I tools/compose-check.py
+      # The release's tag copy to the new image name, against stubbed registry answers: it stops
+      # before any copy when a lookup fails, and copies only the version tags the new name lacks
+      - run: python3 -I tools/image-tag-copy-check.py
   desktop:
     needs: changes
     if: needs.changes.outputs.code == 'true'
