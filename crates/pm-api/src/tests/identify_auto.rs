@@ -1664,3 +1664,157 @@ async fn the_replay_of_a_library_copy_counts_only() {
     assert!(replay_refusal(&node.path().join("library.sqlite")).is_some());
     assert!(replay_refusal(&path).is_none());
 }
+
+/// An album whose tags name no release is matched when its identified songs agree on one (its
+/// page then takes tags); songs on different releases, or only automatic picks, leave it
+/// unmatched.
+#[tokio::test]
+async fn an_album_takes_the_release_its_identified_songs_agree_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let app = router(s.clone());
+    let song = |album: &str, no: u32, release: &str, confidence: pm_model::Confidence| {
+        let mut t = untagged_track(
+            dir.path().join(format!("music/{album}/{no:02}.flac")),
+            &format!("Song {no}"),
+            "Band",
+        );
+        t.album = Some(pm_model::Album {
+            id: None,
+            title: album.into(),
+            album_artist: Some("Band".into()),
+            release_mbid: None,
+            release_group_mbid: None,
+            year: None,
+            upc: None,
+            total_discs: None,
+        });
+        let lib = s.library.lock().unwrap();
+        let id = lib.upsert_track(&t).unwrap();
+        lib.settle(
+            id.0,
+            &pm_library::db::SettleAnswer::Identified {
+                recording: pm_model::MusicUri::Recording {
+                    mbid: mbid(&rec(no + album.len() as u32 * 10)),
+                },
+                confidence,
+                acoustid: None,
+                detail: "test".into(),
+                release: Some(mbid(release)),
+                input_key: None,
+            },
+        )
+        .unwrap();
+        lib.get_track(id).unwrap().unwrap().album.unwrap().id.unwrap()
+    };
+    let fit = pm_model::Confidence::AlbumFit { score: 0.95 };
+    let agreed = song("Four", 1, REL, fit);
+    song("Four", 2, REL, fit);
+    let split = song("Split", 1, REL, fit);
+    song("Split", 2, REL2, fit);
+    let auto = song("Auto", 1, REL, pm_model::Confidence::Auto { score: 0.95 });
+    let tags = |album: i64| {
+        let app = app.clone();
+        async move {
+            call(&app, "GET", &format!("/v1/tags?album_id={album}"), None)
+                .await
+                .1
+        }
+    };
+    let t = tags(agreed).await;
+    assert_eq!(t["uri"], format!("https://musicbrainz.org/release/{REL}"), "{t}");
+    assert!(t.get("needs_match").is_none(), "{t}");
+    assert_eq!(tags(split).await["needs_match"], true);
+    assert_eq!(tags(auto).await["needs_match"], true);
+}
+
+/// Every reason the settling can give, and every word of its details, is one the replay line may
+/// carry: a new reason or detail word that isn't listed fails here, not on a real replay.
+#[test]
+fn every_reason_the_settling_can_give_is_listed() {
+    use pm_library::auto_settle::{Rule, Stay, MARK_WORDS, WHY_WORDS};
+    let mut words: Vec<String> = Vec::new();
+    words.extend(Rule::ALL.iter().map(|r| r.name().to_string()));
+    words.extend(Stay::ALL.iter().map(|r| r.name().to_string()));
+    words.extend(
+        pm_library::AutoSettle::ALL
+            .iter()
+            .map(|r| format!("changed/{}", r.name())),
+    );
+    words.extend(["no_file", "unreadable", "changed"].map(String::from));
+    words.extend(WHY_WORDS.iter().chain(MARK_WORDS).map(|w| w.to_string()));
+    // The details' shapes, built as the settling builds them
+    for src in ["search", "fingerprint", "album"] {
+        for bucket in ["lt50", "50to80", "80to90", "ge90"] {
+            for len in ["len_fit", "len_off", "len_unknown"] {
+                for audio in ["strong", "no_strong"] {
+                    words.push(format!("different_songs/tags_row:{src}:{bucket}:{len}:{audio}"));
+                }
+            }
+        }
+    }
+    for m in MARK_WORDS {
+        words.push(format!("version/title:{m}"));
+        words.push(format!("version/folder:{m}"));
+        words.push(format!("album_says_version/album:{m}"));
+    }
+    for a in ["various", "different", "missing"] {
+        for u in ["unanimous", "split"] {
+            words.push(format!("artist/{a}:{u}"));
+        }
+    }
+    for w in &words {
+        assert!(replay_listed(w), "not listed: {w}");
+    }
+    // And what the settling says on real cases
+    let t = pm_library::same_song::FileTags {
+        title: "Song".into(),
+        artist: "Band".into(),
+        album: Some("Album".into()),
+        duration_ms: Some(10_000),
+    };
+    let opt = |i: u32, title: &str, artist: &str, score: f32, source: &str, secs: Option<f64>| {
+        pm_library::auto_settle::Opt {
+            recording: rec(i),
+            release: None,
+            title: Some(title.into()),
+            artist: Some(artist.into()),
+            release_title: None,
+            score,
+            source: source.into(),
+            duration_secs: secs,
+            live_only: None,
+            stored: true,
+        }
+    };
+    let cases = vec![
+        vec![opt(1, "Song (Live)", "Band", 0.95, "fingerprint", Some(10.0))],
+        vec![opt(1, "Song", "Various Artists", 0.95, "fingerprint", Some(10.0))],
+        vec![
+            opt(1, "Other", "Band", 0.95, "fingerprint", Some(10.0)),
+            opt(2, "Song", "Band", 0.6, "search", None),
+        ],
+        vec![opt(1, "Song", "Band", 0.4, "search", None)],
+        vec![opt(1, "Song", "Band", 0.95, "fingerprint", None)],
+        vec![
+            opt(1, "Song", "Band", 0.95, "album", None),
+            opt(2, "Song", "Band", 0.95, "album", None),
+        ],
+    ];
+    for options in cases {
+        let (v, why) = pm_library::auto_settle::decide_why(&pm_library::auto_settle::Song {
+            tags: &t,
+            options: &options,
+            folder_release: None,
+            rejected: false,
+            answer: true,
+        });
+        if let pm_library::auto_settle::Verdict::Stay(r) = v {
+            let key = match why {
+                Some(d) => format!("{}/{d}", r.name()),
+                None => r.name().to_string(),
+            };
+            assert!(replay_listed(&key), "not listed: {key}");
+        }
+    }
+}
