@@ -42,6 +42,12 @@ impl Player {
         })
     }
 
+    /// The endpoint: its outputs and who uses them (the app's own player uses the same).
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn endpoint(&self) -> &Arc<pm_endpoint::Endpoint> {
+        &self.endpoint
+    }
+
     /// Listen on `ip`, on the usual endpoint port (another when it is taken); the listener on
     /// another address stops first. `None` when nothing can be bound; the UI's "This browser"
     /// zone still plays then.
@@ -138,6 +144,12 @@ pub async fn register(mut s: Settings, player: Option<Arc<Player>>) -> Settings 
 
 /// The node's ids for this player's outputs, as the last registration answered.
 static OUTPUT_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The node's ids for this player's outputs (the phone's own zone plays on one of them).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn output_ids() -> Vec<String> {
+    OUTPUT_IDS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 /// For the node's page: `window.pmDesktop.outputs` (the node's ids for this app's player) and
 /// `output` (the one, on a phone), then a `pmdesktop:output` event, so the page shows what this

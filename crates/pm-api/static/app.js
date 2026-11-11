@@ -1541,6 +1541,7 @@
     const has = (f) => player && typeof player[f] === 'function';
     return {
       addEventListener: (t, f) => ev.addEventListener(t, f),
+      removeEventListener: (t, f) => ev.removeEventListener(t, f),
       get paused() { return st !== 1 && st !== 3; },
       get ended() { return st === 0; },
       get currentTime() { return has('getCurrentTime') ? player.getCurrentTime() || 0 : 0; },
@@ -1569,14 +1570,295 @@
       stop() { clearInterval(tick); if (has('stopVideo')) player.stopVideo(); vid = null; st = -1; },
     };
   })();
+  // The Android app plays the node's streams itself (`window.pmDesktop.nativePlayer`): decoded in
+  // the app and played through the phone's output the way the phone's own zone plays (bit-perfect
+  // or Exclusive USB to a USB DAC), not through Android's mixer. The same surface as <audio>; the
+  // app says where it is in `pmdesktop:native` events. What it can't play (a playlist stream,
+  // another codec) the page plays itself (`nativerefused`).
+  const tauriInvoke = () => (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) || null;
+  const nativeOk = () => !!(window.pmDesktop && window.pmDesktop.nativePlayer && tauriInvoke());
+  const nat = (() => {
+    const ev = new EventTarget(); const fire = (t, detail) => ev.dispatchEvent(new CustomEvent(t, { detail }));
+    const call = (cmd, args) => { const f = tauriInvoke(); return f ? f(cmd, args || {}) : Promise.reject(new Error('the app’s player is off')); };
+    const abs = (u) => { try { return new URL(u, location.href).href; } catch { return ''; } };
+    // st: the app's last status (when it came); src: what the page set; at: where to start it
+    // (restore, a seek before it plays); live: the app has src; adopt: the app already went on
+    // to the song handed ahead; want: play pressed, the app not there yet; ahead: last handed
+    let st = null; let stAt = 0; let src = ''; let at = 0; let live = false; let adopt = false; let want = false; let done = false; let vol = 1; let ahead = null; let held = false; let seq = 0; let fresh = false; let opening = false;
+    let nativeCommand = 0; let external = null;
+    window.addEventListener('pmdesktop:native-command', (e) => {
+      const d = e.detail || {}; if (!(d.id > nativeCommand)) return;
+      // A seek or queue notice cancels an older direct-command error, but the pending local
+      // open still owns its reply (including the timer before native_load). A new local play
+      // supplies its own token; only an explicit system pause cancels and settles this open.
+      nativeCommand = d.id; external = null;
+      if (d.action === 'pause') ++seq;
+      if (d.action === 'play') { if (st && st.url === src) at = st.position_ms / 1000; held = false; want = true; external = { id: d.id, seq }; }
+      else if (d.action === 'pause') { held = true; want = false; opening = false; fire('pause'); }
+      else if (d.action === 'resume') held = false;
+    });
+    window.addEventListener('pmdesktop:native-failed', (e) => {
+      const d = e.detail || {}, err = d.error || {};
+      if (!external || d.id !== external.id || seq !== external.seq || d.url !== src || held || err.overtaken) return;
+      external = null; opening = false; want = false; live = false; at = Math.max(0, Number(d.at) || 0);
+      fire('pause'); fire(err.refused ? 'nativerefused' : 'nativefailed', { why: String(err.message || 'it did not start'), at: d.at || 0 });
+    });
+    const mine = () => live && !!st && st.url === src;
+    const playing = () => mine() && st.transport === 'playing';
+    window.addEventListener('pmdesktop:native', (e) => {
+      const was = st; st = e.detail || null; stAt = Date.now(); if (!st) return;
+      if (!live) return;
+      // The song opens again (the same one tapped while it played): the old copy's updates and
+      // its end wait
+      if (opening && (st.url === src || (was && was.url === src))) return;
+      // (an end of the song before this one, still playing while this one opens, is not this one's)
+      const ended = was && st.ended > was.ended && was.url === src;
+      if (ended) {
+        // Handed ahead: the app already plays the next one (the same one for repeat one); the
+        // page's next src is it
+        adopt = !!st.url && st.advanced > was.advanced; want = false;
+        if (!adopt) done = true;
+        fire('ended'); return;
+      }
+      if (st.url !== src) return;
+      if (st.refused) { live = false; want = false; fire('nativerefused', st.refused); return; }
+      // A refused resume can stay paused (for example, its DAC went away). This is a
+      // completed play request, not a stream failure to retry on another output.
+      if (st.transport === 'paused' && st.error && !st.broke) { want = false; fire('pause'); return; }
+      // A break mid-song: the page's mid-song retry, whatever the page heard before it (at its
+      // very start: the song's one retry)
+      if (st.broke && !(was && was.url === src && was.broke) && !st.taken) { fire('pause'); if (st.position_ms > 0) fire('error'); else fire('nativefailed', { why: st.error || 'the stream broke off', at: 0 }); return; }
+      // (a song opened again while it played: its start is a start, for the bar and the spinner)
+      const before = !fresh && was && was.url === src ? was.transport : 'stopped';
+      if (st.transport === 'playing') fresh = false;
+      if (st.transport === 'playing' && before !== 'playing') { want = false; done = false; fire('play'); fire('playing'); }
+      // A break mid-song: the page's mid-song retry; a song that didn't start: its one retry; a
+      // device gone (a DAC unplugged): paused, said in the bar
+      else if (st.transport !== 'playing' && before === 'playing') { fire('pause'); if (st.error && !st.taken && !st.broke && st.transport === 'stopped' && st.position_ms === 0) fire('nativefailed', st.error); }
+      // The song handed ahead didn't open (the node busy): the page's one retry
+      else if (st.error && !st.taken && st.transport === 'stopped' && (!was || !was.error) && st.position_ms === 0) fire('nativefailed', st.error);
+      if (was && was.duration_ms !== st.duration_ms) fire('durationchange');
+      if (!was || was.position_ms !== st.position_ms) fire('timeupdate');
+    });
+    return {
+      addEventListener: (t, f, o) => ev.addEventListener(t, f, o),
+      removeEventListener: (t, f) => ev.removeEventListener(t, f),
+      get paused() { return !(want || playing()); },
+      get ended() { return done; },
+      // A pause pressed since the last play (a retry doesn't start it again)
+      get held() { return held; },
+      get currentTime() {
+        if (!mine()) return at;
+        const run = st.transport === 'playing' ? Math.min(1000, Date.now() - stAt) : 0;
+        return (st.position_ms + run) / 1000;
+      },
+      set currentTime(v) { external = null; const ms = Math.max(0, Math.round((Number(v) || 0) * 1000)); done = false; if (mine()) { st = { ...st, position_ms: ms }; stAt = Date.now(); call('native_seek', { ms }).catch(() => {}); } else at = ms / 1000; },
+      get duration() { return mine() && st.duration_ms ? st.duration_ms / 1000 : NaN; },
+      // Never a gain on the samples here: the level is Android's (or the DAC's own)
+      get volume() { return vol; },
+      set volume(v) { vol = v; },
+      get muted() { return false; },
+      set muted(_) { /* Android's */ },
+      get src() { return src; },
+      set src(v) {
+        external = null; const u = abs(v);
+        if (adopt && st && u === st.url) {
+          adopt = false; src = u; live = true; done = false;
+          if (st.transport === 'playing') setTimeout(() => { if (src === u) { fire('play'); fire('playing'); } }, 0);
+          return;
+        }
+        adopt = false; src = u; at = 0; live = false; want = false; done = false;
+        // As <audio> does once it knows the song: the page may seek it now (restore)
+        setTimeout(() => { if (src === u) fire('loadedmetadata'); }, 0);
+      },
+      set preload(_) { /* opened when it plays */ },
+      load() { /* opened when it plays */ },
+      async play() {
+        external = null; if (!src) throw new Error('nothing to play');
+        done = false; held = false;
+        if (mine()) {
+          if (st.transport === 'playing') return;
+          // Carry on (it reopens the song when the node took the output, it broke, or it ended):
+          // a failure goes to the page's own handlers, as a failed start does
+          // An open under way (a load, or a play that reopens) carries the outcome: this press
+          // only says play
+          if (opening) { want = true; call('native_play').catch(() => {}); return; }
+          want = true; const tok = ++seq; const pos = this.currentTime; const prior = st;
+          // (a play can reopen the song: after the node took the output, a break, the end)
+          opening = true;
+          try { await call('native_play'); } catch (e) {
+            if (tok !== seq) return;
+            opening = false; want = false; if (e && e.overtaken) return;
+            live = false; fire(e && e.refused ? 'nativerefused' : 'nativefailed', { why: String((e && e.message) || e), at: pos });
+            return;
+          }
+          if (tok !== seq) return;
+          // (a load this play overtook won't end `opening`: this answer does)
+          if (opening) {
+            opening = false;
+            if (src && st && st.url === src && st.transport === 'playing' && !held) { fresh = false; want = false; done = false; fire('play'); fire('playing'); }
+            else if (st !== prior && mine() && st.transport === 'paused' && st.error && !st.broke) { want = false; fire('pause'); }
+            // (the output didn't open: said, as for a failed start)
+            else if (src && st && st.url === src && st.transport === 'stopped' && st.error && !st.broke) { want = false; live = false; fire('pause'); fire('nativefailed', { why: st.error, at: pos }); return; }
+          }
+          if (held) call('native_pause').catch(() => {});
+          return;
+        }
+        // Its first events may come before the answer. Only the latest play() changes anything
+        // once its answer comes (play pressed twice while a song opens)
+        want = true; live = true; fresh = true; const u = src; const tok = ++seq; const prior = st;
+        // A seek the page makes as the song loads (moving here from a zone, a restore) comes
+        // first: the song opens there
+        await new Promise((r) => setTimeout(r, 0));
+        if (src !== u || tok !== seq) return;
+        fire('waiting');
+        opening = true;
+        try { await call('native_load', { url: u, atMs: Math.round(at * 1000), ahead: ahead || null }); } catch (e) {
+          if (tok === seq) opening = false;
+          if (src !== u || tok !== seq || (e && e.overtaken)) return;
+          want = false; live = false;
+          // Said through the engine's own events, whoever pressed play (the bar, the lock screen,
+          // a retry): only what the app can't play itself goes to <audio>; anything else may pass
+          // (the page tries once more)
+          fire('pause'); fire(e && e.refused ? 'nativerefused' : 'nativefailed', { why: String((e && e.message) || e), at: at });
+          return;
+        }
+        if (tok !== seq) return;
+        opening = false;
+        // Its start, as the app says it now (the updates waited while it opened)
+        if (src === u && st && st.url === u && st.transport === 'playing' && !held) { fresh = false; want = false; done = false; fire('play'); fire('playing'); }
+        else if (st !== prior && mine() && st.transport === 'paused' && st.error && !st.broke) { want = false; fire('pause'); }
+        else if (src === u && st && st.url === u && st.transport === 'stopped' && st.error && !st.broke) { want = false; live = false; fire('pause'); fire('nativefailed', { why: st.error, at: at }); return; }
+        // Paused while it opened
+        if (held && src === u) call('native_pause').catch(() => {});
+      },
+      pause() { external = null; want = false; held = true; if (live) call('native_pause').catch(() => {}); },
+      stop() { external = null; want = false; adopt = false; done = false; opening = false; if (live || src) call('native_stop').catch(() => {}); live = false; src = ''; at = 0; ahead = null; },
+      // What follows what plays now (the page's next song), for a gapless join
+      ahead(u) { const a = u ? abs(u) : null; if (a === ahead) return; ahead = a; if (live) call('native_ahead', { url: a }).catch(() => {}); },
+      status: () => (mine() ? st : null),
+    };
+  })();
   const audio = new Proxy({}, {
     get: (_, k) => {
-      if (k === 'addEventListener') return (t, f, o) => { audioEl.addEventListener(t, f, o); yt.addEventListener(t, f); };
-      const e = state.ytOn ? yt : audioEl; const v = e[k];
+      if (k === 'addEventListener') return (t, f, o) => {
+        // Once: on the engine that loads the song, and then gone from the other two (it would
+        // seek a later song there)
+        if (o && o.once) { const off = () => { audioEl.removeEventListener(t, w); yt.removeEventListener(t, w); nat.removeEventListener(t, w); }; const w = (e) => { off(); f(e); }; audioEl.addEventListener(t, w); yt.addEventListener(t, w); nat.addEventListener(t, w); return; }
+        audioEl.addEventListener(t, f, o); yt.addEventListener(t, f); nat.addEventListener(t, f, o);
+      };
+      const e = state.ytOn ? yt : state.natOn ? nat : audioEl; const v = e[k];
       return typeof v === 'function' ? v.bind(e) : v;
     },
-    set: (_, k, v) => { if (k === 'volume') { audioEl.volume = v; yt.volume = v; } else (state.ytOn ? yt : audioEl)[k] = v; return true; },
+    set: (_, k, v) => { if (k === 'volume') { audioEl.volume = v; yt.volume = v; nat.volume = v; } else (state.ytOn ? yt : state.natOn ? nat : audioEl)[k] = v; return true; },
   });
+  // The URL the page's player opens for a queue item
+  const itemUrl = (it) => (it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`);
+  // Whether the app plays it itself: in the app, a stream of the node's (this page's origin), not
+  // one it already couldn't play
+  const nativeFor = (it, url) => { if (!nativeOk() || !it || it.nativeNo || ytOf(it.uri)) return false; try { return new URL(url, location.href).origin === location.origin; } catch { return false; } };
+  const useNative = (on) => {
+    if (on === !!state.natOn) return;
+    if (on) { if (audioEl.getAttribute('src')) { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); } } else nat.stop();
+    state.natOn = on;
+  };
+  // The page's player on a queue item: its engine, then its URL
+  const browserSrc = (it) => { const u = itemUrl(it); useNative(nativeFor(it, u)); audio.src = u; };
+  // The song after this one as the page will play it (repeat one: the same), handed to the app ahead
+  const nativeAhead = () => {
+    if (!state.natOn) return;
+    const q = state.browserQueue; const r = browserRepeat(); const i = state.browserIndex;
+    const n = r === 'one' ? i : i + 1 < q.length ? i + 1 : r === 'all' && q.length ? 0 : -1;
+    const it = q[n]; const u = it && itemUrl(it);
+    nat.ahead(it && nativeFor(it, u) ? u : null);
+  };
+  // ---- Downloads in the Android app: songs, albums and playlists kept on this phone ----
+  // The app keeps them (pm-offline) and says what it has (`pmdesktop:downloads`); online, the
+  // Downloads view is its storage screen. Only the library's own files: a streaming service's
+  // songs get no Download.
+  const appDl = () => nativeOk() && !isOffline();
+  const dlCall = (cmd, args) => { const f = tauriInvoke(); return f ? f(cmd, args || {}) : Promise.reject(new Error('the app’s downloads are off')); };
+  let dlRevision = 0; let dlRead = 0;
+  const dlSet = (d) => { dlRevision += 1; state.dl = d || null; state.dlTracks = new Set((d && d.track_ids) || []); state.dlAlbums = new Set((d && d.album_ids) || []); };
+  const dlMark = () => `<span class="dl-mark" role="img" aria-label="On this phone" title="On this phone">${icon('download')}</span>`;
+  const dlHas = (id) => !!(state.dlTracks && state.dlTracks.has(Number(id)));
+  const dlAlbum = (id) => !!(state.dlAlbums && state.dlAlbums.has(Number(id)));
+  // The mark on song rows and album tiles on this phone: drawn with them, and kept up to date here
+  // when what the phone has changes
+  const markDownloads = (root = document) => {
+    if (!state.dl) return;
+    const put = (el, on) => { const m = el && $('.dl-mark', el); if (on && el && !m) el.insertAdjacentHTML('beforeend', dlMark()); else if (!on && m) m.remove(); };
+    for (const r of $$('.track[data-tid]', root)) put($('.title', r), dlHas(r.dataset.tid));
+    for (const r of $$('[data-srow][data-tid]', root)) put($('.name', r), dlHas(r.dataset.tid));
+    for (const b of $$('.tile[data-album]', root)) put($('.t', b), dlAlbum(b.dataset.album));
+  };
+  const dlLoad = () => { document.body.classList.toggle('app-dl', appDl()); const revision = dlRevision; const read = ++dlRead; return appDl() ? dlCall('downloads_state').then((d) => { if (revision === dlRevision && read === dlRead) { dlSet(d); markDownloads(); } return state.dl; }).catch(() => null) : Promise.resolve(null); };
+  window.addEventListener('pmdesktop:downloads', (e) => { dlSet(e.detail); markDownloads(); if (state.view === 'downloads' && !isOffline() && e.detail) storageUpdate(e.detail); });
+  // Download (or Remove download) for a song, a library album or a playlist, in its ⋯ menu
+  const dlKeep = async (kind, id, on, title, sub, online, songs) => {
+    try {
+      const d = await dlCall('downloads_keep', { kind, id: String(id), on, title: title || null, sub: sub || null, songs: songs || null });
+      dlSet(d); markDownloads();
+      if (state.view === 'downloads' && state.dl) storageUpdate(state.dl);
+      // A song also kept with its album, a playlist or the favourites stays
+      if (!on && d && d.still_kept) { toast(`“${title}” stays on this phone: its album, a playlist or your favourites keep it there`); return; }
+      toast(on ? `Downloading “${title}” to this phone${online ? `; ${online === 1 ? '1 song not in your library stays' : `${online} songs not in your library stay`} online` : ''}` : `“${title}” removed from this phone`);
+    } catch (e) { toast(String((e && e.message) || e), 'error'); }
+  };
+  const dlItem = (kind, id, title, sub, online, songs) => {
+    if (!appDl() || id == null || id === '' || (kind === 'playlist' && !isOwner())) return [];
+    const kept = !!(state.dl && state.dl.items.some((x) => x.kind === kind && x.id === String(id)));
+    // On the phone through its album or a playlist: removed there
+    if (!kept && kind === 'track' && state.dlTracks && state.dlTracks.has(Number(id))) return [];
+    return [{ label: kept ? 'Remove download' : 'Download', icon: kept ? 'trash' : 'download', run: () => dlKeep(kind, id, !kept, title, sub, online, songs) }];
+  };
+  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-dlgo]'); if (b) setView('downloads'); });
+  setTimeout(dlLoad, 0);
+  // The storage screen (Downloads in the app, online): what this phone keeps, its size against
+  // the limit, the downloads under way, Remove per item and Remove all (the phone's copies only)
+  const DL_LIMITS = [2e9, 5e9, 10e9, 20e9, 50e9, null];
+  // Each draw has a number: an older one finishing late (its fetch answered after an event) draws
+  // nothing
+  let storageDraws = 0;
+  // What the screen's lists show (redrawn only when this changes)
+  const storageKey = (d) => JSON.stringify([d.items, d.bytes, d.other_bytes, d.limit, d.songs]);
+  const storageFacts = (d) => {
+    const p = d.progress || {};
+    const facts = [`${fileSize(d.bytes + (d.other_bytes || 0)) || '0 bytes'}${d.limit ? ` of ${fileSize(d.limit)}` : ''} on this phone${d.other_bytes ? ` (${fileSize(d.other_bytes)} from another node)` : ''}`, countOf(d.songs, 'songs'), d.free != null ? `${fileSize(d.free)} free` : ''].filter(Boolean).join(' · ');
+    const at = (p.done || 0) + (p.failed || 0) + (p.preparing || 0);
+    const now = p.running ? `Downloading ${Math.min(at + 1, p.wanted)} of ${p.wanted}${p.current ? `: ${esc(p.current)}` : ''}` : p.full ? esc(p.full) : p.failed ? `${countOf(p.failed, 'songs')} didn’t download; they are tried again at the next sync.` : '';
+    return `${esc(facts)}${now ? `<br>${now}` : ''}`;
+  };
+  // An event while the screen shows: the status line in place; the lists only when they changed
+  const storageUpdate = (d) => {
+    const main = $('#main'); const line = main && $('.dl-note', main);
+    if (!line) { if (main) drawStorage(main, d); return; }
+    line.innerHTML = storageFacts(d);
+    // The lists again when they changed (a song done); the limit row and its picker stay
+    if (main.dataset.dlKey !== storageKey(d)) drawStorage(main, d, true);
+  };
+  const drawStorage = async (main, given, listsOnly) => {
+    const mine = ++storageDraws;
+    const d = given || await dlLoad();
+    if (state.view !== 'downloads' || mine !== storageDraws) return;
+    if (!d) { main.innerHTML = pageHead('Downloads', null) + '<div class="notice">The app’s downloads can’t be read just now. Try again in a moment.</div>'; return; }
+    main.dataset.dlKey = storageKey(d);
+    const sub = (i) => [i.sub, i.kind === 'track' ? '' : i.songs ? `${i.here} of ${countOf(i.songs, 'songs')} here` : `${countOf(i.here, 'songs')} here`, i.online ? `${i.online} stay online` : '', i.bytes ? fileSize(i.bytes) : i.here ? '' : 'waiting'].filter(Boolean).map(esc).join(' · ');
+    const rows = (kind) => d.items.map((x, k) => [x, k]).filter(([x]) => x.kind === kind).map(([x, k]) => `<div class="list-row"><div class="grow"><div class="name">${esc(x.title)}</div><div class="sub">${sub(x)}</div></div><button class="btn sm ghost" data-dlrm="${k}">Remove</button></div>`).join('');
+    const section = (kind, title) => { const r = rows(kind); return r ? `<section class="section"><div class="section-head"><h3>${title}</h3></div><div class="list">${r}</div></section>` : ''; };
+    const limit = `<label class="set-row"><span class="set-label"><span class="set-name">Limit</span><span class="set-help">Downloads stop there, and always leave ${fileSize(d.keep_free)} free on this phone.</span></span><select class="input" id="dllimit" aria-label="Downloads limit">${DL_LIMITS.map((v) => `<option value="${v == null ? '' : v}" ${(d.limit == null ? v == null : v === d.limit) ? 'selected' : ''}>${v == null ? 'No limit' : fileSize(v)}</option>`).join('')}</select></label>`;
+    const body = d.items.length
+      ? section('album', 'Albums') + section('playlist', 'Playlists') + section('track', 'Songs')
+        + `<div class="actions"><button class="btn ghost" id="dlrmall">${icon('trash')} Remove all downloads</button></div>`
+      : `<div class="empty">${icon('download')}<h3>Nothing on this phone yet</h3><p>Download an album, a playlist or a song from its ⋯ menu: it plays here without your node, and saves mobile data.</p></div>`;
+    const lists = $('#dllists', main);
+    if (listsOnly && lists) { lists.innerHTML = body; const h = $('.page-head', main); if (h) h.outerHTML = `<div class="page-head"><h2>Downloads${d.songs ? `<span class="count">${d.songs}</span>` : ''}</h2><div class="actions"></div></div>`; }
+    else main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p><div id="dllists">${body}</div><div class="set-group">${limit}</div>`;
+    $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; return x ? dlKeep(x.kind, x.id, false, x.title) : undefined; });
+    const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your playlists stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
+    if (listsOnly && lists) return;
+    $('#dllimit', main).onchange = async (e) => { const v = e.target.value; try { dlSet(await dlCall('downloads_limit', { bytes: v === '' ? null : Number(v) })); if (state.view === 'downloads') storageUpdate(state.dl); } catch (er) { toast(String((er && er.message) || er), 'error'); } };
+  };
   // The YouTube panel: YouTube's terms want its player visible, so it shows while a YouTube item plays
   const ytPanel = (it) => { const p = $('#ytpanel'); if (!p) return; if (it) { $('#yttitle').textContent = it.title || 'YouTube'; p.hidden = false; } else p.hidden = true; };
   $('#ytmin').onclick = () => { const p = $('#ytpanel'); const small = !p.classList.contains('small'); p.classList.toggle('small', small); $('#ytmin').setAttribute('aria-expanded', String(!small)); $('#ytmin').title = small ? 'Show the video' : 'Make the video smaller'; };
@@ -1588,13 +1870,18 @@
     if (state.browserIndex + 1 < state.browserQueue.length) browserPlay(state.browserIndex + 1);
   });
   const isBrowser = () => state.zone === BROWSER;
+  // What the app's own player says of what plays: the path, as a zone reports it
+  const nativePath = () => { const n = state.natOn && !state.ytOn ? nat.status() : null; const np = n && n.now_playing; return np ? { signal_path: np.signal_path, source_format: np.source_format, output_format: np.output_format, format: np.format || null } : {}; };
   const browserState = () => {
     const it = state.browserQueue[state.browserIndex];
     return {
       id: BROWSER, name: hereName(), output: 'browser',
       transport: audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing',
       queue_index: state.browserIndex,
-      now_playing: it ? { item: it, position_ms: audio.currentTime * 1000, duration_ms: (it.duration_ms && (!Number.isFinite(audio.duration) || it.stream)) ? it.duration_ms : (audio.duration || 0) * 1000, signal_path: null } : null,
+      // Why the app's player paused (the node took this phone's output, the DAC went, the stream
+      // broke): said in the bar
+      error: (() => { const n = state.natOn ? nat.status() : null; return n && n.transport === 'paused' ? n.error : null; })(),
+      now_playing: it ? { item: it, position_ms: audio.currentTime * 1000, duration_ms: (it.duration_ms && (!Number.isFinite(audio.duration) || it.stream)) ? it.duration_ms : (audio.duration || 0) * 1000, signal_path: null, ...nativePath() } : null,
     };
   };
   const currentZone = () => (isBrowser() ? browserState() : state.zones[state.zone]);
@@ -1623,14 +1910,17 @@
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
   const LISTENER_VIEWS_OFF = new Set(['home', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
   const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
-  const zoneList = () => { const zs = Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z)); return appPlatform() && zs.length ? [...zs, browserState()] : [browserState(), ...zs]; };
+  // The phone's own zone (the node's, on this app's output) while the app plays its music itself:
+  // one "This phone" in the phone's picker; listed again while it is the zone in use or plays
+  const ownZoneHidden = (z) => nativeOk() && z.id !== state.zone && z.transport !== 'playing' && ((window.pmDesktop && window.pmDesktop.outputs) || []).includes(z.output);
+  const zoneList = () => { const zs = Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z) && !ownZoneHidden(z)); return appPlatform() && zs.length ? [...zs, browserState()] : [browserState(), ...zs]; };
   // The browser's queue survives a reload, every song with where it was (UX review #6): stream
   // links are rebuilt on load (they carry the token), live radio is not kept.
   let lastSavedQueue = '';
   const isLiveRadio = (it) => it.album === 'Internet radio' && /^https?:/.test(it.uri || '');
   setInterval(() => {
     try {
-      const keep = state.browserQueue.filter((it) => !isLiveRadio(it)).map((it) => { const { stream, ...rest } = it; return rest; });
+      const keep = state.browserQueue.filter((it) => !isLiveRadio(it)).map((it) => { const { stream, nativeNo, ...rest } = it; return rest; });
       const j = JSON.stringify(keep);
       if (j !== lastSavedQueue) { lastSavedQueue = j; localStorage.setItem('pm.browserQueue', j); }
       const cur = state.browserQueue[state.browserIndex];
@@ -1645,8 +1935,8 @@
     if (!it) return;
     state.browserIndex = at.index;
     audio.preload = 'metadata';
-    audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
-    if (at.pos > 0) audio.addEventListener('loadedmetadata', () => { try { audio.currentTime = at.pos; } catch { /* not seekable */ } renderBar(); }, { once: true });
+    browserSrc(it);
+    if (at.pos > 0) audio.addEventListener('loadedmetadata', () => { if (state.browserIndex !== at.index) return; try { audio.currentTime = at.pos; } catch { /* not seekable */ } renderBar(); }, { once: true });
     renderBar();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
@@ -1660,8 +1950,19 @@
   // Every slider for a zone reads the same thing: the level the node read back from the output
   // (`z.volume`, dB or percent on the output's own scale, with its mute), This browser its own
   // audio element. `value` is null while the node hasn't read it: nothing is made up.
+  // In the Android app the page's own player has no gain of its own (audio.volume stays 1): its
+  // slider is Android's media volume, which the phone's volume keys move too. The app says it
+  // (`window.pmDesktop.mediaVolume`, `pmdesktop:mediavolume`) and sets it
+  // (`OdeionAndroid.setMediaVolume`), and learns which zone the page controls for the system's
+  // media controls (`OdeionAndroid.controlling`).
+  const appVolume = () => !!(window.pmDesktop && window.OdeionAndroid);
+  const appMediaVolume = () => (appVolume() && typeof window.pmDesktop.mediaVolume === 'number' ? window.pmDesktop.mediaVolume : null);
+  let appZoneSaid = null;
+  const tellAppZone = (id) => { if (!window.OdeionAndroid || id === appZoneSaid) return; appZoneSaid = id; try { window.OdeionAndroid.controlling(id); } catch { /* the app's side is gone */ } };
   const zoneVolume = (z) => {
     if (!z) return null;
+    if (z.id === BROWSER && appVolume() && state.natOn) return window.pmDesktop.phoneVolume || null;
+    if (z.id === BROWSER && appVolume()) return { kind: 'percent', min: 0, max: 100, step: 1, value: appMediaVolume(), muted: !!audio.muted };
     if (z.id === BROWSER) return { kind: 'db', min: -60, max: 0, step: 1, value: Math.max(-60, Math.round(20 * Math.log10(audio.volume || 0.001))), muted: !!audio.muted };
     const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume; const hk = typeof hv === 'string' ? hv : hv && hv.kind;
     const v = z.volume || null;
@@ -1687,6 +1988,7 @@
   const volSliders = (z) => { const els = new Set(); if (z.id === state.zone) for (const el of [$('#vol'), $('#npvol'), $('#volpopvol')]) if (el) els.add(el); for (const el of $$(`[data-zvol="${cssStr(z.id)}"]`)) els.add(el); return [...els]; };
   const syncVolumeSliders = (z, except) => {
     if (!z) return;
+    if (z.id === state.zone) tellAppZone(z.id);
     // The owner's output list says the scale (and whether there is a volume at all); asked once
     if (z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; for (const cur of Object.values(state.zones || {})) syncVolumeSliders(cur); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); }).catch(() => {}).finally(() => { state.outputsP = null; });
     const r = zoneVolume(z);
@@ -1699,6 +2001,8 @@
   const setZoneVol = async (z, value, from) => {
     const r = zoneVolume(z); if (!r) return;
     const num = Number(value);
+    if (z.id === BROWSER && appVolume() && state.natOn) { try { window.OdeionAndroid.setMediaVolume(r.kind === 'percent' ? Math.round(num) : num, r.kind); } catch { /* the app's side is gone */ } return; }
+    if (z.id === BROWSER && appVolume()) { const p = Math.round(num); audio.volume = 1; window.pmDesktop.mediaVolume = p; try { window.OdeionAndroid.setMediaVolume(p); } catch { /* the app's side is gone */ } syncVolumeSliders(z, from); return; }
     if (z.id === BROWSER) { audio.volume = Math.pow(10, num / 20); syncVolumeSliders(z, from); return; }
     const body = r.kind === 'percent' ? { percent: Math.round(num) } : { db: num };
     // Shown as set until the node's read-back arrives (its zone event syncs every slider); a
@@ -1710,12 +2014,16 @@
   };
   const setZoneMute = async (z, m) => {
     if (!z) return;
+    if (z.id === BROWSER && appVolume() && state.natOn) { try { window.OdeionAndroid.setMediaVolume(m, 'mute'); } catch { /* the app's side is gone */ } return; }
     if (z.id === BROWSER) { audio.muted = m; syncVolumeSliders(z); return; }
     const was = z.volume;
     z.volume = { ...(z.volume || {}), muted: m };
     syncVolumeSliders(z);
     try { await api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: { mute: m } }); } catch (e) { z.volume = was; syncVolumeSliders(z); toast(e.message, 'error'); }
   };
+  // Android's media volume changed (a key, the panel, the slider): every slider of the page's own
+  // player follows; it never keeps a gain of its own
+  window.addEventListener('pmdesktop:mediavolume', () => { if (audio.volume !== 1) audio.volume = 1; syncVolumeSliders(browserState()); });
   const bindVolSlider = (el, zoneOf) => {
     if (!el) return;
     const done = () => { delete el.dataset.dragging; };
@@ -2208,7 +2516,7 @@
   { const sp = new URLSearchParams(location.search); if (sp.get('drive') === 'ok') { toast('Drive signed in: add a folder'); history.replaceState(null, '', location.pathname); } else if (sp.get('drive') === 'error') { toast('Drive: ' + (sp.get('message') || 'sign-in failed'), 'error'); history.replaceState(null, '', location.pathname); } }
   { const sp = new URLSearchParams(location.search); if (sp.get('spotify') === 'ok') { toast('Spotify signed in'); history.replaceState(null, '', location.pathname); } else if (sp.get('spotify') === 'error') { toast('Spotify: ' + (sp.get('message') || 'sign-in failed'), 'error'); history.replaceState(null, '', location.pathname); } }
   const hitItem = (h, album) => ({ uri: h.uri || `${h.source || 'tidal'}:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
-  const browserPlay = (i) => {
+  const browserPlay = (i, startAt = 0) => {
     const it = state.browserQueue[i];
     // The end of the queue: the last song stays on the bar, stopped, ready to play again
     if (!it && i >= state.browserQueue.length && state.browserQueue.length) { audio.pause(); try { audio.currentTime = 0; } catch { /* not loaded */ } renderBar(); return; }
@@ -2217,6 +2525,7 @@
     const yid = ytOf(it.uri);
     if (yid) {
       if (audioEl.getAttribute('src')) { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); }
+      useNative(false);
       state.ytOn = true; ytPanel(it);
       yt.open(yid).catch((e) => toast(e.message, 'error'));
       mediaSessionUpdate(it); renderBar(); if (state.view === 'queue') render();
@@ -2224,10 +2533,14 @@
     }
     if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
     if (/^deezer:/.test(it.uri || '') && !state.previewNoted) { state.previewNoted = true; toast('Deezer plays a 30-second preview of each song without a Deezer partner account'); }
-    audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
+    browserSrc(it);
+    // (a retry opens the song where it was)
+    if (startAt > 0) audio.currentTime = startAt;
     state.browserRetry = state.browserRetry && state.browserRetry.i === i ? state.browserRetry : { i, n: 0 };
     if (!(state.starting && state.starting.zone === BROWSER)) startWait('play', BROWSER, it.title || '');
+    nativeAhead();
     audio.play().catch(async (e) => {
+      // (the app's own player says its failures through its events: nativefailed, nativerefused)
       if (e.name === 'AbortError') { if (state.starting && state.starting.zone === BROWSER && (audio.paused || state.ytOn)) startDone(); return; }
       startFail(e.message, true);
       if (e.name !== 'NotSupportedError') { toast(`Playback: ${e.message}`, 'error'); return; }
@@ -2275,11 +2588,24 @@
     state.midRetry = state.midRetry && state.midRetry.i === i ? state.midRetry : { i, n: 0 };
     if (state.midRetry.n >= 1) return;
     state.midRetry.n++;
-    const src = audio.src; setTimeout(() => { if (state.browserIndex !== i) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
+    const src = audio.src; setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
   });
   // For tests (tools/ui-youtube.js): queue items in the current zone, read the browser engine
   window.pmPlayer = { play: (items) => playSourceItems(items, true), now: () => ({ youtube: !!state.ytOn, index: state.browserIndex, paused: audio.paused, time: audio.currentTime, src: audio.src }) };
-  audio.addEventListener('timeupdate', () => { if (isBrowser()) renderBar(); });
+  audio.addEventListener('timeupdate', () => { nativeAhead(); if (isBrowser()) renderBar(); });
+  // A song that didn't start in the app (the node busy, the link down): once more after 2 s, as
+  // for <audio>, then said
+  const nativeRetry = (i, why, at = 0) => {
+    const it = state.browserQueue[i]; if (!it) return;
+    if (state.natOn && nat.held) { toast(`“${it.title || 'This song'}” did not start: ${why}.`); return; } // paused meanwhile: the next play opens it
+    // (counted per song: another song at the same place in a new queue gets its own retry)
+    state.nativeRetry = state.nativeRetry && state.nativeRetry.it === it ? state.nativeRetry : { it, n: 0 };
+    if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; browserPlay(i, at); }, 2000); return; }
+    toast(`“${it.title || 'This song'}” can't play here: ${why}.`, 'error');
+  };
+  nat.addEventListener('nativefailed', (e) => { const d = (e && e.detail) || {}; const why = (typeof d === 'string' ? d : d.why) || 'it did not start'; if (!state.natOn || state.browserIndex < 0) return; if (state.starting && state.starting.zone === BROWSER) startFail(why, true); nativeRetry(state.browserIndex, why, d.at || 0); renderBar(); });
+  // Opened, then found unplayable by the app (the song handed ahead): the page plays it itself
+  nat.addEventListener('nativerefused', () => { const i = state.browserIndex; const it = state.browserQueue[i]; if (!it || !state.natOn) return; it.nativeNo = true; browserPlay(i); });
   audio.addEventListener('play', () => renderBar());
   audio.addEventListener('pause', () => renderBar());
   // Back on screen after Android stopped the app's audio in the background (its player service
@@ -2612,7 +2938,11 @@
   // only when the node says the phone confirmed it for what plays now.
   const DAC_MODE = { bit_perfect: 'Bit-perfect', exclusive: 'Exclusive USB', shared: 'Shared' };
   const DAC_HELP = { shared: 'Android plays it through its own mixer, which mixes in other sounds and usually converts the music to 48 kHz.' };
-  const deviceOf = (z) => { const o = z && (state.outputs || []).find((x) => x.id === z.output); return (o && o.device) || null; };
+  const deviceOf = (z) => {
+    // The app's own player: the device it plays to, as it says
+    if (z && z.id === BROWSER) { const n = state.natOn ? nat.status() : null; return (n && n.device) || null; }
+    const o = z && (state.outputs || []).find((x) => x.id === z.output); return (o && o.device) || null;
+  };
   // Anything but shared only when confirmed: bit-perfect is said only for mode bit_perfect with
   // confirmed true; an unconfirmed or unknown mode reads as shared
   const dacMode = (d) => (d.confirmed === true && (d.mode === 'bit_perfect' || d.mode === 'exclusive') ? d.mode : 'shared');
@@ -2644,7 +2974,8 @@
     if (!n) {
       // The system's shared output (a phone without a DAC, or one the node no longer knows; a
       // computer's system audio): its mixer is in the path too, so it is never bit-perfect
-      if (!np || !np.signal_path || !/(^|\/)cpal:/.test(String((z && z.output) || ''))) return np;
+      const out = z && z.id === BROWSER ? (nat.status() || {}).output : z && z.output;
+      if (!np || !np.signal_path || !/(^|\/)cpal:/.test(String(out || ''))) return np;
       const of = np.output_format;
       const st = { name: 'system mixer', in_format: of, out_format: of, quality: 'lossless', note: 'shared: the system may convert it and mixes in other sounds' };
       return { ...np, signal_path: { ...np.signal_path, stages: [...np.signal_path.stages, st] } };
@@ -2659,16 +2990,11 @@
   };
   // "Exclusive USB · FiiO KA17 · 96 kHz / 24 bit"
   const dacExLine = (n) => `Exclusive USB · ${n.d.name} · ${kHz(n.f.rate_hz)} kHz / ${n.f.bits} bit`;
-  // Bit-perfect (or Exclusive USB on a DAC without a volume of its own) at full level below
-  // Android's full volume (the listener agreed): said wherever it plays, for as long as it applies
-  const fullLevelText = (d, ex) => (ex
-    ? `Exclusive USB plays at full level: this DAC has no volume of its own, and Android’s volume (${d.media_volume}%) does not apply. Set the level on the amplifier.`
-    : `Bit-perfect plays at full level: Android’s volume (${d.media_volume}%) does not apply. Set the level on the DAC or amplifier.`);
-  const fullLevelNote = (z) => {
-    const n = deviceOf(z) && dacNow(z); const d = n && n.d;
-    return n && n.bp && d.settings && d.settings.full_level_ok && d.media_volume != null && d.media_volume < 100 && !(n.ex && d.hardware_volume)
-      ? fullLevelText(d, n.ex) : '';
-  };
+  // Who sets a USB DAC's level on its bit-perfect paths, as its descriptors tell (`own_volume`;
+  // nothing said while that is unknown): its own volume, which the slider, the volume keys and
+  // Android's panel move; or, without one, the DAC or amplifier itself (the slider is gone then).
+  // Nothing once it played shared: Android's mixer applies the volume there
+  const dacVolumeWords = (d) => (d.mode === 'shared' && d.format ? '' : d.own_volume === true ? 'Volume: the DAC’s own' : d.own_volume === false ? 'Volume: set it on the DAC' : '');
   // "FiiO KA17 · bit-perfect" or "· shared", for the picker and the pill
   const dacWordsFor = (z) => { const n = dacNow(z); return n ? `${n.d.name} · ${n.bp ? (n.ex ? 'exclusive USB' : 'bit-perfect') : 'shared'}` : ''; };
   // "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit", or "Shared · FiiO KA17 · why"
@@ -2677,6 +3003,34 @@
     if (n.bp) return n.ex ? dacExLine(n) : `Bit-perfect · ${n.d.name} · ${kHz(n.f.rate_hz)} kHz / ${n.f.bits} bit`;
     if (n.ex && n.d.format) return `Exclusive USB · ${n.d.name} · not confirmed${n.why && !/not confirmed/.test(n.why) ? ` · ${n.why}` : ''}`;
     return `Shared · ${n.d.name}${n.why ? ` · ${n.why}` : ''}`;
+  };
+  // Now playing › Details, Output: where the sound goes and, when it is not bit-perfect, why.
+  // A zone with a USB DAC: dacLine. The Android app's in-app player (This phone) always plays
+  // through Android's mixer, which runs at its own rate (usually 48 kHz, what a USB DAC then
+  // shows): bit-perfect plays only on the phone's own zone, which the node has while it reaches
+  // the phone's player directly (not through remote access). [value, why]
+  const outputFacts = (z) => {
+    if (!z) return null;
+    if (z.id !== BROWSER) { const l = deviceOf(z) ? dacLine(z) : ''; return l ? [l, ''] : null; }
+    if (appPlatform() !== 'android') return null;
+    // The app plays it itself: the same words as the phone's own zone
+    if (state.natOn && !state.ytOn && z.now_playing && z.now_playing.signal_path) {
+      const l = deviceOf(z) ? dacLine(z) : ''; const n = nat.status();
+      // A song downloaded here plays from its copy: no stream, no mobile data
+      return [l || 'Shared · Android mixer', n && n.from_device ? 'From this phone: the downloaded copy plays, not a stream.' : ''];
+    }
+    if (nativeOk()) {
+      const cur = state.browserQueue[state.browserIndex];
+      if (state.ytOn) return ['Android mixer · usually 48 kHz', 'Not bit-perfect: YouTube plays in its own player, through Android’s mixer.'];
+      return cur && cur.nativeNo ? ['Android mixer · usually 48 kHz', 'Not bit-perfect: the app can’t play this stream itself, so it goes through Android’s mixer.'] : null;
+    }
+    const id = window.pmDesktop.output;
+    const own = id ? Object.values(state.zones || {}).find((x) => x.output === id) : null;
+    const dac = appOutput();
+    const value = `${dac ? `${dac.device.name} · ` : ''}Android mixer · usually 48 kHz`;
+    return [value, own
+      ? `Not bit-perfect: ${hereName()} always plays through Android’s mixer. For bit-perfect, play on ${own.name}.`
+      : `Not bit-perfect: ${hereName()} always plays through Android’s mixer. Bit-perfect plays on the phone’s own zone, which the node adds when it can reach this phone directly (on the same network, not through remote access).`];
   };
   const dacCaps = (d) => [d.max_rate ? `PCM up to ${kHz(d.max_rate)} kHz` : '', d.bits && d.bits.length ? `${d.bits.join(', ')} bit` : '', d.channels ? `${d.channels} channels` : '', d.dsd ? ({ native: 'DSD (native)', dop: 'DSD (DoP)' })[d.dsd] || 'DSD' : '', d.hardware_volume ? 'its own volume' : ''].filter(Boolean).join(' · ');
   // This app's own output (the app tells the page after it registers its player), with its device
@@ -2699,7 +3053,24 @@
       .finally(() => { outputsLoad.inflight = null; if (outputsLoad.again) { outputsLoad.again = false; refreshOutputs(); } });
     return outputsLoad.inflight;
   };
-  const refreshOutputs = () => { if (isOwner()) loadOutputs().then(() => { renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
+  // A USB DAC on the phone (the Android app): "this phone" plays through the phone's own zone, the
+  // path that reaches the DAC unchanged (Exclusive USB, else bit-perfect); the page's own player
+  // always goes through Android's mixer. Once per DAC, and never while the page's player plays.
+  let dacZoneFor = null;
+  const preferPhoneZone = () => {
+    // The native engine already owns this output. A paused DAC must not change the route.
+    if (window.pmDesktop && window.pmDesktop.nativePlayer) return;
+    const o = appOutput();
+    if (!o || appPlatform() !== 'android') { dacZoneFor = null; return; }
+    const key = `${o.id}|${o.device.name}`; if (dacZoneFor === key) return;
+    const z = Object.values(state.zones || {}).find((x) => x.output === o.id); if (!z) return;
+    dacZoneFor = key;
+    if (state.zone !== BROWSER || !audio.paused) return;
+    state.zone = z.id; try { localStorage.setItem('pm.zone', z.id); } catch { /* storage unavailable */ }
+    renderZoneName(); renderBar();
+    toast(`${o.device.name}: this phone plays through ${z.name}, straight to the DAC`);
+  };
+  const refreshOutputs = () => { if (isOwner()) loadOutputs().then(() => { preferPhoneZone(); renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
   window.addEventListener('pmdesktop:output', refreshOutputs);
   const deviceWords = (z) => {
     if (z.id === BROWSER) return appPlatform() ? 'The app plays the files itself' : 'Streams the files to this browser';
@@ -2718,7 +3089,7 @@
     audio.addEventListener('loadedmetadata', () => { if (state.browserIndex !== index) return; try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
     if (!paused) { it.moved = true; browserPlay(index); return; } // browserPlay says why when it can't play
     state.browserIndex = index;
-    audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
+    browserSrc(it);
     audio.preload = 'metadata'; audio.load();
     mediaSessionUpdate(it); renderBar();
   };
@@ -2763,7 +3134,7 @@
         state.zones[zs.id] = zs;
         if (transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
         resume = null;
-        if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } audioEl.removeAttribute('src'); audioEl.load();
+        if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } useNative(false); audioEl.removeAttribute('src'); audioEl.load();
         state.browserQueue = []; state.browserIndex = -1; try { localStorage.removeItem('pm.browserAt'); } catch { /* storage unavailable */ }
       } else if (target === BROWSER) {
         const z = await api('GET', `/zones/${encodeURIComponent(from)}`);
@@ -3417,7 +3788,7 @@
   let qPanelKey = null;
   let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
   const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); const op = $(qOpener); if (op) op.setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) { if (op && op.getClientRects().length) op.focus(); } qOpener = '#quality'; if (fromBack !== true) popTransient(); };
-  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) + fullLevelNote(z) : ''}`; };
+  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) : ''}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
   const loadDsp = async () => { if (isBrowser()) return; const zone = state.zone; try { const cfg = await api('GET', `/zones/${encodeURIComponent(zone)}/dsp`); (state.dspCfg = state.dspCfg || {})[zone] = cfg; } catch (e) { (state.dspCfg = state.dspCfg || {})[zone] = { error: e.message }; } syncQPanel(); };
@@ -3468,7 +3839,7 @@
     }
     const srcLabel = np ? (svc === 'library' ? 'Your library' : svc ? srcName(svc) : (np.stream_title ? 'Live stream' : 'Unknown source')) : 'Nothing playing';
     qPanel.innerHTML = `<div class="pop-title">Playing on</div>
-      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span>${fullLevelNote(z) ? `<span class="sub warn-text" role="status">${esc(fullLevelNote(z))}</span>` : ''}</span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
+      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span></span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
       <div class="pop-title">Source</div>
       <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? decodedBy() : ''))}</span>` : ''}</span></div>
       <div class="pop-title">Signal path</div>
@@ -3711,7 +4082,7 @@
       if (k === 'lyrics') return '<p class="muted" id="nplyricsload">Looking for lyrics…</p><div class="lyrics" id="nplyrics" hidden></div><p class="muted" id="nplyricsnone" hidden>No lyrics found for this song.</p>';
       if (k === 'details') {
         return pathHtml(zoneNp(z, np))
-            + `<dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd></dl>`;
+            + `<dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd>${(() => { const o = outputFacts(z); return o ? `<dt>Output</dt><dd class="np-output">${esc(o[0])}${o[1] ? `<span class="muted small np-output-why">${esc(o[1])}</span>` : ''}</dd>` : ''; })()}</dl>`;
       }
       // More (phones): Details, Sources and Tags, one heading each, and the song's page once at the end
       if (k === 'more') return Object.keys(NP_PART).filter((x) => x !== 'tags' || isOwner()).map((x) => `<section class="np-part" id="nppart-${x}" aria-labelledby="nppart-h-${x}"><h3 id="nppart-h-${x}">${NP_PART[x]}</h3>${sheetBody(x)}</section>`).join('')
@@ -3771,6 +4142,7 @@
     if (state.npPop && now - state.npPop < 300) $$('[data-npt="toggle"] .ic', overlay).forEach((ic) => { ic.style.animationDelay = `-${now - state.npPop}ms`; ic.classList.add('swap'); });
     // (the tick doesn't redraw again for this item)
     renderNowPlaying.lastItem = it; renderNowPlaying.lastTitle = np.stream_title;
+    renderNowPlaying.lastOutput = JSON.stringify(outputFacts(z));
     if (!one) {
       const tabs = $('.np-sheet-tabs', overlay); const on = tabs && $('.chip.on', tabs);
       if (tabs && on) {
@@ -4042,7 +4414,7 @@
     if (overlay.hidden) return;
     const z = currentZone(); const np = z && z.now_playing; const s = $('#npseek');
     if (!np || !s || s.dataset.dragging) return;
-    if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
+    if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle || JSON.stringify(outputFacts(z)) !== renderNowPlaying.lastOutput) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
     if ((z.transport || '') !== (overlay.dataset.transport || '')) {
       overlay.dataset.transport = z.transport || '';
       const playing = z.transport === 'playing';
@@ -4561,7 +4933,7 @@
       const fav = isFav(t); const can = trackHasId(t);
       return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}" data-tid="${t.id}">
         <div class="no"><span class="num">${numbers === 'track' ? (t.track_no ?? '') : i + 1}</span><button class="rowplay" data-act="play" title="Play from here">${icon('play')}</button></div>
-        <div class="main-col"><div class="title"><a class="lnk" data-act="song">${esc(t.title)}</a>${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id })}</div></div>
+        <div class="main-col"><div class="title"><a class="lnk" data-act="song">${esc(t.title)}</a>${dlHas(t.id) ? dlMark() : ''}${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id })}</div></div>
         ${showAlbum ? `<div class="album-col">${t.album ? `<button class="lnk" data-act="album" data-album="${t.album.id}">${esc(t.album.title)}</button>` : ''}</div>` : ''}
         <div class="fmt-col"><span class="fmt ${LOSSY[t.file && t.file.container] ? 'lossy' : ''}">${esc(fileFormat(t.file))}</span></div>
         <div class="dur">${fmt(t.duration_ms)}</div>
@@ -4614,7 +4986,7 @@
   };
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
-  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
+  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}${dlAlbum(a.id) ? dlMark() : ''}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
   // People on Pubky (STEWARD-UX-PEOPLE.md): profiles from Nexus via the node, cached here too.
   const profileCache = new Map();
   const loadProfiles = async (ids) => {
@@ -5045,6 +5417,7 @@
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
       ...favItem,
+      ...(single && single.id != null ? dlItem('track', single.id, single.title, artists(single)) : []),
       // Phones hide the "Match" chip in song rows (no room), so matching is offered here too
       ...(single && single.id != null && !trackHasId(single) && isOwner() ? [{ label: 'Which song is this?…', icon: 'search', run: async () => { const done = await whichSong(single); if (done) { toast(`Identified: ${done.title}`); render(); } } }] : []),
       ...(single && canFixMatch(single) ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: [single.id] }) }] : []),
@@ -5337,6 +5710,7 @@
       { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New playlist', async (name) => { try { await api('POST', '/playlists', trackIds.length === (o.songs || []).length && trackIds.length ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”`); } catch (e) { toast(e.message, 'error'); } }) },
+      ...(o.dl ? dlItem(o.dl.kind, o.dl.id, o.title, o.dl.sub, o.dl.online, o.dl.songs) : single && single.track_id != null ? dlItem('track', single.track_id, single.title, single.artist) : []),
       ...(single ? [{ label: singleFav ? 'Remove from favourites' : 'Add to favourites', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav)) render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && trackIds.length === 1 && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { try { await playSongs([single], 0, 'replace', o.plays_from, anchorEl, o.fallback); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); toast('Radio: similar music follows when the queue ends'); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && single.id && !onThis('song', single.id) ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: single.id }) }] : []),
@@ -5461,6 +5835,8 @@
     io.observe(hero);
   };
   const bindSongRows = (box, all, ctx = {}) => {
+    $$('[data-srow]', box).forEach((r) => { const t = all[Number(r.dataset.srow)]; if (t && t.track_id != null) r.dataset.tid = t.track_id; });
+    markDownloads(box);
     // Cards (web pages, posts) and unmatched lines don't play: play the songs only, from the one
     // clicked; a click on one that doesn't play does nothing
     const songs = all.filter((t) => !t.card); const at = (k) => Math.max(0, songs.indexOf(all[k]));
@@ -6158,7 +6534,7 @@
     // A page opened by a press is the page's own reading, not the press's
     const outer = inHandler; inHandler = 0; let p;
     try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }
-    const drawn = () => { drawing.on = false; }; p.then(drawn, drawn);
+    const drawn = () => { drawing.on = false; markDownloads(); }; p.then(drawn, drawn);
     return p;
   };
   const renderPage = async (api) => {
@@ -6893,7 +7269,7 @@
             try { await api('PUT', `/playlists/${d.summary.id}`, { [key]: r.text }); state.playlists = await api('GET', '/playlists'); toast(key === 'name' ? `Renamed to “${r.text}”` : 'Description saved'); render(); } catch (er) { toast(er.message, 'error'); }
           };
           $('#pldesc').onclick = () => editField('description', 'Description', d.playlist.description);
-          $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, extra: [{ label: 'Rename…', icon: 'notes', own: true, run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', own: true, run: () => editField('description', 'Description', d.playlist.description) },
+          $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, dl: { kind: 'playlist', id: d.summary.id, online: songs.filter((t) => t.track_id == null && !t.card).length }, extra: [{ label: 'Rename…', icon: 'notes', own: true, run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', own: true, run: () => editField('description', 'Description', d.playlist.description) },
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
             ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
@@ -7644,7 +8020,7 @@
             try { if (await setFavourite(target, !fav)) render(); } catch (er) { toast(er.message, 'error'); }
           };
           const extra = [...(commentUri ? [{ label: 'Post about this…', icon: 'notes', run: () => postAbout(commentUri, pg.title) }] : [])];
-          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, alsoHere: iconAlso ? alsoHere.map(({ v, k }) => ({ label: instName(v), svc: alsoSvc(v), k })) : [], switchTo: (k) => setView('item', { kind, id: pg.also_on[k].page }), path: `/${kind}/${id}`, uri: pg.uri, extra });
+          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, dl: kind === 'album' && /^lib-\d+$/.test(String(id)) ? { kind: 'album', id: String(id).slice(4), sub: pg.artist && pg.artist.name, songs: (songs || []).length } : null, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, alsoHere: iconAlso ? alsoHere.map(({ v, k }) => ({ label: instName(v), svc: alsoSvc(v), k })) : [], switchTo: (k) => setView('item', { kind, id: pg.also_on[k].page }), path: `/${kind}/${id}`, uri: pg.uri, extra });
           const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); if (ytOf(v.url)) return playSourceItems([qOf({ uri: `youtube:video:${ytOf(v.url)}`, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playVersion(pg.also_on[Number(b.dataset.aplay)], b));
@@ -7841,7 +8217,7 @@
           const owner = isOwner();
           const tab = !owner ? 'mine' : state.viewArg === 'node' || state.viewArg === 'import' ? state.viewArg : 'mine';
           const tabsHtml = `<div class="chips libtabs" role="tablist" aria-label="Your library">${[['mine', 'My music'], ...(owner ? [['node', 'Node library'], ['import', 'Import']] : [])].map(([k, l]) => `<button class="chip ${tab === k ? 'on' : ''}" role="tab" aria-selected="${tab === k}" aria-controls="libpanel" id="libtab-${k}" data-libtab="${k}">${l}</button>`).join('')}</div>`;
-          const head = pageHead('Your library', null, owner ? `<button class="btn primary" id="libadd">${icon('plus')} Add music</button>` : '') + tabsHtml;
+          const head = pageHead('Your library', null, (appDl() ? `<button class="btn" data-dlgo>${icon('download')} Downloads</button>` : '') + (owner ? `<button class="btn primary" id="libadd">${icon('plus')} Add music</button>` : '')) + tabsHtml;
           if (tab === 'mine') {
             if (!owner) {
               main.innerHTML = head + libPanel(tab, '<div class="card"><p>Your own music lives on your Pubky homeserver: the Odeion app keeps it there and plays it here when this node lets you.</p><p class="muted small">This node’s songs, albums and playlists are under Albums, Artists, Songs and Playlists.</p></div>');
@@ -7945,6 +8321,7 @@
         }
         case 'downloads': {
           // What this device keeps (STEWARD-DOWNLOADS.md): offline, from the app's local server
+          if (!isOffline() && appDl()) { await drawStorage(main); break; }
           if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Odeion app on your phone or laptop: keep an album or a playlist there with its ⋯ menu, and it plays without the node.</p><p><a class="btn" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/desktop-app.md" target="_blank" rel="noopener">' + icon('external') + ' Get the app</a></p>'; drawJobs(); break; }
           let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (state.view !== 'downloads') return;
@@ -8143,7 +8520,8 @@
             + row('People', '', `${countOf(bundled.users || 0, 'accounts')}${bundled.disabled_users ? ` · ${bundled.disabled_users} turned off` : ''}`)
             + row('Invites', '', countOf(bundled.unused_invites || 0, 'unused invites'))
             + row('Storage', '', bundled.disk_used_mb != null ? `${bundled.disk_used_mb} MB used` : '—')) : '';
-          // This phone: the USB DAC this app plays through, what it takes and how it is played (no choices yet)
+          // This phone: the USB DAC this app plays through, what it takes, how it is played and who
+          // sets its level (read-only: one behaviour)
           // The zone on this output: what its DAC does with what plays now
           const dz = myOut ? zoneList().find((z) => z.output === myOut.id) : null;
           const dline = dz && dz.now_playing ? dacLine(dz) : '';
@@ -8151,35 +8529,17 @@
             + (dacUnconfirmed(dv) ? `<div class="notice" role="status">${esc(dacUnconfirmed(dv))}</div>` : '')
             + (dacCaps(dv) ? row('What it takes', esc(dacCaps(dv)), '') : '')
             + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : '')
-            + (dv.settings && (dv.settings.mode === 'bit_perfect' || (dv.settings.mode === 'exclusive' && !dv.hardware_volume)) && dv.settings.full_level_ok && dv.media_volume != null && dv.media_volume < 100 ? `<div class="notice warn" role="status">${esc(fullLevelText(dv, dv.settings.mode === 'exclusive'))}</div>` : ''))
-            // The choices, from apps that take them (they report `settings`)
-            + (dv.settings ? group('Settings', row('Preferred mode', 'Bit-perfect plays at full level: Android applies no volume of its own then, and the level is the DAC’s or the amplifier’s. So Auto plays bit-perfect only while Android’s volume is at full (it never gets louder), and shared otherwise. Bit-perfect plays bit-perfect at any volume: turn the DAC or amplifier down first. Exclusive USB: this app drives the DAC itself with its own USB driver, on any Android; Android asks you once to allow it, and other apps’ sounds go to the phone’s speaker meanwhile. It starts the DAC’s own volume no louder than Android played. Changes apply from the next song.', `<select class="input" id="dvmode" aria-label="Preferred mode">${[['auto', 'Auto'], ['bit_perfect', 'Bit-perfect'], ['exclusive', 'Exclusive USB'], ['shared', 'Shared']].map(([v, l]) => `<option value="${v}" ${(dv.settings.mode || 'auto') === v ? 'selected' : ''} ${(v === 'bit_perfect' || v === 'exclusive') && !(dv.modes || []).includes(v) ? 'disabled' : ''}>${l}</option>`).join('')}</select>`)
-              // Exclusive USB on a DAC with its own volume: the zone's volume moves it
-              + (dv.settings.mode === 'exclusive' && dv.hardware_volume ? row('Use the DAC’s volume', 'The zone’s volume sets the DAC’s own volume; the music stays untouched. Off: the DAC stays where it started, and the zone’s volume changes the samples.', `<input type="checkbox" id="dvvol" aria-label="Use the DAC’s volume" ${dv.settings.dac_volume !== false ? 'checked' : ''}>`) : '')) : '');
+            // Who sets the level, read-only: one behaviour, nothing to choose
+            + (dacVolumeWords(dv) ? row(esc(dacVolumeWords(dv)), dv.own_volume ? 'The app’s slider, the volume keys and Android’s volume panel set the DAC’s own volume; the music itself stays untouched. The first sound is quiet: the level you last played this DAC at, else a low one.' : 'This DAC has no volume of its own, so the app has no slider for it: set the level on the DAC or the amplifier. The music stays bit-perfect.', '') : '')
+            // Android's permission for Exclusive USB (the app's own USB driver) was not given: ask again
+            + (dv.usb_permission === false ? row('Exclusive USB', 'This app can drive the DAC itself with its own USB driver: bit-perfect on any Android, at the DAC’s own volume. Android asks you once to allow it.', '<button class="btn ghost sm" id="dvallow">Allow Exclusive USB</button>') : ''));
           main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}${panel('privacy', group('Usage insights', '<div id="usageme"></div>'))}${panel('usage', group('Usage insights', '<div id="usagenode"></div>'))}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           // Usage insights (usage.js): yours, and the node's switch
           if (window.PM_USAGE) { PM_USAGE.renderPersonal($('#usageme', main)); PM_USAGE.renderNode($('#usagenode', main)); }
-          // This phone: the choices go to the node, which passes them to the app's player
-          const putDev = async (body, what) => { try { await api('PUT', `/outputs/${encodeURIComponent(myOut.id)}/device`, body); toast(`${what}: from the next song`); refreshOutputs(); } catch (e) { toast(e.message, 'error'); } };
-          // Bit-perfect plays at full level: below Android's full volume only with the listener's OK
-          // (asked here; Cancel keeps the mode as it was)
-          const dvm = $('#dvmode', main); if (dvm) { const was = dvm.value; dvm.onchange = () => {
-            const mv = dv.media_volume;
-            if (dvm.value === 'bit_perfect' && mv !== 100) {
-              const at = mv != null ? ` (${mv}%)` : '';
-              if (!confirm(`Bit-perfect plays at full level; Android’s volume${at} no longer applies. Set the level on the DAC or amplifier first.\n\nUse bit-perfect?`)) { dvm.value = was; return; }
-              return putDev({ mode: 'bit_perfect', full_level_ok: true }, 'Mode saved');
-            }
-            // Exclusive USB on a DAC without a volume of its own plays at full level too
-            if (dvm.value === 'exclusive' && !dv.hardware_volume && mv !== 100) {
-              const at = mv != null ? ` (${mv}%)` : '';
-              if (!confirm(`Exclusive USB plays at full level on this DAC (it has no volume of its own); Android’s volume${at} no longer applies. Set the level on the amplifier first.\n\nUse Exclusive USB?`)) { dvm.value = was; return; }
-              return putDev({ mode: 'exclusive', full_level_ok: true }, 'Mode saved (allow the DAC when Android asks)');
-            }
-            return putDev({ mode: dvm.value }, dvm.value === 'exclusive' ? 'Mode saved (allow the DAC when Android asks)' : 'Mode saved');
-          }; }
-          const dvv = $('#dvvol', main); if (dvv) dvv.onchange = () => putDev({ dac_volume: dvv.checked }, dvv.checked ? 'The zone’s volume sets the DAC' : 'The DAC’s volume stays put');
+          // This phone: "Allow Exclusive USB" goes to the node, which passes it to the app's player,
+          // and Android shows its dialog
+          const dva = $('#dvallow', main); if (dva) dva.onclick = async () => { dva.disabled = true; try { await api('PUT', `/outputs/${encodeURIComponent(myOut.id)}/device`, { mode: 'exclusive' }); toast('Allow the DAC when Android asks: Exclusive USB from the next song'); refreshOutputs(); } catch (e) { dva.disabled = false; toast(e.message, 'error'); } };
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
           const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };

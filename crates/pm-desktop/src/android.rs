@@ -364,6 +364,69 @@ fn stop_service(env: &mut jni021::JNIEnv, activity: &jni021::objects::JObject) -
     Ok(())
 }
 
+/// The app's own player plays (or stopped): `PlayerService.appPlaying(on)`, which keeps the
+/// service while it plays out of sight (Exclusive USB is no AudioTrack, so Android's "music
+/// active" says nothing of it); playing, the service is started again if it had ended.
+pub fn app_playing(app: &tauri::AppHandle, on: bool) {
+    use tauri::Manager;
+    if on {
+        resume_player_service(app);
+    }
+    let Some(window) = app.get_webview_window(crate::MAIN) else {
+        return;
+    };
+    let scheduled = window.with_webview(move |wv| {
+        wv.jni_handle().exec(move |env, activity, _webview| {
+            let told = crate::crash::guarded("the player service", || tell_app_playing(env, activity, on))
+                .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+            if let Err(e) = told {
+                if env.exception_check().unwrap_or(false) {
+                    let _ = env.exception_describe();
+                    let _ = env.exception_clear();
+                }
+                tracing::warn!("player service: can't say the app plays ({e})");
+            }
+        });
+    });
+    if let Err(e) = scheduled {
+        tracing::warn!("cannot reach the activity for the player service: {e}");
+    }
+}
+
+fn tell_app_playing(
+    env: &mut jni021::JNIEnv,
+    activity: &jni021::objects::JObject,
+    on: bool,
+) -> jni021::errors::Result<()> {
+    use jni021::objects::{JClass, JValue};
+    let class = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let name = env
+        .call_method(&class, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let name: String = env.get_string(&name.into())?.into();
+    let service = match name.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.PlayerService"),
+        None => "PlayerService".into(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&service)?;
+    let cls = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    let cls = JClass::from(cls);
+    env.call_static_method(&cls, "appPlaying", "(Z)V", &[JValue::Bool(u8::from(on))])?;
+    Ok(())
+}
+
 /// The share sheet for the crash report (`CrashReport.share`, tools/release/android/CrashReport.kt).
 pub fn share_text(app: &tauri::AppHandle, text: String) -> Result<(), String> {
     use tauri::Manager;
@@ -834,32 +897,37 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
         Ok((Box::new(track), report))
     }
 
-    fn media_volume(&self) -> Option<u8> {
-        use jni021::objects::JClass;
-        let p = with_jvm(&self.vm, |env| {
+    fn set_media_volume_on(
+        &self,
+        dac_id: i32,
+        percent: u8,
+    ) -> Result<u8, pm_out_local::bit_perfect::MediaRefused> {
+        use jni021::objects::{JClass, JValue};
+        use pm_out_local::bit_perfect::MediaRefused;
+        let now = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
-            env.call_static_method(class, "mediaVolume", "()I", &[])?.i()
+            env.call_static_method(
+                class,
+                "setMediaVolumeOn",
+                "(II)I",
+                &[JValue::Int(dac_id), JValue::Int(i32::from(percent))],
+            )?
+            .i()
         })
-        .ok()?;
-        u8::try_from(p).ok().filter(|p| *p <= 100)
-    }
-
-    fn media_db_on_dac(&self) -> Option<f32> {
-        use jni021::objects::JClass;
-        let db = with_jvm(&self.vm, |env| {
-            let class: &JClass = self.class.as_obj().into();
-            env.call_static_method(class, "mediaVolumeDbOnUsb", "()F", &[])?
-                .f()
-        })
-        .ok()?;
-        // NaN: Android can't say for the DAC; -inf: silent (both: the hand-over mutes)
-        (!db.is_nan()).then_some(db)
+        .map_err(|_| MediaRefused::Route)?;
+        // -1: media doesn't go to that DAC alone (nothing set); -2: the volume is fixed, or the
+        // set didn't take
+        match now {
+            0..=100 => Ok(now as u8),
+            -2 => Err(MediaRefused::Level),
+            _ => Err(MediaRefused::Route),
+        }
     }
 }
 
 /// Exclusive USB's app side (`UsbExclusive.kt`) for pm-out-local's `exclusive`: Android's
-/// permission for the DAC (asked only when the listener chose Exclusive USB), and the open device's
-/// file descriptor, on which the app's driver speaks usbfs.
+/// permission for the DAC (asked once per DAC by Auto, and by Settings' "Allow Exclusive USB"), and
+/// the open device's file descriptor, on which the app's driver speaks usbfs.
 struct JniUsbExclusive {
     vm: std::sync::Arc<jni021::JavaVM>,
     class: jni021::objects::GlobalRef,
@@ -908,6 +976,34 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
         if let Err(e) = r {
             tracing::warn!("Exclusive USB: cannot ask Android's permission: {e}");
         }
+    }
+
+    /// Auto's one ask for the DAC (`UsbExclusive.requestPermissionOnce`: on screen only, once).
+    fn ask_once(&self, usb: pm_out_local::exclusive::UsbIds) {
+        use jni021::objects::JClass;
+        let r = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "requestPermissionOnce", "(II)V", &Self::ids(usb))?;
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("Exclusive USB: cannot ask Android's permission: {e}");
+        }
+    }
+
+    /// Auto's ask again on a re-attach (`UsbExclusive.requestPermissionAgain`: on screen only):
+    /// whether Android was asked.
+    fn ask_again(&self, usb: pm_out_local::exclusive::UsbIds) -> bool {
+        use jni021::objects::JClass;
+        with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "requestPermissionAgain", "(II)Z", &Self::ids(usb))?
+                .z()
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!("Exclusive USB: cannot ask Android's permission again: {e}");
+            false
+        })
     }
 
     fn open(
@@ -1144,6 +1240,237 @@ impl pm_out_local::bit_perfect::Track for JniTrack {
             Ok(())
         } else {
             Err(why)
+        }
+    }
+}
+
+/// The system's media controls (`MediaControl.kt`, tools/release/android/): one framework
+/// `MediaSession` with its notification, the page's message port (`OdeionAndroid`), audio focus,
+/// and Android's media volume for pm-out-local (`media_volume`). Attached on the UI thread before
+/// the node's page loads (the port reaches pages loaded afterwards); a thread of ours, attached to
+/// the JVM, then waits for what the session's buttons, the page and Android send. Builds without
+/// the class have no media controls.
+pub fn start_media(app: &tauri::AppHandle, offline_origin: std::sync::Arc<std::sync::Mutex<Option<String>>>) {
+    use tauri::Manager;
+    let Some(window) = app.get_webview_window(crate::MAIN) else {
+        return;
+    };
+    let app2 = app.clone();
+    let scheduled = window.with_webview(move |wv| {
+        wv.jni_handle().exec(move |env, activity, webview| {
+            let found = crate::crash::guarded("the media controls", || attach_media(env, activity, webview))
+                .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+            let (vm, class) = match found {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("no media controls ({e})");
+                    return;
+                }
+            };
+            let jni = std::sync::Arc::new(JniMedia {
+                vm: std::sync::Arc::new(vm),
+                class,
+            });
+            pm_out_local::media_volume::set_backend(jni.clone());
+            let media = crate::media_live::init(&app2, jni.clone(), offline_origin);
+            let spawned = std::thread::Builder::new()
+                .name("media-events".into())
+                .spawn(move || media_loop(jni, media));
+            if let Err(e) = spawned {
+                tracing::warn!("no media controls: {e}");
+            }
+        });
+    });
+    if let Err(e) = scheduled {
+        tracing::warn!("cannot reach the activity for the media controls: {e}");
+    }
+}
+
+/// `MediaControl.attach(activity, webview)`, and what the waiting thread needs.
+fn attach_media(
+    env: &mut jni021::JNIEnv,
+    activity: &jni021::objects::JObject,
+    webview: &jni021::objects::JObject,
+) -> jni021::errors::Result<(jni021::JavaVM, jni021::objects::GlobalRef)> {
+    use jni021::objects::{JClass, JValue};
+    let class = app_class(env, activity, "MediaControl")?;
+    let cls: &JClass = class.as_obj().into();
+    env.call_static_method(
+        cls,
+        "attach",
+        "(Landroid/app/Activity;Landroid/webkit/WebView;)V",
+        &[JValue::Object(activity), JValue::Object(webview)],
+    )?;
+    Ok((env.get_java_vm()?, class))
+}
+
+/// `MediaControl.kt`'s static methods, from any thread of ours.
+struct JniMedia {
+    vm: std::sync::Arc<jni021::JavaVM>,
+    class: jni021::objects::GlobalRef,
+}
+
+impl JniMedia {
+    fn call(
+        &self,
+        what: &str,
+        f: impl FnOnce(&mut jni021::JNIEnv, &jni021::objects::JClass) -> jni021::errors::Result<()>,
+    ) {
+        let r = with_jvm(&self.vm, |env| {
+            let class: &jni021::objects::JClass = self.class.as_obj().into();
+            f(env, class)
+        });
+        if let Err(e) = r {
+            tracing::warn!("media controls: {what}: {e}");
+        }
+    }
+}
+
+impl crate::media_live::Native for JniMedia {
+    fn update(&self, session: &str) {
+        self.call("update", |env, class| {
+            let s = env.new_string(session)?;
+            env.call_static_method(
+                class,
+                "update",
+                "(Ljava/lang/String;)V",
+                &[jni021::objects::JValue::Object(&s)],
+            )?;
+            Ok(())
+        });
+    }
+
+    fn art(&self, url: &str, bytes: &[u8]) {
+        self.call("art", |env, class| {
+            let u = env.new_string(url)?;
+            let b = env.byte_array_from_slice(bytes)?;
+            env.call_static_method(
+                class,
+                "art",
+                "(Ljava/lang/String;[B)V",
+                &[
+                    jni021::objects::JValue::Object(&u),
+                    jni021::objects::JValue::Object(&b),
+                ],
+            )?;
+            Ok(())
+        });
+    }
+
+    fn focus(&self, want: bool, ducks: bool) {
+        self.call("focus", |env, class| {
+            env.call_static_method(
+                class,
+                "focus",
+                "(ZZ)V",
+                &[
+                    jni021::objects::JValue::Bool(u8::from(want)),
+                    jni021::objects::JValue::Bool(u8::from(ducks)),
+                ],
+            )?;
+            Ok(())
+        });
+    }
+}
+
+impl pm_out_local::media_volume::MediaVolumeBackend for JniMedia {
+    fn stream(&self) -> Option<pm_out_local::media_volume::Stream> {
+        let s = with_jvm(&self.vm, |env| {
+            let class: &jni021::objects::JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "streamVolume", "()Ljava/lang/String;", &[])?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        })
+        .ok()?;
+        parse_stream(&s)
+    }
+
+    fn set_index(&self, index: u32) -> Result<(), String> {
+        let ok = with_jvm(&self.vm, |env| {
+            let class: &jni021::objects::JClass = self.class.as_obj().into();
+            env.call_static_method(
+                class,
+                "setStreamVolume",
+                "(I)Z",
+                &[jni021::objects::JValue::Int(
+                    i32::try_from(index).unwrap_or(i32::MAX),
+                )],
+            )?
+            .z()
+        })?;
+        ok.then_some(())
+            .ok_or_else(|| "Android did not take the media volume".into())
+    }
+
+    fn set_muted(&self, muted: bool) -> Result<(), String> {
+        let ok = with_jvm(&self.vm, |env| {
+            let class: &jni021::objects::JClass = self.class.as_obj().into();
+            env.call_static_method(
+                class,
+                "setStreamMute",
+                "(Z)Z",
+                &[jni021::objects::JValue::Bool(u8::from(muted))],
+            )?
+            .z()
+        })?;
+        ok.then_some(())
+            .ok_or_else(|| "Android did not take the mute".into())
+    }
+}
+
+/// `MediaControl.streamVolume()`'s answer: `"<index> <max> <muted 0|1>"`, empty when unknown.
+fn parse_stream(s: &str) -> Option<pm_out_local::media_volume::Stream> {
+    let mut it = s.split_whitespace().map(str::parse::<u32>);
+    let (index, max, muted) = (it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?);
+    (max > 0).then_some(pm_out_local::media_volume::Stream {
+        index: index.min(max),
+        max,
+        muted: muted != 0,
+    })
+}
+
+/// Waits for `MediaControl.next` for as long as the app runs.
+fn media_loop(jni: std::sync::Arc<JniMedia>, media: std::sync::Arc<crate::media_live::Media>) {
+    use jni021::objects::{JClass, JValue};
+    let mut env = match jni.vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("no media controls: {e}");
+            return;
+        }
+    };
+    loop {
+        let answer = env.with_local_frame(8, |env| -> jni021::errors::Result<String> {
+            let class: &JClass = jni.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "next", "(J)Ljava/lang/String;", &[JValue::Long(30_000)])?
+                .l()?;
+            Ok(env.get_string(&s.into())?.into())
+        });
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        let answer = match answer {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("media controls: {e}");
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
+        };
+        if answer.is_empty() {
+            continue;
+        }
+        match crate::media::parse_event(&answer) {
+            // In order, one after another (media_live's queue)
+            Some(ev) => media.send(ev),
+            None => tracing::debug!("media controls: an event that isn't one of ours"),
         }
     }
 }

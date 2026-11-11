@@ -38,11 +38,23 @@ silently cannot connect.
    tells the node. It never asks for USB permission. Bit-perfect playback to the DAC
    (tools/release/android/BitPerfect.kt) sets the DAC's mixer attributes, which needs
    MODIFY_AUDIO_SETTINGS (a normal permission, granted at install). Exclusive USB
-   (tools/release/android/UsbExclusive.kt) asks USB permission for the DAC only when the listener
-   chooses it in Settings, and hands the device to the app's own driver. ProGuard keep rules for all three.
+   (tools/release/android/UsbExclusive.kt) asks USB permission for the DAC (Auto once per DAC on
+   screen, again on a replug when it was granted before; Settings' "Allow Exclusive USB"), and
+   hands the device to the app's own driver. ProGuard keep rules for all three.
 12. The window's own colour before the first page paints: the pages' background (light, and dark
    in values-night) as the theme's windowBackground and Android 12's splash screen background, so a
    cold start shows no black frame (owner's recording, 2026-11-06).
+13. The system's media controls (tools/release/android/MediaControl.kt, src/media.rs): one media
+   session for the zone the app controls (the player service's notification becomes the media
+   notification; lock screen, quick settings, headset and Bluetooth buttons, the volume keys), the
+   page's message port (androidx.webkit, in Tauri's template) and Android's media volume. ProGuard
+   keep rule: its static methods are called over JNI.
+14. A USB DAC's permission that lasts: MainActivity takes USB_DEVICE_ATTACHED for audio-class devices
+   (res/xml/usb_audio_devices.xml, class 1), so Android's dialog offers to always open the DAC with
+   Odeion and the grant survives replugs (without it, a permission from requestPermission ends at
+   the unplug and Exclusive USB is first only once). Side effects: Android asks "Open Odeion?" at
+   every plug-in of any USB audio device (dongles and headsets too), even with Odeion not running,
+   and with "always" opens Odeion at each one.
 
 Usage: android-patch.py <crates/pm-desktop> [--without-updater]
 """
@@ -123,6 +135,7 @@ updater = "-keep class **.AppUpdate { public static *; }"
 usb_audio = "-keep class **.UsbAudio { public static *; }"
 bit_perfect = "-keep class **.BitPerfect { public static *; }"
 exclusive = "-keep class **.UsbExclusive { public static *; }"
+media_control = "-keep class **.MediaControl { public static *; }"
 if player not in existing:
     existing = existing.rstrip("\n") + "\n\n# The player service's start/stop (called over JNI from src/android.rs)\n" + player + "\n"
 if crash.split("\n")[0] not in existing:
@@ -135,6 +148,8 @@ if bit_perfect not in existing:
     existing = existing.rstrip("\n") + "\n\n# Bit-perfect playback: its static methods are called over JNI from src/android.rs\n" + bit_perfect + "\n"
 if exclusive not in existing:
     existing = existing.rstrip("\n") + "\n\n# Exclusive USB: its static methods are called over JNI from src/android.rs\n" + exclusive + "\n"
+if media_control not in existing:
+    existing = existing.rstrip("\n") + "\n\n# The media controls: their static methods are called over JNI from src/android.rs\n" + media_control + "\n"
 proguard.write_text(existing)
 
 # 4. multicast permission
@@ -315,6 +330,15 @@ ex_kt, n = re.subn(r"^package [\w.]+", f"package {pkg.group(1)}", ex_kt, count=1
 if n != 1:
     die("UsbExclusive.kt has no package line")
 (activities[0].parent / "UsbExclusive.kt").write_text(ex_kt)
+
+# 13. the media controls, next to MainActivity; the page's message port is androidx.webkit's
+if "androidx.webkit:webkit" not in gradle.read_text():
+    die(f"androidx.webkit is not in {gradle}: the media controls' message port needs it")
+mc_kt = (Path(__file__).parent / "android" / "MediaControl.kt").read_text()
+mc_kt, n = re.subn(r"^package [\w.]+", f"package {pkg.group(1)}", mc_kt, count=1, flags=re.M)
+if n != 1:
+    die("MediaControl.kt has no package line")
+(activities[0].parent / "MediaControl.kt").write_text(mc_kt)
 mtext = manifest.read_text()
 audio_perm = '<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />'
 if audio_perm not in mtext:
@@ -348,7 +372,39 @@ for t in themes:
         ttext = re.sub(r"<resources(\s|>)", r'<resources xmlns:tools="http://schemas.android.com/tools"\1', ttext, count=1)
     t.write_text(ttext)
 
+# 14. USB DACs: MainActivity takes USB_DEVICE_ATTACHED for audio-class devices, so the permission lasts
+res_xml.mkdir(parents=True, exist_ok=True)
+(res_xml / "usb_audio_devices.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
+<!-- tools/release/android-patch.py: USB audio devices (class 1, on the device or an interface). -->
+<resources>
+    <usb-device class="1" />
+</resources>
+""")
+mtext = manifest.read_text()
+usb_action = "android.hardware.usb.action.USB_DEVICE_ATTACHED"
+if usb_action not in mtext:
+    acts = list(re.finditer(r'<activity\b[^>]*?android:name="\.MainActivity"[^>]*?(?:/>|>.*?</activity>)', mtext, re.S))
+    if len(acts) != 1:
+        die(f"expected one MainActivity <activity> in {manifest}, found {len(acts)}")
+    a = acts[0]
+    usb_entry = (
+        "            <intent-filter>\n"
+        f'                <action android:name="{usb_action}" />\n'
+        "            </intent-filter>\n"
+        f'            <meta-data android:name="{usb_action}"\n'
+        '                android:resource="@xml/usb_audio_devices" />\n'
+        "        "
+    )
+    block = a.group(0)
+    if block.endswith("/>"):
+        block = block[:-2].rstrip() + ">\n" + usb_entry + "</activity>"
+    else:
+        # before </activity>, on its indentation
+        block = block[: -len("</activity>")].rstrip() + "\n" + usb_entry + "</activity>"
+    mtext = mtext[: a.start()] + block + mtext[a.end():]
+    manifest.write_text(mtext)
+
 print(
     f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule, "
-    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates, USB DACs (bit-perfect, exclusive USB), window colour"
+    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates, USB DACs (bit-perfect, exclusive USB), window colour, media controls, USB attach filter"
 )

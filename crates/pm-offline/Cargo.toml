@@ -17,6 +17,10 @@ tokio = { workspace = true, features = ["io-util", "net"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tracing = { workspace = true }
 
+# Free space on the device's disk (a sync never fills it)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true }

@@ -112,9 +112,15 @@ pub struct OutputDevice {
     /// source with these ([`caps_for_source`]), so a listed format reaches it unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub formats: Vec<DeviceFormat>,
-    /// The phone's media volume, 0 to 100, when it matters (bit-perfect plays at full level).
+    /// Whether it has a volume of its own (a USB feature unit the app or Android sets), as its
+    /// descriptors tell: `Some(false)` means the level is set on the DAC or the amplifier; `None`
+    /// while that isn't known (Android has not let the app read its descriptors).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_volume: Option<u8>,
+    pub own_volume: Option<bool>,
+    /// Android's permission for the app's own USB driver (Exclusive USB): `Some(false)` when it
+    /// was not given (a UI offers to ask again); `None` where Exclusive USB isn't offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb_permission: Option<bool>,
 }
 
 /// One format a device takes bit-perfect.
@@ -158,18 +164,19 @@ pub fn caps_for_source(formats: &[DeviceFormat], src: AudioFormat, caps: &Output
     }
 }
 
-/// The listener's choices for an [`OutputDevice`].
+/// What a UI sends for an [`OutputDevice`] (`PUT /v1/outputs/{id}/device`). A phone's USB DAC has
+/// one behaviour now (Exclusive USB, else Android's bit-perfect, else shared only where neither is
+/// possible): `mode: exclusive` asks Android's permission for Exclusive USB again, anything else
+/// changes nothing. `dac_volume` and `full_level_ok` are never read; they stay so that settings an
+/// earlier app saved or sent still read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceSettings {
-    /// The mode to use: `auto` takes bit-perfect where the phone allows it, else shared.
     #[serde(default)]
     pub mode: PreferredMode,
-    /// Reserved: kept so earlier apps' settings still read. The phone's DAC has no zone volume of
-    /// its own (in bit-perfect mode the level is the DAC's).
+    /// Never read (an earlier app's "use the DAC's volume").
     #[serde(default = "yes")]
     pub dac_volume: bool,
-    /// The listener agreed that Bit-perfect plays at full level below Android's full volume (asked
-    /// when they chose it); for the DAC attached then only.
+    /// Never read (an earlier app's agreement to full level).
     #[serde(default)]
     pub full_level_ok: bool,
 }
@@ -188,7 +195,9 @@ impl Default for DeviceSettings {
     }
 }
 
-/// [`DeviceSettings::mode`].
+/// [`DeviceSettings::mode`] on the wire. Only `exclusive` means anything now (ask Android's
+/// permission for Exclusive USB again); `shared`, `bit_perfect` and `auto` from an earlier app or
+/// a saved file are all the one behaviour (Auto).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PreferredMode {
@@ -196,7 +205,7 @@ pub enum PreferredMode {
     Auto,
     BitPerfect,
     Shared,
-    /// The app drives the DAC itself (its own USB driver; Android's permission is asked).
+    /// Ask Android's permission for the app's own USB driver again.
     Exclusive,
     /// A choice this node does not know yet: as `auto`.
     #[serde(other)]
@@ -411,10 +420,9 @@ pub trait AudioSink: Send {
     /// with it) is kept.
     fn gone_reported(&mut self) {}
 
-    /// The sink may not carry on as it is with the next write: a phone's DAC paused in
-    /// bit-perfect mode whose listener turned Android's volume down since (writing would put it
-    /// back at full level without consent). Whoever writes opens the output again in the same
-    /// format first (planned as it is now: shared) and writes there.
+    /// The sink may not carry on as it is with the next write (what it plays through changed
+    /// under it). Whoever writes opens the output again in the same format first (planned as it
+    /// is now) and writes there.
     fn reopen_now(&self) -> bool {
         false
     }
@@ -920,8 +928,8 @@ mod tests {
         assert_eq!(caps_for_source(&[], AudioFormat::pcm(96_000, 24, 2), &caps), caps);
     }
 
-    /// The listener's modes on the wire, Exclusive USB among them; one from a newer app is Unknown
-    /// (taken as auto).
+    /// The modes on the wire, Exclusive USB among them; one from a newer app is Unknown (taken as
+    /// auto).
     #[test]
     fn the_preferred_modes_on_the_wire() {
         for (text, mode) in [
@@ -937,5 +945,32 @@ mod tests {
                 assert_eq!(serde_json::to_value(mode).unwrap(), text);
             }
         }
+    }
+
+    /// Settings an earlier app saved or sent (the full-level agreement, the DAC-volume toggle,
+    /// any mode) still read; a device described by an earlier app (with its media volume) too.
+    #[test]
+    fn old_settings_and_devices_still_read() {
+        let old: DeviceSettings =
+            serde_json::from_str(r#"{"mode":"shared","dac_volume":false,"full_level_ok":true}"#).unwrap();
+        assert_eq!(old.mode, PreferredMode::Shared);
+        assert!(old.full_level_ok && !old.dac_volume);
+        let none: DeviceSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(none, DeviceSettings::default());
+        let d: OutputDevice = serde_json::from_str(
+            r#"{"name":"FiiO KA17","mode":"bit_perfect","confirmed":true,"media_volume":40,
+            "settings":{"mode":"bit_perfect","full_level_ok":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (d.name.as_str(), d.own_volume, d.usb_permission),
+            ("FiiO KA17", None, None)
+        );
+        // Unknown whether it has a volume of its own: not said at all
+        let v = serde_json::to_value(OutputDevice::default()).unwrap();
+        assert!(
+            v.get("own_volume").is_none() && v.get("usb_permission").is_none(),
+            "{v}"
+        );
     }
 }

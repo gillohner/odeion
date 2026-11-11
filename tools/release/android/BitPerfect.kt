@@ -370,55 +370,49 @@ class BitPerfect private constructor() {
             worker.postDelayed(clearLater, 3000)
         }
 
-        /// Android's media volume, 0 to 100 (-1: unknown). Bit-perfect plays at full level
-        /// (Android applies no volume then), so Auto uses it only at 100.
+        /// Android's media volume, 0 to 100 (-1: unknown), for UsbAudio's report. On a DAC Android
+        /// plays bit-perfect it is the DAC's own volume (Android scales nothing and hands it to the
+        /// DAC's hardware volume): the Rust side keeps it as that DAC's level.
         @JvmStatic
         fun mediaVolume(): Int {
             val am = audio() ?: return -1
             val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             if (max <= 0) return -1
             val v = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-            // 100 only at the top step: on a phone with 200 or more steps, the one below full
-            // would otherwise round up to 100 (full level without the agreement)
+            // 100 only at the top step (the Rust side's mapping: media_volume.rs)
             if (v >= max) return 100
             return minOf(99, (v * 100 + max / 2) / max)
         }
 
-        /// Android's own attenuation of media, in dB, for the USB DAC it plays to now
-        /// (getStreamVolumeDb, Android 9+), for Exclusive USB's hand-over: NaN when it can't say,
-        /// so the DAC starts muted. The media volume index is the one of media's current route, so
-        /// it is read only when that route is the USB DAC and nothing else: a DAC merely attached
-        /// while media plays on Bluetooth or the speaker gives NaN, never that output's level.
-        /// Android 13+ names the route (getAudioDevicesForAttributes); 9 to 12 only through the
-        /// hidden getDevicesForStream (output device bits): when that can't be called, NaN.
+        /// Before the first bit-perfect track on a DAC: Android's media volume down to `percent`
+        /// (the DAC's last level, else a low one), never up, and only while Android routes media
+        /// to that very DAC and nothing else (getAudioDevicesForAttributes, by its id: with
+        /// several devices the index may be another's, the speaker's). Answers the media volume on
+        /// that DAC as read back, 0 to 100; -1 when media isn't on that DAC alone (nothing set);
+        /// -2 when Android keeps the volume fixed or didn't take the set (no start level). In bit-perfect mode Android passes
+        /// the media volume to the DAC's own volume (BitPerfectThread, then the USB HAL's
+        /// setVolume sets its feature unit); the samples stay untouched. Never forced to 100 %.
         @JvmStatic
-        fun mediaVolumeDbOnUsb(): Float {
-            if (Build.VERSION.SDK_INT < 28) return Float.NaN
-            val am = audio() ?: return Float.NaN
-            val type = usbMediaRoute(am) ?: return Float.NaN
+        fun setMediaVolumeOn(dacId: Int, percent: Int): Int {
+            if (Build.VERSION.SDK_INT < 33) return -1
+            val am = audio() ?: return -1
             return runCatching {
-                am.getStreamVolumeDb(AudioManager.STREAM_MUSIC, am.getStreamVolume(AudioManager.STREAM_MUSIC), type)
-            }.getOrDefault(Float.NaN)
-        }
-
-        /// The USB output type media plays to now when that is its only route, else null.
-        private fun usbMediaRoute(am: AudioManager): Int? {
-            val usb = setOf(AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET)
-            if (Build.VERSION.SDK_INT >= 33) {
-                val routed = runCatching { am.getAudioDevicesForAttributes(media).map { it.type } }.getOrNull()
-                    ?: return null
-                return routed.singleOrNull()?.takeIf { it in usb }
-            }
-            // AudioSystem's output bits: USB device 0x4000, USB headset 0x4000000
-            val bits = runCatching {
-                AudioManager::class.java.getMethod("getDevicesForStream", Int::class.javaPrimitiveType)
-                    .invoke(am, AudioManager.STREAM_MUSIC) as Int
-            }.getOrNull() ?: return null
-            return when (bits) {
-                0x4000 -> AudioDeviceInfo.TYPE_USB_DEVICE
-                0x4000000 -> AudioDeviceInfo.TYPE_USB_HEADSET
-                else -> null
-            }
+                if (am.getAudioDevicesForAttributes(media).singleOrNull()?.id != dacId) return@runCatching -1
+                // A device whose volume Android keeps fixed: no level can be set
+                if (am.isVolumeFixed) return@runCatching -2
+                val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                if (max <= 0) return@runCatching -1
+                // The nearest index, the top one only for 100 % (media_volume.rs index_for)
+                val p = percent.coerceIn(0, 100)
+                val target = if (p == 100) max else minOf(max - 1, (p * max + 50) / 100)
+                val now = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                // Lowered only: a level below it already stays (an unplug meanwhile lowers, never raises)
+                if (now > target) am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+                // Read back: Android ignoring the set (a vendor quirk) is no start level
+                val v = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                if (v > target) return@runCatching -2
+                if (v >= max) 100 else minOf(99, (v * 100 + max / 2) / max)
+            }.getOrDefault(-1)
         }
 
         /// Devices went away (UsbAudio's callback): tracks on them stop at once.

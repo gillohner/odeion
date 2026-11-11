@@ -254,19 +254,44 @@ struct Scratch {
 
 impl Scratch {
     fn new(name: &str) -> std::io::Result<Self> {
-        let dir = std::env::temp_dir().join(format!(
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let prefix = format!(
             "pm-{name}-{}-{}",
             std::process::id(),
             time::OffsetDateTime::now_utc().unix_timestamp_nanos()
-        ));
+        );
+        Self::allocate(name, &std::env::temp_dir(), &prefix, &NEXT)
+    }
+
+    fn allocate(
+        name: &str,
+        parent: &Path,
+        prefix: &str,
+        next: &std::sync::atomic::AtomicU64,
+    ) -> std::io::Result<Self> {
         let mut b = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-        b.create(&dir)?;
-        Ok(Self {
-            file: dir.join(name),
-            dir,
-        })
+        // Clock readings can repeat on a runner, including across concurrent restores. An
+        // exclusive create still protects private data; a collision never reuses that folder.
+        for _ in 0..32 {
+            let serial = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = parent.join(format!("{prefix}-{serial}"));
+            match b.create(&dir) {
+                Ok(()) => {
+                    return Ok(Self {
+                        file: dir.join(name),
+                        dir,
+                    })
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a fresh private backup folder",
+        ))
     }
 }
 
@@ -1382,6 +1407,41 @@ pub(crate) async fn run_schedule(State(s): State<Arc<NodeState>>) -> ApiResult<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_collisions_preserve_existing_folders_and_repeated_clock_allocations() {
+        let root = tempfile::tempdir().unwrap();
+        let occupied = root.path().join("same-clock-0");
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("keep"), b"existing").unwrap();
+        let next = std::sync::atomic::AtomicU64::new(0);
+        let first = Scratch::allocate("restore.db", root.path(), "same-clock", &next).unwrap();
+        let second = Scratch::allocate("restore.db", root.path(), "same-clock", &next).unwrap();
+        assert_ne!(first.dir, second.dir);
+        assert_ne!(first.dir, occupied);
+        assert_eq!(std::fs::read(occupied.join("keep")).unwrap(), b"existing");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&first.dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        // Fail closed after bounded collisions; no occupied directory is adopted or removed.
+        for i in 0..32 {
+            std::fs::create_dir(root.path().join(format!("full-{i}"))).unwrap();
+        }
+        let next = std::sync::atomic::AtomicU64::new(0);
+        assert_eq!(
+            Scratch::allocate("restore.db", root.path(), "full", &next)
+                .err()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert!(root.path().join("full-31").is_dir());
+    }
 
     /// The library copy a backup starts from (sign-ins still in it) lives in a fresh folder only
     /// its owner can open, gone with everything in it afterwards (security review 2026-10-30, #2).

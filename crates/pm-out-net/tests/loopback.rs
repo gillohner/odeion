@@ -173,3 +173,116 @@ fn only_the_key_holder_plays_and_a_new_key_reaches_existing_outputs() {
     cell.set(second);
     drop(pm_stream::block_on(out.open(fmt)).unwrap());
 }
+
+/// One stream per output: the app's own player taking the output pauses the node's zone on it
+/// with the reason (no second stream, no error loop); the node's next play stops the app's
+/// player and takes the output back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_apps_own_player_and_the_nodes_zone_hand_the_output_over() {
+    use pm_endpoint::owner::Holder;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.wav");
+    write_wav(&a, 48_000 * 8, 1);
+    let outputs = OutputRegistry::new();
+    let null = Arc::new(NullOutput::realtime());
+    let local_id = null.id();
+    outputs.register(null);
+    let key = Key::random();
+    let endpoint = Endpoint::new("Phone", outputs, key.clone());
+    let serving = endpoint.spawn(TcpListener::bind("127.0.0.1:0").unwrap()).unwrap();
+    let out: Arc<dyn Output> = Arc::new(
+        NetOutput::connect(serving.addr(), &KeyCell::new(key))
+            .unwrap()
+            .remove(0),
+    );
+    let zone = Zone::new(
+        ZoneId::new("phone"),
+        "Phone",
+        out,
+        Arc::new(LocalFiles::new(PipelineConfig::default())),
+    );
+    zone.enqueue(vec![QueueItem::new(a.to_string_lossy())], Insert::End);
+    zone.play();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while endpoint.owner().holder(&local_id) != Some(Holder::Node) {
+        assert!(
+            std::time::Instant::now() < until,
+            "the node's session never opened"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Paused on the node: the session waits for frames that don't come; it lets go all the same
+    {
+        zone.pause();
+        let st = zone.wait_acked().await;
+        assert_eq!(st.transport, pm_zones::Transport::Paused);
+        let claim = endpoint
+            .owner()
+            .take(&local_id, Holder::App, Arc::new(|| {}), Duration::from_secs(5))
+            .expect("a paused zone's session lets go");
+        drop(claim);
+        zone.stop();
+        zone.wait_stopped().await;
+        zone.play();
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while endpoint.owner().holder(&local_id) != Some(Holder::Node) {
+            assert!(
+                std::time::Instant::now() < until,
+                "the node's session never opened again"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    // The app's player takes it while the node plays: the node's session is stopped and the zone
+    // pauses, saying why
+    let app_stopped = Arc::new(AtomicBool::new(false));
+    let s2 = app_stopped.clone();
+    let claim = endpoint
+        .owner()
+        .take(
+            &local_id,
+            Holder::App,
+            Arc::new(move || s2.store(true, Ordering::SeqCst)),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    let mut st = zone.state();
+    while st.error.is_none() {
+        assert!(
+            std::time::Instant::now() < until + Duration::from_secs(5),
+            "{st:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        st = zone.state();
+    }
+    assert_eq!(st.transport, pm_zones::Transport::Paused, "{st:?}");
+    assert!(
+        st.error.as_deref().unwrap().contains(pm_endpoint::TAKEN_BY_APP),
+        "{st:?}"
+    );
+    assert_eq!(endpoint.owner().holder(&local_id), Some(Holder::App));
+    // The node plays again: the app's player is told to stop; once it lets go, the node has it
+    let slot = Arc::new(std::sync::Mutex::new(Some(claim)));
+    let s3 = slot.clone();
+    let flag = app_stopped.clone();
+    let release = std::thread::spawn(move || {
+        while !flag.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        s3.lock().unwrap().take();
+    });
+    zone.play();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while endpoint.owner().holder(&local_id) != Some(Holder::Node) {
+        assert!(
+            std::time::Instant::now() < until,
+            "the node never got it back: {:?}",
+            zone.state()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    release.join().unwrap();
+    zone.stop();
+}

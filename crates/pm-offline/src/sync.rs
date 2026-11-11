@@ -142,13 +142,164 @@ impl Node {
     }
 }
 
-/// Who this install is, for the node's device list.
-#[derive(Debug, Clone)]
+/// Who this install is, for the node's device list, and how much it may keep.
+#[derive(Debug, Clone, Default)]
 pub struct SyncOptions {
     /// Shown in Settings, e.g. "Pixel 8".
     pub name: String,
     /// `android`, `ios`, `desktop` or `browser`.
     pub kind: String,
+    /// The most the downloads may take, in bytes (`None`: no limit of their own).
+    pub cap_bytes: Option<u64>,
+    /// Never leave less than this free on the device's disk.
+    pub keep_free: u64,
+    /// Told where the sync stands after each song (a storage screen shows it).
+    pub progress: Option<ProgressSink>,
+    /// Bytes the device keeps for other nodes: they count against the limit too.
+    pub other_bytes: u64,
+    /// Asked before each song and body write: true when what to keep changed meanwhile (the
+    /// sync stops there, keeps what it has, and the next one goes on with the new list).
+    pub stop: Option<StopCheck>,
+}
+
+/// See [`SyncOptions::stop`].
+#[derive(Clone)]
+pub struct StopCheck(pub std::sync::Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl std::fmt::Debug for StopCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StopCheck")
+    }
+}
+
+/// Where a sync stands.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct Progress {
+    pub running: bool,
+    /// Songs to download in this sync, and their size (the originals').
+    pub wanted: usize,
+    pub bytes_wanted: u64,
+    pub done: usize,
+    pub bytes_done: u64,
+    pub failed: usize,
+    /// Smaller copies the node is still making (fetched at a later sync).
+    pub preparing: usize,
+    /// The song downloading now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// Why downloading stopped short (the limit, the disk).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full: Option<String>,
+}
+
+/// Where [`Progress`] goes.
+#[derive(Clone)]
+pub struct ProgressSink(pub std::sync::Arc<dyn Fn(&Progress) + Send + Sync>);
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink")
+    }
+}
+
+impl SyncOptions {
+    fn tell(&self, p: &Progress) {
+        if let Some(s) = &self.progress {
+            (s.0)(p);
+        }
+    }
+
+    fn should_stop(&self) -> bool {
+        self.stop.as_ref().is_some_and(|s| (s.0)())
+    }
+}
+
+/// Says the sync is over (running: false) however it ends.
+struct Finish<'a> {
+    opts: &'a SyncOptions,
+    progress: Progress,
+}
+
+impl Drop for Finish<'_> {
+    fn drop(&mut self) {
+        if self.progress.running {
+            self.progress.running = false;
+            self.progress.current = None;
+            self.opts.tell(&self.progress);
+        }
+    }
+}
+
+/// Free bytes on the disk holding `path` (`None` where it can't be read).
+#[cfg(unix)]
+pub fn free_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = path.ancestors().find(|p| p.exists())?;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid C string and a zeroed struct for the call to fill
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some(st.f_bavail as u64 * st.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+pub fn free_bytes(_: &std::path::Path) -> Option<u64> {
+    None
+}
+
+/// Bytes held by completed and partial song files in one node's store. Partial downloads from
+/// earlier attempts consume the same limit as completed songs; ETag sidecars are not songs.
+pub fn download_bytes(dir: &std::path::Path) -> std::io::Result<u64> {
+    let mut bytes = 0u64;
+    for entry in std::fs::read_dir(dir.join("files"))? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() && !entry.file_name().to_string_lossy().ends_with(".etag") {
+            bytes = bytes.saturating_add(entry.metadata()?.len());
+        }
+    }
+    Ok(bytes)
+}
+
+/// Whether one more song of `bytes` fits: under the limit with what the device has, and leaving
+/// `keep_free` on the disk; else why not.
+pub fn fits(
+    have: u64,
+    bytes: u64,
+    cap: Option<u64>,
+    free: Option<u64>,
+    keep_free: u64,
+) -> std::result::Result<(), String> {
+    if let Some(c) = cap {
+        if have.checked_add(bytes).is_none_or(|sum| sum > c) {
+            return Err(format!(
+                "Downloads stopped at the limit of {}: raise it or remove something.",
+                size_words(c)
+            ));
+        }
+    }
+    if free.is_some_and(|f| bytes.checked_add(keep_free).is_none_or(|need| f < need)) {
+        return Err(format!(
+            "Downloads stopped: this device would have less than {} free.",
+            size_words(keep_free)
+        ));
+    }
+    Ok(())
+}
+
+/// "10 GB", "500 MB".
+pub fn size_words(b: u64) -> String {
+    if b >= 1_000_000_000 {
+        let gb = b as f64 / 1e9;
+        if (gb - gb.round()).abs() < 0.05 {
+            format!("{} GB", gb.round() as u64)
+        } else {
+            format!("{gb:.1} GB")
+        }
+    } else {
+        format!("{} MB", (b as f64 / 1e6).round() as u64)
+    }
 }
 
 /// What one sync did.
@@ -162,6 +313,9 @@ pub struct SyncReport {
     pub removed: Vec<i64>,
     /// Songs that failed, and why.
     pub failed: Vec<(i64, String)>,
+    /// Downloading stopped short, and why (the limit, the disk); the rest waits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full: Option<String>,
 }
 
 /// Is this refusal for good (drop the event) rather than "try again later"? A 409 waits: a
@@ -302,10 +456,18 @@ enum Got {
     Done(KeptTrack),
     /// 202: the node is still making the smaller copy.
     Preparing,
+    Full(String),
+    Stopped,
 }
 
 /// Download one song (resuming a partial file), with the node's answer for it.
-async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> Result<Got> {
+async fn download(
+    store: &Store,
+    node: &Node,
+    id: i64,
+    fmt: Option<&Format>,
+    opts: &SyncOptions,
+) -> Result<Got> {
     let mut track = node.get(&format!("/v1/library/tracks/{id}")).await?;
     // The device keeps the name, not where the owner keeps the file
     if let Some(Value::String(p)) = track.pointer_mut("/file/path") {
@@ -375,6 +537,33 @@ async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> 
             return Err(SyncError::Status(s.as_u16(), text.chars().take(200).collect()));
         }
     };
+    // The manifest's size can be stale, and a chunked response has no size at all. Check the
+    // actual response and every write. Count other partials, while replacing an old complete
+    // copy only once against the cap (both copies still count against actual free disk space).
+    let old_bytes = store
+        .track_file(id)
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map_or(0, |m| m.len());
+    let base_bytes = download_bytes(store.dir())?
+        .saturating_sub(have)
+        .saturating_sub(old_bytes)
+        .saturating_add(opts.other_bytes);
+    let mut written = if append { have } else { 0 };
+    let mut available = free_bytes(store.dir());
+    if let Err(why) = fits(base_bytes, total.unwrap_or(written), opts.cap_bytes, None, 0).and_then(|()| {
+        fits(
+            0,
+            total.unwrap_or(written).saturating_sub(written),
+            None,
+            available,
+            opts.keep_free,
+        )
+    }) {
+        return Ok(Got::Full(why));
+    }
+    if opts.should_stop() {
+        return Ok(Got::Stopped);
+    }
     if let Some(et) = resp.headers().get(header::ETAG).and_then(|v| v.to_str().ok()) {
         tokio::fs::write(&etag_file, et).await?;
     }
@@ -390,7 +579,28 @@ async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> 
             .await
             .map_err(|_| SyncError::TimedOut(format!("song {id} stalled")))?;
         let Some(chunk) = next? else { break };
+        if opts.should_stop() {
+            f.flush().await?;
+            return Ok(Got::Stopped);
+        }
+        let bytes = chunk.len() as u64;
+        let free = match (available, free_bytes(store.dir())) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if let Err(why) = fits(
+            base_bytes.saturating_add(written),
+            bytes,
+            opts.cap_bytes,
+            free,
+            opts.keep_free,
+        ) {
+            f.flush().await?;
+            return Ok(Got::Full(why));
+        }
         f.write_all(&chunk).await?;
+        written = written.saturating_add(bytes);
+        available = free.map(|n| n.saturating_sub(bytes));
     }
     f.flush().await?;
     f.sync_all().await?;
@@ -420,6 +630,23 @@ async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> 
         bytes,
         format,
     }))
+}
+
+/// Partial downloads (`<id>.<ext>.part`, `.etag`) of songs not in `wanted`.
+async fn remove_stray_parts(store: &Store, wanted: &std::collections::BTreeSet<i64>) {
+    let Ok(mut dir) = tokio::fs::read_dir(store.files_dir()).await else {
+        return;
+    };
+    while let Ok(Some(e)) = dir.next_entry().await {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !(name.ends_with(".part") || name.ends_with(".etag")) {
+            continue;
+        }
+        let id = name.split('.').next().and_then(|n| n.parse::<i64>().ok());
+        if id.is_some_and(|id| !wanted.contains(&id)) {
+            let _ = tokio::fs::remove_file(e.path()).await;
+        }
+    }
 }
 
 /// An album's cover, once per album; none is fine.
@@ -497,7 +724,15 @@ async fn put_manifest(store: &Store, node: &Node) -> Result<Value> {
     let have: Vec<Value> = ix
         .tracks
         .iter()
-        .map(|(id, t)| json!({"track_id": id, "bytes": t.bytes, "format": t.format}))
+        .map(|(id, t)| {
+            // The node's record of the file when it was fetched: the node compares it with its
+            // record now, so a replaced or re-tagged file is fetched again
+            json!({
+                "track_id": id, "bytes": t.bytes, "format": t.format,
+                "src_size": t.track.pointer("/file/size_bytes").and_then(Value::as_u64),
+                "src_mtime": t.track.pointer("/file/mtime_unix").and_then(Value::as_i64),
+            })
+        })
         .collect();
     node.json(
         Method::PUT,
@@ -547,8 +782,58 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
         report.removed.push(id);
     }
     let format = store.index().keep.format;
-    for id in ids("wanted") {
-        match download(store, node, id, format.as_ref()).await {
+    // The songs to fetch with their size (the original's), and what the screen shows meanwhile
+    let wanted: Vec<(i64, u64, String)> = manifest
+        .get("wanted")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|w| {
+                    let id = w.as_i64().or_else(|| w.get("track_id").and_then(Value::as_i64))?;
+                    let bytes = w.get("bytes").and_then(Value::as_u64).unwrap_or(0);
+                    let title = w
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    Some((id, bytes, title))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Partial downloads of songs no longer wanted (let go, or kept no more) go
+    remove_stray_parts(store, &wanted.iter().map(|w| w.0).collect()).await;
+    let mut fin = Finish {
+        opts,
+        progress: Progress {
+            running: true,
+            wanted: wanted.len(),
+            bytes_wanted: wanted.iter().map(|w| w.1).sum(),
+            ..Progress::default()
+        },
+    };
+    opts.tell(&fin.progress);
+    for (id, _, title) in wanted {
+        // What to keep changed meanwhile (Remove, Remove all, another limit): the next sync goes
+        // on with the new list
+        if opts.should_stop() {
+            tracing::info!("offline: what to keep changed; this sync stops here");
+            break;
+        }
+        fin.progress.current = Some(title);
+        opts.tell(&fin.progress);
+        let got = download(store, node, id, format.as_ref(), opts).await;
+        fin.progress.current = None;
+        match &got {
+            Ok(Got::Done(k)) => {
+                fin.progress.done += 1;
+                fin.progress.bytes_done += k.bytes;
+            }
+            Ok(Got::Preparing) => fin.progress.preparing += 1,
+            Ok(Got::Full(_)) | Ok(Got::Stopped) => {}
+            Err(_) => fin.progress.failed += 1,
+        }
+        match got {
             Ok(Got::Done(kept)) => {
                 let album = kept.track.pointer("/album/id").and_then(Value::as_i64);
                 let old = store.update(|ix| ix.tracks.insert(id, kept.clone()))?;
@@ -561,9 +846,16 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
                 report.downloaded.push(id);
             }
             Ok(Got::Preparing) => report.preparing.push(id),
+            Ok(Got::Full(why)) => {
+                fin.progress.full = Some(why.clone());
+                report.full = Some(why);
+                break;
+            }
+            Ok(Got::Stopped) => break,
             Err(e @ SyncError::Unreachable(_)) => return Err(e),
             Err(e) => report.failed.push((id, e.to_string())),
         }
+        opts.tell(&fin.progress);
     }
     // Covers for songs kept before a cover could be fetched
     let albums: Vec<i64> = store
@@ -610,6 +902,9 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
     // Tell the node what the device has now
     put_manifest(store, node).await?;
     store.update(|ix| ix.synced_at = Some(now()))?;
+    // The final notification sees the completed files AND collection metadata. The guard still
+    // reports completion on every early error, with whatever state was actually saved.
+    drop(fin);
     Ok(report)
 }
 

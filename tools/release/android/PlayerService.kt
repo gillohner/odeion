@@ -6,6 +6,10 @@
 // leaving the app, and the node's stream to this phone stops. Started by the
 // Rust side (src/android.rs) once the app reaches a node or opens its offline page; it
 // must start while the app is on screen (Android 12+ refuses otherwise).
+//
+// Its notification is the media notification while the app's media session (MediaControl.kt) is
+// active: title, artist, cover and the buttons of the zone the app controls, also on the lock
+// screen and in the quick-settings panel; otherwise it says what the service is for.
 package to.synonym.pubkymusic
 
 import android.app.Activity
@@ -47,9 +51,12 @@ class PlayerService : Service() {
             val seen = me.importance == android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
             // Counted only while out of sight: time on screen with nothing playing (browsing,
             // paused) must not end the service just after the music starts and the app is left
-            idleMs = if (am.isMusicActive || seen) 0L else idleMs + WATCH_MS
+            // The app's own player counts as music too (Exclusive USB is no AudioTrack, so
+            // isMusicActive says nothing of it)
+            val music = am.isMusicActive || appPlays
+            idleMs = if (music || seen) 0L else idleMs + WATCH_MS
             // (debug: what the watch saw, for tools/android-background-probe.py part E2)
-            android.util.Log.d("pubky-music", "player service: watch music=${am.isMusicActive} seen=$seen importance=${me.importance} idle=${idleMs / 1000} s")
+            android.util.Log.d("pubky-music", "player service: watch music=$music app=$appPlays seen=$seen importance=${me.importance} idle=${idleMs / 1000} s")
             if (idleMs >= IDLE_MS) {
                 // Only if no start came since: a start still on its way keeps the service
                 if (stopSelfResult(lastStart)) {
@@ -66,30 +73,14 @@ class PlayerService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         lastStart = startId
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Player", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Shown while the app plays, or while this phone is a zone of your node"
-            }
-        )
-        val launch = packageManager.getLaunchIntentForPackage(packageName)
-        val open = PendingIntent.getActivity(this, 0, launch, PendingIntent.FLAG_IMMUTABLE)
-        val text = intent?.getStringExtra(EXTRA_TEXT) ?: "This phone is a zone"
+        text = intent?.getStringExtra(EXTRA_TEXT) ?: "This phone is a zone"
         zone = intent?.getBooleanExtra(EXTRA_ZONE, true) ?: true
-        val n = Notification.Builder(this, CHANNEL)
-            // A monochrome status-bar icon: the launcher icon is an adaptive icon, which some
-            // phones refuse as a small icon ("Bad notification for startForeground", a crash).
-            .setSmallIcon(R.drawable.ic_stat_pubky_music)
-            .setContentTitle("Odeion")
-            .setContentText(text)
-            .setContentIntent(open)
-            .setOngoing(true)
-            .build()
+        val n = build(this, true)
         try {
             if (Build.VERSION.SDK_INT >= 29) {
-                startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
             } else {
-                startForeground(1, n)
+                startForeground(ID, n)
             }
         } catch (e: Exception) {
             // Refused (a missing permission, a background start, a system that wants more):
@@ -100,12 +91,13 @@ class PlayerService : Service() {
             } else {
                 CrashReport.write(this, "The player service could not start", android.util.Log.getStackTraceString(e))
             }
-            running = null
+            runningAs = null
             stopSelf()
             return START_NOT_STICKY
         }
         hold()
-        running = Pair(text, zone)
+        running = true
+        runningAs = Pair(text, zone)
         idleMs = 0L
         tick.removeCallbacks(watch)
         if (!zone) tick.postDelayed(watch, WATCH_MS)
@@ -147,10 +139,13 @@ class PlayerService : Service() {
     }
 
     override fun onDestroy() {
-        running = null
+        running = false
+        runningAs = null
         tick.removeCallbacks(watch)
         release()
         super.onDestroy()
+        // The media session outlives the service (the app on screen): its notification stays
+        refresh(applicationContext)
     }
 
     companion object {
@@ -165,17 +160,69 @@ class PlayerService : Service() {
         fun backgroundRefusal(e: Exception): Boolean =
             Build.VERSION.SDK_INT >= 31 && e.javaClass.name == "android.app.ForegroundServiceStartNotAllowedException"
         private const val NOTIFY = "android.permission.POST_NOTIFICATIONS"
+        /// The service's foreground notification (the media one while the zone plays).
+        const val ID = 1
+        /// The media notification while the session doesn't play (paused, stopped) or the service
+        /// doesn't run: Android 14+ stops treating a media service as foreground once the session
+        /// its notification shows is not playing, and the zone's service must stay (the node may
+        /// start music on this phone at any time). So the service's own notification shows the
+        /// session only while it plays.
+        const val MEDIA_ID = 2
+        @Volatile private var running = false
+        @Volatile private var text = "This phone is a zone"
+
+        private fun builder(c: Context, ongoing: Boolean): Notification.Builder {
+            MediaControl.channel(c)
+            val launch = c.packageManager.getLaunchIntentForPackage(c.packageName)
+            val open = PendingIntent.getActivity(c, 0, launch, PendingIntent.FLAG_IMMUTABLE)
+            return Notification.Builder(c, CHANNEL)
+                // A monochrome status-bar icon: the launcher icon is an adaptive icon, which some
+                // phones refuse as a small icon ("Bad notification for startForeground", a crash).
+                .setSmallIcon(R.drawable.ic_stat_pubky_music)
+                .setContentIntent(open)
+                .setOnlyAlertOnce(true)
+                .setOngoing(ongoing)
+        }
+
+        /// The service's notification as it should be now: the media one while the session plays,
+        /// else what the service is for.
+        fun build(c: Context, service: Boolean): Notification {
+            val b = builder(c, service || running)
+            if (!(MediaControl.playing() && MediaControl.styled(c, b))) {
+                b.setContentTitle("Odeion").setContentText(text)
+            }
+            return b.build()
+        }
+
+        /// The session changed (MediaControl.kt): the notifications follow. The service's shows the
+        /// session while it plays; otherwise (paused, stopped, no service) the media notification
+        /// is a separate one, gone with the session.
+        fun refresh(c: Context) {
+            val nm = c.getSystemService(NotificationManager::class.java) ?: return
+            try {
+                if (running) nm.notify(ID, build(c, false)) else nm.cancel(ID)
+                val separate = MediaControl.active() && !(running && MediaControl.playing())
+                if (separate) {
+                    val b = builder(c, false)
+                    if (MediaControl.styled(c, b)) nm.notify(MEDIA_ID, b.build()) else nm.cancel(MEDIA_ID)
+                } else {
+                    nm.cancel(MEDIA_ID)
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("pubky-music", "player notification: $e")
+            }
+        }
 
         /// The notification text and mode of the running service (null: not running).
         @Volatile
-        private var running: Pair<String, Boolean>? = null
+        private var runningAs: Pair<String, Boolean>? = null
 
         /// Whether Android took the start (false: refused, for example from the background).
         @JvmStatic
         fun start(activity: Activity, text: String, zone: Boolean): Boolean {
             // The phone as a zone, already running as asked (the app back on screen, a reconnect):
             // nothing to start again. (The app mode's idle watch counts on every start, so it starts.)
-            if (zone && running == Pair(text, true)) {
+            if (zone && runningAs == Pair(text, true)) {
                 android.util.Log.d("pubky-music", "player service: zone mode runs already")
                 return true
             }
@@ -207,8 +254,16 @@ class PlayerService : Service() {
         @JvmStatic
         fun stop(context: Context) {
             // (a start right after this one is a real start, not "runs already")
-            running = null
+            runningAs = null
             context.stopService(Intent(context, PlayerService::class.java))
+        }
+
+        /// Whether the app's own player plays now (src/native.rs, told on every change).
+        @Volatile private var appPlays = false
+
+        @JvmStatic
+        fun appPlaying(on: Boolean) {
+            appPlays = on
         }
     }
 }

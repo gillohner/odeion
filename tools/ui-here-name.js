@@ -10,6 +10,11 @@
 //     app, "decodes the file itself" on the web; no bit-perfect claim in the apps;
 //   * with a song in the in-app player (its saved queue), Now playing › Details says "Played by
 //     Android" / "Played by the app" / "Played by this browser";
+//   * in the Android app, Details' Output line says Android's mixer plays it (usually 48 kHz) and
+//     why it is not bit-perfect: without the phone's own zone (remote access), where bit-perfect
+//     plays; once the app says which output is its own (with a USB DAC on it), the paused bar moves
+//     to the phone's own zone with a note, and with "This phone" chosen again, the DAC's name and
+//     that zone's name. The desktop app and the web UI show no Output line;
 //   * in the apps, none of those screens (bar, picker, Sound panel, the Queue page, Now playing)
 //     shows the word "browser";
 // and, from app.js's own text, every "this browser" phrase is on a helper's line, a comment line, or
@@ -41,6 +46,8 @@ const open = async (browser, desktop, w = 390) => {
   return run;
 };
 const text = (page, sel) => page.$eval(sel, (el) => el.innerText || el.textContent || '').catch(() => '');
+// Close Now playing whole: on a phone, Escape first closes its open sheet (More, Up next), then the page
+const closeNp = async (page) => { for (let i = 0; i < 4 && await page.$('#nowplaying:not([hidden])'); i++) { await page.keyboard.press('Escape'); await sleep(300); } };
 const hasBrowser = (t) => /\bbrowser\b/i.test(t);
 
 (async () => {
@@ -95,8 +102,36 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     if (await details.count()) { await details.first().click(); await sleep(500); seen.push(await text(page, '#nowplaying')); }
     const npAll = seen[seen.length - 1];
     check(npAll.includes(played), `${at}: Now playing says "${played}"`);
+    // Details' Output line: where the sound goes, and why it is not bit-perfect
+    const outLine = () => page.evaluate(() => { const d = document.querySelector('#nowplaying .np-output'); return d ? d.textContent : null; });
+    const out0 = await outLine();
+    if (tag === 'android') {
+      check(out0 && out0.startsWith('Android mixer · usually 48 kHz') && /Not bit-perfect: This phone always plays through Android’s mixer\. Bit-perfect plays on the phone’s own zone, which the node adds when it can reach this phone directly \(on the same network, not through remote access\)\./.test(out0), `${at}: Details' Output line, no own zone (remote access): "${out0}"`);
+    } else check(out0 === null, `${at}: no Output line (${out0})`);
+    if (out0 !== null) await page.locator('#nowplaying .np-output').scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(SHOTS, `nowplaying-${tag}.png`) });
-    await page.keyboard.press('Escape'); await sleep(200);
+    if (tag === 'android') {
+      // The app registered its player, a USB DAC on it: the DAC's name, and the zone to play on instead
+      state.fixtures['/outputs'] = { body: [{ ...outputs[0], device: { name: 'FiiO KA17', kind: 'usb_dac', mode: 'shared', modes: ['shared'], confirmed: false } }] };
+      await closeNp(page);
+      await page.evaluate((id) => { window.pmDesktop.outputs = [id]; window.pmDesktop.output = id; window.dispatchEvent(new Event('pmdesktop:output')); }, outputs[0].id);
+      // With the page's player paused, the bar moves to the phone's own zone, the path that reaches
+      // the DAC unchanged, and says so (once per DAC)
+      const moved = async () => (await text(page, '#zonename')).trim() === zone.name && (await text(page, 'body')).includes(`FiiO KA17: this phone plays through ${zone.name}, straight to the DAC`);
+      for (let i = 0; i < 30 && !(await moved()); i++) await sleep(100);
+      check(await moved(), `${at}: a DAC on the app's output moves the paused bar to ${zone.name}, with a note (${(await text(page, '#zonename')).trim()})`);
+      // Chosen again, "This phone" stays (the move is once per DAC): its Output line names the DAC and that zone
+      await page.$eval('#zonebtn', (b) => b.click()); await page.waitForSelector('#zonepop:not([hidden])'); await sleep(200);
+      await page.click('#zonepop [data-zone="browser"]'); await page.waitForSelector('#npart', { timeout: 5000 }); await sleep(500);
+      check((await text(page, '#zonename')).trim() === name, `${at}: "${name}" chosen again stays chosen (${(await text(page, '#zonename')).trim()})`);
+      await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
+      if (await details.count()) { await details.first().click(); await sleep(500); }
+      const out1 = await outLine(); seen.push(await text(page, '#nowplaying'));
+      check(out1 && out1.startsWith('FiiO KA17 · Android mixer · usually 48 kHz') && out1.endsWith(`For bit-perfect, play on ${zone.name}.`), `${at}: with the phone's own zone and its DAC: "${out1}"`);
+      await page.locator('#nowplaying .np-output').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(SHOTS, `nowplaying-${tag}-own-zone.png`) });
+    }
+    await closeNp(page);
     const where = seen.map((t) => (t.match(/[^.\n]*\bbrowser\b[^.\n]*/i) || [''])[0]).filter(Boolean);
     if (inApp) check(!seen.some(hasBrowser), `${at}: no "browser" on the bar, the picker, the Sound panel, the Queue and Zones pages or Now playing${where.length ? ': ' + where.slice(0, 2).join(' | ') : ''}`);
     else check(seen.some(hasBrowser), `${at}: the web UI still says browser`);

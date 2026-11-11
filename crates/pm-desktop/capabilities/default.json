@@ -1,8 +1,24 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The app's own connect page; the node's page gets no IPC.",
+  "description": "The app's own connect page. The node's page gets only the player's commands, for its origin (src/native.rs).",
   "windows": ["main"],
   "local": true,
-  "permissions": ["core:event:default"]
+  "permissions": [
+    "core:event:default",
+    "allow-saved",
+    "allow-open-saved",
+    "allow-connect-manual",
+    "allow-follow-moved",
+    "allow-discover-nodes",
+    "allow-ring-connect",
+    "allow-ring-cancel",
+    "allow-open-ring",
+    "allow-forget",
+    "allow-has-downloads",
+    "allow-open-offline",
+    "allow-crash-report",
+    "allow-crash-dismiss",
+    "allow-crash-share"
+  ]
 }

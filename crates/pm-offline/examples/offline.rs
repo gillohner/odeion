@@ -31,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let opts = SyncOptions {
                 name: "Example device".into(),
                 kind: "desktop".into(),
+                ..Default::default()
             };
             let r = pm_offline::sync(&store, &node, &opts).await?;
             println!("{}", serde_json::to_string_pretty(&r)?);

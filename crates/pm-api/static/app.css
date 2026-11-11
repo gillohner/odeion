@@ -1789,6 +1789,11 @@ html[data-shell="phone"] [data-plplay] { min-height: 40px; min-width: 40px; }
 /* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
 .nav-item.nav-offline { display: none; }
 body.offline .nav-item.nav-offline { display: flex; }
+/* Downloads in the Android app: in the sidebar while online too, and the mark on songs and
+   albums kept on the phone */
+body.app-dl .nav-item.nav-offline { display: flex; }
+.dl-mark { display: inline-flex; align-items: center; margin-left: 6px; color: var(--accent); vertical-align: middle; }
+.dl-mark .ic { width: 14px; height: 14px; }
 body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
 body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip, body.offline #quality,
 body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark,
@@ -1859,6 +1864,8 @@ body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 .np-qitem .grow { display: flex; flex-direction: column; min-width: 0; }
 .np-qitem .name, .np-qitem .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .np-facts { margin-top: 14px; }
+.np-output { overflow-wrap: anywhere; }
+.np-output-why { display: block; margin-top: 2px; }
 /* Tablets and desktops: the player left, the open sheet as a panel right */
 .np2:not(.compact) .np-body { grid-template-columns: minmax(0, 1fr) minmax(300px, 1fr); gap: 32px; }
 .np2:not(.compact) .np-sheet { border-left: 1px solid var(--line); padding-left: 24px; }

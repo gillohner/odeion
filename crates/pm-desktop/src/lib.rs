@@ -12,8 +12,16 @@
 #[cfg(target_os = "android")]
 mod android;
 mod crash;
+// The system's media controls on Android (the decisions; tested on every host)
+#[cfg(any(test, target_os = "android"))]
+mod media;
+#[cfg(target_os = "android")]
+mod media_live;
 mod node;
 mod offline;
+// The page's own player played by the app (Android; built everywhere the player is)
+#[cfg(any(desktop, target_os = "android"))]
+mod native;
 #[cfg(any(desktop, target_os = "android"))]
 mod player;
 mod ring_wait;
@@ -115,13 +123,28 @@ fn init_script(s: Option<&Settings>) -> String {
     let (origin, token) = s
         .and_then(|s| Some((s.origin()?, s.token.clone())))
         .unwrap_or_default();
+    // Android: the page's two calls to the app (`window.OdeionAndroid`) and its Media Session
+    // mirrored to the system's media controls (`media::BRIDGE_JS`)
+    #[cfg(target_os = "android")]
+    let bridge = media::BRIDGE_JS;
+    #[cfg(not(target_os = "android"))]
+    let bridge = "";
     format!(
-        "(function(){{var o={o},t={t};if(o&&location.origin===o){{try{{localStorage.setItem('pm.token',t);}}catch(e){{}}}}window.pmDesktop={{version:{v},platform:{p}}};{EXTERNAL_LINKS_JS}}})();",
+        "(function(){{var o={o},t={t};if(o&&location.origin===o){{try{{localStorage.setItem('pm.token',t);}}catch(e){{}}}}window.pmDesktop={{version:{v},platform:{p}}};{EXTERNAL_LINKS_JS}}})();{bridge}",
         o = serde_json::to_string(&origin).unwrap_or_default(),
         t = serde_json::to_string(&token).unwrap_or_default(),
         v = serde_json::to_string(env!("CARGO_PKG_VERSION")).unwrap_or_default(),
         p = serde_json::to_string(std::env::consts::OS).unwrap_or_default(),
     )
+}
+
+/// Tells the page the app plays its music itself (`window.pmDesktop.nativePlayer`), where it does.
+fn native_init_js() -> &'static str {
+    #[cfg(any(desktop, target_os = "android"))]
+    if native::on() {
+        return "if(window.pmDesktop)window.pmDesktop.nativePlayer=true;";
+    }
+    ""
 }
 
 /// For a node connected after the window was built: the init script holds
@@ -238,6 +261,9 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
         }
     }
     state.store(Some(s.clone()));
+    // The node's page may use the app's own player (its origin: the node's, or the tunnel's)
+    #[cfg(any(desktop, target_os = "android"))]
+    native::allow_page(app, &s.origin().unwrap_or_default(), native::Page::Node);
     show_node(app, &s)?;
     // Keep this device's downloads in step with the current node (read again at every round)
     if let Some(o) = &state.offline {
@@ -252,6 +278,8 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     {
         let (text, zone) = player_service(&info.name, s.via.is_empty(), state.player.is_some());
         android::start_player_service(app, text, zone);
+        // The system's media controls follow this node's zones
+        media_live::connected(s.clone());
     }
     // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(any(desktop, target_os = "android"))]
@@ -298,6 +326,8 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         return Err("Nothing is downloaded to this device yet".into());
     }
     let page = url::Url::parse(&o.page(&node_id).await?).map_err(|e| e.to_string())?;
+    #[cfg(any(desktop, target_os = "android"))]
+    native::allow_page(&app, &page.origin().ascii_serialization(), native::Page::Offline);
     app.get_webview_window(MAIN)
         .ok_or("the window is gone")?
         .navigate(page)
@@ -310,9 +340,18 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                // Not in the middle of a song: back to the node once nothing plays (the page would
+                // be replaced, and the song with it)
+                #[cfg(any(desktop, target_os = "android"))]
+                if native::playing() {
+                    continue;
+                }
                 let state = app.state::<AppState>();
                 let Some(s) = state.current() else { break };
                 match reach(&app, &state, s).await {
+                    // (a song started while the node was reached: after it)
+                    #[cfg(any(desktop, target_os = "android"))]
+                    Ok(_) if native::playing() => continue,
                     Ok((s, info)) => {
                         if let Err(e) = connected(&app, &state, s, &info) {
                             tracing::warn!("back from offline: {e}");
@@ -795,7 +834,10 @@ fn forget(app: AppHandle, state: State<'_, AppState>) {
     state.store(None);
     // No node: the player service ends (and isn't started again when the app comes back)
     #[cfg(target_os = "android")]
-    android::stop_player_service(&app);
+    {
+        android::stop_player_service(&app);
+        media_live::forget();
+    }
     #[cfg(not(target_os = "android"))]
     let _ = app;
 }
@@ -849,7 +891,18 @@ pub fn run() {
             open_offline,
             crash_report,
             crash_dismiss,
-            crash_share
+            crash_share,
+            native::native_load,
+            native::native_ahead,
+            native::native_play,
+            native::native_pause,
+            native::native_seek,
+            native::native_stop,
+            native::native_status,
+            offline::downloads_state,
+            offline::downloads_keep,
+            offline::downloads_remove_all,
+            offline::downloads_limit
         ])
         .setup(|app| {
             if let Ok(dir) = app.path().app_local_data_dir() {
@@ -865,6 +918,11 @@ pub fn run() {
                 .or_else(|| settings::legacy_path().and_then(|p| settings::load(&p)));
             #[cfg(any(desktop, target_os = "android"))]
             let player = crash::guarded("the in-app player", player::start).flatten();
+            // The page's own player, on the same output and owner as the phone's zone
+            #[cfg(target_os = "android")]
+            if let Some(p) = player.as_ref() {
+                native::start(app.handle(), p.endpoint());
+            }
             let shared = Arc::new(Mutex::new(initial.clone()));
             let offline_origin: Arc<Mutex<Option<String>>> = Arc::default();
             let offline = app
@@ -872,6 +930,14 @@ pub fn run() {
                 .app_local_data_dir()
                 .ok()
                 .and_then(|d| offline::Offline::open(d.join("offline"), offline_origin.clone()));
+            // The page hears what this device keeps and how its downloads go; the app's player
+            // plays the songs kept here from their copy
+            #[cfg(target_os = "android")]
+            native::play_downloads(app.handle());
+            if let Some(o) = &offline {
+                let h = app.handle().clone();
+                o.on_change(move || offline::push_state(&h));
+            }
             app.manage(AppState {
                 settings: shared.clone(),
                 path,
@@ -885,11 +951,19 @@ pub fn run() {
             let handle = app.handle().clone();
             let guard = shared.clone();
             let loads = shared;
+            #[cfg(target_os = "android")]
+            let media_origin = offline_origin.clone();
             #[allow(unused_mut)]
             let mut builder = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
                 .initialization_script(init_script(initial.as_ref()))
+                .initialization_script(native_init_js())
                 .on_navigation(move |u| allow_navigation(&handle, &guard, &offline_origin, u))
                 .on_page_load(move |w, payload| {
+                    // Another page (or the same again): what its player played ends with it
+                    #[cfg(any(desktop, target_os = "android"))]
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                        native::page_changed();
+                    }
                     if !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         return;
                     }
@@ -906,6 +980,11 @@ pub fn run() {
                     };
                     if node_page {
                         let _ = w.eval(token_sync_script(&s.token));
+                        // Android's media volume, for the page's own player's slider
+                        #[cfg(target_os = "android")]
+                        if let Some(m) = media_live::get() {
+                            m.page_loaded();
+                        }
                         // Which output is this app's (a phone's USB DAC shows in its Settings)
                         #[cfg(any(desktop, target_os = "android"))]
                         {
@@ -944,7 +1023,7 @@ pub fn run() {
             // A USB DAC plugged in or out: the player registers again, so the node and its page learn it
             #[cfg(target_os = "android")]
             {
-                // The DAC settings (bit-perfect or shared, the DAC's volume) live with the app
+                // The level each USB DAC last played at lives with the app, next to its settings
                 if let Ok(dir) = app.path().app_local_data_dir() {
                     let _ = std::fs::create_dir_all(&dir);
                     pm_out_local::usb_dac::keep_settings_in(dir.join("usb-dac.json"));
@@ -959,6 +1038,8 @@ pub fn run() {
                         }
                     }
                 });
+                // The system's media controls (MediaControl.kt): before the node's page loads
+                android::start_media(app.handle(), media_origin);
                 let handle = app.handle().clone();
                 android::watch_usb_audio(app.handle(), move || {
                     let app = handle.clone();
@@ -992,6 +1073,10 @@ pub fn run() {
                         // On screen again: the player service as it was (refused from the background,
                         // or ended after a while with nothing playing)
                         android::resume_player_service(app);
+                        // The media controls look again (Android's volume, Auto's USB permission)
+                        if let Some(m) = media_live::get() {
+                            m.send(media::Event::Resumed);
+                        }
                     }
                     _ => {}
                 }

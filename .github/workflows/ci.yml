@@ -130,6 +130,8 @@ jobs:
           persist-credentials: false
       - run: docker compose version
       - run: python3 -I tools/branding-check.py --self-test
+      # The phone-as-zone fixture's lock-screen decision on synthetic dumps (no emulator)
+      - run: python3 -I tools/android-endpoint.py --self-test
       # Every action pinned to a commit SHA (a tag can be moved to other code)
       - run: python3 -I tools/workflow-pins-check.py --self-test && python3 -I tools/workflow-pins-check.py
       - run: python3 -I tools/bundle-settings-check.py
@@ -634,6 +636,10 @@ jobs:
           ui-redesign.js redesign-shots
           ui-item-about.js item-about-shots
           ui-usb-dac.js usb-dac-shots
+          ui-native-player.js native-player-shots
+          ui-app-downloads.js app-downloads-shots
+          ui-offline-play.js offline-play-shots
+          ui-android-media.js android-media-shots
           ui-phone-library-targets.js phone-library-targets-shots
           ui-wrong-match.js wrong-match-shots
           ui-phone-library-nav.js phone-library-nav-shots

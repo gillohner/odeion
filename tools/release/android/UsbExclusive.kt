@@ -48,6 +48,16 @@ class UsbExclusive private constructor() {
         /// USB devices Android detached, not yet taken by the Rust side (takeDetached): it forgets
         /// what the listener chose for exactly those devices.
         private val detachedLog = mutableListOf<JSONObject>()
+        /// When a USB audio device was last attached (Android then shows its own "Open Odeion?"
+        /// dialog for it, the app takes USB_DEVICE_ATTACHED) and when the app's activity last
+        /// resumed: Auto's ask again waits for the resume after an attach, so two dialogs never stack.
+        @Volatile private var attachedAt = 0L
+        @Volatile private var resumedAt = 0L
+
+        /// The app's activity resumed (UsbAudio's lifecycle callback).
+        fun resumed() {
+            resumedAt = SystemClock.elapsedRealtime()
+        }
 
         fun init(c: Context) {
             if (context != null) return
@@ -70,6 +80,8 @@ class UsbExclusive private constructor() {
                                     while (detachedLog.size > 64) detachedLog.removeAt(0)
                                 }
                                 if (gone != null && device?.deviceName == gone.deviceName) {
+                                    // Unplugged while the app held it: the speaker never comes on loud
+                                    MediaControl.safeAfterUnplug()
                                     runCatching { conn?.close() }
                                     conn = null
                                     device = null
@@ -83,11 +95,17 @@ class UsbExclusive private constructor() {
                         // Android's answer to the permission dialog: the report gains the DAC's
                         // descriptors, and the Rust side may open it
                         ACTION_PERMISSION -> UsbAudio.refreshNow()
+                        // An audio device plugged in: Android's attach dialog may be up now
+                        UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                            val d = deviceOf(intent)
+                            if (d != null && isAudio(d)) attachedAt = SystemClock.elapsedRealtime()
+                        }
                     }
                 }
             }
             val filter = IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED)
             filter.addAction(ACTION_PERMISSION)
+            filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             if (Build.VERSION.SDK_INT >= 33) {
                 app.registerReceiver(receiver, filter, null, BitPerfect.handler(), Context.RECEIVER_NOT_EXPORTED)
             } else {
@@ -116,16 +134,55 @@ class UsbExclusive private constructor() {
             return runCatching { usb()?.hasPermission(d) ?: false }.getOrDefault(false)
         }
 
-        /// Android's dialog for the DAC: only when the listener chose Exclusive USB.
+        /// Auto's own ask (Exclusive USB is its first path): Android's dialog for this DAC once, and
+        /// only while the app is on screen (Android shows it over the app), never while Android's own
+        /// attach dialog may be up (only once the app resumed after the attach). Someone who said no
+        /// is not asked again; choosing Exclusive USB in Settings asks again (requestPermission).
+        @JvmStatic
+        fun requestPermissionOnce(vendor: Int, product: Int) {
+            val me = android.app.ActivityManager.RunningAppProcessInfo()
+            android.app.ActivityManager.getMyMemoryState(me)
+            if (me.importance != android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) return
+            val p = prefs() ?: return
+            val key = "auto-asked-$vendor:$product"
+            if (p.getBoolean(key, false)) return
+            // Not on top of Android's own attach dialog ("Open Odeion?"): the app's resume after it
+            // asks (the Rust side's ask on resume; the ask is not counted until then)
+            if (attachedAt > resumedAt) return
+            // Counted only once Android was really asked (the DAC listed, the app ready)
+            if (ask(vendor, product)) p.edit().putBoolean(key, true).apply()
+        }
+
+        /// Auto's ask again on a re-attach of a DAC whose permission was given before (a grant
+        /// without "always" ends at the unplug): Android's dialog, only while the app is on screen,
+        /// and not while Android's own attach dialog ("Open Odeion?") may be up: only once the app
+        /// resumed after the attach (the Rust side asks again then). The Rust side asks once per
+        /// attach. Whether Android was asked.
+        @JvmStatic
+        fun requestPermissionAgain(vendor: Int, product: Int): Boolean {
+            val me = android.app.ActivityManager.RunningAppProcessInfo()
+            android.app.ActivityManager.getMyMemoryState(me)
+            if (me.importance != android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) return false
+            if (attachedAt > resumedAt) return false
+            return ask(vendor, product)
+        }
+
+        /// Android's dialog for the DAC: when the listener chose Exclusive USB, or Auto's one ask.
         @JvmStatic
         fun requestPermission(vendor: Int, product: Int) {
-            val c = context ?: return
-            val d = find(vendor, product) ?: return
+            ask(vendor, product)
+        }
+
+        /// Whether Android's dialog was asked for.
+        private fun ask(vendor: Int, product: Int): Boolean {
+            val c = context ?: return false
+            val d = find(vendor, product) ?: return false
             // Explicit (this package) and mutable: Android adds the answer to it
             val intent = Intent(ACTION_PERMISSION).setPackage(c.packageName)
             val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
             val pi = PendingIntent.getBroadcast(c, 0, intent, flags)
-            runCatching { usb()?.requestPermission(d, pi) }
+            val um = usb() ?: return false
+            return runCatching { um.requestPermission(d, pi) }.isSuccess
         }
 
         private fun refused(why: String) = JSONObject().put("ok", false).put("why", why).toString()

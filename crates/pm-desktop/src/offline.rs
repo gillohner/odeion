@@ -11,6 +11,10 @@ use std::time::Duration;
 
 /// How often the device syncs while connected.
 const SYNC_EVERY: Duration = Duration::from_secs(15 * 60);
+/// The downloads' limit until the person sets one.
+pub const DEFAULT_LIMIT: u64 = 10_000_000_000;
+/// Downloads never leave less than this free on the device.
+pub const KEEP_FREE: u64 = 1_000_000_000;
 
 /// The local server, for one node's store.
 struct Server {
@@ -30,9 +34,46 @@ pub struct Offline {
     /// `http://127.0.0.1:<port>` while the local server runs; the navigation guard reads it.
     origin: Arc<Mutex<Option<String>>>,
     /// Raised by every [`Offline::spawn_sync`]: an older loop sees it and stops.
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
     /// One sync at a time, also while a replaced loop finishes its last one.
     syncing: tokio::sync::Mutex<()>,
+    /// Where the current (or last) sync stands, for the storage screen.
+    /// (with the id of the node it syncs with)
+    progress: Arc<Mutex<(String, pm_offline::Progress)>>,
+    /// Told when what the device keeps or the sync's progress changed (the page hears it).
+    changed: Arc<Mutex<Option<Hook>>>,
+}
+
+/// Who hears of changes to the downloads.
+type Hook = Arc<dyn Fn() + Send + Sync>;
+
+/// The device's own settings for downloads (`offline/settings.json`).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct Prefs {
+    /// The limit in bytes; `None` for none; missing: [`DEFAULT_LIMIT`].
+    #[serde(default = "default_limit")]
+    limit: Option<u64>,
+}
+
+fn default_limit() -> Option<u64> {
+    Some(DEFAULT_LIMIT)
+}
+
+/// What the storage screen shows (`downloads_state`).
+#[derive(serde::Serialize)]
+pub struct DownloadsState {
+    #[serde(flatten)]
+    pub summary: pm_offline::Summary,
+    pub limit: Option<u64>,
+    /// What the device keeps for other nodes (it counts against the limit too).
+    pub other_bytes: u64,
+    pub free: Option<u64>,
+    pub keep_free: u64,
+    pub progress: pm_offline::Progress,
+    /// After Remove download of a song: it stays on the device, kept by its album, a playlist or
+    /// the favourites.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub still_kept: Option<bool>,
 }
 
 impl Offline {
@@ -48,9 +89,110 @@ impl Offline {
             open: Mutex::default(),
             server: Default::default(),
             origin,
-            generation: AtomicU64::new(0),
+            generation: Arc::default(),
             syncing: Default::default(),
+            progress: Arc::default(),
+            changed: Arc::default(),
         }))
+    }
+
+    /// Who hears of changes to the downloads (the page, `pmdesktop:downloads`).
+    pub fn on_change(&self, f: impl Fn() + Send + Sync + 'static) {
+        *self.changed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
+    }
+
+    fn tell(&self) {
+        let f = self.changed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(f) = f {
+            f();
+        }
+    }
+
+    fn prefs(&self) -> Prefs {
+        std::fs::read(self.base.join("settings.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or(Prefs {
+                limit: default_limit(),
+            })
+    }
+
+    /// The downloads' limit in bytes (`None`: none of their own; the disk's 1 GB still holds).
+    pub fn set_limit(&self, limit: Option<u64>) -> Result<(), String> {
+        let b = serde_json::to_vec(&Prefs { limit }).map_err(|e| e.to_string())?;
+        std::fs::write(self.base.join("settings.json"), b)
+            .map_err(|e| format!("Can't save the limit: {e}"))?;
+        self.tell();
+        Ok(())
+    }
+
+    /// What this device keeps from the node with this id, with the limit and the sync's progress.
+    pub fn state(&self, node_id: &str) -> DownloadsState {
+        let summary = self
+            .store(node_id)
+            .map(|s| {
+                let mut summary = pm_offline::summary(&s.index());
+                summary.bytes = pm_offline::sync::download_bytes(s.dir()).unwrap_or(summary.bytes);
+                summary
+            })
+            .unwrap_or_default();
+        DownloadsState {
+            summary,
+            limit: self.prefs().limit,
+            other_bytes: self.other_bytes(node_id),
+            free: pm_offline::sync::free_bytes(&self.base),
+            keep_free: KEEP_FREE,
+            still_kept: None,
+            // Another node's sync is not this one's
+            progress: {
+                let p = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+                if p.0 == node_id {
+                    p.1.clone()
+                } else {
+                    pm_offline::Progress::default()
+                }
+            },
+        }
+    }
+
+    /// Keep `item` on the device (or stop keeping it); the caller syncs next.
+    pub fn keep(
+        &self,
+        node_id: &str,
+        item: &pm_offline::KeepItem,
+        on: bool,
+        label: Option<pm_offline::Label>,
+    ) -> Result<(), String> {
+        let store = self.store(node_id).ok_or("Downloads are off on this device")?;
+        store
+            .keep(item, on, label)
+            .map_err(|e| format!("Can't save it: {e}"))?;
+        self.tell();
+        Ok(())
+    }
+
+    /// The copy of a library song this device keeps from the node with this id, if any (with
+    /// `original_only`, only an original).
+    pub fn track_file(&self, node_id: &str, track_id: i64, original_only: bool) -> Option<PathBuf> {
+        let (path, format) = self.store(node_id)?.track_copy(track_id)?;
+        (!original_only || format == "original")
+            .then_some(path)
+            .filter(|p| p.is_file())
+    }
+
+    /// Whether a song stays on the device when it alone is let go (see
+    /// [`pm_offline::kept_otherwise`]).
+    pub fn kept_otherwise(&self, node_id: &str, track_id: i64) -> bool {
+        self.store(node_id)
+            .is_some_and(|s| pm_offline::kept_otherwise(&s.index(), track_id))
+    }
+
+    /// Keep nothing: the next sync removes the device's copies (only those).
+    pub fn keep_nothing(&self, node_id: &str) -> Result<(), String> {
+        let store = self.store(node_id).ok_or("Downloads are off on this device")?;
+        store.keep_nothing().map_err(|e| format!("Can't save it: {e}"))?;
+        self.tell();
+        Ok(())
     }
 
     /// The store of the node with this id, opened once. `None` without an id (a node that never
@@ -116,6 +258,43 @@ impl Offline {
         Ok(format!("{origin}/downloads"))
     }
 
+    /// Completed and partial song bytes for the other nodes on this device.
+    fn other_bytes(&self, node_id: &str) -> u64 {
+        let mine = pm_offline::node_dir(&self.base, node_id);
+        let Ok(dirs) = std::fs::read_dir(&self.base) else {
+            return 0;
+        };
+        dirs.flatten()
+            .map(|d| d.path())
+            .filter(|p| p.is_dir() && *p != mine)
+            .map(|p| pm_offline::sync::download_bytes(&p).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add)
+    }
+
+    /// How a sync of the node with this id runs: the limit, the other nodes' bytes, its progress
+    /// for the page, and a stop once a newer sync was asked for (what to keep changed).
+    fn options(&self, node_id: &str, generation: u64) -> pm_offline::SyncOptions {
+        let (progress, changed) = (self.progress.clone(), self.changed.clone());
+        let node = node_id.to_string();
+        let current = self.generation.clone();
+        pm_offline::SyncOptions {
+            cap_bytes: self.prefs().limit,
+            keep_free: KEEP_FREE,
+            other_bytes: self.other_bytes(node_id),
+            stop: Some(pm_offline::StopCheck(Arc::new(move || {
+                current.load(Ordering::SeqCst) != generation
+            }))),
+            progress: Some(pm_offline::ProgressSink(Arc::new(move |p| {
+                *progress.lock().unwrap_or_else(|e| e.into_inner()) = (node.clone(), p.clone());
+                let f = changed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(f) = f {
+                    f();
+                }
+            }))),
+            ..Self::device()
+        }
+    }
+
     fn device() -> pm_offline::SyncOptions {
         let (name, kind) = match std::env::consts::OS {
             "android" => ("This phone", "android"),
@@ -125,6 +304,7 @@ impl Offline {
         pm_offline::SyncOptions {
             name: name.into(),
             kind: kind.into(),
+            ..Default::default()
         }
     }
 
@@ -142,7 +322,7 @@ impl Offline {
                         break;
                     }
                     let Some(s) = current() else { break };
-                    me.sync_once(&s).await;
+                    me.sync_once(&s, mine).await;
                 }
                 tokio::time::sleep(SYNC_EVERY).await;
                 if me.generation.load(Ordering::SeqCst) != mine {
@@ -152,23 +332,260 @@ impl Offline {
         });
     }
 
-    async fn sync_once(&self, s: &Settings) {
+    async fn sync_once(&self, s: &Settings, generation: u64) {
         let Some(store) = self.store(&s.node_id) else {
             tracing::info!("offline: no sync without the node's id");
             return;
         };
         match pm_offline::Node::new(s.base(), &s.token) {
-            Ok(node) => match pm_offline::sync(&store, &node, &Self::device()).await {
+            Ok(node) => match pm_offline::sync(&store, &node, &self.options(&s.node_id, generation)).await {
                 Ok(r) => tracing::info!(
                     downloaded = r.downloaded.len(),
                     removed = r.removed.len(),
                     sent = r.sent,
                     failed = r.failed.len(),
+                    full = r.full.as_deref().unwrap_or(""),
                     "offline: synced"
                 ),
                 Err(e) => tracing::info!("offline: sync stopped: {e}"),
             },
             Err(e) => tracing::warn!("offline: {e}"),
         }
+    }
+}
+
+/// The node in use and this device's downloads from it.
+fn offline_of(state: &crate::AppState) -> Result<(Arc<Offline>, String), String> {
+    let o = state.offline.clone().ok_or("Downloads are off on this device")?;
+    let node_id = state.current().map(|s| s.node_id).unwrap_or_default();
+    if node_id.is_empty() {
+        return Err("Connect to your node first".into());
+    }
+    Ok((o, node_id))
+}
+
+/// Sync now (a new loop; the running one ends after its round).
+fn sync_now(app: &tauri::AppHandle, o: &Arc<Offline>) {
+    use tauri::Manager;
+    let app = app.clone();
+    o.spawn_sync(move || app.state::<crate::AppState>().current());
+}
+
+/// Run file work off the app's main thread.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The storage screen: what this device keeps from the node in use, the limit, the sync.
+#[tauri::command]
+pub async fn downloads_state(state: tauri::State<'_, crate::AppState>) -> Result<DownloadsState, String> {
+    let (o, node_id) = offline_of(&state)?;
+    blocking(move || Ok(o.state(&node_id))).await
+}
+
+/// Download (`on`) a song, a library album or a playlist to this device, or remove its download;
+/// `title`, `sub` and `songs` (an album's count) name it on the storage screen until its songs
+/// arrive. A sync starts now (a running one stops before its next song).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn downloads_keep(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+    kind: String,
+    id: String,
+    on: bool,
+    title: Option<String>,
+    sub: Option<String>,
+    songs: Option<u32>,
+) -> Result<DownloadsState, String> {
+    let (o, node_id) = offline_of(&state)?;
+    let item =
+        pm_offline::KeepItem::parse(&kind, &id).ok_or("Only songs, albums and playlists of your library")?;
+    let label = title.map(|t| pm_offline::Label {
+        title: t.chars().take(200).collect(),
+        sub: sub.unwrap_or_default().chars().take(200).collect(),
+        songs,
+    });
+    let o2 = o.clone();
+    let st = blocking(move || {
+        o2.keep(&node_id, &item, on, label)?;
+        let mut st = o2.state(&node_id);
+        if let (false, pm_offline::KeepItem::Track(id)) = (on, &item) {
+            st.still_kept = Some(o2.kept_otherwise(&node_id, *id));
+        }
+        Ok(st)
+    })
+    .await?;
+    sync_now(&app, &o);
+    Ok(st)
+}
+
+#[tauri::command]
+pub async fn downloads_remove_all(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<DownloadsState, String> {
+    let (o, node_id) = offline_of(&state)?;
+    let o2 = o.clone();
+    let st = blocking(move || {
+        o2.keep_nothing(&node_id)?;
+        Ok(o2.state(&node_id))
+    })
+    .await?;
+    sync_now(&app, &o);
+    Ok(st)
+}
+
+#[tauri::command]
+pub async fn downloads_limit(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+    bytes: Option<u64>,
+) -> Result<DownloadsState, String> {
+    let (o, node_id) = offline_of(&state)?;
+    let o2 = o.clone();
+    let st = blocking(move || {
+        o2.set_limit(bytes.map(|b| b.max(100_000_000)))?;
+        Ok(o2.state(&node_id))
+    })
+    .await?;
+    sync_now(&app, &o);
+    Ok(st)
+}
+
+/// The page hears the downloads changed (`pmdesktop:downloads`, with the storage screen's state),
+/// built on a blocking thread (it reads the stores and the disk).
+pub fn push_state(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || push_state_now(&app));
+}
+
+fn push_state_now(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    // One at a time, read and sent in the same order: a later state never arrives first
+    static ORDER: Mutex<()> = Mutex::new(());
+    let _one = ORDER.lock().unwrap_or_else(|e| e.into_inner());
+    let state = app.state::<crate::AppState>();
+    let Ok((o, node_id)) = offline_of(&state) else {
+        return;
+    };
+    let st = o.state(&node_id);
+    if let Some(w) = app.get_webview_window(crate::MAIN) {
+        let _ = w.eval(format!(
+            "window.dispatchEvent(new CustomEvent('pmdesktop:downloads',{{detail:{}}}));",
+            serde_json::to_string(&st).unwrap_or_else(|_| "null".into())
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_limit_is_ten_gb_until_set_and_kept_across_runs() {
+        let dir = tempfile_dir();
+        let o = Offline::open(dir.clone(), Arc::default()).unwrap();
+        assert_eq!(o.prefs().limit, Some(DEFAULT_LIMIT));
+        o.set_limit(Some(5_000_000_000)).unwrap();
+        let again = Offline::open(dir.clone(), Arc::default()).unwrap();
+        assert_eq!(again.prefs().limit, Some(5_000_000_000));
+        again.set_limit(None).unwrap();
+        assert_eq!(again.prefs().limit, None);
+        let opts = again.options("node-1", 0);
+        assert_eq!((opts.cap_bytes, opts.keep_free), (None, KEEP_FREE));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// While the node answers only an original stands in for its stream; offline any copy plays.
+    #[test]
+    fn only_an_original_stands_in_while_connected() {
+        let dir = tempfile_dir();
+        let o = Offline::open(dir.clone(), Arc::default()).unwrap();
+        let store = o.store("node-1").unwrap();
+        for (id, format) in [(1, "original"), (2, "aac")] {
+            let file = format!("{id}.{}", if format == "aac" { "m4a" } else { "flac" });
+            std::fs::write(store.dir().join("files").join(&file), b"x").unwrap();
+            store
+                .update(|ix| {
+                    ix.tracks.insert(
+                        id,
+                        pm_offline::KeptTrack {
+                            track: serde_json::json!({"id": id}),
+                            file,
+                            bytes: 1,
+                            format: format.into(),
+                        },
+                    )
+                })
+                .unwrap();
+        }
+        assert!(o.track_file("node-1", 1, true).is_some());
+        assert!(o.track_file("node-1", 1, false).is_some());
+        assert!(
+            o.track_file("node-1", 2, true).is_none(),
+            "a smaller copy doesn't stand in"
+        );
+        assert!(o.track_file("node-1", 2, false).is_some(), "offline it plays");
+        assert!(o.track_file("node-1", 3, false).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keeping_shows_on_the_storage_screen_and_tells_the_page() {
+        let dir = tempfile_dir();
+        let o = Offline::open(dir.clone(), Arc::default()).unwrap();
+        let told = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let t2 = told.clone();
+        o.on_change(move || {
+            t2.fetch_add(1, Ordering::SeqCst);
+        });
+        let label = pm_offline::Label {
+            title: "Journey".into(),
+            sub: "Sefa".into(),
+            songs: Some(9),
+        };
+        o.keep("node-1", &pm_offline::KeepItem::Album(7), true, Some(label))
+            .unwrap();
+        let st = o.state("node-1");
+        assert!(st.summary.album_ids.is_empty(), "nothing here yet");
+        assert_eq!(
+            (st.summary.items[0].title.as_str(), st.summary.items[0].songs),
+            ("Journey", 9)
+        );
+        assert_eq!(st.limit, Some(DEFAULT_LIMIT));
+        o.keep_nothing("node-1").unwrap();
+        assert!(o.state("node-1").summary.items.is_empty());
+        assert_eq!(told.load(Ordering::SeqCst), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn partial_songs_count_in_storage_and_the_other_nodes_budget() {
+        let dir = tempfile_dir();
+        let o = Offline::open(dir.clone(), Arc::default()).unwrap();
+        let mine = o.store("node-1").unwrap();
+        let other = o.store("node-2").unwrap();
+        std::fs::write(mine.dir().join("files/1.flac.part"), [0u8; 200]).unwrap();
+        std::fs::write(other.dir().join("files/2.flac.part"), [0u8; 500]).unwrap();
+        std::fs::write(other.dir().join("files/2.flac.etag"), "etag").unwrap();
+        let st = o.state("node-1");
+        assert_eq!((st.summary.bytes, st.other_bytes), (200, 500));
+        assert_eq!(o.options("node-1", 0).other_bytes, 500);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A folder of its own for one test.
+    fn tempfile_dir() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "pm-desktop-offline-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ))
     }
 }

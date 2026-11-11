@@ -1,12 +1,12 @@
-//! The DAC's own volume (its UAC2 feature unit), and the never-louder hand-over when the exclusive
-//! driver takes the DAC over from Android.
+//! The DAC's own volume (its UAC2 feature unit), the start level when the exclusive driver takes
+//! the DAC over from Android (never louder than the DAC was), and the never-louder give-back.
 //!
-//! While Android plays the DAC (shared mode) the listener's level is Android's media volume, which
-//! Android applies to the samples, through the unit at whatever level (and mute) it had. The
-//! exclusive driver sends the samples untouched, so the level moves to the DAC's feature unit:
-//! before the first sample, the driver sets it to what both together amounted to ([`handover`]),
-//! never more; when that is below what the unit can do, or unknown, it mutes. Giving the DAC back,
-//! the unit is never left louder than it was ([`giveback`]).
+//! The exclusive driver sends the samples untouched, so the level is the DAC's feature unit. Before
+//! the first sample the driver sets it to a known start level ([`start_level`]): the level the app
+//! last played this DAC at, else a low [`START_DB`], on the unit's steps and within its range.
+//! Android's media volume plays no part in it (while the app holds the DAC, Android routes media
+//! to the phone's speaker). Giving the DAC back, the unit is never left louder than it was
+//! ([`giveback`]).
 
 /// One sub-range of a feature unit's volume (`RANGE` reply), in 1/256 dB: `min`, `min + res`, …
 /// up to `max`.
@@ -83,7 +83,7 @@ pub struct Level {
 }
 
 /// `db` as a `CUR` value the unit takes, at or below it; the minimum when it is below that (the
-/// listener's own choice of level, not a hand-over).
+/// listener's own choice of level, or a start level).
 pub fn db_to_cur(db: f32, range: &VolumeRange) -> i16 {
     let want = (f64::from(db) * 256.0).floor() as i32;
     range.at_or_below(want).unwrap_or_else(|| range.min())
@@ -94,24 +94,32 @@ pub fn cur_to_db(cur: i16) -> f32 {
     f32::from(cur) / 256.0
 }
 
-/// The unit's level when the driver takes the DAC over: Android played the DAC at `media_db` (its
-/// own attenuation for the DAC's route, `AudioManager.getStreamVolumeDb`, read before the take
-/// while Android still played the DAC) through the unit at `before`; never louder than both
-/// together. Muted, at its minimum, when either is unknown, Android was silent, the unit was
-/// muted, or the target is below what the unit can do: the listener raises it.
-pub fn handover(media_db: Option<f32>, before: Option<Level>, range: &VolumeRange) -> Level {
-    let quiet = Level {
-        cur: range.min(),
-        mute: true,
-    };
-    let (Some(db), Some(b)) = (media_db.filter(|d| d.is_finite()), before) else {
-        return quiet;
-    };
-    let target = ((db + cur_to_db(b.cur)) * 256.0).floor() as i32;
-    match range.at_or_below(target) {
-        Some(cur) => Level { cur, mute: b.mute },
-        None => quiet,
+/// The start level of a DAC the app has not played before: low, so the first sound is quiet.
+pub const START_DB: f32 = -40.0;
+
+/// The unit's level before the first sample once the driver took the DAC over: `saved_db` (the
+/// level the app last played this DAC at), else [`START_DB`]; on the unit's steps, rounded toward
+/// quieter, at most its maximum and, when the unit can't go that low, its minimum. Never muted:
+/// what the listener hears first is a known, low level.
+pub fn start_level(saved_db: Option<f32>, range: &VolumeRange) -> Level {
+    let db = saved_db.filter(|d| d.is_finite()).unwrap_or(START_DB);
+    Level {
+        cur: db_to_cur(db, range),
+        mute: false,
     }
+}
+
+/// [`start_level`], never louder than the unit was before the take (`before`, when known): the
+/// lower of the two; a unit muted before starts at the lower of the start level and its minimum,
+/// unmuted, so it is heard, quietly. A DAC turned down (or muted) on its own buttons stays down.
+pub fn start_level_below(saved_db: Option<f32>, before: Option<Level>, range: &VolumeRange) -> Level {
+    let start = start_level(saved_db, range);
+    let cur = match before {
+        Some(b) if b.mute => start.cur.min(range.min()),
+        Some(b) => start.cur.min(b.cur),
+        None => start.cur,
+    };
+    Level { cur, mute: false }
 }
 
 /// The unit's level when the driver gives the DAC back to Android: exactly its own level and mute
@@ -126,10 +134,6 @@ mod tests {
 
     fn ka17() -> VolumeRange {
         VolumeRange::single(-127 * 256, 0, 128)
-    }
-
-    fn at(cur: i16) -> Option<Level> {
-        Some(Level { cur, mute: false })
     }
 
     #[test]
@@ -180,93 +184,70 @@ mod tests {
         assert_eq!((r.min(), r.max()), (-60 * 256, 0));
     }
 
-    /// The hand-over is Android's measured attenuation for the DAC plus the unit's level then, on
-    /// the unit's steps, rounded toward quieter: never louder.
+    /// The start level: the level the app last played this DAC at, else -40 dB; on the unit's
+    /// steps toward quieter, within its range; never derived from Android's media volume (it
+    /// isn't an input), never muted.
     #[test]
-    fn the_hand_over_is_never_louder() {
+    fn the_start_level_is_the_last_one_else_minus_40_db() {
         let r = ka17();
-        for tenth in 0..=600 {
-            let db = -(tenth as f32) / 10.0;
-            let l = handover(Some(db), at(0), &r);
-            assert!(!l.mute && cur_to_db(l.cur) <= db, "{db} dB");
-        }
         assert_eq!(
-            handover(Some(-20.0), at(0), &r),
+            start_level(None, &r),
+            Level {
+                cur: -40 * 256,
+                mute: false
+            }
+        );
+        assert_eq!(
+            start_level(Some(-23.0), &r),
+            Level {
+                cur: -23 * 256,
+                mute: false
+            }
+        );
+        // -23.3 dB on 0.5 dB steps: -23.5, the quieter step
+        assert_eq!(start_level(Some(-23.3), &r).cur, -23 * 256 - 128);
+        // Never above the unit's maximum; a broken saved value is no saved value
+        assert_eq!(start_level(Some(6.0), &r).cur, 0);
+        assert_eq!(start_level(Some(f32::NAN), &r).cur, -40 * 256);
+        assert_eq!(start_level(Some(f32::INFINITY), &r).cur, -40 * 256);
+        // A unit that can't go as low as -40 dB: its minimum, still not muted
+        let shallow = VolumeRange::single(-20 * 256, 0, 256);
+        assert_eq!(
+            start_level(None, &shallow),
             Level {
                 cur: -20 * 256,
                 mute: false
             }
         );
-        // The unit was already turned down: the hand-over is that much lower
-        assert_eq!(
-            handover(Some(0.0), at(-10 * 256), &r),
-            Level {
-                cur: -10 * 256,
-                mute: false
-            }
-        );
-        assert_eq!(
-            handover(Some(-3.3), at(-10 * 256), &r),
-            Level {
-                cur: -13 * 256 - 128,
-                mute: false
-            }
-        );
+        assert_eq!(start_level(Some(-90.0), &shallow).cur, -20 * 256);
     }
 
-    /// Codex H3 (round 2 of #306): no assumed curve: without Android's own reading for the DAC
-    /// (an old Android, or not read from the DAC's route) the DAC starts muted at its minimum.
+    /// Never louder than the DAC was before the take: the lower of the start level and the level
+    /// before; muted before: its minimum, heard; unknown before: the start level.
     #[test]
-    fn no_reading_no_sound() {
+    fn the_start_level_is_never_louder_than_before() {
         let r = ka17();
-        let quiet = Level {
-            cur: r.min(),
-            mute: true,
+        let at = |db: i16, mute: bool| Some(Level { cur: db * 256, mute });
+        let heard = |db: i16| Level {
+            cur: db * 256,
+            mute: false,
         };
-        assert_eq!(handover(None, at(0), &r), quiet);
-        assert_eq!(
-            handover(Some(f32::NEG_INFINITY), at(0), &r),
-            quiet,
-            "Android silent"
-        );
-        assert_eq!(handover(Some(f32::NAN), at(0), &r), quiet);
+        // Turned down to -60 dB on its own buttons, -5 dB kept from last time: -60 dB
+        assert_eq!(start_level_below(Some(-5.0), at(-60, false), &r), heard(-60));
+        // At 0 dB before: the start level (-40, or the one kept)
+        assert_eq!(start_level_below(None, at(0, false), &r), heard(-40));
+        assert_eq!(start_level_below(Some(-23.0), at(0, false), &r), heard(-23));
+        // Muted before: its minimum, unmuted
+        assert_eq!(start_level_below(Some(-5.0), at(0, true), &r), heard(-127));
+        // Not known before: the start level
+        assert_eq!(start_level_below(None, None, &r), heard(-40));
     }
 
-    /// Codex H2 / Claude M3 (round 1 of #306): below what the unit can do, or muted before: muted;
-    /// Claude M4 (round 2): the give-back is the unit's own level and mute from before the take.
+    /// Claude M4 (round 2 of #306): the give-back is the unit's own level and mute from before
+    /// the take.
     #[test]
-    fn what_the_unit_cant_do_quietly_is_muted() {
-        let shallow = VolumeRange::single(-20 * 256, 0, 256);
-        let quiet = Level {
-            cur: -20 * 256,
-            mute: true,
-        };
-        assert_eq!(
-            handover(Some(-43.0), at(0), &shallow),
-            quiet,
-            "-43 dB is below -20 dB: muted"
-        );
-        assert_eq!(
-            handover(Some(0.0), None, &shallow),
-            quiet,
-            "the unit's level unknown"
-        );
-        assert_eq!(
-            handover(
-                Some(-3.0),
-                Some(Level {
-                    cur: -6 * 256,
-                    mute: true
-                }),
-                &shallow
-            ),
-            Level {
-                cur: -9 * 256,
-                mute: true
-            },
-            "muted before: muted"
-        );
-        // Back to Android: exactly as before, whatever the hand-over or the listener did
+    fn the_give_back_is_the_level_from_before() {
+        // Back to Android: exactly as before, whatever the start level or the listener did
         let before = Some(Level {
             cur: -20 * 256,
             mute: false,

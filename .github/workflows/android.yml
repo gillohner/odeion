@@ -25,6 +25,9 @@ on:
   pull_request:
     paths:
       - crates/pm-desktop/**
+      - crates/pm-app-player/**
+      - crates/pm-offline/**
+      - crates/pm-audio/**
       - crates/pm-endpoint/**
       - crates/pm-stream/**
       - crates/pm-out-net/**
@@ -119,10 +122,10 @@ jobs:
             if [ "$all" = true ]; then echo true; return; fi
             if printf '%s\n' "$files" | grep -Eq "^(\.github/workflows/android\.yml$|$1)"; then echo true; else echo false; fi
           }
-          zone=$(covers 'crates/(pm-desktop|pm-endpoint|pm-stream|pm-out-net|pm-out-local|pm-usb-audio|pm-api|pm-zones|pm-node)/|Cargo\.(toml|lock)$|tools/android-(endpoint|ui-tour|native-pages)(-test)?\.py$|tools/fixtures/android-ui-tour/|tools/release/android-patch\.py$|tools/release/android/')
+          zone=$(covers 'crates/(pm-offline|pm-app-player|pm-audio|pm-desktop|pm-endpoint|pm-stream|pm-out-net|pm-out-local|pm-usb-audio|pm-api|pm-zones|pm-node)/|Cargo\.(toml|lock)$|tools/android-(endpoint|ui-tour|native-pages)(-test)?\.py$|tools/fixtures/android-ui-tour/|tools/release/android-patch\.py$|tools/release/android/')
           ring=$(covers 'crates/(pm-desktop|pm-pubky)/|tools/android-ring-probe\.py$|tools/release/android-patch\.py$')
           update=$(covers 'crates/pm-desktop/|tools/android-update-probe\.py$|tools/release/(android-patch\.py|android/|updater-manifest\.py|aab-check\.py|android-sign\.sh)|\.github/workflows/release\.yml$')
-          background=$(covers 'crates/pm-desktop/|tools/release/android/|tools/release/android-patch\.py$|tools/android-background-probe\.py$|tools/android-endpoint\.py$')
+          background=$(covers 'crates/(pm-desktop|pm-app-player|pm-audio)/|tools/release/android/|tools/release/android-patch\.py$|tools/android-background-probe\.py$|tools/android-endpoint\.py$')
           node=false
           if [ "$zone" = true ] || [ "$background" = true ]; then node=true; fi
           one='{"include":[{"api":"35","target":"google_apis"}]}'

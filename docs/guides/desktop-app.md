@@ -53,6 +53,46 @@ connects to it on TCP port 7790: allow that if your firewall asks.
 Away from home the app still controls the node and its speakers, but this device isn't offered as
 a speaker then.
 
+### This phone (Android)
+
+On Android, **This phone** in the zone button plays the music in the app itself: the app opens the
+song from your node (at home, or through remote access away from home) and plays it through the
+phone's output the same way the phone's own zone does. With a USB DAC that means Auto, bit-perfect
+or Exclusive USB as chosen in Settings › This phone, and the DAC gets the song's own rate (a
+44.1 kHz FLAC arrives at 44.1 kHz, not at Android's 48 kHz). Now playing › Details › Output says
+what the DAC gets, as for any zone. It keeps playing with the screen off and goes on to the next
+song by itself.
+
+A few streams the app can't play itself (a radio playlist, a format it doesn't decode) play through
+Android's mixer instead; Details › Output then says "Android mixer". The phone's own zone stays on
+the node for other controllers; while the app plays, the node starting that zone pauses the app
+(one stream at a time on the phone's output), and the app playing again takes it back.
+
+### Downloads (Android)
+
+In the app, the ⋯ menu of a song, an album or a playlist of your library has **Download**: the
+app copies the original files to the phone (its own storage, nothing else on the phone sees them)
+and plays them without your node. A playlist keeps its songs from your library; songs it has from a
+streaming service (TIDAL and the like) stay online and are not downloaded. Streaming services'
+songs have no Download.
+
+**Your library › Downloads** (or Downloads in the sidebar) is the storage screen: what is on the
+phone (albums, playlists, songs, each with its size), the total against the limit, what is
+downloading now, **Remove** for each, and **Remove all downloads**. Removing takes away the
+phone's copy only; your library and playlists stay as they are. The limit is 10 GB until you change
+it there, and downloads always leave 1 GB free on the phone; when they reach either, they stop and
+the screen says so. Unfinished song copies count against the limit too, and the app checks the
+bytes as they arrive even if the node's file size is out of date. Songs on the phone carry a small
+download mark in lists and on album tiles.
+The app brings its copies up to date every 15 minutes while it reaches your node, and when a file
+changes on the node (replaced, retagged), the phone gets the new one.
+
+A downloaded song plays from the phone's copy, also while the app reaches your node (no stream,
+no mobile data); Now playing › Details › Output then says "From this phone". With no network (or the
+node off), the app opens what the phone keeps by itself and plays it the same way, through "This
+phone" with its USB DAC path; it goes back to your node when it answers again and nothing is
+playing.
+
 ## Updates
 
 On macOS, Windows and the Linux AppImage, the app checks for a new version when it starts and

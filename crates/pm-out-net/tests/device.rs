@@ -25,6 +25,8 @@ struct Phone {
     opens: std::sync::atomic::AtomicU64,
     /// Its first sink asks to be opened afresh at the next song (full level no longer allowed)
     first_reopens_at_track: std::sync::atomic::AtomicBool,
+    /// Its level as Android reports it (the media volume)
+    level: Mutex<Option<pm_model::ZoneVolume>>,
 }
 
 impl Phone {
@@ -37,6 +39,7 @@ impl Phone {
             reopen: Arc::default(),
             opens: Default::default(),
             first_reopens_at_track: Default::default(),
+            level: Mutex::new(None),
         }
     }
 }
@@ -111,6 +114,9 @@ impl Output for Phone {
             .unwrap()
             .clone()
             .unwrap_or_else(|| self.caps().clone())
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        Ok(*self.level.lock().unwrap())
     }
     async fn configure_device(&self, settings: pm_zones::DeviceSettings) -> Result<(), SinkError> {
         if let Some(d) = self.dac.lock().unwrap().as_mut() {
@@ -459,14 +465,13 @@ async fn what_the_phone_takes_now_reaches_the_zone_and_settings_reach_the_phone(
         assert!(held.live_caps().accepts(&fmt), "{fmt} goes to the DAC as it is");
         drop(held.open(fmt).await.expect("opens"));
     }
-    // Settings from the node reach the phone, and the node sees them at once; a sink open then
-    // opens afresh at the next song, so the change applies there
+    // Settings from the node ("Allow Exclusive USB") reach the phone, and the node sees them at
+    // once; a sink open then opens afresh at the next song, so a change applies there
     let sink = held.open(AudioFormat::pcm(96_000, 24, 2)).await.unwrap();
     assert!(!sink.reopen_at_track());
     let s = pm_zones::DeviceSettings {
-        mode: pm_zones::PreferredMode::Shared,
-        dac_volume: false,
-        full_level_ok: false,
+        mode: pm_zones::PreferredMode::Exclusive,
+        ..pm_zones::DeviceSettings::default()
     };
     held.configure_device(s).await.unwrap();
     assert_eq!(held.device().unwrap().settings, Some(s));
@@ -647,4 +652,48 @@ async fn a_listed_format_reaches_the_dac_unchanged() {
         );
         drop(held.open(src).await.expect("a listed format opens"));
     }
+}
+
+/// The phone's own level reaches the node (its media volume, moved by its volume keys), read back
+/// as the node's poll does; an app from before the read-back ends the session instead, and the
+/// level is unknown then (nothing else breaks).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_phones_own_level_is_read_back() {
+    use pm_model::{VolumeKind, VolumeLevel, ZoneVolume};
+    let (phone, serving, cell) = phone();
+    let mut live = phone.caps().clone();
+    live.hw_volume = Some(VolumeKind::Percent);
+    *phone.live.lock().unwrap() = Some(live);
+    let at = |p: u8| {
+        Some(ZoneVolume {
+            level: VolumeLevel::Percent(p),
+            muted: false,
+        })
+    };
+    *phone.level.lock().unwrap() = at(4);
+    let held = NetOutput::connect(serving.addr(), &cell).unwrap().remove(0);
+    assert_eq!(held.volume().await.unwrap(), at(4));
+    // A key press on the phone
+    *phone.level.lock().unwrap() = at(8);
+    assert_eq!(held.volume().await.unwrap(), at(8));
+
+    // An older app: the Welcome says it has a volume, GetVolume is a frame it doesn't know
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    let mut older = fake::output(serde_json::Value::Null);
+    older["caps"]["hw_volume"] = serde_json::to_value(VolumeKind::Percent).unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut s, _) = l.accept().unwrap();
+            fake::hello(&mut s);
+            fake::welcome(&mut s, older.clone());
+            // The registration ends here; the read-back's frame fails to decode, and the session ends
+            let _ = pm_stream::read_frame(&mut s);
+        }
+    });
+    let out = NetOutput::connect(addr, &KeyCell::new(Key::random()))
+        .unwrap()
+        .remove(0);
+    assert_eq!(out.volume().await.unwrap(), None, "unknown, not an error");
+    server.join().unwrap();
 }

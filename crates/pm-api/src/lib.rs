@@ -260,7 +260,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/zones/{id}/transport", post(transport))
         .route("/zones/{id}/announce", post(announce::announce))
-        .route("/zones/{id}/volume", post(volume))
+        .route("/zones/{id}/volume", post(volume).get(read_volume))
         .route("/zones/{id}/repeat", axum::routing::put(repeat))
         .route("/zones/{id}/radio", axum::routing::put(radio))
         .route("/zones/{id}/crossfade", axum::routing::put(crossfade))
@@ -1429,9 +1429,12 @@ async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputView>> {
     )
 }
 
-/// `PUT /v1/outputs/{id}/device {mode?, full_level_ok?}`: the listener's choices for the hardware
-/// behind an output (a phone's USB DAC: `auto`, `bit_perfect` or `shared`, and whether the zone's
-/// volume is the DAC's). The output's app keeps them; the answer is the output as listed.
+/// `PUT /v1/outputs/{id}/device {mode?}`: what a UI sends for the hardware behind an output (a
+/// phone's USB DAC). It has one behaviour (Exclusive USB, else Android's bit-perfect, else shared
+/// only where neither is possible): `mode: exclusive` asks Android's permission for Exclusive USB
+/// again (Settings' "Allow Exclusive USB"); any other mode is that behaviour. An earlier UI's body
+/// (`shared`, `bit_perfect`, `dac_volume`, `full_level_ok`) is taken and changes nothing. The
+/// output's app gets it; the answer is the output as listed.
 async fn put_output_device(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
@@ -1441,43 +1444,34 @@ async fn put_output_device(
         .outputs
         .get(&OutputId(id.clone()))
         .ok_or_else(|| ApiError::not_found(format!("no output {id}")))?;
-    let Some(device) = out.device() else {
+    if out.device().is_none() {
         return Err(ApiError::bad_request(format!("{id} has no device to set")));
-    };
-    let mut settings = device.settings.unwrap_or_default();
-    if let Some(m) = body.mode {
-        if m == pm_zones::PreferredMode::Unknown {
+    }
+    let mode = match body.mode {
+        Some(pm_zones::PreferredMode::Unknown) => {
             return Err(ApiError::bad_request(
                 "mode is auto, bit_perfect, exclusive or shared",
-            ));
+            ))
         }
-        settings.mode = m;
-    }
-    if let Some(v) = body.dac_volume {
-        settings.dac_volume = v;
-    }
-    // The listener's agreement that Bit-perfect (or Exclusive USB on a DAC without a volume of its
-    // own) plays at full level, asked when they choose it below Android's full volume; it goes
-    // with any other mode
-    settings.full_level_ok = body.full_level_ok.unwrap_or(false)
-        && matches!(
-            settings.mode,
-            pm_zones::PreferredMode::BitPerfect | pm_zones::PreferredMode::Exclusive
-        );
+        Some(pm_zones::PreferredMode::Exclusive) => pm_zones::PreferredMode::Exclusive,
+        _ => pm_zones::PreferredMode::Auto,
+    };
+    let settings = pm_zones::DeviceSettings {
+        mode,
+        ..pm_zones::DeviceSettings::default()
+    };
     out.configure_device(settings)
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok(Json(out.info()))
 }
 
+/// The body of `PUT /v1/outputs/{id}/device`; an earlier UI's `dac_volume` and `full_level_ok`
+/// are taken and not read.
 #[derive(Debug, serde::Deserialize)]
 struct DeviceSettingsPatch {
     #[serde(default)]
     mode: Option<pm_zones::PreferredMode>,
-    #[serde(default)]
-    dac_volume: Option<bool>,
-    #[serde(default)]
-    full_level_ok: Option<bool>,
 }
 
 /// Create a pull output: a zone that plays to it streams WAV at
@@ -2211,6 +2205,19 @@ async fn volume(
     zone.set_volume(body.volume).await?;
     announce::note_volume(zone.id(), &body.volume);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The zone's level as its output reports it now, read from the device and published to every
+/// controller (as the poll does). A controller that saw the level change on the device itself (a
+/// phone's volume keys, read by the app on the phone) asks for it instead of setting it: a set
+/// could land after a newer change on the device and undo it. `null` when the output can't say.
+async fn read_volume(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Option<pm_model::ZoneVolume>> {
+    let zone = zone_of(&s, &id)?;
+    let read = tokio::time::timeout(std::time::Duration::from_secs(4), zone.refresh_volume()).await;
+    Ok(Json(read.ok().flatten()))
 }
 
 async fn repeat(
@@ -21926,18 +21933,30 @@ exec sleep 300
             .replace('/', "%2F")
             .replace(':', "%3A")
             .replace(' ', "%20");
+        // An earlier UI's body is taken and means the one behaviour (nothing to choose, no
+        // agreement to full level); "Allow Exclusive USB" (`mode: exclusive`) reaches the phone
         let (st, out) = call(
             &app,
             "PUT",
             &format!("/v1/outputs/{enc}/device"),
-            Some(serde_json::json!({"mode": "shared", "dac_volume": false})),
+            Some(serde_json::json!({"mode": "shared", "dac_volume": false, "full_level_ok": true})),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{out}");
         assert_eq!(
             out["device"]["settings"],
-            serde_json::json!({"mode": "shared", "dac_volume": false, "full_level_ok": false})
+            serde_json::json!({"mode": "auto", "dac_volume": true, "full_level_ok": false})
         );
+        wait_observed().await;
+        let (st, out) = call(
+            &app,
+            "PUT",
+            &format!("/v1/outputs/{enc}/device"),
+            Some(serde_json::json!({"mode": "exclusive"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert_eq!(out["device"]["settings"]["mode"], "exclusive");
         let (st, _) = call(
             &app,
             "PUT",
@@ -21964,20 +21983,22 @@ exec sleep 300
             .unwrap();
         assert_eq!(
             seen.len(),
-            3,
-            "plugged in at the first registration, the settings, then out"
+            4,
+            "plugged in at the first registration, the settings twice, then out"
         );
         assert_eq!(
             seen[0].1,
             Some(Some("FiiO KA17".to_string())),
             "listed, with its device, when announced"
         );
-        assert_eq!(
-            seen[1].1,
-            Some(Some("FiiO KA17".to_string())),
-            "its settings changed"
-        );
-        assert_eq!(seen[2].1, Some(None), "listed, without a device, when unplugged");
+        for i in [1, 2] {
+            assert_eq!(
+                seen[i].1,
+                Some(Some("FiiO KA17".to_string())),
+                "its settings changed"
+            );
+        }
+        assert_eq!(seen[3].1, Some(None), "listed, without a device, when unplugged");
         let listener = accounts::Caller {
             role: accounts::Role::Listener,
             key: Some("o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy".into()),
@@ -25121,6 +25142,46 @@ exec sleep 300
         assert_eq!(looks.load(SeqCst), 1);
         assert!(cached().contains("s3cret"));
         server.abort();
+    }
+
+    /// `GET /v1/zones/{id}/volume` reads the device now and publishes it (the app asks this after
+    /// the phone's volume keys; it never sets the level to report it): what the device says, also
+    /// a change made on the device itself; `null` for an output without a volume.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_zones_level_is_read_from_the_device_on_request() {
+        use pm_zones::outputs::NullOutput;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let raw = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        let out: Arc<dyn pm_zones::Output> = raw.clone();
+        s.outputs.register(out.clone());
+        let zone = s.create_zone("Phone-like", out);
+        let plain: Arc<dyn pm_zones::Output> = Arc::new(NullOutput::new());
+        s.outputs.register(plain.clone());
+        let none = s.create_zone("No volume", plain);
+        let app = router(s.clone());
+        zone.wait_acked().await;
+        // The device changes its level itself (a volume key on the phone)
+        raw.pretend_level(pm_model::ZoneVolume {
+            level: pm_model::VolumeLevel::Percent(7),
+            muted: false,
+        });
+        let zid = zone.id().0.clone();
+        let (st, v) = call(&app, "GET", &format!("/v1/zones/{zid}/volume"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v, serde_json::json!({"percent": 7, "muted": false}));
+        zone.wait_acked().await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        assert_eq!(
+            z["volume"],
+            serde_json::json!({"percent": 7, "muted": false}),
+            "published: {z}"
+        );
+        let nid = none.id().0.clone();
+        let (st, v) = call(&app, "GET", &format!("/v1/zones/{nid}/volume"), None).await;
+        assert_eq!((st, v), (StatusCode::OK, serde_json::Value::Null));
+        let (st, _) = call(&app, "GET", "/v1/zones/no-such-zone/volume", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
     }
 
     /// A zone of several speakers the owner makes takes the strictest volume limit among them, as

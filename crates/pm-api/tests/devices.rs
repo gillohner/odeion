@@ -463,3 +463,77 @@ async fn a_kept_album_with_gone_files_stays_on_the_device() {
     let (_, m) = call(&app, OWNER, "GET", &uri, None).await;
     assert_eq!(ids(&m["wanted"]), [a2]);
 }
+
+/// A kept original whose file changed on the node (replaced, re-tagged: another size) is wanted
+/// again, so the device's copy follows it; a smaller copy (another size by nature) is not.
+#[tokio::test]
+async fn a_changed_file_is_wanted_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let app = router(s.clone());
+    let one = add(&s, "One", "Album A", 1, 1000);
+    let phone = "3a6c1a9e-7d4b-4c55-9a1e-8b2c3d4e5f61";
+    let (st, d) = call(
+        &app,
+        OWNER,
+        "PUT",
+        &format!("/v1/devices/{phone}"),
+        Some(json!({"name": "Pixel 8", "kind": "android"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    let uri = format!("/v1/devices/{phone}/downloads");
+    // What the device says it has: its copy's size and format, and the node's record it came from
+    let have = |bytes: u64, format: &str, src: Option<(u64, i64)>| {
+        let mut h = json!({"track_id": one, "bytes": bytes, "format": format});
+        if let Some((size, mtime)) = src {
+            h["src_size"] = json!(size);
+            h["src_mtime"] = json!(mtime);
+        }
+        json!({"keep": {"tracks": [one]}, "have": [h]})
+    };
+    let (st, m) = call(
+        &app,
+        OWNER,
+        "PUT",
+        &uri,
+        Some(have(1000, "original", Some((1000, 1)))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    assert!(ids(&m["wanted"]).is_empty(), "the device has it: {m}");
+    // A smaller copy of an unchanged file: not wanted again, whatever its size
+    let (_, m) = call(&app, OWNER, "PUT", &uri, Some(have(300, "aac", Some((1000, 1))))).await;
+    assert!(ids(&m["wanted"]).is_empty(), "{m}");
+    // The node's file changes
+    assert_eq!(add(&s, "One", "Album A", 1, 1200), one, "the same song");
+    for format in ["original", "aac"] {
+        let (_, m) = call(
+            &app,
+            OWNER,
+            "PUT",
+            &uri,
+            Some(have(1000, format, Some((1000, 1)))),
+        )
+        .await;
+        assert_eq!(ids(&m["wanted"]), [one], "{format}: {m}");
+        assert!(
+            ids(&m["unkept"]).is_empty(),
+            "the old copy stays until the new one is there"
+        );
+    }
+    let (_, m) = call(
+        &app,
+        OWNER,
+        "PUT",
+        &uri,
+        Some(have(1200, "original", Some((1200, 1)))),
+    )
+    .await;
+    assert!(ids(&m["wanted"]).is_empty(), "{m}");
+    // A device that doesn't say where its copy came from: an original's own size
+    let (_, m) = call(&app, OWNER, "PUT", &uri, Some(have(1000, "original", None))).await;
+    assert_eq!(ids(&m["wanted"]), [one], "{m}");
+    let (_, m) = call(&app, OWNER, "PUT", &uri, Some(have(1200, "original", None))).await;
+    assert!(ids(&m["wanted"]).is_empty(), "{m}");
+}

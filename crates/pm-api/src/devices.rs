@@ -78,6 +78,12 @@ pub struct Have {
     /// `original`, `aac`, `mp3` or `opus`.
     #[serde(default = "original")]
     pub format: String,
+    /// The node's record of the file when the device fetched it (its size and mtime): a file
+    /// changed since is wanted again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_mtime: Option<i64>,
 }
 
 fn original() -> String {
@@ -298,7 +304,8 @@ pub struct Manifest {
     pub device: DeviceRow,
     pub keep: Keep,
     pub have: Vec<Have>,
-    /// Kept songs it doesn't have yet.
+    /// Kept songs it doesn't have yet, or has an older copy of (an original whose size on the
+    /// node changed since).
     pub wanted: Vec<Wanted>,
     /// Files it has that nothing keeps any more (it may delete them).
     pub unkept: Vec<i64>,
@@ -383,9 +390,34 @@ fn manifest(s: &NodeState, d: &Device) -> Result<Manifest, ApiError> {
         ids: kept_set,
     } = kept_tracks(s, &d.keep)?;
     let have: BTreeSet<i64> = d.have.iter().map(|h| h.track_id).collect();
+    // A song whose file on the node changed since the device fetched it (replaced or re-tagged)
+    // is wanted again; the device's new copy replaces its old one. The device says the node's
+    // record of the file it fetched (`src_size`, `src_mtime`): compared with the record now, so a
+    // copy never differs from its source by nature. A device that doesn't say: an original's
+    // own size
+    let now: std::collections::HashMap<i64, (u64, i64)> = kept
+        .iter()
+        .filter_map(|t| Some((t.id?.0, (t.file.size_bytes, t.file.mtime_unix))))
+        .collect();
+    let changed: BTreeSet<i64> = d
+        .have
+        .iter()
+        .filter(|h| {
+            let Some(&(size, mtime)) = now.get(&h.track_id) else {
+                return false;
+            };
+            match (h.src_size, h.src_mtime) {
+                (Some(was), m) => was != size || m.is_some_and(|m| m != mtime),
+                (None, _) => h.format == "original" && h.bytes != size,
+            }
+        })
+        .map(|h| h.track_id)
+        .collect();
     let wanted = kept
         .into_iter()
-        .filter(|t| t.id.is_some_and(|i| !have.contains(&i.0)))
+        .filter(|t| {
+            t.id.is_some_and(|i| !have.contains(&i.0) || changed.contains(&i.0))
+        })
         .map(|t| Wanted {
             track_id: t.id.map_or(0, |i| i.0),
             title: t.title.clone(),

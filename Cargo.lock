@@ -3882,6 +3882,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-app-player"
+version = "0.2.3"
+dependencies = [
+ "async-trait",
+ "hound",
+ "pm-audio",
+ "pm-endpoint",
+ "pm-model",
+ "pm-zones",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "pm-appdata"
 version = "0.2.3"
 dependencies = [
@@ -4039,6 +4059,7 @@ version = "0.2.3"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
