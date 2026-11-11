@@ -2260,3 +2260,15 @@ html:not([data-shell="phone"]) .np-bsheet { bottom: max(var(--kb, 0px), var(--pl
 .setup-steps { grid-template-columns: minmax(0, 1fr); }
 .setup-step > .grow { min-width: 0; }
 .setup-step .toolbar .input { flex-basis: 180px; }
+
+/* Usage insights (usage.js): the one-time notice between the top bar and the page (in the flow, so
+   it never covers the player, the navigation or the top bar), and its Settings rows */
+#usagenotice { padding: 8px 16px 0; }
+.usage-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.usage-notice > p { flex: 1 1 280px; margin: 0; }
+.usage-notice-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.usage-slot { display: contents; }
+.usage-slot > .set-row:first-child { border-top: 0; }
+.usage-slot > .usage-msg { padding: 0 16px; }
+.usage-slot > .usage-msg:empty { display: none; }
+body.kiosk #usagenotice { display: none; }

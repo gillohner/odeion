@@ -5,9 +5,11 @@ and pass by, and where things go wrong (an error, a slow page, a button that doe
 straight back). They exist to guide changes to the app: what to make easier, and what nobody seems
 to need.
 
-> **Status:** this release has the node's side only: the switch, people's choices, storage and the
-> summary. The browser part (the notice, the Settings pages described below, and the recording
-> itself) comes next. Until then nothing is recorded, even with the switch on.
+> **Status:** the web app records pages opened and how they loaded, requests by kind, buttons by
+> kind and script errors by class, with the notice and the Settings pages described below. Which
+> buttons were shown and passed by, and signs of trouble such as going straight back, come next.
+> The "Usage insights" line in the help menu comes with attaching usage to a problem report.
+> Party guests are not covered yet.
 
 They can't explain why someone did something. A button that is shown and not used is not disliked:
 it may simply not be needed that day. So the summary only gives a use rate once a button was really

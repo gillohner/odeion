@@ -58,7 +58,7 @@ const PAGES = new RegExp(fs.readFileSync(path.join(REPO, 'crates', 'pm-api', 'st
 const CMD = args.slice(sep + 1);
 if (!TOKEN || !BASE || !OUT || sep < 0 || !CMD.length) { console.error('usage: ui-pwa-browser.js <token> <base> <out> [--lan url] -- <node command…>'); process.exit(2); }
 fs.mkdirSync(OUT, { recursive: true });
-const SHELL = new Set(['/', '/app.js', '/app.css', '/pwa.js', '/pwa.css', '/feedback.js', '/feedback.css', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png']);
+const SHELL = new Set(['/', '/app.js', '/app.css', '/pwa.js', '/pwa.css', '/feedback.js', '/feedback.css', '/usage.js', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png']);
 const failures = [];
 let checks = 0;
 const ok = (cond, what) => { checks++; console.log(`${cond ? 'ok  ' : 'FAIL'} ${what}`); if (!cond) failures.push(what); };
@@ -163,7 +163,7 @@ async function launchSafety(browser) {
     const VIA = `http://127.0.0.1:${P.server.address().port}`;
     const { ctx, page } = await caseContext(browser, VIA);
     const k = (await kept(page)).map((x) => x.path);
-    ok(['/', '/pwa.js', '/app.js', '/app.css', '/pwa.css', '/feedback.js', '/feedback.css'].every((f) => k.includes(f)), 'full copy (precondition): the page and its blocking files are kept');
+    ok(['/', '/pwa.js', '/app.js', '/app.css', '/pwa.css', '/feedback.js', '/feedback.css', '/usage.js'].every((f) => k.includes(f)), 'full copy (precondition): the page and its blocking files are kept');
     // M10: the proxy sends 200 headers for the page, then nothing
     P.st.mode = 'stallBody';
     const r = await launchUntil(page, VIA + '/albums', 10000);

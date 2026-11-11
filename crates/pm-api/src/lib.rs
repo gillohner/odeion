@@ -877,6 +877,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/app.js", get(web_js))
         .route("/feedback.js", get(feedback_js))
         .route("/feedback.css", get(feedback_css))
+        .route("/usage.js", get(usage_js))
         .route("/manifest.webmanifest", get(web_manifest))
         .route("/icon.svg", get(web_icon))
         // Installing the web app (docs/guides/install-web-app.md): public like the page
@@ -1263,6 +1264,18 @@ async fn feedback_js() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("../static/feedback.js"),
+    )
+        .into_response()
+}
+
+/// Usage insights' browser part (usage.js): records nothing unless the node's switch is on.
+async fn usage_js() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/usage.js"),
     )
         .into_response()
 }
@@ -18899,6 +18912,49 @@ exec sleep 300
         let page = std::str::from_utf8(&body).unwrap();
         assert!(page.contains(r#"<script src="/pwa.js"></script>"#));
         assert!(page.contains(r#"<link rel="apple-touch-icon" href="/apple-touch-icon.png">"#));
+    }
+
+    /// Usage insights' browser part is served like the app's own script, loaded before app.js
+    /// (which mounts it), and kept by the service worker with the page (an installed app that
+    /// starts without the network waits for it, like for app.js).
+    #[tokio::test]
+    async fn the_node_serves_usage_js_and_the_shell_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state(dir.path(), Some("s3cret")).await);
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/usage.js").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()[header::CONTENT_TYPE],
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-cache");
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(std::str::from_utf8(&body).unwrap().contains("window.PM_USAGE"));
+        let page = include_str!("../static/index.html");
+        let usage = page
+            .find(r#"<script src="/usage.js"></script>"#)
+            .expect("index.html loads usage.js");
+        let app_js = page.find(r#"<script src="/app.js"></script>"#).unwrap();
+        assert!(usage < app_js, "usage.js loads before app.js");
+        assert!(
+            page.contains(r#"<div id="usagenotice" hidden></div>"#),
+            "the notice's slot"
+        );
+        let sw = include_str!("../static/sw.js");
+        for list in ["const FILES = [", "const BLOCKING = ["] {
+            let l = sw
+                .split_once(list)
+                .and_then(|(_, r)| r.split_once(']'))
+                .unwrap()
+                .0;
+            assert!(l.contains("'/usage.js'"), "sw.js {list} keeps /usage.js");
+        }
+        // The party page has no part of it yet (guests: a later slice)
+        assert!(!include_str!("../static/party.html").contains("usage"));
     }
 
     // Identification review, completion and reuse (their own file: fewer shared lines here)

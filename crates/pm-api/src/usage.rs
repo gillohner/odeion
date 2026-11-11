@@ -130,6 +130,8 @@ pub enum View {
     Playlists,
     Queue,
     Radio,
+    /// An artist's releases, one section at a time.
+    Releases,
     Search,
     Settings,
     Shared,
@@ -381,6 +383,13 @@ pub enum Control {
     SettingsBackup,
     SettingsAbout,
     SettingsHomeserver,
+    SettingsPlayfrom,
+    /// The app's own output with a USB DAC on it ("This phone").
+    SettingsDac,
+    /// You › Privacy: usage insights for yourself.
+    SettingsPrivacy,
+    /// This node › Usage insights: the switch.
+    SettingsUsage,
     ThemePick,
     LayoutPick,
     DenseToggle,
@@ -407,6 +416,8 @@ pub enum Control {
     KeyEscape,
     // Usage insights itself
     UsageNoticeDismiss,
+    /// The notice's "What's collected"
+    UsageNoticeMore,
     UsageStop,
     UsageShare,
     UsageClear,
@@ -1147,7 +1158,7 @@ impl Store {
             }
             // The count may need a page of its own (a new day's row) when no page came free yet:
             // then it is undone and the next oldest go too
-            let sp = tx.savepoint().map_err(storage)?;
+            let mut sp = tx.savepoint().map_err(storage)?;
             sp.execute(
                 "INSERT INTO daily (day, metric, key, n) VALUES (?1, 'dropped', 'evicted', ?2)
                  ON CONFLICT(day, metric, key) DO UPDATE SET n = n + ?2",
@@ -1162,6 +1173,18 @@ impl Store {
                 sp.commit().map_err(storage)?;
                 break;
             }
+            // Undone on purpose, and said so when it can't be: a count left half in would be
+            // counted again by the next step
+            #[cfg(test)]
+            let undone = if FAIL_COUNT_ROLLBACK.with(|f| f.get()) {
+                Err(rusqlite::Error::InvalidQuery)
+            } else {
+                sp.rollback()
+            };
+            #[cfg(not(test))]
+            let undone = sp.rollback();
+            undone.map_err(storage)?;
+            sp.finish().map_err(storage)?;
         }
         tx.commit().map_err(storage)?;
         Ok(gone)
@@ -1357,6 +1380,8 @@ thread_local! {
     static FAIL_EVICT_COUNT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Tests: the next this many eviction counts would grow the file past the cap.
     static EVICT_COUNT_TOO_BIG: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Tests: undoing an eviction count that didn't fit fails (ROLLBACK TO refused).
+    static FAIL_COUNT_ROLLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A stored event: when (unix seconds, to the minute), alias, role, viewport, the event.
@@ -3888,6 +3913,133 @@ mod tests {
         assert_eq!(stored(&u), 21 - gone);
         let s = u.summary(u.epoch(&Person::Owner), "t", t0, 1_002 * DAY).unwrap();
         assert_eq!(s["dropped"]["evicted"], gone, "{s}");
+    }
+
+    /// Claude review of 434f4280, Nit 1: a count that didn't fit is undone explicitly; when that
+    /// fails the eviction is refused (nothing commits), instead of going on with a count that may
+    /// still be half in and counting it again.
+    #[test]
+    fn a_failed_savepoint_rollback_refuses_instead_of_counting_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let u = usage(dir.path());
+        let t0 = Instant::now();
+        on(&u, t0);
+        let p = l("a");
+        let a = open(&u, &p, T1, t0);
+        let nav = Event::Nav {
+            view: View::Home,
+            how: How::Push,
+        };
+        for (day, n) in [(1_000, 1), (1_001, 20)] {
+            u.ingest(u.epoch(&p), &p, &a, T1, &vec![nav.clone(); n], 0, t0, day * DAY)
+                .unwrap();
+            u.flush(day * DAY).unwrap();
+        }
+        assert_eq!(stored(&u), 21);
+        EVICT_COUNT_TOO_BIG.with(|n| n.set(1));
+        FAIL_COUNT_ROLLBACK.with(|f| f.set(true));
+        let r = u.with_store(true, |s| s.make_room(1_002 * DAY));
+        FAIL_COUNT_ROLLBACK.with(|f| f.set(false));
+        EVICT_COUNT_TOO_BIG.with(|n| n.set(0));
+        assert!(
+            matches!(r, Err(Refusal::Storage)),
+            "a rollback that fails refuses the eviction"
+        );
+        assert_eq!(stored(&u), 21, "nothing of the refused eviction commits");
+        let s = u.summary(u.epoch(&Person::Owner), "t", t0, 1_002 * DAY).unwrap();
+        assert_eq!(s["dropped"]["evicted"], 0, "{s}");
+    }
+
+    /// The browser's recorder (static/usage.js) sends only what this schema knows: every value
+    /// of its closed lists parses as the enum it is sent as (a value the node refuses would lose
+    /// the whole batch).
+    #[test]
+    fn the_browsers_lists_are_all_in_the_schema() {
+        let js = include_str!("../static/usage.js");
+        let list = |name: &str| -> Vec<String> {
+            let start = format!("const {name} = Object.freeze([");
+            let body = js
+                .split_once(start.as_str())
+                .and_then(|(_, rest)| rest.split_once("])"))
+                .unwrap_or_else(|| panic!("usage.js lists its {name}"))
+                .0;
+            let vals: Vec<String> = body
+                .split(',')
+                .map(|v| v.trim().trim_matches('\'').to_string())
+                .filter(|v| !v.is_empty())
+                .collect();
+            assert!(!vals.is_empty(), "{name} is empty");
+            vals
+        };
+        fn all<T: serde::de::DeserializeOwned>(name: &str, vals: &[String]) {
+            for v in vals {
+                serde_json::from_value::<T>(serde_json::Value::String(v.clone()))
+                    .unwrap_or_else(|_| panic!("usage.js {name} has {v:?}, not in the schema"));
+            }
+        }
+        all::<View>("VIEWS", &list("VIEWS"));
+        all::<Area>("AREAS", &list("AREAS"));
+        all::<Control>("CONTROLS", &list("CONTROLS"));
+        all::<Surface>("SURFACES", &list("SURFACES"));
+        all::<Via>("VIAS", &list("VIAS"));
+        all::<How>("HOWS", &list("HOWS"));
+        all::<Viewport>("VIEWPORTS", &list("VIEWPORTS"));
+        all::<ErrorClass>("ERROR_CLASSES", &list("ERROR_CLASSES"));
+        let kinds = list("KINDS");
+        assert_eq!(
+            kinds,
+            ["nav", "load", "api", "action", "exception"],
+            "S2 sends these kinds only"
+        );
+        assert!(
+            js.contains(&format!("'{SCHEMA}'")),
+            "usage.js names the schema it speaks"
+        );
+    }
+
+    /// Every page app.js draws is a page the schema can name, and every Settings tab is a
+    /// control (a new page or tab without one fails here, not as a refused batch).
+    #[test]
+    fn every_page_and_settings_tab_of_the_app_is_in_the_schema() {
+        let app = include_str!("../static/app.js");
+        let pages = app
+            .split_once("const renderPage = async")
+            .and_then(|(_, rest)| rest.split_once("\n  // ---- "))
+            .expect("app.js has renderPage")
+            .0;
+        let mut views: BTreeSet<&str> = pages
+            .match_indices("        case '")
+            .filter_map(|(i, m)| pages[i + m.len()..].split('\'').next())
+            .collect();
+        let nav = app
+            .split_once("const NAV_VIEWS = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .expect("app.js lists its NAV_VIEWS")
+            .0;
+        views.extend(nav.split(',').map(|v| v.trim().trim_matches('\'')));
+        assert!(views.len() > 25 && views.contains("releases"), "{views:?}");
+        for v in &views {
+            serde_json::from_value::<View>(serde_json::Value::String(v.replace('-', "_")))
+                .unwrap_or_else(|_| panic!("app.js page {v:?} is not a usage View"));
+        }
+        let tabs = app
+            .split_once("const settingsTabs = ")
+            .and_then(|(_, rest)| rest.split_once("\n  ];"))
+            .expect("app.js has settingsTabs")
+            .0;
+        let keys: BTreeSet<&str> = tabs
+            .match_indices("['")
+            .filter_map(|(i, m)| tabs[i + m.len()..].split('\'').next())
+            .collect();
+        assert!(
+            keys.len() > 12 && keys.contains("privacy") && keys.contains("usage"),
+            "{keys:?}"
+        );
+        for k in &keys {
+            let k = if *k == "nodehome" { "node_home" } else { k };
+            serde_json::from_value::<Control>(serde_json::Value::String(format!("settings_{k}")))
+                .unwrap_or_else(|_| panic!("Settings tab {k:?} has no settings_{k} control"));
+        }
     }
 
     /// Kimi review of 77c62a81, L3: a flush the file can't take keeps its page loads and counts
