@@ -120,21 +120,20 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
       await ctx.close();
     }
 
-    // ---- A25: a sign-in way not chosen shows one sentence (mocked ways) ----
+    // ---- A25: another sign-in way is one sentence (mocked ways) ----
     {
       const ctx = await browser.newContext({ viewport: { width: 834, height: 1194 }, hasTouch: true });
       await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
       const p = await ctx.newPage();
       const LONG = 'Nothing in the known places on this machine (rescrobbled). From another machine, paste its key, secret and session key below. Uses the imported API key and secret for this node.';
       await p.route(/\/v1\/sources\/lastfm\/signin$/, (r) => r.request().method() !== 'GET' ? r.fulfill({ json: {} }) : r.fulfill({ json: { ways: [{ id: 'a', label: 'First way', note: 'An app id and secret, then your sign-in.', available: true, recommended: true }, { id: 'b', label: 'Second way', note: LONG, available: true }], imports: [], places: [], in_use: null, chosen: 'a', line: 'Not signed in', details: {} } }));
-      await p.goto(BASE + '/settings/accounts'); await p.waitForSelector('.ways .way', { timeout: 20000 }).catch(() => {});
-      const second = p.locator('.ways .way', { hasText: 'Second way' });
-      const shown = async () => (await second.locator('.way-note').innerText()).trim();
-      const before = await shown().catch(() => '');
-      check(before === 'Nothing in the known places on this machine (rescrobbled).', `a way not chosen shows its first sentence ("${before}")`);
-      await second.click(); await sleep(300);
-      const after = await shown().catch(() => '');
-      check(after.length > before.length && /session key/.test(after), 'chosen, it shows all of it');
+      await p.goto(BASE + '/settings/accounts'); await p.waitForSelector('#lfbody [data-sg=other]', { timeout: 20000 }).catch(() => {});
+      const second = p.locator('#lfbody [data-sg=other] .list-row', { hasText: 'Second way' });
+      const before = (await second.locator('.sub').textContent().catch(() => '')).trim();
+      check(before === 'Nothing in the known places on this machine (rescrobbled).', `another way shows its first sentence ("${before}")`);
+      await p.click('#lfbody [data-sg=other] summary'); await second.locator('[data-sg-way]').click(); await sleep(300);
+      const after = (await p.locator('#lfbody .sg-main .set-label').innerText().catch(() => '')).trim();
+      check(/^Second way/.test(after) && !/session key/.test(after), `picked, it is the action, still one sentence ("${after.replace(/\s+/g, ' ')}")`);
       await ctx.close();
     }
 

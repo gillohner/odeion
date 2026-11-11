@@ -1288,8 +1288,21 @@ code.path { font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .way-action .toolbar { flex-wrap: wrap; }
 .way-action .toolbar .input { flex: 1 1 220px; min-width: 0; width: auto; }
 .way-more { color: var(--fg-2); margin-top: 2px; }
-.ways-adv > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-sm); padding: 4px 2px; }
-.ways-adv > .ways { margin-top: 6px; }
+/* Sign in, simple (owner, 2026-11-08): what it gives and needs first, one action, the other ways
+   a line each under one closed list, signed in one row */
+.sg-lead { margin: 0 0 10px; max-width: 70ch; color: var(--fg-2); }
+.set-rows > .sg-lead { margin: 0; padding: 14px 16px 0; }
+.set-rows > .sg-lead + .set-row { border-top: 0; padding-top: 10px; }
+.set-rows > .sg-other { padding: 0 16px 12px; }
+.sg-other { margin-top: 4px; }
+/* A bold name in a step (Create app, Redirect URIs) never breaks across lines */
+.setup-step .steps b { white-space: nowrap; }
+.sg-other > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-sm); padding: 6px 2px; }
+.sg-other > .list { margin-top: 6px; }
+.sg-other .list-row .sub { overflow-wrap: anywhere; }
+.sg-play-h { margin-top: 18px; }
+.sg-in .set-name, .sg-in .set-help { overflow-wrap: anywhere; }
+.sg-main .set-help { margin-top: 2px; }
 /* People › Invite someone: the key field with Paste and Scan QR; its error under it */
 .invite-fields { margin-top: 12px; }
 .invite-fields .input { flex: 1 1 200px; min-width: 0; width: auto; }
@@ -1375,6 +1388,10 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 .transport .mode-btn { color: var(--muted); width: 40px; height: 40px; }
 .transport .mode-btn:hover { color: var(--fg); }
 .transport .mode-btn.on { color: var(--accent-strong); }
+/* Shuffle and repeat on (bar and Now playing): the accent and a dot under the icon, not colour alone */
+.mode-btn { position: relative; }
+.mode-btn.on { color: var(--accent-strong); }
+.mode-btn.on::after { content: ''; position: absolute; left: 50%; bottom: 3px; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: currentColor; }
 .hero .art.round { background: none; box-shadow: none; border-radius: 50%; }
 .tag-wait { padding: 0 6px 0 2px; font-style: italic; }
 .dialog.wide { width: min(640px, calc(100vw - 32px)); }

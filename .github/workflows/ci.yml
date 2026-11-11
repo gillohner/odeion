@@ -625,6 +625,7 @@ jobs:
           ui-nowplaying-phone.js nowplaying-phone-shots
           ui-phone-simplify.js phone-simplify-shots
           ui-motion.js motion-shots
+          ui-shuffle-repeat.js shuffle-repeat-shots
           ui-redesign.js redesign-shots
           ui-item-about.js item-about-shots
           ui-usb-dac.js usb-dac-shots
@@ -843,9 +844,12 @@ jobs:
         run: |
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
-      - name: sign-in choosers (imports, refusal, remembered way, sign out; desktop and phone)
+      - name: sign-in blocks (other ways, imports, refusal, change, sign out; desktop and phone)
         if: matrix.part == 1
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-signin.js ci-token http://127.0.0.1:7788
+      - name: sign-in pages show only what works (no radios, one action, signed in one row; 360, 412, 1440)
+        if: matrix.part == 1
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-signin-simple.js ci-token http://127.0.0.1:7788
       - name: copy the library to the homeserver (folder tree, totals, the job chip; a 20 000-file library stays quick; desktop and phone)
         if: matrix.part == 1
         timeout-minutes: 10

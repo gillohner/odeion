@@ -150,6 +150,70 @@ fn supported() -> bool {
     cfg!(unix)
 }
 
+/// On macOS Soloist uses Core Audio. On Unix, require a reachable local PipeWire or
+/// PulseAudio socket, rather than treating a configured server name as a working output.
+/// Remote PulseAudio addresses are conservatively excluded; this is not a playback probe.
+async fn sound_output() -> bool {
+    if cfg!(target_os = "macos") {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        local_sound_output(sound_output_sockets(|k| {
+            std::env::var_os(k).filter(|v| !v.is_empty())
+        }))
+        .await
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+#[cfg(unix)]
+fn sound_output_sockets(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let mut sockets = Vec::new();
+    let runtime = env("XDG_RUNTIME_DIR").map(PathBuf::from);
+    match env("PULSE_SERVER") {
+        Some(server) => {
+            let server = server.to_string_lossy();
+            let path = PathBuf::from(server.strip_prefix("unix:").unwrap_or(&server));
+            if path.is_absolute() {
+                sockets.push(path);
+            }
+        }
+        None => {
+            if let Some(dir) = &runtime {
+                sockets.push(dir.join("pulse/native"));
+            }
+            sockets.push(PathBuf::from("/run/pulse/native"));
+        }
+    }
+    let pipewire = PathBuf::from(env("PIPEWIRE_REMOTE").unwrap_or_else(|| "pipewire-0".into()));
+    if pipewire.is_absolute() {
+        sockets.push(pipewire);
+    } else if let Some(dir) = env("PIPEWIRE_RUNTIME_DIR").map(PathBuf::from).or(runtime) {
+        sockets.push(dir.join(pipewire));
+    }
+    sockets
+}
+
+#[cfg(unix)]
+async fn local_sound_output(sockets: Vec<PathBuf>) -> bool {
+    for socket in sockets {
+        if tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            tokio::net::UnixStream::connect(socket),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Spotify's archive for this machine (`soloist_release_<arch>.tar.gz`), Linux and macOS.
 fn archive() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -615,6 +679,9 @@ pub struct SoloistStatus {
     pub soloist: Option<Binary>,
     /// The node can download Soloist for this machine.
     pub can_download: bool,
+    /// macOS's own output, or a local PipeWire/PulseAudio socket accepted a bounded connection.
+    /// This does not certify an actual sink or playback; remote server addresses are excluded.
+    pub sound_output: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downloaded_at: Option<i64>,
     pub running: bool,
@@ -701,6 +768,7 @@ async fn view(s: &NodeState) -> SoloistStatus {
         pipewire_device: st.pipewire_device.clone(),
         soloist,
         can_download: archive().is_some(),
+        sound_output: supported() && sound_output().await,
         downloaded_at: st.downloaded_at,
         running,
         pid,
@@ -983,6 +1051,71 @@ pub(crate) async fn uninstall(State(s): State<Arc<NodeState>>) -> ApiResult<Solo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn sound_output_resolves_configured_local_sockets() {
+        use std::ffi::OsString;
+        let env = |k: &str| match k {
+            "PULSE_SERVER" => Some(OsString::from("unix:/missing/pulse/native")),
+            "PIPEWIRE_REMOTE" => Some(OsString::from("custom-pipewire")),
+            "XDG_RUNTIME_DIR" => Some(OsString::from("/run/user/1000")),
+            "PIPEWIRE_RUNTIME_DIR" => Some(OsString::from("/pipewire-runtime")),
+            _ => None,
+        };
+        assert_eq!(
+            sound_output_sockets(env),
+            vec![
+                PathBuf::from("/missing/pulse/native"),
+                PathBuf::from("/pipewire-runtime/custom-pipewire")
+            ]
+        );
+        let remote = |k: &str| (k == "PULSE_SERVER").then(|| OsString::from("tcp:unavailable.invalid"));
+        assert!(
+            sound_output_sockets(remote).is_empty(),
+            "a remote name is not proof of an output"
+        );
+        assert_eq!(
+            sound_output_sockets(|_| None),
+            vec![PathBuf::from("/run/pulse/native")]
+        );
+        let runtime = |k: &str| (k == "XDG_RUNTIME_DIR").then(|| OsString::from("/run/user/1000"));
+        assert_eq!(
+            sound_output_sockets(runtime),
+            vec![
+                PathBuf::from("/run/user/1000/pulse/native"),
+                PathBuf::from("/run/pulse/native"),
+                PathBuf::from("/run/user/1000/pipewire-0")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn sound_output_requires_a_listening_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("sound");
+        assert!(
+            !local_sound_output(vec![socket.clone()]).await,
+            "missing endpoint"
+        );
+        std::fs::write(&socket, b"regular file").unwrap();
+        assert!(
+            !local_sound_output(vec![socket.clone()]).await,
+            "a file is not an audio socket"
+        );
+        let live = dir.path().join("live");
+        let listener = tokio::net::UnixListener::bind(&live).unwrap();
+        assert!(
+            local_sound_output(vec![socket, live.clone()]).await,
+            "a listener accepts the probe"
+        );
+        drop(listener);
+        assert!(
+            !local_sound_output(vec![live]).await,
+            "a stale socket does not accept connections"
+        );
+    }
 
     #[test]
     fn now_reads_soloists_playback_state() {

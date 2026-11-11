@@ -357,10 +357,18 @@
     // After the one before it on the same line, so the node applies them, and their answers land, in the
     // order they were made (a late answer to the first Next can't undo the second)
     const send = () => apiSend(method, path, snap, opts);
-    const entry = { ask: opts.repeat ? null : ask, p: was ? was.p.catch(() => {}).then(send) : send() };
+    // (one cut while it waits behind another on its line stops waiting)
+    const after = (p) => (opts.signal ? Promise.race([p, new Promise((_, rej) => { const fail = () => rej(opts.signal.why || new Error('aborted')); if (opts.signal.aborted) fail(); else opts.signal.addEventListener('abort', fail, { once: true }); })]) : p);
+    // (`settled`: this one and every earlier one on the line are done, even one cut while it waited:
+    // the next on the line still goes after the earlier ones)
+    const prev = was ? was.settled : Promise.resolve();
+    const entry = { ask: opts.repeat ? null : ask, p: was ? after(prev).then(send) : send() };
+    entry.settled = prev.then(() => entry.p.catch(() => {}));
     inFlight.set(line, entry);
-    const drop = () => { if (inFlight.get(line) === entry) inFlight.delete(line); };
-    entry.p.then(drop, drop);
+    // (kept on its line until it and every earlier one there have settled, even when it was cut while
+    // waiting: a later one still goes after the earlier ones; a failed one isn't handed to a new ask)
+    const done = () => { entry.ask = null; }; entry.p.then(done, done);
+    entry.settled.then(() => { if (inFlight.get(line) === entry) inFlight.delete(line); });
     return entry.p;
   };
   const apiSend = async (method, path, body, opts = {}) => {
@@ -377,7 +385,7 @@
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: opts.signal,
       });
-    } catch (e) { if (opts.signal && opts.signal.aborted) throw e; linkHint(); throw new Error("Can't reach the node."); }
+    } catch (e) { if (opts.signal && opts.signal.aborted) throw opts.signal.why || e; linkHint(); throw new Error("Can't reach the node."); }
     // opts.onHeaders: a caller that reads a header of the answer (x-partial on a listing that may miss some)
     if (opts.onHeaders) opts.onHeaders(r.headers);
     // and again once the change has landed: a read that started meanwhile isn't kept either
@@ -1739,33 +1747,37 @@
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
   const streamUrlFor = (uri) => { const local = /^track:(\d+)$/.exec(uri || ''); if (local) return `/v1/library/tracks/${local[1]}/file${tokenQ()}`; if (ytOf(uri)) return null; const m = /^(tidal|qobuz|soundcloud|bandcamp|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
-  const playSourceItems = async (qitems, replace = true, at = 'end') => {
+  // `o.shuffle` (a page's Play or Shuffle): the queue is loaded with that mode (see playTracks)
+  const playSourceItems = async (qitems, replace = true, at = 'end', o = {}) => {
     if (!qitems.length) return;
     // YouTube's player lives in this page: it can't send audio to the node's zones (unless yt-dlp is on)
     const ytZones = (state.sources || []).some((x) => x.id === 'youtube' && x.enabled !== false && /zones/.test(x.status));
-    if (!isBrowser() && !ytZones && qitems.some((q) => ytOf(q.uri))) {
+    if (!onBrowser(o) && !ytZones && qitems.some((q) => ytOf(q.uri))) {
       const rest = qitems.filter((q) => !ytOf(q.uri));
       if (!rest.length) {
-        showMenu(document.activeElement && document.activeElement !== document.body ? document.activeElement : $('#zonebtn'), [{ title: `YouTube plays only ${hereOnly()}` }, { label: `Play ${hereOnly()}`, icon: 'zone', run: () => { state.zone = BROWSER; try { localStorage.setItem('pm.zone', BROWSER); } catch { /* */ } renderZoneName(); playSourceItems(qitems, replace, at); } }]);
+        showMenu(document.activeElement && document.activeElement !== document.body ? document.activeElement : $('#zonebtn'), [{ title: `YouTube plays only ${hereOnly()}` }, { label: `Play ${hereOnly()}`, icon: 'zone', run: () => { state.zone = BROWSER; try { localStorage.setItem('pm.zone', BROWSER); } catch { /* */ } renderZoneName(); playSourceItems(qitems, replace, at, { ...o, turn: undefined, mode: undefined }); } }]);
         return;
       }
       toast(`${countOf(qitems.length - rest.length, 'YouTube items')} left out: YouTube plays only ${hereOnly()}`);
       qitems = rest;
     }
-    if (isBrowser()) {
+    if (onBrowser(o)) {
       const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
       if (at === 'now' && state.browserQueue.length) { state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); browserPlay(state.browserIndex + 1); return; }
-      if (replace || at === 'now') { state.browserQueue = bitems; browserPlay(0); } else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else state.browserQueue.push(...bitems);
+      if (replace || at === 'now') browserLoad(bitems, o.shuffle); else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else browserAppend(bitems);
       if (!replace) toast(bitems.length === 1 ? 'Added to queue' : `${countOf(bitems.length, 'tracks')} added`);
       return;
     }
-    if (at === 'now') { try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at: 'next', replace: false, play: false }); await transport({ action: 'next' }); refreshQueue(); } catch (e) { toast(e.message, 'error'); } return; }
-    if (replace) startWait('play', state.zone, qitems[0].title || '', true);
-    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (replace) startSent(); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
+    // (every change of the zone's queue takes its turn: an add can't be lost to a replace still waiting)
+    const zid = zoneOf(o);
+    if (at === 'now') { try { await zoneOp(zid, async (t) => { await api('POST', `/zones/${encodeURIComponent(zid)}/queue`, { items: qitems, at: 'next', replace: false, play: false }, { signal: t.signal }); const ev0 = evOf(zid); const st = await api('POST', `/zones/${encodeURIComponent(zid)}/transport`, { action: 'next' }, { repeat: true, signal: t.signal }); applyAnswer(st, ev0); }, o.turn); renderBar(); refreshQueue(); } catch (e) { toast(e.message, 'error'); } return; }
+    if (replace && o.shuffle !== undefined) return loadZoneQueue(qitems, o.shuffle, o);
+    const wait = replace ? startWait('play', zid, qitems[0].title || '', true, true) : null;
+    try { await zoneOp(zid, (t) => { if (replace) startSending(wait, zid); return api('POST', `/zones/${encodeURIComponent(zid)}/queue`, { items: qitems, at, replace, play: replace }, { signal: t.signal }); }, o.turn); if (replace) startSent(wait); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message, false, wait); else toast(e.message, 'error'); }
   };
   // Play on a Spotify Connect device: the active one, else a menu of the devices online. Spotify streams it; the node only drives it.
   // Spotify can't share one app between nodes, so the owner makes their own: these steps, then only its client ID (PKCE through the return page, no secret)
-  const spotSetup = (sp, hidden) => `<form class="set-group" id="spotapp" ${hidden ? 'hidden' : ''}><p class="muted small">Spotify lets each person use their own free developer app. It takes about two minutes, once:</p><ol class="muted small steps"><li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify developer dashboard</a>, sign in with your Spotify account and choose <b>Create app</b> (any name and description).</li><li>Under <b>Redirect URIs</b> add this address, tick <b>Web API</b>, and save:<div class="toolbar"><code class="path">${esc(sp.redirect_uri)}</code><button type="button" class="btn ghost sm" id="spotcopy">Copy</button></div></li><li>Under <b>User Management</b>, add every Spotify account that will sign in here (up to 25).</li><li>Copy the <b>Client ID</b> from the app's Settings and paste it below. No secret is needed.</li></ol><div class="toolbar"><label class="sr-only" for="spotid">Spotify client ID</label><input id="spotid" name="id" class="input" autocomplete="off" spellcheck="false" placeholder="Client ID (32 letters and digits)" pattern="[0-9a-fA-F]{32}" required value="${esc(sp.client_id || '')}"><button class="btn primary">Save</button>${hidden ? '<button type="button" class="btn ghost" id="spotappcancel">Cancel</button>' : ''}</div></form>`;
+  const spotSetup = (sp, hidden) => `<form class="stack" id="spotapp" ${hidden ? 'hidden' : ''}><ol class="muted small steps"><li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify developer dashboard</a>, sign in with your Spotify account and choose <b>Create app</b> (any name and description).</li><li>Under <b>Redirect URIs</b> add this address, tick <b>Web API</b>, and save:<div class="toolbar"><code class="path">${esc(sp.redirect_uri)}</code><button type="button" class="btn ghost sm" id="spotcopy">Copy</button></div></li><li>Under <b>User Management</b>, add every Spotify account that will sign in here (up to 25).</li><li>Copy the <b>Client ID</b> from the app's Settings and paste it below. No secret is needed.</li></ol><div class="toolbar"><label class="sr-only" for="spotid">Spotify client ID</label><input id="spotid" name="id" class="input" autocomplete="off" spellcheck="false" placeholder="Client ID (32 letters and digits)" pattern="[0-9a-fA-F]{32}" required value="${esc(sp.client_id || '')}"><button class="btn primary">Save</button>${hidden ? '<button type="button" class="btn ghost" id="spotappcancel">Cancel</button>' : ''}</div></form>`;
   // The fallback for a sign-in whose last step could not reach this node (another network, an app allowing only
   // loopback redirects): paste the address the sign-in page landed on; the node finishes from its parameters.
   const pasteBack = (svc) => `<details class="small"><summary>Landed on a page that didn't load?</summary><form class="toolbar" id="${svc}paste"><input class="input" name="url" placeholder="Paste that page's address (…?code=…)" autocomplete="off" spellcheck="false" required aria-label="The address you landed on"><button class="btn sm" type="submit">Finish sign-in</button></form></details>`;
@@ -1780,11 +1792,14 @@
     const ca = $('#spotappcancel'); if (ca) ca.onclick = () => { f.hidden = true; };
     const fg = $('#spotappforget'); if (fg) fg.onclick = () => save('', 'Spotify app forgotten');
   };
-  // One Sign in per source, the ways side by side (STEWARD-CREDENTIALS-REUSE.md): the radio list of
-  // ways, one status line with Change way and Sign out, and the import (found sign-ins, a picked
-  // file) and paste areas every source shares. A source's config gives `actions(pick, si, h)` for
-  // its own ways' areas (null = the shared import/paste area), `wire(pick, si, h, act)` for their
-  // handlers, `extra(si, pick)` for rows under the status line, `after(si, h, el)` once rendered.
+  // One Sign in per source (owner, 2026-11-08: “make sure ui is simpler; remove all options that don't
+  // work at the moment”): a first line saying what it gives and needs; only the ways that work here;
+  // one of them is the action, the others a line each under one closed “Other ways to sign in”;
+  // signed in, one row. A source's config gives `lead(si)` (that first line), `keep(w, si)` (drops a
+  // way that is not a sign-in or not a working path), `actions(pick, si, h)` for its own ways' areas
+  // (null = the shared import/paste area), `wire(pick, si, h, act)` for their handlers, `inUse(si)`
+  // and `signOut(h)` where the sign-in shown is not the source's in-use one, `extra(si, pick)` for
+  // rows under it, `after(si, h, el)` once rendered.
   const sgHelp = (h) => (h ? `<p class="set-help">${h}</p>` : '');
   // A long note's first sentence (or the clause before a colon), and the rest: settings show the
   // rest only where it is needed (UX sweep A25)
@@ -1829,21 +1844,34 @@
     if (!el.isConnected) return;
     const mem = state.signin = state.signin || {}; const m = mem[cfg.source] = mem[cfg.source] || {};
     const wayOf = (id) => si.ways.find((w) => w.id === id) || {};
-    const usable = si.ways.filter((w) => w.available);
-    // The way picked here, else the remembered one, else the recommended one
-    let pick = [m.way, si.chosen].find((id) => usable.some((w) => w.id === id)) || (usable.find((w) => w.recommended) || usable[0] || si.ways[0] || {}).id;
-    const choosing = !si.in_use || !!m.change;
+    const inUse = cfg.inUse ? cfg.inUse(si) : si.in_use;
+    // Only the ways that work here (owner, 2026-11-08): no greyed rows; the everyday ones first
+    const usable = si.ways.filter((w) => w.available && (!cfg.keep || cfg.keep(w, si))).sort((a, b) => (a.advanced ? 1 : 0) - (b.advanced ? 1 : 0));
+    const changing = !!inUse && !!m.change && usable.some((w) => w.id !== inUse.way);
+    const choosing = !inUse || changing;
+    const offered = changing ? usable.filter((w) => w.id !== inUse.way) : usable;
+    const main = offered.find((w) => w.recommended) || offered[0];
+    // The way opened here, else one with a sign-in under way (a code waiting), else the recommended one
+    const pick = [m.way, cfg.prefer && cfg.prefer(si)].find((id) => id && offered.some((w) => w.id === id)) || (main || {}).id;
+    const others = offered.filter((w) => w.id !== pick);
     const rows = [];
+    const lead = cfg.lead ? cfg.lead(si) : '';
+    if (lead) rows.push(`<p class="sg-lead" data-sg="lead">${lead}</p>`);
     if (cfg.before) rows.push(...[].concat(cfg.before(si) || []));
-    if (si.in_use) rows.push(sgRow('Signed in', `${esc(si.in_use.label)}${si.in_use.gives ? ' · ' + esc(si.in_use.gives) : ''}${si.in_use.user && !/^\d+$/.test(si.in_use.user) ? ' · ' + esc(si.in_use.user) : ''}.`, `<button class="btn ghost sm" data-sg="change">${choosing ? 'Keep this way' : 'Change way'}</button><button class="btn ghost sm" data-sg="out">Sign out</button>`));
-    if (choosing) {
-      const wayHtml = (w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${(() => { const [a, b] = splitNote(w.available ? w.note : w.reason || w.note); return `${esc(a)}${b ? `<span class="way-more"> ${esc(b)}</span>` : ''}`; })()}</span></span></label>`;
-      // The everyday ways first; the rest under Advanced (open when one of them is picked)
-      const adv = si.ways.filter((w) => w.advanced);
-      const ways = si.ways.filter((w) => !w.advanced).map(wayHtml).join('') + (adv.length ? `<details class="ways-adv" data-sg="advanced" ${adv.some((w) => w.id === pick) ? 'open' : ''}><summary>Advanced</summary><div class="ways">${adv.map(wayHtml).join('')}</div></details>` : '');
-      rows.push(sgBlock(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to ${esc(cfg.name)}">${ways}</div><div class="way-action" data-sg="action"></div>`));
+    // Signed in: one row, who and what it gives; Change only when another way works here
+    if (inUse) {
+      const who = inUse.user && !/^\d+$/.test(inUse.user) ? inUse.user : '';
+      const gives = inUse.gives ? String(inUse.gives).charAt(0).toUpperCase() + String(inUse.gives).slice(1) : '';
+      rows.push(`<div class="set-row sg-in" data-sg="signed-in"><div class="set-label"><div class="set-name">${who ? `Signed in as ${esc(who)}` : 'Signed in'}</div>${sgHelp([esc(inUse.label), esc(gives)].filter(Boolean).join(' · '))}</div><div class="set-ctl">${usable.some((w) => w.id !== inUse.way) ? `<button class="btn ghost sm" data-sg="change" aria-expanded="${changing}">${changing ? 'Cancel' : 'Change'}</button>` : ''}<button class="btn ghost sm" data-sg="out">Sign out</button></div></div>`);
     }
-    if (choosing) rows.push('<div class="notice warn" role="alert" data-sg="error" hidden><span data-sg="error-text"></span><div class="actions"><button class="btn sm" data-sg="another">Try another way</button></div></div>');
+    if (choosing && !offered.length && !inUse) rows.push(`<p class="muted small" data-sg="none">${esc(cfg.none ? cfg.none(si) : ((si.ways.find((w) => w.reason) || {}).reason || `${cfg.name} can’t be signed in to on this node.`))}</p>`);
+    if (choosing && offered.length) {
+      // One way: just its button or form. Several: the picked one, the rest a line each under one closed list
+      const pw = wayOf(pick);
+      rows.push(`<div class="set-row set-block sg-main">${offered.length > 1 ? `<div class="set-label"><div class="set-name">${esc(pw.label)}</div>${sgHelp(esc(splitNote(pw.note)[0]))}</div>` : ''}<div class="set-body"><div class="way-action" data-sg="action"></div></div></div>`);
+      if (others.length) rows.push(`<details class="sg-other" data-sg="other"><summary>Other ways to sign in</summary><div class="list">${others.map((w) => `<div class="list-row"><div class="grow"><div class="name">${esc(w.label)}</div><div class="sub">${esc(splitNote(w.note)[0])}</div></div><button class="btn ghost sm" data-sg-way="${esc(w.id)}" aria-label="Use ${esc(w.label)}">Use this</button></div>`).join('')}</div></details>`);
+      rows.push(`<div class="notice warn" role="alert" data-sg="error" hidden><span data-sg="error-text"></span>${others.length ? '<div class="actions"><button class="btn sm" data-sg="another">Try another way</button></div>' : ''}</div>`);
+    }
     if (cfg.extra) rows.push(...[].concat(cfg.extra(si, pick) || []));
     el.innerHTML = sgGroup(cfg.title === undefined ? 'Sign in' : cfg.title, rows.join(''));
     const h = {
@@ -1851,8 +1879,8 @@
       pick: () => pick,
       choose: async (way) => { m.way = way; try { await api('PUT', `/sources/${cfg.source}/signin`, { way }); return true; } catch (e) { toast(e.message, 'error'); return false; } },
       refill: (now) => signinChooser(cfg, now),
-      done: () => { m.change = false; state.sources = null; render(); },
-      useImport: async (body, what) => { try { const r = await api('POST', `/sources/${cfg.source}/signin/import`, body); toast(`Saved ${r.in_use ? r.in_use.label : what}`); m.change = false; state.sources = null; render(); } catch (e) { const notice = el.querySelector('[data-sg="error"]'); if (notice) { notice.querySelector('[data-sg="error-text"]').textContent = e.message; notice.hidden = false; } else toast(e.message, 'error'); } },
+      done: () => { m.change = false; m.way = null; state.sources = null; render(); },
+      useImport: async (body, what) => { try { const r = await api('POST', `/sources/${cfg.source}/signin/import`, body); toast(`Saved ${r.in_use ? r.in_use.label : what}`); m.change = false; m.way = null; state.sources = null; render(); } catch (e) { const notice = el.querySelector('[data-sg="error"]'); if (notice) { notice.querySelector('[data-sg="error-text"]').textContent = e.message; notice.hidden = false; } else toast(e.message, 'error'); } },
       useButton: (w, who) => `<div class="toolbar"><button class="btn primary" data-sg="use">Use ${esc(w.label)}</button><span class="muted small">Already signed in with it${who || ''}.</span></div>`,
       // What other apps on this machine hold (read-only), the file itself, where the node looked
       importArea: (o = {}) => {
@@ -1867,13 +1895,9 @@
       pasteArea: (o = {}) => `<form class="stack" data-sg="paste"><textarea class="input" name="text" rows="${o.rows || 3}" aria-label="${esc(o.label || 'What to paste')}" placeholder="${esc(o.placeholder || '')}" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn primary sm" type="submit">Use it</button><span class="muted small">${esc(o.note || 'Kept like the node’s own sign-in; never shown again.')}</span></div></form>`,
     };
     const act = el.querySelector('[data-sg="action"]');
-    const renderAction = () => {
-      if (!act) return;
-      el.querySelectorAll('.way').forEach((l) => l.classList.toggle('on', l.querySelector('input').value === pick));
+    if (act) {
       const w = wayOf(pick);
-      let html = null;
-      if (si.in_use && si.in_use.way === pick) html = '<p class="muted small">This is the way in use.</p>';
-      else if (cfg.actions) html = cfg.actions(pick, si, h);
+      let html = cfg.actions ? cfg.actions(pick, si, h) : null;
       if (html == null) html = w.action === 'import' ? h.importArea() : w.action === 'paste' ? h.pasteArea() : '';
       act.innerHTML = html;
       const useIt = act.querySelector('[data-sg="use"]'); if (useIt) useIt.onclick = async () => { if (await h.choose(pick)) { toast(`Using ${w.label || 'this way'}`); h.done(); } };
@@ -1881,17 +1905,18 @@
       const ff = act.querySelector('[data-sg="file"]'); if (ff) ff.onsubmit = async (e) => { e.preventDefault(); const file = ff.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } h.useImport({ text: await file.text() }, 'the file'); };
       const pf = act.querySelector('[data-sg="paste"]'); if (pf) pf.onsubmit = (e) => { e.preventDefault(); h.useImport({ text: pf.querySelector('textarea').value }, 'the pasted sign-in'); };
       if (cfg.wire) cfg.wire(pick, si, h, act);
-    };
-    el.querySelectorAll(`input[name="way-${cfg.source}"]`).forEach((r) => r.onchange = () => { pick = r.value; m.way = r.value; renderAction(); });
-    renderAction();
-    const another = el.querySelector('[data-sg="another"]'); if (another) another.onclick = () => { el.querySelector('input[type=radio]:not(:disabled)')?.focus(); };
-    const ch = el.querySelector('[data-sg="change"]'); if (ch) ch.onclick = () => { m.change = !m.change; signinChooser(cfg, si); };
-    const out = el.querySelector('[data-sg="out"]'); if (out) out.onclick = async () => { try { await api('DELETE', `/sources/${cfg.source}/signin`); toast(`Signed out of ${cfg.name}`); m.change = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
+    }
+    // Another way swaps in as the action; the focus goes to it
+    el.querySelectorAll('[data-sg-way]').forEach((b) => b.onclick = () => { m.way = b.dataset.sgWay; signinChooser(cfg, si).then(() => { const a = el.querySelector('[data-sg="action"]'); const f = a && a.querySelector('button, input, textarea, select, a[href]'); if (f) f.focus(); }); });
+    const another = el.querySelector('[data-sg="another"]'); if (another) another.onclick = () => { const d = el.querySelector('[data-sg="other"]'); if (d) { d.open = true; const b = d.querySelector('[data-sg-way]'); if (b) b.focus(); } };
+    const ch = el.querySelector('[data-sg="change"]'); if (ch) ch.onclick = () => { m.change = !m.change; m.way = null; signinChooser(cfg, si).then(() => { const a = m.change && el.querySelector('[data-sg="action"]'); const f = (a && a.querySelector('button, input, textarea, select, a[href]')) || el.querySelector('[data-sg="change"]'); if (f) f.focus(); }); };
+    const out = el.querySelector('[data-sg="out"]'); if (out) out.onclick = async () => { try { if (cfg.signOut) { if ((await cfg.signOut(h)) === false) return; } else await api('DELETE', `/sources/${cfg.source}/signin`); toast(`Signed out of ${cfg.name}`); m.change = false; m.way = null; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
     if (cfg.after) cfg.after(si, h, el);
   };
-  // TIDAL (owner, 2026-11-04): Sign in with TIDAL (the browser sign-in, Recommended: full tracks
-  // lossless and hi-res), the code sign-in as the fallback, and under Advanced the official app,
-  // your own device client and a pasted token; quality and health under the full-tracks sign-in.
+  // TIDAL (owner, 2026-11-04 and 11-08): Sign in with TIDAL (the browser sign-in: full tracks,
+  // lossless and hi-res) where this build can, else the code sign-in; the official app and a
+  // pasted token under Other ways. Your own device client only once one is set here: TIDAL hands
+  // none out. Quality and health under the full-tracks sign-in.
   const tidalBrowserSignIn = async (btn) => { if (btn) btn.disabled = true; try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; } };
   // Sign in with TIDAL: TIDAL's sign-in in a new tab (opened at the click, so no popup blocker
   // stops it), then the page here asks for the address TIDAL lands on. In the desktop and Android
@@ -1922,6 +1947,9 @@
   };
   const tidalSigninCfg = (el) => ({
     source: 'tidal', name: 'TIDAL', el,
+    lead: () => `Full tracks, lossless and hi-res, and your TIDAL collection and playlists. Needs a paid TIDAL plan. Unofficial: can stop working. ${guideLink('tidal-full-tracks.md')}`,
+    keep: (w, si) => w.id !== 'own-device' || (!isListener() && (si.details.unofficial || {}).client_from === 'settings'),
+    prefer: (si) => { const u = si.details.unofficial || {}; return u.pending ? si.chosen : u.browser_pending ? 'browser' : null; },
     actions: (pick, si, h) => {
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
       const own = !u.from && u.signed_in;
@@ -1937,7 +1965,7 @@
         if (isListener()) return ownerSets('A device client of the node’s own');
         const now = u.client_from === 'settings' ? '<p class="muted small">Your device client is set here and used for the code sign-in. <button class="btn ghost sm" id="tfclientforget">Forget it</button></p>'
           : u.client_from === 'config' ? '<p class="muted small">A device client is set in the node config; one entered here is used instead.</p>' : '';
-        return now + stepCard(1, 'Device client ID and secret', u.client_from === 'settings', `A TIDAL device client you are allowed to use, for the code sign-in; it replaces the built-in one for everyone here. The node keeps it like a sign-in and never shows the secret again. An app from developer.tidal.com is not a device client: that one goes in Settings › This node › Service apps. ${guideLink('tidal-full-tracks.md')}`,
+        return now + stepCard(1, 'Device client ID and secret', u.client_from === 'settings', `For the code sign-in, for everyone here; the secret is never shown again. ${guideLink('tidal-full-tracks.md')}`,
           `<form class="stack" id="tfclient" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="Device client ID" autocomplete="off" spellcheck="false" aria-label="Device client ID" required>${secretInput('secret', 'Device client secret', 'Device client secret')}</div><div class="toolbar"><button class="btn" type="button" id="tfcheck">Check</button><button class="btn primary" type="submit">Save and sign in with a code</button><span class="check-out small" id="tfcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>client_id=… client_secret=…</code> block or JSON into either field: it is split.</p></form>`);
       }
       if (pick === 'import') return h.importArea({ fileLabel: 'Token file', accept: '.json,.toml,.txt,application/json' });
@@ -1961,23 +1989,25 @@
       }
       const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { try { await api('PUT', '/sources/tidal/unofficial', { client_id: '' }); toast('Device client forgotten'); } catch (e) { toast(e.message, 'error'); } h.refill(); };
     },
-    // The full-tracks status at the top: Off / Needs a device client / Needs sign-in / Working
+    // The full-tracks status, only when it says more than the signed-in row: Off, Problem, AAC
+    // only, Waiting, or no way to full tracks in this build
     before: (si) => {
       const u = si.details.unofficial || {}; const broke = u.health && !u.health.ok; const lossy = !!(u.health && u.health.ok && u.health.lossy);
       // A session first (also one imported or pasted, which needs no device client here), then
       // a code waiting, then what is missing
       const st = u.signed_in
         ? (broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
-          : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here (pick the way it came from below to use it).' }
+          : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here.' }
           // AAC only is a code sign-in's (TIDAL sends its device client AAC); a browser
           // session's AAC track is that track (the Health row below says so)
           : lossy && u.session_client !== 'pkce' ? { cls: 'warn', label: 'AAC only', text: 'Full tracks, but TIDAL sends them as AAC (lossy).' }
           : { cls: 'ok', label: 'Working', text: `Full tracks ${u.quality === 'high' ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz'}.` })
         : u.pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the code to be entered at link.tidal.com.' }
         : u.browser_pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the address of the TIDAL page you landed on (step 2 below).' }
-        : !u.client_from && !u.browser_available ? { cls: '', label: 'Needs client', text: 'Needs a TIDAL device client (Advanced › Your own device client below).' }
-        : { cls: '', label: 'Needs sign-in', text: `Needs your TIDAL sign-in (${u.browser_available ? 'Sign in with TIDAL' : 'the code sign-in'} below).` };
-      return [sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} Unofficial: can stop working, uses your TIDAL account. ${guideLink('tidal-full-tracks.md')}`, u.signed_in ? '<button class="btn ghost sm" id="tfout">Sign out</button>' : '')];
+        : !u.client_from && !u.browser_available && !si.ways.some((w) => (w.id === 'browser' || w.id === 'device') && w.available) ? { cls: '', label: 'Not in this build', text: 'This build can’t sign in for full tracks itself; a token from another app (tidal-dl-ng and others) still works.' }
+        : null;
+      if (!st || st.cls === 'ok') return [];
+      return [sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} ${guideLink('tidal-full-tracks.md')}`, (u.signed_in && !u.enabled && !broke ? '<button class="btn sm" id="tfon">Turn on</button>' : '') + (u.signed_in ? '<button class="btn ghost sm" id="tfout">Sign out</button>' : ''))];
     },
     extra: (si) => {
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const rows = [];
@@ -1993,8 +2023,8 @@
           if (codeSession) rows.push(sgRow('Lossless', 'Sign in with TIDAL again for lossless.', again));
           if (u.health && u.health.ok) rows.push(sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
         }
-        if (!st.signed_in) rows.push(sgRow('Your collection', `Collection and playlist imports go through ${esc((si.ways.find((w) => w.id === 'app') || {}).label || 'the official app')}; sign in with it too for those.`, st.configured ? '<button class="btn sm" id="tsiapp2">Sign in with it too</button>' : ''));
-      } else if (si.in_use && st.playback_limit) rows.push(sgRow('Playback', `TIDAL plays 30-second previews to apps on its ${esc(st.access_tier || 'THIRD_PARTY')} developer tier; search, albums and the imports are unaffected. For full tracks, change way to Sign in with TIDAL.`, '<span class="pill warn">previews</span>'));
+        if (!st.signed_in && st.configured && si.ways.some((w) => w.id === 'app' && w.available)) rows.push(sgRow('Your collection', `Importing your collection and playlists needs ${esc(((si.ways.find((w) => w.id === 'app') || {}).label || 'the official app').replace(/^Your /, 'your '))} too.`, '<button class="btn sm" id="tsiapp2">Sign in with it too</button>'));
+      } else if (si.in_use && st.playback_limit) rows.push(sgRow('Playback', `30-second previews with this sign-in.${si.ways.some((w) => (w.id === 'browser' || w.id === 'device') && w.available) ? ' For full tracks: Change.' : ''}`, '<span class="pill warn">previews</span>'));
       // The page has no general Status row (the full-tracks status leads): a problem with the
       // sign-in in use still shows, as a phone has no source list beside it
       const src = (state.sources || []).find((x) => x.id === 'tidal'); const ss = src && srcState({ ...src, enabled: true });
@@ -2004,7 +2034,13 @@
     after: (si, h) => {
       const u = si.details.unofficial || {};
       const putU = async (body, ok) => { try { await api('PUT', '/sources/tidal/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } h.refill(); };
-      const tr = $('#tfretry'); if (tr) tr.onclick = () => putU({ enabled: true }, 'Trying full tracks again');
+      // Select the retained full-tracks session as well as enabling it. If its original sign-in
+      // method is no longer available, paste selects the same session without replacing it.
+      const sessionWay = u.from === 'pasted' ? 'paste' : u.from ? 'import' : u.session_client === 'pkce' ? 'browser' : 'device';
+      const resumeWay = [sessionWay, 'paste'].find((id) => si.ways.some((w) => w.id === id && w.available));
+      const resume = async (ok) => { if (resumeWay && await h.choose(resumeWay)) { toast(ok); h.done(); } };
+      const tr = $('#tfretry'); if (tr) tr.onclick = () => u.signed_in ? resume('Trying full tracks again') : putU({ enabled: true }, 'Trying full tracks again');
+      const ton = $('#tfon'); if (ton) ton.onclick = () => resume('TIDAL full tracks are on');
       const tq = $('#tfq'); if (tq) tq.onchange = () => putU({ quality: tq.value }, 'Quality saved');
       const a2 = $('#tsiapp2'); if (a2) a2.onclick = () => tidalBrowserSignIn(a2);
       // From a code sign-in to the browser one: the chooser opens on it and TIDAL's tab opens
@@ -2036,21 +2072,21 @@
       : broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
       : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here.' }
       : { cls: 'ok', label: 'Working', text: `Full tracks ${quality}.` };
-    const status = sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} Unofficial: can stop working; needs a paid Qobuz plan. ${guideLink('qobuz.md')}`,
-      (u.signed_in ? `<input type="checkbox" class="switch" role="switch" id="qbon" ${u.enabled ? 'checked' : ''} aria-label="Qobuz full tracks">` : '') + (u.signed_in ? '<button class="btn ghost sm" id="qbout">Sign out</button>' : ''))
-      + (broke ? `<div class="notice warn" role="status">${esc(u.health.detail)}. Qobuz links still open on qobuz.com.<div class="actions"><button class="btn sm" id="qbretry">Try again</button></div></div>` : '');
+    const lead = `<p class="sg-lead" data-sg="lead">Full tracks in CD or hi-res quality. Needs a paid Qobuz plan. Unofficial: can stop working. ${guideLink('qobuz.md')}</p>`;
     const account = u.signed_in
-      ? `<p class="small">Signed in${u.user ? ' as ' + esc(u.user) : ''}${u.plan ? ' · ' + esc(u.plan) : ''} · ${u.hires ? 'hi-res' : 'CD quality'}. Only Qobuz’s session is kept. <button class="btn ghost sm" type="button" id="qbout2">Sign out</button></p>`
-      : `<p class="muted small">Your email and password go to Qobuz once; the node keeps only the session.</p><form class="stack" id="qbin"><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required>${secretInput('password', 'Qobuz password', 'Password', 'current-password')}<button class="btn primary" type="submit">Sign in</button></div><div class="notice warn" role="alert" id="qbinerr" hidden></div></form>`;
+      ? `<div class="set-row sg-in" data-sg="signed-in"><div class="set-label"><div class="set-name">Signed in${u.user ? ' as ' + esc(u.user) : ''} <span class="pill ${st.cls}">${esc(st.label)}</span></div>${sgHelp(esc([u.plan, st.text].filter(Boolean).join(' · ')))}</div><div class="set-ctl"><input type="checkbox" class="switch" role="switch" id="qbon" ${u.enabled ? 'checked' : ''} aria-label="Qobuz full tracks"><button class="btn ghost sm" id="qbout">Sign out</button></div></div>`
+        + (broke ? `<div class="notice warn" role="status">${esc(u.health.detail)}. Qobuz links still open on qobuz.com.<div class="actions"><button class="btn sm" id="qbretry">Try again</button></div></div>` : '')
+      : sgRow(`Full tracks <span class="pill">Needs sign-in</span>`, 'Your email and password go to Qobuz once; the node keeps only the session.', '')
+        + `<form class="stack" id="qbin"><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required>${secretInput('password', 'Qobuz password', 'Password', 'current-password')}<button class="btn primary" type="submit">Sign in</button></div><div class="notice warn" role="alert" id="qbinerr" hidden></div></form>`;
     const playback = u.signed_in ? sgGroup('Playback', sgRow('Quality', 'Max plays up to 24-bit/192 kHz where Qobuz has it and your plan allows.', `<select class="input" id="qbq" aria-label="Qobuz quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="cd" ${u.quality === 'cd' ? 'selected' : ''}>CD (16-bit/44.1 kHz)</option><option value="mp3" ${u.quality === 'mp3' ? 'selected' : ''}>MP3 (320 kbps)</option></select>`)
       + (u.health && u.health.ok ? sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>') : '')) : '';
-    el.innerHTML = sgGroup('Qobuz', status) + sgGroup('Sign in with your Qobuz account', account) + playback;
+    el.innerHTML = sgGroup('Sign in with your Qobuz account', lead + account) + playback;
     const refill = () => qobuzSetup(el);
     const put = async (body, ok) => { try { await api('PUT', '/sources/qobuz/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } state.sources = null; refill(); };
     const on = $('#qbon'); if (on) on.onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Qobuz full tracks are on' : 'Qobuz full tracks are off');
     const retry = $('#qbretry'); if (retry) retry.onclick = () => put({ enabled: true }, 'Trying Qobuz again');
     const signOut = async () => { try { await api('DELETE', '/sources/qobuz/unofficial/login'); toast('Signed out of Qobuz'); } catch (e) { toast(e.message, 'error'); } state.sources = null; render(); };
-    for (const id of ['#qbout', '#qbout2']) { const b = $(id); if (b) b.onclick = signOut; }
+    const so = $('#qbout'); if (so) so.onclick = signOut;
     const qi = $('#qbin'); if (qi) {
       wireSecretToggles(qi);
       qi.onsubmit = async (e) => {
@@ -2060,20 +2096,32 @@
     }
     const qq = $('#qbq'); if (qq) qq.onchange = () => put({ quality: qq.value }, 'Quality saved');
   };
-  // Spotify: your own app (Connect control, library), librespot picked in a Spotify app, or
-  // librespot with a credentials.json you pick; Soloist and librespot's own settings keep their rows.
+  // Spotify (owner, 2026-11-08): one sign-in, your own free developer app then Connect, in two
+  // numbered steps. librespot and Soloist are ways to play, not to sign in: they sit under Other
+  // ways to play on the Spotify tab, and only when they can run on this machine.
+  const spotifyAppInUse = (si) => {
+    if (si.in_use && si.in_use.way === 'app') return si.in_use;
+    const st = si.details.status || {};
+    return st.signed_in ? { way: 'app', label: 'Your own Spotify app', user: st.display_name || '', gives: st.product === 'premium' ? 'Connect playback on your devices, your library' : '' } : null;
+  };
   const spotifySigninCfg = (el) => ({
     source: 'spotify', name: 'Spotify', el,
-    actions: (pick, si, h) => {
-      const st = si.details.status || {}; const ls = si.details.librespot || {}; const w = h.wayOf(pick);
-      if (pick === 'app') {
-        if (!st.configured) return isListener() ? ownerSets('The node’s Spotify app') : spotSetup(st, false);
-        if (st.signed_in) return h.useButton(w, st.display_name ? ' as ' + esc(st.display_name) : '');
-        return `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button><span class="muted small">Opens Spotify’s sign-in; the app must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and, while in development mode, your Spotify account under its user management.</span></div>${pasteBack('spotify')}${isListener() ? '' : spotAppRow(st) + (st.app_from === 'settings' ? spotSetup(st, true) : '')}`;
-      }
-      if (pick === 'librespot') return ls.enabled ? `<p class="muted small">librespot is on: pick it in a Spotify app on this network; its device name and output are below.</p>` : `<div class="toolbar"><button class="btn primary" data-sg="use">Switch librespot on</button><span class="muted small">Then pick it in a Spotify app on this network. Its device name and output are set below.</span></div>`;
-      if (pick === 'librespot-file') return h.importArea({ fileLabel: 'credentials.json', accept: '.json,application/json', what: 'credentials.json', intro: 'The credentials.json another librespot saved; it is kept readable by the node only.', withPaste: true, label: 'credentials.json contents', placeholder: '{"username": …, "auth_type": …, "auth_data": …}' });
-      return null;
+    // (a listener: the node's app is the owner's to set up, so no developer app to make)
+    lead: (si) => `Control Spotify on your devices and import your library. Needs Spotify Premium${isListener() || (si.ways.find((w) => w.id === 'app') || {}).available === false || (si.details.status || {}).configured ? '' : ' and a free Spotify developer app (2 minutes)'}.`,
+    keep: (w) => w.id === 'app',
+    inUse: spotifyAppInUse,
+    none: (si) => (si.ways.find((w) => w.id === 'app') || {}).reason || 'Spotify isn’t set up on this node yet.',
+    // Sign out of the app, also while librespot is the way picked last
+    signOut: async () => { await api('DELETE', '/sources/spotify/signin?way=app'); return true; },
+    actions: (pick, si) => {
+      const st = si.details.status || {};
+      if (pick !== 'app') return null;
+      // A listener signs in with the node's app: the owner sets it up (Settings › This node)
+      if (isListener()) return `<div class="setup-steps">${stepCard(1, 'The node’s Spotify app', !!st.configured, st.configured ? 'Set up by whoever runs this node.' : '', st.configured ? '' : ownerSets('The node’s Spotify app'))}`
+        + stepCard(2, 'Connect Spotify', false, st.configured ? 'Opens Spotify’s sign-in and comes back here.' : 'After step 1.', st.configured ? `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button></div>${pasteBack('spotify')}` : '') + '</div>';
+      const app = st.app_from === 'config' ? '<p class="muted small">Set up on this node.</p>' : spotAppRow(st);
+      return `<div class="setup-steps">${stepCard(1, 'Your free developer app', !!st.configured, st.configured ? 'Done.' : 'At Spotify, once:', st.configured ? app + (st.app_from === 'settings' ? spotSetup(st, true) : '') : spotSetup(st, false))}`
+        + stepCard(2, 'Connect Spotify', false, st.configured ? 'Opens Spotify’s sign-in and comes back here.' : 'After step 1.', st.configured ? `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button></div>${pasteBack('spotify')}` : '') + '</div>';
     },
     wire: (pick, si, h) => {
       const sp = $('#spotin'); if (sp) sp.onclick = async () => { if (await h.choose('app')) { try { const r = await api('GET', '/sources/spotify/login'); location.href = r.url; } catch (e) { toast(e.message, 'error'); } } };
@@ -2081,12 +2129,15 @@
       wirePasteBack('spotify', 'Spotify signed in');
     },
   });
-  // YouTube: your Data API key for search, or a cookies file you pick for yt-dlp.
-  const youtubeSigninCfg = (el) => ({
+  // YouTube: your Data API key for search; the cookies file for yt-dlp only once YouTube plays on
+  // your speakers (`speakers`), as it does nothing before.
+  const youtubeSigninCfg = (el, speakers) => ({
     source: 'youtube', name: 'YouTube', el,
+    lead: () => `Search YouTube here and play it ${hereIn()}. Search needs a free YouTube Data API key.`,
+    keep: (w) => w.id !== 'cookies' || !!speakers,
     actions: (pick, si, h) => {
       const key = (si.details.key || {}).set;
-      if (pick === 'key') return key ? `<div class="toolbar"><span class="pill ok account">Search on · your API key</span><button class="btn ghost sm" data-yt="forget">Forget the key</button></div><p class="muted small">Each search spends 100 of the key’s 10,000 free daily units, so YouTube is searched only when you pick it, never in the everyday search.</p>` : `<form class="stack" data-yt="key"><p class="muted small">In the <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">Google Cloud console</a>, enable the YouTube Data API v3, then create an API key under Credentials and paste it here. It is checked once, then never shown again.</p><div class="toolbar"><label class="sr-only" for="ytkeyin">YouTube Data API key</label><input id="ytkeyin" class="input" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="YouTube Data API key" required><button class="btn primary" type="submit">Save</button></div></form>`;
+      if (pick === 'key') return key ? `<div class="toolbar"><span class="pill ok account">Search on · your API key</span><button class="btn ghost sm" data-yt="forget">Forget the key</button></div><p class="muted small">Each search spends 100 of the key’s 10,000 free daily units, so YouTube is searched only when you pick it, never in the everyday search.</p>` : `<form class="stack" data-yt="key"><p class="muted small">In the <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">Google Cloud console</a>, turn on the YouTube Data API v3, create an API key under Credentials and paste it here.</p><div class="toolbar"><label class="sr-only" for="ytkeyin">YouTube Data API key</label><input id="ytkeyin" class="input" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="YouTube Data API key" required><button class="btn primary" type="submit">Save</button></div></form>`;
       if (pick === 'cookies') return h.importArea({ fileLabel: 'Cookies file', accept: '.txt,text/plain', what: 'the cookies file', intro: 'The Netscape cookies file you export for yt-dlp; the copy is kept readable by the node only, and yt-dlp on your speakers plays as your account.', withPaste: true, label: 'Cookies file contents', placeholder: '# Netscape HTTP Cookie File …', rows: 4 });
       return null;
     },
@@ -2095,16 +2146,20 @@
       const kg = act.querySelector('[data-yt="forget"]'); if (kg) kg.onclick = async () => { try { await api('PUT', '/sources/youtube/key', { key: '' }); toast('YouTube key forgotten'); h.done(); } catch (e) { toast(e.message, 'error'); } };
     },
   });
-  // Last.fm (Settings › Accounts): your own API account, rescrobbled's sign-in, or a pasted one;
-  // scrobbling on/off and the waiting plays stay as rows.
+  // Last.fm (Settings › Accounts): your own API account then Connect, in two steps; a sign-in
+  // found on this machine (rescrobbled) only when there is one, or the three values pasted.
+  // Scrobbling on/off and the waiting plays stay as rows.
   const lastfmSigninCfg = (el) => ({
     source: 'lastfm', name: 'Last.fm', el, title: '',
+    lead: () => 'Sends what you play to your Last.fm profile. Needs a free Last.fm API account (2 minutes).',
+    keep: (w, si) => w.id !== 'import' || (si.imports || []).length > 0,
     actions: (pick, si, h) => {
       const lf = si.details.lastfm || {};
       if (pick === 'own') {
-        if (!lf.configured) return `<form class="stack" data-lf="app"><p class="muted small">Last.fm gives each app its own key: <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">create one</a> (any name; no callback needed), then paste its API key and shared secret. Both stay on this node; the secret only signs requests here.</p><div class="toolbar"><input class="input" name="key" placeholder="API key" autocomplete="off" spellcheck="false" pattern="[0-9a-fA-F]{32}" aria-label="Last.fm API key" required><input class="input" name="secret" type="password" placeholder="Shared secret" autocomplete="off" aria-label="Last.fm shared secret" required><button class="btn" type="submit">Save</button></div></form>`;
-        const appRow = lf.app_from === 'config' ? '<p class="muted small">This node’s Last.fm app is set in its config.</p>' : `<p class="muted small">Your Last.fm app: <code class="path">${esc(lf.api_key || '')}</code> <button class="btn ghost sm" data-lf="appforget">Forget</button></p>`;
-        return `<div class="toolbar"><button class="btn primary" data-lf="in">Connect Last.fm</button><span class="muted small">Opens Last.fm’s permission page; it comes back here.</span></div>${appRow}`;
+        const appForm = `<form class="stack" data-lf="app"><p class="muted small"><a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">Create an API account</a> (any name, no callback), then paste its API key and shared secret.</p><div class="toolbar"><input class="input" name="key" placeholder="API key" autocomplete="off" spellcheck="false" pattern="[0-9a-fA-F]{32}" aria-label="Last.fm API key" required><input class="input" name="secret" type="password" placeholder="Shared secret" autocomplete="off" aria-label="Last.fm shared secret" required><button class="btn" type="submit">Save</button></div></form>`;
+        const appRow = lf.app_from === 'config' ? '<p class="muted small">Set up on this node.</p>' : `<p class="muted small">Your Last.fm app: <code class="path">${esc(lf.api_key || '')}</code> <button class="btn ghost sm" data-lf="appforget">Forget</button></p>`;
+        return `<div class="setup-steps">${stepCard(1, 'Your free Last.fm API account', !!lf.configured, lf.configured ? 'Done.' : 'At Last.fm, once:', lf.configured ? appRow : appForm)}`
+          + stepCard(2, 'Connect Last.fm', false, lf.configured ? 'Opens Last.fm’s permission page and comes back here.' : 'After step 1.', lf.configured ? '<div class="toolbar"><button class="btn primary" data-lf="in">Connect Last.fm</button></div>' : '') + '</div>';
       }
       if (pick === 'import') return h.importArea({ fileLabel: 'Last.fm key, secret and session key', accept: '.toml,.txt', intro: 'From another machine, use a text file with three lines: the API key, shared secret and session key. rescrobbled’s config alone does not contain the session.', withPaste: true, label: 'API key, shared secret and session key', placeholder: 'API key\nshared secret\nsession key' });
       if (pick === 'paste') return h.pasteArea({ label: 'API key, shared secret and session key', placeholder: 'API key\nshared secret\nsession key', rows: 3 });
@@ -2241,26 +2296,49 @@
   window.addEventListener('pmdesktop:suspended', () => { clearTimeout(stallCheck); stallCheck = null; });
 
   const rememberTracks = (tracks) => { for (const t of tracks || []) if (t && t.id != null) state.trackCache.set('track:' + t.id, t); };
-  const playTracks = async (tracks, replace = true, at = 'end') => {
+  // A node zone's new queue with a mode, in one call: the items in their order, shuffle on or off
+  // (on: a random song first, the rest shuffled after it; the node keeps the order for shuffle off);
+  // the zone's repeat and radio stay
+  const loadZoneQueue = async (items, shuffle, o = {}) => {
+    const zid = zoneOf(o);
+    const index = shuffle ? Math.floor(Math.random() * items.length) : 0;
+    const wait = startWait('play', zid, items[index].title || '', true, true);
+    const mine = o.mode || askMode(shufflePending, zid, shuffle);
+    try {
+      await zoneOp(zid, async (t) => {
+        // (the zone's repeat and radio, and the song this replaces, as they are when the load goes)
+        startSending(wait, zid);
+        const z = state.zones[zid] || {}; const ev0 = evOf(zid);
+        const st = await api('POST', `/zones/${encodeURIComponent(zid)}/load`, { items, index, transport: 'playing', shuffle, repeat: z.repeat || 'off', radio: !!z.radio }, { signal: t.signal });
+        applyAnswer(st, ev0);
+      }, o.turn);
+      startSent(wait); refreshQueue();
+    } catch (e) { startFail(e.message, false, wait); } finally { if (!o.mode) doneMode(shufflePending, zid, mine); }
+  };
+  // A page's Play and Shuffle (`o.shuffle` false or true) load the queue in its order with that mode:
+  // Shuffle starts on a random song. Without it a new queue keeps the zone's mode (shuffled after its
+  // first song when on)
+  const playTracks = async (tracks, replace = true, at = 'end', o = {}) => {
     tracks = (tracks || []).filter((t) => t && t.id != null);
     if (!tracks.length) return;
     rememberTracks(tracks);
-    if (isBrowser()) {
+    if (onBrowser(o)) {
       const items = tracks.map((t) => ({ id: t.id, uri: 'track:' + t.id, track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album ? t.album.title : '', duration_ms: t.duration_ms }));
-      if (replace) { state.browserQueue = items; browserPlay(0); }
+      if (replace) browserLoad(items, o.shuffle);
       else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...items);
-      else state.browserQueue.push(...items);
+      else browserAppend(items);
       if (!replace) toast(items.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(items.length, 'tracks')} added`);
       if (state.view === 'queue') render();
       return;
     }
-    if (replace) startWait('play', state.zone, tracks[0].title, true);
+    if (replace && o.shuffle !== undefined) return loadZoneQueue(tracks.map((t) => ({ uri: `track:${t.id}`, title: t.title || null, artist: artists(t) || null, album: t.album ? t.album.title : null, duration_ms: t.duration_ms || null })), o.shuffle, o);
+    const zid = zoneOf(o); const wait = replace ? startWait('play', zid, tracks[0].title, true, true) : null;
     try {
-      await api('POST', `/zones/${state.zone}/queue`, { track_ids: tracks.map((t) => t.id), replace, play: replace, at });
-      if (replace) startSent();
+      await zoneOp(zid, (t) => { if (replace) startSending(wait, zid); return api('POST', `/zones/${encodeURIComponent(zid)}/queue`, { track_ids: tracks.map((t) => t.id), replace, play: replace, at }, { signal: t.signal }); }, o.turn);
+      if (replace) startSent(wait);
       if (!replace) toast(tracks.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(tracks.length, 'tracks')} added`);
       refreshQueue();
-    } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
+    } catch (e) { if (replace) startFail(e.message, false, wait); else toast(e.message, 'error'); }
   };
   const transport = async (action) => {
     if (isBrowser()) {
@@ -2320,7 +2398,7 @@
         const { songs, out } = await listenerSongs(d);
         if (!songs.length) return toast('None of its songs is in this library', 'error');
         if (out > 0) toast(`${countOf(out, 'items')} not in this library; left out of ${hereName().toLowerCase()}'s queue`);
-        await playSongs(songs);
+        await playSongs(songs, 0, 'replace', undefined, undefined, undefined, { shuffle: false });
         return;
       }
       if (isBrowser()) {
@@ -2348,13 +2426,22 @@
         if (!songs.length && !local.length) return toast(left ? `${left}; nothing here plays ${hereIn()}` : 'Nothing here plays on your services', 'error');
         // Say what was omitted before starting: a playback failure must remain the last notice.
         if (left) toast(`${left}; left out of ${hereName().toLowerCase()}'s queue`);
-        await playSongs([...songs, ...local]);
+        await playSongs([...songs, ...local], 0, 'replace', undefined, undefined, undefined, { shuffle: false });
         return;
       }
-      startWait('play', state.zone, (state.playlists.find((x) => x.id === id) || {}).name || '', true);
-      const r = await api('POST', `/playlists/${id}/play`, { zone: state.zone });
-      startSent();
-      toast(`Queued ${r.queued} song${r.queued === 1 ? '' : 's'}${r.missing.length ? `; ${r.missing.length} not playable here` : ''}`);
+      // Play is in the list's order: shuffle goes off first (Shuffle loads through playSongs); both on
+      // the zone in use when pressed
+      const zid = state.zone;
+      const wait = startWait('play', zid, (state.playlists.find((x) => x.id === id) || {}).name || '', true, true);
+      // (its shuffle off is the zone's pending mode, as a page's Play would be)
+      const mine = askMode(shufflePending, zid, false);
+      try {
+        // (asked whenever the node has the mode, not only when this app sees it on: what the zone's
+        // earlier changes left may not be in yet; the node does nothing when it is off already)
+        const r = await zoneOp(zid, async (t) => { startSending(wait, zid); if ('shuffle' in (state.zones[zid] || {})) await setZoneShuffle(false, zid, t.signal); return api('POST', `/playlists/${id}/play`, { zone: zid }, { signal: t.signal }); });
+        startSent(wait);
+        toast(`Queued ${r.queued} song${r.queued === 1 ? '' : 's'}${r.missing.length ? `; ${r.missing.length} not playable here` : ''}`);
+      } catch (e) { startFail(e.message, true, wait); toast(e.message, 'error'); } finally { doneMode(shufflePending, zid, mine); }
     } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
   const refreshQueue = async (rerender = true) => {
@@ -2365,30 +2452,128 @@
     if (!$('#nowplaying').hidden) renderNowPlaying();
   };
 
-  // Repeat (off → all → one) for the zone in use; this browser keeps its own choice
+  // Shuffle and repeat are modes of the zone in use, as in any player: the node's come with its state
+  // (on /v1/events, so another open app sees them too); this browser keeps its own next to its queue.
+  // Repeat goes off → all → one. Shuffle on plays what comes next in a random order, the current song
+  // staying; off puts the queue back in its original order, the current song in its place.
   const REPEATS = ['off', 'all', 'one'];
+  // Each zone's states from the node's events, counted: an answer to a request is newer than the
+  // zone's state here only when no event for that zone came while it was on its way
+  const zoneEvents = new Map();
+  const evOf = (id) => zoneEvents.get(id) || 0;
+  const countEvent = (id) => zoneEvents.set(id, evOf(id) + 1);
+  const applyAnswer = (st, ev0) => { if (st && st.id && state.zones[st.id] && evOf(st.id) === ev0) state.zones[st.id] = st; };
+  // One change of a zone's mode or queue at a time from this app, in the order asked (a toggle,
+  // a page's Play or Shuffle, a playlist's shuffle off): the last one asked is the node's last word
+  const zoneOps = new Map();
+  // `fn(turn)` runs when the ones asked before it are done. What it goes on to load (discovery finding
+  // songs, the library read for a page's rows) runs inside its turn, given `turn`, rather than waiting
+  // on itself. A turn over 60 s is cut: its requests take `turn.signal`, so none of its answers lands
+  // here after the ones that follow (the node may still act on one; its next event says)
+  const TURN_MS = 60000;
+  const zoneOp = (zid, fn, turn) => {
+    if (turn && turn.zid === zid && turn.open) return Promise.resolve().then(() => fn(turn));
+    const mine = { zid, open: false, signal: null };
+    const run = (zoneOps.get(zid) || Promise.resolve()).then(() => {
+      const ac = new AbortController(); mine.signal = ac.signal; mine.open = true;
+      const why = new Error('The node did not answer in 60 seconds'); ac.signal.why = why; // (older engines pass no reason)
+      const t = setTimeout(() => ac.abort(why), TURN_MS);
+      return Promise.resolve().then(() => fn(mine)).finally(() => { clearTimeout(t); mine.open = false; });
+    });
+    zoneOps.set(zid, run.catch(() => {})); return run;
+  };
+  // The zone a change goes to: its turn's when it runs inside one (the zone in use may have changed
+  // meanwhile), else the zone in use. `onBrowser(o)` likewise
+  const zoneOf = (o) => (o && o.turn ? o.turn.zid : state.zone);
+  const onBrowser = (o) => (o && o.turn ? o.turn.zid === BROWSER : isBrowser());
+  // The mode a zone was last asked for (a toggle, a page's Play or Shuffle, a playlist's Play), until
+  // it is in: a press turns from it, and an older change can't put its own back over a newer press
+  const shufflePending = new Map(); const repeatPending = new Map();
+  const askMode = (map, zid, value) => { const token = { value }; map.set(zid, token); renderModes(); return token; };
+  const doneMode = (map, zid, token) => { if (map.get(zid) === token) { map.delete(zid); renderModes(); } };
+  // A page's Play or Shuffle on a node zone: its mode is asked for when its turn is, and goes with the
+  // turn to what it loads (the library read, the finding of songs, the load itself)
+  const withTurn = (zid, o, fn) => { const mode = o.shuffle !== undefined && !o.mode ? askMode(shufflePending, zid, o.shuffle) : null; return zoneOp(zid, (turn) => fn({ ...o, turn, mode: o.mode || mode })).finally(() => { if (mode) doneMode(shufflePending, zid, mode); }); };
   const browserRepeat = () => { try { return localStorage.getItem('pm.repeat') || 'off'; } catch { return 'off'; } };
   const zoneRepeat = () => (isBrowser() ? browserRepeat() : (state.zones[state.zone] || {}).repeat || 'off');
+  const browserShuffle = () => { try { return localStorage.getItem('pm.shuffle') === 'on'; } catch { return false; } };
+  const setBrowserShuffle = (on) => { try { if (on) localStorage.setItem('pm.shuffle', 'on'); else localStorage.removeItem('pm.shuffle'); } catch { /* no storage */ } };
+  const zoneShuffle = () => (isBrowser() ? browserShuffle() : !!(state.zones[state.zone] || {}).shuffle);
+  // Fisher-Yates on a[from…]
+  const shuffleFrom = (a, from = 0) => { for (let k = a.length - 1; k > from; k--) { const j = from + Math.floor(Math.random() * (k - from + 1)); [a[k], a[j]] = [a[j], a[k]]; } return a; };
+  // This browser's original order while shuffled: each item's `ord`. One added with "Add to queue"
+  // ends it (browserAppend); one with no `ord` ("Play next", or put in by hand) follows the item
+  // before it in the play order, so "Play next" is next in both orders. Returns the queue in that
+  // order (and numbers it again)
+  const browserOrder = () => {
+    const q = state.browserQueue; let prev = -1;
+    q.forEach((it) => { if (typeof it.ord !== 'number') it.ord = prev + 1e-6; prev = it.ord; });
+    const orig = q.map((it, k) => [it, k]).sort((a, b) => a[0].ord - b[0].ord || a[1] - b[1]).map(([it]) => it);
+    orig.forEach((it, k) => { it.ord = k; });
+    return orig;
+  };
+  const browserAppend = (items) => { const top = state.browserQueue.reduce((m, it) => (typeof it.ord === 'number' ? Math.max(m, it.ord) : m), -1); items.forEach((it, k) => { it.ord = top + 1 + k; }); state.browserQueue.push(...items); };
+  // A new queue here: in its order, shuffled after the first song when shuffle is on (`shuffle`, from a
+  // page's Play or Shuffle, sets the mode first; Shuffle starts on a random song)
+  const browserLoad = (items, shuffle) => {
+    if (shuffle !== undefined) setBrowserShuffle(shuffle);
+    items.forEach((it, k) => { it.ord = k; });
+    if (browserShuffle()) shuffleFrom(items, shuffle ? 0 : 1);
+    state.browserQueue = items; browserPlay(0); renderModes();
+  };
   const renderModes = () => {
-    const r = zoneRepeat(); const b = $('#repeatbtn'); if (!b) return;
-    const words = { off: 'Repeat: off', all: 'Repeat: the whole queue', one: 'Repeat: this song' }[r];
-    b.innerHTML = icon(r === 'one' ? 'repeat-one' : 'repeat'); b.classList.toggle('on', r !== 'off');
-    b.setAttribute('aria-pressed', String(r !== 'off')); b.setAttribute('aria-label', words); b.title = words;
+    const r = !isBrowser() && repeatPending.has(state.zone) ? repeatPending.get(state.zone).value : zoneRepeat();
+    const sh = !isBrowser() && shufflePending.has(state.zone) ? shufflePending.get(state.zone).value : zoneShuffle();
+    const rWords = { off: 'Repeat: off', all: 'Repeat: the whole queue', one: 'Repeat: this song' }[r]; const sWords = `Shuffle: ${sh ? 'on' : 'off'}`;
+    // (on: the accent and a dot under the icon, not colour alone; the state is in the label too)
+    const mark = (b, on, words, ic) => { if (ic && b.dataset.ic !== ic) { b.innerHTML = icon(ic); b.dataset.ic = ic; } b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.setAttribute('aria-label', words); b.title = words; };
+    $$('#repeatbtn, [data-npt="repeat"]').forEach((b) => mark(b, r !== 'off', rWords, r === 'one' ? 'repeat-one' : 'repeat'));
+    $$('#shufflebtn, [data-npt="shuffle"]').forEach((b) => mark(b, sh, sWords));
+    const qs = $('#qshuffle'); if (qs && qs.dataset.on !== String(sh)) { qs.dataset.on = String(sh); qs.classList.toggle('primary', sh); qs.setAttribute('aria-pressed', String(sh)); qs.innerHTML = `${icon('shuffle')} Shuffle ${sh ? 'on' : 'off'}`; qs.title = sh ? 'Shuffle is on: press to play the queue in its order again' : 'Play what comes next in a random order; the playing song stays'; }
   };
-  $('#repeatbtn').onclick = async () => {
-    const next = REPEATS[(REPEATS.indexOf(zoneRepeat()) + 1) % REPEATS.length];
-    if (isBrowser()) { try { localStorage.setItem('pm.repeat', next); } catch { /* no storage */ } renderModes(); return; }
-    try { const st = await api('PUT', `/zones/${state.zone}/repeat`, { repeat: next }); if (st && st.id) state.zones[st.id] = st; else if (state.zones[state.zone]) state.zones[state.zone].repeat = next; renderModes(); } catch (e) { toast(e.message, 'error'); }
+  const cycleRepeat = async () => {
+    if (isBrowser()) { const next = REPEATS[(REPEATS.indexOf(zoneRepeat()) + 1) % REPEATS.length]; try { localStorage.setItem('pm.repeat', next); } catch { /* no storage */ } renderModes(); return; }
+    // (in the zone's turn, like a load, which carries the repeat as it is when it goes)
+    const zid = state.zone; const cur = repeatPending.has(zid) ? repeatPending.get(zid).value : zoneRepeat();
+    const next = REPEATS[(REPEATS.indexOf(cur) + 1) % REPEATS.length];
+    const mine = askMode(repeatPending, zid, next);
+    // (a 204 says the node took it, not that nothing changed since: another app may have set repeat
+    // after it, its event already here. The zone is read again in the same turn, so a load after it
+    // carries the node's repeat; the read is kept only if no event came while it was on its way)
+    try {
+      await zoneOp(zid, async (t) => {
+        const ev0 = evOf(zid); const st = await api('PUT', `/zones/${encodeURIComponent(zid)}/repeat`, { repeat: next }, { signal: t.signal });
+        if (st && st.id) { applyAnswer(st, ev0); return; }
+        // (a read that fails leaves the change made: it is taken here unless an event came since the PUT)
+        const ev1 = evOf(zid); const zs = await api('GET', `/zones/${encodeURIComponent(zid)}`, undefined, { signal: t.signal }).catch(() => null);
+        if (zs && zs.id) applyAnswer(zs, ev1); else if (state.zones[zid] && evOf(zid) === ev0) state.zones[zid].repeat = next;
+      });
+    } catch (e) { toast(e.message, 'error'); } finally { doneMode(repeatPending, zid, mine); }
   };
-  $('#shufflebtn').onclick = async () => {
+  // The node's mode, set (a node from before modes answers 404/405: it says to update)
+  const setZoneShuffle = async (on, zid = state.zone, signal) => {
+    const ev0 = evOf(zid);
+    let st; try { st = await api('PUT', `/zones/${encodeURIComponent(zid)}/shuffle`, { shuffle: on }, { signal }); } catch (e) { throw noRoute(e); }
+    if (st && st.id) applyAnswer(st, ev0); else if (state.zones[zid] && evOf(zid) === ev0) state.zones[zid].shuffle = on;
+  };
+  // (two presses before the node answers, on two copies: the second turns the first's choice back)
+  // (the mode buttons carry data-repeat: a press while the last one is still on its way turns the
+  // choice back, so every press runs; the busy guard would drop it)
+  const toggleShuffle = async () => {
     if (isBrowser()) {
-      const q = state.browserQueue; const i = state.browserIndex;
-      const rest = q.slice(i + 1); if (rest.length < 2) { toast('Nothing to shuffle: add more songs to the queue first'); return; }
-      for (let k = rest.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [rest[k], rest[j]] = [rest[j], rest[k]]; }
-      state.browserQueue = [...q.slice(0, i + 1), ...rest]; toast('Shuffled what comes next'); if (state.view === 'queue') render(); return;
+      const on = !browserShuffle();
+      const q = state.browserQueue; const cur = q[state.browserIndex];
+      if (on) { q.forEach((it, k) => { it.ord = k; }); shuffleFrom(q, state.browserIndex + 1); } else { state.browserQueue = browserOrder(); if (cur) state.browserIndex = state.browserQueue.indexOf(cur); }
+      // (Up next in Now playing and the Queue page show the new order: their rows play by position)
+      setBrowserShuffle(on); renderModes(); if (state.view === 'queue') render(); if (!$('#nowplaying').hidden) renderNowPlaying(); return;
     }
-    try { await api('POST', `/zones/${state.zone}/shuffle`); toast('Shuffled what comes next'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+    // (one write at a time per zone, in the order pressed: the last press is the node's last word)
+    const zid = state.zone; const on = !(shufflePending.has(zid) ? shufflePending.get(zid).value : zoneShuffle());
+    const mine = askMode(shufflePending, zid, on); // (the press shows at once)
+    try { await zoneOp(zid, (t) => setZoneShuffle(on, zid, t.signal)); refreshQueue(); } catch (e) { toast(e.message, 'error'); } finally { doneMode(shufflePending, zid, mine); }
   };
+  $('#repeatbtn').onclick = cycleRepeat;
+  $('#shufflebtn').onclick = toggleShuffle;
   $('#toggle').onclick = () => transport({ action: 'toggle' });
   // Next and Previous pressed twice skip twice: they don't wait for the last press (data-repeat)
   $('#next').dataset.repeat = ''; $('#prev').dataset.repeat = '';
@@ -2547,8 +2732,9 @@
     const wasPlaying = cur && cur.transport === 'playing';
     try {
       if (from === BROWSER) {
-        let queue = state.browserQueue;
-        const cur = state.browserIndex >= 0 ? queue[state.browserIndex] : null;
+        // (shuffle on: the items in their original order, so the node keeps it; it draws the rest again)
+        const cur = state.browserIndex >= 0 ? state.browserQueue[state.browserIndex] : null;
+        let queue = browserShuffle() ? browserOrder() : state.browserQueue;
         // YouTube plays in this page: a zone takes it only with yt-dlp on (as playSourceItems)
         const ytZones = (state.sources || []).some((x) => x.id === 'youtube' && x.enabled !== false && /zones/.test(x.status));
         if (!ytZones && queue.some((q) => ytOf(q.uri))) {
@@ -2563,7 +2749,7 @@
         const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
         // Pause here first: the node may take seconds to open the track, and both would play meanwhile
         if (transport === 'playing') { audio.pause(); resume = true; }
-        const zs = await api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: index >= 0 ? index : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), radio: false });
+        const zs = await zoneOp(target, (t) => api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: index >= 0 ? index : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), shuffle: browserShuffle(), radio: false }, { signal: t.signal }));
         state.zones[zs.id] = zs;
         if (transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
         resume = null;
@@ -2580,6 +2766,8 @@
         if (state.zones[from]) { state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' }; }
         state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null, limit: it.limit || null }; });
         try { localStorage.setItem('pm.repeat', z.repeat || 'off'); } catch { /* storage unavailable */ }
+        // (shuffle comes along; the zone's original order isn't in its state, so the play order stands for it)
+        state.browserQueue.forEach((it, k) => { it.ord = k; }); setBrowserShuffle(!!z.shuffle);
         if (index >= 0 && index < state.browserQueue.length && z.transport !== 'stopped') browserResumeAt(index, pos, z.transport === 'paused'); else state.browserIndex = -1;
       } else {
         const was = state.zones[from];
@@ -3154,26 +3342,35 @@
   // every play button on every page counts without each call site knowing)
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now() }; }, true);
   // `replace`: the queue is being replaced, so the song still playing does not end the wait
-  const startWait = (what, zoneId = state.zone, title = '', replace = false) => {
+  const startWait = (what, zoneId = state.zone, title = '', replace = false, deferred = false) => {
     startDone(true);
     const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
     if (a) a.classList.add('starting');
     const zw = state.zones[zoneId]; const oldItem = replace && zw && zw.now_playing ? zw.now_playing.item.id : null;
     // `sent`: a replace waits for the node's answer first, so the old queue moving on by itself
     // (its song ended) isn't taken for the new one starting
-    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a, oldItem, sent: !replace }; state.startError = null;
-    setTimeout(() => { if (state.starting && state.starting.at === at) { const zn = state.zones[zoneId]; startFail(`${zn ? zn.name : 'The zone'} did not start playing in 20 seconds`); } }, 20000);
+    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a, oldItem, sent: !replace, deferred }; state.startError = null;
+    // (a start waiting its turn behind the zone's other changes: its 20 s run from when its request goes)
+    if (!deferred) armStart(at, zoneId);
     renderBar();
+    return at;
   };
+  const armStart = (at, zoneId) => setTimeout(() => { if (state.starting && state.starting.at === at) { const zn = state.zones[zoneId]; startFail(`${zn ? zn.name : 'The zone'} did not start playing in 20 seconds`); } }, 20000);
   // The node took the replace: from now on the zone playing another song ends the wait (it may
   // already be playing it)
-  const startSent = () => {
-    const s = state.starting; if (!s || s.sent) return; s.sent = true;
+  // The song a replace replaces, as it is when the request goes (a start queued behind others: the
+  // song in hand when it was pressed may have changed meanwhile, and ending the wait on it would be early)
+  const startSending = (wait, zid) => { const s = state.starting; if (!s || s.at !== wait) return; const z = state.zones[zid]; s.oldItem = z && z.now_playing ? z.now_playing.item.id : null; if (s.deferred) { s.deferred = false; armStart(wait, zid); } };
+  // (`wait`, from startWait: a start another start replaced meanwhile is not this one)
+  const startSent = (wait) => {
+    const s = state.starting; if (!s || s.sent || (wait && s.at !== wait)) return; s.sent = true;
     const z = state.zones[s.zone]; if (z && z.transport === 'playing' && z.now_playing && z.now_playing.item.id !== s.oldItem) startDone();
   };
   const startDone = (quiet) => { const s = state.starting; if (!s) return; if (s.anchor) s.anchor.classList.remove('starting'); state.starting = null; if (!quiet) renderBar(); if (s.what === 'move' && !zonePop.hidden) renderZonePop(); };
-  const startFail = (msg, quiet) => {
-    const s = state.starting; if (!s) return; startDone(true);
+  const startFail = (msg, quiet, wait) => {
+    const s = state.starting;
+    if (wait && (!s || s.at !== wait)) { if (!quiet) toast(msg || 'something went wrong', 'error'); return; }
+    if (!s) return; startDone(true);
     // The song still playing (a refused replace leaves it on) doesn't clear the error: a new one does
     const zf = state.zones[s.zone]; const still = zf && zf.transport === 'playing' && zf.now_playing ? zf.now_playing.item.id : null;
     state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now(), still };
@@ -3518,7 +3715,7 @@
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
             <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${streamLabel(np) ? esc(streamLabel(np)) : `${h ? LABEL[h] : hereName()}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}`}</span></button>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
-            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" data-repeat aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" data-repeat aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${zoneVolume(z) ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : ''}
+            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn mode-btn" data-npt="shuffle" data-repeat aria-pressed="false" aria-label="Shuffle: off">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" data-repeat aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" data-repeat aria-label="Next">${icon('next')}</button><button class="icon-btn mode-btn" data-npt="repeat" data-repeat aria-pressed="false" aria-label="Repeat: off">${icon('repeat')}</button></div>${zoneVolume(z) ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : ''}
             ${one ? '' : `<nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>`}
           </section>
           ${one ? '' : `          <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
@@ -3561,7 +3758,10 @@
     // it moves the bar's own slider, which sets the zone's volume
     const nv = $('#npvol', overlay); if (nv) { applyVol(nv, zoneVolume(z)); bindVolSlider(nv, currentZone); syncVolumeSliders(z); }
     else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = loadOutputs().then(() => { if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
-    $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
+    // The bar's own handlers, called directly; the modes' state comes from renderModes (as the bar's)
+    const npAct = { shuffle: toggleShuffle, repeat: cycleRepeat, prev: () => transport({ action: 'previous' }), toggle: () => transport({ action: 'toggle' }), next: () => transport({ action: 'next' }) };
+    $$('[data-npt]', overlay).forEach((b) => b.onclick = () => npAct[b.dataset.npt]());
+    renderModes();
     sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
     // (a drag that ends without a change, or is cancelled, lets go too)
@@ -3695,25 +3895,34 @@
     const name = v.label || srcName(srcSvc(v.source));
     b.disabled = true; b.innerHTML = '<span class="spin"></span> Switching…';
     const z0 = playingIt(); const version = z0.queue_version;
-    if (z0.transport === 'playing') startWait('play', zone, `${z0.now_playing.item.title || ''} · from ${name}`, true);
+    const wait = z0.transport === 'playing' ? startWait('play', zone, `${z0.now_playing.item.title || ''} · from ${name}`, true, true) : null;
     try {
-      let queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
-      // The queue changed meanwhile (a song added elsewhere): read it again, so nothing is lost
-      if (state.zones[zone] && state.zones[zone].queue_version !== version) queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
-      const at = queue.findIndex((q) => q.id === itemId);
-      const z = playingIt();
-      if (at < 0 || !z) throw new Error('another song is playing now: open Sources again');
-      // The new source's own cover and length: the old item's cover stays only between two items
-      // of the same service (a library file shows its album's); the length comes with the source
-      const scheme = (u) => String(u || '').split(':')[0];
-      const items = queue.map((q, k) => (k === at ? { ...q, uri, image: scheme(uri) !== 'track' && scheme(uri) === scheme(q.uri) ? q.image || null : null, duration_ms: null } : q));
-      const zs = await api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio });
+      // (read and loaded in one turn of the zone, so nothing of its queue changes in between)
+      const zs = await zoneOp(zone, async (t) => {
+        let queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`, undefined, { signal: t.signal });
+        // The queue changed meanwhile (a song added elsewhere): read it again, so nothing is lost
+        if (state.zones[zone] && state.zones[zone].queue_version !== version) queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`, undefined, { signal: t.signal });
+        const at = queue.findIndex((q) => q.id === itemId);
+        const z = playingIt();
+        if (at < 0 || !z) throw new Error('another song is playing now: open Sources again');
+        // The new source's own cover and length: the old item's cover stays only between two items
+        // of the same service (a library file shows its album's); the length comes with the source
+        const scheme = (u) => String(u || '').split(':')[0];
+        const items = queue.map((q, k) => (k === at ? { ...q, uri, image: scheme(uri) !== 'track' && scheme(uri) === scheme(q.uri) ? q.image || null : null, duration_ms: null } : q));
+        // (the start's 20 s run from here, after the reads; the song it replaces is the one playing now)
+        if (wait) startSending(wait, zone);
+        return api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio }, { signal: t.signal });
+        // (no shuffle: the node would draw the queue again from its play order, songs heard included;
+        // keeping the mode with its order needs a node call that swaps one item's source in place)
+      });
       // The zone's answer says whether the new source plays (a paused zone sends no event to wait for)
       if (zs && zs.id) state.zones[zs.id] = zs;
       if (zs && zs.error) throw new Error(zs.error);
+      // (the node took the load: a zone playing another song now ends the wait, here or by its event)
+      if (wait) startSent(wait);
       toast(`Playing from ${name}`);
       refreshQueue();
-    } catch (e) { startFail(e.message, true); toast(e.message, 'error'); if (b.isConnected) { b.disabled = false; b.innerHTML = `${icon('play')} Play from here`; } }
+    } catch (e) { if (wait) startFail(e.message, true, wait); toast(e.message, 'error'); if (b.isConnected) { b.disabled = false; b.innerHTML = `${icon('play')} Play from here`; } }
   };
   // Sleep timer per zone (node zones through the API, the browser zone locally).
   const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };
@@ -5025,29 +5234,36 @@
   const qOf = (t, fallback = {}) => ({ uri: t.track_id != null ? 'track:' + t.track_id : nodeRel(t.uri), track_id: t.track_id, artists: t.artists, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: nodeRel(t.image || fallback.image || null) });
   // Library tracks by id, in order and with duplicates: the ones a page already loaded come
   // from the track cache, the rest are read four at a time (not one request per song at once).
-  const readTracks = async (ids) => {
+  const readTracks = async (ids, signal) => {
     const out = ids.map((id) => state.trackCache.get('track:' + id) || null);
     const need = [...new Set(ids.filter((id, k) => !out[k]))]; const got = new Map();
-    const worker = async () => { while (need.length) { const id = need.shift(); got.set(id, await api('GET', `/library/tracks/${id}`)); } };
+    const worker = async () => { while (need.length) { const id = need.shift(); got.set(id, await api('GET', `/library/tracks/${id}`, undefined, { signal })); } };
     await Promise.all(Array.from({ length: Math.min(4, need.length) }, worker));
     rememberTracks([...got.values()]);
     return ids.map((id, k) => out[k] || got.get(id));
   };
   // Play a list of item songs from index k: library tracks, streamed items, or Spotify Connect.
-  const playSongs = async (songs, k = 0, how = 'replace', pf, anchorEl, fallback) => {
+  const playSongs = async (songs, k = 0, how = 'replace', pf, anchorEl, fallback, o = {}) => {
+    // (a node zone's turn first: the library read and the finding wait inside it, and it goes to the
+    // zone it was asked on)
+    if (!onBrowser(o) && !o.turn) return withTurn(state.zone, o, (o2) => playSongs(songs, k, how, pf, anchorEl, fallback, o2));
     const first = songs[k];
-    if (first && first.track_id == null && !first.uri && first.page) {
-      // A song only known by its link: the resolver finds where it plays.
-      return discoverPlay({ uri: first.page, page: first.page, title: first.title, artist: first.artist, image: first.image }, null, anchorEl);
+    // (a page's Play or Shuffle starts from the songs that play; discovery when none does)
+    const playsDirectly = (t) => t.track_id != null || t.uri;
+    if (first && first.track_id == null && !first.uri && first.page && (o.shuffle === undefined || !songs.slice(k).some(playsDirectly))) {
+      // A song only known by its link: the resolver finds where it plays (with the mode asked for, and
+      // where it was asked: next, at the end, or in place of the queue)
+      return discoverPlay({ uri: first.page, page: first.page, title: first.title, artist: first.artist, image: first.image }, null, anchorEl, { ...o, how });
     }
     const list = songs.slice(k).filter((t) => t.track_id != null || t.uri);
     if (!list.length) return toast('Nothing here plays on your services', 'error');
-    if (pf && pf.mode === 'connect') return spotifyPlay(list.map((t) => t.uri).filter(Boolean), anchorEl);
-    if (list.every((t) => t.track_id != null)) { try { const tr = await readTracks(list.map((t) => t.track_id)); return how === 'replace' ? playTracks(tr, true) : playTracks(tr, false, how); } catch (e) { return toast(e.message, 'error'); } }
+    // (Spotify plays it on its own device, not in the zone's queue: no turn to hold)
+    if (pf && pf.mode === 'connect') { spotifyPlay((o.shuffle ? shuffleFrom([...list]) : list).map((t) => t.uri).filter(Boolean), anchorEl); return; }
+    if (list.every((t) => t.track_id != null)) { try { const tr = await readTracks(list.map((t) => t.track_id), o.turn && o.turn.signal); return how === 'replace' ? playTracks(tr, true, 'end', o) : playTracks(tr, false, how, o); } catch (e) { return toast(e.message, 'error'); } }
     // In a mixed queue a library row has track_id, not a provider URI.
     // Keep every playable row (and duplicates) in its original position.
     const items = list.map((t) => qOf(t, fallback));
-    return how === 'replace' ? playSourceItems(items, true) : playSourceItems(items, false, how);
+    return how === 'replace' ? playSourceItems(items, true, 'end', o) : playSourceItems(items, false, how, o);
   };
   const copyLink = async (path) => { const u = location.origin + path; try { await navigator.clipboard.writeText(u); toast('Link copied'); } catch { toast(u); } };
   // The ⋯ menu, the same on a page's hero and on every song row.
@@ -5570,16 +5786,21 @@
     return sec;
   };
   const mins = (ms) => { if (ms && ms < 60000) return `${Math.round(ms / 1000)} s`; const m = Math.round((ms || 0) / 60000); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; };
-  const discoverPlay = async (it, v, anchor) => {
-    if (v) return playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: '', duration_ms: null, image: it.image || null }], true);
+  // `o.shuffle` (a page's Play or Shuffle): what is found loads with that mode, as the page's songs would;
+  // `o.how` ('next', 'end'): where it goes, else in place of the queue. On a node zone the finding takes
+  // the zone's turn first, so what it loads keeps its place among the zone's other changes (and its zone)
+  const discoverPlay = async (it, v, anchor, o = {}) => {
+    if (!onBrowser(o) && !o.turn) return withTurn(state.zone, o, (o2) => discoverPlay(it, v, anchor, o2));
+    const replace = !o.how || o.how === 'replace'; const at = replace ? 'end' : o.how;
+    if (v) return playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: '', duration_ms: null, image: it.image || null }], replace, at, o);
     let plan;
-    try { plan = await api('GET', `/discover/play?uri=${encodeURIComponent(it.page || it.uri)}`); } catch (e) { return toast(e.message, 'error'); }
+    try { plan = await api('GET', `/discover/play?uri=${encodeURIComponent(it.page || it.uri)}`, undefined, { signal: o.turn && o.turn.signal }); } catch (e) { return toast(e.message, 'error'); }
     const pf = plan.plays_from;
     if (pf && pf.service === 'library') {
-      try { const tracks = await Promise.all(plan.track_ids.map((id) => api('GET', `/library/tracks/${id}`))); return playTracks(tracks, true); } catch (e) { return toast(e.message, 'error'); }
+      try { const tracks = await Promise.all(plan.track_ids.map((id) => api('GET', `/library/tracks/${id}`, undefined, { signal: o.turn && o.turn.signal }))); return playTracks(tracks, replace, at, o); } catch (e) { return toast(e.message, 'error'); }
     }
-    if (pf && pf.mode === 'connect') return spotifyPlay(plan.spotify_uris, anchor);
-    if (pf && plan.items.length) { toast(`Playing from ${pf.label}`); return playSourceItems(plan.items, true); }
+    if (pf && pf.mode === 'connect') { spotifyPlay(o.shuffle ? shuffleFrom([...plan.spotify_uris]) : plan.spotify_uris, anchor); return; }
+    if (pf && plan.items.length) { toast(`Playing from ${pf.label}`); return playSourceItems(plan.items, replace, at, o); }
     const options = [{ title: 'Not on your services' }, ...(plan.connect || []).map((c) => ({ label: `Connect ${SERVICE_NAMES[c] || c}`, icon: 'zone', run: () => setView('sources') }))];
     if (plan.preview) options.push({ label: `Play a 30 s preview (${SERVICE_NAMES[plan.preview.service] || plan.preview.service})`, icon: 'play', run: () => playSourceItems([{ uri: plan.preview.id.startsWith('track:') ? `${plan.preview.service}:${plan.preview.id}` : plan.preview.id, title: it.title || '', artist: it.artist || '', album: `30 s preview · ${SERVICE_NAMES[plan.preview.service] || plan.preview.service}`, duration_ms: 30000, image: it.image || null }], false, 'now') });
     if (anchor) showMenu(anchor, options); else toast('Not on your services: connect one in Sources', 'error');
@@ -5823,8 +6044,8 @@
     // While the files are read the card counts them; when done, Home shows the albums once
     if (info.scanning) { state.setupScanning = true; again(); } else if (state.setupScanning) { state.setupScanning = false; render(); }
     const pb = $('#setupplay'); if (pb) pb.onclick = async () => {
-      // Up to 200 tracks in a random order (albums or not: untagged files have none)
-      try { const r = await api('GET', '/library/tracks?limit=200'); const t = r.tracks.slice(); for (let i = t.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [t[i], t[j]] = [t[j], t[i]]; } await playTracks(t, true); again(); } catch (e) { toast(e.message, 'error'); }
+      // Up to 200 tracks with shuffle on (albums or not: untagged files have none)
+      try { const r = await api('GET', '/library/tracks?limit=200'); await playTracks(r.tracks, true, 'end', { shuffle: true }); again(); } catch (e) { toast(e.message, 'error'); }
     };
     const ci = $('#setupcontact'); if (ci) {
       const save = async () => { const c = ci.value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; homeCache.clear(); toast('Saved: Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
@@ -6059,7 +6280,7 @@
             + (f.other.length ? `<section class="section"><div class="section-head"><h3>From other services</h3></div><div id="favother"><div class="skeleton" style="height:56px"></div></div></section>` : '');
           lists.fav = f.tracks;
           const hc = $('[data-hsconnect]', main); if (hc) hc.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) render(); };
-          const fp = $('#favplay'); if (fp) fp.onclick = () => playTracks(f.tracks, true);
+          const fp = $('#favplay'); if (fp) fp.onclick = () => playTracks(f.tracks, true, 'end', { shuffle: false });
           if (f.other.length) { const items = await describe(f.other); const box = $('#favother'); if (box && state.view === 'favourites') { box.innerHTML = discoverRows(items); bindDiscoverRows(items); } }
           break;
         }
@@ -6303,7 +6524,7 @@
             + (d.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(d.albums)}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(d.tracks, { key: 'genre' })}</section>`;
           lists.genre = d.tracks;
-          $('#gplay').onclick = () => playTracks(d.tracks, true);
+          $('#gplay').onclick = () => playTracks(d.tracks, true, 'end', { shuffle: false });
           break;
         }
         case 'tracks': {
@@ -6351,9 +6572,9 @@
             // Play all: what is shown when filtered, else every track (fetched on the press).
             const sh = $('#shuffle');
             if (sh) sh.onclick = async () => {
-              if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true);
+              if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true, 'end', { shuffle: false });
               sh.disabled = true; toast(`Loading ${countOf(total, 'tracks')}…`);
-              try { playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks), true); } catch (e) { toast(e.message, 'error'); }
+              try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
               sh.disabled = false;
             };
           }
@@ -6395,8 +6616,8 @@
             + `<section class="section" id="smsongs"><div class="section-head"><h3>Songs</h3></div>${ts.length ? songRows(songs, { numbers: 'index' }) : '<p class="muted small">No song matches these rules right now.</p>'}</section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
           if (ts.length) { bindSongRows($('#smsongs'), songs, {}); enableSelect($('#smsongs'), songs); }
-          $('#smplay').onclick = () => playTracks(ts, true);
-          $('#smshuffle').onclick = () => playTracks([...ts].sort(() => Math.random() - 0.5), true);
+          $('#smplay').onclick = () => playTracks(ts, true, 'end', { shuffle: false });
+          $('#smshuffle').onclick = () => playTracks(ts, true, 'end', { shuffle: true });
           $('#smedit').onclick = () => setView('smart-edit', sid);
           break;
         }
@@ -6614,12 +6835,12 @@
               const { songs: list, out } = await listenerSongs(d);
               if (!list.length) return toast('None of its songs is in this library', 'error');
               if (out) toast(`${countOf(out, 'items')} not in this library; left out of the queue`);
-              return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl);
+              return playSongs(list, 0, 'replace', null, anchorEl, undefined, { shuffle });
             }
             const all = [...playable(songs), ...localSongs]; const list = isBrowser() ? all.filter((t) => t.track_id != null || t.uri) : all; const out = all.length - list.length;
             if (!list.length) return toast(out ? `${countOf(out, 'songs')} ${out === 1 ? 'plays' : 'play'} only elsewhere; nothing here plays ${hereIn()}` : 'Nothing here plays on your services', 'error');
             if (out) toast(`${countOf(out, 'songs')} left out of ${hereName().toLowerCase()}'s queue: ${out === 1 ? 'it plays' : 'they play'} only elsewhere`);
-            return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl);
+            return playSongs(list, 0, 'replace', null, anchorEl, undefined, { shuffle });
           };
           $('#plplay').onclick = (e) => (isBrowser() ? playAll(false, e.currentTarget) : playPlaylist(d.summary.id));
           stickyHead(d.summary.name, (el) => (isBrowser() ? playAll(false, el) : playPlaylist(d.summary.id)));
@@ -6674,6 +6895,8 @@
           const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
           const asked = state.viewArg && known(state.viewArg.source) ? state.viewArg.source : null;
           const active = asked || (phone ? null : (known(state.sourceId) ? state.sourceId : 'library'));
+          // Another source: its sign-in opens on the recommended way again, not one opened before
+          if (active && active !== state.sourceId && state.signin) Object.values(state.signin).forEach((m) => { m.way = null; m.change = false; });
           if (active) state.sourceId = active;
           const cur = active === 'library' ? { id: 'library', name: 'Your library', description: '', status: 'ready', enabled: true } : srcs.find((x) => x.id === active) || null;
           const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
@@ -6693,19 +6916,19 @@
           let tidal = null; let tidalSi = null; if (active === 'tidal') { try { tidalSi = await api('GET', '/sources/tidal/signin'); tidal = tidalSi.details.status || null; } catch { tidalSi = null; tidal = null; } if (state.view !== 'sources') return; }
           let sub = null; let subPls = []; if (active === 'subsonic') { try { sub = await api('GET', '/sources/subsonic/server'); if (sub.connected) subPls = await api('GET', '/sources/subsonic/playlists').catch(() => []); } catch { sub = null; } if (state.view !== 'sources') return; }
           const subAccount = active !== 'subsonic' ? '' : sub && sub.connected
-            ? `<div class="toolbar"><span class="pill ok account">Connected · ${esc(sub.name || 'your server')}${sub.version ? ' ' + esc(sub.version) : ''} · ${esc(sub.user || '')}@${esc(sub.url || '')}</span><button class="btn ghost" id="subforget">Forget this server</button></div>`
+            ? row(`Signed in as ${esc(sub.user || '')}`, `${esc(sub.name || 'Your server')}${sub.version ? ' ' + esc(sub.version) : ''} · ${esc(sub.url || '')} · its music in search, its playlists below`, '<button class="btn ghost sm" id="subforget">Forget this server</button>', 'sg-in')
               + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz id or ISRC on the server)</span></div>${subPls.length ? `<div class="list">${subPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-subpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No playlists on the server.</p>'}</section>`
-            : `<form class="card subform" id="subform"><h3>Connect your server</h3><p class="muted small">Navidrome, Airsonic, Gonic, Ampache, LMS or another Odeion node. The password stays on this node; requests are signed with a fresh token each time.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://music.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label><div class="toolbar"><button class="btn primary" id="subconnect" type="submit">${icon('zone')} Connect</button></div></form>`;
+            : `<form class="card subform" id="subform"><p class="sg-lead" data-sg="lead">Play your own music server here: Navidrome, Airsonic, Gonic, Ampache, LMS or another Odeion node. Needs its address, a user and password.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://music.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label><div class="toolbar"><button class="btn primary" id="subconnect" type="submit">${icon('zone')} Connect</button></div></form>`;
           let jf = null; let jfPls = []; if (active === 'jellyfin') { try { jf = await api('GET', '/sources/jellyfin/server'); if (jf.connected) jfPls = await api('GET', '/sources/jellyfin/playlists').catch(() => []); } catch { jf = null; } if (state.view !== 'sources') return; }
           const jfAccount = active !== 'jellyfin' ? '' : jf && jf.connected
-            ? `<div class="toolbar"><span class="pill ok account">Signed in · ${esc(jf.server_name || 'Jellyfin')}${jf.version ? ' ' + esc(jf.version) : ''} · ${esc(jf.user || '')}</span><button class="btn ghost" id="jfout">Sign out</button></div>`
+            ? row(`Signed in as ${esc(jf.user || '')}`, `${esc(jf.server_name || 'Jellyfin')}${jf.version ? ' ' + esc(jf.version) : ''} · its music in search, its playlists below`, '<button class="btn ghost sm" id="jfout">Sign out</button>', 'sg-in')
               + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz recording id in Jellyfin)</span></div>${jfPls.length ? `<div class="list">${jfPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-jfpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No music playlists.</p>'}</section>`
-            : `<form class="card subform" id="jfform"><h3>Sign in to your Jellyfin</h3><p class="muted small">Also works with Emby. The password is used once to sign in; the node keeps only the access token Jellyfin gives it.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://jellyfin.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password"></label><div class="toolbar"><button class="btn primary" id="jfin" type="submit">${icon('zone')} Sign in</button></div></form>`;
+            : `<form class="card subform" id="jfform"><p class="sg-lead" data-sg="lead">Play your Jellyfin or Emby music here and import its playlists. Needs its address, a user and password (used once; only Jellyfin’s token is kept).</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://jellyfin.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password"></label><div class="toolbar"><button class="btn primary" id="jfin" type="submit">${icon('zone')} Sign in</button></div></form>`;
           let jam = null; if (active === 'jamendo') { try { jam = await api('GET', '/sources/jamendo/status'); } catch { jam = null; } if (state.view !== 'sources') return; }
-          const jamAccount = active !== 'jamendo' ? '' : !jam || !jam.configured ? `<div class="notice">This build of the node has no built-in Jamendo app. Add one in Settings › This node › Service apps.</div>`
-            : jam.signed_in ? `<div class="toolbar"><span class="pill ok account">Signed in${jam.name ? ' · ' + esc(jam.name) : ''}</span><button class="btn" id="jamimport">${icon('heart')} Add my Jamendo likes to Favourites</button><button class="btn ghost" id="jamout">Sign out</button></div>`
-            : !jam.can_sign_in ? `<p class="muted small">Search and full-length playback need no account. Signing in to bring your Jamendo likes over needs your own Jamendo app with its secret in the node config (<code>[jamendo]</code>).</p>`
-            : `<div class="toolbar"><button class="btn" id="jamin">${icon('zone')} Sign in to Jamendo</button><span class="muted small">Optional: search and full-length playback need no account. Signing in brings your likes and favourites to this node. The Jamendo app's redirect URL must be on the same domain as <code>${esc(jam.redirect_uri)}</code>.</span></div>`;
+          // Jamendo: a sign-in only where one can be made here (no notice about apps when not)
+          const jamAccount = active !== 'jamendo' || !jam || !jam.configured || (!jam.signed_in && !jam.can_sign_in) ? ''
+            : jam.signed_in ? row(`Signed in${jam.name ? ' as ' + esc(jam.name) : ''}`, 'Your Jamendo likes can come to Favourites here.', `<button class="btn sm" id="jamimport">${icon('heart')} Add my likes to Favourites</button><button class="btn ghost sm" id="jamout">Sign out</button>`, 'sg-in')
+            : `<p class="sg-lead" data-sg="lead">Optional: brings your Jamendo likes to Favourites here. Search and full tracks need no account.</p><div class="toolbar"><button class="btn" id="jamin">${icon('zone')} Sign in to Jamendo</button></div>`;
           let spot = null; if (active === 'spotify') { try { spot = await api('GET', '/sources/spotify/status'); } catch { spot = null; } if (state.view !== 'sources') return; }
           const account = active === 'jamendo' ? jamAccount : active === 'subsonic' ? subAccount : active === 'jellyfin' ? jfAccount : '';
 
@@ -6714,8 +6937,8 @@
               + row('Play from', 'Which source plays a song first when several have it.', '<button class="btn ghost" data-goto-settings="playback">Open Settings › Zones and outputs</button>'))
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
                 + (cur.id === 'tidal' || cur.id === 'qobuz' ? '' : (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
-                + (cur.features ? row('What it does', (cur.features.length ? cur.features.map((f) => FEATURE_WORDS[f] || f).join(' · ') : 'Nothing yet') + (cur.stage === 'unofficial' ? '. Unofficial: a private API the service has not approved; it can stop working at any time.' : cur.stage === 'beta' ? '. New here; tell us what breaks.' : '.'), cur.stage && cur.stage !== 'stable' ? `<span class="pill ${cur.stage === 'unofficial' ? 'warn' : ''}">${esc(cur.stage === 'unofficial' ? 'Unofficial' : 'Beta')}</span>` : '') : ''))
-              + (account ? group('Account', block('', '', account)) : '')
+                + (cur.features ? row('What it does', (cur.features.length ? cur.features.map((f) => FEATURE_WORDS[f] || f).join(' · ') : 'Nothing yet') + (cur.stage === 'unofficial' ? '. Unofficial: it can stop working at any time.' : cur.stage === 'beta' ? '. New here; tell us what breaks.' : '.'), cur.stage && cur.stage !== 'stable' ? `<span class="pill ${cur.stage === 'unofficial' ? 'warn' : ''}">${esc(cur.stage === 'unofficial' ? 'Unofficial' : 'Beta')}</span>` : '') : ''))
+              + (account ? group('Sign in', /^<div class="set-row/.test(account) ? account : block('', '', account)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalsignin"></div>' : '')
               + (cur.id === 'qobuz' ? '<div id="signin-qobuz"></div>' : '')
               + (cur.id === 'spotify' ? '<div id="signin-spotify"></div>' : '')
@@ -6723,7 +6946,7 @@
               + (cur.enabled && (!cur.features || cur.features.includes('search')) && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') && (cur.id !== 'soundcloud' || /^(ready|signed in)/.test(cur.status)) && (cur.id !== 'bandcamp' || /^(ready|signed in)/.test(cur.status)) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
               + (cur.id === 'youtube' ? '<div id="ytzones"></div>' : '')
               + (cur.id === 'bandcamp' ? '<div id="bcmode"></div>' : '')
-              + (cur.id === 'spotify' ? '<div id="spotsoloist"></div><div id="splibrespot"></div>' : '')
+              + (cur.id === 'spotify' ? '<div id="spotplay" hidden><h3 class="set-h sg-play-h">Other ways to play</h3><div id="splibrespot"></div><div id="spotsoloist"></div></div>' : '')
               + (cur.id === 'soundcloud' ? '<div id="scmode"></div>' : '')
               + '<div id="srcmine"></div>';
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
@@ -6733,7 +6956,7 @@
           signinChooser(tidalSigninCfg($('#tidalsignin')), tidalSi);
           qobuzSetup($('#signin-qobuz'));
           signinChooser(spotifySigninCfg($('#signin-spotify')));
-          signinChooser(youtubeSigninCfg($('#signin-youtube')));
+          if ($('#signin-youtube')) api('GET', '/sources/youtube/unofficial').catch(() => ({})).then((u) => signinChooser(youtubeSigninCfg($('#signin-youtube'), !!(u && u.enabled && (u.ytdlp || u.can_download)))));
           // YouTube › On your speakers (unofficial): yt-dlp as an external program (STEWARD-DUAL-MODE.md)
           const yz = $('#ytzones');
           const fillYtZones = async () => {
@@ -6741,8 +6964,10 @@
             let u; try { u = await api('GET', '/sources/youtube/unofficial'); } catch (e) { yz.innerHTML = ''; return; }
             if (!yz.isConnected) return;
             const y = u.ytdlp;
-            const rows = [row('On your speakers (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="yzon" ${u.enabled ? 'checked' : ''} aria-label="YouTube on your speakers (unofficial)">`)];
-            if (u.enabled || y) {
+            const usable = !!(y || u.can_download);
+            if (!usable && !u.enabled) { yz.innerHTML = ''; return; }
+            const rows = [row('On your speakers (unofficial)', usable ? esc(splitNote(u.warning)[0]) : 'Unavailable on this machine. You can turn it off.', `<input type="checkbox" class="switch" role="switch" id="yzon" ${u.enabled ? 'checked' : ''} aria-label="YouTube on your speakers (unofficial)">`)];
+            if (usable && (u.enabled || y)) {
               rows.push(y
                 ? row('yt-dlp', `${esc(y.version ? 'Version ' + y.version : 'Found')}: ${y.from === 'downloaded' ? 'downloaded by this node' : y.from === 'config' ? 'set in the node config' : 'installed on this machine'} (<code>${esc(y.path)}</code>).`, y.from === 'downloaded' ? '<button class="btn ghost sm" id="yzupdate">Update</button><button class="btn ghost sm" id="yzremove">Remove</button>' : '')
                 : row('yt-dlp', u.can_download ? 'Needed to play YouTube on your speakers. The node downloads it from yt-dlp’s official GitHub releases and checks it against the release’s checksums.' : 'Needed to play YouTube on your speakers. Install yt-dlp on this machine, then reload this page.', u.can_download ? '<button class="btn primary sm" id="yzget">Download yt-dlp</button>' : ''));
@@ -6798,15 +7023,24 @@
             };
             draw();
           }
+          // Spotify › Other ways to play: shown once one of them can run here (owner, 2026-11-08)
+          // A group under the "Other ways to play" heading: its own title one level down
+          const subGroup = (title, body) => `<div class="set-group"><h4 class="set-h">${title}</h4><div class="set-rows">${body}</div></div>`;
+          const spotPlayShown = () => { const box = $('#spotplay'); if (box) box.hidden = !$$('#splibrespot > *, #spotsoloist > *', box).length; };
           const slo = $('#spotsoloist');
           const fillSoloist = async () => {
             if (!slo || !slo.isConnected) return;
-            let u; try { u = await api('GET', '/sources/spotify/soloist'); } catch (e) { slo.innerHTML = ''; return; }
+            let u; try { u = await api('GET', '/sources/spotify/soloist'); } catch (e) { slo.innerHTML = ''; spotPlayShown(); return; }
             if (!slo.isConnected) return;
             const b = u.soloist;
-            const rows = [row('Spotify Soloist', esc(u.note), `<input type="checkbox" class="switch" role="switch" id="slon" ${u.enabled ? 'checked' : ''} ${u.supported ? '' : 'disabled'} aria-label="Spotify Soloist">`)];
-            if (!u.supported) rows.push('<div class="notice">Spotify Soloist runs on Linux and macOS only, so this node can’t start it.</div>');
-            else {
+            // Soloist plays on this machine's own PipeWire or PulseAudio output: none in a container
+            // or a service without a desktop session, and nothing to get without a build for it
+            if (!u.enabled && !u.running && !(u.supported && u.sound_output && (b || u.can_download))) { slo.innerHTML = ''; spotPlayShown(); return; }
+            const rows = [row('Spotify Soloist', 'Spotify’s own player, on this machine’s speakers (not the node’s zones). Its key needs Spotify Premium.', `<input type="checkbox" class="switch" role="switch" id="slon" ${u.enabled ? 'checked' : ''} ${u.supported ? '' : 'disabled'} aria-label="Spotify Soloist">`)];
+            // Left on where it can't play (no sound output any more): just the switch, to turn it off
+            const noPlay = !u.running && !(u.supported && u.sound_output);
+            if (noPlay) rows.push('<div class="notice" role="status">This machine has no sound output Soloist can play on.</div>');
+            if (!noPlay) {
               if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">${esc(u.health.detail)}<div class="actions"><button class="btn sm" id="slretry">Try again</button></div></div>`);
               if (u.enabled && u.waiting_for) rows.push(`<div class="notice" role="status">Switched on, waiting for ${esc(u.waiting_for)}.</div>`);
               const stateText = !u.running ? (u.enabled ? 'Not running.' : 'Off.') : u.paired === false ? `Running as “${esc(u.device_name)}”. Nobody has picked it yet: open a Spotify app on this network, choose this device from the device picker and press play.` : u.paired ? `Running as “${esc(u.device_name)}”, paired with a Spotify account.` : `Starting as “${esc(u.device_name)}”…`;
@@ -6821,7 +7055,7 @@
                 ? row('Soloist', `${esc(b.version ? b.version : 'Found')}: ${b.from === 'downloaded' ? `downloaded by this node${u.downloaded_at ? ' on ' + new Date(u.downloaded_at * 1000).toLocaleDateString() : ''}` : b.from === 'config' ? 'set in the node config' : 'installed on this machine'} (<code>${esc(b.path)}</code>). Spotify’s builds stop working 90 days after they were made.`, b.from === 'downloaded' ? '<button class="btn ghost sm" id="slupdate">Update</button><button class="btn ghost sm" id="slremove">Remove</button>' : '')
                 : row('Soloist', u.can_download ? 'The node downloads Spotify’s build for this machine from Spotify’s own servers, when you ask. Spotify publishes no checksums; the node checks that the download runs. By using it you accept Spotify’s Terms and Conditions of Use.' : 'Spotify offers no build for this machine here. Install Soloist yourself and point <code>[spotify] soloist</code> in the node config at it, then reload this page.', u.can_download ? '<button class="btn primary sm" id="slget">Download Soloist</button>' : ''));
             }
-            slo.innerHTML = group('Play on this machine', rows.join(''));
+            slo.innerHTML = subGroup('Spotify Soloist', rows.join('')); spotPlayShown();
             const put = async (body, ok) => { try { await api('PUT', '/sources/spotify/soloist', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
             $('#slon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Spotify Soloist is on' : 'Spotify Soloist is off');
             const sr = $('#slretry'); if (sr) sr.onclick = () => put({ enabled: true }, 'Starting Spotify Soloist again');
@@ -6843,20 +7077,35 @@
           const lso = $('#splibrespot');
           const fillLibrespot = async () => {
             if (!lso || !lso.isConnected) return;
-            let u; try { u = await api('GET', '/sources/spotify/librespot'); } catch (e) { lso.innerHTML = ''; return; }
+            let u, si; try { [u, si] = await Promise.all([api('GET', '/sources/spotify/librespot'), api('GET', '/sources/spotify/signin')]); } catch (e) { lso.innerHTML = ''; spotPlayShown(); return; }
             if (!lso.isConnected) return;
             const b = u.librespot;
-            const rows = [row('librespot (unofficial)', `${esc(u.warning)} Unlike Soloist, it can play into one of the node’s zones.`, `<input type="checkbox" class="switch" role="switch" id="lson" ${u.enabled ? 'checked' : ''} ${u.supported ? '' : 'disabled'} aria-label="librespot (unofficial)">`)];
-            if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">${esc(u.health.detail)}<div class="actions"><button class="btn sm" id="lsretry">Try again</button></div></div>`);
-            if (u.enabled && u.waiting_for) rows.push(`<div class="notice" role="status">Switched on, waiting for ${esc(u.waiting_for)}.</div>`);
-            if (u.enabled || b) {
-              rows.push(row('librespot', b ? `${esc(b.version || 'Found')}: ${b.from === 'config' ? 'set in the node config' : b.from === 'data' ? 'in the node’s bin folder' : 'installed on this machine'} (<code>${esc(b.path)}</code>).` : 'Not installed. librespot publishes no ready-made builds: install it with <code>cargo install librespot</code>, your distribution’s package or Homebrew, then reload this page (or point <code>[spotify] librespot</code> in the node config at it).', `<a class="btn ghost sm" href="https://github.com/librespot-org/librespot" target="_blank" rel="noopener">About librespot</a>`));
+            const lsd = (si.details && si.details.librespot) || {};
+            const lsIn = si.in_use && /^librespot/.test(si.in_use.way) ? si.in_use : lsd.signed_in ? { way: lsd.credentials_from ? 'librespot-file' : 'librespot', user: lsd.user, label: lsd.credentials_from ? 'librespot, from a credentials file' : 'librespot, picked in a Spotify app' } : null;
+            // librespot publishes no builds: nothing here until it is installed on this machine (an
+            // account still signed in without it: the switch and Sign out, to undo that)
+            if ((!b || !u.supported) && !lsIn) { lso.innerHTML = ''; spotPlayShown(); return; }
+            const gone = !b || !u.supported;
+            const rows = [row('librespot', `Plays into one of the node’s zones: pick it in a Spotify app on this network. ${esc(splitNote(u.warning)[0])}`, `<input type="checkbox" class="switch" role="switch" id="lson" ${u.enabled ? 'checked' : ''} aria-label="librespot">`)];
+            if (lsIn) rows.push(row(`Signed in as ${esc(lsIn.user || 'your Spotify account')}`, esc(lsIn.label), '<button class="btn ghost sm" id="lsout">Sign out</button>'));
+            if (gone) rows.push('<div class="notice" role="status">librespot isn’t installed on this machine.</div>');
+            if (!gone && u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">${esc(u.health.detail)}<div class="actions"><button class="btn sm" id="lsretry">Try again</button></div></div>`);
+            if (!gone && u.enabled && u.waiting_for) rows.push(`<div class="notice" role="status">Switched on, waiting for ${esc(u.waiting_for)}.</div>`);
+            if (!gone) {
+              rows.push(row('Program', `${esc(b.version || 'Found')}: ${b.from === 'config' ? 'set in the node config' : b.from === 'data' ? 'in the node’s bin folder' : 'installed on this machine'} (<code>${esc(b.path)}</code>).`, ''));
               const zoneOpts = u.zones.map((z) => `<option value="zone:${esc(z.id)}" ${u.output === 'zone' && u.zone_id === z.id ? 'selected' : ''}>Zone: ${esc(z.name)}</option>`).join('');
               rows.push(`<form class="set-row set-block" id="lsdev"><div class="set-label"><div class="set-name">Device and output</div>${help('The name Spotify apps show, and where the sound goes: this machine’s own sound output, or one of the node’s zones (librespot then pipes its audio into the node, and the zone starts, pauses and stops with it).')}</div><div class="set-body"><div class="toolbar"><input class="input" name="name" maxlength="64" placeholder="Device name" autocomplete="off" aria-label="librespot device name" value="${esc(u.device_name)}"><select class="input" name="out" aria-label="librespot output"><option value="local" ${u.output === 'local' ? 'selected' : ''}>This machine’s sound</option>${zoneOpts}</select><button class="btn" type="submit">Save</button></div></div></form>`);
               rows.push(row('Status', !u.running ? (u.enabled ? 'Not running.' : 'Off.') : `Running as “${esc(u.device_name)}”${u.user ? `, picked by ${esc(u.user)}` : '. Pick it in a Spotify app on this network'}.${u.now && u.now.title ? ` ${u.now.status === 'paused' ? 'Paused' : 'Playing'}: ${esc(u.now.title)}${u.now.artists && u.now.artists.length ? ' · ' + esc(u.now.artists.join(', ')) : ''}.` : ''}`, u.running ? '<span class="pill ok">Running</span>' : `<span class="pill">${u.enabled ? 'Waiting' : 'Off'}</span>`));
             }
-            lso.innerHTML = group('librespot', rows.join(''));
+            // Signed in with another librespot (spotifyd, raspotify, go-librespot): its credentials.json
+            if (!lsIn && !gone) rows.push(`<details class="small set-row set-block" id="lsfile"><summary>Signed in with another librespot? Use its credentials.json</summary><div class="stack"><form class="stack" id="lsfilepick"><div class="toolbar"><input class="input" type="file" name="file" aria-label="credentials.json" accept=".json,application/json"><button class="btn sm" type="submit">Use this file</button></div></form><form class="stack" id="lsfilepaste"><textarea class="input" name="text" rows="3" aria-label="credentials.json contents" placeholder='{"username": …, "auth_type": …, "auth_data": …}' autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn sm" type="submit">Use it</button><span class="muted small">Kept readable by the node only.</span></div></form><div class="notice warn" role="alert" id="lsfileerr" hidden></div></div></details>`);
+            lso.innerHTML = subGroup('librespot', rows.join('')); spotPlayShown();
             const put = async (body, ok) => { try { await api('PUT', '/sources/spotify/librespot', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
+            const lsImport = async (text) => { const err = $('#lsfileerr'); err.hidden = true; try { await api('POST', '/sources/spotify/signin/import', { text }); toast('librespot signed in'); render(); } catch (e) { err.textContent = e.message; err.hidden = false; } };
+            const lfp = $('#lsfilepick'); if (lfp) lfp.onsubmit = async (e) => { e.preventDefault(); const file = lfp.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } return lsImport(await file.text()); };
+            const lfs = $('#lsfilepaste'); if (lfs) lfs.onsubmit = (e) => { e.preventDefault(); return lsImport(lfs.querySelector('textarea').value); };
+            // Sign out of librespot by its way, also while the app is the one in use
+            const lo = $('#lsout'); if (lo) lo.onclick = async () => { try { await api('DELETE', `/sources/spotify/signin?way=${encodeURIComponent(lsIn.way)}`); toast('librespot signed out'); } catch (e) { toast(e.message, 'error'); } render(); };
             $('#lson').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'librespot is on' : 'librespot is off');
             const lr = $('#lsretry'); if (lr) lr.onclick = () => put({ enabled: true }, 'Starting librespot again');
             const ld = $('#lsdev'); if (ld) ld.onsubmit = (e) => { e.preventDefault(); const f = new FormData(ld); const out = String(f.get('out') || 'local'); put({ device_name: String(f.get('name') || '').trim(), output: out === 'local' ? 'local' : 'zone', zone_id: out.startsWith('zone:') ? out.slice(5) : '' }, 'librespot saved'); };
@@ -6868,14 +7117,14 @@
             let u; try { u = await api('GET', '/sources/soundcloud/unofficial'); } catch (e) { scm.innerHTML = ''; return; }
             if (!scm.isConnected) return;
             const broke = u.health && !u.health.ok;
-            const rows = [row('SoundCloud (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="scon" ${u.enabled ? 'checked' : ''} aria-label="SoundCloud (unofficial)">`)];
+            const rows = [`<p class="sg-lead" data-sg="lead">Search and play SoundCloud here; your likes and playlists with your sign-in token. Needs a SoundCloud web client ID.</p>`, row('SoundCloud (unofficial)', esc(splitNote(u.warning)[0]), `<input type="checkbox" class="switch" role="switch" id="scon" ${u.enabled ? 'checked' : ''} aria-label="SoundCloud (unofficial)">`)];
             if (broke) rows.push(`<div class="notice warn" role="status">Switched itself off: ${esc(u.health.detail)}. SoundCloud links still open on soundcloud.com.<div class="actions"><button class="btn sm" id="scretry">Try again</button></div></div>`);
-            if (u.client_from) rows.push(row('Client ID', `<code class="path">${esc(u.client_id || '')}</code> · ${u.client_from === 'config' ? 'set in the node config.' : 'set here. SoundCloud can stop accepting a client at any time; then enter another one.'}`, `<button class="btn ghost sm" id="scclientchange">Change</button>${u.client_from === 'settings' ? '<button class="btn ghost sm" id="scclientforget">Forget</button>' : ''}`));
-            rows.push(`<form class="set-row set-block" id="scclient" ${u.client_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">Client ID</div>${help('The node has no built-in SoundCloud client and reads none off soundcloud.com: enter a SoundCloud web client ID you are allowed to use. Until you do, SoundCloud stays off.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="Client ID" autocomplete="off" spellcheck="false" aria-label="SoundCloud client ID" required><button class="btn" type="submit">Save</button></div></div></form>`);
+            if (u.client_from) rows.push(row('Client ID', `<code class="path">${esc(u.client_id || '')}</code> · ${u.client_from === 'config' ? 'set in the node config.' : 'set here.'}`, `${u.client_from === 'settings' ? '<button class="btn ghost sm" id="scclientchange">Change</button><button class="btn ghost sm" id="scclientforget">Forget</button>' : ''}`));
+            rows.push(`<form class="set-row set-block" id="scclient" ${u.client_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">Client ID</div>${help('A SoundCloud web client ID you are allowed to use; SoundCloud stays off until one is set.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="Client ID" autocomplete="off" spellcheck="false" aria-label="SoundCloud client ID" required><button class="btn" type="submit">Save</button></div></div></form>`);
             if (u.client_from) {
               rows.push(u.signed_in
-                ? row('Signed in', `Your likes and playlists come from SoundCloud account ${esc(u.user || '')}. The token stays on the node and never comes back.`, '<button class="btn ghost sm" id="sctokenforget">Sign out</button>')
-                : `<form class="set-row set-block" id="sctoken"><div class="set-label"><div class="set-name">Your likes and playlists</div>${help('Optional: paste your own SoundCloud sign-in token (the one your browser uses while you are signed in). The node checks it once with SoundCloud and keeps it like a sign-in; it never shows it again. Without it, search and playback still work.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="token" type="password" placeholder="Sign-in token (optional)" autocomplete="off" spellcheck="false" aria-label="SoundCloud sign-in token" required><button class="btn" type="submit">Save</button></div></div></form>`);
+                ? row(`Signed in as ${esc(u.user || 'your SoundCloud account')}`, 'Your likes and playlists, below.', '<button class="btn ghost sm" id="sctokenforget">Sign out</button>', 'sg-in')
+                : `<form class="set-row set-block" id="sctoken"><div class="set-label"><div class="set-name">Your likes and playlists</div>${help('Optional: the sign-in token your browser uses on soundcloud.com. Checked once, never shown again.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="token" type="password" placeholder="Sign-in token (optional)" autocomplete="off" spellcheck="false" aria-label="SoundCloud sign-in token" required><button class="btn" type="submit">Save</button></div></div></form>`);
               rows.push(row('Streams', 'MP3 as SoundCloud serves it, progressive or stitched from HLS. Tracks SoundCloud encrypts (Go+) are skipped; a track SoundCloud only snips plays its 30-second preview.', ''));
               if (u.health && u.health.ok) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
             }
@@ -7023,15 +7272,7 @@
           }
           if (state.view !== 'source-item' || state.viewArg.id !== id || state.viewArg.source !== source) return;
           const qitems = it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms, image: it.image || null }));
-          const playFrom = async (i, replace = true) => {
-            const items = qitems.slice(i);
-            if (isBrowser()) {
-              const bitems = items.map((q, k) => ({ id: Date.now() + k, uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
-              if (replace) { state.browserQueue = bitems; browserPlay(0); } else state.browserQueue.push(...bitems);
-              return;
-            }
-            try { await api('POST', `/zones/${state.zone}/queue`, { items, replace, play: replace, at: 'end' }); toast(replace ? `Playing from ${srcName}` : 'Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
-          };
+          const playFrom = (i, replace = true) => playSourceItems(qitems.slice(i), replace, 'end', replace ? { shuffle: false } : {}); // (Play: in order, shuffle off)
           const canHeart = !!(await (async () => { try { await api('GET', '/favourites?uri=' + encodeURIComponent(it.url)); return true; } catch { return false; } })());
           main.innerHTML = backBtn('sources', srcName) + `<div class="artist-hero"><div class="portrait" style="border-radius:12px;background:hsl(${hue(it.title)} 35% 28%)">${it.image ? `<img src="${esc(it.image)}" alt="" data-err="remove">` : esc(initials(it.title))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, it.tracks.length + (it.tracks.length === 1 ? ' track' : ' tracks')].filter(Boolean).join(' · '))} · <a href="${esc(webUrl(it.url))}" target="_blank" rel="noopener">open</a>${it.licence ? (/^https?:/.test(it.licence) ? ` · <a href="${esc(webUrl(it.licence))}" target="_blank" rel="noopener">licence</a>` : ` · ${esc(it.licence)}`) : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to playlist">${icon('playlist')} Playlist</button>${it.library_album_id ? `<button class="btn ghost" id="ainlib" title="You already have this album">${icon('disc')} In your library</button>` : ''}${canHeart ? `<button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Favourited' : 'Favourite'}</button>` : ''}</div></div>${it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : ''}</div></div>`
             + `<div class="tracks">${it.tracks.map((t, i) => `<div class="track compact" data-i="${i}"><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue">${icon('plus')}</button></div></div>`).join('')}</div>`;
@@ -7040,7 +7281,7 @@
           const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { if (await setFavourite({ uri: it.url }, !on)) render(); } catch (er) { toast(er.message, 'error'); } };
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playFrom(Number(b.dataset.aplay), true));
           const ainlib = $('#ainlib'); if (ainlib) ainlib.onclick = () => setView('album', it.library_album_id);
-          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
+          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; browserAppend([{ id: Date.now(), uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }]); toast('Added to queue'); return; } try { const zid = state.zone; await zoneOp(zid, (t) => api('POST', `/zones/${encodeURIComponent(zid)}/queue`, { items: [qitems[i]], at: 'end' }, { signal: t.signal })); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
           break;
         }
         case 'radio': {
@@ -7351,7 +7592,7 @@
           const ia = $('#iartist'); if (ia) ia.onclick = () => setView('item', { kind: 'artist', id: pg.artist.id });
           const iq = $('#iartistq'); if (iq) iq.onclick = () => { search.value = pg.artist.name; runSearch(); };
           const ial = $('#ialbum'); if (ial) ial.onclick = () => setView('item', { kind: 'album', id: pg.album.id });
-          const playAll = (shuffle, how = 'replace', anchorEl) => { if (pg.unavailable) return toast(pg.unavailable, 'error'); if (!songs.length) return discoverPlay({ uri: pg.uri || '', page: pg.open_on[0] ? pg.open_on[0].url : pg.uri, title: pg.title, artist: fallback.artist, image: pg.image }, null, anchorEl); const list = shuffle ? [...songs].sort(() => Math.random() - 0.5) : songs; return playSongs(list, 0, how, pf, anchorEl, fallback); };
+          const playAll = (shuffle, how = 'replace', anchorEl) => { if (pg.unavailable) return toast(pg.unavailable, 'error'); if (!songs.length) return discoverPlay({ uri: pg.uri || '', page: pg.open_on[0] ? pg.open_on[0].url : pg.uri, title: pg.title, artist: fallback.artist, image: pg.image }, null, anchorEl, how === 'replace' ? { shuffle, how } : { how }); return playSongs(songs, 0, how, pf, anchorEl, fallback, how === 'replace' ? { shuffle } : {}); };
           $('#iplay').onclick = (e) => playAll(false, 'replace', e.currentTarget);
           stickyHead(state.itemTitle, (el) => playAll(false, 'replace', el));
           const sh = $('#ishuffle'); if (sh) sh.onclick = (e) => playAll(true, 'replace', e.currentTarget);
@@ -7410,7 +7651,8 @@
           await refreshQueue(false);
           if (state.view !== 'queue') return;
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
-          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" title="Shuffle what comes next; the playing track stays">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
+          const hadQsh = !!document.activeElement && document.activeElement.id === 'qshuffle';
+          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
             + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
           const qedit = async (i, op, to) => {
@@ -7427,8 +7669,10 @@
             }
             const it = q[i]; if (!it) return;
             try {
-              if (op === 'rm') await api('DELETE', `/zones/${encodeURIComponent(state.zone)}/queue/${it.id}`);
-              else { const j = op === 'to' ? to : op === 'up' ? i - 1 : i + 1; if (j === i) return; await api('PUT', `/zones/${encodeURIComponent(state.zone)}/queue/${it.id}`, { to_index: j }); }
+              // (in the zone's turn: a load on its way goes first, so it can't undo the edit afterwards)
+              const zid = state.zone; const j = op === 'rm' ? null : op === 'to' ? to : op === 'up' ? i - 1 : i + 1; if (j === i) return;
+              await zoneOp(zid, (t) => op === 'rm' ? api('DELETE', `/zones/${encodeURIComponent(zid)}/queue/${it.id}`, undefined, { signal: t.signal })
+                : api('PUT', `/zones/${encodeURIComponent(zid)}/queue/${it.id}`, { to_index: j }, { signal: t.signal }));
               refreshQueue();
             } catch (e) { toast(e.message, 'error'); }
           };
@@ -7471,21 +7715,20 @@
           });
           $$('[data-qdown]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qdown), 'down'));
           $$('[data-qrm]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qrm), 'rm'));
-          const qr = $('#qradio'); if (qr) qr.onclick = async () => { try { await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: !(z && z.radio) }); toast(z && z.radio ? 'Radio off' : 'Radio on: similar music follows the queue'); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; render(); } catch (e) { toast(e.message, 'error'); } };
-          const qsh = $('#qshuffle'); if (qsh) qsh.onclick = async () => {
-            if (isBrowser()) {
-              const bq = state.browserQueue; const start = state.browserIndex == null ? 0 : state.browserIndex + 1;
-              for (let i = bq.length - 1; i > start; i--) { const j = start + Math.floor(Math.random() * (i - start + 1)); [bq[i], bq[j]] = [bq[j], bq[i]]; }
-              render(); return;
-            }
-            try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/shuffle`); toast('Upcoming tracks shuffled'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+          const qr = $('#qradio'); if (qr) qr.onclick = async () => {
+            // (in the zone's turn, like a load, which carries the radio as it is when it goes)
+            const zid = state.zone; const on = !(z && z.radio);
+            try { await zoneOp(zid, async (t) => { await api('PUT', `/zones/${encodeURIComponent(zid)}/radio`, { on }, { signal: t.signal }); const zs = await api('GET', `/zones/${encodeURIComponent(zid)}`, undefined, { signal: t.signal }); if (zs && zs.id) state.zones[zs.id] = zs; }); toast(on ? 'Radio on: similar music follows the queue' : 'Radio off'); render(); } catch (e) { toast(e.message, 'error'); }
           };
+          // The same mode as the bar's Shuffle, with its state
+          // (the toggle keeps the focus across the page's redraw)
+          const qsh = $('#qshuffle'); if (qsh) { qsh.onclick = toggleShuffle; renderModes(); if (hadQsh) qsh.focus(); }
           const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Move to' }, ...zoneList().filter((o) => o.id !== state.zone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]);
           const qsv = $('#qsave'); if (qsv) qsv.onclick = async () => {
             const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: state.zone };
             try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); }
           };
-          const qc = $('#qclear'); if (qc) qc.onclick = async () => { try { await api('DELETE', `/zones/${state.zone}/queue`); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
+          const qc = $('#qclear'); if (qc) qc.onclick = async () => { const zid = state.zone; try { await zoneOp(zid, (t) => api('DELETE', `/zones/${encodeURIComponent(zid)}/queue`, undefined, { signal: t.signal })); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
           break;
         }
         case 'zones': {
@@ -7689,8 +7932,8 @@
           bindTrackRows(main, lists);
           $$('[data-dlalbum]', main).forEach((b) => b.onclick = () => { state.dlAlbum = Number(b.dataset.dlalbum); render(); main.scrollTo && main.scrollTo(0, 0); });
           const dc = $('[data-dlclose]', main); if (dc) dc.onclick = () => { state.dlAlbum = null; render(); };
-          $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = k === 'all' ? [...lists.all].sort(() => Math.random() - 0.5) : lists[k]; if (ts && ts.length) playTracks(ts, true); });
-          $$('[data-dlpl]', main).forEach((b) => b.onclick = () => playTracks(songsOf(pls[Number(b.dataset.dlpl)].track_ids), true));
+          $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = lists[k]; if (ts && ts.length) playTracks(ts, true, 'end', { shuffle: k === 'all' }); });
+          $$('[data-dlpl]', main).forEach((b) => b.onclick = () => playTracks(songsOf(pls[Number(b.dataset.dlpl)].track_ids), true, 'end', { shuffle: false }));
           break;
         }
         case 'settings': {
@@ -7835,9 +8078,15 @@
             ? qEntries.map(([src, q]) => row(esc(SERVICE_NAMES[src] || srcName(src)), applies(q.applies), `<span class="pill">${esc(String(q.value == null ? '—' : q.value))}</span>${q.applies === 'yours' ? ` <button class="btn ghost sm" data-qreset="${esc(src)}">Use the node’s</button>` : ''}`)).join('')
             : block('', 'Each service plays at the quality set on its page in Sources. Your own choice per service, over the node’s, comes here with the services’ quality choices.', '<button class="btn ghost" data-goto-sources>Open Sources</button>'));
           // This node › Service apps: the apps the admin sets once for everyone
-          // Built in, or the admin's own app (Advanced); the service's limits in plain words
+          // Built in, or the admin's own app; the service's limits in plain words
           const appFrom = (a) => a.from === 'settings' ? 'Your own app' : a.from === 'builtin' ? 'Built in' : a.from === 'config' ? 'Your own app, set in node.toml' : a.from ? 'Set' : '';
-          const appAdvanced = (a) => !a.set ? '' : `<details class="small app-adv"><summary>Advanced: use your own app</summary><form class="toolbar" data-appform="${esc(a.id)}">${(a.fields || []).map((f) => `<label class="sr-only" for="app-${esc(a.id)}-${esc(f.name)}">${esc(a.name)} ${esc(f.label)}</label><input id="app-${esc(a.id)}-${esc(f.name)}" name="${esc(f.name)}" class="input" type="${f.secret ? 'password' : 'text'}" autocomplete="off" spellcheck="false" placeholder="${esc(f.label)}${f.optional ? ' (if your app has one)' : ''}" ${f.optional ? '' : 'required'}>`).join('')}<button class="btn primary">Save</button></form>${(a.redirects || []).length ? `<p class="muted small">Your app lists ${a.redirects.length > 1 ? 'one of these redirect addresses (the second only with a secret)' : 'this redirect address'}:</p><ul class="app-redirects">${a.redirects.map((r) => `<li><code class="path">${esc(r)}</code></li>`).join('')}</ul>` : ''}${webUrl(a.get_one) ? `<p class="muted small"><a href="${esc(webUrl(a.get_one))}" target="_blank" rel="noopener">${icon('external')} Where to make one</a></p>` : ''}</details>`;
+          // Only what can be done here (owner, 2026-11-08): no row for an app with nothing to set and
+          // none in use, and no own-app form where the service hands none out (Qobuz, TIDAL's device
+          // clients); one saved here before keeps its Remove
+          const NO_OWN_APP = new Set(['qobuz', 'tidal-full']);
+          const ownAppForm = (a) => !!a.set && !NO_OWN_APP.has(a.id);
+          const appShown = (a) => a.configured || !!a.page || ownAppForm(a);
+          const appAdvanced = (a) => !ownAppForm(a) ? '' : `<details class="small app-adv"><summary>Use your own app</summary><form class="toolbar" data-appform="${esc(a.id)}">${(a.fields || []).map((f) => `<label class="sr-only" for="app-${esc(a.id)}-${esc(f.name)}">${esc(a.name)} ${esc(f.label)}</label><input id="app-${esc(a.id)}-${esc(f.name)}" name="${esc(f.name)}" class="input" type="${f.secret ? 'password' : 'text'}" autocomplete="off" spellcheck="false" placeholder="${esc(f.label)}${f.optional ? ' (if your app has one)' : ''}" ${f.optional ? '' : 'required'}>`).join('')}<button class="btn primary">Save</button></form>${(a.redirects || []).length ? `<p class="muted small">Your app lists ${a.redirects.length > 1 ? 'one of these redirect addresses (the second only with a secret)' : 'this redirect address'}:</p><ul class="app-redirects">${a.redirects.map((r) => `<li><code class="path">${esc(r)}</code></li>`).join('')}</ul>` : ''}${webUrl(a.get_one) ? `<p class="muted small"><a href="${esc(webUrl(a.get_one))}" target="_blank" rel="noopener">${icon('external')} Where to make one</a></p>` : ''}</details>`;
           // An app whose value lives on its own page (the AcoustID key with Identify): the way there, no form
           const appGo = (a) => a.page === 'library:node' ? ` <button class="btn ghost sm" data-applib="node">Open Node library</button>` : '';
           const appRow = (a) => `<div class="set-row"><div class="set-label"><div class="set-name">${esc(a.name)}</div>${help([appFrom(a), a.note ? esc(a.note) : ''].filter(Boolean).join(' · '))}${a.limits ? (() => { const [x, y] = splitNote(a.limits); return help(esc(x)) + (y ? `<details class="small morenote"><summary>More</summary><p class="set-help">${esc(y)}</p></details>` : ''); })() : ''}${appAdvanced(a)}</div><div class="set-ctl">${a.configured ? `<span class="pill ok">${a.from === 'builtin' ? 'Built in' : 'Set'}</span>` : '<span class="pill">Not set up</span>'}${a.from === 'settings' && a.set && (a.fields || []).length ? ` <button class="btn ghost sm" data-appreset="${esc(a.id)}">${a.builtin ? 'Use built-in' : 'Remove'}</button>` : ''}${appGo(a)}</div></div>`;
@@ -7845,7 +8094,7 @@
           const SRC_POLICIES = [['node', 'This node’s', 'Everyone plays TIDAL, Qobuz and Spotify through the sign-ins made here. Listeners can’t sign in to their own.'], ['own', 'Each person’s own', 'Everyone signs in to their own accounts; a listener without one gets “Open in” instead.'], ['choice', 'Each person chooses', 'This node’s by default; each listener may switch to their own.']];
           const curPolicy = ns.sources_policy || 'own';
           const policyTab = group('Sources for everyone', row('Whose sign-ins people play with', (SRC_POLICIES.find(([v]) => v === curPolicy) || SRC_POLICIES[1])[2] + ' Switching keeps every sign-in, yours and theirs.', `<div class="chips" role="radiogroup" aria-label="Whose sign-ins people play with">${SRC_POLICIES.map(([v, l]) => `<button class="chip scope ${curPolicy === v ? 'on' : ''}" role="radio" aria-checked="${curPolicy === v}" data-srcpolicy="${v}">${l}</button>`).join('')}</div>`));
-          const appsTab = policyTab + group('Set once, for everyone on this node', apps && apps.length ? apps.map(appRow).join('') : block('', 'No list from this node.', ''));
+          const appsTab = policyTab + group('Set once, for everyone on this node', apps && apps.length ? apps.filter(appShown).map(appRow).join('') : block('', 'No list from this node.', ''));
           // This homeserver: the bundled one
           const hsTab = bundled && bundled.configured ? group('The homeserver', row('Address', esc(bundled.icann_domain || ''), bundled.pubky_address ? `<code class="small">${esc(bundled.pubky_address)}</code>` : '')
             + row('Status', '', bundled.reachable ? `<span class="pill ok">Running${bundled.version ? ` · ${esc(bundled.version)}` : ''}</span>` : `<span class="pill bad">Not reachable</span>${bundled.error ? ` <span class="muted small">${esc(bundled.error)}</span>` : ''}`)
@@ -8293,7 +8542,7 @@
     const libChanged = !first && (restarted || (ev.library_rev != null && ev.library_rev !== link.libRev));
     const downFor = link.downSince ? Date.now() - link.downSince : 0;
     link.seq = ev.seq ?? null; link.boot = ev.boot ?? null; link.libRev = ev.library_rev ?? null;
-    state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); state.zonesSeen = true; ensureZone(); renderZoneName();
+    Object.keys(state.zones || {}).forEach(countEvent); state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ev.zones.forEach((z) => countEvent(z.id)); state.zonesSeen = true; ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
     setConn('ok', nodeLabel()); checkHealth(); mountHelp(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { const was = state.devOutputs; state.devOutputs = !!ns.dev_outputs; if (was !== state.devOutputs && state.view === 'zones') render(); }).catch(() => {});
@@ -8509,7 +8758,7 @@
       }
       if (ev.type === 'zone_event' && ev.event && ev.event.type === 'error' && state.starting && ev.zone === state.starting.zone) startFail(ev.event.message, true);
       if (ev.type === 'zone') {
-        const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state;
+        const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state; countEvent(ev.state.id);
         syncVolumeSliders(ev.state);
         if (state.starting && ev.state.id === state.starting.zone) {
           const fresh = state.starting.oldItem == null || (ev.state.now_playing && ev.state.now_playing.item.id !== state.starting.oldItem);
@@ -8533,7 +8782,7 @@
         // A group of yours went: rebuilt (follow it) or ended (back to your own zone). Ask first,
         // then fall back as for any zone that goes
         const yours = ev.zone === state.zone && (state.along || state.hosting || state.alongHome);
-        delete state.zones[ev.zone];
+        delete state.zones[ev.zone]; countEvent(ev.zone);
         if (yours) refreshAlong().finally(() => { ensureZone(); renderZoneName(); renderBar(); refreshQueue(); });
         else { ensureZone(); renderZoneName(); refreshAlong(); }
       }
