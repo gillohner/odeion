@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-11
 
+- **The phone's Library tabs keep your place visible.** Opening a section or returning with Back brings its selected tab into view, with nearby sections ready to tap. Resizing keeps the tab you are using with the keyboard visible, or the selected tab when focus is elsewhere. The tabs have larger touch targets, and updates elsewhere leave your scrolling alone.
+
 - **Signing in as another Pubky identity ends the old one's sync at once.** A sync or a vault pass still running for the identity signed out used to finish: it could bring that identity's playlists, bookmarks or sign-ins onto the node and push the node's changes to the old identity's homeserver. It now stops before its next write, on either side, and the new sign-in's own sync takes over.
 
 - **A restore that fails on the way leaves the library as it was.** Everything the restored library is to hold (this node's own settings, the sign-ins, listeners' own, invites and parties) is put together in a staged copy first; the live library is replaced in one step at the very end, so an error before it changes nothing, instead of leaving the restored library with this node's settings half carried over.
