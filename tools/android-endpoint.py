@@ -908,6 +908,14 @@ def offline_playback(node, track):
     """A song downloaded in the app plays with no network and no node (see the module's doc)."""
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     time.sleep(3)
+    # On "This phone": "Play from here" plays on the page's zone, and the UI tour before (Play to)
+    # leaves the page on the phone's zone on the node
+    moved = len(logcat())
+    pick('="This phone', "the page's “This phone”")
+    try:
+        until("the page on “This phone”", lambda: "the page controls this zone zone=browser" in logcat()[moved:], timeout=20)
+    except RuntimeError:
+        log("the page's move to “This phone” was not logged (it may have been on it already)")
     mark = len(logcat())
     tap(lambda n: 'text="Library"' in n or 'content-desc="Library"' in n, "Library")
     tap(lambda n: 'text="Songs"' in n or 'content-desc="Songs"' in n, "Songs")
