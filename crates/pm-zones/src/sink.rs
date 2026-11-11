@@ -631,6 +631,13 @@ pub trait Output: Send + Sync {
     ) -> Unmuted {
         let back = |l| crate::zone::back_to_limit(l, max, |db| self.percent_for_db(db));
         if !self.unmute_restores_level() {
+            // A percent-only output (AirPlay) clamps a dB level below its quietest one up to it.
+            // Under a limit at or below that floor, any level it plays is above the limit: it
+            // comes back silent (0 %), and says why
+            let percent_only = matches!(self.caps().hw_volume, Some(pm_model::VolumeKind::Percent));
+            let too_quiet =
+                percent_only && matches!(level, Volume::Db(_)) && self.quietest_db().is_some_and(|q| max < q);
+            let level = if too_quiet { Volume::Percent(0) } else { level };
             if let Err(e) = self.set_volume(level).await {
                 return Unmuted::nothing(e);
             }
@@ -638,7 +645,12 @@ pub trait Output: Send + Sync {
             return match self.set_volume(Volume::Mute(false)).await {
                 Ok(()) => Unmuted {
                     any: true,
-                    error: None,
+                    error: too_quiet.then(|| {
+                        SinkError::Device(format!(
+                            "{} can't play as quietly as this zone's volume limit ({max} dB), so it stays silent",
+                            self.name()
+                        ))
+                    }),
                     held: true,
                 },
                 // The level write already brought it back, at `level`
@@ -754,6 +766,12 @@ pub trait Output: Send + Sync {
 
     async fn set_volume(&self, _v: Volume) -> Result<(), SinkError> {
         Err(SinkError::NoVolume(self.id()))
+    }
+
+    /// The quietest level above silence a percent-only output plays, when a dB level below it is
+    /// played at it instead (AirPlay: -30 dB). None: it plays any level asked for.
+    fn quietest_db(&self) -> Option<f32> {
+        None
     }
 
     /// The highest percent level this output plays at or below `db` (a zone's volume limit caps

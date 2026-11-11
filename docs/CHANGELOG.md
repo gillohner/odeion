@@ -6,6 +6,9 @@ Newest first. Dates are when the change landed on `main`.
 
 - **Last.fm scrobbles stay with the sign-in they were played under.** A play that started before another Last.fm account (or the same one again) signed in is not scrobbled to the new sign-in. Signing out in Settings also drops the scrobbles that were only waiting in memory, and a late "sign in again" answer for an older sign-in no longer marks the current one as broken.
 - **Signing in right after "Sign out everywhere" sticks.** A sign-in made in the same second as the sign-out is no longer treated as older than it and moved aside on the next sync. Signing in again with the same credentials while the vault still holds the old sign-in keeps the new one. What this node has seen of a vault is now kept per identity, so after switching identity the other identity's copies are not refused as stale.
+- **Pubky Ring sign-in stops before you approve when your homeserver can't be found.** If the record of the identity signed in here is missing, names no homeserver, or can't be looked up, the sign-in says so before showing the code, instead of failing after Ring's approval.
+- **Unmuting an AirPlay speaker respects a volume limit below -30 dB.** AirPlay can't play quieter than -30 dB, so under a zone limit set lower it now stays silent on unmute and says why, instead of coming back at -30 dB.
+- Podcast positions are saved under the same lock as progress changes, so a save can no longer mix an older position with a newer change.
 
 ## 0.2.3
 

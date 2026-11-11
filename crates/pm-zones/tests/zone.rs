@@ -2244,6 +2244,111 @@ async fn an_output_that_chooses_its_level_on_unmuting_gets_the_limit_first() {
     );
 }
 
+/// A percent-only output that chooses its level on unmuting and clamps dB to its own -30 dB
+/// floor (AirPlay's way): every level is sent as a percent here, so the clamp is visible.
+struct PercentFloor {
+    inner: NullOutput,
+    asked: Mutex<Vec<Volume>>,
+    last: Mutex<Option<u8>>,
+}
+
+impl PercentFloor {
+    /// AirPlay's scale: linear over -30..0 dB, 0 % is silent.
+    fn db_of(v: Volume) -> Option<f32> {
+        match v {
+            Volume::Db(d) => Some(d.clamp(-30.0, 0.0)),
+            Volume::Percent(0) => Some(-144.0),
+            Volume::Percent(p) => Some(-30.0 + 30.0 * f32::from(p.min(100)) / 100.0),
+            _ => None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Output for PercentFloor {
+    fn id(&self) -> OutputId {
+        OutputId::new("percent-floor", "1")
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    fn unmute_restores_level(&self) -> bool {
+        false
+    }
+    fn percent_for_db(&self, db: f32) -> u8 {
+        ((db.clamp(-30.0, 0.0) + 30.0) / 30.0 * 100.0).floor() as u8
+    }
+    fn quietest_db(&self) -> Option<f32> {
+        Some(-30.0)
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        self.asked.lock().unwrap().push(v);
+        match v {
+            Volume::Percent(p) => *self.last.lock().unwrap() = Some(p),
+            Volume::Db(d) => *self.last.lock().unwrap() = Some(self.percent_for_db(d)),
+            _ => {}
+        }
+        Ok(())
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        Ok(None)
+    }
+}
+
+/// A zone limit below a percent-only output's own floor (-40 dB under AirPlay's -30 dB): any
+/// level it plays is above the limit, so it comes back silent and the unmute says why, never at
+/// the -30 dB it would clamp a dB level up to. A limit at or above its floor (-30 or -10 dB)
+/// with a level below it (-35 dB) still comes back audible.
+#[tokio::test]
+async fn an_unmute_below_a_percent_outputs_floor_stays_under_the_limit() {
+    for (limit, expect_silent) in [(-40.0_f32, true), (-10.0, false), (-30.0, false)] {
+        let zones = Zones::new(Arc::new(Factory {
+            tracks: BTreeMap::new(),
+            gate: Arc::new(Gate::default()),
+            hang: Arc::new(Gate::default()),
+        }));
+        zones.set_volume_limit(Some(Arc::new(move |_: &OutputId| Some(limit))));
+        let out = Arc::new(PercentFloor {
+            inner: NullOutput::with_volume(pm_model::VolumeKind::Percent),
+            asked: Mutex::new(Vec::new()),
+            last: Mutex::new(None),
+        });
+        let zone = zones.create("Receiver", out.clone());
+        // A dB level asked for (it shows as dB: the device can't say its own level)
+        let level = if expect_silent { -45.0 } else { -35.0 };
+        zone.set_volume(Volume::Db(level)).await.unwrap();
+        zone.set_volume(Volume::Mute(true)).await.unwrap();
+        out.asked.lock().unwrap().clear();
+        let r = zone.set_volume(Volume::Mute(false)).await;
+        zone.wait_acked().await;
+        let asked = out.asked.lock().unwrap().clone();
+        let first = *asked.first().expect("a level before the unmute");
+        let db = PercentFloor::db_of(first).expect("a level");
+        assert_eq!(asked.last(), Some(&Volume::Mute(false)), "{asked:?}");
+        if expect_silent {
+            assert_eq!(
+                first,
+                Volume::Percent(0),
+                "silent, not clamped up to -30 dB: {asked:?}"
+            );
+            let e = r.expect_err("the unmute says it stays silent");
+            assert!(e.to_string().contains("can't play as quietly"), "{e}");
+        } else {
+            r.unwrap();
+            assert!(
+                db > -144.0 && db <= limit,
+                "audible within the limit: {first:?} ({db} dB)"
+            );
+        }
+    }
+}
+
 /// A group whose later member refuses the unmute: the earlier member came back all the same,
 /// so the cap is applied to the group anyway, and the refusal is reported.
 #[tokio::test]

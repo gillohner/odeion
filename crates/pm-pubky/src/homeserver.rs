@@ -484,7 +484,22 @@ impl NodeHomeserver {
         target: Option<&PublicKey>,
         allow_local: bool,
     ) -> Result<Vec<crate::records::Freshened>, String> {
-        self.sign_in_records(identity, target, allow_local, true).await
+        self.sign_in_records(identity, target, allow_local, true, false)
+            .await
+    }
+
+    /// [`Self::fresh_for_sign_in`] before a sign-in's link exists: also refused when `identity`
+    /// (the one that approves) has no homeserver to route to ([`crate::records::unresolved_identity`]),
+    /// so Ring's approval isn't spent on a sign-in that would fail after it. Not for a sign-in
+    /// already approved (a lookup that times out then would end it after the approval).
+    pub async fn fresh_before_sign_in_link(
+        &self,
+        identity: Option<&PublicKey>,
+        target: Option<&PublicKey>,
+        allow_local: bool,
+    ) -> Result<Vec<crate::records::Freshened>, String> {
+        self.sign_in_records(identity, target, allow_local, true, true)
+            .await
     }
 
     /// [`Self::fresh_for_sign_in`] for a sign-in anyone allowed may approve (a controller or browser
@@ -498,17 +513,20 @@ impl NodeHomeserver {
         likely: Option<&PublicKey>,
         allow_local: bool,
     ) -> Result<Vec<crate::records::Freshened>, String> {
-        self.sign_in_records(likely, None, allow_local, false).await
+        self.sign_in_records(likely, None, allow_local, false, false)
+            .await
     }
 
     /// The lookups of [`Self::fresh_for_sign_in`]; `identity_selects`: the identity is the one
-    /// that approves, so its homeserver is the one the sign-in routes to.
+    /// that approves, so its homeserver is the one the sign-in routes to; `before_link`: no link
+    /// exists yet, so an approving identity with no homeserver found refuses.
     async fn sign_in_records(
         &self,
         identity: Option<&PublicKey>,
         target: Option<&PublicKey>,
         allow_local: bool,
         identity_selects: bool,
+        before_link: bool,
     ) -> Result<Vec<crate::records::Freshened>, String> {
         use crate::records::{self, freshen_until, IDENTITY_STAGE, SIGN_IN_LOOKUPS};
         let pkarr = self.pubky.client().pkarr();
@@ -529,15 +547,38 @@ impl NodeHomeserver {
             let user = identity?;
             let (u, packet) = freshen_until(pkarr, user, start + IDENTITY_STAGE).await;
             tracing::info!(key = %u.key, from = ?u.from, "pkarr: the signed-in identity's record");
-            let named = packet.as_ref().and_then(records::homeserver_in)?;
+            let Some(named) = packet.as_ref().and_then(records::homeserver_in) else {
+                return Some((u, None));
+            };
             let fresh = if first.iter().any(|k| ***k == named) {
                 None
             } else {
                 Some(freshen_until(pkarr, &named, start + SIGN_IN_LOOKUPS).await.0)
             };
-            Some((named.to_string(), fresh))
+            Some((u, Some((named.to_string(), fresh))))
         };
         let (mut out, own) = futures_util::future::join(ready, own).await;
+        let (looked_up, own) = match own {
+            Some((u, own)) => (Some(u), own),
+            None => (None, None),
+        };
+        // The identity that approves, whose homeserver couldn't be looked up: refused before the
+        // link exists (a local homeserver needs no lookup on the wider network)
+        if before_link
+            && identity_selects
+            && target.is_none()
+            && self.network == Network::Mainnet
+            && !allow_local
+        {
+            let named = own.as_ref().map(|(n, _)| n.as_str());
+            if let Some(why) = looked_up
+                .as_ref()
+                .and_then(|u| records::unresolved_identity(u, named))
+            {
+                tracing::warn!(?out, identity = ?looked_up, "pkarr: sign-in not started: {why}");
+                return Err(why);
+            }
+        }
         let selected = match (target, &own) {
             (Some(t), _) => Some(t.z32()),
             (None, Some((named, _))) if identity_selects => Some(named.clone()),

@@ -906,6 +906,9 @@ pub fn spawn_background(s: &Arc<NodeState>) {
 }
 
 fn record_positions(s: &NodeState) {
+    // The documents first, then the positions: a progress change made while this waited for them
+    // is read below and a position read before it can't overwrite it
+    let _docs = documents();
     let playing: Vec<(String, u64, Option<u64>)> = s
         .zones
         .list()
@@ -922,7 +925,6 @@ fn record_positions(s: &NodeState) {
     if playing.is_empty() {
         return;
     }
-    let _docs = documents();
     let all = feeds(s);
     let by_url: HashMap<&str, &Episode> = all
         .iter()

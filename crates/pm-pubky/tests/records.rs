@@ -272,6 +272,51 @@ async fn the_identitys_own_homeserver_decides_its_sign_in() {
     assert!(r.unwrap_err().contains("names only this device"));
 }
 
+/// The identity that approves, whose homeserver can't be found (no record of it, or a record
+/// naming no homeserver): the sign-in is refused before its link exists, so Ring's approval
+/// isn't spent on a sign-in that would fail after it. A log in anyone may approve, and a node on
+/// a local homeserver, still go on.
+#[tokio::test]
+async fn an_approving_identity_whose_homeserver_isnt_found_refuses_before_the_link() {
+    let user = Keypair::random();
+    let identity = pubky::PublicKey::from(user.public_key());
+    let malformed = SignedPacket::builder()
+        .txt(
+            "note".try_into().unwrap(),
+            "no homeserver here".try_into().unwrap(),
+            3600,
+        )
+        .timestamp(Timestamp::from(1_762_200_000_000_000))
+        .sign(&user)
+        .unwrap();
+    for (packets, says) in [
+        (vec![], "couldn't be found"),
+        (vec![malformed], "names no homeserver"),
+    ] {
+        let (url, _) = relay(packets.clone()).await;
+        let (c, _) = client(&url, &[]);
+        let r = mainnet(c)
+            .fresh_before_sign_in_link(Some(&identity), None, false)
+            .await;
+        let why = r.expect_err("refused before the link exists");
+        assert!(why.contains(says), "{why}");
+        // A sign-in already approved (the app back from Ring) isn't ended by it
+        let (c, _) = client(&url, &[]);
+        let after = mainnet(c).fresh_for_sign_in(Some(&identity), None, false).await;
+        assert!(after.is_ok(), "{after:?}");
+        // Whoever approves decides: only warmed, nothing refuses
+        let (c, _) = client(&url, &[]);
+        let warmed = mainnet(c).warm_for_sign_in(Some(&identity), false).await;
+        assert!(warmed.is_ok(), "{warmed:?}");
+        // A local homeserver's identity needs no record on the wider network
+        let (c, _) = client(&url, &[]);
+        let local = mainnet(c)
+            .fresh_before_sign_in_link(Some(&identity), None, true)
+            .await;
+        assert!(local.is_ok(), "{local:?}");
+    }
+}
+
 /// The network stalls on every lookup; the identity's record and its homeserver's are held
 /// here. Both stages fall back to the held copies within the whole step's time, and the sign-in
 /// goes on (the overall bound never cancels the second stage's cache read).

@@ -3398,7 +3398,7 @@ async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSt
         .sync_handle()
         .and_then(|h| pubky::PublicKey::try_from(h.z32()).ok());
     let records = hs
-        .fresh_for_sign_in(identity.as_ref(), None, s.bundled_homeserver().is_some())
+        .fresh_before_sign_in_link(identity.as_ref(), None, s.bundled_homeserver().is_some())
         .await
         .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
     let flow = hs
