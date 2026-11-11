@@ -259,8 +259,9 @@
     try { out = fn(); } catch (e) { console.error(e); toast((e && e.message) || 'That didn’t work; try again.', 'error'); return undefined; } finally { inHandler--; }
     if (!out || typeof out.then !== 'function') return out;
     // (until it settles, a redraw it makes is the press's: usage insights count its reads)
-    // (at most 10 s: a press that never settles doesn't make every later redraw its own)
-    pressing++; { let left = false; const settled = () => { if (!left) { left = true; pressing--; } }; out.then(settled, settled); setTimeout(settled, 10000); }
+    // (at most 10 s, or while its dialog is open: a press that never settles doesn't make every later
+    // redraw and request its own, and a confirmed dialog's change still counts)
+    pressing++; { let left = false; const settled = () => { if (!left) { left = true; pressing--; } }; out.then(settled, settled); const cap = () => { if (left) return; if (document.querySelector('dialog[open]')) setTimeout(cap, 10000); else settled(); }; setTimeout(cap, 10000); }
     const failed = (e) => { if (!e || e.name !== 'AbortError') toast((e && e.message) || 'That didn’t work; try again.', 'error'); };
     if (!el) { out.catch(failed); return out; }
     // Several actions on one control at once (the same click reaching its row's handler, or changes in a
