@@ -255,6 +255,11 @@ pub struct NodeState {
     /// WebDAV and drive scans going (they don't take the library folders' scan slot): an automatic
     /// run waits for them too.
     pub(crate) side_scans: std::sync::atomic::AtomicUsize,
+    /// Held by every scan while it reads and writes the library (the folders', the watcher's, a
+    /// WebDAV share's, a drive's) and by a match correction: a scan that read a file before a
+    /// correction can't store what it read after it. Scans wait for it; a correction waits a
+    /// while ([`crate::identify`]).
+    pub(crate) scan_gate: Mutex<()>,
     /// Pinakes cards for any link: by-uri, then paced resolves, cached.
     pub pinakes_reader: crate::pinakes_reader::PinakesReader,
     /// Deezer API origin (tests point it at a mock).
@@ -538,6 +543,7 @@ impl NodeState {
             identify: Mutex::new(Default::default()),
             identify_waiting: Default::default(),
             side_scans: Default::default(),
+            scan_gate: Mutex::new(()),
             pinakes_reader: Default::default(),
             presence: Default::default(),
             search_answers: Default::default(),
@@ -809,6 +815,8 @@ impl NodeState {
         let state = self.clone();
         tokio::task::spawn_blocking(move || {
             let mut summary = crate::types::LastScan::default();
+            // While it reads and writes: no match correction in between
+            let gate = state.scan_gate();
             let result = (|| -> Result<(), pm_library::LibraryError> {
                 let lib = pm_library::Library::open(&state.db_path)?;
                 let scanner = pm_library::Scanner::new(&lib).with_art_dir(&state.art_dir);
@@ -839,6 +847,7 @@ impl NodeState {
                 }
                 Ok(())
             })();
+            drop(gate);
             if let Err(e) = result {
                 tracing::error!("scan: {e}");
             }
@@ -2286,10 +2295,16 @@ impl NodeState {
         self.token_file.get().map(PathBuf::as_path)
     }
 
-    /// A WebDAV or drive scan going, counted until the guard goes (also when the scan panics).
-    pub(crate) fn side_scan(&self) -> SideScan<'_> {
+    /// A WebDAV or drive scan going, counted from before it is spawned until the guard goes (also
+    /// when the scan panics).
+    pub(crate) fn side_scan(self: &Arc<Self>) -> SideScan {
         self.side_scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        SideScan(&self.side_scans)
+        SideScan(self.clone())
+    }
+
+    /// The scan gate ([`Self::scan_gate`]), waited for.
+    pub(crate) fn scan_gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.scan_gate.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn is_scanning(&self) -> bool {
@@ -2298,11 +2313,13 @@ impl NodeState {
 }
 
 /// [`NodeState::side_scan`]'s guard.
-pub(crate) struct SideScan<'a>(&'a std::sync::atomic::AtomicUsize);
+pub(crate) struct SideScan(Arc<NodeState>);
 
-impl Drop for SideScan<'_> {
+impl Drop for SideScan {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0
+            .side_scans
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

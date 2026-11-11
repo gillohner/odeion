@@ -1892,36 +1892,58 @@ async fn with_automatic_matching_off_unsure_songs_wait_for_the_owner() {
     assert_eq!(recording_of(&s, id), Some(rec(1)));
 }
 
-/// Kimi review r2: no correction while a library scan goes (a scan that read the file before
-/// could store the old recording after it); a pick whose evidence changed since the settling read
-/// it isn't stored; one source's evidence is never folded into another's.
+/// Kimi review r2/r3: a correction waits for a scan going (a scan that read the file before could
+/// store the old recording after it), a while, then is refused; a scan asked for meanwhile still
+/// runs after it; a pick whose evidence changed since the settling read it isn't stored; one
+/// source's evidence is never folded into another's.
 #[tokio::test]
 async fn corrections_wait_for_scans_and_picks_for_their_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let s = state(dir.path(), None).await;
     let app = router(s.clone());
-    // A correction while a scan holds the library: refused, nothing changed
+    // A correction while a scan holds the gate: it waits, then lands
     let id = waiting(&s, dir.path(), "U", "Song U", &[fp(1, "Song U", "Band", 0.6)]);
-    assert!(s.begin_scan());
-    let (st, b) = call(
-        &app,
-        "POST",
-        &format!("/v1/library/tracks/{id}/match"),
-        Some(serde_json::json!({"recording_mbid": rec(2)})),
-    )
-    .await;
-    assert_eq!(st, StatusCode::CONFLICT, "{b}");
+    let correct = |id: i64, recording: u32| {
+        let app = app.clone();
+        tokio::spawn(async move {
+            call(
+                &app,
+                "POST",
+                &format!("/v1/library/tracks/{id}/match"),
+                Some(serde_json::json!({"recording_mbid": rec(recording)})),
+            )
+            .await
+        })
+    };
+    let gate = s.scan_gate();
+    let waiting_one = correct(id, 2);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!waiting_one.is_finished(), "it waits for the scan");
     assert!(canonical(&s, id).is_none());
-    s.end_scan();
-    let (st, b) = call(
-        &app,
-        "POST",
-        &format!("/v1/library/tracks/{id}/match"),
-        Some(serde_json::json!({"recording_mbid": rec(2)})),
-    )
-    .await;
+    drop(gate);
+    let (st, b) = waiting_one.await.unwrap();
     assert_eq!(st, StatusCode::OK, "{b}");
-    assert!(!s.is_scanning(), "the slot is given back");
+    assert_eq!(recording_of(&s, id), Some(rec(2)));
+    // ... a scan that goes on longer than it waits: refused, nothing changed
+    let other_song = waiting(&s, dir.path(), "W", "Song W", &[fp(1, "Song W", "Band", 0.6)]);
+    let gate = s.scan_gate();
+    let refused = correct(other_song, 3);
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    drop(gate);
+    let (st, b) = refused.await.unwrap();
+    assert_eq!(st, StatusCode::CONFLICT, "{b}");
+    assert!(canonical(&s, other_song).is_none());
+    // A scan asked for during a correction (the watcher's) still runs, after it
+    let music = dir.path().join("music/New");
+    std::fs::create_dir_all(&music).unwrap();
+    tone_wav(&music.join("01 New.wav"), 1);
+    let gate = s.scan_gate();
+    assert!(s.start_scan(vec![music.clone()]).unwrap(), "not dropped");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(s.is_scanning());
+    drop(gate);
+    until("the scan", || !s.is_scanning()).await;
+    track_id_by_name(&s, "01 New.wav");
     // A pick decided on options that changed meanwhile (a search added one): not stored
     let other = waiting(&s, dir.path(), "V", "Song V", &[fp(3, "Song V", "Band", 0.95)]);
     let lib = s.library.lock().unwrap();
@@ -1973,4 +1995,158 @@ async fn corrections_wait_for_scans_and_picks_for_their_evidence() {
         (row.source.as_str(), row.score, row.release_mbid),
         ("search", 0.8, None)
     );
+}
+
+/// Kimi review r3: an automatic pick is decided on what the song was; a scan that finds its file
+/// or tags changed reopens it (checked again), never keeps the old pick. Unchanged, it stays.
+#[tokio::test]
+async fn a_changed_file_reopens_an_automatic_pick() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let id = waiting(
+        &s,
+        dir.path(),
+        "X",
+        "Song X",
+        &[fp(1, "Song X", "Band", 0.95), fp(2, "Song X", "Band", 0.95)],
+    );
+    answered(
+        &s,
+        id,
+        0.95,
+        &[
+            (1, "Song X", "Band", Some(10.0)),
+            (2, "Song X", "Band", Some(10.0)),
+        ],
+    );
+    recheck_run(&s).await;
+    assert!(matches!(
+        canonical(&s, id),
+        Some((_, pm_model::Confidence::Auto { .. }))
+    ));
+    // A scan of the unchanged file: the pick stays
+    let t = s
+        .library
+        .lock()
+        .unwrap()
+        .get_track(pm_model::TrackId(id))
+        .unwrap()
+        .unwrap();
+    s.library.lock().unwrap().upsert_track(&t).unwrap();
+    assert!(matches!(
+        canonical(&s, id),
+        Some((_, pm_model::Confidence::Auto { .. }))
+    ));
+    // A scan that read the file changed (its commit landing after the pick): reopened
+    let mut changed = t.clone();
+    changed.file.size_bytes += 1;
+    changed.canonical = None;
+    s.library.lock().unwrap().upsert_track(&changed).unwrap();
+    assert!(canonical(&s, id).is_none(), "no stale automatic pick");
+    let c = s.library.lock().unwrap().identity_counts().unwrap();
+    assert_eq!((c.unchecked, c.by.auto), (1, 0), "{c:?}");
+}
+
+/// Claude review r3: the WebDAV/drive scan counter is given back when a scan panics.
+#[tokio::test]
+async fn a_panicking_side_scan_gives_its_count_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let s2 = s.clone();
+    let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _scan = s2.side_scan();
+        panic!("a scan failing");
+    }));
+    assert!(hit.is_err());
+    assert_eq!(s.side_scans.load(SeqCst), 0);
+}
+
+/// Claude review r3: a correction to the folder's own fit keeps its release (and tag fixes skip a
+/// song whose match changed while they waited to write).
+#[tokio::test]
+async fn a_correction_keeps_the_folders_release_and_tag_fixes_check_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let app = router(s.clone());
+    let mut fit = fp(7, "Song Y", "Band", 0.9);
+    fit.source = "album".into();
+    fit.release = Some(mbid(REL));
+    let id = waiting(&s, dir.path(), "Y", "Song Y", &[fit]);
+    let (st, b) = call(
+        &app,
+        "POST",
+        &format!("/v1/library/tracks/{id}/match"),
+        Some(serde_json::json!({"recording_mbid": rec(7), "release_mbid": REL})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(
+        s.library.lock().unwrap().identify_release(id).unwrap().as_deref(),
+        Some(REL)
+    );
+    // Tag fixes: listed with recording 30, corrected to 31 while they waited for the write lock
+    let path = dir.path().join("music/Z/01 Z.wav");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    tone_wav(&path, 1);
+    let z = s
+        .library
+        .lock()
+        .unwrap()
+        .upsert_track(&untagged_track(path, "Z", "Band"))
+        .unwrap()
+        .0;
+    s.library
+        .lock()
+        .unwrap()
+        .settle(
+            z,
+            &pm_library::db::SettleAnswer::Identified {
+                recording: pm_model::MusicUri::Recording { mbid: mbid(&rec(30)) },
+                confidence: pm_model::Confidence::AlbumFit { score: 0.95 },
+                acoustid: None,
+                detail: "album_fit".into(),
+                release: None,
+                input_key: None,
+            },
+        )
+        .unwrap();
+    let writes = identify::id_writes();
+    let app2 = app.clone();
+    let fixes = tokio::spawn(async move {
+        call(
+            &app2,
+            "POST",
+            "/v1/library/tag-fixes",
+            Some(serde_json::json!({})),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let done = s
+        .library
+        .lock()
+        .unwrap()
+        .rematch(z, Some(&rec(30)), Some((&mbid(&rec(31)), None)), false, None)
+        .unwrap();
+    assert!(matches!(done, pm_library::Rematch::Done { .. }));
+    drop(writes);
+    let (st, r) = fixes.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let skipped: Vec<(i64, String)> = r["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| {
+            (
+                k["track_id"].as_i64().unwrap(),
+                k["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        skipped.contains(&(z, "its match changed meanwhile".to_string())),
+        "{r}"
+    );
+    let (_, tags) = pm_library::probe_and_read(&dir.path().join("music/Z/01 Z.wav")).unwrap();
+    assert_eq!(tags.recording_mbid, None, "nothing written over the correction");
 }

@@ -232,11 +232,13 @@ pub enum AutoSettle {
     NotOffered,
     /// The owner rejected a recording for it.
     Rejected,
+    /// A scan was writing: left for the next pass.
+    Scanning,
 }
 
 impl AutoSettle {
     /// Every outcome.
-    pub const ALL: [AutoSettle; 7] = [
+    pub const ALL: [AutoSettle; 8] = [
         AutoSettle::Stored,
         AutoSettle::Changed,
         AutoSettle::NoFile,
@@ -244,6 +246,7 @@ impl AutoSettle {
         AutoSettle::Left,
         AutoSettle::NotOffered,
         AutoSettle::Rejected,
+        AutoSettle::Scanning,
     ];
 
     pub fn name(self) -> &'static str {
@@ -255,6 +258,7 @@ impl AutoSettle {
             Self::Left => "left",
             Self::NotOffered => "not_offered",
             Self::Rejected => "rejected",
+            Self::Scanning => "scanning",
         }
     }
 }
@@ -807,14 +811,23 @@ impl Library {
         }
         // The file replaced or its tags changed: suggestions found for what it was are dropped (a
         // review page loaded before can't confirm them), and a song without an identity is
-        // checked again by the next run. An identity stays, as it always did.
+        // checked again by the next run. An identity stays, as it always did, except an automatic
+        // pick (decided on what the song was).
         if before.is_some() && before != identify_input_of(&tx, track_id, &path)? {
-            let open: bool = tx.query_row(
-                "SELECT canonical_uri IS NULL FROM tracks WHERE id = ?1",
+            let (open, auto): (bool, bool) = tx.query_row(
+                "SELECT canonical_uri IS NULL, COALESCE(canonical_confidence_source, '') = 'auto' FROM tracks WHERE id = ?1",
                 params![track_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            if open {
+            // An automatic pick was decided on what the song was: reopened, checked again
+            if auto {
+                tx.execute(
+                    "UPDATE tracks SET canonical_uri = NULL, canonical_confidence_source = NULL, canonical_confidence_score = NULL
+                     WHERE id = ?1",
+                    params![track_id],
+                )?;
+            }
+            if open || auto {
                 tx.execute(
                     "DELETE FROM identify_suggestions WHERE track_id = ?1",
                     params![track_id],
@@ -4375,22 +4388,18 @@ fn suggestions_of(conn: &Connection, track: i64) -> Result<Vec<SuggestionRow>> {
 /// ([`crate::auto_settle::folder_release`]): each song's vote is its release when a run, its tags
 /// or the owner identified it (never an automatic pick), else the release its album's tags name.
 fn folder_release_on(conn: &Connection, dir: &Path) -> Result<Option<String>> {
+    // Exactly this folder's files (not a sibling folder named alike), hidden files left out
     let prefix = format!("{}/", dir.to_string_lossy().trim_end_matches('/'));
     let mut stmt = conn.prepare(
         "SELECT CASE WHEN t.canonical_uri IS NOT NULL AND COALESCE(t.canonical_confidence_source, '') <> 'auto'
                        AND s.release_mbid IS NOT NULL THEN s.release_mbid ELSE a.release_mbid END
          FROM files f JOIN tracks t ON t.id = f.track_id
            LEFT JOIN identify_state s ON s.track_id = t.id LEFT JOIN albums a ON a.id = t.album_id
-         WHERE f.path LIKE ?1 ESCAPE '\\' AND instr(substr(f.path, ?2), '/') = 0",
+         WHERE substr(f.path, 1, ?2) = ?1 AND instr(substr(f.path, ?2 + 1), '/') = 0
+           AND NOT EXISTS (SELECT 1 FROM hidden_files h WHERE h.path = f.path)",
     )?;
     let votes: Vec<Option<String>> = stmt
-        .query_map(
-            params![
-                format!("{}%", like_escape(&prefix)),
-                prefix.chars().count() as i64 + 1
-            ],
-            |r| r.get(0),
-        )?
+        .query_map(params![prefix, prefix.chars().count() as i64], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
     Ok(crate::auto_settle::folder_release(
         votes.iter().flatten().map(String::as_str),

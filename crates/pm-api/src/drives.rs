@@ -959,11 +959,14 @@ pub struct NewRoot {
 
 fn start_scan(s: &Arc<NodeState>, root: Root) {
     let s2 = s.clone();
+    // Counted before it is spawned: an automatic run or a correction never misses it
+    let scan = s.side_scan();
     tokio::task::spawn_blocking(move || {
         let scanned = {
-            let _scan = s2.side_scan();
+            let _gate = s2.scan_gate();
             scan_root(&s2, &root)
         };
+        drop(scan);
         match scanned {
             Ok(r) => {
                 tracing::info!(drive = root.provider.name(), folder = %root.name, added = r.files_added, removed = r.files_removed, errors = r.errors.len(), "drive scan done");

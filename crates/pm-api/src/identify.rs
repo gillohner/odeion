@@ -1784,7 +1784,13 @@ pub async fn auto_settle_pass(s: &NodeState) -> Result<SettleReport, ApiError> {
             options: &signature,
             folder: fr.as_deref().map(|r| (dir.as_path(), r)),
         };
-        let stored = write_waiting(s, |lib| lib.settle_auto(id, &pick)).await?;
+        // Not while a scan writes (it may hold what it read before this pick): left to the next
+        // pass (and a scan that changes the song's file reopens an automatic pick anyway)
+        let stored = write_waiting(s, |lib| match s.scan_gate.try_lock() {
+            Err(std::sync::TryLockError::WouldBlock) => Ok(pm_library::AutoSettle::Scanning),
+            _ => lib.settle_auto(id, &pick),
+        })
+        .await?;
         if stored == pm_library::AutoSettle::Stored {
             report.settled += 1;
             *report.by_rule.entry(rule.name().to_string()).or_default() += 1;
@@ -2995,6 +3001,13 @@ pub(crate) async fn set_match(
     Ok(Json(out))
 }
 
+/// How long a correction waits for a scan going to end before it gives up (409).
+const CORRECTION_WAIT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_secs(2)
+} else {
+    std::time::Duration::from_secs(30)
+};
+
 /// One ID write into a file at a time (a correction, "Write IDs" after a run or on the page), each
 /// checking what the song is right before it writes: two writers never leave a file naming what
 /// the other one replaced.
@@ -3054,21 +3067,25 @@ fn correct(
     use pm_library::Rematch;
     let _one = id_writes();
     // No scan alongside it: a scan that read the file before could store the old recording after
-    // the correction (the library folders' scan slot is held; WebDAV and drive scans are waited
-    // out by the caller trying again)
-    if s.side_scans.load(std::sync::atomic::Ordering::SeqCst) > 0 || !s.begin_scan() {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "A library scan is going; nothing was changed. Try again when it is done.",
-        ));
-    }
-    struct Slot<'a>(&'a NodeState);
-    impl Drop for Slot<'_> {
-        fn drop(&mut self) {
-            self.0.end_scan();
+    // the correction. It waits for the scan gate a while; scans wait for it in turn
+    let _gate = {
+        let since = std::time::Instant::now();
+        loop {
+            match s.scan_gate.try_lock() {
+                Ok(g) => break g,
+                Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) if since.elapsed() < CORRECTION_WAIT => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        "A library scan is going; nothing was changed. Try again when it is done.",
+                    ))
+                }
+            }
         }
-    }
-    let _slot = Slot(s);
+    };
     let (track, now, release_kept, choice) = {
         let lib = s.library.lock().expect("library poisoned");
         // A release only when the folder's own fit names it (the album lane's option): a search
