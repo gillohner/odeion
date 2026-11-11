@@ -2101,6 +2101,10 @@ async fn enqueue(
         QueueAt::Next => Insert::Next,
     };
     let ids = zone.enqueue(items, at);
+    // A queue replaced with shuffle on plays shuffled, the order sent kept as the original one
+    if body.replace {
+        zone.shuffle_replacement();
+    }
     if body.play {
         if body.replace {
             zone.play_index(0);
@@ -25010,4 +25014,187 @@ exec sleep 300
 
     // Automatic matching, automatic settling and "Wrong match?" (their own file)
     mod identify_auto;
+
+
+    /// An 8-item queue playing on the null output with repeat one, `index` current; the zone.
+    async fn looping_queue(
+        n: usize,
+        index: usize,
+    ) -> (tempfile::TempDir, Arc<NodeState>, axum::Router, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("t.wav");
+        write_wav(&wav, 441);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let items: Vec<_> = (0..n)
+            .map(|i| serde_json::json!({"uri": wav.to_string_lossy(), "title": format!("t{i}")}))
+            .collect();
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": items, "replace": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/repeat"),
+            Some(serde_json::json!({"repeat": "one"})),
+        )
+        .await;
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "play", "index": index})),
+        )
+        .await;
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        for _ in 0..500 {
+            if zone.state().now_playing.is_some_and(|n| n.index == index) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(zone.state().now_playing.map(|n| n.index), Some(index));
+        (dir, s, app, zid)
+    }
+
+    fn queue_titles(z: &serde_json::Value) -> Vec<String> {
+        z["queue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["title"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// A queue replaced while the zone's shuffle is on plays shuffled: shuffle stays on and means
+    /// it, the order sent is kept as the original one, and shuffle off gives it back.
+    #[tokio::test]
+    async fn a_queue_replaced_with_shuffle_on_plays_shuffled() {
+        let (dir, s, app, zid) = looping_queue(8, 0).await;
+        let wav = dir.path().join("t.wav");
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/shuffle"),
+            Some(serde_json::json!({"shuffle": true})),
+        )
+        .await;
+        let sent: Vec<String> = (0..10).map(|i| format!("n{i}")).collect();
+        let items: Vec<_> = sent
+            .iter()
+            .map(|t| serde_json::json!({"uri": wav.to_string_lossy(), "title": t}))
+            .collect();
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        // A shuffle leaves ten items as they were once in 10! tries: replace again then
+        let mut played = Vec::new();
+        for _ in 0..3 {
+            let (st, _) = call(
+                &app,
+                "POST",
+                &format!("/v1/zones/{zid}/queue"),
+                Some(serde_json::json!({"items": items, "replace": true})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+            assert_eq!(z["shuffle"], true, "{z}");
+            played = queue_titles(&z);
+            if played != sent {
+                break;
+            }
+        }
+        assert_ne!(played, sent, "plays shuffled");
+        let order = zone.shuffle_order().expect("shuffled");
+        let original: Vec<String> = order.iter().map(|i| played[*i].clone()).collect();
+        assert_eq!(original, sent, "the order sent is the original order");
+        let (_, z) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/shuffle"),
+            Some(serde_json::json!({"shuffle": false})),
+        )
+        .await;
+        assert_eq!(queue_titles(&z), sent, "shuffle off: the order sent");
+        // Shuffle off: a replace plays in the order sent
+        let (_, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": items, "replace": true})),
+        )
+        .await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        assert_eq!(
+            (queue_titles(&z), z["shuffle"].as_bool()),
+            (sent.clone(), Some(false))
+        );
+    }
+
+    /// Where the playing item is after its queue changes order: `now_playing.index` follows it
+    /// (shuffle off puts it back in its original place; an earlier item moved after it moves it
+    /// up one), always the same as `queue_index`.
+    #[tokio::test]
+    async fn now_playing_index_follows_the_item_when_the_queue_reorders() {
+        let (_dir, s, app, zid) = looping_queue(8, 0).await;
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        let same_place = |z: &serde_json::Value| {
+            let qi = z["queue_index"].as_u64().unwrap() as usize;
+            assert_eq!(z["now_playing"]["index"].as_u64(), Some(qi as u64), "{z}");
+            assert_eq!(z["now_playing"]["item"]["id"], z["queue"][qi]["id"], "{z}");
+            z["now_playing"]["item"]["title"].as_str().unwrap().to_string()
+        };
+        // Shuffle on (the playing item goes first), play another one, shuffle off
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/shuffle"),
+            Some(serde_json::json!({"shuffle": true})),
+        )
+        .await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        let k = 5;
+        let title = z["queue"][k]["title"].as_str().unwrap().to_string();
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "play", "index": k})),
+        )
+        .await;
+        for _ in 0..500 {
+            if zone.state().now_playing.is_some_and(|n| n.index == k) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/shuffle"),
+            Some(serde_json::json!({"shuffle": false})),
+        )
+        .await;
+        let z = serde_json::to_value(zone.wait_acked().await).unwrap();
+        assert_eq!(same_place(&z), title);
+        let at: usize = title[1..].parse().unwrap();
+        assert_eq!(
+            z["queue_index"].as_u64(),
+            Some(at as u64),
+            "back in its original place"
+        );
+        // An earlier item moved after the playing one: it moves up one
+        let first = z["queue"][0]["id"].as_u64().unwrap();
+        zone.move_item(first, at);
+        let st = zone.wait_acked().await;
+        let z = serde_json::to_value(&st).unwrap();
+        assert_eq!(same_place(&z), title);
+        assert_eq!(z["queue_index"].as_u64(), Some(at as u64 - 1));
+    }
 }

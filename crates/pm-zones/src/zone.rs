@@ -378,6 +378,18 @@ impl Zone {
         self.queue.lock().expect("queue poisoned").shuffle_order()
     }
 
+    /// Shuffle a replacement only while shuffle is still on. Checking the mode and
+    /// reshuffling share one guard, so a concurrent shuffle-off cannot be undone.
+    pub fn shuffle_replacement(&self) {
+        let seed = seed();
+        self.with_queue(|q| {
+            if q.shuffle() {
+                // Clear already removed the old cursor. Preserve a Play completed since then.
+                q.reshuffle(seed);
+            }
+        });
+    }
+
     /// What is saved per zone, from one look at the queue ([`Queue::snapshot`]).
     pub fn queue_snapshot(&self) -> QueueSnapshot {
         self.queue.lock().expect("queue poisoned").snapshot()

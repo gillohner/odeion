@@ -2814,3 +2814,138 @@ async fn an_audible_member_that_refuses_its_correction_is_not_hidden() {
         VolumeLevel::Db(-20.0)
     );
 }
+
+
+/// The playing item's place follows the queue while its track plays on (no new start reads it
+/// again): after shuffle off, `now_playing.index` is where the item went back to, and after an
+/// earlier item is moved after it, one place up; always `queue_index`, the same item.
+#[tokio::test]
+async fn now_playing_index_follows_a_reorder_while_the_track_plays() {
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    let tracks: Vec<(&str, u32, u64)> = names.iter().map(|n| (*n, RATE, 100_000)).collect();
+    let r = rig(&tracks);
+    r.zone.enqueue(
+        names.iter().rev().map(|n| QueueItem::new(*n)).collect(),
+        Insert::End,
+    );
+    // Deterministic play order, with the original order recorded separately.
+    r.zone
+        .restore_shuffle(&(0..names.len()).rev().collect::<Vec<_>>());
+    let shuffled: Vec<String> = r
+        .zone
+        .wait_acked()
+        .await
+        .queue
+        .iter()
+        .map(|i| i.uri.clone())
+        .collect();
+    assert_ne!(shuffled, names, "the fixture has a non-identity play order");
+    // An item the shuffle moved
+    let k = (0..names.len()).find(|k| shuffled[*k] != names[*k]).unwrap();
+    let uri = shuffled[k].clone();
+    r.zone.play_index(k);
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let st = r.zone.wait_acked().await;
+    assert_eq!(
+        st.now_playing.as_ref().map(|n| (n.index, n.item.uri.clone())),
+        Some((k, uri.clone()))
+    );
+    let same_place = |st: &pm_zones::ZoneState| {
+        let n = st.now_playing.as_ref().expect("playing");
+        assert_eq!(Some(n.index), st.queue_index, "{st:?}");
+        assert_eq!(st.queue[n.index].id, n.item.id, "{st:?}");
+        assert_eq!(n.item.uri, uri);
+        n.index
+    };
+    // Shuffle off: back in its original place, still playing
+    r.zone.set_shuffle(false);
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let st = r.zone.wait_acked().await;
+    let at = same_place(&st);
+    assert_eq!(at, names.iter().position(|n| *n == uri).unwrap());
+    // An earlier item moved after it: one place up. (The first item is earlier unless it is
+    // the playing one; then move the last one before it.)
+    let (id, to, want) = if at > 0 {
+        (st.queue[0].id, at, at - 1)
+    } else {
+        (st.queue[st.queue.len() - 1].id, 0, 1)
+    };
+    assert!(r.zone.move_item(id, to));
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let st = r.zone.wait_acked().await;
+    assert_eq!(same_place(&st), want);
+}
+
+/// A second controller can finish Play after replacement enqueue but before its shuffle.
+#[tokio::test]
+async fn replacement_shuffle_preserves_a_play_completed_after_enqueue() {
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    let tracks: Vec<(&str, u32, u64)> = names.iter().map(|n| (*n, RATE, 100_000)).collect();
+    let r = rig(&tracks);
+    r.zone.set_shuffle(true);
+    r.zone.stop();
+    r.zone.clear();
+    r.zone
+        .enqueue(names.iter().map(|n| QueueItem::new(*n)).collect(), Insert::End);
+    r.zone.wait_acked().await;
+    r.zone.play_index(3);
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let playing = r.zone.wait_acked().await.now_playing.unwrap().item.id;
+    // Resume the replacement only after the other controller's Play has completed.
+    r.zone.shuffle_replacement();
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let st = r.zone.wait_acked().await;
+    let np = st.now_playing.as_ref().unwrap();
+    assert_eq!(np.item.id, playing);
+    assert_eq!(st.queue_index, Some(np.index));
+    assert_eq!(st.queue[np.index].id, playing);
+    let next = st.queue[np.index + 1].id;
+    r.zone.next();
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let st = r.zone.wait_acked().await;
+    let np = st.now_playing.as_ref().unwrap();
+    assert_eq!(np.item.id, next);
+    assert_eq!(st.queue_index, Some(np.index));
+}
+
+/// A replacement delayed at the former mode-read/mutation boundary must respect shuffle-off.
+#[tokio::test]
+async fn a_replacement_never_reenables_shuffle_turned_off_by_another_controller() {
+    let r = rig(&[("a", RATE, 100_000), ("b", RATE, 100_000)]);
+    let zone = Arc::new(r.zone);
+    zone.enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    zone.set_shuffle(true);
+    let boundary = Arc::new(std::sync::Barrier::new(2));
+    let proceed = Arc::new(std::sync::Barrier::new(2));
+    let replacement = {
+        let zone = zone.clone();
+        let boundary = boundary.clone();
+        let proceed = proceed.clone();
+        std::thread::spawn(move || {
+            assert!(zone.shuffle());
+            boundary.wait();
+            proceed.wait();
+            zone.shuffle_replacement();
+        })
+    };
+    boundary.wait();
+    zone.set_shuffle(false);
+    proceed.wait();
+    replacement.join().unwrap();
+    assert!(!zone.shuffle());
+    assert_eq!(
+        zone.wait_acked()
+            .await
+            .queue
+            .iter()
+            .map(|i| i.uri.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+}

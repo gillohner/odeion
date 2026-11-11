@@ -627,6 +627,10 @@ async fn dispatch(
                     }
                     if !items.is_empty() {
                         zone.enqueue(items, Insert::End);
+                        // A list set with shuffle on plays shuffled, as sent being the original order
+                        if action == "set" {
+                            zone.shuffle_replacement();
+                        }
                     }
                 }
                 "start" => {
