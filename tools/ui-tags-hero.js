@@ -328,27 +328,30 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       // ---- G: the screenshot's case: a library album with no MusicBrainz match ----
       pages['album/lib-137'] = item('album', 'lib-137', { target: { album_id: 137 }, songs: [{ id: 'lib-501', track_id: 501, title: 'Track one', artist: 'Various', duration_ms: 200000, no: 1 }], on_pubky: { uri: GUESS, indexed: true, tags: [['guessed', 9]], taggers: 9 } });
       own = { 'album:137': 'needs_match' }; pub = { 'album:137': 422 }; uris = {};
-      await go('/album/lib-137'); await page.locator('#htags').waitFor(); await sleep(400);
+      await go('/album/lib-137'); await page.locator('#hmatch [data-htag-match]').waitFor(); await sleep(400);
       assert.doesNotMatch(await page.locator('#htags').innerText(), /guessed/, 'a guessed identity\'s tags never show');
       assert.equal(await page.locator('#htags [data-htag-plus], #htags input[data-htag-add]').count(), 0, 'no tag goes to a guessed identity');
-      assert.match(await page.locator('#htags').innerText(), /Match this album to tag it/);
+      // (one small row under Play since TASK-phone-ui-simplify-1108: "Not matched to MusicBrainz · Match")
+      assert.match(await page.locator('#hmatch').innerText(), /Not matched to MusicBrainz/);
+      assert.match(await page.locator('#hmatch [data-htag-match]').getAttribute('aria-label'), /Match this album to tag it/);
       assert.equal(await page.locator('#itags').count(), 0);
       await shot('album-unmatched');
-      await page.locator('#htags [data-htag-match]').click();
+      await page.locator('#hmatch [data-htag-match]').click();
       await page.locator('#main h1, #main h2').filter({ hasText: /Confirm matches/ }).first().waitFor();
       await page.waitForFunction(() => document.activeElement && document.activeElement.closest && !!document.activeElement.closest('.idalbum'), null, { timeout: 5000 }).catch(() => {});
       assert.equal(await page.evaluate(() => { const a = document.activeElement; const sec = a && a.closest('.idalbum'); return sec ? sec.querySelector('[data-track]').dataset.track : null; }), '501', 'straight to this album\'s folder');
       // Once only: a redraw of the list (here: back and forward) stays put and says nothing more
       await page.evaluate(() => { document.querySelector('#toast').textContent = ''; window.scrollTo(0, 0); });
-      await page.goBack(); await page.locator('#htags [data-htag-match]').waitFor(); await page.goForward();
+      await page.goBack(); await page.locator('#hmatch [data-htag-match]').waitFor(); await page.goForward();
       await page.locator('#main h1, #main h2').filter({ hasText: /Confirm matches/ }).first().waitFor(); await sleep(500);
       assert.equal(await page.locator('#toast').textContent(), '', 'no second message');
       assert.equal(await page.evaluate(() => !!(document.activeElement && document.activeElement.closest && document.activeElement.closest('.idalbum'))), false, 'no second jump to the folder');
       // Its folder further down the list: the page says how to get there
       folders = [folder('a', 300), folder('b', 400)];
-      await go('/album/lib-137'); await page.locator('#htags [data-htag-match]').click();
+      await go('/album/lib-137'); await page.locator('#hmatch [data-htag-match]').click();
       await page.locator('#main h1, #main h2').filter({ hasText: /Confirm matches/ }).first().waitFor(); await sleep(400);
-      assert.match(await page.locator('#toast').textContent(), /Show more/);
+      // (said on the page, at the top of the list: a toast floated over the rows)
+      assert.match(await page.locator('#main .idnote').textContent(), /Show more/);
       folders = null;
       // A matched library album: the node's URI for its tags, and on_pubky about exactly that one (no second lookup)
       pages['album/lib-7'] = item('album', 'lib-7', { target: { album_id: 7 }, on_pubky: { uri: RELEASE, indexed: true, tags: [['gabber', 5]], taggers: 5, faces: { gabber: [P[2]] } } });

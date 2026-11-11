@@ -383,6 +383,9 @@ html:not([data-shell="phone"]) .lyric-lines { overscroll-behavior: contain; }
 .dialog h2 { margin-bottom: 6px; }
 .dialog p { margin-bottom: 16px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+/* Phone dialog actions stay easy to tap, including when larger text needs another row. */
+html[data-shell="phone"] .dialog-actions { flex-wrap: wrap; }
+html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44px; max-width: 100%; white-space: normal; }
 .field { display: block; }
 .field span { display: block; font-size: var(--fs-xs); color: var(--muted); margin-bottom: 6px; }
 .field input, .input { width: 100%; background: var(--surface); border: 1px solid var(--line-strong); color: var(--fg); padding: 9px 12px; border-radius: var(--r-sm); font: inherit; }
@@ -1430,6 +1433,7 @@ html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs).more-
 .libnav > *, .scopechips > *, .np-sheet-tabs > * { scroll-snap-align: start; }
 .libnav::-webkit-scrollbar { display: none; }
 .libnav .chip { flex: none; }
+html[data-shell="phone"] .libnav .chip { min-height: 44px; min-width: 44px; scroll-snap-align: center; }
 .main > .libnav + * { margin-top: 14px; }
 html[data-shell="desktop"] .libnav { display: none; }
 html[data-shell="desktop"] .main > .libnav + * { margin-top: 0; }
@@ -1603,7 +1607,7 @@ html[data-shell="phone"] #jobpop, html[data-shell="phone"] #volpop { width: auto
 .picker .list-row:hover { background: var(--surface-2); }
 /* Search: one scrolling row of sources on phones */
 @media (max-width: 720px) {
-  .scopechips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -14px; margin-right: -14px; padding: 0 14px; }
+  .scopechips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -14px; margin-right: -14px; padding: 0 14px; scroll-padding-inline: 14px; }
   .scopechips::-webkit-scrollbar { display: none; }
   .scopechips .chip { flex: none; }
 }
@@ -2011,3 +2015,233 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
 /* A button that is its icon on a phone (its label says what it does elsewhere) */
 html[data-shell="phone"] .btn.iconic .btn-label { display: none; }
 html[data-shell="phone"] .btn.iconic { padding-left: 10px; padding-right: 10px; }
+
+/* ==== Phone UI simpler (owner, 2026-11-08: "too cramped make ui simpler"; PLAN-phone-ui-simplify-1108) ==== */
+/* The one loader: a ring the size of the text it sits in, centred on its line, turning; with reduced
+   motion it pulses instead (it had no display of its own, so inline it was cut to a 2 px arc) */
+.spin, .chip.scope .spin, .srcchip .spin { display: inline-block; flex: none; box-sizing: border-box; width: max(14px, 1em); height: max(14px, 1em); border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); vertical-align: -0.2em; animation: spin 0.9s linear infinite; }
+/* (an opacity pulse is not motion: it beats the reduced-motion rule that stops every animation) */
+@media (prefers-reduced-motion: reduce) { .spin, .chip.scope .spin, .srcchip .spin { animation: spinpulse 1.6s ease-in-out infinite !important; } }
+@keyframes spinpulse { 50% { opacity: 0.4; } }
+/* The page-loading line reads as a line: a faint track the width of the screen with the bar on it */
+.navprog { height: 2px; background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+/* Mini player (phones): one surface on the tabs, the cover, the song with the whole width, one
+   play/pause icon; the sound pill and the zone button live in Now playing. A 2 px progress line on top. */
+.mini-prog { display: none; }
+html[data-shell="phone"] .player { position: relative; display: flex; align-items: center; gap: 4px; padding: 6px 4px 6px 12px; min-height: 60px; touch-action: none; overflow: hidden; }
+html[data-shell="phone"] .mini-prog { display: block; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--line); pointer-events: none; }
+html[data-shell="phone"] .mini-prog > span { display: block; height: 100%; width: var(--p, 0%); background: var(--accent); }
+html[data-shell="phone"] .player-now { flex: 1 1 auto; min-width: 0; margin: 0; padding: 4px 0; gap: 12px; border-radius: 0; background: none; will-change: transform; }
+html[data-shell="phone"] .player-now:hover { background: none; }
+html[data-shell="phone"] .player-now .np-text { flex: 1; min-width: 0; }
+html[data-shell="phone"] .player-now .np-title { font-size: var(--fs-md); }
+html[data-shell="phone"] .player-right { order: 1; flex: none; gap: 4px; overflow: visible; }
+html[data-shell="phone"] .player-right > :is(.quality, .zone-btn, .volbtn, .volume) { display: none !important; }
+html[data-shell="phone"] .player-center { order: 2; flex: none; }
+html[data-shell="phone"] .player #toggle { width: 48px; height: 48px; background: none; color: var(--fg); }
+html[data-shell="phone"] .player #toggle .ic { width: 28px; height: 28px; }
+@media (hover: hover) { html[data-shell="phone"] .player #toggle:hover { background: var(--surface-2); } }
+html[data-shell="phone"] .player .np-art-wait { display: flex; align-items: center; justify-content: center; }
+html[data-shell="phone"] .player .np-art-wait .spin { width: 20px; height: 20px; }
+.np-art-wait { display: flex; align-items: center; justify-content: center; }
+/* The song follows a finger sideways (next, previous) and snaps */
+.player-now.dragging, .np-big.dragging { transition: none !important; }
+.player-now.snap, .np-big.snap { transition: transform var(--dur-base) var(--ease), opacity var(--dur-base) var(--ease); }
+@media (prefers-reduced-motion: reduce) { .player-now.snap, .np-big.snap { transition: none; } }
+
+/* Now playing on a phone: one screen that doesn't scroll (the free height goes to the cover), three
+   buttons under the transport, and the sheet they open over it */
+.np2.compact { height: 100%; min-height: 0; display: flex; flex-direction: column; padding: 4px 16px calc(8px + env(safe-area-inset-bottom, 0px)); overflow: hidden; touch-action: none; }
+.np2.compact .np-top { margin: 0 -8px 4px; flex: none; }
+.np2.compact .np-top .icon-btn { width: 48px; height: 48px; }
+.np2.compact .np-top .icon-btn .ic { width: 24px; height: 24px; }
+.np2.compact .np-zone { border: 0; background: none; min-height: 48px; max-width: 64%; padding: 0 10px; font-size: var(--fs-sm); color: var(--fg-2); gap: 6px; }
+.np2.compact .np-zone .ic { width: 18px; height: 18px; }
+.np2.compact .np-body { display: flex; flex: 1 1 auto; min-height: 0; }
+.np2.compact .np-player { flex: 1; min-height: 0; max-width: 520px; margin: 0 auto; justify-content: space-evenly; gap: 6px; }
+.np2.compact .np-big { width: min(100%, max(140px, calc(100dvh - 450px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)))); flex: none; margin: 0 auto; }
+.np2.compact .np-titlerow { margin-top: 4px; }
+.np2.compact .np-titles h1 { font-size: var(--fs-xl); }
+.np2.compact .np-heart { width: 48px; height: 48px; }
+.np2.compact .np-quality { min-height: 32px; padding: 0 12px; font-size: var(--fs-xs); }
+.np2.compact .np-quality { position: relative; }
+.np2.compact .np-quality::after { content: ''; position: absolute; inset: -8px 0; }
+.np2.compact .np-transport { margin-top: 0; gap: 8px; justify-content: space-between; }
+.np2.compact .np-transport .icon-btn { width: 48px; height: 48px; }
+.np2.compact .np-transport .icon-btn .ic { width: 24px; height: 24px; }
+.np2.compact .np-transport .icon-btn.play { width: 64px; height: 64px; }
+.np2.compact .np-transport .icon-btn.play .ic { width: 30px; height: 30px; }
+.np2.compact .np-vol { margin: 0 auto; width: 100%; max-width: none; }
+/* (the sliders take their drags; the screen's swipes leave them alone) */
+.np2.compact input[type="range"] { touch-action: none; }
+.np-dock { display: none; }
+.np2.compact .np-dock { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; flex: none; margin: 4px -8px 0; }
+.np-dockbtn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 48px; padding: 0 8px; border: 0; border-radius: var(--r-pill); background: none; color: var(--fg-2); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
+.np-dockbtn .ic { width: 20px; height: 20px; flex: none; }
+.np-dockbtn:hover { background: var(--surface-2); color: var(--fg); }
+.np-dockbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.np-dockbtn[aria-expanded="true"] { color: var(--accent-strong); }
+/* The sheet: the whole height but a sliver at the top (it reads as a sheet over the player), a
+   handle, the song with Play, one tab bar, then its own scroll. It ends above the keyboard. */
+.np-bsheet { position: fixed; z-index: 30; left: 0; right: 0; top: calc(env(safe-area-inset-top, 0px) + 8px); bottom: var(--kb, 0px); display: flex; flex-direction: column; background: var(--surface); border-radius: var(--r-lg) var(--r-lg) 0 0; box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.28); touch-action: pan-y; }
+.np-bsheet[hidden] { display: none; }
+.np-bsheet.opening { animation: bsheetup var(--dur-slow) var(--ease) both; }
+.np-bsheet.closing { animation: bsheetdown var(--dur-base) var(--ease-in-out) both; }
+@keyframes bsheetup { from { transform: translateY(100%); } to { transform: none; } }
+@keyframes bsheetdown { to { transform: translateY(100%); } }
+@media (prefers-reduced-motion: reduce) { .np-bsheet.opening, .np-bsheet.closing { animation: none; } }
+.np-bsheet .np-sheet-head { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0 12px; flex: none; border-bottom: 1px solid var(--line); touch-action: none; }
+.np-grab { display: flex; align-items: center; justify-content: center; height: 24px; width: 100%; padding: 0; border: 0; background: none; cursor: pointer; }
+.np-grab > span { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
+.np-grab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--r-sm); }
+.np-bsheet .np-strip { display: flex; align-items: center; gap: 12px; padding: 0 0 4px 4px; }
+.np-bsheet .np-strip-art { width: 40px; height: 40px; border-radius: var(--r-sm); overflow: hidden; flex: none; background: var(--surface-3); }
+.np-bsheet .np-strip-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.np-bsheet .np-strip-art :is(.src-badge, .src-badges) { display: none; }
+.np-bsheet .np-strip-text { flex: 1; min-width: 0; }
+.np-bsheet .np-strip-text .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-bsheet .np-strip-text .sub { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-bsheet .np-strip .icon-btn.play { width: 48px; height: 48px; background: none; color: var(--fg); }
+.np-bsheet .np-strip .icon-btn.play .ic { width: 28px; height: 28px; }
+.np-stabs { display: grid !important; grid-template-columns: repeat(3, 1fr); overflow: visible; mask-image: none !important; -webkit-mask-image: none !important; }
+.np-stab { position: relative; min-height: 48px; border: 0; background: none; color: var(--muted); font: inherit; font-size: var(--fs-md); font-weight: 600; cursor: pointer; }
+.np-stab.on { color: var(--fg); }
+.np-stab.on::after { content: ''; position: absolute; left: 25%; right: 25%; bottom: 0; height: 3px; border-radius: 3px 3px 0 0; background: var(--accent); }
+.np-stab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.np-bsheet .np-sheet-body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding: 12px 16px calc(16px + env(safe-area-inset-bottom, 0px)); }
+.np-bsheet .np-sheet-body:focus { outline: none; }
+/* Up next: plain rows, no box around them */
+.np-bsheet .np-queue { margin: 0 -16px; border: 0; background: none; border-radius: 0; }
+.np-bsheet .np-qitem { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 6px 16px; border: 0; border-radius: 0; }
+.np-bsheet .np-qitem .name { font-weight: 500; }
+.np-bsheet .np-qitem .sub { color: var(--muted); font-size: var(--fs-xs); }
+.np-bsheet .np-sheet-foot { margin-top: 8px; }
+.np-bsheet .np-sheet-foot .btn { min-height: 48px; }
+/* Lyrics fill the sheet and scroll their own box */
+.np-bsheet[data-tab="lyrics"] .np-sheet-body { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
+.np-bsheet[data-tab="lyrics"] .lyrics { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: 0; }
+.np-bsheet[data-tab="lyrics"] .lyrics[hidden] { display: none; }
+.np-bsheet[data-tab="lyrics"] .lyric-lines { flex: 1; min-height: 0; max-height: none; overscroll-behavior: contain; padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
+.lyric-head { display: flex; align-items: center; gap: 8px; min-height: 48px; margin-bottom: 4px; }
+.lyric-how { flex: 1; min-width: 0; }
+.lyric-head .lyric-nudge { margin-left: auto; gap: 0; }
+.lyric-head .lyric-nudge .icon-btn { font-size: var(--fs-lg); color: var(--fg-2); }
+html[data-shell="phone"] .lyric-head .lyric-nudge .icon-btn { width: 48px; height: 48px; }
+@media (pointer: coarse) { .lyric-head .lyric-nudge .icon-btn { width: 48px; height: 48px; } }
+.lyric-off { min-width: 3.5em; text-align: right; }
+/* More: Details, Sources, Tags as plain parts, one heading each; the status is a line of text */
+.np-part + .np-part { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.np-part h3 { font-size: var(--fs-lg); margin: 0 0 8px; }
+.np-bsheet .path { margin: 0; border: 0; border-radius: 0; background: none; }
+.np-bsheet .path-head { padding: 4px 0 8px; border-bottom: 0; font-weight: 500; }
+.np-bsheet .path-row { padding: 6px 0; grid-template-columns: 14px 96px 1fr; border-bottom: 0; }
+.np-bsheet .np-facts { margin-top: 8px; }
+.np-bsheet #npsources .list { border: 0; background: none; margin: 0 -16px; }
+.np-bsheet #npsources .list-row { padding-left: 16px; padding-right: 16px; }
+.np-bsheet .np-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.np-bsheet .np-tags .taginput { flex: 1 1 160px; min-height: 48px; }
+/* The toast on a phone: a snackbar the width of the screen less 16 px, its bottom set when shown */
+html[data-shell="phone"] .toast { left: 16px; right: 16px; max-width: none; transform: translateY(8px); }
+html[data-shell="phone"] .toast.show { transform: none; }
+/* (the bar's rule that hides an empty sound pill hid Now playing's quality line too: it has the class) */
+html[data-shell="phone"] #nowplaying .np-quality { display: inline-flex; }
+.np-bsheet .np-tags > .eyebrow { display: none; }
+
+/* Lists (phones): one row: 56-64 px, the title and one line under it, the length, one ⋯ with a 48 px
+   target; a tap on the row plays it, so no play triangle of its own. Track numbers on album pages
+   only. The playing song: its title in the accent with a small equaliser. */
+html[data-shell="phone"] .srow { min-height: 60px; padding: 6px 0 6px 12px; gap: 12px; }
+html[data-shell="phone"] .srow > [data-splay] { display: none; }
+html[data-shell="phone"] .srow > :is([data-smore], [data-cmore]) { width: 48px; height: 48px; flex: none; margin-left: -4px; }
+html[data-shell="phone"] .srow > .muted.small { flex: none; font-variant-numeric: tabular-nums; }
+html[data-shell="phone"] .list.nums .srow .num { display: block; width: 20px; margin-right: -4px; }
+html[data-shell="phone"] .list:has(> .srow) { border-left: 0; border-right: 0; border-radius: 0; }
+.srow .grow { min-width: 0; }
+html[data-shell="phone"] .srow .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srow.cur .name, .srow.cur .name .lnk { color: var(--accent-strong); }
+.srow.cur .name::before, .track.cur .title::before { content: ''; display: inline-block; width: 12px; height: 11px; margin-right: 6px; vertical-align: -1px;
+  background: linear-gradient(var(--accent), var(--accent)) 0 100% / 3px 55% no-repeat, linear-gradient(var(--accent), var(--accent)) 4.5px 100% / 3px 100% no-repeat, linear-gradient(var(--accent), var(--accent)) 9px 100% / 3px 35% no-repeat; }
+/* Select: on the title's baseline, its check on the word's centre line (owner, 2026-11-08: "checkmark on
+   select not on same line": the check sat on the button's centre, the word on its top baseline). The
+   word's line is the button's height, so the word is in its middle; the check sits on the baseline,
+   lowered by half the difference between its size and the word's x-height. */
+.section-head > .btn.selstart { align-items: baseline; gap: 6px; min-height: 0; padding-top: 0; padding-bottom: 0; line-height: 32px; }
+.section-head > .btn.selstart > .ic { width: 16px; height: 16px; align-self: baseline; position: relative; top: 0.22em; }
+/* (its word ends at the row's edge, inside it: no negative side margin) */
+html[data-shell="phone"] .section-head > .btn.selstart { line-height: 48px; padding: 0 0 0 8px; margin: -12px 0; }
+
+/* Album page (phones): a compact header (the cover beside the title, artist and source), Play and
+   Shuffle, then three icon buttons of one kind; "Not matched · Match" as one small row under them */
+html[data-shell="phone"] #main > .hero.item-hero { grid-template-columns: 112px minmax(0, 1fr); gap: 4px 16px; align-items: start; }
+html[data-shell="phone"] #main > .hero.item-hero > .art { width: 112px; grid-row: 1 / span 5; align-self: start; }
+html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) { display: contents; }
+html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.eyebrow, h1, .sub, .srcline) { grid-column: 2; margin: 0; min-width: 0; }
+html[data-shell="phone"] #main > .hero.item-hero h1 { font-size: var(--fs-xl); line-height: 1.2; overflow-wrap: anywhere; }
+html[data-shell="phone"] #main > .hero.item-hero .sub { font-size: var(--fs-md); }
+html[data-shell="phone"] #main > .hero.item-hero .eyebrow { font-size: var(--fs-2xs); }
+html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.htags, .actions, .hmatch-slot, .also-icons, .hero-tags) { grid-column: 1 / -1; }
+html[data-shell="phone"] #main > .hero.item-hero .actions { margin-top: 12px !important; gap: 8px; flex-wrap: wrap; }
+/* (Also on and Open in: a row of their own under Play and the icons) */
+html[data-shell="phone"] #main > .hero.item-hero .actions > .also-icons { order: 4; flex: 1 0 100%; margin: 0; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > :is(#iplay, #ishuffle) { min-height: 48px; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > :is(#izone, #ifav, #imore) { width: 48px; height: 48px; min-width: 48px; padding: 0; justify-content: center; border: 0; background: none; color: var(--fg-2); border-radius: 50%; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > :is(#izone, #ifav, #imore) .ic { width: 24px; height: 24px; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #ifav { order: 1; margin-left: auto; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #izone { order: 2; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #imore { order: 3; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #ifav.on { color: var(--accent-strong); }
+.htags:not(:has(> :not(datalist))) { display: none; }
+.hmatch-slot:empty { display: none; }
+.hmatch { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; }
+.hmatch-btn { min-height: 40px; padding: 0 4px; font-weight: 600; color: var(--accent-strong); }
+html[data-shell="phone"] .hmatch-btn { min-height: 48px; }
+
+/* Confirm matches (phones too): one level of cards (the album's list), the candidates as rows in it;
+   the file's name one line, the whole of it on a tap; the explanation folded under the title */
+.idhow { margin: -4px 0 12px; }
+.idhow > summary { cursor: pointer; min-height: 40px; display: flex; align-items: center; list-style: none; }
+.idhow > summary::-webkit-details-marker { display: none; }
+.idhow > summary::after { content: '▾'; margin-left: 6px; font-size: 0.9em; }
+.idhow[open] > summary::after { content: '▴'; }
+.idhow > p { margin: 0 0 4px; max-width: 72ch; }
+.idnote { margin: 0 0 12px; }
+.idpath { margin-top: 2px; min-width: 0; }
+.idpath > summary { list-style: none; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.idpath > summary::-webkit-details-marker { display: none; }
+.idpath[open] > summary { white-space: normal; overflow-wrap: anywhere; }
+.idpath > span { display: block; overflow-wrap: anywhere; }
+.idpath:not([open]) > span { display: none; }
+@media (max-width: 720px) {
+  .idopts { gap: 0; }
+  .idopt { background: none; border-radius: 0; padding: 8px 0; border-top: 1px solid var(--line); }
+  .idrow { padding: 12px; }
+}
+html[data-shell="phone"] #main > .hero.item-hero .actions { gap: 4px; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #iplay { padding: 0 18px 0 14px; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle { padding: 0 14px; margin-left: 4px; }
+/* (the narrowest phones: Shuffle is its word, so the three icons keep their 48 px) */
+@media (max-width: 379px) { html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle > .ic { display: none; } }
+html[data-shell="phone"] .sk-srow > .icon-btn { display: none; }
+/* (a song row is one tap target on a phone: it plays; its song, artist and album pages are in its ⋯) */
+html[data-shell="phone"] .srow:not(.card-row) :is(.name, .sub) .lnk:not(.vmark) { pointer-events: none; }
+@media (pointer: coarse) { .section-head > .btn.selstart { line-height: 40px; margin-top: -4px; margin-bottom: -4px; } }
+
+/* (review round 1) A desktop window up to 720 px wide: the old one-screen minimum height goes, and the
+   sheet ends above the player bar */
+html:not([data-shell="phone"]) .np2.compact .np-player { min-height: 0; }
+html:not([data-shell="phone"]) .np-bsheet { bottom: max(var(--kb, 0px), var(--player)); }
+/* The sheet's own scroll keeps vertical panning for the browser and leaves sideways drags to the page
+   (a scroller allows both by itself, and a sideways drag was taken as a pan and cancelled) */
+.np-bsheet .np-sheet-body, .np-bsheet .lyric-lines { touch-action: pan-y; }
+/* A short screen (split screen, landscape, a large system font): the first screen scrolls rather than
+   cut off. Its vertical swipes are then the scroll's (the chevron and the three buttons still work). */
+@media (max-height: 540px) { .np2.compact { overflow-y: auto; touch-action: pan-y; } .np2.compact .np-body { flex: none; } }
+/* Nothing playing on a phone: the top bar and the message */
+.np2.compact.np-idle { justify-content: flex-start; }
+.np2.compact.np-idle .empty { margin: auto 0; }
+/* Get started on the narrowest phones (320 px, the CI emulator): a step's text column may shrink below
+   its field's preferred width, so the field and its button wrap inside the card */
+.setup-steps { grid-template-columns: minmax(0, 1fr); }
+.setup-step > .grow { min-width: 0; }
+.setup-step .toolbar .input { flex-basis: 180px; }

@@ -38,6 +38,9 @@ pub enum VaultStoreError {
     NoGrant,
     #[error("another device is changing {0}; try again in a moment")]
     Busy(String),
+    /// Another sign-in replaced the session this pass ran under: it ended before writing more.
+    #[error("another sign-in replaced this session")]
+    Replaced,
     #[error("the service refused the refresh: {0}")]
     Refresh(String),
     #[error("this node's Pubky sign-in doesn't include your streaming sign-ins yet; sign it in again with Pubky Ring")]
@@ -318,6 +321,9 @@ struct Marks {
     /// The highest `signed_out_everywhere_at` seen in the device list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signed_out_everywhere_at: Option<u64>,
+    /// New wipe observations are bound to the vault owner, even when a machine changes users.
+    #[serde(default)]
+    wipes_by_owner: std::collections::BTreeMap<String, u64>,
 }
 
 /// The hash of an envelope as this node read it (its serialised form), for the marks.
@@ -349,7 +355,12 @@ fn write_marks(path: &Path, m: &Marks) -> std::io::Result<()> {
     }
     let tmp = tmp_beside(path);
     write_private(&tmp, &serde_json::to_vec(m).expect("marks serialise"))?;
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Change the marks at `path` with `f`, under the file lock; written only when they changed.
@@ -422,6 +433,7 @@ pub struct Vault<'a> {
     revocations: Option<&'a Path>,
     /// This client's record of the newest copies it has seen ([`Marks`]).
     marks: Option<&'a Path>,
+    still: Option<&'a (dyn Fn() -> bool + Sync)>,
 }
 
 impl<'a> Vault<'a> {
@@ -434,6 +446,30 @@ impl<'a> Vault<'a> {
             device: None,
             revocations: None,
             marks: None,
+            still: None,
+        }
+    }
+
+    /// Borrow this vault for an identity-owned operation. Compound helpers check again
+    /// immediately before each mutation; lock/lease release and rollback remain unconditional.
+    pub fn guarded<'b>(&'b self, still: &'b (dyn Fn() -> bool + Sync)) -> Vault<'b> {
+        Vault {
+            session: self.session,
+            owner: self.owner.clone(),
+            secret: self.secret,
+            lease_only: self.lease_only,
+            device: self.device,
+            revocations: self.revocations,
+            marks: self.marks,
+            still: Some(still),
+        }
+    }
+
+    fn current(&self) -> Result<()> {
+        if self.still.is_some_and(|still| !still()) {
+            Err(VaultStoreError::Replaced)
+        } else {
+            Ok(())
         }
     }
 
@@ -558,9 +594,15 @@ impl<'a> Vault<'a> {
             return Ok(served);
         };
         update_marks(p, |m| {
-            let kept = possible(m.signed_out_everywhere_at);
-            if served > kept || kept != m.signed_out_everywhere_at {
-                m.signed_out_everywhere_at = kept.max(served);
+            // Keep the legacy unscoped floor for existing installations; never add a new
+            // owner's observation to it. New clears cannot sign another owner out locally.
+            let kept = possible(m.wipes_by_owner.get(&self.owner).copied())
+                .max(possible(m.signed_out_everywhere_at));
+            m.signed_out_everywhere_at = possible(m.signed_out_everywhere_at);
+            if let Some(at) = kept.max(served) {
+                m.wipes_by_owner.insert(self.owner.clone(), at);
+            } else {
+                m.wipes_by_owner.remove(&self.owner);
             }
             kept.max(served)
         })
@@ -1059,6 +1101,7 @@ impl Vault<'_> {
     pub(crate) async fn lock(&self, path: &str) -> Result<Locked> {
         let storage = self.session.storage();
         for attempt in 1..=LOCK_TRIES {
+            self.current()?;
             match storage.lock(path, LOCK_FOR).await {
                 Ok(l) => return Ok(Locked { lock: Some(l) }),
                 Err(e) if status(&e) == Some(reqwest::StatusCode::METHOD_NOT_ALLOWED) => {
@@ -1075,6 +1118,7 @@ impl Vault<'_> {
 
     /// Write under a lock taken with [`Vault::lock`].
     pub(crate) async fn put_locked(&self, held: &Locked, path: &str, body: Vec<u8>) -> Result<()> {
+        self.current()?;
         let storage = self.session.storage();
         match &held.lock {
             Some(l) => storage.put_locked(l, body).await?,
@@ -1456,6 +1500,7 @@ impl Vault<'_> {
                 Ok(false) => {}
                 // One blob that can't be shared now doesn't stop the others; the next touch
                 // tries it again
+                Err(VaultStoreError::Replaced) => return Err(VaultStoreError::Replaced),
                 Err(e) => tracing::warn!(service = %service, "vault: not shared with new devices yet: {e}"),
             }
         }
@@ -1866,6 +1911,7 @@ impl Vault<'_> {
             until: now() + spec::LOCK_SECONDS,
         };
         let body = serde_json::to_vec(&lease).map_err(|_| VaultError::Format("lease"))?;
+        self.current()?;
         self.session.storage().put(path.as_str(), body).await?;
         tokio::time::sleep(LEASE_SETTLE).await;
         Ok(read().await?.is_some_and(|l| l.client == me))
@@ -1889,6 +1935,7 @@ impl Vault<'_> {
             until: now() + spec::LOCK_SECONDS,
         };
         let body = serde_json::to_vec(&lease).map_err(|_| VaultError::Format("lease"))?;
+        self.current()?;
         self.session.storage().put(path.as_str(), body).await?;
         Ok(())
     }
@@ -2161,6 +2208,11 @@ impl Vault<'_> {
             ix.extra
                 .insert(SIGNED_OUT_EVERYWHERE.into(), serde_json::json!(now()));
             let body = index_body(&mut ix)?;
+            // Persist the exact proposed marker before the remote write. A refused local
+            // write leaves the API's pending intent intact and cannot accept a remote wipe;
+            // cancellation or a lost remote response cannot lose the accepted marker. A
+            // remote failure conservatively retains this explicit local sign-out intent.
+            self.marker(&ix)?;
             self.put_locked(&held, spec::INDEX_PATH, body).await
         }
         .await;
@@ -2207,19 +2259,25 @@ impl Vault<'_> {
             }
         }
         let storage = self.session.storage();
-        let r = match &held.lock {
-            Some(l) => storage.delete_locked(l).await.map(|_| ()),
-            None => storage.delete(path.as_str()).await.map(|_| ()),
-        };
+        let r = async {
+            self.current()?;
+            let r = match &held.lock {
+                Some(l) => storage.delete_locked(l).await.map(|_| ()),
+                None => storage.delete(path.as_str()).await.map(|_| ()),
+            };
+            match r {
+                Ok(()) => Ok(()),
+                Err(e) if is_not_found(&e) => Ok(()),
+                Err(e) => Err(VaultStoreError::from(e)),
+            }
+        }
+        .await;
+        // Cancellation must still release resources owned by this operation.
         self.unlock(held).await;
-        match r {
-            Ok(()) => {}
-            Err(e) if is_not_found(&e) => {}
-            Err(e) => return Err(e.into()),
+        if leased {
+            self.drop_lease(service).await;
         }
-        if let Some(lp) = spec::lease_path(service) {
-            let _ = storage.delete(lp.as_str()).await;
-        }
+        r?;
         // Gone, its mark kept: a sign-in made anew starts above it
         Ok(true)
     }

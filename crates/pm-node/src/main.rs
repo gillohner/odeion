@@ -411,6 +411,12 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             std::time::Duration::from_secs(20),
             std::time::Duration::from_secs(300),
         );
+        // AirPlay receivers and BluOS players switched on after the start (a speaker asleep or
+        // unplugged at the start) get their zones within a minute, without a rescan
+        state.spawn_mdns_watch(
+            std::time::Duration::from_secs(20),
+            std::time::Duration::from_secs(60),
+        );
     }
     for z in state.zones.list() {
         tracing::info!(zone = %z.id, output = %z.output, "zone ready");

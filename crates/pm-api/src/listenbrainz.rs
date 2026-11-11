@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 const ACCOUNT_KEY: &str = "listenbrainz.account";
 const PENDING_KEY: &str = "listenbrainz.pending";
+const GENERATION_KEY: &str = "listenbrainz.send_generation";
 const IMPORTED_KEY: &str = "listenbrainz.imported_until";
 const PENDING_MAX: usize = 1000;
 pub const API_BASE: &str = "https://api.listenbrainz.org";
@@ -77,15 +78,6 @@ fn pending(s: &NodeState) -> Vec<Value> {
         .flatten()
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default()
-}
-
-fn set_pending(s: &NodeState, list: &[Value]) {
-    let lib = s.library.lock().expect("library poisoned");
-    let _ = if list.is_empty() {
-        lib.delete_setting(PENDING_KEY).map(|_| ())
-    } else {
-        lib.set_setting(PENDING_KEY, &Value::from(list.to_vec()).to_string())
-    };
 }
 
 async fn get_json(
@@ -210,11 +202,8 @@ fn count_once(s: &Arc<NodeState>, key: &(String, String, u64)) {
     if sent.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let Some(acct) = account(s).filter(|a| a.submit) else {
-        return;
-    };
-    let s = s.clone();
-    tokio::spawn(async move { send_listens(&s, &acct.token, vec![listen]).await });
+    // Capture ownership before spawning: the task may first run after disconnect/reconnect.
+    tokio::spawn(send_play(s.clone(), vec![listen]));
 }
 
 /// A zone started `item`: "playing now", then a listen once it has played half its length or
@@ -273,21 +262,95 @@ pub(crate) fn track_ended(s: &Arc<NodeState>, zone: &pm_zones::ZoneId, item: &pm
     count_once(s, &key);
 }
 
-/// Send listens with any that are waiting; keep them all when ListenBrainz cannot take them.
-async fn send_listens(s: &NodeState, token: &str, new: Vec<Value>) {
-    let mut all = pending(s);
-    all.extend(new);
-    let mut left: Vec<Value> = Vec::new();
-    // ListenBrainz takes up to 1000 per import; listens are small
-    for chunk in all.chunks(100) {
-        let kind = if chunk.len() == 1 { "single" } else { "import" };
-        if let Err(e) = submit(s, token, kind, chunk.to_vec()).await {
-            tracing::debug!("listenbrainz: {e}; keeping {} listens for later", chunk.len());
-            left.extend_from_slice(chunk);
+/// Send listens with any that are waiting ([`crate::send_queue`]): `new` joins the waiting list
+/// on disk first, then one sender at a time sends the list and removes what ListenBrainz took.
+/// What it couldn't take, and anything added meanwhile, waits for the next send.
+// The generation distinguishes disconnect/reconnect even when the token is reused.
+fn send_owner(s: &NodeState) -> Option<(Account, Option<String>)> {
+    let lib = s.library.lock().expect("library poisoned");
+    let account: Account = serde_json::from_str(&lib.get_setting(ACCOUNT_KEY).ok()??).ok()?;
+    if !account.submit {
+        return None;
+    }
+    Some((account, lib.get_setting(GENERATION_KEY).ok()?))
+}
+
+pub(crate) fn send_play(s: Arc<NodeState>, new: Vec<Value>) -> impl std::future::Future<Output = ()> + Send {
+    let owner = send_owner(&s);
+    async move {
+        if let Some((account, generation)) = owner {
+            send_owned(&s, &account.token, generation, new).await;
         }
     }
-    let skip = left.len().saturating_sub(PENDING_MAX);
-    set_pending(s, &left[skip..]);
+}
+
+pub(crate) async fn send_listens(s: &NodeState, token: &str, new: Vec<Value>) {
+    let Some((account, generation)) = send_owner(s).filter(|(a, _)| a.token == token) else {
+        return;
+    };
+    send_owned(s, &account.token, generation, new).await;
+}
+
+fn owns_queue(lib: &pm_library::Library, token: &str, generation: &Option<String>) -> bool {
+    lib.get_setting(GENERATION_KEY).ok().as_ref() == Some(generation)
+        && lib
+            .get_setting(ACCOUNT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<Account>(&j).ok())
+            .is_some_and(|a| a.token == token && a.submit)
+}
+
+async fn send_owned(s: &NodeState, token: &str, generation: Option<String>, new: Vec<Value>) {
+    // The account a listen is kept for in memory while the library refuses it: this token in this
+    // connection (a reconnect makes a new generation)
+    let owner = format!("{token}#{}", generation.as_deref().unwrap_or(""));
+    let who = (s.node_id.as_str(), "listenbrainz", owner.as_str());
+    // Check ownership and enqueue under one guard, before any sender-lock wait.
+    let unstored = {
+        let lib = s.library.lock().expect("library poisoned");
+        if !owns_queue(&lib, token, &generation) {
+            return;
+        }
+        match crate::send_queue::enqueue(&lib, PENDING_KEY, new, PENDING_MAX) {
+            Ok(()) => Vec::new(),
+            Err((e, new)) => {
+                tracing::warn!("listenbrainz: the new ones couldn't be stored ({e}); sending them now");
+                new
+            }
+        }
+    };
+    let _one = crate::send_queue::sender(&s.node_id, "listenbrainz").await;
+    // The account and the list together, under the library's lock: a sender that waited while
+    // the owner connected another account sends nothing (the list is that account's now; what
+    // only memory had waits there for its own account)
+    let batch = {
+        let lib = s.library.lock().expect("library poisoned");
+        if !owns_queue(&lib, token, &generation) {
+            crate::send_queue::hold(who.0, who.1, who.2, unstored, PENDING_MAX);
+            return;
+        }
+        crate::send_queue::batch(&lib, PENDING_KEY, PENDING_MAX, who, unstored)
+    };
+    let mut sent: Vec<Value> = Vec::new();
+    // ListenBrainz takes up to 1000 per import; listens are small
+    for chunk in batch.all().chunks(100) {
+        let kind = if chunk.len() == 1 { "single" } else { "import" };
+        match submit(s, token, kind, chunk.to_vec()).await {
+            Ok(()) => sent.extend_from_slice(chunk),
+            Err(e) => tracing::debug!("listenbrainz: {e}; keeping {} listens for later", chunk.len()),
+        }
+    }
+    // Still this connection's list (sending switched off meanwhile: still its own)
+    let lib = s.library.lock().expect("library poisoned");
+    let owns = lib.get_setting(GENERATION_KEY).ok().as_ref() == Some(&generation)
+        && lib
+            .get_setting(ACCOUNT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<Account>(&j).ok())
+            .is_some_and(|a| a.token == token);
+    crate::send_queue::settle(&lib, PENDING_KEY, PENDING_MAX, who, owns, batch, &sent);
 }
 
 fn view(s: &NodeState) -> ListenBrainzView {
@@ -346,9 +409,19 @@ pub(crate) async fn connect(
                 acct.user = cur.user;
             }
         }
-        lib.set_setting(ACCOUNT_KEY, &serde_json::to_string(&acct).expect("serializes"))?;
+        let account = serde_json::to_string(&acct).expect("serializes");
         if body.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
-            crate::vault_cache::new_sign_in(&lib, "listenbrainz");
+            let generation = uuid::Uuid::new_v4().to_string();
+            let lineage = crate::vault_cache::new_lineage("listenbrainz");
+            lib.update_settings_atomic(&[
+                (GENERATION_KEY, Some(&generation)),
+                (ACCOUNT_KEY, Some(&account)),
+                ("vault.lineage.listenbrainz", Some(&lineage)),
+            ])?;
+            // A new connection: what waited in memory was the old one's
+            crate::send_queue::forget_held(&s.node_id, "listenbrainz");
+        } else {
+            lib.set_setting(ACCOUNT_KEY, &account)?;
         }
     }
     if acct.submit && !pending(&s).is_empty() {
@@ -361,8 +434,14 @@ pub(crate) async fn connect(
 pub(crate) async fn disconnect(State(s): State<Arc<NodeState>>) -> ApiResult<ListenBrainzView> {
     {
         let lib = s.library.lock().expect("library poisoned");
-        lib.delete_setting(ACCOUNT_KEY)?;
-        lib.delete_setting(PENDING_KEY)?;
+        let generation = uuid::Uuid::new_v4().to_string();
+        lib.update_settings_atomic(&[
+            (GENERATION_KEY, Some(&generation)),
+            (ACCOUNT_KEY, None),
+            (PENDING_KEY, None),
+        ])?;
+        // What waited in memory goes too (kept for the old connection only, never sent again)
+        crate::send_queue::forget_held(&s.node_id, "listenbrainz");
     }
     Ok(Json(view(&s)))
 }

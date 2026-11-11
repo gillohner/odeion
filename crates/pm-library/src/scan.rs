@@ -45,7 +45,13 @@ pub struct Scanner<'a> {
     folders: Mutex<HashMap<PathBuf, HashMap<String, HashSet<String>>>>,
     /// Per folder: its cover image, looked for once in a scan.
     covers: Mutex<HashMap<PathBuf, Option<(PathBuf, String)>>>,
+    /// [`Scanner::with_after_read`].
+    after_read: Option<AfterRead>,
 }
+
+/// [`Scanner::with_after_read`]'s hook.
+#[doc(hidden)]
+pub type AfterRead = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
 
 /// Folder image names tried, in order, when a file has no embedded picture.
 const FOLDER_COVERS: &[&str] = &["cover", "folder", "front", "album", "artwork"];
@@ -65,7 +71,16 @@ impl<'a> Scanner<'a> {
             art_dir: None,
             folders: Mutex::new(HashMap::new()),
             covers: Mutex::new(HashMap::new()),
+            after_read: None,
         }
+    }
+
+    /// Called with each file of a [`Scanner::scan`] once it is read, before its write: a test
+    /// pauses a scan there.
+    #[doc(hidden)]
+    pub fn with_after_read(mut self, hook: AfterRead) -> Self {
+        self.after_read = Some(hook);
+        self
     }
 
     /// Extract embedded covers into `dir` (created on demand) and pick up
@@ -251,6 +266,9 @@ impl<'a> Scanner<'a> {
                 }
             }
             let read = tags::probe_and_read(&path).map(|p| self.prepare(&path, p));
+            if let Some(hook) = &self.after_read {
+                hook(&path);
+            }
             writes.read(ReadFile {
                 path,
                 size,

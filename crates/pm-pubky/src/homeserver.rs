@@ -15,8 +15,10 @@
 
 use crate::config::Network;
 use crate::schemas::{Activity, Bookmark, MusicPost, Playlist, Review, Visibility};
+use pubky::Pubky;
 pub use pubky::PubkySession;
-use pubky::{Pubky, PublicKey};
+/// A Pubky key (a person's or a homeserver's), for callers that don't depend on `pubky` themselves.
+pub use pubky::PublicKey;
 use serde::Serialize;
 
 /// The homeserver answers 404 for a directory nobody has written to yet.
@@ -417,9 +419,15 @@ fn parse_list_page(body: &[u8]) -> Result<Page<String>, HomeserverError> {
     Ok(page)
 }
 
+/// Why a write stopped: the caller's session was replaced by another sign-in meanwhile.
+pub const REPLACED: &str = "another sign-in replaced this session";
+
 #[derive(Clone)]
 pub struct NodeHomeserver {
     pubky: Pubky,
+    /// Which network the client is on: on a local testnet a homeserver record naming the
+    /// client's own machine is what the homeserver is; on the public network it isn't.
+    network: Network,
 }
 
 /// Pubky clients built in this process: each one starts its own DHT node and keeps its own
@@ -440,12 +448,114 @@ impl NodeHomeserver {
             Network::Mainnet => Pubky::new()?,
             Network::Testnet => Pubky::testnet()?,
         };
-        Ok(Self { pubky })
+        Ok(Self { pubky, network })
     }
 
-    /// Wrap a client the caller configured (timeouts, testnet host).
+    /// Wrap a client the caller configured (timeouts, testnet host), on the public network.
     pub fn from_pubky(pubky: Pubky) -> Self {
-        Self { pubky }
+        Self::from_pubky_on(pubky, Network::Mainnet)
+    }
+
+    /// Wrap a client the caller configured, saying which network it is on.
+    pub fn from_pubky_on(pubky: Pubky, network: Network) -> Self {
+        Self { pubky, network }
+    }
+
+    pub fn network(&self) -> Network {
+        self.network
+    }
+
+    /// Before a sign-in: the newest records of the homeservers it may route to, network-first
+    /// ([`crate::records::freshen`]), so the grant exchange routes on the newest and not on the
+    /// first record a relay or DHT node answered with: `target` (a signup's homeserver) when
+    /// given; the homeserver of `identity` (the one signed in here before, whose `_pubky` record
+    /// is freshened first) when known; the project's public homeserver always, to have it ready.
+    ///
+    /// All of it within [`crate::records::SIGN_IN_LOOKUPS`], the identity's record within
+    /// [`crate::records::IDENTITY_STAGE`] and its homeserver's in the rest, each keeping time for
+    /// the copy held here. On the public network, the record of the homeserver the sign-in routes
+    /// to (`target`, else the identity's known homeserver) refuses it when it names only this
+    /// machine or nothing is known of it. An unknown Ring approver selects no homeserver yet
+    /// ([`crate::records::refusal`]), before its link exists; other homeservers' records never do.
+    /// On a local testnet the local homeserver's record is loopback by nature.
+    pub async fn fresh_for_sign_in(
+        &self,
+        identity: Option<&PublicKey>,
+        target: Option<&PublicKey>,
+        allow_local: bool,
+    ) -> Result<Vec<crate::records::Freshened>, String> {
+        self.sign_in_records(identity, target, allow_local, true).await
+    }
+
+    /// [`Self::fresh_for_sign_in`] for a sign-in anyone allowed may approve (a controller or browser
+    /// log in, which a listener on another homeserver may approve as well as the owner): the
+    /// newest records of `likely` (the node's owner) and of the public homeserver are fetched
+    /// the same way, to have them ready, but the approver isn't known yet, so no homeserver is
+    /// selected and nothing found refuses the sign-in (an owner's homeserver that answers badly
+    /// doesn't keep a listener from logging in).
+    pub async fn warm_for_sign_in(
+        &self,
+        likely: Option<&PublicKey>,
+        allow_local: bool,
+    ) -> Result<Vec<crate::records::Freshened>, String> {
+        self.sign_in_records(likely, None, allow_local, false).await
+    }
+
+    /// The lookups of [`Self::fresh_for_sign_in`]; `identity_selects`: the identity is the one
+    /// that approves, so its homeserver is the one the sign-in routes to.
+    async fn sign_in_records(
+        &self,
+        identity: Option<&PublicKey>,
+        target: Option<&PublicKey>,
+        allow_local: bool,
+        identity_selects: bool,
+    ) -> Result<Vec<crate::records::Freshened>, String> {
+        use crate::records::{self, freshen_until, IDENTITY_STAGE, SIGN_IN_LOOKUPS};
+        let pkarr = self.pubky.client().pkarr();
+        let start = tokio::time::Instant::now();
+        let public = PublicKey::try_from_z32(records::PUBLIC_HOMESERVER).map_err(|e| e.to_string())?;
+        // Keys as z32 (a `PublicKey` displays as `pubky<z32>`)
+        let mut first: Vec<&PublicKey> = vec![&public];
+        if let Some(t) = target.filter(|t| **t != public) {
+            first.push(t);
+        }
+        let ready = futures_util::future::join_all(
+            first
+                .iter()
+                .map(|k| async move { freshen_until(pkarr, k, start + SIGN_IN_LOOKUPS).await.0 }),
+        );
+        // The identity's record, then the homeserver it names, alongside
+        let own = async {
+            let user = identity?;
+            let (u, packet) = freshen_until(pkarr, user, start + IDENTITY_STAGE).await;
+            tracing::info!(key = %u.key, from = ?u.from, "pkarr: the signed-in identity's record");
+            let named = packet.as_ref().and_then(records::homeserver_in)?;
+            let fresh = if first.iter().any(|k| ***k == named) {
+                None
+            } else {
+                Some(freshen_until(pkarr, &named, start + SIGN_IN_LOOKUPS).await.0)
+            };
+            Some((named.to_string(), fresh))
+        };
+        let (mut out, own) = futures_util::future::join(ready, own).await;
+        let selected = match (target, &own) {
+            (Some(t), _) => Some(t.z32()),
+            (None, Some((named, _))) if identity_selects => Some(named.clone()),
+            // Only warmed: whoever approves decides where the sign-in goes
+            (None, Some(_)) => None,
+            // Ring chooses the approving identity. Warming PUBLIC does not select it.
+            (None, None) => None,
+        };
+        if let Some((_, Some(f))) = own {
+            out.push(f);
+        }
+        if self.network == Network::Mainnet {
+            if let Some(why) = records::refusal(&out, selected.as_deref(), allow_local) {
+                tracing::warn!(?out, ?selected, "pkarr: sign-in not started: {why}");
+                return Err(why);
+            }
+        }
+        Ok(out)
     }
 
     pub fn pubky(&self) -> &Pubky {
@@ -907,6 +1017,7 @@ impl NodeHomeserver {
         &self,
         session: &PubkySession,
         dir: &str,
+        still: &(dyn Fn() -> bool + Sync),
     ) -> Result<(usize, usize), HomeserverError> {
         let user = session.public_key();
         let paths = self
@@ -929,7 +1040,14 @@ impl NodeHomeserver {
                 kept += 1;
                 continue;
             };
+            // Each write and delete only while the caller's session is still the one to write
+            if !still() {
+                return Err(HomeserverError::Transport(REPLACED.into()));
+            }
             self.write_object(session, &v1_path, &v1_tag).await?;
+            if !still() {
+                return Err(HomeserverError::Transport(REPLACED.into()));
+            }
             self.delete(session, &path).await?;
             moved += 1;
         }

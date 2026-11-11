@@ -5,7 +5,8 @@
 #         docker buildx build --platform linux/amd64,linux/arm64 -t pubky-music-node .
 # Run:    docker run --rm -p 7788:7788 --device /dev/snd -v music:/music:ro -v data:/data \
 #           -e ODEION_CONTACT=you@example.org pubky-music-node   (token: docker exec <name> cat /data/api-token)
-# The image keeps its pre-Odeion name (ghcr.io/gillohner/pubky-music-node): installs pull it by that name.
+# Published as ghcr.io/gillohner/odeion and, for installs from before the rename, under its old name
+# ghcr.io/gillohner/pubky-music-node too (the same image).
 
 FROM --platform=$BUILDPLATFORM rust:1-bookworm AS build
 ARG TARGETARCH

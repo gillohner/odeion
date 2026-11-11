@@ -132,7 +132,7 @@ instead**, paste the token and press **Log in with the token**. Then in **Your l
 library**, type your music folder's path (for example `/srv/music`) and press **Add folder**. (Or
 list it in the config before the start: `[library]` `folders = ["/srv/music"]` in
 `/etc/pubky-music/node.toml`; the node then reads it at every start.) Continue with the [first
-steps](../../README.md#first-steps-after-installing).
+steps](overview.md#first-steps-after-installing).
 
 Music inside your home folder works only if the `pubky-music` user may read it; many systems keep
 home folders private. A folder such as `/srv/music` is simpler.

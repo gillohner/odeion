@@ -214,8 +214,10 @@ for g in ("install-linux.md", "remote-access.md", "desktop-app.md"):
 has("docs/guides/install-linux.md", "odeiond.service", "the Linux guide installs odeiond.service")
 has("docs/branding-compatibility.md", "# Odeion branding and compatibility", "the compatibility inventory exists")
 cl = text("docs/CHANGELOG.md")
-unreleased = cl.split("\n## ", 2)[1] if cl.count("\n## ") >= 1 else ""
-check(unreleased.startswith("Unreleased") and "Odeion" in unreleased, "CHANGELOG's Unreleased section has the Odeion entry")
+# The rename's entry: under Unreleased, or once released under the newest version (0.2.3)
+sections = cl.split("\n## ")[1:]
+check(bool(sections) and sections[0].startswith("Unreleased") and "Odeion" in "\n".join(sections[:2]),
+      "CHANGELOG's Unreleased section or the newest release has the Odeion entry")
 
 # ---------------------------------------------------------------- 2. compatibility identities kept
 check(tauri.get("identifier") == "to.synonym.pubkymusic", "the app identifier (Android application id) is unchanged")
@@ -240,13 +242,19 @@ has("crates/pm-remote/src/lib.rs", "pubky-music/http/1", "the iroh ALPN is uncha
 has("crates/pm-appdata/src/paths.rs", "/priv/pubky.music/", "the homeserver app-data path is unchanged")
 has("Cargo.toml", 'repository = "https://github.com/gillohner/pubky-music-node"', "the repository URL is unchanged")
 check('"crates/pubky-music-specs"' in text("Cargo.toml"), "pubky-music-specs stays a workspace member")
-check("images: ghcr.io/${{ github.repository }}" in rel, "the image is published under the repository's name")
+images = re.search(r"images: \|\n((?:\s+ghcr\.io/\S+\n)+)", rel)
+image_names = images.group(1).split() if images else []
+check(image_names[:1] == ["ghcr.io/gillohner/odeion"], "the image is published as ghcr.io/gillohner/odeion")
+check("ghcr.io/gillohner/pubky-music-node" in image_names,
+      "and under its old name, the same image (installs from before the rename pull it)")
+check("imagetools create -t \"ghcr.io/gillohner/odeion:$t\" \"ghcr.io/gillohner/pubky-music-node:$t\"" in rel,
+      "older version tags are copied to the new name")
 check('name="pubky-music-node-${{ matrix.platform }}"' in rel, "node archives keep their download names")
 check('"pubky-music-$platform.dmg"' in text("tools/release/collect-app.sh"), "app downloads keep their names")
 has("deploy/bundle/docker-compose.yml", "name: pubky-music\n", "the bundle's compose project (its volumes) is unchanged")
-has("deploy/bundle/docker-compose.yml", "${ODEION_IMAGE:-${PM_IMAGE:-ghcr.io/gillohner/pubky-music-node}}:${ODEION_TAG:-${PM_TAG:-edge}}",
-    "the bundle keeps its image and still reads the PM_ .env names (ODEION_ first)")
-has("deploy/truenas/docker-compose.yaml", "image: ghcr.io/gillohner/pubky-music-node:edge", "TrueNAS pulls the same image")
+has("deploy/bundle/docker-compose.yml", "${ODEION_IMAGE:-${PM_IMAGE:-ghcr.io/gillohner/odeion}}:${ODEION_TAG:-${PM_TAG:-edge}}",
+    "the bundle pulls the image by its new name and still reads the PM_ .env names (ODEION_ first)")
+has("deploy/truenas/docker-compose.yaml", "image: ghcr.io/gillohner/odeion:edge", "TrueNAS pulls the same image")
 has("deploy/truenas/docker-compose.yaml", "container_name: pubky-music\n", "TrueNAS keeps its container name")
 old_unit = text("deploy/bare-metal/pubky-music-node.service")
 check(bool(old_unit), "the old unit file stays (published install commands use it)")
