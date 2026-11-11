@@ -848,6 +848,9 @@ pub(crate) fn queue_into(zone: &pm_zones::Zone, items: Vec<pm_zones::QueueItem>,
     }
     zone.enqueue(items, Insert::End);
     if replace {
+        // With shuffle on it plays shuffled, the playlist's order kept as the original one (as a
+        // queue replaced through `POST /v1/zones/{id}/queue`)
+        zone.shuffle_replacement();
         zone.play_index(0);
     }
 }
