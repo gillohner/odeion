@@ -162,6 +162,7 @@ pub struct Zone {
     /// A set and its read-back, or a poll's read, one at a time (the device's I/O): a poll that
     /// started before a set can't publish after it.
     volume_io: Arc<tokio::sync::Mutex<()>>,
+    unmute_safety: crate::sink::UnmuteSafety,
     /// The level last published, changed only together with the command that publishes it (the
     /// engine's state can lag the commands still queued). Never held across an await.
     volume_published: Arc<std::sync::Mutex<Published>>,
@@ -198,7 +199,7 @@ pub fn cap_volume(v: Volume, limit: Option<f32>, percent_for: impl Fn(f32) -> u8
 const PERCENT_STEP: u8 = 3;
 
 /// The request that brings `level` back to `limit` when it is above it.
-fn back_to_limit(
+pub(crate) fn back_to_limit(
     level: pm_model::VolumeLevel,
     limit: f32,
     percent_for: impl Fn(f32) -> u8,
@@ -259,6 +260,7 @@ impl Zone {
             events,
             crossfade,
             volume_io: Default::default(),
+            unmute_safety: Default::default(),
             volume_published: Default::default(),
             volume_limit: Default::default(),
         }
@@ -494,86 +496,89 @@ impl Zone {
             }
         }
         let seen = self.published().announced;
+        if let (Volume::Mute(false), Some(max)) = (v, limit) {
+            return self.unmute_within(max, seen).await;
+        }
         let percent_for = |db: f32| self.output.percent_for_db(db);
-        let unmuting = v == Volume::Mute(false);
-        let level_is_chosen = !self.output.unmute_restores_level();
-        // The limit as a level of the output's kind
-        let at_limit = |max: f32| match self.output.caps().hw_volume {
-            Some(pm_model::VolumeKind::Db { .. }) => Volume::Db(max),
-            _ => Volume::Percent(percent_for(max)),
-        };
-        // An output that chooses the level on unmuting (AirPlay, Squeezebox) with nothing to go
-        // back to would come back at full for a moment: the limit goes first, so it comes back
-        // at the limit
-        let mut preset: Option<Option<pm_model::ZoneVolume>> = None;
-        if let (true, true, Some(max)) = (unmuting, level_is_chosen, limit) {
-            if self.published().level.is_none() && !matches!(self.output.volume().await, Ok(Some(_))) {
-                preset = Some(self.set_and_read(at_limit(max)).await?.0);
+        let (mut next, _) = self.set_and_read(v).await?;
+        // A successful absolute group write establishes every member's level. Mute changes
+        // and aggregate readback say nothing about a previously unreadable member.
+        if matches!(v, Volume::Db(_) | Volume::Percent(_)) {
+            self.unmute_safety.clear();
+        }
+        if let (Volume::Up, Some(max)) = (v, limit) {
+            // A step the device took past the limit
+            if let Some(back) = next.and_then(|n| back_to_limit(n.level, max, percent_for)) {
+                next = self.set_and_read(back).await?.0;
             }
         }
-        // A group whose later member refuses the unmute still has its earlier members unmuted:
-        // the cap below is applied all the same, and the refusal reported after
-        let set = self.output.set_volume(v).await;
-        let partial = match set {
-            Ok(()) => None,
-            Err(e) if unmuting && limit.is_some() => Some(e),
-            Err(e) => return Err(e),
+        self.publish_volume(next, seen);
+        Ok(())
+    }
+
+    /// Unmute held to the zone's limit `max`, never raising a device ([`Output::unmute_held`],
+    /// per member in a group). A device that chooses its level on unmuting (AirPlay, Squeezebox)
+    /// is given the level last published, held to the limit (the limit itself while none is
+    /// known), before it unmutes, so it never comes back at full. One that restores its own is
+    /// brought down when it is above the limit: by its reading, else by the zone's level asked
+    /// for at that moment (a level the device announced meanwhile is the newer one). The zone
+    /// shows itself unmuted when some device came back. A device that can't report shows the
+    /// held level only when it is known to be there; after a refused correction it keeps the
+    /// level it had, so the next unmute corrects again. A refusal is returned after the rest.
+    async fn unmute_within(&self, max: f32, seen: u64) -> Result<(), SinkError> {
+        let percent_for = |db: f32| self.output.percent_for_db(db);
+        let was = self.published().level;
+        let held = match was.map(|l| l.level) {
+            Some(pm_model::VolumeLevel::Db(d)) => Volume::Db(d.min(max)),
+            Some(pm_model::VolumeLevel::Percent(p)) => Volume::Percent(p.min(percent_for(max))),
+            None => match self.output.caps().hw_volume {
+                Some(pm_model::VolumeKind::Db { .. }) => Volume::Db(max),
+                _ => Volume::Percent(percent_for(max)),
+            },
         };
-        let (mut next, reported) = self.read_after(v).await;
-        // The level set before the unmute is what the device plays at now
-        if let (None, Some(Some(l))) = (next, &preset) {
-            next = Some(pm_model::ZoneVolume {
-                level: l.level,
-                muted: false,
-            });
+        let chooses = !self.output.unmute_restores_level();
+        let last = || self.published().level.map(|l| l.level);
+        let last: &(dyn Fn() -> Option<pm_model::VolumeLevel> + Send + Sync) = &last;
+        let r = self
+            .output
+            .unmute_held(held, max, Some(last), true, &self.unmute_safety)
+            .await;
+        if !r.any {
+            // Nothing came back: the zone stays as it was shown
+            return Err(r
+                .error
+                .unwrap_or_else(|| SinkError::Device("the unmute went nowhere".into())));
         }
-        if let Some(max) = limit {
-            let back = match v {
-                // A step the device took past the limit
-                Volume::Up => next.and_then(|n| back_to_limit(n.level, max, percent_for)),
-                // Unmuting: a device that reports its level is set back when it came up above
-                // the limit, whichever way it unmutes
-                Volume::Mute(false) if reported => {
-                    next.and_then(|n| back_to_limit(n.level, max, percent_for))
-                }
-                _ if preset.is_some() => None,
-                // One that can't report and chooses the level itself is given the level last
-                // published, held to the limit (the limit itself while none is known)
-                Volume::Mute(false) if level_is_chosen => {
-                    Some(match self.published().level.map(|l| l.level) {
-                        Some(pm_model::VolumeLevel::Db(d)) => Volume::Db(d.min(max)),
-                        Some(pm_model::VolumeLevel::Percent(p)) => Volume::Percent(p.min(percent_for(max))),
-                        None => at_limit(max),
-                    })
-                }
-                // One that keeps its own level through a mute is never raised: only a level
-                // last published above the limit (lowered since) is brought down to it
-                Volume::Mute(false) => self
-                    .published()
-                    .level
-                    .and_then(|l| back_to_limit(l.level, max, percent_for)),
-                _ => None,
+        let (mut next, reported) = self.read_after(Volume::Mute(false)).await;
+        if !reported {
+            let level = if r.held && (chooses || was.is_some()) {
+                Some(match held {
+                    Volume::Db(d) => pm_model::VolumeLevel::Db(d),
+                    Volume::Percent(p) => pm_model::VolumeLevel::Percent(p),
+                    _ => unreachable!("held is a level"),
+                })
+            } else {
+                // Not known to be held (a correction was refused): the level it had stays shown
+                self.published().level.map(|l| l.level)
             };
-            if let Some(back) = back {
-                let (again, read) = self.set_and_read(back).await?;
-                next = again;
-                // The unmute went through before this level: the state says so
-                if unmuting && !read {
-                    if let Some(n) = next.as_mut() {
-                        n.muted = false;
-                    }
-                }
-            }
+            next = level.map(|level| pm_model::ZoneVolume { level, muted: false });
         }
+        // Some device came back: the zone shows it, and a member's refusal is said after
+        self.publish_volume(next, seen);
+        r.error.map_or(Ok(()), Err)
+    }
+
+    /// Publish `next` as the zone's level (none: the last one stays), unless the device announced
+    /// a level of its own since `seen` (it is newer).
+    fn publish_volume(&self, next: Option<pm_model::ZoneVolume>, seen: u64) {
         let mut p = self.published();
         if p.announced != seen {
-            return partial.map_or(Ok(()), Err);
+            return;
         }
         if next.is_some() {
             p.level = next;
         }
         self.send(Command::Volume(p.level));
-        partial.map_or(Ok(()), Err)
     }
 
     /// The zone's volume limit now: the node's for this zone's output, if any.
