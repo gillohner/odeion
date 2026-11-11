@@ -5707,23 +5707,31 @@
   const setListPref = (kind, p) => { try { localStorage.setItem(`pm.list.${kind}`, JSON.stringify(p)); } catch { /* no storage */ } };
   // Sorting changes the order of the current matches, keeping the filter and keyboard position.
   const renderSortedList = async (control) => {
-    const query = $('#filter')?.value; let focused = document.activeElement === control;
+    let query = $('#filter')?.value; let focused = document.activeElement === control;
     const gen = navGen;
     // Removing Sort during loading leaves focus on body. Any later focus transfer cancels
     // restoration, even if the person then dismisses that control (Search followed by Escape).
     const moved = () => { focused = false; };
+    // What the person types (or clears with Escape) in the filter meanwhile is what is put back
+    const typed = (e) => { if (!e.target || e.target.id !== 'filter') return; if (e.type === 'input') query = e.target.value; else if (e.key === 'Escape') query = ''; };
     document.addEventListener('focusin', moved, { capture: true, once: true, signal: navCtl.signal });
+    document.addEventListener('input', typed, { capture: true, signal: navCtl.signal });
+    document.addEventListener('keydown', typed, { capture: true, signal: navCtl.signal });
     try {
-      // A redraw of the same page while it sorts (the library changed) is the one the filter and
-      // the focus go to: wait for the newest one
+      // A redraw of the same page while it sorts (the library changed) replaces the list again: the
+      // filter goes back after each render, the focus once the newest is done. (A redraw still
+      // loading shows no Sort, so none can start before the sort and end after it.)
       const rendered = render(); let drawing = lastDrawing;
       await rendered;
-      while (gen === navGen && drawing !== lastDrawing) { drawing = lastDrawing; await drawing.done; }
-      if (gen !== navGen) return;
-      const filter = $('#filter');
-      if (filter && query != null) { filter.value = query; filter.oninput?.(); }
+      for (;;) {
+        if (gen !== navGen) return;
+        const filter = $('#filter');
+        if (filter && query != null) { filter.value = query; filter.oninput?.(); }
+        if (drawing === lastDrawing) break;
+        drawing = lastDrawing; await drawing.done;
+      }
       if (focused && document.activeElement === document.body) $('[data-lsort]', main)?.focus({ preventScroll: true });
-    } finally { document.removeEventListener('focusin', moved, true); }
+    } finally { document.removeEventListener('focusin', moved, true); document.removeEventListener('input', typed, true); document.removeEventListener('keydown', typed, true); }
   };
   const albumFav = (a) => !!(a.release_mbid && state.favUris && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`));
   const sortList = (kind, list, how) => {

@@ -4,9 +4,9 @@
 //   * Search with no words while a search still runs (the phone's Search tab, the box emptied): the
 //     progress line goes, the search box is no longer a combobox over results, and the old search
 //     ending later changes nothing;
-//   * Artists Sort while the library changes: the redraw that comes during the sort (its list in first
-//     or last) keeps the typed filter, its matching rows and count, and Sort's keyboard focus. (Albums
-//     sort from the list in memory: no answer to wait for, so no redraw comes in between.)
+//   * Artists Sort while the library changes: a redraw that comes during the sort keeps the typed
+//     filter (or what is typed meanwhile), its matching rows and count, and Sort's keyboard focus,
+//     whichever list comes in last.
 //   [ONLY=rows|search|sort] node tools/ui-rows-search-sort.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const assert = require('node:assert/strict');
@@ -111,7 +111,9 @@ async function emptySearchWhileRunning(browser, width) {
 // ---- Sort while the library changes ----------------------------------------
 const artists = Array.from({ length: 45 }, (_, i) => ({ id: i + 1, name: i < 3 ? `Loop ${'ABC'[i]}` : `Other ${i}`, albums: i < 3 ? [1, 3, 2][i] : 1, tracks: 3 }));
 const lists = { artists: { url: /\/v1\/library\/artists(?:\?|$)/, body: artists, rows: '#artistlist [data-artist]', attr: 'data-artist' } };
-// `order`: which answer comes last, the sort's own ('sort') or the library redraw's ('library')
+// `order`: 'sort' (the sort's list comes last), 'library' (the redraw's list comes last), 'typed'
+// (as 'library', and the person types another filter while the redraw's list is on its way). A
+// redraw still loading shows no Sort (checked too), so none starts before the sort.
 async function sortDuringRedraw(browser, width, kind, order) {
   const { page, context, state } = await fx.create(browser, width, { mobile: width < 600 });
   const L = lists[kind];
@@ -126,28 +128,37 @@ async function sortDuringRedraw(browser, width, kind, order) {
   });
   let socket = null;
   await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
+  const ids = () => page.locator(L.rows).evaluateAll((els, attr) => els.map((e) => Number(e.getAttribute(attr))), L.attr);
   try {
     await fx.go(page, `/${kind}`);
     await page.locator('#filter').waitFor();
     assert.ok(await until(() => !!socket), 'events connected');
     await page.fill('#filter', 'Loop');
+    // The library changes while the sort's list is on its way: the page redraws
     await page.locator('[data-lsort]').focus();
     await page.selectOption('[data-lsort]', 'added');
     await held[2];
-    // The library changes while the sort's list is on its way: the page redraws
     socket.send(JSON.stringify({ type: 'library_changed' }));
     await held[3];
-    if (order === 'sort') { gates[3].open(); await sleep(300); gates[2].open(); } else { gates[2].open(); await sleep(300); gates[3].open(); }
-    assert.ok(await until(async () => (await page.locator(L.rows).count()) === 3), `${kind}: only the matches once both lists are in (rows: ${await page.locator(L.rows).count()})`);
-    await sleep(200);
-    assert.equal(await page.locator('#filter').inputValue(), 'Loop', 'the typed filter survives the redraw');
-    assert.deepEqual(await page.locator(L.rows).evaluateAll((els, attr) => els.map((e) => Number(e.getAttribute(attr))), L.attr), [3, 2, 1], 'matches in the chosen order');
-    assert.equal(await page.locator('.page-head .count').getAttribute('data-filtered'), '3 shown', 'the count follows the rows');
+    assert.equal(await page.locator('[data-lsort]').count(), 0, 'no Sort while a redraw loads');
+    if (order === 'sort') { gates[3].open(); await sleep(300); gates[2].open(); } else gates[2].open();
+    if (order === 'typed') {
+      assert.ok(await until(async () => (await ids()).length === 3), 'the sort\'s own list is filtered at once');
+      await page.fill('#filter', 'Loop B');
+    }
+    if (order !== 'sort') { await sleep(300); gates[3].open(); }
+    const want = order === 'typed' ? [2] : [3, 2, 1];
+    assert.ok(await until(async () => (await ids()).length === want.length), `${kind}: only the matches once both lists are in (rows: ${await page.locator(L.rows).count()})`);
+    await sleep(300);
+    assert.equal(await page.locator('#filter').inputValue(), order === 'typed' ? 'Loop B' : 'Loop', 'the filter survives the redraw (the newest one typed)');
+    assert.deepEqual(await ids(), want, 'matches in the chosen order');
+    assert.equal(await page.locator('.page-head .count').getAttribute('data-filtered'), `${want.length} shown`, 'the count follows the rows');
     assert.equal(await page.locator('[data-lsort]').inputValue(), 'added');
-    assert.equal(await page.locator('[data-lsort]').evaluate((e) => e === document.activeElement), true, 'Sort keeps the keyboard focus');
+    if (order !== 'typed') assert.equal(await page.locator('[data-lsort]').evaluate((e) => e === document.activeElement), true, 'Sort keeps the keyboard focus');
+    else assert.equal(await page.locator('[data-lsort]').evaluate((e) => e === document.activeElement), false, 'focus moved by the person is not taken back to Sort');
     await page.screenshot({ path: path.join(shots, `sort-redraw-${kind}-${width}-${order}.png`) });
     assert.deepEqual(state.errors, []);
-    console.log(`PASS sort during a library redraw ${kind} ${width} (${order} answers last): filter, rows, count and focus kept`);
+    console.log(`PASS sort during a library redraw ${kind} ${width} (${order}): filter, rows, count and focus`);
   } finally { Object.values(gates).forEach((g) => g.open()); await context.close(); }
 }
 
@@ -158,6 +169,6 @@ async function sortDuringRedraw(browser, width, kind, order) {
     const run = (part) => !process.env.ONLY || process.env.ONLY === part;
     if (run('rows')) for (const w of [360, 390, 412]) await phoneRows(browser, w);
     if (run('search')) for (const w of [360, 390, 412]) await emptySearchWhileRunning(browser, w);
-    if (run('sort')) for (const w of [1280, 390]) for (const order of ['sort', 'library']) await sortDuringRedraw(browser, w, 'artists', order);
+    if (run('sort')) for (const w of [1280, 390]) for (const order of ['sort', 'library', 'typed']) await sortDuringRedraw(browser, w, 'artists', order);
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
