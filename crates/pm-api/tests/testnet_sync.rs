@@ -1,6 +1,9 @@
 //! Playlist sync against a local Pubky testnet. Needs `pubky-testnet`
 //! running on the default ports (`cargo install pubky-testnet && pubky-testnet`)
 //! and `PM_TESTNET=1`; skipped otherwise, so CI stays hermetic.
+// The sync future a test spawns (`tokio::spawn`, which needs it Send) nests deeper than the
+// default limit of 128 lets the compiler check
+#![recursion_limit = "256"]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -2801,4 +2804,152 @@ async fn a_large_private_folder_lists_within_the_pages_deadline() {
         homeserver.list_private_files(&session).await.unwrap().len(),
         2_000
     );
+}
+
+/// A listing with a listener's byte bounds is read by the node itself (each page capped before it
+/// is parsed), with a grant session's own bearer for the private root: it lists exactly what the
+/// SDK lists, over two pages, private and public.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capped_listing_lists_what_the_sdk_lists() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    use pm_pubky::homeserver::ListBounds;
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let (session, _z32, raw) = identity(&pubky, "pm-api-capped-list").await;
+    assert!(
+        session.as_grant().is_some(),
+        "a grant session: the node's own bearer request is the one tested"
+    );
+    let roots = [
+        ("/priv/social/v1/posts/", Visibility::Private),
+        ("/pub/social/v1/posts/", Visibility::Public),
+    ];
+    for (root, _) in roots {
+        let puts = (0..130).map(|i| {
+            let session = &session;
+            async move {
+                session
+                    .storage()
+                    .put(format!("{root}{i:04}/{i:04}.json").as_str(), b"{}".to_vec())
+                    .await
+                    .unwrap();
+            }
+        });
+        futures_util::StreamExt::collect::<Vec<()>>(futures_util::StreamExt::buffer_unordered(
+            futures_util::stream::iter(puts),
+            8,
+        ))
+        .await;
+    }
+    let capped = ListBounds {
+        max_entry_bytes: 2 * 1024,
+        max_bytes: 4 * 1024 * 1024,
+        ..ListBounds::OWNER
+    };
+    for (root, visibility) in roots {
+        let sdk = homeserver
+            .list_tree(&raw, root, visibility, Some(&session), ListBounds::OWNER)
+            .await
+            .unwrap();
+        let ours = homeserver
+            .list_tree(&raw, root, visibility, Some(&session), capped)
+            .await
+            .unwrap();
+        assert_eq!(ours.entries.len(), 130, "{root}");
+        assert_eq!(ours, sdk, "{root}");
+    }
+}
+
+/// A sign-in that replaces this node's while a sync runs ends that sync before its next write:
+/// nothing of the old identity's lands in the library, nothing of the node's is pushed to the old
+/// identity's homeserver, and the new sign-in's own sync takes over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_in_switch_ends_the_old_sessions_sync() {
+    use pm_api::sync::SyncError;
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
+    // Identity A, with a session for this node and one for another device of A's
+    let signer_a = pubky.signer(Keypair::random());
+    signer_a.signup(&hs, None).await.unwrap();
+    let session_a = signer_a
+        .signin_blocking(ClientId::new("pm-api-switch-node").unwrap())
+        .await
+        .unwrap();
+    let session_a2 = signer_a
+        .signin_blocking(ClientId::new("pm-api-switch-other").unwrap())
+        .await
+        .unwrap();
+    let (session_b, _, _) = identity(&pubky, "pm-api-switch-b").await;
+    let dir = tempfile::tempdir().unwrap();
+    let bookmark = |n: &NodeState, i: u32| {
+        let uri = pm_model::MusicUri::parse(&format!(
+            "https://musicbrainz.org/recording/00000000-0000-4000-8000-{i:012}"
+        ))
+        .unwrap();
+        n.library
+            .lock()
+            .unwrap()
+            .add_bookmark(
+                &pm_pubky::Bookmark::id_for(&uri),
+                &uri.to_url(),
+                1_700_000_000_000_000,
+            )
+            .unwrap();
+        uri.to_url()
+    };
+    // A's other device put a bookmark on A's homeserver
+    let other = node(dir.path(), "other");
+    let theirs = bookmark(&other, 1);
+    let sync_other = Arc::new(PubkySync::from_session(homeserver.clone(), session_a2));
+    other.set_sync(Some(sync_other.clone()));
+    let r = sync_other.sync(&other.library).await.unwrap();
+    assert_eq!(r.pushed, 1, "{r:?}");
+    // This node, signed in as A with a bookmark of its own queued, starts a sync; B signs in
+    // before it gets anywhere
+    let n = node(dir.path(), "n");
+    let mine = bookmark(&n, 2);
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), session_a.clone()));
+    n.set_sync(Some(sync_a.clone()));
+    let pass = {
+        let (sync_a, library) = (sync_a.clone(), n.library.clone());
+        tokio::spawn(async move { sync_a.sync(&library).await })
+    };
+    let sync_b = Arc::new(PubkySync::from_session(homeserver.clone(), session_b));
+    n.set_sync(Some(sync_b.clone()));
+    assert!(sync_a.is_retired());
+    let r = pass.await.unwrap();
+    assert!(matches!(r, Err(SyncError::Replaced)), "{r:?}");
+    // Nothing of A's here, nothing of the node's there
+    let urls: Vec<String> = n
+        .library
+        .lock()
+        .unwrap()
+        .list_bookmarks()
+        .unwrap()
+        .into_iter()
+        .map(|b| b.uri)
+        .collect();
+    assert_eq!(urls, [mine], "A's bookmark landed on the node");
+    let on_a: Vec<String> = homeserver
+        .read_v1_bookmarks_except(&session_a, &std::collections::HashMap::new())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, url, _)| url)
+        .collect();
+    assert_eq!(on_a, [theirs], "the node's bookmark went to A's homeserver");
+    // B's own sync is the one that runs now: the node's bookmark goes to B
+    let r = sync_b.sync(&n.library).await.unwrap();
+    assert_eq!((r.pushed, r.pulled), (1, 0), "{r:?}");
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    // A sync of the retired session, started later, writes nothing either
+    assert!(matches!(sync_a.sync(&n.library).await, Err(SyncError::Replaced)));
 }

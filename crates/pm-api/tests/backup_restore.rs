@@ -602,6 +602,146 @@ async fn a_backup_leaves_out_the_pending_queue_cleanup_note() {
     );
 }
 
+/// A scheduled backup runs one at a time (a second one asked for meanwhile is told so), and a
+/// schedule changed while a run is under way is kept: the run notes only when it ran and how it
+/// went, never the folder, interval or passphrase it started with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_schedule_changed_during_a_run_is_kept_and_runs_dont_overlap() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), "a", None);
+    let app = router(s.clone());
+    let (first, second) = (dir.path().join("backups-1"), dir.path().join("backups-2"));
+    let (st, v) = json(
+        &app,
+        "PUT",
+        "/v1/backup/schedule",
+        Some(serde_json::json!({"folder": first.to_string_lossy(), "every_hours": 24, "keep": 3})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // The run is held after writing its file (a test marker), long enough to change the schedule
+    let marker = s.data_dir().join(pm_api::backup::HOLD_RUN_MARKER);
+    std::fs::write(&marker, b"").unwrap();
+    let run = {
+        let app = app.clone();
+        tokio::spawn(async move { json(&app, "POST", "/v1/backup/schedule/run", None).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let (st, v) = json(&app, "POST", "/v1/backup/schedule/run", None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "a second run while one is written: {v}");
+    let (st, v) = json(
+        &app,
+        "PUT",
+        "/v1/backup/schedule",
+        Some(serde_json::json!({"folder": second.to_string_lossy(), "every_hours": 6, "keep": 5})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = run.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{v}");
+    std::fs::remove_file(&marker).unwrap();
+    let (_, sch) = json(&app, "GET", "/v1/backup/schedule", None).await;
+    assert_eq!(
+        sch["folder"],
+        serde_json::json!(second.to_string_lossy()),
+        "the change is kept: {sch}"
+    );
+    assert_eq!(
+        (sch["every_hours"].as_u64(), sch["keep"].as_u64()),
+        (Some(6), Some(5))
+    );
+    let file = sch["last_file"].as_str().expect("the run is noted");
+    assert!(
+        first.join(file).is_file(),
+        "the run wrote into the folder it started with"
+    );
+    assert!(sch["last_at"].as_i64().is_some());
+    assert!(sch["last_error"].is_null());
+    // Runs again, now into the new folder
+    let (st, v) = json(&app, "POST", "/v1/backup/schedule/run", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(second.join(v["last_file"].as_str().unwrap()).is_file());
+}
+
+/// A restore that fails on the way leaves the library exactly as it was: everything the restored
+/// library is to hold is put together in a staged copy first, and the live library is replaced
+/// in one step at the very end. A fault between the two (a test marker) returns the error and
+/// changes nothing; without the fault the same restore goes through.
+#[tokio::test]
+async fn a_restore_that_fails_leaves_the_library_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a", None);
+    let b = node(dir.path(), "b", None);
+    let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
+    {
+        let lib = a.library.lock().unwrap();
+        lib.add_bookmark(
+            "fav-a",
+            "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000a",
+            1,
+        )
+        .unwrap();
+        lib.add_tag(
+            "tag-a",
+            "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000a",
+            "calm",
+            1,
+        )
+        .unwrap();
+    }
+    set(&a, "tidal.user", r#"{"access_token":"fixture-a","user_id":"7"}"#);
+    set(&a, "node.contact", "pubky://a");
+    set(&a, "home.location", "47.4,8.5");
+    b.library
+        .lock()
+        .unwrap()
+        .add_bookmark(
+            "fav-b",
+            "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000b",
+            2,
+        )
+        .unwrap();
+    set(&b, "node.contact", "pubky://b");
+    let (plain, _) = pm_api::backup::make(&b, None).unwrap();
+    let before = snapshot(&a);
+    let marker = a.data_dir().join(pm_api::backup::FAIL_BEFORE_SWAP_MARKER);
+    std::fs::write(&marker, b"").unwrap();
+    let app = router(a.clone());
+    let (st, r) = restore(&app, &plain, None).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{r}");
+    assert_eq!(
+        snapshot(&a),
+        before,
+        "the library changed although the restore failed"
+    );
+    // The node still works as itself: its sign-in, its contact
+    assert_eq!(
+        a.library
+            .lock()
+            .unwrap()
+            .get_setting("tidal.user")
+            .unwrap()
+            .as_deref(),
+        Some(r#"{"access_token":"fixture-a","user_id":"7"}"#)
+    );
+    // Without the fault the same restore goes through: b's library, with a's own sign-in kept
+    std::fs::remove_file(&marker).unwrap();
+    let (st, r) = restore(&app, &plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let after = snapshot(&a);
+    assert_ne!(after, before);
+    assert_eq!(
+        after["favourites"],
+        serde_json::json!(["https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000b"])
+    );
+    assert_eq!(after["tidal"], before["tidal"], "a sign-in made here stays");
+    assert_eq!(
+        after["contact"],
+        serde_json::json!("pubky://b"),
+        "the backup's settings come in"
+    );
+}
+
 /// The library file inside a backup (the zip's `library.db`).
 fn library_db_of(backup: &[u8]) -> Vec<u8> {
     use std::io::Read;

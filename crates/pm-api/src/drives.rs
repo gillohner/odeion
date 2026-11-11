@@ -568,6 +568,8 @@ fn scan_root(s: &NodeState, root: &Root) -> Result<pm_library::scan::ScanReport,
         .collect();
     let token = access_token(&s.drives, Some(s), root.provider)?;
     let ep = s.drives.read().map_err(|_| "drives")?.endpoints.clone();
+    // Listed without it; held while files are read and written (no match correction in between)
+    let _gate = s.scan_gate();
     let lib = pm_library::Library::open(&s.db_path).map_err(|e| e.to_string())?;
     let scanner = pm_library::Scanner::new(&lib).with_art_dir(&s.art_dir);
     let open = |e: &pm_library::scan::RemoteEntry| -> std::io::Result<Box<dyn pm_library::tags::RemoteRead>> {
@@ -705,15 +707,28 @@ pub(crate) async fn login(
             ),
         )
     })?;
-    let verifier = crate::tidal::random_urlsafe(48);
-    let challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
-    let nonce = crate::tidal::random_urlsafe(18);
     let callback = format!(
         "{}/drives/{}/callback",
         crate::tidal::external_base(&s, &headers),
         p.id()
     );
+    if app.client_secret.is_empty() {
+        // A OneDrive app is a public client: no secret to add, so an own app needs an own return page
+        let instead = match p {
+            Provider::Onedrive => {
+                "Use your own OneDrive app with a return page of your own ([auth] return_page in node.toml)."
+            }
+            Provider::Google => {
+                "Use your own app with its secret (Settings › This node › Service apps, or \
+                 google_client_secret in node.toml)."
+            }
+        };
+        crate::project_apps::check_return_page(&s, &callback, instead)?;
+    }
+    let verifier = crate::tidal::random_urlsafe(48);
+    let challenge =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
+    let nonce = crate::tidal::random_urlsafe(18);
     // A node's own app with its secret returns to the node; the project app via the return page
     let (redirect, state) = if app.client_secret.is_empty() {
         (
@@ -946,12 +961,23 @@ pub struct NewRoot {
 
 fn start_scan(s: &Arc<NodeState>, root: Root) {
     let s2 = s.clone();
-    tokio::task::spawn_blocking(move || match scan_root(&s2, &root) {
-        Ok(r) => {
-            tracing::info!(drive = root.provider.name(), folder = %root.name, added = r.files_added, removed = r.files_removed, errors = r.errors.len(), "drive scan done");
-            s2.notify_library();
+    // Counted before it is spawned: an automatic run or a correction never misses it
+    let scan = s.side_scan();
+    tokio::task::spawn_blocking(move || {
+        let scanned = scan_root(&s2, &root);
+        drop(scan);
+        match scanned {
+            Ok(r) => {
+                tracing::info!(drive = root.provider.name(), folder = %root.name, added = r.files_added, removed = r.files_removed, errors = r.errors.len(), "drive scan done");
+                s2.notify_library();
+                crate::identify::after_scan(&s2, r.files_added + r.files_updated);
+            }
+            Err(e) => {
+                tracing::warn!(drive = root.provider.name(), folder = %root.name, "drive scan failed: {e}");
+                // Songs the settling left while it held the gate are settled still
+                crate::identify::after_scan(&s2, 0);
+            }
         }
-        Err(e) => tracing::warn!(drive = root.provider.name(), folder = %root.name, "drive scan failed: {e}"),
     });
 }
 

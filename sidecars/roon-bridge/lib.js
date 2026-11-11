@@ -58,9 +58,10 @@ export function keyLines(key) {
  * or 4 minutes, whichever comes first (the usual scrobble rule).
  */
 export class Scrobbler {
-  constructor(api, log = console) {
+  constructor(api, log = console, now = () => Date.now()) {
     this.api = api;
     this.log = log;
+    this.now = now;
     this.zoneState = new Map(); // zone_id -> { key, posted, length, seek }
   }
 
@@ -97,8 +98,13 @@ export class Scrobbler {
       this.log.log(`scrobbled: ${l.line1} — ${l.line2} → ${r.uri}`);
       return true;
     } catch (e) {
-      if (e.status === 422) this.log.log(`skipped (no canonical identity): ${l.line1} — ${l.line2}`);
-      else this.log.error(`scrobble failed: ${e.message}`);
+      if (e.status === 422) {
+        this.log.log(`skipped (no canonical identity): ${l.line1} — ${l.line2}`);
+      } else {
+        // A failed answer can follow a committed listen. Without an idempotency key,
+        // keep this play consumed rather than posting it a second time.
+        this.log.error(`scrobble failed (not retried): ${e.message}`);
+      }
       return false;
     }
   }

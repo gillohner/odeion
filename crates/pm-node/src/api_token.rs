@@ -46,7 +46,7 @@ pub fn resolve(configured: &str, listen: &str, data_dir: &Path) -> std::io::Resu
     let configured = configured.trim();
     let placeholder = PLACEHOLDERS.iter().any(|p| configured.eq_ignore_ascii_case(p));
     if !configured.is_empty() && !placeholder {
-        if configured.len() < 16 {
+        if configured.chars().count() < 16 {
             tracing::warn!("[api] token is shorter than 16 characters; a long random one is safer");
         }
         return Ok((Some(configured.to_string()), Source::Configured));

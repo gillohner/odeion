@@ -47,6 +47,7 @@ pub mod discover;
 pub mod downloads;
 pub mod drives;
 pub mod events;
+pub mod feedback;
 pub mod files;
 pub mod first_run;
 pub mod first_steps;
@@ -74,6 +75,8 @@ pub mod opensubsonic;
 pub mod party;
 pub mod peer;
 pub mod people;
+pub mod personal;
+pub mod personal_collections;
 pub mod pinakes_reader;
 pub mod play_from;
 pub mod playlists;
@@ -93,6 +96,7 @@ pub mod reviews;
 pub mod roon_import;
 pub mod search;
 pub mod segmented;
+pub(crate) mod send_queue;
 pub mod shared;
 pub mod signin;
 pub mod smart;
@@ -108,6 +112,8 @@ pub mod subsonic;
 pub mod sync;
 pub mod tag_fixes;
 pub mod tags;
+#[doc(hidden)]
+pub mod test_hooks;
 pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
@@ -322,32 +328,42 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/library/folders/suggest", get(first_run::suggest_folders))
         .route("/library/scan", post(scan))
-        // Collections: the same resource as /playlists (playlists.rs)
-        .route("/collections", get(playlists::list).post(playlists::create))
+        // Collections: the same resource as /playlists (playlists.rs); each caller their own
+        // (a listener's: personal_collections.rs)
+        .route(
+            "/collections",
+            get(personal_collections::list).post(personal_collections::create),
+        )
         .route(
             "/collections/{id}",
-            get(playlists::get)
-                .put(playlists::update)
-                .delete(playlists::delete),
+            get(personal_collections::get)
+                .put(personal_collections::update)
+                .delete(personal_collections::delete),
         )
-        .route("/collections/{id}/items", post(playlists::add_items))
+        .route("/collections/{id}/items", post(personal_collections::add_items))
         .route(
             "/collections/{id}/items/{index}",
-            axum::routing::delete(playlists::remove_item),
+            axum::routing::delete(personal_collections::remove_item),
         )
         .route(
             "/collections/{id}/local/{index}",
             axum::routing::delete(playlists::remove_local),
         )
-        .route("/collections/{id}/play", post(playlists::play))
+        .route("/collections/{id}/play", post(personal_collections::play))
         .route("/collections/{id}/play-from", get(play_from::playlist_play_from))
         .route("/collections/{id}/order", put(playlists::set_order))
-        .route("/collections/{id}/visibility", put(playlists::set_visibility))
+        .route(
+            "/collections/{id}/visibility",
+            put(personal_collections::set_visibility),
+        )
         .route(
             "/collections/{id}/items/{index}/source",
             put(playlists::pin_source),
         )
-        .route("/playlists", get(playlists::list).post(playlists::create))
+        .route(
+            "/playlists",
+            get(personal_collections::list).post(personal_collections::create),
+        )
         .route("/playlists/from-queue", post(playlists::from_queue))
         .route("/playlists/import", post(activity::import_playlist))
         .route("/playlists/import/file", post(activity::import_playlist_file))
@@ -380,23 +396,26 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route(
             "/playlists/{id}",
-            get(playlists::get)
-                .put(playlists::update)
-                .delete(playlists::delete),
+            get(personal_collections::get)
+                .put(personal_collections::update)
+                .delete(personal_collections::delete),
         )
-        .route("/playlists/{id}/items", post(playlists::add_items))
+        .route("/playlists/{id}/items", post(personal_collections::add_items))
         .route(
             "/playlists/{id}/local/{index}",
             axum::routing::delete(playlists::remove_local),
         )
         .route(
             "/playlists/{id}/items/{index}",
-            axum::routing::delete(playlists::remove_item),
+            axum::routing::delete(personal_collections::remove_item),
         )
-        .route("/playlists/{id}/play", post(playlists::play))
+        .route("/playlists/{id}/play", post(personal_collections::play))
         .route("/playlists/{id}/play-from", get(play_from::playlist_play_from))
         .route("/playlists/{id}/order", put(playlists::set_order))
-        .route("/playlists/{id}/visibility", put(playlists::set_visibility))
+        .route(
+            "/playlists/{id}/visibility",
+            put(personal_collections::set_visibility),
+        )
         .route("/playlists/{id}/items/{index}/source", put(playlists::pin_source))
         .route("/shared/resolve", get(shared::resolve))
         .route("/shared/{user}/playlists", get(shared::list))
@@ -438,6 +457,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/identify/settings", put(identify::put_settings))
         .route("/library/identify/key/check", post(identify::check_key))
         .route("/library/identify/write", post(identify::write_now))
+        .route("/library/identify/fix", get(identify::fix_view))
         .route("/library/tag-fixes", get(tag_fixes::list).post(tag_fixes::apply))
         .route("/library/suggestions", get(identify::suggestions))
         .route("/library/suggestions/albums", get(identify::review_albums))
@@ -445,6 +465,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/suggestions/skip", post(identify::skip))
         .route("/library/suggestions/unskip", post(identify::unskip))
         .route("/library/tracks/{id}/candidates", get(identify::track_candidates))
+        .route("/library/tracks/{id}/match", post(identify::set_match))
         .route("/library/suggestions/{id}/accept", post(identify::accept))
         .route("/library/suggestions/{id}", delete(identify::reject))
         .route("/discover/uri", get(discover::on_pubky))
@@ -734,6 +755,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/presence/along", post(presence::join).delete(presence::leave))
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
+        // A listener's own homeserver, for their bookmarks (personal.rs)
+        .route(
+            "/me/homeserver",
+            get(personal::status).delete(personal::disconnect),
+        )
+        .route("/me/homeserver/connect", post(personal::connect_start))
+        .route("/me/homeserver/connect/poll", get(personal::connect_poll))
         // Usage insights, each person's own side (usage.rs: owner and listeners, never guests or
         // a node without a token; the handlers read bodies themselves, within their own limits)
         .route("/usage/me", get(usage::me).put(usage::choose))
@@ -757,6 +785,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
             get(accounts::my_sources).put(accounts::set_my_sources),
         )
         .route("/people", get(people::list))
+        // Problem reports to the node's private inbox (feedback.rs)
+        .route("/feedback", post(feedback::send))
+        .route("/feedback/mine", get(feedback::mine))
         .route("/devices", get(devices::list))
         .route(
             "/devices/{id}",
@@ -844,6 +875,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/ux/", get(ux_index))
         .route("/ux/{*path}", get(ux_file))
         .route("/app.js", get(web_js))
+        .route("/feedback.js", get(feedback_js))
+        .route("/feedback.css", get(feedback_css))
         .route("/manifest.webmanifest", get(web_manifest))
         .route("/icon.svg", get(web_icon))
         // Installing the web app (docs/guides/install-web-app.md): public like the page
@@ -1004,6 +1037,9 @@ async fn auth(
         .get::<axum::extract::MatchedPath>()
         .map(|m| m.as_str().to_string());
     let token = bearer_for(&headers, &query, req.method(), route.as_deref());
+    // Stamp before authenticating: work delayed after admission must not inherit a later
+    // removal/re-add or restore merely because music is enabled again when it resumes.
+    let access_started = people::access_started(&state);
     let Some(caller) = accounts::caller(&state, token.as_deref()) else {
         // An owner's browser session while the node has no identity loaded: not refused for good
         // (the page keeps it), it works again once the identity is. Log out still ends it, so the
@@ -1053,7 +1089,9 @@ async fn auth(
     };
     req.extensions_mut().insert(caller);
     // Catalogue reads (search, item pages) use the asking person's sign-in, or the app's
-    let resp = accounts::ASKING.scope(asking, next.run(req)).await;
+    let resp = personal::AUTHENTICATED_ACCESS
+        .scope(access_started, accounts::ASKING.scope(asking, next.run(req)))
+        .await;
     if let Some((zone, caller)) = played.filter(|_| resp.status().is_success()) {
         presence::played(&state, &zone, &caller);
     }
@@ -1213,6 +1251,29 @@ async fn web_js() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("../static/app.js"),
+    )
+        .into_response()
+}
+
+/// Help and problem reports (feedback.js, feedback.css), loaded by the page.
+async fn feedback_js() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/feedback.js"),
+    )
+        .into_response()
+}
+
+async fn feedback_css() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/feedback.css"),
     )
         .into_response()
 }
@@ -2043,6 +2104,10 @@ async fn enqueue(
         QueueAt::Next => Insert::Next,
     };
     let ids = zone.enqueue(items, at);
+    // A queue replaced with shuffle on plays shuffled, the order sent kept as the original one
+    if body.replace {
+        zone.shuffle_replacement();
+    }
     if body.play {
         if body.replace {
             zone.play_index(0);
@@ -3030,7 +3095,7 @@ async fn settings_restore_now(State(s): State<Arc<NodeState>>) -> ApiResult<sync
     let r = sync
         .restore_settings(&s, false)
         .await
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?
+        .map_err(sync_error)?
         .ok_or_else(|| ApiError::not_found("no settings backup on the homeserver yet"))?;
     s.notify_library();
     Ok(Json(r))
@@ -3223,18 +3288,21 @@ async fn move_folder(
     if !to.is_dir() {
         return Err(ApiError::bad_request(format!("{} is not a folder", to.display())));
     }
-    if !s.begin_scan() {
+    let Some(slot) = s.scan_slot() else {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "a scan is running; try again when it is done",
         ));
-    }
+    };
+    // No match correction meanwhile (it would write a file under paths being moved)
+    let held = s.no_corrections().await;
     let moved = s
         .library
         .lock()
         .expect("library poisoned")
         .move_folder(std::path::Path::new(m.from.trim()), &to);
-    s.end_scan();
+    drop(held);
+    drop(slot);
     let moved = moved?;
     s.unwatch(std::path::Path::new(m.from.trim()));
     s.watch_more(&to);
@@ -3324,16 +3392,48 @@ async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSt
     let hs = s
         .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // The newest records first, so the grant exchange routes on them (the identity signed in
+    // here before, when there is one)
+    let identity = s
+        .sync_handle()
+        .and_then(|h| pubky::PublicKey::try_from(h.z32()).ok());
+    let records = hs
+        .fresh_for_sign_in(identity.as_ref(), None, s.bundled_homeserver().is_some())
+        .await
+        .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
     let flow = hs
         .start_login("pubky-music-node")
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     *s.login.lock().await = Some(flow);
     let qr_svg = qr_svg(&url);
-    Ok(Json(LoginStarted { url, qr_svg }))
+    Ok(Json(LoginStarted { records, url, qr_svg }))
 }
 
 const CONTROLLER_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// How often a controller log in may warm the homeserver records (see `controller_login_start`).
+const CONTROLLER_WARM_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run `work` unless it last succeeded less than `every` ago; one at a time (a caller that waited
+/// for another's run uses its result). A failure is not remembered: the next caller tries again.
+async fn now_and_then<F, Fut, E>(
+    last: &tokio::sync::Mutex<Option<std::time::Instant>>,
+    every: std::time::Duration,
+    work: F,
+) -> Result<(), E>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+{
+    let mut last = last.lock().await;
+    if last.is_some_and(|at| at.elapsed() < every) {
+        return Ok(());
+    }
+    work().await?;
+    *last = Some(std::time::Instant::now());
+    Ok(())
+}
 /// Sign-ins waiting at once, in all and from one address (security review 2026-10-30, #4).
 const MAX_LOGINS: usize = 64;
 const MAX_LOGINS_PER_ORIGIN: usize = 6;
@@ -3498,18 +3598,41 @@ async fn controller_login_start(
     };
     let renew_asked = asked.renewal.is_some_and(|code| renewal_good(&s, &code));
     let device = asked.device;
-    // Held from the check to the insert: sign-ins started at once can't pass the caps together
-    let mut logins = s.controller_logins.lock().await;
-    logins.retain(|_, (_, at, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
-    let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
-        return Err(ApiError::new(
+    // Before any relay wait: an approval kept at the relay is as old as the sign-in it answers
+    let access = people::access_started(&s);
+    // No owner, no sign-in: said before any homeserver lookup, so it doesn't hang on the network
+    let no_owner = || {
+        ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             "the node has no Pubky session loaded: sign it in (Settings → Pubky, or `odeiond login`), or restart it once its homeserver answers",
-        ));
+        )
+    };
+    let Some(identity) = s.sync_handle().map(|h| h.z32().to_string()) else {
+        return Err(no_owner());
     };
     let hs = s
         .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // The newest records first, so the grant exchange routes on them: the owner's, to have them
+    // ready. A listener on another homeserver may approve this log in too, so what is found of
+    // the owner's homeserver never refuses it. Before the sign-ins' lock: these are network
+    // lookups, and the polls of every waiting sign-in take that lock too. Anyone may ask (no
+    // token), so the lookups run one at a time and at most every CONTROLLER_WARM_EVERY: what they
+    // found stays in the client's cache meanwhile
+    let identity = pubky::PublicKey::try_from(identity.as_str()).ok();
+    now_and_then(&s.controller_warmed, CONTROLLER_WARM_EVERY, || async {
+        hs.warm_for_sign_in(identity.as_ref(), s.bundled_homeserver().is_some())
+            .await
+            .map(drop)
+    })
+    .await
+    .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
+    // Held from the check to the insert: sign-ins started at once can't pass the caps together
+    let mut logins = s.controller_logins.lock().await;
+    logins.retain(|_, (_, at, _, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
+    let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
+        return Err(no_owner());
+    };
     // The node's own session lacks folders and the owner asked: this log in asks for them too, so
     // the owner's approval renews it (no separate "sign in again")
     let (renews, caps) = login_capabilities(renew_asked, s.sync_handle().is_some_and(|h| h.needs_resign()));
@@ -3521,7 +3644,7 @@ async fn controller_login_start(
     loop {
         let waiting: Vec<(String, std::time::Instant, String)> = logins
             .iter()
-            .map(|(id, (_, at, o, _))| (id.clone(), *at, o.clone()))
+            .map(|(id, (_, at, o, _, _))| (id.clone(), *at, o.clone()))
             .collect();
         match make_room(&waiting, &origin) {
             Some(old) => {
@@ -3530,7 +3653,10 @@ async fn controller_login_start(
             None => break,
         }
     }
-    logins.insert(id.clone(), (flow, std::time::Instant::now(), origin, device));
+    logins.insert(
+        id.clone(),
+        (flow, std::time::Instant::now(), origin, device, access),
+    );
     drop(logins);
     let qr_svg = qr_svg(&url);
     let owner_face = profiles::login_face(&s, &owner, profiles::FaceFrom::Owner).await;
@@ -3545,6 +3671,27 @@ async fn controller_login_start(
     }))
 }
 
+/// A listener's Ring approval becomes a personal token only while the music access it started
+/// under still stands: `started` is the access revision taken when the sign-in started, before
+/// any relay wait. The final check and the synchronous mint run under the listener's membership
+/// lock and the roster guard (the order Remove takes them), so Remove with a re-add, Music off or
+/// a restore cannot cross them. Neither lock is held over network I/O. `None`: no music access.
+pub(crate) async fn mint_listener_sign_in(
+    s: &NodeState,
+    who: &str,
+    started: u64,
+) -> Result<Option<String>, ApiError> {
+    let key = who.trim_start_matches("pubky");
+    let membership = personal::membership_lock(s, key);
+    let _membership = membership.lock().await;
+    let _roster = s.roster.lock().await;
+    people::access_current(s, key, started)?;
+    if !people::may_use_music(s, key) {
+        return Ok(None);
+    }
+    accounts::mint(s, key).map(Some)
+}
+
 /// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with a browser session
 /// of its own when the approver is the owner (renewing the node's session when this log in asked
 /// for its folders); `denied` otherwise, with who approved and whose node it is.
@@ -3554,10 +3701,10 @@ async fn controller_login_poll(
 ) -> ApiResult<ControllerLoginStatus> {
     let id = q.get("id").cloned().unwrap_or_default();
     let mut logins = s.controller_logins.lock().await;
-    let Some((flow, at, _, device)) = logins.get(&id) else {
+    let Some((flow, at, _, device, access)) = logins.get(&id) else {
         return Ok(Json(ControllerLoginStatus::of("expired")));
     };
-    let device = *device;
+    let (device, access) = (*device, *access);
     if at.elapsed() > CONTROLLER_LOGIN_TTL {
         logins.remove(&id);
         return Ok(Json(ControllerLoginStatus::of("expired")));
@@ -3570,9 +3717,9 @@ async fn controller_login_poll(
             let who = session.public_key().to_string();
             let owner = s.sync_handle().map(|h| h.z32().to_string()).unwrap_or_default();
             if who != owner {
-                // A listener in People with music access gets a personal token
-                if people::may_use_music(&s, &who) {
-                    let token = accounts::mint(&s, &who)?;
+                // A listener in People with music access gets a personal token, unless their
+                // access changed after this sign-in started (409: start a new one)
+                if let Some(token) = mint_listener_sign_in(&s, &who, access).await? {
                     tracing::info!(%who, "listener signed in with Pubky Ring");
                     return Ok(Json(ControllerLoginStatus {
                         token: Some(token),
@@ -3704,6 +3851,15 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
 }
 
 /// Push local changes to the private homeserver folder and pull what is missing.
+/// A sync error as an answer: a session another sign-in replaced meanwhile is a conflict (409),
+/// not a homeserver failure.
+fn sync_error(e: sync::SyncError) -> ApiError {
+    match e {
+        sync::SyncError::Replaced => ApiError::new(StatusCode::CONFLICT, e.to_string()),
+        e => ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()),
+    }
+}
+
 async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
     let Some(sync) = s.sync_handle() else {
         return Err(ApiError::new(
@@ -3711,10 +3867,7 @@ async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
             "no Pubky session: set `pubky.session_secret_file` in the node config",
         ));
     };
-    let report = sync
-        .sync(&s.library)
-        .await
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let report = sync.sync(&s.library).await.map_err(sync_error)?;
     sync.backup_settings(&s).await;
     if report.pulled > 0 {
         s.notify_library();
@@ -3770,7 +3923,7 @@ mod tests {
         w.finalize().unwrap();
     }
 
-    async fn state(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
+    pub(crate) async fn state(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
         state_with(dir, token, Default::default()).await
     }
 
@@ -6237,7 +6390,8 @@ mod tests {
             ("PUT", "/v1/node/settings"),
             ("POST", "/v1/library/folders"),
             ("POST", "/v1/zones"),
-            ("POST", "/v1/playlists"),
+            // (a listener's own collections are theirs: tests/listener_collections.rs)
+            ("POST", "/v1/playlists/from-queue"),
             ("GET", "/v1/sources/plex/server"),
         ] {
             let (st, v) = send(m, p.into(), tok.clone(), Some(serde_json::json!({}))).await;
@@ -9509,12 +9663,31 @@ mod tests {
     }
 
     /// Controllers sign in with Pubky Ring; without a node session there is
-    /// no owner to compare against, so the node says so instead of starting.
+    /// no owner to compare against, so the node says so instead of starting: at once, whatever
+    /// the network does (here a PKARR relay that never answers, on the public network).
     #[tokio::test]
     async fn controller_sign_in_needs_the_node_signed_in_first() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), Some("t0k")).await;
+        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://127.0.0.1:{}/", stalled.local_addr().unwrap().port());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((c, _)) = stalled.accept().await {
+                held.push(c);
+            }
+        });
+        let mut b = pubky::PubkyHttpClient::builder();
+        b.pkarr(move |p| {
+            p.no_dht();
+            p.relays(&[relay.as_str()]).unwrap()
+        });
+        s.set_homeserver(pm_pubky::homeserver::NodeHomeserver::from_pubky_on(
+            pubky::Pubky::with_client(b.build().unwrap()),
+            pm_pubky::Network::Mainnet,
+        ));
         let app = router(s);
+        let started = std::time::Instant::now();
         let resp = app
             .clone()
             .oneshot(
@@ -9527,6 +9700,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "no homeserver lookup first: {:?}",
+            started.elapsed()
+        );
         let (st, v) = call(&app, "GET", "/v1/auth/pubky/poll?id=nope", None).await;
         assert_eq!(st, StatusCode::OK, "{v}");
         assert_eq!(v["status"], "expired");
@@ -9691,6 +9869,36 @@ mod tests {
         let mut tunnel = req(None, Some("127.0.0.1:1"));
         tunnel.extensions_mut().insert(peer::Remote);
         assert_eq!(login_origin(&tunnel), "iroh");
+    }
+
+    /// The controller log in's warm-up (`POST /v1/auth/pubky/start` needs no token): many asking
+    /// at once start one run, none runs again within the interval, a failed run is tried again by
+    /// the next caller, and once the interval has passed it runs again.
+    #[tokio::test]
+    async fn the_controller_warm_up_runs_now_and_then() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let last = tokio::sync::Mutex::new(None);
+        let every = std::time::Duration::from_secs(30);
+        let count = AtomicUsize::new(0);
+        let runs = &count;
+        let work = move || async move {
+            runs.fetch_add(1, SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Ok::<(), String>(())
+        };
+        let all = futures_util::future::join_all((0..10).map(|_| now_and_then(&last, every, work))).await;
+        assert!(all.iter().all(Result::is_ok));
+        assert_eq!(runs.load(SeqCst), 1, "ten at once: one run");
+        now_and_then(&last, every, work).await.unwrap();
+        assert_eq!(runs.load(SeqCst), 1, "within the interval: none");
+        *last.lock().await = None;
+        let failed = now_and_then(&last, every, || async { Err::<(), _>("refused".to_string()) });
+        assert_eq!(failed.await, Err("refused".to_string()));
+        now_and_then(&last, every, work).await.unwrap();
+        assert_eq!(runs.load(SeqCst), 2, "a failure is tried again");
+        *last.lock().await = std::time::Instant::now().checked_sub(every);
+        now_and_then(&last, every, work).await.unwrap();
+        assert_eq!(runs.load(SeqCst), 3, "the interval passed: it runs again");
     }
 
     #[tokio::test]
@@ -11040,6 +11248,7 @@ exec sleep 300
     /// (a zip) into `<data_dir>/bandcamp`, which becomes a library folder and is scanned.
     #[tokio::test]
     async fn bandcamp_streams_and_downloads_purchases_into_the_library() {
+        let _base_guard = bandcamp::API_TEST_LOCK.lock().await;
         use pm_zones::SourceFactory;
         use std::io::Write as _;
         let flac = std::fs::read(concat!(
@@ -11233,7 +11442,14 @@ exec sleep 300
         let mut last = serde_json::Value::Null;
         for _ in 0..100 {
             let (_, d) = call(&app, "GET", "/v1/sources/bandcamp/downloads", None).await;
-            last = d[0].clone();
+            // This purchase's job, by its id (the list is process-wide)
+            last = d
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"] == "p5")
+                .cloned()
+                .unwrap_or_default();
             if last["state"] == "done" || last["state"] == "failed" {
                 break;
             }
@@ -23340,6 +23556,166 @@ exec sleep 300
         assert_eq!(s.zones.list().len(), zones);
     }
 
+    /// An AirPlay receiver and a BluOS player that were off at the start get their zones from the
+    /// mDNS watch, without a rescan, each with the queue it had saved; found again on every pass, or
+    /// by two registrations at once, each is registered once (no `-2` zone).
+    #[tokio::test]
+    async fn speakers_switched_on_after_the_start_get_their_zones_and_queues() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let air = || pm_out_airplay::Device {
+            id: "90568261365F".into(),
+            name: "ecofriday".into(),
+            model: Some("PULSE FLEX 2i".into()),
+            addr: "127.0.0.1:9".parse().unwrap(),
+            encryption: vec!["0".into(), "4".into()],
+            codecs: vec!["0".into(), "1".into()],
+        };
+        let blu = || pm_out_bluos::Player {
+            id: "90568261365f".into(),
+            name: "ecofriday".into(),
+            host: "127.0.0.1".into(),
+            port: 9,
+            model: Some("PULSE FLEX 2i".into()),
+        };
+        let zones_of = |s: &Arc<NodeState>, outs: &[OutputId]| -> Vec<String> {
+            let mut z: Vec<String> = s
+                .zones
+                .list()
+                .iter()
+                .filter(|z| outs.contains(&z.output))
+                .map(|z| z.id.to_string())
+                .collect();
+            z.sort();
+            z
+        };
+        let titles = |z: &serde_json::Value| -> Vec<String> {
+            z["queue"]
+                .as_array()
+                .map(|q| {
+                    q.iter()
+                        .map(|i| i["title"].as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("short.wav");
+        write_wav(&wav, 441);
+
+        // Before the restart: both speakers had zones, each with its queue (saved)
+        let (outs, zids) = {
+            let s = state(dir.path(), None).await;
+            let app = router(s.clone());
+            let mut outs = s.register_airplay(vec![air()]);
+            outs.extend(s.register_bluos(vec![blu()]));
+            assert_eq!(outs.len(), 2, "{outs:?}");
+            let zids = zones_of(&s, &outs);
+            assert_eq!(zids.len(), 2, "{zids:?}");
+            for zid in &zids {
+                let items: Vec<_> = (0..3)
+                    .map(|i| serde_json::json!({"uri": wav.to_string_lossy(), "title": format!("{zid} {i}")}))
+                    .collect();
+                let (st, _) = call(
+                    &app,
+                    "POST",
+                    &format!("/v1/zones/{zid}/queue"),
+                    Some(serde_json::json!({"items": items})),
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK);
+                let key = format!("queue.{zid}");
+                let want = format!("{zid} 2");
+                let saved = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    while !s
+                        .library
+                        .lock()
+                        .unwrap()
+                        .get_setting(&key)
+                        .unwrap()
+                        .is_some_and(|j| j.contains(&want))
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                })
+                .await;
+                assert!(saved.is_ok(), "{zid}'s queue was not saved");
+            }
+            (outs, zids)
+        };
+
+        // The start: both speakers are off. They answer from the watch's third pass on
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        assert!(zones_of(&s, &outs).is_empty(), "no zone while they are off");
+        let passes = Arc::new(AtomicUsize::new(0));
+        let n = passes.clone();
+        let browse: crate::state::MdnsBrowse = Arc::new(move || {
+            if n.fetch_add(1, Ordering::SeqCst) < 2 {
+                (Vec::new(), Vec::new())
+            } else {
+                (vec![air()], vec![blu()])
+            }
+        });
+        s.spawn_mdns_passes(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(300),
+            browse,
+        );
+        let mut waited = 0;
+        while passes.load(Ordering::SeqCst) < 2 && waited < 100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            waited += 1;
+        }
+        assert!(zones_of(&s, &outs).is_empty(), "still off: no zone");
+        let mut waited = 0;
+        while zones_of(&s, &outs).len() < 2 && waited < 100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            waited += 1;
+        }
+        assert_eq!(
+            zones_of(&s, &outs),
+            zids,
+            "both came back, under their own ids, without a rescan"
+        );
+        for zid in &zids {
+            let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+            let want: Vec<String> = (0..3).map(|i| format!("{zid} {i}")).collect();
+            assert_eq!(titles(&z), want, "{zid}'s saved queue is back");
+        }
+        // Found again on later passes: nothing more
+        let seen = passes.load(Ordering::SeqCst);
+        let mut waited = 0;
+        while passes.load(Ordering::SeqCst) < seen + 2 && waited < 1500 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            waited += 1;
+        }
+        assert!(
+            passes.load(Ordering::SeqCst) >= seen + 2,
+            "the watch keeps looking"
+        );
+        assert_eq!(zones_of(&s, &outs), zids, "one zone each, no -2");
+
+        // Two registrations of the same speakers at once (a rescan during a pass): one zone each
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let both = |s: &Arc<NodeState>| {
+            let s = s.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut new = s.register_airplay(vec![air()]);
+                new.extend(s.register_bluos(vec![blu()]));
+                new
+            })
+        };
+        let (a, b) = tokio::join!(both(&s), both(&s));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(a.len() + b.len(), 2, "{a:?} {b:?}");
+        assert_eq!(zones_of(&s, &outs).len(), 2);
+        assert!(
+            s.zones.list().iter().all(|z| !z.id.to_string().ends_with("-2")),
+            "no -2 zone"
+        );
+    }
+
     /// A renderer that had a zone comes back at a start whose SSDP search missed it, described at
     /// its last URL (once: one with its zone isn't described again); one that answers only later
     /// gets its zone from the next pass, without a rescan; another device now at a known URL gets
@@ -24630,5 +25006,1498 @@ exec sleep 300
         let (st, _) = call(&app, "DELETE", &format!("/v1/zones/{}", zone2.id()), None).await;
         assert_eq!(st, StatusCode::NO_CONTENT);
         assert_eq!(s.sources.volume_limit(&group), None);
+    }
+
+    /// The project's return page forwards only to a node on a local address: a sign-in through
+    /// it from any other address answers 412 (and the apps listing says so), a local address
+    /// signs in through it, and a node's own `[auth] return_page` is never second-guessed.
+    #[tokio::test]
+    async fn the_shared_return_page_needs_a_local_address() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        // A node reached by another name than localhost has a token
+        let s = state(dir.path(), Some("fixture-api")).await;
+        s.tidal.write().unwrap().creds = tidal::TidalCredentials {
+            client_id: "project-app".into(),
+            ..Default::default()
+        };
+        s.spotify.write().unwrap().creds = spotify::SpotifyCredentials {
+            client_id: "own-app".into(),
+            client_secret: String::new(),
+        };
+        let no_secret = |id: &str| drives::App {
+            client_id: id.into(),
+            client_secret: String::new(),
+        };
+        s.set_drive_apps(drives::apps_from(no_secret("g-client"), no_secret("m-client")));
+        let app = router(s.clone());
+        let send = |method: &'static str, path: &'static str, host: &'static str| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("host", host)
+                    .header("authorization", "Bearer fixture-api")
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                let st = resp.status();
+                let b = resp.into_body().collect().await.unwrap().to_bytes();
+                (
+                    st,
+                    serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default(),
+                )
+            }
+        };
+        let logins = [
+            (
+                "GET",
+                "/v1/sources/tidal/login",
+                "/tidal/callback",
+                "Use the code sign-in",
+            ),
+            (
+                "GET",
+                "/v1/sources/spotify/login",
+                "/spotify/callback",
+                "Use your own app with its secret in node.toml",
+            ),
+            (
+                "POST",
+                "/v1/library/drives/google/login",
+                "/drives/google/callback",
+                "Use your own app",
+            ),
+            (
+                "POST",
+                "/v1/library/drives/onedrive/login",
+                "/drives/onedrive/callback",
+                "Use your own OneDrive app with a return page of your own",
+            ),
+        ];
+        let notes = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .filter(|a| {
+                    a["note"]
+                        .as_str()
+                        .is_some_and(|n| n.contains("returns only to local"))
+                })
+                .map(|a| a["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        // An internet address: refused before any sign-in starts, with what to use instead
+        for (m, path, _, instead) in logins {
+            let (st, v) = send(m, path, "music.example.com").await;
+            assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{path}: {v}");
+            let msg = v["error"]
+                .as_str()
+                .or(v["message"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                msg.contains("isn't a local one") && msg.contains(instead),
+                "{path}: {v}"
+            );
+        }
+        let (_, apps) = send("GET", "/v1/node/apps", "music.example.com").await;
+        assert_eq!(
+            notes(&apps),
+            ["spotify", "tidal", "google-drive", "onedrive"],
+            "{apps}"
+        );
+        // A local address: through the return page, which forwards to this node's callback
+        for (m, path, callback, _) in logins {
+            let (st, v) = send(m, path, "192.168.1.5:7788").await;
+            assert_eq!(st, StatusCode::OK, "{path}: {v}");
+            let u = url::Url::parse(v["url"].as_str().unwrap()).unwrap();
+            let q: std::collections::HashMap<String, String> = u.query_pairs().into_owned().collect();
+            assert_eq!(q["redirect_uri"], crate::project_apps::RETURN_PAGE, "{path}");
+            let (_, enc) = q["state"].split_once('.').unwrap();
+            let back = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(enc)
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(back).unwrap(),
+                format!("http://192.168.1.5:7788{callback}")
+            );
+        }
+        let (_, apps) = send("GET", "/v1/node/apps", "192.168.1.5:7788").await;
+        assert!(notes(&apps).is_empty(), "{apps}");
+        // The node's own return page: its owner's redirector, used from any address
+        s.set_return_page("https://return.example/callback");
+        for (m, path, _, _) in logins {
+            let (st, v) = send(m, path, "music.example.com").await;
+            assert_eq!(st, StatusCode::OK, "{path}: {v}");
+        }
+        let (_, apps) = send("GET", "/v1/node/apps", "music.example.com").await;
+        assert!(notes(&apps).is_empty(), "{apps}");
+    }
+
+    // Automatic matching, automatic settling and "Wrong match?" (their own file)
+    mod identify_auto;
+
+    /// An 8-item queue playing on the null output with repeat one, `index` current; the zone.
+    async fn looping_queue(
+        n: usize,
+        index: usize,
+    ) -> (tempfile::TempDir, Arc<NodeState>, axum::Router, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("t.wav");
+        write_wav(&wav, 441);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let items: Vec<_> = (0..n)
+            .map(|i| serde_json::json!({"uri": wav.to_string_lossy(), "title": format!("t{i}")}))
+            .collect();
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": items, "replace": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/repeat"),
+            Some(serde_json::json!({"repeat": "one"})),
+        )
+        .await;
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "play", "index": index})),
+        )
+        .await;
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        for _ in 0..500 {
+            if zone.state().now_playing.is_some_and(|n| n.index == index) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(zone.state().now_playing.map(|n| n.index), Some(index));
+        (dir, s, app, zid)
+    }
+
+    fn queue_titles(z: &serde_json::Value) -> Vec<String> {
+        z["queue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["title"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// A queue replaced while the zone's shuffle is on plays shuffled: shuffle stays on and means
+    /// it, the order sent is kept as the original one, and shuffle off gives it back.
+    #[tokio::test]
+    async fn a_queue_replaced_with_shuffle_on_plays_shuffled() {
+        let (dir, s, app, zid) = looping_queue(8, 0).await;
+        let wav = dir.path().join("t.wav");
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/shuffle"),
+            Some(serde_json::json!({"shuffle": true})),
+        )
+        .await;
+        let sent: Vec<String> = (0..10).map(|i| format!("n{i}")).collect();
+        let items: Vec<_> = sent
+            .iter()
+            .map(|t| serde_json::json!({"uri": wav.to_string_lossy(), "title": t}))
+            .collect();
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        // A shuffle leaves ten items as they were once in 10! tries: replace again then
+        let mut played = Vec::new();
+        for _ in 0..3 {
+            let (st, _) = call(
+                &app,
+                "POST",
+                &format!("/v1/zones/{zid}/queue"),
+                Some(serde_json::json!({"items": items, "replace": true})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+            assert_eq!(z["shuffle"], true, "{z}");
+            played = queue_titles(&z);
+            if played != sent {
+                break;
+            }
+        }
+        assert_ne!(played, sent, "plays shuffled");
+        let order = zone.shuffle_order().expect("shuffled");
+        let original: Vec<String> = order.iter().map(|i| played[*i].clone()).collect();
+        assert_eq!(original, sent, "the order sent is the original order");
+        let (_, z) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/shuffle"),
+            Some(serde_json::json!({"shuffle": false})),
+        )
+        .await;
+        assert_eq!(queue_titles(&z), sent, "shuffle off: the order sent");
+        // Shuffle off: a replace plays in the order sent
+        let (_, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": items, "replace": true})),
+        )
+        .await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        assert_eq!(
+            (queue_titles(&z), z["shuffle"].as_bool()),
+            (sent.clone(), Some(false))
+        );
+    }
+
+    /// Where the playing item is after its queue changes order: `now_playing.index` follows it
+    /// (shuffle off puts it back in its original place; an earlier item moved after it moves it
+    /// up one), always the same as `queue_index`.
+    #[tokio::test]
+    async fn now_playing_index_follows_the_item_when_the_queue_reorders() {
+        let (_dir, s, app, zid) = looping_queue(8, 0).await;
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        let same_place = |z: &serde_json::Value| {
+            let qi = z["queue_index"].as_u64().unwrap() as usize;
+            assert_eq!(z["now_playing"]["index"].as_u64(), Some(qi as u64), "{z}");
+            assert_eq!(z["now_playing"]["item"]["id"], z["queue"][qi]["id"], "{z}");
+            z["now_playing"]["item"]["title"].as_str().unwrap().to_string()
+        };
+        // Shuffle on (the playing item goes first), play another one, shuffle off
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/shuffle"),
+            Some(serde_json::json!({"shuffle": true})),
+        )
+        .await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        let k = 5;
+        let title = z["queue"][k]["title"].as_str().unwrap().to_string();
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "play", "index": k})),
+        )
+        .await;
+        for _ in 0..500 {
+            if zone.state().now_playing.is_some_and(|n| n.index == k) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/shuffle"),
+            Some(serde_json::json!({"shuffle": false})),
+        )
+        .await;
+        let z = serde_json::to_value(zone.wait_acked().await).unwrap();
+        assert_eq!(same_place(&z), title);
+        let at: usize = title[1..].parse().unwrap();
+        assert_eq!(
+            z["queue_index"].as_u64(),
+            Some(at as u64),
+            "back in its original place"
+        );
+        // An earlier item moved after the playing one: it moves up one
+        let first = z["queue"][0]["id"].as_u64().unwrap();
+        zone.move_item(first, at);
+        let st = zone.wait_acked().await;
+        let z = serde_json::to_value(&st).unwrap();
+        assert_eq!(same_place(&z), title);
+        assert_eq!(z["queue_index"].as_u64(), Some(at as u64 - 1));
+    }
+
+    /// Progress changes made at once, from many devices, are all kept: the progress document is
+    /// one setting, read and written under one lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn podcast_progress_changes_at_once_are_all_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/podcasts/enabled",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        drop(app);
+        let n = 200u64;
+        let feed = podcasts::Feed {
+            id: "feed1".into(),
+            url: "https://example.com/feed.xml".into(),
+            title: "A show".into(),
+            episodes: (0..n)
+                .map(|i| podcasts::Episode {
+                    id: format!("ep{i}"),
+                    title: format!("Episode {i}"),
+                    url: format!("https://example.com/ep{i}.mp3"),
+                    ..podcasts::Episode::default()
+                })
+                .collect(),
+            ..podcasts::Feed::default()
+        };
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("podcasts.feeds", &serde_json::to_string(&vec![feed]).unwrap())
+            .unwrap();
+        let mut tasks = Vec::new();
+        for i in 0..n {
+            let s = s.clone();
+            tasks.push(tokio::spawn(async move {
+                podcasts::set_progress(
+                    State(s),
+                    Path(format!("ep{i}")),
+                    Json(podcasts::SetProgress {
+                        position_ms: Some(1000 + i),
+                        played: None,
+                    }),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| e.message)
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        let prog: std::collections::HashMap<String, podcasts::Progress> = serde_json::from_str(
+            &s.library
+                .lock()
+                .unwrap()
+                .get_setting("podcasts.progress")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(prog.len(), n as usize, "every change kept");
+        for i in 0..n {
+            assert_eq!(prog[&format!("ep{i}")].position_ms, 1000 + i);
+        }
+    }
+
+    /// Two uploads started at once can't both take the same room on the disk they wait on: the
+    /// room is counted, checked and the upload added in one step.
+    #[tokio::test]
+    async fn two_uploads_started_at_once_cant_both_take_the_same_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        // 300 MB usable: one 200 MB upload fits, two don't
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 5 * GB + 300 * 1024 * 1024,
+            total: 100 * GB,
+        })));
+        let hs = Arc::new(FakeHomeserver::default());
+        *s.copy_seams.lock().unwrap() = (Some(hs), Some(disk));
+        let upload = |name: &str| add_music::NewUpload {
+            name: name.into(),
+            size: 200 * 1024 * 1024,
+            relative_path: None,
+            blake3: None,
+        };
+        let (a, b) = tokio::join!(
+            add_music::start(State(s.clone()), Json(upload("a.flac"))),
+            add_music::start(State(s.clone()), Json(upload("b.flac")))
+        );
+        let statuses: Vec<Option<StatusCode>> = [a, b]
+            .iter()
+            .map(|r| r.as_ref().err().map(|e| e.status))
+            .collect();
+        assert_eq!(
+            statuses.iter().filter(|st| st.is_none()).count(),
+            1,
+            "one start goes through: {statuses:?}"
+        );
+        assert!(
+            statuses.contains(&Some(StatusCode::INSUFFICIENT_STORAGE)),
+            "the other is told there is no room: {statuses:?}"
+        );
+    }
+
+    /// Two different songs for one path in the mirror folder, at once, both land whole under two
+    /// names; the same song twice lands once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_songs_for_one_mirror_path_both_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("song.flac");
+        let (one, two) = (vec![1u8; 4096], vec![2u8; 4096]);
+        let hash = |b: &[u8]| blake3::hash(b).to_hex().to_string();
+        let (h1, h2) = (hash(&one), hash(&two));
+        let (a, b) = tokio::join!(
+            add_music::place_in_mirror(&dest, &h1, one.clone()),
+            add_music::place_in_mirror(&dest, &h2, two.clone())
+        );
+        let (a, b) = (a.unwrap().unwrap(), b.unwrap().unwrap());
+        assert_ne!(a, b, "two names");
+        let mut names: Vec<String> = [&a, &b]
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["song (2).flac", "song.flac"]);
+        let mut contents = vec![std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap()];
+        contents.sort();
+        assert_eq!(contents, [one.clone(), two]);
+        // The same song again: kept as it is, nothing new
+        assert_eq!(
+            add_music::place_in_mirror(&dest, &hash(&one), one).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            2,
+            "no part file left"
+        );
+    }
+
+    /// An upload whose in-flight record can't be written isn't sent: a crash would leave a
+    /// remote file nobody settles at the next start.
+    #[tokio::test]
+    async fn an_upload_whose_record_cant_be_written_is_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let hs = Arc::new(FakeHomeserver::default());
+        let disk = FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 50 * GB,
+            total: 100 * GB,
+        }));
+        let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TRIGGER no_record BEFORE INSERT ON settings WHEN NEW.key = '{k}'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            k = copy_guard::IN_FLIGHT_KEY
+        ))
+        .unwrap();
+        let r = copy_guard::upload_guarded(&s, hs.as_ref(), &disk, "/pub/files/x.flac", vec![1u8; 10], None)
+            .await;
+        assert!(
+            matches!(r, Err(copy_guard::Refused::Other(ref why)) if why.contains("record")),
+            "{r:?}"
+        );
+        assert_eq!(hs.uploads.lock().unwrap().len(), 0, "nothing was sent");
+    }
+
+    /// A Bandcamp purchase download, through the router: the claim is made before any network
+    /// call (a second request for the same purchase while the first looks it up is told it is
+    /// running), and a request dropped mid-lookup (the page closed) ends its claim as a failed
+    /// job, so the purchase can be asked for again at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_bandcamp_download_request_frees_its_purchase() {
+        let _base_guard = bandcamp::API_TEST_LOCK.lock().await;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new()
+            .route(
+                "/api/fan/2/collection_summary",
+                get(|| async {
+                    Json(serde_json::json!({"fan_id": 77, "collection_summary": {"fan_id": 77, "username": "listener"}}))
+                }),
+            )
+            .route(
+                "/api/fancollection/1/collection_items",
+                post({
+                    let gate = gate.clone();
+                    move || {
+                        let gate = gate.clone();
+                        async move {
+                            // The lookup hangs until the test lets it go
+                            gate.acquire().await.unwrap().forget();
+                            Json(serde_json::json!({"items": [], "more_available": false, "last_token": "0::a::"}))
+                        }
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        bandcamp::set_site_base(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/bandcamp/unofficial",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/bandcamp/unofficial",
+            Some(serde_json::json!({"identity": "identity=7%09abc%3D%3D"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        let id = "pdroptest1";
+        let state_of = |app: Router| async move {
+            let (_, d) = call(&app, "GET", "/v1/sources/bandcamp/downloads", None).await;
+            d.as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"] == id)
+                .map(|j| j["state"].as_str().unwrap().to_string())
+        };
+        let first = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                call(
+                    &app,
+                    "POST",
+                    &format!("/v1/sources/bandcamp/collection/{id}/download"),
+                    None,
+                )
+                .await
+            })
+        };
+        for _ in 0..100 {
+            if state_of(app.clone()).await.as_deref() == Some("queued") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            state_of(app.clone()).await.as_deref(),
+            Some("queued"),
+            "claimed before the lookup"
+        );
+        // A second request meanwhile: already running
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/sources/bandcamp/collection/{id}/download"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        // The first request goes away mid-lookup
+        first.abort();
+        let _ = first.await;
+        assert_eq!(
+            state_of(app.clone()).await.as_deref(),
+            Some("failed"),
+            "the claim ended"
+        );
+        // The purchase can be asked for again: past the claim, into the (still held) lookup
+        let again = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            call(
+                &app,
+                "POST",
+                &format!("/v1/sources/bandcamp/collection/{id}/download"),
+                None,
+            ),
+        )
+        .await;
+        assert!(again.is_err(), "not refused as running: {again:?}");
+        gate.add_permits(10);
+        // Its own job only: the list is process-wide, and another test reads its own from it
+        bandcamp::forget_job(id);
+    }
+
+    /// A scheduled backup whose caller goes away mid-write keeps its lock to its end: a second
+    /// run meanwhile is told one is being written, and the first run's result is noted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scheduled_backup_whose_caller_went_away_still_holds_its_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let folder = dir.path().join("backups");
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/backup/schedule",
+            Some(serde_json::json!({"folder": folder.to_string_lossy(), "every_hours": 24, "keep": 3})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        // The run is held after its write (a test marker) for a moment
+        std::fs::write(s.data_dir().join(backup::HOLD_RUN_MARKER), b"").unwrap();
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            call(&app, "POST", "/v1/backup/schedule/run", None),
+        )
+        .await;
+        assert!(dropped.is_err(), "the first caller went away mid-run");
+        let (st, v) = call(&app, "POST", "/v1/backup/schedule/run", None).await;
+        assert_eq!(
+            st,
+            StatusCode::CONFLICT,
+            "the first run still holds its lock: {v}"
+        );
+        // The first run ends by itself and notes its result
+        let mut noted = serde_json::Value::Null;
+        for _ in 0..100 {
+            let (_, sch) = call(&app, "GET", "/v1/backup/schedule", None).await;
+            if sch["last_file"].is_string() {
+                noted = sch;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(noted["last_file"].is_string(), "the run was noted: {noted}");
+        std::fs::remove_file(s.data_dir().join(backup::HOLD_RUN_MARKER)).unwrap();
+    }
+
+    /// The mirror folder's locks go when their last holder is done, and two files for names in one
+    /// folder at once land under two names.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mirror_folder_locks_are_dropped_and_names_stay_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("Album");
+        std::fs::create_dir_all(&folder).unwrap();
+        // x.flac is taken by another song: a file for x.flac goes to x (2).flac, the name the
+        // other one asks for directly
+        std::fs::write(folder.join("x.flac"), [9u8; 64]).unwrap();
+        let (one, two) = (vec![1u8; 4096], vec![2u8; 4096]);
+        let hash = |b: &[u8]| blake3::hash(b).to_hex().to_string();
+        let (h1, h2) = (hash(&one), hash(&two));
+        let (p1, p2) = (folder.join("x.flac"), folder.join("x (2).flac"));
+        let (a, b) = tokio::join!(
+            add_music::place_in_mirror(&p1, &h1, one.clone()),
+            add_music::place_in_mirror(&p2, &h2, two.clone())
+        );
+        let (a, b) = (a.unwrap().unwrap(), b.unwrap().unwrap());
+        assert_ne!(a, b, "two names");
+        assert_eq!(std::fs::read(&a).unwrap(), one);
+        assert_eq!(std::fs::read(&b).unwrap(), two);
+        assert!(
+            !add_music::mirror_lock_held(&folder),
+            "this folder's lock went with its holders"
+        );
+    }
+
+    /// Two plays ending together, with listens waiting from before: each listen reaches
+    /// ListenBrainz once (the waiting ones are taken by one sender), and when ListenBrainz can't
+    /// take them, every one waits again, none twice, and goes once it is back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_listenbrainz_senders_with_a_backlog_send_each_listen_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        // The account the senders send for (a sender checks it is still the one connected)
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "listenbrainz.account",
+                &serde_json::json!({"token": "LBT", "user": "owner", "submit": true}).to_string(),
+            )
+            .unwrap();
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        *s.listenbrainz_base.write().unwrap() =
+            format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/1/submit-listens",
+            post({
+                let (got, refuse) = (got.clone(), refuse.clone());
+                move |Json(b): Json<serde_json::Value>| {
+                    let (got, refuse) = (got.clone(), refuse.clone());
+                    async move {
+                        // Slow enough that both senders are in flight at once
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        if refuse.load(Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        }
+                        got.lock()
+                            .unwrap()
+                            .extend(b["payload"].as_array().unwrap().iter().cloned());
+                        StatusCode::OK
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let listen = |n: u64| serde_json::json!({"listened_at": n, "track_metadata": {"artist_name": "A", "track_name": format!("T{n}")}});
+        let waiting = serde_json::Value::from((1..=3).map(listen).collect::<Vec<_>>()).to_string();
+        let pending = || {
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting("listenbrainz.pending")
+                .unwrap()
+        };
+        let times = |list: &[serde_json::Value]| {
+            let mut t: Vec<u64> = list.iter().map(|l| l["listened_at"].as_u64().unwrap()).collect();
+            t.sort();
+            t
+        };
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            listenbrainz::send_listens(&s, "LBT", vec![listen(4)]),
+            listenbrainz::send_listens(&s, "LBT", vec![listen(5)])
+        );
+        assert_eq!(times(&got.lock().unwrap()), [1, 2, 3, 4, 5], "each listen once");
+        assert_eq!(pending(), None);
+        // Refused: everything waits again, nothing twice
+        refuse.store(true, Ordering::SeqCst);
+        got.lock().unwrap().clear();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            listenbrainz::send_listens(&s, "LBT", vec![listen(4)]),
+            listenbrainz::send_listens(&s, "LBT", vec![listen(5)])
+        );
+        let left: Vec<serde_json::Value> = serde_json::from_str(&pending().unwrap()).unwrap();
+        assert_eq!(times(&left), [1, 2, 3, 4, 5], "all wait, none twice");
+        // Once ListenBrainz is back, the next send takes them
+        refuse.store(false, Ordering::SeqCst);
+        listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
+        assert_eq!(times(&got.lock().unwrap()), [1, 2, 3, 4, 5]);
+        assert_eq!(pending(), None);
+    }
+
+    /// The same for Last.fm: two senders with a backlog send each scrobble once; refused ones
+    /// all wait again, none twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_lastfm_senders_with_a_backlog_send_each_scrobble_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        const KEY: &str = "0123456789abcdef0123456789abcdef";
+        const SECRET: &str = "fedcba9876543210fedcba9876543210";
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let got: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/",
+            post({
+                let (got, refuse) = (got.clone(), refuse.clone());
+                move |body: String| {
+                    let (got, refuse) = (got.clone(), refuse.clone());
+                    async move {
+                        let p: std::collections::HashMap<String, String> =
+                            url::form_urlencoded::parse(body.as_bytes())
+                                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                .collect();
+                        assert_eq!(p.get("method").map(String::as_str), Some("track.scrobble"), "{p:?}");
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        if refuse.load(Ordering::SeqCst) {
+                            return Json(serde_json::json!({"error": 9, "message": "Invalid session key - Please re-authenticate"}));
+                        }
+                        let tracks: Vec<String> = p
+                            .iter()
+                            .filter(|(k, _)| k.starts_with("track["))
+                            .map(|(_, v)| v.clone())
+                            .collect();
+                        let n = tracks.len();
+                        got.lock().unwrap().extend(tracks);
+                        Json(serde_json::json!({"scrobbles": {"@attr": {"accepted": n, "ignored": 0}}}))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        lastfm::set_api_base(&format!("{base}/"));
+        // The app in this node's own settings, never the process-wide config another test reads
+        let app = serde_json::json!({"api_key": KEY, "api_secret": SECRET, "from": "settings"}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(lastfm::APP_KEY, &app)
+            .unwrap();
+        let session =
+            serde_json::json!({"key": "sess-key-xyz", "user": "listener", "submit": true}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.session", &session)
+            .unwrap();
+        let scrobble =
+            |n: u64| serde_json::json!({"artist": "A", "track": format!("T{n}"), "timestamp": n.to_string()});
+        let waiting = serde_json::Value::from((1..=3).map(scrobble).collect::<Vec<_>>()).to_string();
+        let pending = || s.library.lock().unwrap().get_setting("lastfm.pending").unwrap();
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            lastfm::send_scrobbles(&s, vec![scrobble(4)]),
+            lastfm::send_scrobbles(&s, vec![scrobble(5)])
+        );
+        assert_eq!(
+            sorted(got.lock().unwrap().clone()),
+            ["T1", "T2", "T3", "T4", "T5"],
+            "each once"
+        );
+        assert_eq!(pending(), None);
+        // Refused (the session is marked as broken): everything waits again, nothing twice
+        refuse.store(true, Ordering::SeqCst);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            lastfm::send_scrobbles(&s, vec![scrobble(4)]),
+            lastfm::send_scrobbles(&s, vec![scrobble(5)])
+        );
+        let left: Vec<serde_json::Value> = serde_json::from_str(&pending().unwrap()).unwrap();
+        let left: Vec<String> = left
+            .iter()
+            .map(|x| x["track"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            sorted(left),
+            ["T1", "T2", "T3", "T4", "T5"],
+            "all wait, none twice"
+        );
+    }
+
+    /// A ListenBrainz mock whose submit answers only once let through (`gate`), takes nothing
+    /// whose payload holds a listen at `listened_at == 0`, and keeps what it took.
+    async fn gated_listenbrainz(
+        s: &NodeState,
+    ) -> (
+        Arc<tokio::sync::Semaphore>,
+        Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        Arc<tokio::sync::Semaphore>,
+    ) {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        // The account the senders send for (a sender checks it is still the one connected)
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "listenbrainz.account",
+                &serde_json::json!({"token": "LBT", "user": "owner", "submit": true}).to_string(),
+            )
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        *s.listenbrainz_base.write().unwrap() =
+            format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new()
+            .route(
+                "/1/submit-listens",
+                post({
+                    let (gate, got, entered) = (gate.clone(), got.clone(), entered.clone());
+                    move |h: axum::http::HeaderMap, Json(b): Json<serde_json::Value>| {
+                        let (gate, got, entered) = (gate.clone(), got.clone(), entered.clone());
+                        async move {
+                            entered.add_permits(1);
+                            let Ok(permit) = gate.acquire().await else {
+                                return StatusCode::SERVICE_UNAVAILABLE;
+                            };
+                            permit.forget();
+                            let payload = b["payload"].as_array().unwrap().clone();
+                            if payload.iter().any(|l| l["listened_at"] == 0) {
+                                return StatusCode::SERVICE_UNAVAILABLE;
+                            }
+                            // Which account it went to, with each listen
+                            let token = h
+                                .get("authorization")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+                            got.lock().unwrap().extend(payload.into_iter().map(|mut l| {
+                                l["_to"] = serde_json::json!(token);
+                                l
+                            }));
+                            StatusCode::OK
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/1/validate-token",
+                get(|| async { Json(serde_json::json!({"valid": true, "user_name": "fixture"})) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        (gate, got, entered)
+    }
+
+    fn a_listen(n: u64) -> serde_json::Value {
+        serde_json::json!({"listened_at": n, "track_metadata": {"artist_name": "A", "track_name": format!("T{n}")}})
+    }
+
+    fn waiting_listens(s: &NodeState) -> Vec<u64> {
+        let v: Vec<serde_json::Value> = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("listenbrainz.pending")
+            .unwrap()
+            .map(|j| serde_json::from_str(&j).unwrap())
+            .unwrap_or_default();
+        v.iter().map(|l| l["listened_at"].as_u64().unwrap()).collect()
+    }
+
+    /// A send cut short (the node stopping mid-send: the task is dropped while ListenBrainz
+    /// hasn't answered) loses nothing: every waiting listen, the new one too, is still on disk,
+    /// and the next send takes them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_send_cut_short_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, entered) = gated_listenbrainz(&s).await;
+        crate::send_queue::enqueue(
+            &s.library.lock().unwrap(),
+            "listenbrainz.pending",
+            (1..=3).map(a_listen).collect(),
+            1000,
+        )
+        .unwrap();
+        let send = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(4)]).await })
+        };
+        // Prove the request reached the remote boundary before cancelling; it has not
+        // committed any listens while its gate is closed.
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        assert_eq!(waiting_listens(&s), [1, 2, 3, 4], "counted while sending");
+        send.abort();
+        let _ = send.await;
+        assert_eq!(
+            waiting_listens(&s),
+            [1, 2, 3, 4],
+            "nothing lost when the send stops"
+        );
+        // Dropping a client does not cancel an Axum handler. Permanently refuse that
+        // abandoned request before allowing a retry to commit at a fresh endpoint.
+        gate.close();
+        assert!(got.lock().unwrap().is_empty());
+        let (retry_gate, retried, _) = gated_listenbrainz(&s).await;
+        retry_gate.add_permits(10);
+        listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
+        let mut sent: Vec<u64> = retried
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(sent, [1, 2, 3, 4]);
+        assert!(waiting_listens(&s).is_empty());
+        assert!(
+            got.lock().unwrap().is_empty(),
+            "abandoned request never committed"
+        );
+    }
+
+    /// A listen added while a send is under way waits on disk at once, isn't lost when the send
+    /// ends, and goes with the next sender; nothing is sent twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_added_during_a_send_waits_and_goes_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        let first = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(1)]).await })
+        };
+        for _ in 0..100 {
+            if !waiting_listens(&s).is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // The first send is held at ListenBrainz; a second play ends now
+        let second = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(2)]).await })
+        };
+        for _ in 0..100 {
+            if waiting_listens(&s) == [1, 2] {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            waiting_listens(&s),
+            [1, 2],
+            "the new listen waits on disk at once"
+        );
+        gate.add_permits(10);
+        first.await.unwrap();
+        second.await.unwrap();
+        let mut sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(sent, [1, 2], "each once");
+        assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// When ListenBrainz takes part of the backlog (one chunk of 100 refused, the other taken),
+    /// exactly the refused ones wait.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_the_listens_listenbrainz_refused_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        gate.add_permits(10);
+        crate::send_queue::enqueue(
+            &s.library.lock().unwrap(),
+            "listenbrainz.pending",
+            (0..150).map(a_listen).collect(),
+            1000,
+        )
+        .unwrap();
+        listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
+        assert_eq!(
+            waiting_listens(&s),
+            (0..100).collect::<Vec<u64>>(),
+            "the refused chunk waits"
+        );
+        assert_eq!(got.lock().unwrap().len(), 50, "the other chunk went");
+    }
+
+    /// A sender that waited for its turn while the owner connected another ListenBrainz account
+    /// sends nothing with the old account: the waiting list is the new account's now, and its own
+    /// sender sends it there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waiting_sender_never_sends_the_next_accounts_listens() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        let account =
+            |token: &str| serde_json::json!({"token": token, "user": token, "submit": true}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.account", &account("TOKA"))
+            .unwrap();
+        // A's first sender is held at ListenBrainz with listen 1; A's second waits its turn
+        let first = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "TOKA", vec![a_listen(1)]).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let waiting = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "TOKA", vec![a_listen(2)]).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // The owner connects B; B's play ends
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.account", &account("TOKB"))
+            .unwrap();
+        let b = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "TOKB", vec![a_listen(3)]).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        gate.add_permits(10);
+        first.await.unwrap();
+        waiting.await.unwrap();
+        b.await.unwrap();
+        let to = |token: &str| {
+            let mut v: Vec<u64> = got
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l["_to"] == format!("Token {token}"))
+                .map(|l| l["listened_at"].as_u64().unwrap())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(to("TOKA"), [1], "A's account got only what A's first sender took");
+        assert_eq!(to("TOKB"), [2, 3], "the rest went to the account connected now");
+        assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// Capture the production play future without polling it, then really disconnect and
+    /// reconnect. Neither a different token nor reuse of the same token revives that play.
+    #[tokio::test]
+    async fn an_unpolled_old_play_cannot_enqueue_after_reconnect() {
+        for next_token in ["NEXT", "LBT"] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = state(dir.path(), None).await;
+            let (gate, got, _) = gated_listenbrainz(&s).await;
+            gate.add_permits(10);
+            let old = listenbrainz::send_play(s.clone(), vec![a_listen(1)]);
+            let _ = listenbrainz::disconnect(axum::extract::State(s.clone()))
+                .await
+                .unwrap();
+            let _ = listenbrainz::connect(
+                axum::extract::State(s.clone()),
+                Json(ListenBrainzForm {
+                    token: Some(next_token.into()),
+                    submit: Some(true),
+                }),
+            )
+            .await
+            .unwrap();
+            old.await;
+            assert!(
+                waiting_listens(&s).is_empty(),
+                "old play never entered replacement queue"
+            );
+            listenbrainz::send_listens(&s, next_token, vec![a_listen(2)]).await;
+            let sent: Vec<u64> = got
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|l| l["listened_at"].as_u64().unwrap())
+                .collect();
+            assert_eq!(sent, [2], "only the replacement account's own play was sent");
+            assert!(waiting_listens(&s).is_empty());
+        }
+    }
+
+    /// Failed account lifecycle writes must leave every related setting unchanged and an
+    /// already captured, unpolled counted play deliverable under the still-current account.
+    #[tokio::test]
+    async fn failed_listenbrainz_account_changes_preserve_unpolled_plays() {
+        for generation in [None, Some("generation-A")] {
+            for (disconnect, key) in [
+                (false, "listenbrainz.account"),
+                (false, "vault.lineage.listenbrainz"),
+                (true, "listenbrainz.account"),
+                (true, "listenbrainz.pending"),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let s = state(dir.path(), None).await;
+                let (gate, got, _) = gated_listenbrainz(&s).await;
+                gate.add_permits(10);
+                {
+                    let lib = s.library.lock().unwrap();
+                    if let Some(g) = generation {
+                        lib.set_setting("listenbrainz.send_generation", g).unwrap();
+                    }
+                    lib.set_setting("vault.lineage.listenbrainz", "1-original")
+                        .unwrap();
+                    crate::send_queue::enqueue(&lib, "listenbrainz.pending", vec![a_listen(8)], 1000)
+                        .unwrap();
+                }
+                let snapshot = || {
+                    let lib = s.library.lock().unwrap();
+                    [
+                        "listenbrainz.account",
+                        "listenbrainz.send_generation",
+                        "listenbrainz.pending",
+                        "vault.lineage.listenbrainz",
+                    ]
+                    .map(|key| lib.get_setting(key).unwrap())
+                };
+                let before = snapshot();
+                let old = listenbrainz::send_play(s.clone(), vec![a_listen(1)]);
+                let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+                let (op, row) = if disconnect {
+                    ("DELETE", "OLD")
+                } else {
+                    ("INSERT", "NEW")
+                };
+                db.execute_batch(&format!(
+                    "CREATE TRIGGER reject_account_change BEFORE {op} ON settings WHEN {row}.key = '{key}' BEGIN SELECT RAISE(ABORT, 'fixture persistence failure'); END;"
+                )).unwrap();
+                let failed = if disconnect {
+                    listenbrainz::disconnect(axum::extract::State(s.clone()))
+                        .await
+                        .is_err()
+                } else {
+                    listenbrainz::connect(
+                        axum::extract::State(s.clone()),
+                        Json(ListenBrainzForm {
+                            token: Some("NEXT".into()),
+                            submit: Some(true),
+                        }),
+                    )
+                    .await
+                    .is_err()
+                };
+                assert!(failed, "the injected {key} failure must reach the caller");
+                assert_eq!(snapshot(), before, "all account state rolls back for {key}");
+                db.execute_batch("DROP TRIGGER reject_account_change").unwrap();
+                old.await;
+                let mut sent: Vec<u64> = got
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v["listened_at"].as_u64().unwrap())
+                    .collect();
+                sent.sort();
+                assert_eq!(sent, [1, 8], "the original account can still deliver both plays");
+                assert!(waiting_listens(&s).is_empty());
+            }
+        }
+    }
+
+    /// A new listen the library refuses to store (a failing write) is still sent with the rest,
+    /// from memory: it isn't lost before any try.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_that_cant_be_stored_is_still_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        gate.add_permits(10);
+        let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER no_pending_i BEFORE INSERT ON settings WHEN NEW.key = 'listenbrainz.pending'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;
+             CREATE TRIGGER no_pending_u BEFORE UPDATE ON settings WHEN NEW.key = 'listenbrainz.pending'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+        )
+        .unwrap();
+        listenbrainz::send_listens(&s, "LBT", vec![a_listen(7)]).await;
+        let sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        assert_eq!(sent, [7], "sent from memory");
+    }
+
+    /// The library refuses `key`'s writes until the returned triggers are dropped.
+    fn refuse_writes_of(dir: &std::path::Path, key: &str) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open(dir.join("lib.sqlite")).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TRIGGER no_pending_i BEFORE INSERT ON settings WHEN NEW.key = '{key}'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;
+             CREATE TRIGGER no_pending_u BEFORE UPDATE ON settings WHEN NEW.key = '{key}'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;"
+        ))
+        .unwrap();
+        db
+    }
+
+    fn writes_work_again(db: &rusqlite::Connection) {
+        db.execute_batch("DROP TRIGGER no_pending_i; DROP TRIGGER no_pending_u;")
+            .unwrap();
+    }
+
+    /// A listen the library refused to store is sent from memory; ListenBrainz refuses it, and
+    /// by then the library takes writes again: it is stored to wait for the next send, not lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_sent_from_memory_and_refused_waits_once_storage_is_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, entered) = gated_listenbrainz(&s).await;
+        let db = refuse_writes_of(dir.path(), "listenbrainz.pending");
+        // `listened_at` 0: the mock refuses it
+        let send = listenbrainz::send_listens(&s, "LBT", vec![a_listen(0)]);
+        let drive = async {
+            entered.acquire().await.unwrap().forget();
+            writes_work_again(&db);
+            gate.add_permits(1);
+        };
+        tokio::join!(send, drive);
+        assert!(got.lock().unwrap().is_empty());
+        assert_eq!(waiting_listens(&s), [0], "kept for the next send");
+    }
+
+    /// A full backlog (the cap) and a new listen, ListenBrainz taking everything: every one is
+    /// sent, the oldest too; the cap only holds what is still waiting after a send.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_full_listenbrainz_backlog_and_a_new_listen_are_all_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        gate.add_permits(100);
+        let backlog = serde_json::Value::from((1..=1000).map(a_listen).collect::<Vec<_>>()).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.pending", &backlog)
+            .unwrap();
+        listenbrainz::send_listens(&s, "LBT", vec![a_listen(1001)]).await;
+        let mut sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(
+            sent,
+            (1..=1001).collect::<Vec<u64>>(),
+            "none dropped before it was tried"
+        );
+        assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// A Last.fm mock for this node: each `track.scrobble` answers once let through (`gate`),
+    /// refused while `refuse` is set; the track names it took are in `got`; `entered` counts
+    /// requests that arrived.
+    struct LastfmMock {
+        gate: Arc<tokio::sync::Semaphore>,
+        got: Arc<std::sync::Mutex<Vec<String>>>,
+        refuse: Arc<std::sync::atomic::AtomicBool>,
+        entered: Arc<tokio::sync::Semaphore>,
+    }
+
+    async fn gated_lastfm(s: &NodeState) -> LastfmMock {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let got: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/",
+            post({
+                let (gate, got, refuse, entered) =
+                    (gate.clone(), got.clone(), refuse.clone(), entered.clone());
+                move |body: String| {
+                    let (gate, got, refuse, entered) =
+                        (gate.clone(), got.clone(), refuse.clone(), entered.clone());
+                    async move {
+                        entered.add_permits(1);
+                        gate.acquire().await.unwrap().forget();
+                        if refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                            return Json(serde_json::json!({"error": 11, "message": "Service Offline"}));
+                        }
+                        let tracks: Vec<String> = url::form_urlencoded::parse(body.as_bytes())
+                            .filter(|(k, _)| k.starts_with("track["))
+                            .map(|(_, v)| v.into_owned())
+                            .collect();
+                        let n = tracks.len();
+                        got.lock().unwrap().extend(tracks);
+                        Json(serde_json::json!({"scrobbles": {"@attr": {"accepted": n, "ignored": 0}}}))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        lastfm::set_api_base(&format!("{base}/"));
+        let app = serde_json::json!({
+            "api_key": "0123456789abcdef0123456789abcdef",
+            "api_secret": "fedcba9876543210fedcba9876543210",
+            "from": "settings"
+        })
+        .to_string();
+        let lib = s.library.lock().unwrap();
+        lib.set_setting(lastfm::APP_KEY, &app).unwrap();
+        lib.set_setting(
+            "lastfm.session",
+            &serde_json::json!({"key": "sess-key-xyz", "user": "listener", "submit": true}).to_string(),
+        )
+        .unwrap();
+        LastfmMock {
+            gate,
+            got,
+            refuse,
+            entered,
+        }
+    }
+
+    fn a_scrobble(n: u64) -> serde_json::Value {
+        serde_json::json!({"artist": "A", "track": format!("T{n}"), "timestamp": n.to_string()})
+    }
+
+    fn waiting_scrobbles(s: &NodeState) -> Vec<String> {
+        let v: Vec<serde_json::Value> = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("lastfm.pending")
+            .unwrap()
+            .map(|j| serde_json::from_str(&j).unwrap())
+            .unwrap_or_default();
+        v.iter()
+            .map(|l| l["track"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The same for Last.fm: a scrobble the library refused, sent from memory and refused by
+    /// Last.fm, is stored once the library takes writes again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scrobble_sent_from_memory_and_refused_waits_once_storage_is_back() {
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let LastfmMock {
+            gate,
+            got,
+            refuse,
+            entered,
+        } = gated_lastfm(&s).await;
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let db = refuse_writes_of(dir.path(), "lastfm.pending");
+        let send = lastfm::send_scrobbles(&s, vec![a_scrobble(7)]);
+        let drive = async {
+            entered.acquire().await.unwrap().forget();
+            writes_work_again(&db);
+            gate.add_permits(1);
+        };
+        tokio::join!(send, drive);
+        assert!(got.lock().unwrap().is_empty());
+        assert_eq!(waiting_scrobbles(&s), ["T7"], "kept for the next send");
+    }
+
+    /// The same for Last.fm: a full backlog and a new scrobble are all sent, the oldest too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_full_lastfm_backlog_and_a_new_scrobble_are_all_sent() {
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let LastfmMock { gate, got, .. } = gated_lastfm(&s).await;
+        gate.add_permits(100);
+        let backlog = serde_json::Value::from((1..=1000).map(a_scrobble).collect::<Vec<_>>()).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.pending", &backlog)
+            .unwrap();
+        lastfm::send_scrobbles(&s, vec![a_scrobble(1001)]).await;
+        let mut sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t[1..].parse().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(
+            sent,
+            (1..=1001).collect::<Vec<u64>>(),
+            "none dropped before it was tried"
+        );
+        assert!(waiting_scrobbles(&s).is_empty());
+    }
+
+    /// A sync or a settings restore whose session another sign-in replaced answers 409, not 502.
+    #[test]
+    fn a_replaced_sync_is_a_conflict() {
+        assert_eq!(sync_error(sync::SyncError::Replaced).status, StatusCode::CONFLICT);
+        assert_eq!(
+            sync_error(sync::SyncError::Store("x".into())).status,
+            StatusCode::BAD_GATEWAY
+        );
     }
 }

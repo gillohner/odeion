@@ -46,6 +46,29 @@ test("scrobbles once per track after the halfway mark, keyed per zone", async ()
   assert.equal(s.seekUpdate({ zone_id: "unknown", seek_position: 1 }), null);
 });
 
+test("a lost response or error never reposts the same playback", async () => {
+  for (const status of [undefined, 429, 503, 401]) {
+    const accepted = [];
+    const api = async (method, path, body) => {
+      accepted.push(body); // The node committed before its answer was lost or replaced.
+      const error = new Error("response lost after commit");
+      error.status = status;
+      throw error;
+    };
+    const s = new Scrobbler(api, quiet);
+    const zone = (seek, title = "Get Lucky") => ({ zone_id: "z", state: "playing", now_playing: { three_line: { line1: title, line2: "Daft Punk", line3: "RAM" }, length: 369, seek_position: seek } });
+    await s.maybeScrobble(zone(10));
+    assert.equal(await s.maybeScrobble(zone(200)), false);
+    for (const seek of [201, 210, 300, 360]) {
+      assert.equal(await s.maybeScrobble(zone(seek)), false);
+    }
+    assert.equal(accepted.length, 1, "an ambiguous commit is never replayed");
+    await s.maybeScrobble(zone(10, "Next song"));
+    await s.maybeScrobble(zone(200, "Next song"));
+    assert.equal(accepted.length, 2, "the next playback still gets its own attempt");
+  }
+});
+
 test("a 422 from the node is a skip, not a failure", async () => {
   const { fetchImpl } = fakeFetch(() => [422, { error: "no canonical identity" }]);
   const s = new Scrobbler(makeApi({ fetchImpl }), quiet);

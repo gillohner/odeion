@@ -607,6 +607,70 @@ mod tests {
         }
     }
 
+    /// The stopped-node CLI uses the same membership rule as the web restore: continuing and
+    /// paused music access keep the current name (legacy None too); regained access gets a new
+    /// name. Empty or unreadable current rosters cannot revive the backup's old identity.
+    #[test]
+    fn the_restore_command_reconciles_report_memberships_before_replacing_the_library() {
+        for (access, name, enabled) in [
+            ("music", Some("membership-b"), true),
+            ("music", None, true),
+            ("music", Some("paused-b"), false),
+            ("homeserver", None, false),
+            ("absent", None, false),
+            ("unreadable", None, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = NodeConfig {
+                data_dir: dir.path().join("data"),
+                ..Default::default()
+            };
+            let roster = |access, reports: Option<&str>, enabled| {
+                serde_json::json!({"people": [{
+                    "key": "ann", "access": access, "music_enabled": enabled,
+                    "added_at": 1, "reports": reports
+                }]})
+                .to_string()
+            };
+            open(&cfg)
+                .unwrap()
+                .set_setting("people", &roster("music", Some("membership-a"), true))
+                .unwrap();
+            let file = dir.path().join("copy.sqlite");
+            backup(&cfg, &file, false).unwrap();
+            let current = match access {
+                "absent" => "{\"people\":[]}".into(),
+                "unreadable" => "{not a roster".into(),
+                _ => roster(access, name, enabled),
+            };
+            open(&cfg).unwrap().set_setting("people", &current).unwrap();
+            restore(&cfg, &file).unwrap();
+            let read = |cfg: &NodeConfig| {
+                serde_json::from_str::<pm_api::people::Roster>(
+                    &open(cfg).unwrap().get_setting("people").unwrap().unwrap(),
+                )
+                .unwrap()
+            };
+            let restored = read(&cfg);
+            let ann = &restored.people[0];
+            assert_eq!(ann.access, pm_api::people::Access::Music);
+            if access == "music" {
+                assert_eq!(ann.reports.as_deref(), name);
+            } else {
+                assert!(ann.reports.is_some());
+                assert_ne!(ann.reports.as_deref(), Some("membership-a"));
+            }
+            let empty = NodeConfig {
+                data_dir: dir.path().join("empty"),
+                ..Default::default()
+            };
+            restore(&empty, &file).unwrap();
+            let restored = read(&empty);
+            assert!(restored.people[0].reports.is_some());
+            assert_ne!(restored.people[0].reports.as_deref(), Some("membership-a"));
+        }
+    }
+
     /// A current database that won't open (damaged, or a newer version's) is what a restore is
     /// for: it goes ahead, carrying nothing over.
     #[test]

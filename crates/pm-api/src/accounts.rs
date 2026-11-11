@@ -10,8 +10,9 @@
 //!   once.
 //!
 //! Each request carries a [`Caller`] (an extension) for handlers that care who is asking.
-//! Listeners' own playlists, bookmarks and history (on their own homeserver) come with the
-//! node agent's per-person sync; until then a listener's writes to them are refused.
+//! A listener's own bookmarks live on their own homeserver, through the grant they give the
+//! node (personal.rs, `/v1/me/homeserver`). Their own playlists and history come later; until
+//! then a listener's writes to those are refused.
 
 use crate::state::NodeState;
 use crate::{ApiError, ApiResult};
@@ -402,6 +403,19 @@ fn load(s: &NodeState, setting: &str) -> Vec<PersonToken> {
         .unwrap_or_default()
 }
 
+/// Cleanup and token mutations must distinguish an empty store from an unreadable one.
+fn load_checked(lib: &pm_library::Library, setting: &str) -> Result<Vec<PersonToken>, ApiError> {
+    let Some(json) = lib.get_setting(setting)? else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&json).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot read sign-in store: {e}"),
+        )
+    })
+}
+
 /// Changes a token list in place: read and saved under one hold of the library, so two changes
 /// at once (a log in while Make a new token ends every session) can't bring ended ones back.
 fn update<R>(
@@ -418,12 +432,7 @@ fn update_in<R>(
     setting: &str,
     f: impl FnOnce(&mut Vec<PersonToken>) -> R,
 ) -> Result<R, ApiError> {
-    let mut all: Vec<PersonToken> = lib
-        .get_setting(setting)
-        .ok()
-        .flatten()
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default();
+    let mut all = load_checked(lib, setting)?;
     let r = f(&mut all);
     lib.set_setting(setting, &serde_json::to_string(&all).expect("serializes"))?;
     if [TOKENS, OWNER_SESSIONS, DEVICE_SESSIONS].contains(&setting) {
@@ -507,7 +516,7 @@ fn mint_owners(s: &NodeState, key: &str, list: &str, cap: usize) -> Result<Strin
     let mut evicted = false;
     let made = update_in(&lib, list, |all| {
         // Still the node's identity, checked under the same hold as the cleanup when it takes on
-        // another one (`keep_owner_sessions_of`), so no session of the old one slips past it
+        // another one (`keep_current_owner_sessions`), so no session of the old one slips past it
         let current = s
             .sync_handle()
             .is_some_and(|h| h.z32().trim_start_matches("pubky") == key);
@@ -551,18 +560,51 @@ fn owner_session(s: &NodeState, token: &str, owner: &str) -> bool {
 /// The node took on the identity `owner` (restored at start, or a log in renewed or changed it):
 /// browser sessions and device sign-ins of any other identity end, so none can come back later.
 pub fn keep_owner_sessions_of(s: &NodeState, owner: &str) -> Result<(), ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    let r = retain_owner(&lib, owner);
+    drop(lib);
+    settle_retain(s, r)
+}
+
+/// [`keep_owner_sessions_of`] for the identity the node has loaded now, read under the library's
+/// hold and kept while the lists change (library before identity, as a sign-in mints): an
+/// identity change that took effect meanwhile can't be undone by an earlier one's cleanup, which
+/// would end the newer identity's sessions. No identity loaded: nothing ends here.
+pub fn keep_current_owner_sessions(s: &NodeState) -> Result<(), ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    let identity = s.sync.lock().expect("sync lock");
+    let Some(owner) = identity.as_ref().map(|h| h.z32().to_string()) else {
+        return Ok(());
+    };
+    let r = retain_owner(&lib, &owner);
+    // The usage lock is taken before the identity's when sessions are revoked: both are let go
+    // first
+    drop(identity);
+    drop(lib);
+    settle_retain(s, r)
+}
+
+/// What [`retain_owner`] did: whether any session ended, and each list's write.
+type Retained = (bool, Result<(), ApiError>, Result<(), ApiError>);
+
+/// Keep only `owner`'s browser sessions and device sign-ins.
+fn retain_owner(lib: &pm_library::Library, owner: &str) -> Retained {
     let owner = owner.trim_start_matches("pubky");
     let mut ended = false;
-    let browsers = update(s, OWNER_SESSIONS, |all| {
+    let browsers = update_in(lib, OWNER_SESSIONS, |all| {
         let before = all.len();
         all.retain(|t| t.key == owner);
         ended |= all.len() < before;
     });
-    let devices = update(s, DEVICE_SESSIONS, |all| {
+    let devices = update_in(lib, DEVICE_SESSIONS, |all| {
         let before = all.len();
         all.retain(|t| t.key == owner);
         ended |= all.len() < before;
     });
+    (ended, browsers, devices)
+}
+
+fn settle_retain(s: &NodeState, (ended, browsers, devices): Retained) -> Result<(), ApiError> {
     // A browser session or a device sign-in ended: its usage insights end too, also when a write
     // failed after
     if ended {
@@ -645,6 +687,30 @@ fn listener_of(s: &NodeState, token: &str) -> Option<String> {
     crate::people::may_use_music(s, &key).then_some(key)
 }
 
+/// This listener token's active report membership, read with its authorization under one library
+/// lock. `Some(None)` is a valid legacy membership; `None` means no matching token, no enabled
+/// music membership, or unreadable state. A restore cannot put the token and roster reads on
+/// opposite sides of a replacement. No roster lock: feedback also calls this inside an inbox write.
+pub(crate) fn listener_report_membership(s: &NodeState, token: &str, key: &str) -> Option<Option<String>> {
+    if !token.starts_with("pml_") || token == s.token()?.as_str() {
+        return None;
+    }
+    let key = key.trim_start_matches("pubky");
+    let h = hash(token);
+    let lib = s.library.lock().expect("library poisoned");
+    let tokens: Vec<PersonToken> = serde_json::from_str(&lib.get_setting(TOKENS).ok()??).ok()?;
+    if !tokens.iter().any(|t| t.hash == h && t.key == key) {
+        return None;
+    }
+    let roster: crate::people::Roster =
+        serde_json::from_str(&lib.get_setting(crate::people::SETTING).ok()??).ok()?;
+    roster
+        .people
+        .into_iter()
+        .find(|p| p.key == key && p.access.music() && p.music_enabled)
+        .map(|p| p.reports)
+}
+
 /// The zones a listener may play on: the owner's list, or every zone when none is set
 /// (`None`). A list that can't be read, or isn't a list of zone ids, is an error: listeners
 /// are then kept off every zone until the owner sets the list again, never let onto all of them.
@@ -700,10 +766,14 @@ const OWNER_ONLY: &[&str] = &[
 ];
 
 /// What a listener may read: the shared library, public catalogues and directories, their
-/// zones, and who they are. Everything else (the owner's bookmarks, playlists, tags, reviews,
-/// history, podcast subscriptions and streaming accounts) stays the owner's.
+/// zones, who they are and their own bookmarks (bookmarks.rs answers each person's own).
+/// Everything else (the owner's bookmarks, playlists, tags, reviews, history, podcast
+/// subscriptions and streaming accounts) stays the owner's.
 const LISTENER_READS: &[&str] = &[
     "/me",
+    "/bookmarks",
+    // The same, by its older name (the page and the offline app's sync still use it)
+    "/favourites",
     "/events",
     "/info",
     "/status",
@@ -736,6 +806,8 @@ const LISTENER_READS: &[&str] = &[
 /// acts on the caller's own account, reads included; the apps and clients behind them stay the
 /// owner's (the handlers refuse those fields, and [`LISTENER_OWN_EXCEPTIONS`] those routes).
 const LISTENER_OWN: &[&str] = &[
+    // Their own problem reports (feedback.rs keeps each person to theirs)
+    "/feedback",
     // Usage insights: their own choice, aliases and events (usage.rs checks the person itself)
     "/usage",
     "/play-order",
@@ -760,6 +832,9 @@ const LISTENER_OWN: &[&str] = &[
 
 /// Inside [`LISTENER_OWN`], what goes on under every source policy: plays, streams and the play order.
 const LISTENER_OWN_ALWAYS: &[&str] = &[
+    // Problem reports aren't a sign-in either: a listener reports and sees their own whatever
+    // plays through whose sign-ins (feedback.rs keeps each person to theirs)
+    "/feedback",
     // Usage insights aren't a sign-in: a listener's own choice, Stop for me and Clear mine work
     // whatever plays through whose sign-ins (usage.rs checks the person)
     "/usage",
@@ -853,6 +928,11 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
         }
         return None;
     }
+    // Their own collections, on their own homeserver (personal_collections.rs answers each
+    // person's); the rest of /collections and /playlists stays the owner's
+    if crate::personal_collections::is_own_route(method, path) {
+        return None;
+    }
     if *method == Method::GET || *method == Method::HEAD {
         if !under(path, LISTENER_READS) || LISTENER_READ_EXCEPTIONS.iter().any(|x| path.contains(x)) {
             return Some("that is the owner's");
@@ -883,7 +963,11 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     if path == "/presence/along" {
         return None;
     }
-    Some("listeners' own playlists, bookmarks and history are not built yet; this change would land in the owner's")
+    // Their own bookmarks, on their own homeserver (bookmarks.rs answers each person's)
+    if path == "/bookmarks" || path == "/favourites" {
+        return None;
+    }
+    Some("that is the owner's: a listener's own are their bookmarks and collections")
 }
 
 /// The request's caller, from its token: the API token or an owner's browser session is the
@@ -1010,6 +1094,15 @@ pub fn sessions_of(s: &NodeState, key: &str) -> usize {
     load_tokens(s).iter().filter(|t| t.key == key).count()
 }
 
+pub(crate) fn sessions_of_checked(s: &NodeState, key: &str) -> Result<usize, ApiError> {
+    Ok(
+        load_checked(&s.library.lock().expect("library poisoned"), TOKENS)?
+            .iter()
+            .filter(|t| t.key == key)
+            .count(),
+    )
+}
+
 /// Forgets every token of `key` (People › remove).
 pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
     let done = update(s, TOKENS, |all| all.retain(|t| t.key != key));
@@ -1020,12 +1113,25 @@ pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
 /// Everything the node keeps for one listener goes (People › Remove): their own streaming
 /// sign-ins and settings (`person.<key>.*`), their tokens, preferences, presence setting and
 /// devices, and what was fetched with their sign-ins (TIDAL tracks, search answers, item pages).
-pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
+/// Their problem reports go in People › Remove before this (people.rs).
+pub async fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
+    let lock = crate::personal::person_lock(s, key);
+    let _one = lock.lock().await;
+    forget_person_locked(s, key).await
+}
+
+/// [`forget_person`] with their operation lock already held. People › Remove has already
+/// revoked access and holds the separate membership lock until all of this finishes.
+pub(crate) async fn forget_person_locked(s: &NodeState, key: &str) -> Result<(), ApiError> {
     let signed_out = sign_out_everywhere(s, key);
     // Their usage choice and what is still linked to them go (usage.rs), also when the token list
     // could not be written: they are already off the roster, so a retried remove never comes
     s.usage.forget_listener(key);
-    signed_out?;
+    // Their problem reports go in People › Remove itself, before this (people.rs)
+    // Their grant and copies must not stay for when that identity is added again.
+    let grant = crate::personal::forget(s, key).await;
+    // Everything else goes too before a failure above is answered (removing them again finishes
+    // what is left)
     // Their sign-ins still on the way: they would land again when the service answers
     let theirs = Who::Listener(key.to_string());
     crate::tidal::pending()
@@ -1036,27 +1142,51 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
         .lock()
         .expect("pending")
         .retain(|_, p| p.who != theirs);
-    {
+    let settings_problems = {
         let lib = s.library.lock().expect("library poisoned");
-        for (k, _) in lib.settings_with_prefix(&format!("{PERSON_PREFIX}{key}."))? {
-            lib.delete_setting(&k)?;
-        }
-        lib.delete_setting(&crate::prefs::storage_key_of(key))?;
-        lib.delete_setting(&crate::presence::visible_key(key))?;
+        let mut problems = Vec::new();
+        let mut keys = vec![
+            crate::prefs::storage_key_of(key),
+            crate::presence::visible_key(key),
+        ];
         // What they read with their own sign-ins, and with the node's ([`Who::tag`])
         let on_node = Who::ListenerOnNode(key.to_string()).tag();
-        for tag in [key, on_node.as_str()] {
-            for (k, _) in lib.settings_with_prefix(&crate::discover::contents_prefix_of(tag))? {
-                lib.delete_setting(&k)?;
+        for prefix in [
+            format!("{PERSON_PREFIX}{key}."),
+            crate::discover::contents_prefix_of(key),
+            crate::discover::contents_prefix_of(&on_node),
+        ] {
+            match lib.settings_with_prefix(&prefix) {
+                Ok(all) => keys.extend(all.into_iter().map(|(k, _)| k)),
+                Err(e) => problems.push(e.to_string()),
             }
         }
-    }
+        for key in keys {
+            if let Err(e) = lib.delete_setting(&key) {
+                problems.push(e.to_string());
+            }
+        }
+        problems
+    };
     let on_node = Who::ListenerOnNode(key.to_string()).tag();
     crate::tidal::forget_streams_of(key);
     crate::tidal::forget_streams_of(&on_node);
     crate::search::forget_answers_of(s, key);
     crate::search::forget_answers_of(s, &on_node);
     crate::devices::forget_all_of(s, key);
+    // Every failure is answered, a grant still on the node first (a key to their homeserver,
+    // and what removing them again is for)
+    let problems: Vec<String> = [grant.err(), signed_out.err().map(|e| e.message)]
+        .into_iter()
+        .flatten()
+        .chain(settings_problems)
+        .collect();
+    if !problems.is_empty() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            problems.join("; "),
+        ));
+    }
     Ok(())
 }
 

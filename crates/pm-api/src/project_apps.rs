@@ -114,6 +114,73 @@ pub fn onedrive_client_id() -> Option<&'static str> {
 /// (source: github.com/gillohner/pubky-music-auth). `[auth] return_page` overrides it.
 pub const RETURN_PAGE: &str = "https://gillohner.github.io/pubky-music-auth/callback";
 
+/// Whether the project's [`RETURN_PAGE`] forwards to `callback`: an http(s) address with no
+/// user name or password on the browser's own network: `localhost` and `*.localhost`, a name
+/// ending in `.local` or `.home.arpa`, an IPv4 address in 127/8, 10/8, 172.16/12, 192.168/16,
+/// 169.254/16 or 100.64/10, or an IPv6 address `::1`, `fc00::/7`, `fe80::/10` or an IPv4-mapped
+/// one whose IPv4 part is local. Every other name is refused, however it looks. The same table
+/// as the page's (`callback/index.html` in github.com/gillohner/pubky-music-auth); the `url`
+/// crate follows the same URL rules as the browser (`0x7f.1` is `127.0.0.1`).
+pub fn return_page_accepts(callback: &str) -> bool {
+    let Ok(u) = url::Url::parse(callback) else {
+        return false;
+    };
+    if !matches!(u.scheme(), "http" | "https") || !u.username().is_empty() || u.password().is_some() {
+        return false;
+    }
+    let v4 = |ip: std::net::Ipv4Addr| {
+        let [a, b, ..] = ip.octets();
+        a == 127
+            || a == 10
+            || (a == 172 && b & 0xf0 == 16)
+            || (a == 192 && b == 168)
+            || (a == 169 && b == 254)
+            || (a == 100 && b & 0xc0 == 64)
+    };
+    match u.host() {
+        Some(url::Host::Domain(d)) => {
+            let d = d.to_ascii_lowercase();
+            let d = d.strip_suffix('.').unwrap_or(&d);
+            d == "localhost"
+                || [".localhost", ".local", ".home.arpa"]
+                    .iter()
+                    .any(|t| d.ends_with(t))
+        }
+        Some(url::Host::Ipv4(ip)) => v4(ip),
+        Some(url::Host::Ipv6(ip)) => match ip.to_ipv4_mapped() {
+            Some(m) => v4(m),
+            None => {
+                let first = ip.segments()[0];
+                ip.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
+            }
+        },
+        None => false,
+    }
+}
+
+/// Whether a sign-in that would return to `callback` through the return page can: always with a
+/// node's own `[auth] return_page` (its owner's redirector), else when the project's page
+/// forwards there ([`return_page_accepts`]).
+pub(crate) fn return_page_reaches(s: &crate::state::NodeState, callback: &str) -> bool {
+    s.return_page() != RETURN_PAGE || return_page_accepts(callback)
+}
+
+/// A sign-in through the return page to `callback` that it can't reach: 412, with what to use
+/// instead (`instead`, e.g. "Use your own app with its secret.").
+pub(crate) fn check_return_page(
+    s: &crate::state::NodeState,
+    callback: &str,
+    instead: &str,
+) -> Result<(), crate::ApiError> {
+    if return_page_reaches(s, callback) {
+        return Ok(());
+    }
+    Err(crate::ApiError::new(
+        axum::http::StatusCode::PRECONDITION_FAILED,
+        format!("This node's address isn't a local one, so the shared sign-in can't return to it. {instead}"),
+    ))
+}
+
 /// `state` for a sign-in through the return page: `<nonce>.<base64url(callback URL)>`.
 pub fn return_state(nonce: &str, callback: &str) -> String {
     use base64::Engine;
@@ -131,6 +198,52 @@ pub fn state_nonce(state: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_return_page_forwards_only_to_local_addresses() {
+        // The same cases as the page's test (pubky-music-auth test/callback.test.mjs)
+        for cb in [
+            "http://127.0.0.1:7788/tidal/callback",
+            "http://localhost:7788/tidal/callback",
+            "http://192.168.1.5/v1/sources/tidal/callback",
+            "https://10.0.0.2/cb",
+            "http://172.16.0.1/cb",
+            "http://172.31.255.1/cb",
+            "http://169.254.10.1/cb",
+            "http://[::1]:7788/cb",
+            "http://[fd00::1]/cb",
+            "http://[fe80::1]/cb",
+            "http://[::ffff:192.168.1.5]/cb",
+            "http://box.local/cb",
+            "http://box.local./cb",
+            "http://BOX.Home.Arpa/cb",
+            "http://odeion.localhost/cb",
+            "http://100.101.102.103/cb",
+            "http://0x7f.1/cb",
+        ] {
+            assert!(return_page_accepts(cb), "{cb} is local");
+        }
+        for cb in [
+            "https://example.com/cb",
+            "http://0x7f000001.example.com/cb",
+            "http://127.0.0.1.nip.io/cb",
+            "http://10.0.0.1@evil.example/cb",
+            "http://user:pw@127.0.0.1/cb",
+            "http://[2001:db8::1]/cb",
+            "http://[::ffff:8.8.8.8]/cb",
+            "http://8.8.8.8/cb",
+            "http://172.32.0.1/cb",
+            "http://100.128.0.1/cb",
+            "http://box.ts.net/cb",
+            "http://localhost.example.com/cb",
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "ftp://127.0.0.1/cb",
+            "not a url",
+        ] {
+            assert!(!return_page_accepts(cb), "{cb} is refused");
+        }
+    }
 
     #[test]
     fn state_carries_the_nonce_and_the_callback() {

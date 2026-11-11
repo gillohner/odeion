@@ -413,6 +413,25 @@ pub struct Bookmarks {
     /// Every bookmarked canonical URL, for quick "is this bookmarked" checks.
     #[serde(default)]
     pub uris: Vec<String>,
+    /// A listener's: where their own homeserver stands (personal.rs). The owner's have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homeserver: Option<PersonalState>,
+}
+
+/// Where a listener's own homeserver stands for the node (personal.rs).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersonalState {
+    /// The node holds their grant.
+    pub connected: bool,
+    /// Their homeserver refused it (revoked in Ring): approve the node again.
+    #[serde(default)]
+    pub lost: bool,
+    /// Changes the node keeps until their homeserver answers.
+    #[serde(default)]
+    pub pending: usize,
+    /// It didn't answer just now: this is the node's copy.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// A tag on a canonical URL or a library object (one target field), with its label.
@@ -529,6 +548,9 @@ pub struct BookmarkChanged {
     /// The same as `bookmarked`, for clients of the deprecated `/v1/favourites`.
     #[serde(default)]
     pub favourite: bool,
+    /// A listener's change their homeserver didn't take yet: the node keeps it until it answers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
 }
 
 impl BookmarkChanged {
@@ -537,6 +559,7 @@ impl BookmarkChanged {
             uri,
             bookmarked,
             favourite: bookmarked,
+            pending: false,
         }
     }
 }
@@ -1044,6 +1067,10 @@ pub struct SyncActivity {
     pub last: Option<SyncReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The session whose first sync this is (`PubkySync::id`): only it updates the activity, and
+    /// a sign-in that replaces it resets what it left running.
+    #[serde(skip)]
+    pub owner: Option<u64>,
 }
 
 // ---- activity and import (integrations) ----
@@ -1946,6 +1973,10 @@ pub struct CreatePull {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginStarted {
+    /// The homeserver records fetched network-first before this sign-in (the public homeserver,
+    /// the identity signed in here before), with where each came from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<pm_pubky::records::Freshened>,
     /// `pubkyauth://…` to scan or paste into Pubky Ring.
     pub url: String,
     /// The same as a QR code (SVG markup), for screens.

@@ -70,7 +70,7 @@ const cases={
  async 'm1-connect-omitted'(browser){
   for(const width of [1280,820,390])for(const how of ['list','detail','detail-connect-first']){
    const m=mixed(how==='detail-connect-first');const run=await create(browser,width,{tracks:m.tracks,collections:[m.d.summary],fixtures:m.fx});external(run);const {page,state}=run;
-   if(how==='list'){await go(page,'/playlists');await page.locator('[data-plplay="c1"]').click();}else{await go(page,'/playlist/c1');await page.locator('#plsongs [data-splay]').first().waitFor();await page.locator('#plplay').click();}
+   if(how==='list'){await go(page,'/playlists');await page.locator('[data-plplay="c1"]').click();}else{await go(page,'/playlist/c1');await page.locator('#plsongs .srow').first().waitFor();await page.locator('#plplay').click();}
    await until(async()=>(await queue(page)).length>0,'browser queue written');await sleep(400);
    const q=await queue(page);const src=(await page.evaluate(()=>pmPlayer.now())).src;
    assert.deepEqual(q.map((x)=>x.uri),m.expected,`${width} ${how}: every library/provider stream kept in order with duplicates; Connect and unavailable omitted`);
@@ -88,11 +88,11 @@ const cases={
  async 'm2-structured-no-refetch'(browser){
   for(const width of [1280,820,390]){
    const m=mixed();const run=await create(browser,width,{tracks:m.tracks,collections:[m.d.summary],fixtures:m.fx});await trackReads(run,m.tracks,()=>({}));const {page,state}=run;
-   await go(page,'/playlist/c1');await page.locator('#plsongs [data-splay]').first().waitFor();await sleep(1200);
+   await go(page,'/playlist/c1');await page.locator('#plsongs .srow').first().waitFor();await sleep(1200);
    assert.deepEqual(run.reads,[],`${width}: structured collection rows need no track reads`);
    const names=await credits(page,'#plsongs .srow:first-child [data-artist-credit]');assert.deepEqual(names,['Artist 1','Earth, Wind & Fire'],'exact structured credit order and comma name');
    assert.equal(await page.locator('#plsongs .srow:first-child [data-artist-credit]').nth(1).getAttribute('href'),'/artist/lib-21');
-   await page.locator('#plsongs [data-splay]').first().click();await page.locator('#np').click();await page.locator('#nowplaying .np-titles .artist [data-artist-credit]').first().waitFor();await sleep(800);
+   await page.locator('#plsongs .srow').first().evaluate((r)=>{const b=r.querySelector('[data-splay]');(b&&b.offsetParent?b:r).click();});await page.locator('#np').click();await page.locator('#nowplaying .np-titles .artist [data-artist-credit]').first().waitFor();await sleep(800);
    // (Now playing reads its song once for the bookmark heart; that is not credit hydration.)
    assert.equal(await page.locator('[data-credit-track]').count(),0,`${width}: player credits use the queued structured artists, nothing to hydrate`);
    assert.deepEqual(await credits(page,'#nowplaying .np-titles .artist [data-artist-credit]'),['Artist 1','Earth, Wind & Fire']);
@@ -102,7 +102,7 @@ const cases={
  // M2: a page of flattened rows reads a bounded number of tracks, two at a time.
  async 'm2-bounded'(browser){
   const l=legacy(80);const run=await create(browser,1280,{tracks:l.ts,collections:[summary],fixtures:l.fx});await trackReads(run,l.ts,()=>({delay:40}));const {page,state}=run;
-  await go(page,'/playlist/c1');await page.locator('#plsongs [data-splay]').first().waitFor();
+  await go(page,'/playlist/c1');await page.locator('#plsongs .srow').first().waitFor();
   await until(async()=>(await credits(page,'#plsongs .srow:first-child [data-artist-credit]')).length===2,'first row hydrated');await sleep(2500);
   const ids=new Set(run.reads.map((r)=>r.id));
   assert.ok(run.reads.length<=48&&ids.size===run.reads.length,`bounded distinct reads per visit: ${run.reads.length}`);assert.ok(run.peak<=2,`peak overlap ${run.peak}`);
@@ -154,7 +154,7 @@ const cases={
  async 'm2-empty-join'(browser){
   const t={...lib(1),artists:[{id:11,name:'Artist 1',join_phrase:''}]};const m=mixed();m.d.tracks[0]=t;m.d.tracks[2]=t;
   const run=await create(browser,820,{tracks:m.tracks,collections:[m.d.summary],fixtures:m.fx});await trackReads(run,m.tracks,()=>({}));const {page,state}=run;
-  await go(page,'/playlist/c1');await page.locator('#plsongs [data-splay]').first().waitFor();await sleep(1200);
+  await go(page,'/playlist/c1');await page.locator('#plsongs .srow').first().waitFor();await sleep(1200);
   assert.deepEqual(run.reads,[],'no hydration read');assert.deepEqual(await credits(page,'#plsongs .srow:first-child [data-artist-credit]'),['Artist 1']);
   assert.equal(await page.locator('#plsongs [data-artist-credit]').first().getAttribute('href'),'/artist/lib-11');assert.deepEqual(state.errors,[]);
   console.log('PASS structured credit with empty join phrase: zero reads, exact link');await run.context.close();

@@ -69,7 +69,7 @@ try:
     check(e.get("PM_TOKEN") == "fixture-old-token" and e.get("PM_NAME") == "Old name"
           and e.get("PM_CONTACT") == "old@example.invalid" and e.get("PM_PUBLIC_URL") == "http://192.0.2.1:7788",
           "old names only: the node gets them")
-    check(image == "ghcr.io/gillohner/pubky-music-node:v0.2.2", f"old names only: the same image ({image})")
+    check(image == "ghcr.io/gillohner/odeion:v0.2.2", f"old names only: the same image ({image})")
     check(c.get("name") == "pubky-music", "the compose project keeps its name")
     check({"music-node", "cloudflare"} <= set(c.get("volumes", {})), "the volumes keep their names")
     check(all(v.get("name", "").startswith("pubky-music_") for v in c.get("volumes", {}).values()),
@@ -113,7 +113,7 @@ try:
     check(r.returncode != 0 and "run ./setup.sh first" in r.stderr, "without setup.sh's ADMIN_PASSWORD the start still stops")
 
     r, c, e, image = bundle("PM_TOKEN=fixture-old-token\n")
-    check(e.get("PM_NAME") == "Odeion" and image == "ghcr.io/gillohner/pubky-music-node:edge",
+    check(e.get("PM_NAME") == "Odeion" and image == "ghcr.io/gillohner/odeion:edge",
           "nothing set: the default name and image")
 
     TRUENAS = REPO / "deploy" / "truenas" / "docker-compose.yaml"
@@ -126,7 +126,7 @@ try:
     te = c.get("services", {}).get("node", {}).get("environment", {})
     check(r.returncode == 0 and te.get("ODEION_NAME") == "TrueNAS ♫" and te.get("PM_NAME") == "TrueNAS",
           "TrueNAS: an ODEION_ setting under environment reaches the container")
-    check(c.get("services", {}).get("node", {}).get("image") == "ghcr.io/gillohner/pubky-music-node:edge",
+    check(c.get("services", {}).get("node", {}).get("image") == "ghcr.io/gillohner/odeion:edge",
           "TrueNAS: the same image")
 finally:
     shutil.rmtree(base, ignore_errors=True)

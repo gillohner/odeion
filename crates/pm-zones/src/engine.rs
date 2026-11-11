@@ -373,6 +373,22 @@ impl Engine {
         match cmd {
             Command::Shutdown => return Flow::Exit,
             Command::QueueChanged => {
+                // The playing item's place may have moved (shuffle on or off, a move, a removal
+                // before it): `now_playing.index` follows it (an item no longer in the queue
+                // keeps its old place)
+                {
+                    let q = self.queue.lock().expect("queue poisoned");
+                    if let Some(cur) = self.current.as_mut() {
+                        if let Some(i) = q.position_of(cur.item.id) {
+                            cur.index = i;
+                        }
+                    }
+                    if let Some(inc) = self.incoming.as_mut() {
+                        if let Some(i) = q.position_of(inc.item.id) {
+                            inc.index = i;
+                        }
+                    }
+                }
                 // The next item may have changed: an item opened ahead is kept while it is still
                 // the next one, else given up (and prefetched again lazily)
                 let still = self
@@ -1015,10 +1031,13 @@ impl Engine {
             None => None,
         };
         let start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
-        self.queue
-            .lock()
-            .expect("queue poisoned")
-            .set_current(Some(index));
+        // Where the item is now: the queue may have changed order while it opened
+        let index = {
+            let mut q = self.queue.lock().expect("queue poisoned");
+            let index = q.position_of(item.id).unwrap_or(index);
+            q.set_current(Some(index));
+            index
+        };
         self.emit(ZoneEvent::TrackStarted {
             item: item.clone(),
             index,

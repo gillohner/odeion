@@ -102,7 +102,9 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
     const words = await page.evaluate(() => { const zb = document.querySelector('#zonename'); const up = document.querySelector('#upstreams'); const fits = (el) => el && el.scrollWidth <= el.clientWidth + 1; return { zone: zb && zb.textContent, zoneFits: fits(zb), zoneShown: zb && Math.round(zb.getBoundingClientRect().width), zoneMax: zb && getComputedStyle(zb).maxWidth, upMax: up && getComputedStyle(up).maxWidth, vw: innerWidth }; });
     // (the words are cut with an ellipsis where the bar is tight: what shows must still be readable)
     // (a 360 px bar has 36 px for it beside the play button and the quality pill; a 412 px one near 100)
-    check(words.zoneMax && parseFloat(words.zoneMax) >= (w < 400 ? 84 : 96) && words.zoneShown >= (w < 400 ? 32 : 44), `${w}: the bar's zone button may keep up to ${words.zoneMax} of its words (was ${w <= 420 ? 64 : 96}px) and shows ${words.zoneShown} px of them`);
+    // (TASK-phone-ui-simplify-1108: the phone's bar names no zone, the song has its room; Now playing
+    // names it, tools/ui-phone-simplify.js)
+    check(words.zoneShown === 0, `${w}: the phone's bar leaves the zone's name to Now playing (${words.zoneShown} px of it in the bar)`);
     check(words.upMax && (words.upMax === '48%' || parseFloat(words.upMax) >= words.vw * 0.47), `${w}: the status chip may take ${words.upMax} of the bar (was 40%)`);
     check(!state.errors.length, `${w}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();

@@ -164,6 +164,8 @@ pub async fn start_sign_in(s: &Settings, expect_owner: &str) -> Result<SignInSta
         .map_err(|e| e.to_string())?
         .post(api(s, "auth/pubky/start"))
         .json(&serde_json::json!({"device": true}))
+        // The node looks the homeserver records up first (up to 9 s, `pm_pubky::records`)
+        .timeout(Duration::from_secs(20))
         .send()
         .await
         .map_err(|e| format!("Can't reach the node: {e}"))?;

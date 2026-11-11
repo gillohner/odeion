@@ -245,6 +245,11 @@ impl Output for SlimOutput {
         false
     }
 
+    /// A level is a gain above zero: setting one is heard.
+    fn level_write_unmutes(&self) -> bool {
+        true
+    }
+
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
         if fmt.kind != SampleKind::Pcm || !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));

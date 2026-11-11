@@ -19,14 +19,16 @@ async function assertTarget(page,c){const u=new URL(page.url());if(c.id!=null)as
   const {page,context,state}=await create(browser,width,{tracks:[t],collections:[summary],fixtures:{'/playlists/c1':{body:d}}});
   for(const screen of ['tracks','collection','player']){
    for(let step=0;step<test.credits.length*2;step++){const n=Math.floor(step/2);
-    await go(page,screen==='collection'?'/playlist/c1':'/tracks');await page.locator(screen==='collection'?'#plsongs [data-splay]':'.track').first().waitFor();
+    await go(page,screen==='collection'?'/playlist/c1':'/tracks');await page.locator(screen==='collection'?'#plsongs .srow':'.track').first().waitFor();
     let root=screen==='collection'?page.locator('#plsongs .srow .grow .sub').first():page.locator('.track .by').first();
     if(screen==='player'){await page.locator('.track [data-act="play"]').first().click();await page.locator('#np').click();root=page.locator('#nowplaying .np-titles .artist');await root.waitFor();}
     const expected=test.credits.map(c=>c.name);const names=await root.locator('a:not([data-salbum]):not([data-np-album]),button:not([data-salbum]):not([data-np-album])').allTextContents();
     assert.deepEqual(names,expected,`${width} ${test.name} ${screen}: independent exact credit names`);
     const before=state.hits.length,now=await page.evaluate(()=>pmPlayer.now());const link=root.locator('[data-artist-credit]').nth(n);
     assert.equal(await link.getAttribute('href'),target(test.credits[n]));
-    if(step%2){await link.focus();await page.keyboard.press('Enter');}else await link.click();
+    // (a phone's song row is one tap target that plays: its links answer the keyboard, the ⋯ menu has the pages)
+    const inert=await link.evaluate(a=>getComputedStyle(a).pointerEvents==='none');
+    if(step%2||inert){await link.focus();await page.keyboard.press('Enter');}else await link.click();
     await page.waitForTimeout(150);await assertTarget(page,test.credits[n]);
     assert.ok(!state.hits.slice(before).some(badPlayback),'artist navigation never starts row playback');
     assert.equal((await page.evaluate(()=>pmPlayer.now())).index,now.index);
