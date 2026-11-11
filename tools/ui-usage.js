@@ -273,6 +273,10 @@ const noOverlap = (page) => page.evaluate(() => {
       await page.waitForSelector('[data-usage-node="off"]');
       await page.screenshot({ path: path.join(SHOTS, 'node-usage-1280.png') });
       check(await page.locator('[data-usage-node="clear"]').count() === 1, 'Clear all is its own button');
+      await page.focus('[data-usage-node="clear"]'); await page.keyboard.press('Enter');
+      await page.waitForSelector('dialog[open]'); await page.keyboard.press('Escape');
+      await until(() => page.evaluate(() => !document.querySelector('dialog[open]') && !!document.querySelector('[data-usage-node="clear"]:not([disabled])')));
+      check(await page.evaluate(() => document.activeElement && document.activeElement.matches('[data-usage-node="clear"]')) && u.on === true, 'a cancelled Clear all leaves the focus on Clear all (never on Turn off)');
       await context.close();
     }
   } finally { await browser.close(); }

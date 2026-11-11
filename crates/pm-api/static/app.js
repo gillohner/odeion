@@ -4016,8 +4016,8 @@
     const fresh = v !== 'search' && (v !== state.view || JSON.stringify(arg ?? null) !== JSON.stringify(state.viewArg ?? null));
     // Usage insights: which page, never its argument; the page a load starts on, a page this sent
     // elsewhere, Back or Forward, else opened (a tab or query inside a page too)
-    if (window.PM_USAGE) PM_USAGE.nav(v, firstPage ? 'initial' : v !== asked ? 'redirect' : how === 'pop' ? 'pop' : 'push');
     state.view = v; state.viewArg = arg; state.tab = tab;
+    if (window.PM_USAGE) PM_USAGE.nav(v, firstPage ? 'initial' : v !== asked ? 'redirect' : how === 'pop' ? 'pop' : 'push');
     if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
     markTabs();
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || ((v === 'artist' || v === 'releases') && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });

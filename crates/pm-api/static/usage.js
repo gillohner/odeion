@@ -247,10 +247,11 @@
     n.querySelector('[data-usage="dismiss"]').onclick = seen;
     n.querySelector('[data-usage="more"]').onclick = () => { seen(); if (ctx && ctx.open) ctx.open(); };
     n.querySelector('[data-usage="stop"]').onclick = async (e) => {
-      const b = e.currentTarget; b.disabled = true;
+      const b = e.currentTarget; const had = n.contains(document.activeElement); b.disabled = true;
       // (a Stop the node didn't take still holds on this page; the notice says so and stays)
-      try { await choose(false); } catch (err) { const p = n.querySelector('p'); if (p) { p.textContent = `${err.message || 'That didn’t work.'} Nothing more is recorded on this page; try again, or open Settings › Privacy.`; p.setAttribute('role', 'alert'); } b.disabled = false; return; }
+      try { await choose(false); } catch (err) { const p = n.querySelector('p'); if (p) { p.setAttribute('role', 'alert'); p.textContent = `${err.message || 'That didn’t work.'} Nothing more is recorded on this page; try again, or open Settings › Privacy.`; } b.disabled = false; if (had) b.focus(); return; }
       seen();
+      if (had && (document.activeElement === document.body || !document.activeElement)) { const m = document.getElementById('main'); if (m) m.focus({ preventScroll: true }); }
     };
   };
 
@@ -282,17 +283,18 @@
     if (focused) { const b = el.querySelector('[data-usage]:not([disabled]), [data-usage-node]:not([disabled])'); if (b) b.focus(); }
   };
   // After a redraw the pressed button is gone: focus goes to the panel's new one, unless it moved on
-  const refocus = (el) => { const a = document.activeElement; if (el.isConnected && (!a || a === document.body || !a.isConnected)) { const b = el.querySelector('[data-usage]:not([disabled]), [data-usage-node]:not([disabled])'); if (b) b.focus(); } };
+  // (the same kind of button first: after Clear all that is Clear all, never the switch next to it)
+  const refocus = (el, sel) => { const a = document.activeElement; if (el.isConnected && (!a || a === document.body || !a.isConnected)) { const b = (sel && el.querySelector(`${sel}:not([disabled])`)) || el.querySelector('[data-usage]:not([disabled]), [data-usage-node]:not([disabled])'); if (b) b.focus(); } };
   const say = (el, text, bad) => { const m = el.querySelector('.usage-msg'); if (m) { m.textContent = text; m.classList.toggle('warn-text', !!bad); } };
   const ask = (title, text, label) => (ctx && ctx.ask ? ctx.ask(title, text, label) : Promise.resolve(window.confirm(`${title}\n\n${text}`)));
   const renderPersonal = async (el) => {
     if (!el) return;
     el.classList.add('usage-slot');
     if (!ctx || !token) { el.innerHTML = row('Usage insights', 'Usage insights need a sign-in; nothing is recorded in this browser.', ''); return; }
-    el.innerHTML = row('Usage insights', 'Loading…', '');
+    draw(el, row('Usage insights', 'Loading…', ''));
     const j = await readMe();
     if (!el.isConnected) return;
-    if (!j) { el.innerHTML = row('Usage insights', 'The node can’t say right now.', ''); return; }
+    if (!j) { draw(el, row('Usage insights', 'The node can’t say right now.', '')); return; }
     const L = j.limits || {};
     const keep = `Raw events are kept ${L.raw_retention_days || 14} days, daily counts ${L.aggregate_retention_days || 90} days. Only the node’s owner can read them, on this node; nothing leaves it automatically.`;
     const state = !j.node_on ? 'Off on this node: nothing is recorded.' : j.sharing ? 'On: this browser sends which pages and buttons you use.' : 'You stopped usage insights for yourself: nothing of yours is recorded, on any of your browsers.';
@@ -301,7 +303,7 @@
       + row('What is recorded', esc(WHAT), '')
       + row('Clear mine', esc(`Deletes the raw events still linked to you. ${keep} Clear does not stop, and Stop does not clear.`), '<button class="btn ghost" data-usage="clear">Clear mine</button>'));
     const btn = (k) => el.querySelector(`[data-usage="${k}"]`);
-    const go = (k, fn) => { const b = btn(k); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { say(el, e.message, true); b.disabled = false; b.focus(); return; } refocus(el); }; };
+    const go = (k, fn) => { const b = btn(k); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { say(el, e.message, true); b.disabled = false; b.focus(); return; } refocus(el, `[data-usage="${{ stop: 'share', share: 'stop' }[k] || k}"]`); }; };
     go('stop', async () => { await choose(false); await renderPersonal(el); say(el, 'Stopped for you. Nothing more of yours is recorded.'); });
     go('share', async () => { await choose(true); await renderPersonal(el); say(el, 'Sharing again from your next page.'); });
     go('clear', async () => {
@@ -322,7 +324,7 @@
     draw(el, row('Usage insights', esc(s.enabled ? `On: every signed-in browser, yours and listeners’, records which pages and buttons are used. Each person is told, and can stop for themselves.${cov}` : `Off: nothing is recorded on this node.${cov}`) + (s.saved ? '' : ' <span class="warn-text">Not saved yet: a restart before the node can save it would forget it.</span>'),
       `<button class="btn ${s.enabled ? '' : 'primary'}" data-usage-node="${s.enabled ? 'off' : 'on'}">${s.enabled ? 'Turn off' : 'Turn on'}</button>`)
       + row('Stored', esc(`${s.events || 0} events from ${s.aliases || 0} open browsers. Raw events go after ${(s.limits && s.limits.raw_retention_days) || 14} days, daily counts after ${(s.limits && s.limits.aggregate_retention_days) || 90}. The summary: odeiond usage summary on the node.`), '<button class="btn ghost" data-usage-node="clear">Clear all</button>'));
-    const go = (k, fn) => { const b = el.querySelector(`[data-usage-node="${k}"]`); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { say(el, e.message, true); b.disabled = false; b.focus(); return; } refocus(el); }; };
+    const go = (k, fn) => { const b = el.querySelector(`[data-usage-node="${k}"]`); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { say(el, e.message, true); b.disabled = false; b.focus(); return; } refocus(el, `[data-usage-node="${{ on: 'off', off: 'on' }[k] || k}"]`); }; };
     const put = async (body) => { const x = await request('PUT', '/node/usage', body); const j = await answer(x); if (!x.ok) throw new Error(x.status === 409 ? 'Usage insights changed since this page showed them. Look again.' : (j && j.error) || 'That didn’t work; try again.'); };
     go('on', async () => {
       if (!await ask('Turn on usage insights?', 'Every signed-in browser on this node, yours and listeners’, then records which pages and buttons are used: never what anyone types, plays or names. Each person sees a notice and can stop for themselves.', 'Turn on')) { await renderNode(el); return; }
