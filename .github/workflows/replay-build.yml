@@ -1,0 +1,28 @@
+name: replay-build
+on:
+  push:
+    branches: ['scratch/am361-replay-build*']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      - run: |
+          cargo test -p pm-api --lib --no-run --message-format=json \
+            | python3 -c "import sys,json;[print(j['executable']) for j in map(json.loads,sys.stdin) if j.get('reason')=='compiler-artifact' and j.get('executable') and j['target']['name']=='pm_api']" > exe.txt
+          cat exe.txt; cp "$(head -1 exe.txt)" pm_api_lib_tests && ls -la pm_api_lib_tests && sha256sum pm_api_lib_tests
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pm-api-lib-tests
+          path: pm_api_lib_tests
+          retention-days: 2
