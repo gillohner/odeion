@@ -627,6 +627,10 @@ async fn dispatch(
                     }
                     if !items.is_empty() {
                         zone.enqueue(items, Insert::End);
+                        // A list set with shuffle on plays shuffled, as sent being the original order
+                        if action == "set" {
+                            zone.shuffle_replacement();
+                        }
                     }
                 }
                 "start" => {
@@ -640,14 +644,22 @@ async fn dispatch(
                 "stop" => zone.pause(),
                 "skip" => {
                     let index = num(p, "index", 0) as usize;
-                    zone.play_index(index);
                     let offset = num(p, "offset", 0) as u64;
+                    // Subscribed before the start: a track that starts at once would otherwise
+                    // have started before anyone listened, and the offset would never be sought
+                    let mut events = zone.subscribe();
+                    let asked = zone.queue().get(index).map(|it| it.id);
+                    zone.play_index(index);
                     if offset > 0 {
-                        let mut events = zone.subscribe();
                         let started = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                             loop {
                                 match events.recv().await {
-                                    Ok(pm_zones::ZoneEvent::TrackStarted { .. }) => break true,
+                                    // The item asked for, not one the zone moved on to before it
+                                    Ok(pm_zones::ZoneEvent::TrackStarted { item, .. })
+                                        if Some(item.id) == asked =>
+                                    {
+                                        break true
+                                    }
                                     Ok(pm_zones::ZoneEvent::Error { .. }) | Err(_) => break false,
                                     Ok(_) => {}
                                 }

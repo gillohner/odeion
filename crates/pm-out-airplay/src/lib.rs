@@ -262,6 +262,11 @@ impl Output for AirPlayOutput {
         false
     }
 
+    /// A level is a gain above zero: setting one is heard.
+    fn level_write_unmutes(&self) -> bool {
+        true
+    }
+
     fn now_playing(&self, item: Option<&QueueItem>) {
         let meta = item.map(|it| match &self.describe {
             Some(d) => d(it),

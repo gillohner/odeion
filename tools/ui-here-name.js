@@ -52,13 +52,14 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
   const browser = await chromium.launch();
   for (const [tag, desktop, name, played] of CASES) {
     const { page, context, state } = await open(browser, desktop);
-    await fx.go(page, '/library'); await page.waitForSelector('#zonename'); await sleep(400);
+    await fx.go(page, '/library'); await page.waitForSelector('#zonename', { state: 'attached' }); await sleep(400);
     const inApp = !!desktop; const at = `${tag}`;
     const seen = [];
     check((await text(page, '#zonename')).trim() === name, `${at}: the zone button says "${name}" (${(await text(page, '#zonename')).trim()})`);
     seen.push(await text(page, '.player'));
     // The picker: the in-app player last in the apps (the phone's own zone first), first on the web
-    await page.click('#zonebtn'); await page.waitForSelector('#zonepop:not([hidden])'); await sleep(200);
+    // (a phone's bar has no zone button: Now playing's zone label presses it)
+    await page.$eval('#zonebtn', (b) => b.click()); await page.waitForSelector('#zonepop:not([hidden])'); await sleep(200);
     const rows = (await page.$$eval('#zonepop .name', (ns) => ns.map((n) => n.textContent.trim()))).filter((r) => r === name || r === zone.name);
     seen.push(await text(page, '#zonepop'));
     check(rows.includes(name) && rows.includes(zone.name) && (inApp ? rows[rows.length - 1] === name : rows[0] === name), `${at}: the picker lists "${name}" ${inApp ? 'last, after the phone\'s own zone' : 'first'} (${rows.join(' · ')})`);
@@ -68,7 +69,7 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     const pill = await page.$('#quality');
     const pillShown = pill && await pill.evaluate((q) => q.getClientRects().length > 0);
     if (pillShown) {
-      await page.click('#quality'); await page.waitForSelector('#qpanel:not([hidden])'); await sleep(200);
+      await page.$eval('#quality', (q) => q.click()); await page.waitForSelector('#qpanel:not([hidden])'); await sleep(200);
       const panel = await text(page, '#qpanel'); seen.push(panel);
       check(inApp ? (tag === 'android' ? /Android mixes it to the system rate/.test(panel) : /the system mixes it/.test(panel)) && !/bit-perfect|decodes the file itself/i.test(panel) : /decodes the file itself/.test(panel), `${at}: the Sound panel says what plays the sound (${panel.replace(/\s+/g, ' ').slice(0, 120)})`);
       await page.screenshot({ path: path.join(SHOTS, `sound-${tag}.png`) });
@@ -77,7 +78,7 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
       // A phone hides the pill while nothing plays: the panel is checked in a desktop-wide window
       const wide = await open(browser, desktop, 1280);
       await fx.go(wide.page, '/library'); await wide.page.waitForSelector('#quality'); await sleep(400);
-      await wide.page.click('#quality'); await wide.page.waitForSelector('#qpanel:not([hidden])'); await sleep(200);
+      await wide.page.$eval('#quality', (q) => q.click()); await wide.page.waitForSelector('#qpanel:not([hidden])'); await sleep(200);
       const panel = await text(wide.page, '#qpanel'); seen.push(panel);
       check(inApp ? (tag === 'android' ? /Android mixes it to the system rate/.test(panel) : /the system mixes it/.test(panel)) && !/bit-perfect|decodes the file itself/i.test(panel) : /decodes the file itself/.test(panel), `${at} (1280): the Sound panel says what plays the sound (${panel.replace(/\s+/g, ' ').slice(0, 120)})`);
       await wide.page.screenshot({ path: path.join(SHOTS, `sound-${tag}.png`) });
@@ -94,7 +95,8 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     await fx.go(page, '/library'); await page.waitForSelector('#npart'); await sleep(500);
     await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
     const np = await text(page, '#nowplaying'); seen.push(np);
-    const details = page.locator('#nowplaying .np-tabs [data-npsheet="details"]');
+    // (Details: its tab beside the player, or in More on a phone)
+    const details = page.locator('#nowplaying .np-tabs [data-npsheet="details"], #nowplaying .np-dock [data-npsheet="more"]');
     if (await details.count()) { await details.first().click(); await sleep(500); seen.push(await text(page, '#nowplaying')); }
     const npAll = seen[seen.length - 1];
     check(npAll.includes(played), `${at}: Now playing says "${played}"`);

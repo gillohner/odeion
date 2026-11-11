@@ -1625,3 +1625,44 @@ async fn a_replayed_envelope_of_a_device_is_not_rotated_past_it() {
     assert_eq!(now.sign_in.tokens["access_token"], "node-again");
     assert!(vb.read("tidal").await.is_err(), "the laptop reads nothing new");
 }
+
+/// The unchanged predicate may accept just before retirement. Internal awaited reads must
+/// not allow the later PUT/DELETE, and cancellation must release the operation's lock.
+#[tokio::test]
+async fn retirement_after_the_vault_predicate_prevents_the_compound_mutation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 1).await;
+    let secret = ClientSecret::generate();
+    let vault = Vault::new(&sessions[0], &secret);
+    vault.register("Fixture").await.unwrap();
+    vault.write_shared("tidal", &sign_in("before")).await.unwrap();
+    let before = vault.envelope("tidal").await.unwrap().unwrap();
+    let alive = AtomicBool::new(true);
+    let still = || alive.load(Ordering::SeqCst);
+    let guarded = vault.guarded(&still);
+    let result = guarded
+        .write_shared_if("tidal", &sign_in("after"), None, &|_| {
+            alive.store(false, Ordering::SeqCst);
+            true
+        })
+        .await;
+    assert!(matches!(result, Err(VaultStoreError::Replaced)));
+    assert_eq!(vault.envelope("tidal").await.unwrap().unwrap(), before);
+    // The canceled write released its lock, allowing the current owner to proceed.
+    vault.write_shared("tidal", &sign_in("current")).await.unwrap();
+    let before = vault.envelope("tidal").await.unwrap().unwrap();
+    alive.store(true, Ordering::SeqCst);
+    let result = guarded
+        .remove_if("tidal", &|_| {
+            alive.store(false, Ordering::SeqCst);
+            true
+        })
+        .await;
+    assert!(matches!(result, Err(VaultStoreError::Replaced)));
+    assert_eq!(vault.envelope("tidal").await.unwrap().unwrap(), before);
+    assert!(vault.remove_if("tidal", &|_| true).await.unwrap());
+}

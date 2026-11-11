@@ -1357,6 +1357,112 @@ async fn items_resolve_their_source_with_pins_and_orders() {
     assert_eq!(r["missing"], serde_json::json!([tidal]));
 }
 
+/// A playlist (or collection) played into a zone with shuffle on replaces its queue shuffled, the
+/// playlist's order kept as the original one; with shuffle off it plays in that order.
+#[tokio::test]
+async fn a_playlist_played_with_shuffle_on_plays_shuffled() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    let sent: Vec<String> = (0..10).map(|i| format!("n{i}")).collect();
+    for t in &sent {
+        write_wav(&music.join(format!("{t}.wav")), t, None);
+    }
+    let settings = settings_for(dir.path(), "shuffled", Some(music.clone()), None);
+    let db = settings.db_path.clone();
+    let outputs = OutputRegistry::new();
+    outputs.register(Arc::new(NullOutput::new()));
+    let s = NodeState::new(settings, Library::open(&db).unwrap(), outputs);
+    s.zones_for_all_outputs();
+    let app = router(s.clone());
+    let (st, _) = call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+    assert_eq!(st, StatusCode::OK);
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (_, found) = call(&app, "GET", "/v1/library/tracks?limit=50", None).await;
+    let tracks = found["tracks"].as_array().unwrap();
+    let ids: Vec<i64> = sent
+        .iter()
+        .map(|t| {
+            tracks.iter().find(|x| x["title"] == *t).unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    let (st, pl) = call(
+        &app,
+        "POST",
+        "/v1/playlists",
+        Some(serde_json::json!({"name": "Ten", "track_ids": ids})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{pl}");
+    let id = pl["summary"]["id"].as_str().unwrap().to_string();
+    let zone = s.zones.get(&ZoneId::new("null-output")).unwrap();
+    let titles = |z: &serde_json::Value| -> Vec<String> {
+        z["queue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["title"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    let (st, _) = call(
+        &app,
+        "PUT",
+        "/v1/zones/null-output/shuffle",
+        Some(serde_json::json!({"shuffle": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    // A shuffle leaves ten items as they were once in 10! tries: play it again then
+    let mut played = Vec::new();
+    for _ in 0..3 {
+        let (st, r) = call(
+            &app,
+            "POST",
+            &format!("/v1/playlists/{id}/play"),
+            Some(serde_json::json!({"zone": "null-output"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["queued"], 10, "{r}");
+        let (_, z) = call(&app, "GET", "/v1/zones/null-output", None).await;
+        assert_eq!(z["shuffle"], true, "{z}");
+        played = titles(&z);
+        if played != sent {
+            break;
+        }
+    }
+    assert_ne!(played, sent, "plays shuffled");
+    let order = zone.shuffle_order().expect("shuffled");
+    let original: Vec<String> = order.iter().map(|i| played[*i].clone()).collect();
+    assert_eq!(original, sent, "the playlist's order is the original order");
+    // Shuffle off: it plays in the playlist's order
+    call(
+        &app,
+        "PUT",
+        "/v1/zones/null-output/shuffle",
+        Some(serde_json::json!({"shuffle": false})),
+    )
+    .await;
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/v1/playlists/{id}/play"),
+        Some(serde_json::json!({"zone": "null-output"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, z) = call(&app, "GET", "/v1/zones/null-output", None).await;
+    assert_eq!((titles(&z), z["shuffle"].as_bool()), (sent.clone(), Some(false)));
+    zone.stop();
+}
+
 fn settings_for(
     dir: &std::path::Path,
     name: &str,

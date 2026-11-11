@@ -511,7 +511,94 @@ pub fn amplitude_percent(db: f32) -> u8 {
     (10f64.powf(f64::from(db.clamp(-80.0, 0.0)) / 20.0) * 100.0).floor() as u8
 }
 
+/// What [`Output::unmute_held`] did.
+#[derive(Debug)]
+pub struct Unmuted {
+    /// Some device came back: one, a member of a group, a player of a native group that unmuted
+    /// before another refused, or a device whose level write already unmuted it.
+    pub any: bool,
+    /// The first refusal.
+    pub error: Option<SinkError>,
+    /// Every device that came back is at or under the limit as far as is known (by its reading,
+    /// or by a level write that went through). False when a correction it needed was refused:
+    /// the zone then keeps showing the level it had, so the next unmute corrects again.
+    pub held: bool,
+}
+
+impl Unmuted {
+    /// Nothing came back.
+    pub fn nothing(e: SinkError) -> Self {
+        Self {
+            any: false,
+            error: Some(e),
+            held: true,
+        }
+    }
+
+    /// One device's outcome folded into a group's: the group came back when any member did; the
+    /// first refusal is kept; held when every member that came back is.
+    pub fn and(mut self, m: Unmuted) -> Self {
+        self.any |= m.any;
+        self.held &= m.held || !m.any;
+        if self.error.is_none() {
+            self.error = m.error;
+        }
+        self
+    }
+}
+
+/// The zone's last level, asked for when it is needed (a level the device announced since
+/// replaces the one the unmute began with).
+pub type LastLevel<'a> = Option<&'a (dyn Fn() -> Option<pm_model::VolumeLevel> + Send + Sync)>;
+
+/// Members whose level has not yet been established safe after an unmute refusal.
+/// This belongs to the zone, independently of its aggregate displayed level.
+#[derive(Default)]
+pub struct UnmuteSafety(std::sync::Mutex<std::collections::HashSet<OutputId>>);
+
+impl UnmuteSafety {
+    fn unresolved(&self, id: &OutputId) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).contains(id)
+    }
+
+    fn record(&self, id: OutputId, unsafe_level: bool) {
+        let mut members = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if unsafe_level {
+            members.insert(id);
+        } else {
+            members.remove(&id);
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+/// [`Output::unmute_held`] for each of a group's `players` in turn (a node group's members, or the
+/// players of a native Sonos, HEOS or BluOS group), each by its own level: none is given the
+/// group's (a player may have been turned down on its own); `last`, the group's, only tells
+/// whether one that can't report may be above the limit.
+pub async fn unmute_each(
+    players: &[&dyn Output],
+    level: Volume,
+    max: f32,
+    last: LastLevel<'_>,
+    safety: &UnmuteSafety,
+) -> Unmuted {
+    let mut out = Unmuted {
+        any: false,
+        error: None,
+        held: true,
+    };
+    for p in players {
+        out = out.and(p.unmute_held(level, max, last, false, safety).await);
+    }
+    out
+}
+
 /// One place audio can go (handoff §6.4).
+
 #[async_trait]
 pub trait Output: Send + Sync {
     fn id(&self) -> OutputId;
@@ -523,6 +610,105 @@ pub trait Output: Send + Sync {
     /// level to its limit itself.
     fn unmute_restores_level(&self) -> bool {
         true
+    }
+
+    /// Whether a level write alone makes the device heard (AirPlay, Squeezebox: mute is a level),
+    /// so a level that went through unmuted it whatever the unmute after it says.
+    fn level_write_unmutes(&self) -> bool {
+        false
+    }
+
+    /// Unmute under the zone's limit `max`, never raising the device. `last` is the zone's level;
+    /// `sole`: the zone is the device's only controller (a single device), so `last` is its
+    /// level; a group's member may have been set apart, so `last` never sets it.
+    ///
+    /// One that chooses its level on unmuting gets `level` (the zone's level held to the limit)
+    /// first. One that restores its own is brought down to the limit while still muted when its
+    /// reading is above it. A member that can't be read while the group's level is above the
+    /// limit (lowered since) may be above it too: it stays muted, and that is the refusal. After
+    /// the unmute, whether or not the device said yes (a native group may have unmuted a player
+    /// before another refused), it is brought down again when its reading, else (`sole`) `last`
+    /// asked for now, is above the limit.
+    async fn unmute_held(
+        &self,
+        level: Volume,
+        max: f32,
+        last: LastLevel<'_>,
+        sole: bool,
+        safety: &UnmuteSafety,
+    ) -> Unmuted {
+        let back = |l| crate::zone::back_to_limit(l, max, |db| self.percent_for_db(db));
+        if !self.unmute_restores_level() {
+            if let Err(e) = self.set_volume(level).await {
+                return Unmuted::nothing(e);
+            }
+            safety.record(self.id(), false);
+            return match self.set_volume(Volume::Mute(false)).await {
+                Ok(()) => Unmuted {
+                    any: true,
+                    error: None,
+                    held: true,
+                },
+                // The level write already brought it back, at `level`
+                Err(e) if self.level_write_unmutes() => Unmuted {
+                    any: true,
+                    error: Some(e),
+                    held: true,
+                },
+                Err(e) => Unmuted::nothing(e),
+            };
+        }
+        match self.volume().await {
+            Ok(Some(v)) => {
+                if let Some(b) = back(v.level) {
+                    if let Err(e) = self.set_volume(b).await {
+                        safety.record(self.id(), true);
+                        // Already heard above the limit (its mute had failed, or it was never
+                        // muted): it is playing and not held, which is said, never hidden behind a
+                        // peer that took the limit. A muted one stays muted: nothing came back
+                        return Unmuted {
+                            any: !v.muted,
+                            held: v.muted,
+                            error: Some(e),
+                        };
+                    }
+                }
+                safety.record(self.id(), false);
+            }
+            _ if !sole
+                && (safety.unresolved(&self.id())
+                    || last.and_then(|f| f()).is_none_or(|l| back(l).is_some())) =>
+            {
+                safety.record(self.id(), true);
+                return Unmuted::nothing(SinkError::Device(format!(
+                    "{}: its level can't be read, so it stays muted under the volume limit",
+                    self.name()
+                )));
+            }
+            _ => {}
+        }
+        let unmuted = self.set_volume(Volume::Mute(false)).await;
+        let after = self.volume().await.ok().flatten();
+        let any = match (&unmuted, after) {
+            (Ok(()), _) => true,
+            (Err(_), Some(v)) => !v.muted,
+            (Err(_), None) => false,
+        };
+        let now = after
+            .map(|v| v.level)
+            .or_else(|| last.filter(|_| sole).and_then(|f| f()));
+        let fix = match now.and_then(back) {
+            Some(b) => self.set_volume(b).await.err(),
+            None => None,
+        };
+        if now.is_some() {
+            safety.record(self.id(), fix.is_some());
+        }
+        Unmuted {
+            any,
+            held: fix.is_none(),
+            error: unmuted.err().or(fix),
+        }
     }
 
     /// The device's maker and model in words, when the protocol tells (UPnP, AirPlay, Cast,

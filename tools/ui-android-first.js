@@ -102,7 +102,8 @@ const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
     await page.goBack(); await sleep(400);
     check(await page.$eval('.popover.menu', (m) => m.hidden) && new URL(page.url()).pathname === '/', `${w}: Back closes the status panel and the page stays`);
     // Play to, then Sleep timer from it
-    await page.click('#zonebtn'); await page.waitForSelector('#zonepop:not([hidden])');
+    // (the phone's bar has no zone button: Now playing's zone label presses it)
+    await page.$eval('#zonebtn', (b) => b.click()); await page.waitForSelector('#zonepop:not([hidden])');
     await fits(page, `${w} Play to`); await sheet(page, '#zonepop', `${w} Play to`);
     await page.screenshot({ path: path.join(SHOTS, `playto-${w}.png`) });
     await pull(page, '#zonepop', 40); await sleep(300);
@@ -111,7 +112,7 @@ const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
     check(kept === 6, `${w}: the swipe keeps every move from the browser's own panning, the first included (${kept} of 6)`);
     check(await page.$eval('#zonepop', (e) => e.hidden) && await page.$eval('#scrim', (e) => e.hidden), `${w}: a swipe down closes Play to and its scrim`);
     if (!(await page.$eval('#zonepop', (e) => e.hidden))) await page.keyboard.press('Escape'); // (so the rest still runs where the swipe failed)
-    await page.click('#zonebtn'); await page.waitForSelector('#zonepop:not([hidden]) #zpsleep');
+    await page.$eval('#zonebtn', (b) => b.click()); await page.waitForSelector('#zonepop:not([hidden]) #zpsleep');
     await page.click('#zpsleep'); await page.waitForSelector('.popover.menu:not([hidden]) .pop-title');
     await fits(page, `${w} Sleep timer`); await sheet(page, '.popover.menu:not([hidden])', `${w} Sleep timer`);
     await page.goBack(); await sleep(400);

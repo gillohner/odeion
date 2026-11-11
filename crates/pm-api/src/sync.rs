@@ -30,6 +30,10 @@ pub enum SyncError {
     Library(#[from] pm_library::LibraryError),
     #[error("storing pulled post: {0}")]
     Store(String),
+    /// Another sign-in replaced this session while it was syncing: the pass ended before it
+    /// wrote anything more of the old identity's.
+    #[error("another sign-in replaced this session")]
+    Replaced,
 }
 
 impl SyncError {
@@ -47,6 +51,11 @@ pub struct PubkySync {
     refused: std::sync::atomic::AtomicBool,
     /// One pass at a time (a manual sync and the background carry-on never overlap).
     pass: tokio::sync::Mutex<()>,
+    /// This handle among all the node's sessions (its first sync's activity names it).
+    id: u64,
+    /// Set when another sign-in replaced this session ([`crate::state::NodeState::set_sync`]):
+    /// a pass still running writes nothing more, to the library or the homeserver.
+    retired: std::sync::atomic::AtomicBool,
 }
 
 /// At most this many writes and deletes per sync pass: a big change (thousands of bookmarks from
@@ -66,8 +75,14 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
     let s = s.clone();
     tokio::spawn(async move {
         let started = std::time::Instant::now();
+        // Under the activity's lock: a session another sign-in replaced (retired before its
+        // activity is reset, `NodeState::set_sync`) never writes the new one's activity
         let step = |s: &crate::state::NodeState, words: &str| {
             let mut a = s.sync_activity.lock().expect("sync activity");
+            if sync.is_retired() {
+                return;
+            }
+            a.owner = Some(sync.id());
             a.running = true;
             a.step = Some(words.to_string());
             if a.started_at.is_none() || a.finished_at.is_some() {
@@ -77,22 +92,35 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
             }
         };
         step(&s, "Telling your other devices where this node is");
-        if let Err(e) = sync.publish_node_for(&s).await {
-            tracing::warn!("publishing the node record failed: {e}");
+        match sync.publish_node_for(&s).await {
+            Ok(()) => {}
+            Err(SyncError::Replaced) => return,
+            Err(e) => tracing::warn!("publishing the node record failed: {e}"),
         }
         step(&s, "Bringing your settings back");
         match sync.restore_settings(&s, true).await {
             Ok(Some(r)) => tracing::info!(?r, "settings restored from the homeserver"),
             Ok(None) => {}
+            Err(SyncError::Replaced) => return,
             Err(e) => tracing::warn!("settings restore failed: {e}"),
+        }
+        if sync.is_retired() {
+            return;
         }
         // The sign-ins in the person's vault, then every 15 minutes (vault_cache)
         crate::vault_cache::start(&s, sync.clone());
         step(&s, "Syncing your playlists, bookmarks and tags");
         let result = sync.sync(&s.library).await;
         let ms = started.elapsed().as_millis() as u64;
+        // Replaced: the new sign-in's first sync is the one the page follows, and it may be
+        // running right now; nothing of its activity is touched
         {
             let mut a = s.sync_activity.lock().expect("sync activity");
+            // Replaced (whatever the pass returned): the new sign-in owns the activity now
+            if sync.is_retired() {
+                tracing::info!(ms, "first sync ended: another sign-in replaced this one");
+                return;
+            }
             a.running = false;
             a.step = None;
             a.finished_at = Some(pm_library::db::now_unix());
@@ -155,6 +183,11 @@ pub fn node_record(
     }
 }
 
+fn next_sync_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl PubkySync {
     /// Restore a session from an exported secret and prepare to sync.
     pub async fn connect(network: Network, secret: &str) -> Result<Self, HomeserverError> {
@@ -171,6 +204,8 @@ impl PubkySync {
             z32,
             refused: Default::default(),
             pass: Default::default(),
+            retired: Default::default(),
+            id: next_sync_id(),
         })
     }
 
@@ -183,7 +218,44 @@ impl PubkySync {
             z32,
             refused: Default::default(),
             pass: Default::default(),
+            retired: Default::default(),
+            id: next_sync_id(),
         }
+    }
+
+    /// This handle among the node's sessions.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Another sign-in replaced this session: whatever pass is running ends before its next
+    /// write, and the background loops stop.
+    pub fn retire(&self) {
+        self.retired.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_retired(&self) -> bool {
+        self.retired.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Checked before every write of a pass: [`SyncError::Replaced`] once retired.
+    fn current(&self) -> Result<(), SyncError> {
+        if self.is_retired() {
+            return Err(SyncError::Replaced);
+        }
+        Ok(())
+    }
+
+    /// The library for a write by this pass, once this session is still the node's.
+    fn lib<'a>(
+        &self,
+        library: &'a Arc<Mutex<Library>>,
+    ) -> Result<std::sync::MutexGuard<'a, Library>, SyncError> {
+        // The lock first, then the check: a replacement made while this waited for the lock is
+        // seen here, not only one made before it
+        let lib = library.lock().expect("library poisoned");
+        self.current()?;
+        Ok(lib)
     }
 
     /// The folders the node asks for at sign-in that this session was not granted.
@@ -225,9 +297,11 @@ impl PubkySync {
         // Read first: the old record is overwritten only once what it held is noted
         if let Some(old) = self.homeserver.read_node_record(&self.session).await? {
             if !old.token.is_empty() {
+                self.current()?;
                 crate::access_token::note_published(s, &old.token)?;
             }
         }
+        self.current()?;
         self.publish_node(&s.name, &s.public_url, &s.version, iroh.as_deref())
             .await?;
         // Also after a failure or a restart since the note was made
@@ -312,7 +386,10 @@ impl PubkySync {
     /// unsynced objects stay queued.
     pub async fn sync(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
         let _one_at_a_time = self.pass.lock().await;
-        crate::tags::before_sync(&library.lock().expect("library poisoned"));
+        {
+            let lib = self.lib(library)?;
+            crate::tags::before_sync(&lib);
+        }
         match self.sync_once(library).await {
             Ok(mut report) => {
                 if report
@@ -350,7 +427,7 @@ impl PubkySync {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(PASS_PAUSE).await;
-                if !s.sync_handle().is_some_and(|h| Arc::ptr_eq(&h, &me)) {
+                if me.is_retired() {
                     break;
                 }
                 match me.sync(&s.library).await {
@@ -364,6 +441,7 @@ impl PubkySync {
                         }
                         left = r.pending;
                     }
+                    Err(SyncError::Replaced) => break,
                     Err(e) => {
                         tracing::warn!("batched sync stopped: {e}");
                         break;
@@ -377,9 +455,8 @@ impl PubkySync {
         let mut report = SyncReport::default();
         let owner = v1::PubkyId::try_from(raw_key(&self.z32))
             .map_err(|e| SyncError::Store(format!("signed-in key: {e}")))?;
-        let migrated = library
-            .lock()
-            .expect("library poisoned")
+        let migrated = self
+            .lib(library)?
             .get_setting(V1_MIGRATED)?
             .is_some_and(|v| !v.is_empty());
 
@@ -396,24 +473,22 @@ impl PubkySync {
         .into_iter()
         .enumerate()
         {
-            moved_out[k] = library
-                .lock()
-                .expect("library poisoned")
-                .get_setting(key)?
-                .is_some();
+            moved_out[k] = self.lib(library)?.get_setting(key)?.is_some();
             if moved_out[k] {
                 continue;
             }
-            match self.homeserver.move_tags_to_v1(&self.session, dir).await {
+            self.current()?;
+            match self
+                .homeserver
+                .move_tags_to_v1(&self.session, dir, &|| !self.is_retired())
+                .await
+            {
                 Ok((moved, kept)) => {
                     if moved > 0 {
                         tracing::info!(moved, kept, from = dir, "tags moved to /pub/social/v1/tags/");
                         report.pushed += moved;
                     }
-                    library
-                        .lock()
-                        .expect("library poisoned")
-                        .set_setting(key, &now_micros().to_string())?;
+                    self.lib(library)?.set_setting(key, &now_micros().to_string())?;
                     moved_out[k] = true;
                 }
                 Err(e) => report.errors.push(tag_write_hint(format!(
@@ -421,21 +496,24 @@ impl PubkySync {
                 ))),
             }
         }
-        let pending = library.lock().expect("library poisoned").unsynced_tags()?;
+        let pending = self.lib(library)?.unsynced_tags()?;
         let total = pending.len();
         for (done, row) in pending.into_iter().enumerate() {
             if spent(&report) {
                 report.pending += total - done;
                 break;
             }
+            self.current()?;
             if row.deleted {
                 // Also the older folders, for a tag written there and never moved
                 for old in [
                     format!("{}{}", pm_pubky::schemas::LEGACY_TAG_DIR, row.id),
                     pm_pubky::schemas::app_tag_path(&row.id),
                 ] {
+                    self.current()?;
                     let _ = self.delete_quietly(&old).await;
                 }
+                self.current()?;
                 let path = format!("{}{}.json", v1::tags_dir(), row.id);
                 match self.delete_quietly(&path).await {
                     Ok(()) => report.deleted += 1,
@@ -461,19 +539,16 @@ impl PubkySync {
                     ));
                     continue;
                 }
-                if let Err(e) = self.homeserver.write_object(&self.session, &path, &tag).await {
+                if let Err(e) = self.write_object(&path, &tag).await {
                     report.errors.push(tag_write_hint(format!("write {path}: {e}")));
                     continue;
                 }
                 report.pushed += 1;
             }
-            library
-                .lock()
-                .expect("library poisoned")
-                .mark_tag_synced(&row.id, now_micros())?;
+            self.lib(library)?.mark_tag_synced(&row.id, now_micros())?;
         }
         let (known_tags, not_music) = {
-            let lib = library.lock().expect("library poisoned");
+            let lib = self.lib(library)?;
             let not_music: HashSet<String> = lib
                 .get_setting(TAGS_NOT_MUSIC)?
                 .and_then(|v| serde_json::from_str(&v).ok())
@@ -488,7 +563,7 @@ impl PubkySync {
             .await
         {
             Ok(remote) => {
-                let lib = library.lock().expect("library poisoned");
+                let lib = self.lib(library)?;
                 for t in remote.tags {
                     if lib.tag_by_id(&t.id)?.is_none() {
                         lib.add_tag(&t.id, &t.uri, &t.label, t.created_at)?;
@@ -533,9 +608,8 @@ impl PubkySync {
             }
         }
         // Bookmarks the node has are listed, not downloaded again
-        let known_favs: std::collections::HashMap<String, (String, i64)> = library
-            .lock()
-            .expect("library poisoned")
+        let known_favs: std::collections::HashMap<String, (String, i64)> = self
+            .lib(library)?
             .list_bookmarks()?
             .into_iter()
             .filter_map(|f| {
@@ -547,10 +621,12 @@ impl PubkySync {
             .homeserver
             .read_v1_bookmarks_except(&self.session, &known_favs)
             .await?;
+        // Tests stop here (every read done, no write yet) to replace the session mid-pass
+        crate::test_hooks::pause(|| format!("sync.after_reads:{}", self.z32)).await;
 
         // The migration: queue every object the homeserver has only in the old format.
         if !migrated {
-            let lib = library.lock().expect("library poisoned");
+            let lib = self.lib(library)?;
             let mut queued = 0;
             for row in lib.list_music_posts(None)? {
                 if !heads.has(&row.id) {
@@ -575,7 +651,7 @@ impl PubkySync {
         // the spec's unit. Readers take the older values too; private ones follow on their next
         // edit.
         {
-            let lib = library.lock().expect("library poisoned");
+            let lib = self.lib(library)?;
             if lib.get_setting(TIMES_IN_MICROS)?.is_none() {
                 for row in lib.list_music_posts(Some(TYPE_PLAYLIST))? {
                     if row.visibility == "public" && row.synced_at.is_some() {
@@ -589,7 +665,7 @@ impl PubkySync {
         // Playlists the homeserver has only in the old format (the long ones, kept back before
         // collections lost their size cap): write them as v1 collections now. Old files stay.
         {
-            let lib = library.lock().expect("library poisoned");
+            let lib = self.lib(library)?;
             for row in lib.list_music_posts(Some(pm_pubky::schemas::post::TYPE_PLAYLIST))? {
                 if row.synced_at.is_some() && !heads.has(&row.id) {
                     lib.mark_music_post_unsynced(&row.id)?;
@@ -602,7 +678,7 @@ impl PubkySync {
 
         // Bookmarks the homeserver has and this node does not.
         {
-            let lib = library.lock().expect("library poisoned");
+            let lib = self.lib(library)?;
             for (_, url, created_at) in remote_favs {
                 if removed_favs.contains(&url) || lib.bookmark_by_uri(&url)?.is_some() {
                     continue;
@@ -640,7 +716,7 @@ impl PubkySync {
                 ListBounds::OWNER,
             )
             .await?;
-        let lib = library.lock().expect("library poisoned");
+        let lib = self.lib(library)?;
         for (_, f) in remote_favs {
             let url = f.uri.to_url();
             if lib.bookmark_by_uri(&url)?.is_none() {
@@ -679,13 +755,14 @@ impl PubkySync {
         heads: &mut Heads,
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
-        let pending = library.lock().expect("library poisoned").unsynced_music_posts()?;
+        let pending = self.lib(library)?.unsynced_music_posts()?;
         let total = pending.len();
         for (done, row) in pending.into_iter().enumerate() {
             if spent(report) {
                 report.pending += total - done;
                 break;
             }
+            self.current()?;
             let public = row.visibility == "public";
             // A listen lives under the root the history setting picked, and nowhere else. A
             // collection or a review is written privately (the draft); a public one is also
@@ -743,11 +820,7 @@ impl PubkySync {
                                 continue;
                             }
                         };
-                        if let Err(e) = self
-                            .homeserver
-                            .write_object(&self.session, &path, &post.to_json())
-                            .await
-                        {
+                        if let Err(e) = self.write_object(&path, &post.to_json()).await {
                             let msg = format!("write {path}: {e}");
                             let stop = is_forbidden(&msg);
                             report.errors.push(namespace_hint(msg));
@@ -786,9 +859,7 @@ impl PubkySync {
                 report.pushed += 1;
             }
             // Only if it is still what was pushed: a move or an edit meanwhile goes next pass
-            library
-                .lock()
-                .expect("library poisoned")
+            self.lib(library)?
                 .mark_music_post_synced_if_unchanged(&row, now_micros())?;
         }
         Ok(())
@@ -802,13 +873,14 @@ impl PubkySync {
         report: &mut SyncReport,
     ) -> Result<HashSet<String>, SyncError> {
         let mut removed = HashSet::new();
-        let pending = library.lock().expect("library poisoned").unsynced_bookmarks()?;
+        let pending = self.lib(library)?.unsynced_bookmarks()?;
         let total = pending.len();
         for (done, row) in pending.into_iter().enumerate() {
             if spent(report) {
                 report.pending += total - done;
                 break;
             }
+            self.current()?;
             let Ok(uri) = pm_pubky::schemas::item_uri(&row.uri) else {
                 report
                     .errors
@@ -842,11 +914,7 @@ impl PubkySync {
                         continue;
                     }
                 };
-                if let Err(e) = self
-                    .homeserver
-                    .write_object(&self.session, &path, &bookmark)
-                    .await
-                {
+                if let Err(e) = self.write_object(&path, &bookmark).await {
                     let msg = format!("write {path}: {e}");
                     let stop = is_forbidden(&msg);
                     report.errors.push(namespace_hint(msg));
@@ -857,10 +925,7 @@ impl PubkySync {
                 }
                 report.pushed += 1;
             }
-            library
-                .lock()
-                .expect("library poisoned")
-                .mark_bookmark_synced(&row.id, now_micros())?;
+            self.lib(library)?.mark_bookmark_synced(&row.id, now_micros())?;
         }
         Ok(removed)
     }
@@ -880,7 +945,7 @@ impl PubkySync {
         // backs up `listens.cleared_before`); this node's own listens written before it go too,
         // or a later move here would publish them again
         if let Some(theirs) = self.cleared_elsewhere().await {
-            let lib = library.lock().expect("library poisoned");
+            let lib = self.lib(library)?;
             match crate::listens::adopt_cleared(&lib, theirs) {
                 Ok(n) if n > 0 => {
                     tracing::info!(listens = n, "history deleted on another node: removed here too")
@@ -891,7 +956,10 @@ impl PubkySync {
                     .push(format!("history deleted elsewhere: {}", e.message)),
             }
         }
-        let cleared_before = crate::listens::cleared_before(&library.lock().expect("library poisoned"));
+        let cleared_before = {
+            let lib = self.lib(library)?;
+            crate::listens::cleared_before(&lib)
+        };
         let mut reads = 0;
         for ns in [v1::SOCIAL_NAMESPACE, pubky_music_specs::MUSIC_NAMESPACE] {
             let mut found = heads.newest_in(ns);
@@ -904,7 +972,7 @@ impl PubkySync {
             }
             // What is new or newer than the node's copy, then fetched 8 at a time
             let wanted: Vec<(String, v1::Head, bool)> = {
-                let lib = library.lock().expect("library poisoned");
+                let lib = self.lib(library)?;
                 let mut w = Vec::new();
                 for (id, (head, public)) in found {
                     let take = match lib.get_music_post(&id)? {
@@ -942,6 +1010,7 @@ impl PubkySync {
                 .collect()
                 .await;
             for (id, head, public, bytes) in fetched {
+                self.current()?;
                 let bytes = match bytes {
                     Ok(b) => b,
                     Err(e) => {
@@ -984,7 +1053,7 @@ impl PubkySync {
                 } else {
                     Visibility::Private
                 };
-                let lib = library.lock().expect("library poisoned");
+                let lib = self.lib(library)?;
                 store(&lib, &post, &id, visibility).map_err(|e| SyncError::Store(e.message))?;
                 lib.mark_music_post_synced(&id, now_micros())?;
                 report.pulled += 1;
@@ -993,8 +1062,24 @@ impl PubkySync {
         Ok(())
     }
 
+    /// Write an object for this pass, never once another sign-in replaced this session.
+    async fn write_object<T: serde::Serialize + Sync + ?Sized>(
+        &self,
+        path: &str,
+        value: &T,
+    ) -> Result<(), HomeserverError> {
+        if self.is_retired() {
+            return Err(HomeserverError::Transport(pm_pubky::homeserver::REPLACED.into()));
+        }
+        self.homeserver.write_object(&self.session, path, value).await
+    }
+
     /// Delete, counting "already gone" as done.
     async fn delete_quietly(&self, path: &str) -> Result<(), HomeserverError> {
+        // Never once another sign-in replaced this session (the pass ends at its next check)
+        if self.is_retired() {
+            return Err(HomeserverError::Transport(pm_pubky::homeserver::REPLACED.into()));
+        }
         match self.homeserver.delete(&self.session, path).await {
             Err(HomeserverError::Pubky(e)) if e.to_string().contains("404") => Ok(()),
             other => other,
@@ -1075,8 +1160,7 @@ impl PubkySync {
         };
         let (dest, body) =
             v1::publish_plan(social, id, &edit_id, owner).map_err(|e| format!("publish {id}: {e}"))?;
-        self.homeserver
-            .write_object(&self.session, &dest, &body)
+        self.write_object(&dest, &body)
             .await
             .map_err(|e| format!("write {dest}: {e}"))?;
         heads.record(v1::Root::Pub, ns, id, &dest);
@@ -1342,8 +1426,15 @@ impl PubkySync {
         // A history delete another node made since this one last synced is adopted first, so
         // this copy doesn't write over it
         let theirs = self.cleared_elsewhere().await;
+        // Tests stop here (the read done, nothing adopted) to replace the session meanwhile
+        crate::test_hooks::pause(|| format!("sync.backup_after_read:{}", self.z32)).await;
+        // That read was the old identity's when another sign-in replaced this one meanwhile:
+        // its history delete is not this node's to adopt (nor to write into the new identity's
+        // copy)
         let backup = {
-            let lib = s.library.lock().expect("library poisoned");
+            let Ok(lib) = self.lib(&s.library) else {
+                return;
+            };
             if let Some(theirs) = theirs {
                 if let Err(e) = crate::listens::adopt_cleared(&lib, theirs) {
                     tracing::warn!(error = %e.message, "history deleted on another node");
@@ -1367,6 +1458,9 @@ impl PubkySync {
             }
         };
         let v = serde_json::to_value(&backup).expect("serializes");
+        if self.is_retired() {
+            return;
+        }
         if let Err(e) = self.homeserver.write_node_settings(&self.session, &v).await {
             tracing::warn!("settings backup failed: {e}");
         }
@@ -1394,7 +1488,7 @@ impl PubkySync {
         let backup: SettingsBackup =
             serde_json::from_value(v).map_err(|e| SyncError::Store(format!("settings backup: {e}")))?;
         let fresh = {
-            let lib = s.library.lock().expect("library poisoned");
+            let lib = self.lib(&s.library)?;
             lib.list_folders().map(|f| f.is_empty()).unwrap_or(true) && s.contact().trim().is_empty()
         };
         if only_if_fresh && !fresh {
@@ -1405,15 +1499,17 @@ impl PubkySync {
             saved_at: backup.saved_at,
             ..Default::default()
         };
+        // Nothing of the old identity's lands once another sign-in replaced this one
+        self.current()?;
         if s.contact().trim().is_empty()
             && !backup.contact.trim().is_empty()
-            && s.set_contact(&backup.contact).is_ok()
+            && s.set_contact_if(&backup.contact, &|| !self.is_retired()).is_ok()
         {
             out.contact = true;
         }
         let mut new_folders = Vec::new();
         {
-            let lib = s.library.lock().expect("library poisoned");
+            let lib = self.lib(&s.library)?;
             let have: std::collections::HashSet<String> = lib
                 .list_folders()
                 .unwrap_or_default()

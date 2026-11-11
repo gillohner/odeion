@@ -3,7 +3,7 @@
 This runs the node from its Docker image on a NAS or any Linux machine. It takes about five
 minutes. You need Docker with Docker Compose, and to know where your music folder is.
 
-The image is `ghcr.io/gillohner/pubky-music-node`, for amd64 (most NAS and PCs) and arm64
+The image is `ghcr.io/gillohner/odeion`, for amd64 (most NAS and PCs) and arm64
 (Raspberry Pi 4 and 5 with a 64-bit system). Use the `edge` tag, built from the newest code;
 `latest` is the last numbered release.
 
@@ -15,7 +15,7 @@ and save this as `docker-compose.yml` there:
 ```yaml
 services:
   pubky-music:
-    image: ghcr.io/gillohner/pubky-music-node:edge
+    image: ghcr.io/gillohner/odeion:edge
     container_name: pubky-music
     restart: unless-stopped
     # Needed to find speakers on your network and for them to reach the node.
@@ -66,7 +66,7 @@ device list does too.
 Give the machine a fixed address in the router, so it doesn't change. The node reads your music
 folder (`/music` inside the container) by itself when it starts; **Your library › Node library**
 lists it. Continue with the
-[first steps](../../README.md#first-steps-after-installing).
+[first steps](overview.md#first-steps-after-installing).
 
 To choose the token yourself instead, add `PM_TOKEN: "<a long random string>"` under
 `environment` before the first start (`openssl rand -hex 32` makes one; a password manager can
