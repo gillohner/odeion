@@ -164,6 +164,34 @@
     if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(imgSrc(it.image))}" data-err="remove">${coverBadge(svc, quiet)}</div>`; }
     return art(albumIdOf(it), (it && (it.title || it.uri)) || '', cls, svc, quiet);
   };
+  // One place for the toast on a phone (owner's recording, 2026-11-08: it floated mid-screen): 8 px
+  // above the highest bar at the bottom (the mini player, the tabs) or the keyboard, whichever is
+  // higher; 16 px above the screen's bottom when none shows (Now playing). Wider screens: the CSS.
+  const placeToast = (t) => {
+    if ((document.documentElement.dataset.shell || 'desktop') !== 'phone') { t.style.bottom = ''; return; }
+    const bars = ['.player', '#bottomnav'].map((q) => document.querySelector(q)).filter((el) => el && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
+    const top = Math.min(window.innerHeight, ...bars.map((el) => el.getBoundingClientRect().top));
+    const kb = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--kb')) || 0;
+    t.style.bottom = `${Math.max(window.innerHeight - top + 8, kb + 8, 16)}px`;
+  };
+  // The soft keyboard (Android WebView, iOS): how much of the screen's bottom it covers, for the
+  // phone's Now playing sheet and the toast; a field focused in the sheet scrolls into view above it
+  if (window.visualViewport) {
+    const vv = window.visualViewport;
+    let kbWas = 0;
+    const kbMove = () => {
+      const h = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+      document.documentElement.style.setProperty('--kb', `${h}px`);
+      // (the keyboard's height is the viewport's lost height; a pan moves offsetTop only)
+      const kbH = Math.round(window.innerHeight - vv.height);
+      const a = document.activeElement;
+      if (kbH !== kbWas && a && a.matches && a.matches('input, textarea') && a.closest('.np-bsheet')) requestAnimationFrame(() => a.scrollIntoView({ block: 'center' }));
+      kbWas = kbH;
+      const t = document.getElementById('toast'); if (t && t.classList.contains('show')) placeToast(t);
+    };
+    vv.addEventListener('resize', kbMove); vv.addEventListener('scroll', kbMove);
+  }
+  document.addEventListener('focusin', (e) => { const a = e.target; if (a && a.matches && a.matches('input, textarea') && a.closest('.np-bsheet')) setTimeout(() => { if (document.activeElement === a) a.scrollIntoView({ block: 'center' }); }, 300); });
   // `action` ({ label, run }): a button in the toast (Undo); the toast stays longer then. Returns that button
   const toast = (msg, kind = '', action = null) => {
     const t = $('#toast');
@@ -174,6 +202,7 @@
     const unhook = () => { if (toast.ac) toast.ac.abort(); toast.ac = null; };
     if (action) { b = document.createElement('button'); b.className = 'btn sm toast-act'; b.textContent = action.label; b.onclick = () => { clearTimeout(toast.h); unhook(); b.remove(); hide(); Promise.resolve(action.run()).catch((e) => toast(e.message, 'error')); }; t.appendChild(b); }
     t.className = `toast show ${kind}`;
+    placeToast(t);
     clearTimeout(toast.h);
     // (a toast with an action waits while the pointer or the focus is on it: it goes 4 s after both left)
     // (a 'wait' toast stays until the next toast replaces it: the answer's, or its error)
@@ -556,6 +585,39 @@
         : sv.state === 'error' ? `<span class="warn-text">Not saved${sv.error ? `: ${esc(sv.error)}` : ''}</span>`
           : sv.pending ? `${countOf(sv.pending, 'changes')} to save`
             : `Saved${sv.last_saved_at ? ` · ${ago(sv.last_saved_at)}` : ''}`);
+  // Wrapped phone dialog actions can move below the scrollport on resize or text reflow.
+  // Reveal only the already-focused action; ordinary redraws and manual scrolling stay put.
+  let dialogActionFrame = 0, dialogActionObserver = null;
+  const revealDialogAction = () => {
+    if (dialogActionFrame) return;
+    dialogActionFrame = requestAnimationFrame(() => {
+      dialogActionFrame = 0;
+      const action = document.activeElement;
+      if (shellMode() !== 'phone' || !action?.matches('dialog[open] .dialog-actions .btn')) return;
+      const dialog = action.closest('dialog'), b = action.getBoundingClientRect(), d = dialog.getBoundingClientRect();
+      // The opening animation scales the dialog; rects use that scale, scroll offsets do not.
+      const scale = d.height / dialog.offsetHeight;
+      // Include the four pixels occupied by the keyboard focus outline, rounding outwards.
+      const top = Math.max(0, d.top + dialog.clientTop * scale) + 4 * scale;
+      const bottom = Math.min(innerHeight, d.bottom - dialog.clientTop * scale) - 4 * scale;
+      const delta = b.bottom > bottom ? b.bottom - bottom : b.top < top ? b.top - top : 0;
+      if (delta) dialog.scrollBy({ top: delta > 0 ? Math.ceil(delta / scale) : Math.floor(delta / scale), behavior: 'instant' });
+    });
+  };
+  window.addEventListener('resize', revealDialogAction);
+  document.addEventListener('focusout', () => { if (dialogActionObserver) dialogActionObserver.disconnect(); });
+  document.addEventListener('focusin', (e) => {
+    if (dialogActionObserver) dialogActionObserver.disconnect();
+    if (!window.ResizeObserver || !e.target.matches('dialog[open] .dialog-actions .btn')) return;
+    const dialog = e.target.closest('dialog'), footer = e.target.closest('.dialog-actions');
+    const size = () => `${dialog.clientWidth}:${dialog.clientHeight}:${footer.offsetWidth}:${footer.offsetHeight}`;
+    let previous = size();
+    dialogActionObserver = new ResizeObserver(() => {
+      const next = size();
+      if (next !== previous) { previous = next; revealDialogAction(); }
+    });
+    dialogActionObserver.observe(dialog); dialogActionObserver.observe(footer);
+  });
   // Edit a song's tags on the node (the file is not touched)
   // `e`: GET /library/tracks/{id}/edit: the song's edit (in the fields) and what the file says
   // (shown as each field's placeholder); an empty field is the file's value
@@ -3106,8 +3168,24 @@
   // A scrolling chip row fades at its end only while more chips are off to the right (touch layouts)
   const CHIP_ROWS = '.libnav, .scopechips, .np-sheet-tabs';
   const fadeRow = (el) => el.classList.toggle('more-right', el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  // A newly drawn Library row starts around the current section. Remember its size so
+  // unrelated updates leave a person's swipe alone; resizing keeps keyboard focus in view.
+  const libraryNavSizes = new WeakMap();
+  const revealLibrarySection = (el) => {
+    const width = el.clientWidth;
+    if (!width) { libraryNavSizes.delete(el); return; }
+    const size = `${width}:${el.scrollWidth}`;
+    if (libraryNavSizes.get(el) === size) return;
+    const focused = document.activeElement;
+    const current = el.contains(focused) && focused.matches('[data-libnav]') ? focused : $('[aria-current="page"]', el);
+    if (!current) return;
+    libraryNavSizes.set(el, size);
+    const row = el.getBoundingClientRect(), chip = current.getBoundingClientRect();
+    // Scroll only this row: scrollIntoView can also move the page vertically.
+    el.scrollLeft += chip.left - row.left - (width - chip.width) / 2;
+  };
   let fadeQueued = false;
-  const fadeRows = () => { if (fadeQueued) return; fadeQueued = true; requestAnimationFrame(() => { fadeQueued = false; $$(CHIP_ROWS).forEach(fadeRow); }); };
+  const fadeRows = () => { if (fadeQueued) return; fadeQueued = true; requestAnimationFrame(() => { fadeQueued = false; $$(CHIP_ROWS).forEach((el) => { if (el.matches('.libnav')) revealLibrarySection(el); fadeRow(el); }); }); };
   document.addEventListener('scroll', (e) => { if (e.target instanceof Element && e.target.matches(CHIP_ROWS)) fadeRow(e.target); }, true);
   window.addEventListener('resize', fadeRows);
   new MutationObserver(fadeRows).observe(document.body, { childList: true, subtree: true });
@@ -3139,6 +3217,9 @@
   window.addEventListener('popstate', () => {
     if (selfPop) { selfPop = false; popHandled = true; if (popResolve) { popResolve(); popResolve = null; } popPending = null; return; }
     const open = transients.filter((t) => t.open()); if (!open.length) return;
+    // A layer over another (a phone's Now playing sheet) closes alone: the next back closes what is under it
+    const top = open[open.length - 1];
+    if (top.layer && open.length > 1 && open.slice(0, -1).every((t) => t === npTr)) { top.close(true); pushTransient(); popHandled = true; return; }
     open.forEach((t) => t.close(true)); popHandled = true;
   });
 
@@ -3287,7 +3368,10 @@
     const z = currentZone(); const np = z && z.now_playing; const m = np && /^track:(\d+)$/.exec(np.item.uri || '');
     const id = m ? m[1] : null;
     $$('#main .track[data-tid]').forEach((r) => r.classList.toggle('cur', r.dataset.tid === id));
+    const uri = np ? np.item.uri || '' : '';
+    $$('#main .srow[data-np]').forEach((r) => { const on = !!uri && r.dataset.np === uri; r.classList.toggle('cur', on); if (on) r.setAttribute('aria-current', 'true'); else r.removeAttribute('aria-current'); });
   };
+  const npUri = () => { const z = currentZone(); return z && z.now_playing ? z.now_playing.item.uri || '' : ''; };
   // The dashboard follows the zone: the whole screen when the song changes, else only the time
   const drawDashboard = () => {
     const box = $('#dash'); if (!box || state.view !== 'dashboard') return;
@@ -3370,6 +3454,8 @@
     probe.onerror = () => { artTints.set(src, null); const now = $('#nowplaying .np-big img'); if (now && (now.currentSrc || now.src) === src) clear(); };
     probe.src = src;
   };
+  // The phone mini player's progress: a 2 px line on its top edge
+  const miniProgress = (f) => { const el = $('#miniprog'); if (el) el.style.setProperty('--p', `${Math.max(0, Math.min(1, f || 0)) * 100}%`); };
   const renderBar = () => {
     markPlaying(); renderModes(); if (state.view === 'dashboard') drawDashboard();
     const z = currentZone(); const np = z && z.now_playing;
@@ -3382,7 +3468,8 @@
     // plays, or what went wrong, for a few seconds
     const st = state.starting && state.starting.zone === state.zone ? state.starting : null;
     const se = !st && state.startError && state.startError.zone === state.zone && Date.now() - state.startError.at < 10000 ? state.startError : null;
-    const waitHtml = st ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title np-wait" role="status"><span class="spin"></span> ${st.what === 'move' ? 'Moving to' : 'Starting on'} ${esc(z ? z.name : 'the zone')}…</div><div class="np-sub">${esc(st.title || '')}</div></div>` : '';
+    // (the spinner sits in the cover's square, centred: inline in the title it was cut to an arc)
+    const waitHtml = st ? `<div class="np-art placeholder np-art-wait"><span class="spin" aria-hidden="true"></span></div><div class="np-text"><div class="np-title np-wait" role="status">${st.what === 'move' ? 'Moving to' : 'Starting on'} ${esc(z ? z.name : 'the zone')}…</div><div class="np-sub">${esc(st.title || '')}</div></div>` : '';
     const errHtml = se ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">Couldn’t start</div><div class="np-sub"><span class="warn-text" role="alert">${esc(se.msg)}</span></div></div>` : '';
     if (!np && !state.zonesSeen && !state.zonePicked && barKept().title && !waitHtml && !errHtml) {
       // The node hasn't said yet: the song the bar showed last stays (index.html drew it)
@@ -3395,7 +3482,7 @@
       // A zone that stopped on an error says so here, until the next track starts (the node clears it)
       const err = z && z.transport === 'stopped' && z.error;
       $('#np').innerHTML = waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`;
-      $('#pos').textContent = '0:00'; $('#dur').textContent = '0:00'; seek.value = 0; setFill(seek);
+      $('#pos').textContent = '0:00'; $('#dur').textContent = '0:00'; seek.value = 0; setFill(seek); miniProgress(0);
       q.className = 'quality idle'; $('.qtext', q).textContent = '—'; $('.qsrc', q).innerHTML = ''; $('.qdsp', q).hidden = true; $('.qshort', q).innerHTML = `<span class="qdev">${esc(z ? z.name : '')}</span>`; q.title = 'Sound: where it plays from, how it gets to you, and DSP';
       q.setAttribute('aria-label', `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`);
       syncQPanel();
@@ -3415,6 +3502,7 @@
     if (!waitHtml && !errHtml && z.transport === 'paused' && z.error) { const sub = $('#np .np-sub'); if (sub) sub.innerHTML = `<span class="warn-text" role="alert">${esc(z.error)}</span>`; }
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
+    miniProgress(np.duration_ms ? np.position_ms / np.duration_ms : 0);
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
     // and whether DSP is on; on phones the device and a quality badge (CSS swaps .qtext for .qshort)
     const zp = zoneNp(z, np);
@@ -3476,7 +3564,7 @@
   const qPanel = $('#qpanel');
   let qPanelKey = null;
   let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
-  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $(qOpener).focus(); qOpener = '#quality'; if (fromBack !== true) popTransient(); };
+  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); const op = $(qOpener); if (op) op.setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) { if (op && op.getClientRects().length) op.focus(); } qOpener = '#quality'; if (fromBack !== true) popTransient(); };
   const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) + fullLevelNote(z) : ''}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
@@ -3545,16 +3633,16 @@
   const openQPanel = (opener) => {
     closePop(); closeJobPop();
     renderQPanel();
-    qPanel.hidden = false; $('#scrim').hidden = false; qOpener = opener; $(opener).setAttribute('aria-expanded', 'true'); pushTransient();
+    qPanel.hidden = false; $('#scrim').hidden = false; qOpener = opener; { const op = $(opener); if (op) op.setAttribute('aria-expanded', 'true'); } pushTransient();
     loadDsp();
     if (isOwner() && !state.outputs) loadOutputs().then(() => syncQPanel()).catch(() => {});
+    // Its first control; with none (the in-page player: no DSP, no volume here) the panel itself,
+    // so Escape and the arrows work and a screen reader lands in it
+    const first = $('[data-dsp]:not(:disabled), button', qPanel) || qPanel; first.focus();
   };
   $('#quality').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
     openQPanel('#quality');
-    // Its first control; with none (the in-page player: no DSP, no volume here) the panel itself,
-    // so Escape and the arrows work and a screen reader lands in it
-    const first = $('[data-dsp]:not(:disabled), button', qPanel) || qPanel; first.focus();
   };
   // Where the bar has no room for the slider (narrow tablets and desktops): a small volume popover
   $('#volbtn').onclick = () => { if (!volPop().hidden) closeVolPop(); else openVolPop(); };
@@ -3585,7 +3673,7 @@
     if (tid != null) { try { t = await api('GET', `/library/tracks/${tid}`); } catch { t = null; } if (!live()) return; if (t) { fav = isFav(t); drawHeart(); } }
     if (!$('#nppubky', overlay)) return;
     const target = t ? { track_id: Number(tid) } : pageUri ? { uri: pageUri } : null;
-    const pageRow = songPage ? `<div class="np-pubky-row"><button class="btn ghost sm" id="nppage">${icon('compass')} Song page: sources, versions, tags</button></div>` : '';
+    const pageRow = songPage && !$('.np-bsheet', overlay) ? `<div class="np-pubky-row"><button class="btn ghost sm" id="nppage">${icon('compass')} Song page: sources, versions, tags</button></div>` : '';
     let tags = [];
     if (target) { try { tags = (await api('GET', `/tags?${new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)]))}`)).tags || []; } catch { tags = []; } }
     const box = $('#nppubky', overlay); if (!box || !live()) return;
@@ -3593,7 +3681,7 @@
       ? `<div class="np-tags"><span class="eyebrow">Tags</span>${tags.map((x) => `${tagChip(x.label, { own: true, attrs: `data-np-tag="${esc(x.label)}"`, title: `Your tag · open ${x.label}` })}${x.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>`
       : t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in playlists.</p>'
         : `<p class="muted">Nothing to tag here: ${it.stream || np2Stream(it) ? 'this is a live stream' : 'this song has no page yet'}.</p>`);
-    const pb = $('#nppage', overlay); if (pb) pb.onclick = () => setView('item', { kind: 'song', id: songPage });
+    const pb = $('#nppage', box); if (pb) pb.onclick = () => setView('item', { kind: 'song', id: songPage });
     $$('[data-np-tag]', box).forEach((x) => x.onclick = () => setView('tag', x.dataset.npTag));
     const ta = $('#nptagadd', overlay);
     if (ta) {
@@ -3614,57 +3702,140 @@
     const was = !overlay.hidden;
     overlay.hidden = !open;
     document.body.classList.toggle('np-open', open);
-    if (open) { renderNowPlaying(); if (!was) { transients.push(npTr); pushTransient(); } return; }
+    // (a toast on screen moves with the bars: Now playing hides the mini player and the tabs)
+    { const t = $('#toast'); if (t.classList.contains('show')) placeToast(t); }
+    // (what it covers is out of reach for Tab and screen readers while it is open: the side bar, the
+    // page and the phone's tabs; a desktop's player bar is not under it and stays)
+    $$('.shell > .sidebar, .shell > .content, .shell > .bottomnav').forEach((el) => { el.inert = open; });
+    if (open) { if (!was) { transients.push(npTr); pushTransient(); } renderNowPlaying(); return; }
     const k = transients.indexOf(npTr); if (k >= 0) transients.splice(k, 1);
+    const ks = transients.indexOf(npSheetTr); if (ks >= 0) transients.splice(ks, 1);
     if (npCompact()) state.npSheet = null;
     // Focus goes back to the mini player that opened it, not to the page's top
     if (was && (!document.activeElement || document.activeElement === document.body || overlay.contains(document.activeElement))) { const b = $('#np'); if (b) b.focus({ preventScroll: true }); }
     if (was && fromBack !== true) popTransient();
   };
-  // Phones: swipe up on the mini player opens Now playing; swipe down from its top closes it
-  {
-    let y0 = null; let d0 = null;
-    const player = $('.player');
-    player.addEventListener('touchstart', (e) => { y0 = shellMode() === 'phone' && !e.target.closest('input') ? e.touches[0].clientY : null; }, { passive: true });
-    player.addEventListener('touchend', (e) => { if (y0 != null && y0 - e.changedTouches[0].clientY > 40 && overlay.hidden) toggleNowPlaying(true); y0 = null; });
-    overlay.addEventListener('touchstart', (e) => { d0 = shellMode() === 'phone' && overlay.scrollTop <= 0 && !e.target.closest('input, .np-sheet') ? e.touches[0].clientY : null; }, { passive: true });
-    overlay.addEventListener('touchend', (e) => { if (d0 != null && e.changedTouches[0].clientY - d0 > 80 && !overlay.hidden) toggleNowPlaying(); d0 = null; });
-  }
-  // Now playing on one screen (docs/ux/responsive.md, build step 2): the player, and five sheets
-  // (Queue, Lyrics, Details, Sources, Tags). Phones open a sheet over the player from the bottom row;
-  // tablets and desktops keep one open beside it. The open sheet survives re-renders (state.npSheet).
-  // The parts' headings on a phone's one screen
-  const NP_ONE_LABEL = { queue: 'Up next', lyrics: 'Lyrics', details: 'Details', sources: 'Sources', tags: 'Tags' };
+  // Swipes on a phone (owner, 2026-11-08: "use swipe gestures … down swipe, up on song, and next song
+  // and previous"), with Pointer Events: a finger (or pen) only, never a mouse. The first 10 px decide
+  // the direction; sideways, `move` follows the finger and past 40 px (or a quick flick) `left` or
+  // `right` runs as it slides out, else it snaps back; up and down run `up` / `down` past 40 / 60 px.
+  // A drag that starts on a slider or a field is the slider's. The tap a swipe leaves is dropped.
+  const calmMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const swipeable = (el, o) => {
+    let s = null;
+    const reset = () => { if (s && s.move) { s.move.classList.remove('dragging'); s.move.style.transform = ''; s.move.style.opacity = ''; } s = null; };
+    // (a second finger is not primary and is ignored; a new primary press replaces a gesture whose end
+    // never came here)
+    el.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' || !e.isPrimary) return;
+      reset();
+      if ((o.when && !o.when(e)) || e.target.closest('input, textarea, select, [data-noswipe]')) return;
+      s = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, dir: null, from: o.origin ? o.origin(e) : null, move: o.move ? o.move(e) : null, xok: o.x ? o.x(e) : true };
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!s || e.pointerId !== s.id) return;
+      const dx = e.clientX - s.x; const dy = e.clientY - s.y;
+      if (!s.dir && Math.hypot(dx, dy) > 10) {
+        s.dir = Math.abs(dx) > Math.abs(dy) * 1.2 ? 'x' : 'y';
+        // The rest of the gesture comes here even when a redraw replaces what the finger pressed
+        // (the mini player redraws several times a second while it plays); not on the press, or a
+        // tap on a button in it would land here instead
+        try { el.setPointerCapture(e.pointerId); } catch { /* not a live pointer (a test's) */ }
+      }
+      if (s.dir === 'x' && s.xok && s.move && (o.left || o.right) && !calmMotion()) { s.move.classList.add('dragging'); s.move.classList.remove('snap'); s.move.style.transform = `translateX(${dx}px)`; s.move.style.opacity = String(Math.max(0.35, 1 - Math.abs(dx) / 320)); }
+    });
+    el.addEventListener('pointerup', (e) => {
+      if (!s || e.pointerId !== s.id) return;
+      const dx = e.clientX - s.x; const dy = e.clientY - s.y; const v = Math.abs(dx) / Math.max(1, e.timeStamp - s.t);
+      const g = s; s = null;
+      let run = null;
+      if (g.dir === 'x' && g.xok && (Math.abs(dx) > 40 || (v > 0.5 && Math.abs(dx) > 20))) run = dx < 0 ? o.left : o.right;
+      else if (g.dir === 'y') run = dy < -40 ? o.up : dy > 60 ? o.down : null;
+      if (g.dir) el.dataset.swiped = String(Date.now());
+      const m = g.move;
+      if (m && g.dir === 'x' && g.xok && !calmMotion()) {
+        m.classList.remove('dragging'); m.classList.add('snap');
+        if (run) {
+          // out the side it went, back in from the other (the new song draws meanwhile)
+          const w = m.offsetWidth || 300; m.style.transform = `translateX(${dx < 0 ? -w : w}px)`; m.style.opacity = '0';
+          setTimeout(() => { m.classList.remove('snap'); m.style.transform = `translateX(${dx < 0 ? w * 0.4 : -w * 0.4}px)`; void m.offsetWidth; m.classList.add('snap'); m.style.transform = ''; m.style.opacity = ''; setTimeout(() => m.classList.remove('snap'), 260); }, 200);
+        } else { m.style.transform = ''; m.style.opacity = ''; setTimeout(() => m.classList.remove('snap'), 260); }
+      } else if (m) { m.classList.remove('dragging'); m.style.transform = ''; m.style.opacity = ''; }
+      if (run) run(g.from);
+    });
+    el.addEventListener('pointercancel', (e) => { if (s && e.pointerId === s.id) reset(); });
+    // (its own capture only: taking it makes the pressed child lose its implicit one, which bubbles here)
+    el.addEventListener('lostpointercapture', (e) => { if (e.target === el && s && e.pointerId === s.id) reset(); });
+    // (the click a swipe ends with is not a tap)
+    // (only a real one: the swipe's own action may press a button in it)
+    el.addEventListener('click', (e) => { if (e.isTrusted && Date.now() - Number(el.dataset.swiped || 0) < 400) { e.preventDefault(); e.stopPropagation(); } }, true);
+  };
+  // Mini player: tap or swipe up opens Now playing, left is the next song, right the previous;
+  // down does nothing (no stop by accident)
+  swipeable($('.player'), {
+    when: () => shellMode() === 'phone' && overlay.hidden,
+    move: () => $('#np'),
+    left: () => $('#next').click(), right: () => $('#prev').click(),
+    up: () => toggleNowPlaying(true),
+  });
+  // Now playing on one screen (docs/ux/responsive.md, build step 2): the player, and its sheets.
+  // Tablets and desktops keep one of five (Queue, Lyrics, Details, Sources, Tags) open beside it.
+  // Phones (and windows up to 720 px) show the player alone, on one screen that doesn't scroll, with
+  // three buttons under it: Up next, Lyrics and More (Details, Sources, Tags); each opens one
+  // full-height sheet with a tab bar, its own scroll, closed by a swipe down or back (owner,
+  // 2026-11-08: the one long scroll of 11-05 "feels weird"). The open sheet survives re-renders (state.npSheet).
+  const NP_PART = { details: 'Details', sources: 'Sources', tags: 'Tags' };
+  const NP_COMPACT = [['queue', 'Up next', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['more', 'More', 'info']];
   const NP_SHEETS_ALL = [['queue', 'Queue', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['details', 'Details', 'info'], ['sources', 'Sources', 'archive'], ['tags', 'Tags', 'compass']];
   const npSheets = () => NP_SHEETS_ALL.filter(([k]) => k !== 'tags' || isOwner()); // listeners cannot tag
   // Compact: the phone arrangement (sheets over the player), also in a desktop window narrower than two columns need
   const npCompact = () => shellMode() === 'phone' || window.innerWidth <= 720;
-  const npSheetNow = () => { const k = npSheets().some(([x]) => x === state.npSheet) ? state.npSheet : null; return npCompact() ? k : k || 'queue'; };
+  // (on a phone Details, Sources and Tags are parts of More: asking for one opens More at it; More
+  // asked for on a wider screen is its Details)
+  const npSheetNow = () => {
+    let k = state.npSheet;
+    if (npCompact()) { if (NP_PART[k]) { state.npMoreAt = k; k = state.npSheet = 'more'; } return NP_COMPACT.some(([x]) => x === k) ? k : null; }
+    if (k === 'more') k = state.npMoreAt || 'details';
+    return npSheets().some(([x]) => x === k) ? k : 'queue';
+  };
+  const npTabs = () => (npCompact() ? NP_COMPACT : npSheets());
   // What a re-render keeps: the sheet's scroll and the focused control
   const npKeep = () => {
     const a = document.activeElement; const body = $('.np-sheet-body', overlay);
     let focus = null;
     if (a && overlay.contains(a)) {
-      const where = a.closest('.np-jump') ? '.np-jump ' : a.closest('.np-sheet-tabs') ? '.np-sheet-tabs ' : a.closest('.np-tabs') ? '.np-tabs ' : a.closest('.np-strip') ? '.np-strip ' : a.closest('.np-transport') ? '.np-transport ' : '';
+      const where = a.closest('.np-dock') ? '.np-dock ' : a.closest('.np-sheet-tabs') ? '.np-sheet-tabs ' : a.closest('.np-tabs') ? '.np-tabs ' : a.closest('.np-strip') ? '.np-strip ' : a.closest('.np-transport') ? '.np-transport ' : '';
       if (a.id) focus = '#' + a.id;
-      else for (const k of ['npsheet', 'npjump', 'npqi', 'npt']) if (a.dataset && a.dataset[k] != null) { focus = `${where}[data-${k}="${a.dataset[k]}"]`; break; }
+      else for (const k of ['npsheet', 'npqi', 'npt']) if (a.dataset && a.dataset[k] != null) { focus = `${where}[data-${k}="${a.dataset[k]}"]`; break; }
     }
     const lines = $('.lyric-lines', overlay);
-    const bar = $('.np-jump', overlay);
-    return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, lyric: lines ? lines.scrollTop : 0, focus, top: overlay.scrollTop, height: overlay.scrollHeight - (parseFloat(getComputedStyle(overlay).paddingTop) || 0) - (parseFloat(getComputedStyle(overlay).paddingBottom) || 0), stuck: !!bar && bar.classList.contains('stuck') };
+    return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, lyric: lines ? lines.scrollTop : 0, focus };
   };
-  let npMark = () => {}; // the one screen's current-chip marker (set by each render)
-  let npObs = null; // the one screen's observers (sticky chips, the part in view, Sources when near)
+  // The sheet over a phone's player is a layer of its own for back: back closes it first, then Now playing
+  const npSheetTr = { layer: true, open: () => !overlay.hidden && npCompact() && !!state.npSheet && !!$('.np-bsheet:not([hidden])', overlay), close: () => closeNpSheet(true) };
+  const closeNpSheet = (fromBack) => {
+    const k = transients.indexOf(npSheetTr); if (k >= 0) transients.splice(k, 1);
+    if (!state.npSheet) return;
+    const was = state.npSheet; const sh = $('.np-bsheet', overlay);
+    const done = () => { state.npSheetClosing = null; if (state.npSheet !== was) return; state.npSheet = null; renderNowPlaying(); const b = $(`.np-dock [data-npsheet="${was}"]`, overlay); if (b && fromBack !== 'quiet') b.focus({ preventScroll: true }); };
+    if (sh && !calmMotion()) { sh.classList.add('closing'); state.npSheetClosing = was; setTimeout(done, 190); } else done();
+  };
   const renderNowPlaying = () => {
     const keep = npKeep(); npGen += 1; const gen = npGen;
-    const oneScroll = overlay.scrollTop; const prevUri = overlay.dataset.npuri || ''; const prevTransport = overlay.dataset.transport || '';
-    const prevImg = $('#nowplaying .np-big img'); const prevSrc = prevImg && prevImg.complete && prevImg.naturalWidth ? (prevImg.currentSrc || prevImg.src) : null; if (npObs) { npObs.forEach((o) => o.disconnect()); npObs = null; }
+    const prevUri = overlay.dataset.npuri || ''; const prevTransport = overlay.dataset.transport || '';
+    const prevImg = $('#nowplaying .np-big img'); const prevSrc = prevImg && prevImg.complete && prevImg.naturalWidth ? (prevImg.currentSrc || prevImg.src) : null;
     const z = currentZone(); const np = z && z.now_playing;
     if (!np) {
       setTimeout(setArtTint, 0); // no cover: no tint
-      overlay.innerHTML = `<div class="np-page np2"><div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close">${icon('chevron')}</button><span class="spacer"></span><button class="btn ghost" id="npq">${icon('queue')} Queue</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
+      // (the phone's bar has no zone button or sound pill: both are here, also with nothing playing)
+      overlay.innerHTML = `<div class="np-page np2${npCompact() ? ' compact np-idle' : ''}"><div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z ? z.name : 'this zone')}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z ? z.name : 'Zone')}</span></button><span class="spacer"></span>${shellMode() === 'phone' ? `<button class="icon-btn" id="npsound" aria-label="Sound" title="Sound">${icon('volume')}</button>` : ''}<button class="btn ghost" id="npq">${icon('queue')} Queue</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
       $('#npclose').onclick = () => toggleNowPlaying();
       $('#npq').onclick = () => setView('queue');
+      $('#npzone').onclick = () => $('#zonebtn').click();
+      { const sb = $('#npsound'); if (sb) sb.onclick = () => openQPanel('#npsound'); }
+      { const k = transients.indexOf(npSheetTr); if (k >= 0) transients.splice(k, 1); }
+      if (npCompact()) state.npSheet = null;
+      overlay.dataset.layout = `${shellMode()}-${npCompact()}`; overlay.dataset.sheet = ''; overlay.dataset.npuri = '';
       return;
     }
     const it = np.item;
@@ -3675,7 +3846,7 @@
     const colour = Q_COLOUR;
     const fmtLine = np.signal_path ? fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format) : '';
     const sheet = npSheetNow();
-    // Phones: one screen that scrolls, the player first and the five parts under it (owner, 2026-11-05)
+    // Phones: the player on one screen, the sheets over it (owner, 2026-11-08)
     const one = npCompact();
     const songPage = npPageId(it.uri);
     const links = np.stream_title ? null : npLinksHtml(it, null);
@@ -3690,20 +3861,30 @@
         return pathHtml(zoneNp(z, np))
             + `<dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd>${(() => { const o = outputFacts(z); return o ? `<dt>Output</dt><dd class="np-output">${esc(o[0])}${o[1] ? `<span class="muted small np-output-why">${esc(o[1])}</span>` : ''}</dd>` : ''; })()}</dl>`;
       }
+      // More (phones): Details, Sources and Tags, one heading each, and the song's page once at the end
+      if (k === 'more') return Object.keys(NP_PART).filter((x) => x !== 'tags' || isOwner()).map((x) => `<section class="np-part" id="nppart-${x}" aria-labelledby="nppart-h-${x}"><h3 id="nppart-h-${x}">${NP_PART[x]}</h3>${sheetBody(x)}</section>`).join('')
+        + (songPage ? `<div class="np-sheet-foot"><button class="btn sm ghost" id="nppage">${icon('compass')} Song page: sources, versions, tags</button></div>` : '');
       if (k === 'sources') return `<div id="npsources">${songPage ? '<div class="skeleton" style="height:80px"></div>' : '<p class="muted">This song has no page of its own yet, so its other sources are not known.</p>'}</div>`;
       return '<div class="np-pubky" id="nppubky" aria-live="polite"></div>';
     };
     const tab = ([k, l, ic], cls) => { const on = sheet === k ? ' on' : ''; return `<button class="${cls === 'chip' ? 'chip' : 'np-tab'}${on}" data-npsheet="${k}" ${cls === 'chip' ? `role="tab" id="nptab-${k}" aria-controls="npsheetpanel" aria-selected="${sheet === k}" tabindex="${sheet === k ? 0 : -1}"` : `aria-pressed="${sheet === k}"`}>${cls === 'chip' ? '' : icon(ic)}<span>${l}</span></button>`; };
     const title = np.stream_title ? esc(np.stream_title) : links.title;
-    // The parts under the player, each a card with its heading, and one row of chips to reach them:
-    // it stays at the top once the transport scrolls away, with the song and Play beside it
-    const oneHtml = () => `<nav class="np-jump${keep.stuck ? ' stuck' : ''}" aria-label="More about this song"><div class="np-jump-strip" aria-hidden="true"><span class="np-strip-art">${itemArt(it, '', npSvc(np))}</span><span class="np-strip-text"><span class="name">${np.stream_title ? esc(np.stream_title) : esc(it.title || '')}</span><span class="sub">${esc(it.artist || '')}</span></span></div><button class="icon-btn play np-jump-play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><div class="chips np-jump-chips">${npSheets().map(([k]) => `<button class="chip" data-npjump="${k}" aria-controls="npsec-${k}">${esc(NP_ONE_LABEL[k])}</button>`).join('')}</div></nav>`
-      + npSheets().map(([k]) => `<section class="np-sec" id="npsec-${k}" aria-labelledby="npsech-${k}"><h2 class="np-sec-h" id="npsech-${k}" tabindex="-1">${esc(NP_ONE_LABEL[k])}</h2><div class="np-sec-body">${sheetBody(k)}</div></section>`).join('');
+    // Phones: three buttons under the player, and the sheet they open (a handle, the song with Play,
+    // one tab bar)
+    const ctab = ([k, l]) => `<button class="np-stab ${sheet === k ? 'on' : ''}" data-npsheet="${k}" role="tab" id="nptab-${k}" aria-controls="npsheetpanel" aria-selected="${sheet === k}" tabindex="${sheet === k ? 0 : -1}">${l}</button>`;
+    const dockHtml = () => `<nav class="np-dock" aria-label="More about this song"${under}>${NP_COMPACT.map(([k, l, ic]) => `<button class="np-dockbtn" data-npsheet="${k}" aria-expanded="${sheet === k}" aria-controls="npbsheet">${icon(ic)}<span>${l}</span></button>`).join('')}</nav>`;
+    const bsheetHtml = () => `<section class="np-bsheet${sheet && !keep.sheet ? ' opening' : ''}${sheet && state.npSheetClosing === sheet ? ' closing' : ''}" id="npbsheet" role="dialog" aria-modal="true" aria-label="${sheet ? esc(NP_COMPACT.find(([k]) => k === sheet)[1]) : ''}" data-tab="${sheet || ''}" ${sheet ? '' : 'hidden'}>
+            <div class="np-sheet-head"><button class="np-grab" id="npgrab" aria-label="Close the sheet" title="Close (swipe down)"><span aria-hidden="true"></span></button>
+              <div class="np-strip"><div class="np-strip-art">${itemArt(it, '', npSvc(np))}</div><div class="np-strip-text"><div class="name">${np.stream_title ? esc(np.stream_title) : esc(it.title || '')}</div><div class="sub">${esc(it.artist || '')}</div></div><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button></div>
+              <div class="np-sheet-tabs np-stabs" role="tablist" aria-label="More about this song">${NP_COMPACT.map(ctab).join('')}</div></div>
+            <div class="np-sheet-body" role="tabpanel" id="npsheetpanel" ${sheet ? `aria-labelledby="nptab-${sheet}"` : ''} tabindex="-1">${sheet ? sheetBody(sheet) : ''}</div>
+          </section>`;
     const artist = np.stream_title ? esc(it.artist || '') : links.artistsHtml;
+    const under = one && sheet ? ' inert' : ''; // (what the phone's sheet covers)
     overlay.innerHTML = `
       <div class="np-page np2${sheet && !one ? ' has-sheet' : ''}${one ? ' compact' : ''}">
-        <div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
-        <div class="np-body">
+        <div class="np-top"${under}><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
+        <div class="np-body"${under}>
           <section class="np-player" aria-label="Now playing">
             <div class="np-big">${itemArt(it, '', npSvc(np))}</div>
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
@@ -3712,12 +3893,13 @@
             <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" data-repeat aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" data-repeat aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${zoneVolume(z) ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : ''}
             ${one ? '' : `<nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>`}
           </section>
-          ${one ? oneHtml() : `          <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
+          ${one ? '' : `          <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
             <div class="np-strip"><div class="np-strip-art">${itemArt(it, '', npSvc(np))}</div><div class="np-strip-text"><div class="name">${np.stream_title ? esc(np.stream_title) : esc(it.title || '')}</div><div class="sub">${esc(it.artist || '')}</div></div><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button></div>
             <div class="np-sheet-head"><span class="grab" aria-hidden="true"></span><div class="chips np-sheet-tabs" role="tablist" aria-label="More about this song">${npSheets().map((t) => tab(t, 'chip')).join('')}</div><button class="icon-btn np-sheet-close" id="npsheetclose" aria-label="Close the sheet" title="Close">${icon('close')}</button></div>
             <div class="np-sheet-body" role="tabpanel" id="npsheetpanel" ${sheet ? `aria-labelledby="nptab-${sheet}"` : ''} tabindex="-1">${sheet ? sheetBody(sheet) : ''}</div>
           </section>`}
         </div>
+        ${one ? dockHtml() + bsheetHtml() : ''}
       </div>`;
     const sk = $('#npseek'); setFill(sk);
     // A track change: the last cover fades out over the new one, the title slides in; a sheet change
@@ -3759,35 +3941,36 @@
     for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) sk.addEventListener(ev, () => { setTimeout(() => { delete sk.dataset.dragging; }, 0); }, { passive: true });
     $('#npclose').onclick = () => toggleNowPlaying();
     $('#npzone').onclick = () => $('#zonebtn').click();
-    // On a phone's one screen a part is scrolled to, not opened
-    // (just under the chips row as it is once it holds the song too; the part asked for stays the
-    // current chip until the listener scrolls, also where the page ends before it reaches the top)
-    const jump = (k, smooth = true) => {
-      const sec = $(`#npsec-${k}`, overlay); const bar = $('.np-jump', overlay); if (!sec) return;
-      let barH = 0; if (bar) { const was = bar.classList.contains('stuck'); bar.classList.add('stuck'); barH = bar.offsetHeight; bar.classList.toggle('stuck', was); }
-      state.npPin = { k, uri: it.uri }; npMark();
-      const top = sec.getBoundingClientRect().top - overlay.getBoundingClientRect().top + overlay.scrollTop - barH - 8;
-      overlay.scrollTo({ top, behavior: smooth && !matchMedia('(prefers-reduced-motion: reduce)').matches ? 'smooth' : 'auto' });
-      const h = $('.np-sec-h', sec); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); }
+    const openSheet = (k) => {
+      state.npSheet = k; renderNowPlaying();
+      const f = $(`.np-sheet-tabs [data-npsheet="${npSheetNow()}"]`, overlay); if (f) f.focus({ preventScroll: true });
     };
-    const openSheet = (k) => { if (one) { jump(k); return; } state.npSheet = k; renderNowPlaying(); const f = $(`.np-sheet-tabs [data-npsheet="${k}"]`, overlay); if (f) f.focus(); };
     $$('[data-npsheet]', overlay).forEach((b) => b.onclick = () => openSheet(b.dataset.npsheet));
     // Tabs: arrow keys move between them (WAI-ARIA tabs)
     const stabs = $('.np-sheet-tabs', overlay); if (stabs) stabs.onkeydown = (e) => {
-      const ks = npSheets().map(([k]) => k); const i = ks.indexOf(sheet); if (i < 0) return;
+      const ks = npTabs().map(([k]) => k); const i = ks.indexOf(sheet); if (i < 0) return;
       const j = e.key === 'ArrowRight' ? (i + 1) % ks.length : e.key === 'ArrowLeft' ? (i - 1 + ks.length) % ks.length : e.key === 'Home' ? 0 : e.key === 'End' ? ks.length - 1 : -1;
       if (j >= 0) { e.preventDefault(); e.stopPropagation(); openSheet(ks[j]); }
     };
     const sclose = $('#npsheetclose'); if (sclose) sclose.onclick = () => { const was = sheet; state.npSheet = null; renderNowPlaying(); const t = $(`.np-tabs [data-npsheet="${was}"]`, overlay) || $('.np-tabs [data-npsheet]', overlay); if (t) t.focus(); };
     // The quality line opens Details (the signal path)
     $('#npquality').onclick = () => openSheet('details');
-    {
-      // Phones: drag the sheet's head down to close it
-      let y0 = null; const head = $('.np-sheet-head', overlay);
-      if (head) head.addEventListener('touchstart', (e) => { y0 = e.touches[0].clientY; }, { passive: true });
-      if (head) head.addEventListener('touchend', (e) => { e.stopPropagation(); if (y0 != null && e.changedTouches[0].clientY - y0 > 60 && npCompact()) { state.npSheet = null; renderNowPlaying(); } y0 = null; });
+    if (one) {
+      // (the swipes are bound once, on the overlay: see npSwipes)
+      const sh = $('.np-bsheet', overlay);
+      if (sh && sheet) {
+        $('#npgrab', sh).onclick = () => closeNpSheet();
+        if (sheet === 'more') {
+          const pb = $('#nppage', sh); if (pb) pb.onclick = () => setView('item', { kind: 'song', id: songPage });
+          // More opened at a part (the quality line: Details; a link: Sources or Tags)
+          if (state.npMoreAt && state.npMoreAt !== 'details' && keep.sheet !== 'more') { const part = $(`#nppart-${state.npMoreAt}`, sh); const body = $('.np-sheet-body', sh); if (part && body) body.scrollTop = part.offsetTop - body.offsetTop; }
+          state.npMoreAt = null;
+        }
+      }
     }
     $('#npmore').onclick = (e) => { const b = e.currentTarget; showMenu(b, [
+      // (a phone's bar has no sound pill: its panel opens from here)
+      ...(shellMode() === 'phone' ? [{ label: 'Sound', note: 'Where it plays from, how it gets to you, DSP', icon: 'volume', run: () => setTimeout(() => openQPanel('#npmore'), 0) }] : []),
       { label: 'Dashboard', note: 'Full screen, for a TV or tablet', icon: 'external', run: () => window.open(`/now-playing?zone=${encodeURIComponent(state.zone)}`, '_blank', 'noopener') },
       { label: sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel(), icon: 'moon', run: () => setTimeout(() => showMenu(b, [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]), 0) },
       ...(isBrowser() ? [] : [{ label: 'DSP', note: 'Equaliser, crossfeed, room correction', icon: 'settings', run: () => { state.dspOpen = state.zone; setView('settings', 'playback'); } }]),
@@ -3797,57 +3980,39 @@
     $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => { transport({ action: 'play', index: Number(b.dataset.npqi) }); setTimeout(renderNowPlaying, 500); });
     const qf = $('#npqfull'); if (qf) qf.onclick = () => setView('queue');
     overlay.dataset.sheet = sheet || ''; overlay.dataset.npuri = it.uri || ''; overlay.dataset.layout = `${shellMode()}-${npCompact()}`;
-    state.npWant = { gen, at: Date.now(), scroll: sheet && keep.sheet === sheet ? keep.scroll : null, lyric: (one || sheet === 'lyrics') && (one || keep.sheet === 'lyrics') ? keep.lyric : null, focus: keep.focus };
+    state.npWant = { gen, at: Date.now(), scroll: sheet && keep.sheet === sheet ? keep.scroll : null, lyric: sheet === 'lyrics' && keep.sheet === 'lyrics' ? keep.lyric : null, focus: keep.focus };
     npRestore();
-    if (sheet === 'sources' && songPage && !one) fillNpSources(songPage, gen);
-    if (!one) { overlay.onscroll = null; overlay.ontouchstart = overlay.onwheel = overlay.onkeydown = overlay.onpointerdown = null; npMark = () => {}; }
-    if (one) {
-      // The parts fill again after this (Sources, Tags): the page keeps its height meanwhile, so a
-      // listener reading near the end isn't thrown back up
-      // (until the listener's next own move, or 15 s: by then the parts have filled, however long
-      // their answers took, and two redraws can come before they do; the height is carried across)
-      const pg = $('.np-page', overlay);
-      const prior = state.npHold && Date.now() < state.npHold.until && state.npHold.uri === it.uri ? state.npHold.height : 0;
-      // (the same song only: another one has its own height)
-      const want = prevUri === (it.uri || '') ? Math.max(keep.height || 0, prior) : 0;
-      if (pg && want) {
-        state.npHold = { height: want, until: Date.now() + 15000, uri: it.uri };
-        pg.style.minHeight = `${want}px`;
-        setTimeout(() => { if (pg.isConnected && state.npHold && Date.now() >= state.npHold.until - 50) { pg.style.minHeight = ''; state.npHold = null; } }, 15000);
-      }
-      overlay.scrollTop = oneScroll;
-      const bar = $('.np-jump', overlay); const chips = $$('[data-npjump]', overlay);
-      chips.forEach((c) => c.onclick = () => jump(c.dataset.npjump));
-      if ('IntersectionObserver' in window) {
-        // The chips row gets the song and Play once the transport is out of sight
-        const t = new IntersectionObserver(([e]) => { if (bar) bar.classList.toggle('stuck', !e.isIntersecting && e.boundingClientRect.top < 0); }, { root: overlay });
-        t.observe($('.np-transport', overlay));
-        // Sources loads when it comes near
-        const p = new IntersectionObserver(([e]) => { if (e.isIntersecting && songPage) { p.disconnect(); fillNpSources(songPage, gen); } }, { root: overlay, rootMargin: '0px 0px 50% 0px' });
-        const src = $('#npsec-sources', overlay); if (src) p.observe(src);
-        npObs = [t, p];
-      } else if (songPage) fillNpSources(songPage, gen);
-      // The current chip: the last part whose top has reached the chips row
-      const mark = () => {
-        const edge = (bar ? bar.getBoundingClientRect().bottom : 0) + 24; let cur = null;
-        $$('.np-sec', overlay).forEach((x) => { if (x.getBoundingClientRect().top <= edge) cur = x.id; });
-        if (state.npPin && state.npPin.uri === it.uri) cur = `npsec-${state.npPin.k}`;
-        chips.forEach((c) => (`npsec-${c.dataset.npjump}` === cur ? c.setAttribute('aria-current', 'true') : c.removeAttribute('aria-current')));
-      };
-      let queued = false;
-      overlay.onscroll = () => { if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; mark(); }); } };
-      overlay.ontouchstart = overlay.onwheel = overlay.onkeydown = overlay.onpointerdown = () => { state.npPin = null; if (state.npHold) { state.npHold = null; const p = $('.np-page', overlay); if (p) p.style.minHeight = ''; } };
-      npMark = mark;
-      mark();
-      // A part asked for (the quality line, a link from elsewhere) is shown once
-      if (state.npSheet) { const k = state.npSheet; state.npSheet = null; requestAnimationFrame(() => jump(k, false)); }
-    }
+    if ((sheet === 'sources' || (one && sheet === 'more')) && songPage) fillNpSources(songPage, gen);
+    // Back closes an open sheet first: its layer is registered whenever one shows (a resize into the
+    // phone arrangement with a sheet chosen shows one too), and dropped when none does
+    { const k = transients.indexOf(npSheetTr); if (one && sheet) { if (k < 0) transients.push(npSheetTr); } else if (k >= 0) transients.splice(k, 1); }
     fillNpPubky(it, gen);
     loadLyrics(it);
     setArtTint();
     npRestore();
     refreshSleep();
   };
+  // Now playing's swipes on a phone, bound once on the overlay (a render replaces everything in it, and
+  // the gesture must survive that): on the first screen down closes Now playing, up opens Up next, and
+  // the cover goes to the next song left and the previous one right, following the finger; on the
+  // sheet a swipe down on its head closes it, and sideways anywhere on it moves between its tabs
+  {
+    const npStep = (d) => { const ks = NP_COMPACT.map(([k]) => k); const j = ks.indexOf(state.npSheet) + d; if (j >= 0 && j < ks.length) { state.npSheet = ks[j]; renderNowPlaying(); const f = $(`.np-sheet-tabs [data-npsheet="${ks[j]}"]`, overlay); if (f) f.focus({ preventScroll: true }); } };
+    // (where the press was, decided when it happens: the sheet's list can be redrawn under the finger,
+    // Sources when its answer comes, and then the pressed element is no longer in the sheet)
+    const origin = (e) => (e.target.closest('.np-sheet-head') ? 'head' : e.target.closest('.np-bsheet') ? 'sheet' : e.target.closest('.np-big') ? 'cover' : 'screen');
+    const inSheet = (o) => o === 'head' || o === 'sheet';
+    swipeable(overlay, {
+      when: () => npCompact() && !!$('.np2.compact:not(.np-idle)', overlay),
+      origin,
+      move: (e) => (!state.npSheet && origin(e) === 'cover' ? $('.np-big', overlay) : null),
+      x: (e) => (state.npSheet ? inSheet(origin(e)) : origin(e) === 'cover'),
+      left: (o) => { if (inSheet(o)) npStep(1); else if (o === 'cover') { $('#next').click(); setTimeout(renderNowPlaying, 400); } },
+      right: (o) => { if (inSheet(o)) npStep(-1); else if (o === 'cover') { $('#prev').click(); setTimeout(renderNowPlaying, 400); } },
+      up: (o) => { if (!state.npSheet && !inSheet(o)) { state.npSheet = 'queue'; renderNowPlaying(); const f = $('.np-sheet-tabs [data-npsheet="queue"]', overlay); if (f) f.focus({ preventScroll: true }); } },
+      down: (o) => { if (o === 'head') closeNpSheet(); else if (!inSheet(o) && !state.npSheet) toggleNowPlaying(); },
+    });
+  }
   // The quality sheet (STEWARD-UX-PLAYER-SOURCES §2), from the player's quality label: what is
   // arriving, what the zone makes of it and why, the service's quality choice, and the way to the
   // Play from order and the zone's output settings.
@@ -3886,8 +4051,8 @@
     const canPlay = (v) => { const svc = srcSvc(v.source); if (svc === 'youtube' || /^youtube:/.test(switchUri(v) || '') || previewOnly(svc)) return false; return rk ? rk.healthy.has(svc) : svc === 'library'; };
     const canSwitch = (v) => !isBrowser() && cur && switchUri(v) && switchUri(v) !== cur.uri && canPlay(v);
     box.innerHTML = (also.length ? `<div class="list">${also.map((v, k) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${canSwitch(v) ? `<button class="btn sm" data-npswitch="${k}" aria-label="Play from here: ${esc(v.label || srcName(srcSvc(v.source)))}">${icon('play')} Play from here</button>` : ''}${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open in ${esc(v.label || v.source)} (new tab)" title="Open in ${esc(v.label || v.source)} (new tab)">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
-      + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`;
-    $('#npsongpage', overlay).onclick = () => setView('item', { kind: 'song', id: songPage });
+      + ($('.np-bsheet', overlay) ? '' : `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`);
+    const sp = $('#npsongpage', overlay); if (sp) sp.onclick = () => setView('item', { kind: 'song', id: songPage });
     $$('[data-npswitch]', box).forEach((b) => b.onclick = () => switchSource(also[Number(b.dataset.npswitch)], b, cur.id));
     npRestore();
   };
@@ -3947,7 +4112,10 @@
     if (!l) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
     const off = state.lyricsOffset || 0;
-    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}${l.source === 'lrclib' ? ' <a class="muted small" href="https://lrclib.net" target="_blank" rel="noopener">from LRCLIB</a>' : ''}${l.synced ? ` <span class="lyric-nudge"><button class="icon-btn sm" data-lnudge="-500" title="Lines earlier (0.5 s)" aria-label="Show lines half a second earlier">−</button><span class="muted small">${off ? `${off > 0 ? '+' : ''}${(off / 1000).toFixed(1)} s` : ''}</span><button class="icon-btn sm" data-lnudge="500" title="Lines later (0.5 s)" aria-label="Show lines half a second later">+</button></span>` : ''}</h3><div class="lyric-lines${l.synced ? ' synced' : ''}">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}" role="button" tabindex="0" title="Play from here"${ln.text ? '' : ' aria-label="Instrumental: play from here"'}` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
+    // (one heading: the sheet's tab says Lyrics; this row says how they are timed and where from,
+    // with the timing nudge as two full-size buttons on its right)
+    const how = [l.synced ? 'Synced' : '', l.source === 'lrclib' ? 'from <a class="muted" href="https://lrclib.net" target="_blank" rel="noopener">LRCLIB</a>' : ''].filter(Boolean).join(' · ');
+    box.innerHTML = `<div class="lyric-head"><span class="muted small lyric-how">${how}</span>${l.synced ? `<span class="lyric-nudge"><span class="muted small lyric-off">${off ? `${off > 0 ? '+' : ''}${(off / 1000).toFixed(1)} s` : ''}</span><button class="icon-btn" data-lnudge="-500" title="Lines earlier (0.5 s)" aria-label="Show lines half a second earlier">−</button><button class="icon-btn" data-lnudge="500" title="Lines later (0.5 s)" aria-label="Show lines half a second later">+</button></span>` : ''}</div><div class="lyric-lines${l.synced ? ' synced' : ''}">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}" role="button" tabindex="0" title="Play from here"${ln.text ? '' : ' aria-label="Instrumental: play from here"'}` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
     // Synced: a tap on a line plays from it; a scroll by hand pauses the following for a few seconds
     const lines = $('.lyric-lines', box);
     if (l.synced && lines) {
@@ -4263,33 +4431,44 @@
     (async () => {
       try {
         const r = await fetch(`/v1/search?${new URLSearchParams({ q, in: scope })}`, { headers: state.token ? { authorization: 'Bearer ' + state.token } : {}, signal: run.ctrl.signal });
+        if (!r.ok) throw new Error('Search request failed');
         run.sources = (r.headers.get('x-pm-sources') || '').split(',').filter(Boolean);
         searchChanged(run);
-        setTimeout(() => { for (const src of run.sources) if (!run.answers[src]) run.slow.add(src); searchChanged(run); }, 5000);
+        setTimeout(() => { if (!run.pending) return; for (const src of run.sources) if (!run.answers[src]) run.slow.add(src); searchChanged(run); }, 5000);
         const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
+        const accept = (line) => {
+          if (!line.trim()) return;
+          const a = JSON.parse(line); run.answers[a.source] = a; run.slow.delete(a.source);
+          if (!run.firstAt) run.firstAt = Date.now();
+          searchChanged(run);
+        };
         for (;;) {
           const { value, done } = await reader.read(); if (done) break;
           buf += dec.decode(value, { stream: true });
           let nl;
           while ((nl = buf.indexOf('\n')) >= 0) {
             const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-            if (!line.trim()) continue;
-            const a = JSON.parse(line); run.answers[a.source] = a; run.slow.delete(a.source);
-            if (!run.firstAt) run.firstAt = Date.now();
-            searchChanged(run);
+            accept(line);
           }
         }
-      } catch (e) { if (e.name !== 'AbortError') toast(e.message, 'error'); }
+        accept(buf + dec.decode());
+        if (run.sources.some((src) => !run.answers[src])) throw new Error('Search response incomplete');
+      } catch (e) { if (e.name !== 'AbortError') run.error = true; }
       run.pending = false; run.doneAt = Date.now();
       window.pmLastSearch = { q, scope, first_ms: run.firstAt && run.firstAt - run.startedAt, all_ms: run.doneAt - run.startedAt, sources: Object.fromEntries(Object.values(run.answers).map((a) => [a.source, a.ms])) };
       searchChanged(run);
     })();
     return run;
   };
+  // Retried searches have the same query and scope, but a different run. Old tag replies and
+  // slow-source timers must never replace the new results or change their progress.
+  const displayedSearch = () => state.view === 'search' && state.viewArg && searchRuns.get(`${(state.viewArg.q || '').toLowerCase()}|${state.viewArg.in || 'everywhere'}`);
+  const currentSearch = (run) => !!run && displayedSearch() === run;
   const searchChanged = (run) => {
+    if (!currentSearch(run)) return;
     const prog = $('#sprog'); const total = Math.max(run.sources.length, 1); const got = Object.keys(run.answers).length;
     if (prog) { prog.hidden = !run.pending; prog.firstElementChild.style.width = `${Math.max(8, (got / total) * 100)}%`; }
-    if (state.view === 'search' && state.viewArg && state.viewArg.q === run.q && (state.viewArg.in || 'everywhere') === run.scope) renderSearchBody(run);
+    renderSearchBody(run);
   };
   // Keyboard on the search box (TASK-pinakes-social-ux A1): ↑/↓ walk the results across the
   // groups, Enter opens the one in focus, Shift+Enter plays it; the box keeps the focus and says
@@ -4343,7 +4522,7 @@
   }, true);
   const isLink = (q) => /^https?:\/\/\S+$/i.test(q);
   const linkKind = (u) => (/\/(artist|artists)\//.test(u) ? 'artist' : /\/(album|albums|release|release-group)\//.test(u) ? 'album' : 'song');
-  const runSearch = async (how) => {
+  const runSearch = async (how, savedScope) => {
     const q = search.value.trim();
     if (!q) { if (state.view === 'search') setView('home'); return; }
     // A pasted link skips searching: its item page (by-uri, then resolve; "Reading this link…").
@@ -4351,21 +4530,42 @@
     // A pasted Pubky key (with or without pubky:// or the pubky prefix) opens that person
     const pk = /^(?:pubky:\/\/|pubky)?([a-z0-9]{52})\/?$/.exec(q);
     if (pk) { setView('person', pk[1]); return; }
-    const scope = (state.viewArg && state.view === 'search' && state.viewArg.in) || state.searchScope || 'everywhere';
+    const scope = savedScope || (state.viewArg && state.view === 'search' && state.viewArg.in) || state.searchScope || 'everywhere';
     startSearch(q, scope);
     setView('search', { q, in: scope }, how === 'pop' ? 'pop' : 'push');
   };
   search.addEventListener('input', () => { searchKeys.reset(); clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { search.value = ''; search.blur(); if (state.view === 'search') setView('home'); } });
 
+  // Whether the focused element got its focus from a click on it (not from the keyboard or the page)
+  let pointerDown = { at: 0, target: null }, focusByPointer = false;
+  document.addEventListener('pointerdown', (e) => { pointerDown = { at: performance.now(), target: e.target }; }, true);
+  document.addEventListener('focusin', (e) => { const t = pointerDown.target; focusByPointer = !!t && performance.now() - pointerDown.at < 1000 && (e.target === t || (e.target.contains && e.target.contains(t))); }, true);
   document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented) return;
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
-    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
+    // Escape closes what is on top: a panel or menu, else the phone's sheet, else Now playing
+    if (e.key === 'Escape') {
+      if (document.querySelector('dialog[open]')) return; // (it closes itself, and only itself)
+      const pops = !qPanel.hidden || !$('#zonepop').hidden || !menuEl.hidden || !volPop().hidden;
+      if (pops) { closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
+      if (npSheetTr.open()) { closeNpSheet(); return; }
+      if (!overlay.hidden) toggleNowPlaying();
+      return;
+    }
     if (typing) return;
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
     if (row && e.target === row && (e.key === 'Enter' || e.code === 'Space')) { e.preventDefault(); row.click(); return; }
-    if (e.key === '/') { e.preventDefault(); search.focus(); search.select(); return; }
+    // A control reached with the keyboard (or focused by the page) owns Space: it presses it. The one
+    // a click left focused doesn't (Space would press it again): Space plays or pauses there. Arrows
+    // belong only to controls that move with them (tabs, menu items, sliders). Search, Help and Now
+    // playing stay available everywhere.
+    const onControl = e.target.closest('button, a, summary, .clickable[tabindex], [role="button"], [role="tab"], [role="menuitem"], [role="slider"]');
+    if (e.code === 'Space' && onControl && !(focusByPointer && document.activeElement === e.target)) return;
+    if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && e.target.closest('[role="tab"], [role="menuitem"], [role="slider"]')) return;
+    // (the search field is under an open Now playing, out of reach there: it closes first)
+    if (e.key === '/') { e.preventDefault(); if (!overlay.hidden) toggleNowPlaying(false); search.focus(); search.select(); return; }
     if (e.code === 'Space') { e.preventDefault(); transport({ action: 'toggle' }); }
     if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey) transport({ action: 'next' });
     if (e.key === 'ArrowLeft' && !e.metaKey && !e.ctrlKey) transport({ action: 'previous' });
@@ -4393,6 +4593,10 @@
   // A library track's page id: its canonical identity when known, else lib-<id>.
   const trackPageId = (t) => { const c = Array.isArray(t.canonical) ? t.canonical[0] : t.canonical; const u = canonicalUrl(c); return u ? idOf(u) : 'lib-' + t.id; };
   const trackHasId = (t) => !!canonicalUrl(Array.isArray(t.canonical) ? t.canonical[0] : t.canonical);
+  // How a song got its match (`auto`, `album_fit`, `tagged_mbid`…), when the node says
+  // "Wrong match?": the owner's, for a song with a match
+  const canFixMatch = (t) => isOwner() && t && t.id != null && trackHasId(t);
+  const MATCH_HOW = { album_fit: 'its folder as an album', fingerprint: 'how it sounds', 'fingerprint+release': 'how it sounds', tag_match: 'its exact title, artist and length', auto: 'picked automatically', confirmed_by_user: 'you', tagged_mbid: 'the IDs in its tags', tagged_isrc: 'the ISRC in its tags' };
   // Playlists and hearts name a song the way other apps understand (its MusicBrainz entry), so a
   // file nobody has matched yet asks "Which song is this?" first (fresh-eyes review: adding your
   // own songs to a playlist failed with "no canonical identity"). Resolves to the tracks, now
@@ -4416,6 +4620,67 @@
     if (pick == null) return null;
     const picked = c.suggestions.find((x) => x.id === pick);
     try { const done = await api('POST', `/library/suggestions/${pick}/accept?track_id=${encodeURIComponent(t.id)}${picked ? `&recording_mbid=${encodeURIComponent(picked.recording_mbid)}` : ''}`); rememberTracks([done]); return done; } catch (e) { toast(e.message, 'error'); return null; }
+  };
+  // "Wrong match?" (owner, 2026-11-11): the Confirm matches view for songs that have a match, each
+  // with its match now, the options it was chosen from, a MusicBrainz search and "Not matched".
+  // Nothing changes until Save; a choice names the match the page showed (409: reload).
+  const renderFixMatches = async (ids) => {
+    const gen = state.idGen = (state.idGen || 0) + 1;
+    const live = () => state.view === 'identify' && state.idGen === gen;
+    main.innerHTML = pageHead('Wrong match?', null) + '<p class="muted small idloading" role="status">Loading the songs’ matches…</p>';
+    let page; let st;
+    try { [page, st] = await Promise.all([api('GET', `/library/identify/fix?tracks=${ids.map(Number).join(',')}`), api('GET', '/library/identify').catch(() => null)]); } catch (e) { if (live()) main.innerHTML = pageHead('Wrong match?', null) + emptyState('search', 'Couldn’t load these songs', e.message); return; }
+    if (!live()) return;
+    const files = !st ? '' : st.write_ids ? '"Write IDs into my files" is on: the file’s IDs are replaced or removed (its tags are backed up first).' : 'Your files stay as they are ("Write IDs into my files" is off).';
+    const how = (o) => (o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search');
+    const recOf = (o) => o.recording_mbid || o.recording;
+    // Each song's options: the kept ones, then what a search found (by recording, once each)
+    const extra = new Map(); const chosen = new Map();
+    const optRow = (t, o, k) => `<div class="idopt idpick"><input type="radio" id="fx-${t.id}-${k}" name="fx-${t.id}" value="${esc(recOf(o))}" data-rel="${esc(o.source === 'album' ? (o.release_mbid || '') : '')}" ${chosen.get(t.id) === recOf(o) ? 'checked' : ''}><label class="grow" for="fx-${t.id}-${k}"><span class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></span><span class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${how(o)} · ${Math.round((o.score || 0) * 100)}%</span></label><a class="idmb small" href="https://musicbrainz.org/recording/${esc(recOf(o))}" target="_blank" rel="noopener" aria-label="${esc(`${o.title || 'Recording'} on MusicBrainz`)}">MusicBrainz ${icon('external')}</a></div>`;
+    const songHtml = (g) => {
+      const t = g.track; const cur = g.current;
+      const seen = new Set(cur ? [cur.recording_mbid] : []);
+      const opts = [...g.options, ...(extra.get(t.id) || [])].filter((o) => { const r = recOf(o); if (seen.has(r)) return false; seen.add(r); return true; });
+      const now = cur ? `<div class="idopt idpick"><input type="radio" id="fx-${t.id}-keep" name="fx-${t.id}" value="keep" ${chosen.get(t.id) === 'keep' ? 'checked' : ''}><label class="grow" for="fx-${t.id}-keep"><span class="name">Keep this match${cur.auto ? ' <span class="pill" data-auto>auto</span>' : ''}</span><span class="sub">${cur.auto ? 'Picked automatically: used in Odeion, not written into your file until you keep it here' : `Matched by ${esc(MATCH_HOW[cur.source] || cur.source)}`}</span></label><a class="idmb small" href="https://musicbrainz.org/recording/${esc(cur.recording_mbid)}" target="_blank" rel="noopener" aria-label="The match now on MusicBrainz">MusicBrainz ${icon('external')}</a></div>` : '';
+      const body = cur && cur.from_tags && !(st && st.write_ids) ? '<p class="small muted">Its file’s tags name this recording: turn on Write IDs into my files (Your library › Node library › Identify) to change it here, or correct the tags.</p>'
+        : `${now}${opts.map((o, k) => optRow(t, o, k)).join('')}<div class="idopt idpick"><input type="radio" id="fx-${t.id}-none" name="fx-${t.id}" value="none" ${chosen.get(t.id) === 'none' ? 'checked' : ''}><label class="grow small" for="fx-${t.id}-none">Not matched <span class="muted">(none of these: the song stays without a match)</span></label></div><div class="idopt idpick idlater"><input type="radio" id="fx-${t.id}-same" name="fx-${t.id}" value="" ${!chosen.get(t.id) ? 'checked' : ''}><label class="grow small muted" for="fx-${t.id}-same">No change</label></div><form class="toolbar" data-find="${t.id}"><input class="input" name="q" placeholder="Search MusicBrainz: title and artist" aria-label="${esc(`Search MusicBrainz for ${t.title}`)}" autocomplete="off"><button class="btn sm" type="submit">Search</button></form>`;
+      return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms), (t.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div>${cur ? '' : '<p class="small muted">No match now.</p>'}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${body}</div></div>`;
+    };
+    const draw = () => {
+      const intro = `<p class="muted small idintro">Pick the right recording, search MusicBrainz for it, or choose Not matched. The match you replace is never picked again for this song. ${esc(files)} Tags you already published on Pubky for the old match stay on it.</p>`;
+      const albumHtml = (a, ai) => `<section class="section idalbum" data-album="${ai}"><div class="section-head"><h3>${esc(a.album || a.key.split('/').filter(Boolean).slice(-1)[0] || 'Library')}${a.artist ? ` <span class="muted small">${esc(a.artist)}</span>` : ''}</h3><span class="muted small">${countOf(a.songs.length, 'songs')}</span></div><div class="list">${a.songs.map(songHtml).join('')}</div><div class="actions idconfirm"><button class="btn primary" type="button" data-fixsave="${ai}">Save</button><span class="small muted" role="status" data-fixout="${ai}"></span></div></section>`;
+      main.innerHTML = pageHead('Wrong match?', page.songs) + intro + page.albums.map(albumHtml).join('');
+      $$('.idrow input[type=radio]', main).forEach((r) => r.onchange = () => chosen.set(Number(r.name.slice(3)), r.value));
+      $$('[data-find]', main).forEach((f) => f.onsubmit = async (e) => {
+        e.preventDefault(); const id = Number(f.dataset.find); const q = f.q.value.trim(); const b = $('button', f); b.disabled = true;
+        try {
+          const c = await api('GET', `/library/tracks/${id}/candidates${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+          if (!live()) return;
+          if (c.needs_contact) { toast('MusicBrainz needs your email or website first (Get started on Home)', 'error'); b.disabled = false; return; }
+          extra.set(id, [...(extra.get(id) || []), ...(c.found || [])]);
+          if (!(c.found || []).length) toast('MusicBrainz found nothing strong for that');
+          draw();
+        } catch (err) { toast(err.message, 'error'); b.disabled = false; }
+      });
+      $$('[data-fixsave]', main).forEach((btn) => btn.onclick = async () => {
+        const ai = Number(btn.dataset.fixsave); const a = page.albums[ai]; const out = $(`[data-fixout="${ai}"]`, main);
+        const todo = a.songs.filter((g) => chosen.get(g.track.id));
+        if (!todo.length) { out.textContent = 'Nothing chosen'; return; }
+        btn.disabled = true; out.textContent = 'Saving…'; let done = 0; let failed = null; let notWritten = 0;
+        for (const g of todo) {
+          const v = chosen.get(g.track.id); const cur = g.current ? g.current.recording_mbid : null;
+          const input = $(`input[name="fx-${g.track.id}"]:checked`, main);
+          const body = v === 'none' ? { none: true, expect: cur } : v === 'keep' ? { recording_mbid: cur, expect: cur } : { recording_mbid: v, release_mbid: (input && input.dataset.rel) || null, expect: cur };
+          try { const r = await api('POST', `/library/tracks/${g.track.id}/match`, body); done++; if (r.files && !r.files.written) notWritten++; } catch (e) { failed = e.message; break; }
+        }
+        toast(`${countOf(done, 'songs')} corrected${notWritten ? `; IDs not written into ${countOf(notWritten, 'files')}` : ''}${failed ? `; stopped: ${failed}` : ''}`, failed || notWritten ? 'error' : '');
+        if (!live()) return;
+        // What was saved is the page's now; a stale choice shows as it stands
+        if (failed) { await renderFixMatches(ids); return; }
+        await renderFixMatches(ids);
+      });
+    };
+    draw();
   };
   const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr', start = 0, bare = false } = {}) => {
     rememberTracks(tracks);
@@ -4723,7 +4988,15 @@
     ht.groups.forEach((g) => { const dk = `${ht.page}|${g.scope}`; if (!open.has(g.scope) && heroDrafts.has(dk) && !heroSending.has(dk)) open.set(g.scope, { value: heroDrafts.get(dk), focus: false }); });
     // An empty input nobody is in isn't kept (it would never close)
     const drafts = [...open].filter(([, d]) => d.value.trim() || d.focus).map(([scope, d]) => ({ scope, ...d }));
-    box.innerHTML = `${ht.groups.map((g) => heroTagGroup(g, ht)).join('')}${ht.note ? `<p class="hnote small"><span class="muted">${esc(ht.note)}</span>${ht.match ? ` <button class="btn sm" data-htag-match>${esc(ht.match.label)}</button>` : ''}</p>` : ''}<datalist id="htagsugg"></datalist>`;
+    // Not matched yet: one small row under Play and the others (owner, 2026-11-08: the full-width
+    // button above Play was "placed weirdly and very large"); other notes stay with the tags
+    const slot = $('#hmatch');
+    const matchRow = ht.note && ht.match && slot;
+    box.innerHTML = `${ht.groups.map((g) => heroTagGroup(g, ht)).join('')}${ht.note && !matchRow ? `<p class="hnote small"><span class="muted">${esc(ht.note)}</span>${ht.match ? ` <button class="btn sm" data-htag-match>${esc(ht.match.label)}</button>` : ''}</p>` : ''}<datalist id="htagsugg"></datalist>`;
+    if (slot) {
+      slot.innerHTML = matchRow ? `<p class="hmatch small"><span class="muted" title="${esc(ht.note)}">Not matched to MusicBrainz</span><span class="muted" aria-hidden="true">·</span><button class="lnk hmatch-btn" data-htag-match aria-label="${esc(ht.match.label)}" title="${esc(ht.note)}">Match</button></p>` : '';
+      const mb = $('[data-htag-match]', slot); if (mb) mb.onclick = () => setView('identify', { tracks: ht.match.tracks });
+    }
     bindHeroTags(box, ht);
     drafts.forEach((d) => { const b = $(`[data-htag-plus="${d.scope}"]`, box); if (b) { openHeroAdd(box, ht, b, d.focus); const inp = $(`input[data-htag-add="${d.scope}"]`, box); if (inp) inp.value = d.value; } });
     foldHeroTags(box);
@@ -4755,8 +5028,17 @@
   };
   // A small anchored menu (track ⋯, album actions). One at a time; Esc or the scrim closes it.
   const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; document.body.appendChild(menuEl);
-  // Long-press on a touch screen (and right-click) on a song row opens its ⋯ menu
-  document.addEventListener('contextmenu', (e) => { const row = e.target.closest && e.target.closest('.srow, .track, [data-srow]'); const more = row && row.querySelector('[data-smore], [data-act="more"]'); if (!more || e.target.closest('input, textarea, a[href]')) return; e.preventDefault(); more.click(); });
+  // Long-press on a phone, in a list that has Select: selection, with that row ticked (owner,
+  // 2026-11-08); elsewhere (and right-click) the row's ⋯ menu
+  const longPressSelect = (row) => {
+    if (shellMode() !== 'phone' || !matchMedia('(pointer: coarse)').matches || !row.matches('.srow[data-srow]')) return false;
+    const sec = row.closest('.section'); const b = sec && $('.section-head [data-selstart]', sec); if (!b) return false;
+    if (!sec.classList.contains('selecting')) b.click();
+    // (the box is ticked directly: a click now would be taken for the long press's own release)
+    const c = $('.selbox input', row); if (c && !c.checked) { c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); }
+    return !!c;
+  };
+  document.addEventListener('contextmenu', (e) => { const row = e.target.closest && e.target.closest('.srow, .track, [data-srow]'); const more = row && row.querySelector('[data-smore], [data-act="more"]'); if (!more || e.target.closest('input, textarea, a[href]')) return; e.preventDefault(); if (longPressSelect(row)) return; more.click(); });
   // Song rows on touch screens (docs/ux/responsive.md, build step 3): swipe right to play next, left to
   // add to a playlist (the owner's choice); a long press opens the row's menu, also where the browser
   // sends no contextmenu (iOS). Each runs the row's own ⋯ menu, so every kind of song row behaves alike.
@@ -4766,7 +5048,7 @@
     // the click a long press leaves on release (iOS) must not play the row
     document.addEventListener('click', (e) => {
       // the click iOS sends on releasing a long press: whatever is under the finger then (a row, the menu sheet)
-      if (Date.now() - longEnd < 400 || (Date.now() - lastLong < 1500 && e.target.closest && e.target.closest('.srow, .track, [data-srow]') && !e.target.closest('[data-smore], [data-act="more"]'))) { e.preventDefault(); e.stopImmediatePropagation(); lastLong = 0; longEnd = 0; }
+      if (e.isTrusted && (Date.now() - longEnd < 400 || (Date.now() - lastLong < 1500 && e.target.closest && e.target.closest('.srow, .track, [data-srow]') && !e.target.closest('[data-smore], [data-act="more"]')))) { e.preventDefault(); e.stopImmediatePropagation(); lastLong = 0; longEnd = 0; }
     }, true);
     const ROWS = '.srow, .track, [data-srow]';
     const moreOf = (row) => row.querySelector('[data-smore], [data-act="more"]');
@@ -4777,7 +5059,7 @@
       if (!row || e.touches.length !== 1 || e.target.closest('input, textarea, [data-qgrip], [draggable="true"]') || row.closest('.selecting') || !moreOf(row)) { sw = null; return; }
       const t = e.touches[0];
       sw = { row, x: t.clientX, y: t.clientY, dx: 0, on: false, moved: false };
-      sw.timer = setTimeout(() => { const s2 = sw; if (s2 && s2.row === row && !s2.moved && Date.now() - lastCtx > 800) { s2.long = true; lastLong = Date.now(); moreOf(row).click(); } }, 600);
+      sw.timer = setTimeout(() => { const s2 = sw; if (s2 && s2.row === row && !s2.moved && Date.now() - lastCtx > 800) { s2.long = true; lastLong = Date.now(); if (!longPressSelect(row)) moreOf(row).click(); } }, 600);
     }, { passive: true });
     document.addEventListener('touchmove', (e) => {
       if (!sw) return; const t = e.touches[0]; const dx = t.clientX - sw.x; const dy = t.clientY - sw.y;
@@ -4896,6 +5178,7 @@
       ...(single && single.id != null ? dlItem('track', single.id, single.title, artists(single)) : []),
       // Phones hide the "Match" chip in song rows (no room), so matching is offered here too
       ...(single && single.id != null && !trackHasId(single) && isOwner() ? [{ label: 'Which song is this?…', icon: 'search', run: async () => { const done = await whichSong(single); if (done) { toast(`Identified: ${done.title}`); render(); } } }] : []),
+      ...(single && canFixMatch(single) ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: [single.id] }) }] : []),
       { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl.id, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } }) },
       ...radioItem,
       ...versionItems,
@@ -5038,7 +5321,7 @@
     if (state.searchScope && off.has(state.searchScope)) state.searchScope = 'everywhere';
   };
   const FEATURE_WORDS = { search: 'Search', play: 'Plays on your zones', connect: 'Plays on its own devices', artists: 'Artist pages', library: 'Your library', playlists: 'Your playlists', downloads: 'Downloads what you bought', lyrics: 'Lyrics', scrobble: 'Reports your plays' };
-  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', soundcloud: 'SoundCloud', bandcamp: 'Bandcamp', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
+  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', soundcloud: 'SoundCloud', bandcamp: 'Bandcamp', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', plex: 'Plex', podcasts: 'Podcasts', radio: 'Internet radio', audiobookshelf: 'Audiobookshelf', youtube: 'YouTube', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
   const sourceChip = (t, k) => t.pending ? '<span class="chip srcchip wait" aria-label="Finding where this plays"><span class="spin"></span></span>' : t.unavailable
@@ -5198,6 +5481,8 @@
       // The owner's library: edit tags on the node, take a song out (Your library › Node library)
       ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title) }] : []),
       ...(isOwner() && /^\/album\/lib-\d+$/.test(o.path || '') ? [{ label: 'Rename album…', icon: 'disc', run: () => editAlbumTags(Number(o.path.split('-').pop()), o.title) }] : []),
+      // A library song's or album's match corrected: the Confirm matches view for its songs
+      ...(isOwner() && trackIds.length && /^\/(song|album)\//.test(o.path || '') ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: trackIds.slice(0, 500) }) }] : []),
       ...(o.path ? [{ label: 'Copy link', icon: 'compass', run: () => copyLink(o.path) }] : []),
       // Library files only: services' songs are not the user's files
       ...(state.pubkyUser && trackIds.length ? [{ label: trackIds.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(trackIds.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: trackIds }) }] : []),
@@ -5242,7 +5527,10 @@
   const subLine = (html, mark) => (mark ? `<div class="sub subv"><span class="subtext">${html}</span>${html ? '<span aria-hidden="true">·</span>' : ''}${mark}</div>` : `<div class="sub">${html}</div>`);
   const VERSION_FROM = { library: 'Your library', homeserver: 'Your homeserver' };
   const versionLabel = (v) => [VERSION_FROM[v.source] || v.source, v.format || (v.container || '').toUpperCase(), v.size_bytes ? fileSize(v.size_bytes) : ''].filter(Boolean).join(' · ');
-  const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([t.artist || t.artists ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
+  // (`data-np`: what the row plays, so the playing one is marked; `opts.oneArtist`: the album's songs
+  // are all by its artist, said once in the header and not on every row)
+  const songNpKey = (t) => (t.track_id != null ? `track:${t.track_id}` : t.uri || '');
+  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
@@ -5250,7 +5538,7 @@
   const enableSelect = (section, songs, opts = {}) => {
     if (!section || !songs.length) return;
     const head = $('.section-head', section); if (!head || $('[data-selstart]', head)) return;
-    head.insertAdjacentHTML('beforeend', `<button class="btn ghost sm" data-selstart aria-pressed="false">${icon('check')} Select</button>`);
+    head.insertAdjacentHTML('beforeend', `<button class="btn ghost sm selstart" data-selstart aria-pressed="false">${icon('check')}<span>Select</span></button>`);
     const sel = new Set();
     const draw = () => {
       if (!selBar) { selBar = document.createElement('div'); selBar.className = 'selbar'; selBar.setAttribute('role', 'toolbar'); selBar.setAttribute('aria-label', 'Selected songs'); document.body.appendChild(selBar); }
@@ -5304,7 +5592,13 @@
     // clicked; a click on one that doesn't play does nothing
     const songs = all.filter((t) => !t.card); const at = (k) => Math.max(0, songs.indexOf(all[k]));
     $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, at(Number(b.dataset.splay)), 'replace', ctx.plays_from, b, ctx.fallback); });
-    $$('[data-srow]:not([data-card]):not([data-search])', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback); });
+    // While selecting, a tap on a row ticks it (on phones a long press starts selecting, and the
+    // next taps add songs): it never plays and replaces the queue then. Its box ticks itself
+    $$('[data-srow]:not([data-card]):not([data-search])', box).forEach((r) => r.onclick = (e) => {
+      if (e.target.closest('a,button')) return;
+      if (r.closest('.selecting')) { const c = $('.selbox input', r); if (c && !e.target.closest('.selbox')) { c.checked = !c.checked; c.dispatchEvent(new Event('change', { bubbles: true })); } return; }
+      playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback);
+    });
     fillCards(box);
     // A card's ⋯: open it, copy its link, and the row's own moves (on phones the only way to them)
     $$('[data-cmore]', box).forEach((b) => b.onclick = (e) => {
@@ -5461,15 +5755,75 @@
     }
     return byKind;
   };
-  const renderSearchBody = (run) => {
-    const chips = $('#scopechips'); const box = $('#sresults'); if (!chips || !box) return;
+  const renderSearchScopes = (chips, run) => {
     const scope = run.scope;
-    if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(run); }).catch(() => { state.sourcesLoading = false; }); }
+    const scrollLeft = chips.scrollLeft;
+    const focused = document.activeElement;
+    const rowBefore = chips.getBoundingClientRect(), focusBefore = focused.parentElement === chips && focused.getBoundingClientRect();
+    const focusWasVisible = focusBefore && focusBefore.left >= Math.max(0, rowBefore.left) && focusBefore.right <= Math.min(innerWidth, rowBefore.right);
     const services = (state.sources || []).filter((x) => x.enabled !== false && (!x.features || x.features.includes('search')) && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
-    const scopes = [['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])];
+    const scopes = new Map([['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])]);
+    // A listener does not read the owner's /sources. A requested service uses its public name,
+    // even for tag searches (whose replies come from Library/Pubky). Keep it available after
+    // choosing another source, but never reintroduce a service explicitly switched off.
+    for (const saved of searchRuns.values()) {
+      const id = saved.scope;
+      const named = id !== 'musicbrainz' && Object.prototype.hasOwnProperty.call(SERVICE_NAMES, id);
+      if (!scopes.has(id) && (named || saved.sources.includes(id)) && !(state.sources || []).some((x) => x.id === id && x.enabled === false)) scopes.set(id, srcName(id));
+    }
     const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
-    chips.innerHTML = scopes.map(([id, name]) => `<button class="chip scope ${scope === id ? 'on' : ''}" data-scope-in="${id}">${id === 'everywhere' || id === 'library' || id === 'pubky' ? '' : svcBadge(id)}${esc(name)} ${scope === 'everywhere' || scope === id ? stat(id === 'everywhere' ? '' : id) : ''}</button>`).join('');
-    $$('[data-scope-in]', chips).forEach((b) => b.onclick = () => { state.searchScope = b.dataset.scopeIn; startSearch(run.q, b.dataset.scopeIn); setView('search', { q: run.q, in: b.dataset.scopeIn }, 'replace'); });
+    const buttons = new Map($$('[data-scope-in]', chips).map((b) => [b.dataset.scopeIn, b]));
+    const ordered = [];
+    for (const [id, name] of scopes) {
+      const b = buttons.get(id) || document.createElement('button');
+      b.type = 'button'; b.className = `chip scope ${scope === id ? 'on' : ''}`; b.dataset.scopeIn = id;
+      const html = `${['everywhere', 'library', 'pubky'].includes(id) ? '' : svcBadge(id)}${esc(name)} ${scope === 'everywhere' || scope === id ? stat(id === 'everywhere' ? '' : id) : ''}`;
+      if (b.innerHTML !== html) b.innerHTML = html;
+      ordered.push(b); buttons.delete(id);
+      b.onclick = () => {
+        const focused = document.activeElement === b;
+        state.searchScope = id; startSearch(run.q, id); setView('search', { q: run.q, in: id }, 'replace');
+        if (focused && document.activeElement === document.body) $$('#scopechips [data-scope-in]').find((x) => x.dataset.scopeIn === id)?.focus({ preventScroll: true });
+      };
+    }
+    buttons.forEach((b) => b.remove());
+    // Keep the focused button attached, arranging its siblings around it when discovery changes
+    // their order. Moving that button itself would lose focus and a held Space key's activation.
+    let next = null;
+    for (const b of ordered.reverse()) {
+      if (b !== focused && (b.parentElement !== chips || b.nextElementSibling !== next)) chips.insertBefore(b, next);
+      next = b;
+    }
+    // Inserting earlier choices can make scroll snapping follow the old snap target.
+    // A person who already moved the row keeps their position instead.
+    if (chips.dataset.manuallyMoved) chips.scrollLeft = scrollLeft;
+    if (!chips.dataset.revealBound) {
+      chips.dataset.revealBound = '1';
+      // Source discovery may insert choices before the selected one. Reveal it again only if
+      // the person has not started moving through this row themselves.
+      for (const event of ['pointerdown', 'touchstart', 'wheel', 'keydown', 'focusin']) chips.addEventListener(event, () => {
+        chips.dataset.manuallyMoved = '1';
+        if (event === 'focusin') delete chips.dataset.focusScrolled;
+        else if (event !== 'keydown') chips.dataset.focusScrolled = '1';
+      }, { passive: true });
+    }
+    const selected = $$('[data-scope-in]', chips).find((b) => b.dataset.scopeIn === scope);
+    // Discovery and counts can move a visible focused button. Keep it visible, but leave a
+    // deliberate scroll away intact. Otherwise reveal the selection until the person takes over.
+    const reveal = focusWasVisible && !chips.dataset.focusScrolled && focused.parentElement === chips ? focused : !chips.dataset.manuallyMoved ? selected : null;
+    if (reveal) {
+      const row = chips.getBoundingClientRect(), button = reveal.getBoundingClientRect();
+      const padding = getComputedStyle(chips);
+      if (button.left < row.left + parseFloat(padding.paddingLeft) || button.right > row.right - parseFloat(padding.paddingRight)) chips.scrollLeft += (button.left + button.right - row.left - row.right) / 2;
+    }
+  };
+  const renderSearchBody = (run) => {
+    if (!currentSearch(run)) return;
+    const chips = $('#scopechips'); const box = $('#sresults'); if (!chips || !box) return;
+    const retryFocus = $('[data-sretry]:focus', box);
+    const scope = run.scope;
+    if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(displayedSearch()); }).catch(() => { state.sourcesLoading = false; }); }
+    renderSearchScopes(chips, run);
     const allKinds = mergeSearch(run);
     run.facets = run.facets || {};
     const facetCounts = facetsOf(allKinds);
@@ -5479,8 +5833,8 @@
     const nOn = Object.values(run.facets).filter(Boolean).length;
     const facetRow = facetChips ? `<div class="chips facets" role="group" aria-label="Narrow the results">${facetChips}${nOn ? '<button class="chip sm ghost" data-facet="">Clear</button>' : ''}</div>` : '';
     const facetBar = facetRow && shellMode() === 'phone' ? `<details class="sfilters" ${run.filtersOpen ? 'open' : ''}><summary class="chip">Filters${nOn ? ` · ${nOn}` : ''}</summary>${facetRow}</details>` : facetRow;
-    const problems = run.sources.filter((src) => (run.answers[src] && run.answers[src].status !== 'ok') || (!run.answers[src] && run.slow.has(src)));
-    const pendingAny = run.pending && run.sources.some((src) => !run.answers[src]);
+    const problems = run.sources.filter((src) => (run.answers[src] && run.answers[src].status !== 'ok') || (!run.error && !run.answers[src] && run.slow.has(src)));
+    const pendingAny = run.pending && (!run.sources.length || run.sources.some((src) => !run.answers[src]));
     const skel = (n, tiles) => (tiles ? `<div class="sk-grid">${'<div class="skeleton"></div>'.repeat(n)}</div>` : `<div class="skeleton" style="height:${n * 54}px"></div>`);
     const sections = [];
     const counts = {}; for (const ans of Object.values(run.answers)) for (const [k, c] of ans.counts || []) counts[k] = Math.max(counts[k] || 0, c);
@@ -5510,7 +5864,14 @@
     const notes = problems.length ? `<div class="snotes">${problems.map((src) => { const err = run.answers[src] && run.answers[src].error; const said = err ? short(err, src).replace(/[.\s·]+$/, '') : ''; const why = said && !said.toLowerCase().includes(srcName(src).toLowerCase()) ? `${srcName(src)}: ${said}` : said; const again = !err || /answered 5\d\d|timed? ?out|time-?out|took too long|reach|network|busy|later|didn.t answer|isn.t answering|sending request|refused|dns|connect(ion)? (error|reset|closed)/i.test(err); return `<span class="snote" title="${esc(err || 'still waiting')}">${svcBadge(src)} ${why ? esc(why) : `${esc(srcName(src))} didn’t answer`}${again ? ` · <a data-sretry="${src}">Retry</a>` : ''}</span>`; }).join('')}</div>` : '';
     const nothing = !pendingAny && !SEARCH_KINDS.some(([k]) => byKind[k].length);
     const nothingAtAll = nothing && !(tg && ((tg.mine || []).length || (tg.others || []).length));
-    box.innerHTML = notes + facetBar + (nothingAtAll ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
+    // Keep Retry attached while late tags/sources redraw the results. Replacing it and restoring
+    // focus loses the browser's native Space activation between keydown and keyup.
+    let content = $('#scontent', box);
+    if (!content) { box.innerHTML = '<div id="scontent"></div>'; content = $('#scontent', box); }
+    const failure = $('#sfailure', box);
+    if (run.error && !failure) box.insertAdjacentHTML('afterbegin', '<div class="snotes" id="sfailure"><div class="notice" role="status"><div class="row"><span class="grow">Search couldn’t finish.</span><button class="btn sm" data-sretry>Retry</button></div></div></div>');
+    else if (!run.error && failure) failure.remove();
+    content.innerHTML = notes + facetBar + (nothingAtAll && !run.error ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
     const sf = $('.sfilters', box); if (sf) sf.addEventListener('toggle', () => { run.filtersOpen = sf.open; });
     // A facet chip keeps the focus across the re-render (or it moves to the first chip, after Clear)
     $$('[data-facet]', box).forEach((b) => b.onclick = () => {
@@ -5530,7 +5891,8 @@
     $$('[data-sother]', box).forEach((r) => r.onclick = () => { const [k, n] = r.dataset.sother.split(':'); const h = byKind[k][Number(n)]; if (k === 'person') setView('person', h.id); else if (k === 'playlist' && h.sources.includes('library')) setView('playlist', h.id); else if (h.page) openWeb(h.page); });
     const to = $('[data-sopen="top"]', box); if (to) to.onclick = () => setView('item', { kind: top.kind === 'song' ? 'song' : top.kind, id: top.id });
     const tp = $('[data-splaytop]', box); if (tp) tp.onclick = async (e) => { if (top.kind === 'song') return playSongs([{ ...top, artist: top.subtitle }], 0, 'replace', null, e.currentTarget); try { const pg = await api('GET', `/item/${top.kind}/${top.id}`); playSongs(pg.songs || [], 0, 'replace', pg.plays_from, e.currentTarget, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } };
-    $$('[data-sretry]', box).forEach((b) => b.onclick = () => { searchRuns.delete(`${run.q.toLowerCase()}|${run.scope}`); startSearch(run.q, run.scope); render(); });
+    $$('[data-sretry]', box).forEach((b) => b.onclick = () => { searchRuns.delete(`${run.q.toLowerCase()}|${run.scope}`); startSearch(run.q, run.scope); render(); search.focus(); });
+    if (retryFocus && !retryFocus.isConnected) { const again = $$('[data-sretry]', box).find((b) => b.dataset.sretry === retryFocus.dataset.sretry); (again || search).focus(); }
   };
   // ---- Home (STEWARD-UX-HOME.md): everything Pinakes knows about music, one section per call ----
   const HOME_TITLES = { 'trending-songs': 'Trending songs', 'trending-albums': 'Trending albums', 'trending-artists': 'Trending artists', following: 'From people you follow', tags: 'Tags people use for music', concerts: 'Concerts near you', podcasts: 'Podcasts', yours: 'Yours on Pubky', new: 'New on Pubky' };
@@ -5720,6 +6082,23 @@
   };
   const listPref = (kind) => { try { return JSON.parse(localStorage.getItem(`pm.list.${kind}`) || '{}'); } catch { return {}; } };
   const setListPref = (kind, p) => { try { localStorage.setItem(`pm.list.${kind}`, JSON.stringify(p)); } catch { /* no storage */ } };
+  // Sorting changes the order of the current matches, keeping the filter and keyboard position.
+  const renderSortedList = async (control) => {
+    const query = $('#filter')?.value; let focused = document.activeElement === control;
+    const gen = navGen;
+    // Removing Sort during loading leaves focus on body. Any later focus transfer cancels
+    // restoration, even if the person then dismisses that control (Search followed by Escape).
+    const moved = () => { focused = false; };
+    document.addEventListener('focusin', moved, { capture: true, once: true, signal: navCtl.signal });
+    try {
+      const rendered = render(); const drawing = lastDrawing;
+      await rendered;
+      if (gen !== navGen || drawing !== lastDrawing) return;
+      const filter = $('#filter');
+      if (filter && query != null) { filter.value = query; filter.oninput?.(); }
+      if (focused && document.activeElement === document.body) $('[data-lsort]', main)?.focus({ preventScroll: true });
+    } finally { document.removeEventListener('focusin', moved, true); }
+  };
   const albumFav = (a) => !!(a.release_mbid && state.favUris && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`));
   const sortList = (kind, list, how) => {
     const by = (f) => [...list].sort((a, b) => String(f(a) || '').localeCompare(String(f(b) || ''), undefined, { sensitivity: 'base', numeric: true }));
@@ -5798,7 +6177,7 @@
       token_config: () => ['Change the node’s token', 'The node’s token was in a saved queue’s links, where everyone who could use that zone could read it. It is set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): change it there and restart the node. Every app then needs the new token.', `<a class="btn sm primary" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`],
       token: () => ['Make a new token for the node', 'The node’s token was in a saved queue’s links, where everyone who could use that zone could read it. Make a new one in Settings › Access: every app then needs the new token, and your browsers log in again.', '<a class="btn sm primary" href="/settings" data-setup-settings>Open Settings</a>'],
       music: () => ['Add your music', has.music ? `${countOf(n(info.library.tracks), 'tracks')}${info.library.albums ? ` · ${countOf(n(info.library.albums), 'albums')}` : ''}. More folders: Your library › Node library.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody],
-      play: () => ['Play something', tracks ? `It plays ${hereIn()}. To play on speakers or another device, use the zone button at the bottom right.` : musicTodo ? 'Once your music is in.' : `Search for a song, or browse your services on Sources. It plays ${hereIn()}, or on a speaker from the zone button.`, tracks ? `<button class="btn sm primary" id="setupplay">${icon('play')} Shuffle my music</button>` : musicTodo ? '' : '<button class="btn sm" data-setup-sources>Open Sources</button>'],
+      play: () => ['Play something', tracks ? `It plays ${hereIn()}. To play on speakers or another device, ${shellMode() === 'phone' ? 'pick one in Zones, or its name at the top of Now playing' : 'use the zone button at the bottom right'}.` : musicTodo ? 'Once your music is in.' : `Search for a song, or browse your services on Sources. It plays ${hereIn()}, or on a speaker from the zone button.`, tracks ? `<button class="btn sm primary" id="setupplay">${icon('play')} Shuffle my music</button>` : musicTodo ? '' : '<button class="btn sm" data-setup-sources>Open Sources</button>'],
       contact: () => ['See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>'],
       speakers: () => ['Play on your speakers (optional)', 'No speaker found yet. Speakers and streamers on your network show up by themselves; Snapcast and MPD need a line in the node’s config.', `<button class="btn sm" id="setupspeakers">Look for speakers</button> <a class="lnk small" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/speakers.md" target="_blank" rel="noopener">Which speakers work</a>`],
       pubky: () => (hsHere && !has.pubky
@@ -5900,7 +6279,7 @@
   };
   const renderPage = async (api) => {
     // The search box is a combobox over the results page only
-    if (state.view !== 'search') { search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls'); search.removeAttribute('aria-activedescendant'); }
+    if (state.view !== 'search') { search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls'); search.removeAttribute('aria-activedescendant'); $('#sprog').hidden = true; }
     const v = state.view;
     // The dashboard is a full screen of its own (a TV or tablet): no sidebar, bars or player
     document.body.classList.toggle('kiosk', v === 'dashboard');
@@ -6071,7 +6450,7 @@
           const letters = (lp.sort || 'name') === 'name' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.title)))] : (lp.sort === 'artist' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.album_artist)))] : []);
           main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums') : '') + (isOwner() ? `<button class="btn" data-addmusic>${icon('plus')} Add music</button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; render(); });
-          const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); render(); };
+          const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); return renderSortedList(ls); };
           const lf = $('[data-lfav]', main); if (lf) lf.onclick = () => { setListPref('albums', { ...lp, fav: !lp.fav }); render(); };
           const grid = $('#albumgrid');
           if (grid) {
@@ -6104,7 +6483,7 @@
             const draw = (list) => { stop(); alist.innerHTML = ''; stop = growItems(alist, list, (part) => part.map(row).join(''), bindRows, 150); };
             draw(artistsSorted);
             $$('[data-az]', main).forEach((b) => b.onclick = () => { const i = artistsSorted.findIndex((a) => firstLetter(a.name) === b.dataset.az); if (i >= 0) { draw(artistsSorted.slice(i)); $$('[data-az]', main).forEach((x) => x.classList.toggle('on', x === b)); } });
-            const als = $('[data-lsort]', main); if (als) als.onchange = () => { setListPref('artists', { ...alp, sort: als.value }); render(); };
+            const als = $('[data-lsort]', main); if (als) als.onchange = () => { setListPref('artists', { ...alp, sort: als.value }); return renderSortedList(als); };
             const f = $('#filter');
             if (f) {
               f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? artistsSorted.filter((a) => a.name.toLowerCase().includes(q)) : artistsSorted; draw(list); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
@@ -6114,6 +6493,8 @@
           break;
         }
         case 'identify': {
+          // "Wrong match?" from a song or album menu: those songs' matches
+          if (state.viewArg && Array.isArray(state.viewArg.fix) && state.viewArg.fix.length) { await renderFixMatches(state.viewArg.fix); break; }
           // Album review: each folder's songs together, every song with its own options and
           // evidence. A song with one strong option is offered ticked; a song whose options
           // disagree waits for the owner's pick. Confirm stores the album's choices in one go,
@@ -6122,8 +6503,11 @@
           // back, starts a new one): an answer that comes late draws nothing
           const gen = state.idGen = (state.idGen || 0) + 1;
           const live = () => state.view === 'identify' && state.idGen === gen;
-          // Something at once while the first page comes (owner, 2026-11-04: no answer for long)
-          main.innerHTML = pageHead('Confirm matches', null) + '<p class="muted small idloading" role="status">Loading the matches to confirm…</p><div class="sk-grid">' + '<div class="skeleton"></div>'.repeat(4) + '</div>';
+          // Something at once while the first page comes (owner, 2026-11-04: no answer for long),
+          // in the page's own shape: its header, the line that explains it, rows where the list comes
+          // (owner, 2026-11-08: a grid of covers first, then a list, then the header pushed it down)
+          const idHow = (files, done = false) => `<details class="idhow small"><summary class="muted">How confirming works</summary><p class="muted${done ? ' idintro' : ''}">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity.${files ? ` ${esc(files)}` : ''}</p></details>`;
+          main.innerHTML = pageHead('Confirm matches', null, '<button class="btn ghost" id="idskipall" disabled title="Leave every unsure song as it is">Skip all unsure</button>') + idHow('') + '<p class="muted small idloading" role="status">Loading the matches to confirm…</p>' + rowSkeleton(6);
           const [page, st] = await Promise.all([api('GET', '/library/suggestions/albums?limit=50'), api('GET', '/library/identify').catch(() => null)]);
           if (!live()) return;
           // Paged by folder: "Show more" asks for the albums after the last one shown, so albums
@@ -6166,21 +6550,26 @@
               // "Not this" sit beside it, not inside it
               const opts = g.options.map((o) => `<div class="idopt idpick"><input type="radio" id="idopt-${o.id}" name="${name}" value="${o.id}" data-rec="${esc(o.recording_mbid)}" ${isChecked(g, String(o.id)) ? 'checked' : ''}><label class="grow" for="idopt-${o.id}"><span class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></span><span class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${how(o)} · ${Math.round(o.score * 100)}%</span></label><a class="idmb small" href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener" aria-label="${esc(`${o.title || 'Recording'} on MusicBrainz`)}">MusicBrainz ${icon('external')}</a><button class="btn ghost sm" type="button" data-reject="${o.id}" data-track="${t.id}" data-rec="${esc(o.recording_mbid)}" aria-label="${esc(`Not ${o.title || 'this recording'}`)}">Not this</button></div>`).join('');
               const note = g.status === 'conflict' ? '<p class="small warn-text idhold">These disagree: pick one, or leave it for later.</p>' : g.hold ? `<p class="small muted idhold">Not ticked: ${esc(holdWhy[g.hold] || g.hold)}.</p>` : '';
-              return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms), (t.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div>${note}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${opts}<div class="idopt idpick idlater"><input type="radio" id="idlater-${t.id}" name="${name}" value="" ${isChecked(g, '') ? 'checked' : ''}><label class="grow small muted" for="idlater-${t.id}">Leave for later</label></div></div></div>`;
+              return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms)].filter(Boolean).join(' · '))}</div>${t.file.path ? `<details class="idpath small muted"><summary title="${esc(t.file.path)}">${esc(t.file.path.split('/').pop())}</summary><span>${esc(t.file.path)}</span></details>` : ''}${note}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${opts}<div class="idopt idpick idlater"><input type="radio" id="idlater-${t.id}" name="${name}" value="" ${isChecked(g, '') ? 'checked' : ''}><label class="grow small muted" for="idlater-${t.id}">Leave for later</label></div></div></div>`;
             }).join('');
             if (!a.songs.length) return '';
             return `<section class="section idalbum" data-album="${ai}"><div class="section-head"><h3>${head}</h3><span class="muted small">${parts}</span></div>${rel}<div class="list">${songs}</div><div class="actions idconfirm"><button class="btn ghost" type="button" data-skip="${ai}" title="Leave these songs as they are: they play and show as usual, and Identify again leaves them alone">Leave as is</button><button class="btn primary" type="button" data-confirm="${ai}"></button><span class="small muted" role="status" data-confirm-out="${ai}"></span></div></section>`;
           };
+          let idNote = ''; // a note at the top of the list (the album asked for is not among these)
           const draw = () => {
-            main.innerHTML = pageHead('Confirm matches', page.songs, page.songs ? '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is">Skip all unsure</button>' : '') + (albums.some((a) => a.songs.length) || next != null ? `<p class="muted small idintro" style="margin-top:-6px">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity. ${esc(files)}</p>${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
+            // (the note is for the draw it came with: a later one, after Show more or Skip all, leaves it out)
+            const note = idNote ? `<p class="notice small idnote" role="status">${esc(idNote)}</p>` : ''; idNote = '';
+            main.innerHTML = pageHead('Confirm matches', page.songs, page.songs ? '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is">Skip all unsure</button>' : '') + (albums.some((a) => a.songs.length) || next != null ? `${idHow(files, true)}${note}${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : note + emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
             $$('[data-album]', main).forEach(wire);
             const ska = $('#idskipall'); if (ska) ska.onclick = (ev) => { if (locked.size) return undefined; hold('all', ska); return busy(ska, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { hold('all', null); throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: undoSkip({ all: true }) }); if (!live()) return; listGen++; albums.forEach((a) => { a.songs = []; }); page.songs = 0; next = null; hold('all', null); draw(); focusUndo(ub); }, ev); };
             // (a "Show more" answer that comes after Skip all is for a list that is gone)
             const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; const gen = listGen; try { const p = await api('GET', `/library/suggestions/albums?limit=50&${next}`); if (!live() || gen !== listGen) return; albums.push(...p.albums.filter((a) => !albums.some((x) => x.key === a.key))); next = cursor(p); draw(); } catch (e) { if (!live() || gen !== listGen) return; toast(e.message, 'error'); more.disabled = false; } };
           };
           // One album drawn again from what is known here, after a confirm or a "Not this" (the
-          // rest of the page, its choices and where it is scrolled stay; nothing is fetched)
+          // rest of the page, its choices and where it is scrolled stay; nothing is fetched; the
+          // note at the top was for the first draw and goes)
           const redraw = (ai) => {
+            { const n = $('.idnote', main); if (n) n.remove(); }
             const sec = $(`[data-album="${ai}"]`, main); if (!sec) return;
             const html = albumHtml(albums[ai], ai);
             if (!html) { sec.remove(); } else { sec.insertAdjacentHTML('afterend', html); sec.remove(); wire($(`[data-album="${ai}"]`, main)); }
@@ -6266,7 +6655,7 @@
             try { history.replaceState({ ...(history.state || {}), arg: histArg('identify', state.viewArg) }, '', location.pathname + location.search); } catch { /* sandboxed */ }
             const row = want.map((t) => $(`.idrow[data-track="${Number(t)}"]`, main)).find(Boolean); const sec = row && row.closest('.idalbum');
             if (sec) { sec.scrollIntoView({ block: 'start' }); const h = $('h3', sec); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); } }
-            else toast(next != null ? 'This album isn\'t among the first folders here: Show more at the end lists the rest.' : 'This album has no matches waiting to be confirmed. Identify (Settings) looks for it again.');
+            else { idNote = next != null ? 'This album isn\'t among the first folders here: Show more at the end lists the rest.' : 'This album has no matches waiting to be confirmed. Identify (Settings) looks for it again.'; draw(); }
           }
           break;
         }
@@ -6355,7 +6744,7 @@
           const run = startSearch(a.q, scope);
           main.innerHTML = `<div class="page-head"><h2>Results for “${esc(a.q)}”</h2></div><div class="scopechips" id="scopechips"></div><div id="sresults"></div><div id="sresults-said" class="sr-only" aria-live="polite"></div>`;
           search.setAttribute('aria-controls', 'sresults'); search.setAttribute('aria-expanded', 'true');
-          renderSearchBody(run);
+          searchChanged(run);
           break;
         }
         case 'dashboard': {
@@ -7094,9 +7483,11 @@
           // This render's generation: an answer (or failure) from an older render, or from a page
           // left meanwhile, is dropped (the same page opened again is a newer render)
           const gen = state.pageGen = (state.pageGen || 0) + 1;
-          await pubkyUser();
           const { kind, id } = state.viewArg;
           const live = () => gen === state.pageGen && state.view === 'item' && state.viewArg.id === id;
+          await pubkyUser();
+          // Account discovery can finish after Back has restored another page.
+          if (!live()) return;
           // Retry asks the node to fetch the service's lists again, once
           const refresh = state.viewArg.refresh ? '?refresh=1' : ''; delete state.viewArg.refresh;
           loading();
@@ -7235,11 +7626,12 @@
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
-            + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
+            + `<div class="hero item-hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
+              <div class="hmatch-slot" id="hmatch"></div>
               </div></div>`
             + (aboutTop ? aboutTopHtml(pg) : '')
-            + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : pg.unavailable ? empty(`${esc(pg.unavailable)}${pg.link ? ` <a href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener">Open on ${esc(pg.source)}</a>` : ''}`) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
+            + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}), ...(kind === 'album' ? { listClass: 'nums', oneArtist: songs.length > 1 && songs.every((t) => (t.artist || '') === (songs[0].artist || '')) && !!songs[0].artist } : {}) }) : pg.unavailable ? empty(`${esc(pg.unavailable)}${pg.link ? ` <a href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener">Open on ${esc(pg.source)}</a>` : ''}`) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
             + (kind === 'song' && pg.albums.length ? `<section class="section" id="ialbums"><div class="section-head"><h3>On the album</h3><span class="muted small">${pg.albums.length}</span></div>${itemTileGrid(pg.albums, 'album')}</section>` : '')
             // An artist's releases: Albums, EPs & singles, Other releases (each with View all), or
             // what the list is when it isn't there: loading, an error with Retry, nothing found
@@ -8328,7 +8720,9 @@
     // so the unsure ones are a secondary line, not a warning, and Identify stays the main button
     const reviewFirst = false;
     const unsure = ph === 'needs_review' && c.suggested ? `<p class="small muted idsub" id="idunsure">${n(c.suggested)} ${c.suggested === 1 ? 'song' : 'songs'} unsure (optional): songs play and show as usual, identified or not.</p>` : '';
-    box.innerHTML = `<p class="idphase ${ph === 'failed' || ph === 'interrupted' ? 'warn-text' : ''}" id="idphase" data-phase="${esc(ph)}" role="status">${ph === 'running' ? '<span class="spin"></span> ' : ''}${head}</p>${unsure}
+    // Unsure songs whose files the node can't find now (a share offline, a folder moved): not counted above, as on Confirm matches
+    const offline = c.suggested_missing ? `<p class="small muted" id="idmissing">${n(c.suggested_missing)} more unsure ${c.suggested_missing === 1 ? 'song’s file is' : 'songs’ files are'} out of reach now (a share offline or a folder moved); they wait until the files are back.</p>` : '';
+    box.innerHTML = `<p class="idphase ${ph === 'failed' || ph === 'interrupted' ? 'warn-text' : ''}" id="idphase" data-phase="${esc(ph)}" role="status">${ph === 'running' ? '<span class="spin"></span> ' : ''}${head}</p>${unsure}${offline}
       ${(() => {
         // One bar, one segment per state (owner, 2026-11-04: half purple, half dark read as "half
         // done, half empty" while the rest was to confirm and not found): identified, to confirm,
@@ -8340,8 +8734,8 @@
         const legend = parts.filter(([, v]) => v).map(([k, v, w]) => `<span class="idkey"><span class="idswatch ${k}" aria-hidden="true"></span>${k === 'suggested' ? `<a data-view="identify">${n(v)} ${w}</a>` : `${n(v)} ${w}`}</span>`).join(' ');
         return `${bar}<p class="small idlegend">${c.total ? `${n(c.total)} ${c.total === 1 ? 'song' : 'songs'}:` : ''}${legend ? ` <span class="idkeys">${legend}</span>` : ''}</p>`;
       })()}
-      ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.title_artist, 'by their exact title, artist and length'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
-      ${!p.running && p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>` : ''}
+      ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.title_artist, 'by their exact title, artist and length'], [c.by.auto, 'picked automatically <span class="pill" data-auto>auto</span>'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
+      ${!p.running && p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}${(() => { const k = Object.values(p.settled || {}).reduce((a, b) => a + b, 0); return k ? `; ${k} unsure ${k === 1 ? 'song' : 'songs'} picked automatically` : ''; })()}.</p>` : ''}
       ${(() => {
         // The AcoustID key lives here, with its state and a Check (owner, 2026-10-31): Settings
         // keeps no copy. Matching by how songs sound needs it; without it, title and artist only
@@ -8352,7 +8746,9 @@
           : `Songs are matched by their title and artist only. Matching by how they sound (AcoustID) finds more: get a free key at ${where} (register an application) and paste it here.`;
         return `<div class="set-row" id="acidrow"><div class="set-label"><div class="set-name">AcoustID key ${pill}</div><p class="set-help">${words}</p><form class="toolbar" id="acidform"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own || ks === 'refused' ? 'A new key' : 'AcoustID application key'}" autocomplete="off" spellcheck="false" aria-label="AcoustID key"><button class="btn sm" type="button" id="acidcheck">Check</button><button class="btn sm primary" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}<span class="small" id="acidout" role="status"></span></form></div></div>`;
       })()}
+      <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idauto" ${st.auto_match !== false ? 'checked' : ''}> Match new songs automatically <span class="muted">(after each scan that adds or changes songs, once a week for songs not found, and unsure songs whose best match is clearly ahead settled; on by default)</span></label>
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>
+      <p class="small muted" id="idautohelp">Unsure songs whose best match is clearly ahead are matched automatically (marked auto). Odeion uses those matches for albums, Pubky tags and Pinakes, but writes their IDs into your files only after you confirm them: Wrong match? on the song.</p>
       <div class="actions">${reviewFirst ? `<button class="btn primary" data-view="identify" id="idreview">Review ${matches(c.suggested)}</button>` : ''}<button class="btn ${reviewFirst ? '' : 'primary'}" id="idrun" ${p.running || ph === 'empty' ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested && !reviewFirst ? `<button class="btn" data-view="identify">Review ${n(c.suggested)} unsure</button>${p.running ? '' : '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is: it plays and shows as usual, and Identify again leaves it alone">Skip all unsure</button>'}` : ''}${c.skipped ? `<button class="btn ghost" id="idunskip" ${idUnskip.sending ? 'disabled' : ''}>${idUnskip.armedUntil > Date.now() ? `Bring back all ${n(c.skipped)}? Press again` : `Bring back ${n(c.skipped)} skipped`}</button>` : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
     $$('[data-view="identify"]', box).forEach((b) => b.onclick = () => setView('identify'));
     const acf = $('#acidform'); if (acf) {
@@ -8364,6 +8760,7 @@
       chk.onclick = async () => { chk.disabled = true; out.textContent = 'Checking…'; out.classList.remove('warn-text'); const k = $('#acidkey').value.trim(); try { const r = await api('POST', '/library/identify/key/check', k ? { acoustid_key: k } : {}); out.textContent = r.detail; out.classList.toggle('warn-text', !r.ok); } catch (e) { out.textContent = e.message; out.classList.add('warn-text'); } chk.disabled = false; };
       const clr = $('#acidclear'); if (clr) clr.onclick = () => saveKey('');
     }
+    const au = $('#idauto'); if (au) au.onchange = async () => { try { await api('PUT', '/library/identify/settings', { auto_match: au.checked }); toast(au.checked ? 'New songs are matched after each scan, and clear unsure ones settled' : 'Songs are matched only when you press Identify, and every unsure one waits for you'); renderIdentify(); } catch (e) { toast(e.message, 'error'); au.checked = !au.checked; } };
     const wr = $('#idwrite'); if (wr) wr.onchange = async () => { try { await api('PUT', '/library/identify/settings', { write_ids: wr.checked }); toast(wr.checked ? 'IDs will be written into your files' : 'Your files stay as they are'); renderIdentify(); } catch (e) { toast(e.message, 'error'); wr.checked = !wr.checked; } };
     const wn = $('#idwritenow'); if (wn) wn.onclick = async () => { wn.disabled = true; try { const r = await api('POST', '/library/identify/write'); toast(`${r.written} file${r.written === 1 ? '' : 's'} updated${r.skipped.length ? `, ${r.skipped.length} left as they were (${r.skipped[0].reason})` : ''}`); } catch (e) { toast(e.message, 'error'); } wn.disabled = false; };
     const run = $('#idrun'); if (run) run.onclick = async () => { try { await api('POST', '/library/identify', { retry: !c.unchecked }); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
@@ -8450,7 +8847,15 @@
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z])); state.zonesSeen = true;
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false); refreshAlong();
-      { const r = routeFromPath(); if (r && r.v === 'search' && r.arg && r.arg.q) { search.value = r.arg.q; history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search); runSearch('pop'); } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace'); }
+      {
+        const r = routeFromPath();
+        if (r && r.v === 'search' && r.arg && r.arg.q) {
+          search.value = r.arg.q;
+          history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search);
+          // A saved search's source applies to its first request, before the view is drawn.
+          runSearch('pop', r.arg.in || 'everywhere');
+        } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace');
+      }
       link.loaded = true;
       openEvents();
     } catch (e) {

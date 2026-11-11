@@ -65,14 +65,47 @@ impl AppState {
         self.settings.lock().ok()?.clone()
     }
 
+    /// Save `s` and make it the current settings, both under the settings lock: a registration's
+    /// [`AppState::store_if_node`] can't write its file between this save and this set.
     fn store(&self, s: Option<Settings>) {
-        if let Err(e) = settings::save(&self.path, s.as_ref()) {
-            tracing::warn!("cannot save the app settings: {e}");
-        }
-        if let Ok(mut cur) = self.settings.lock() {
-            *cur = s;
-        }
+        store_in(&self.settings, &self.path, s);
     }
+
+    /// Store `s` only while the current settings still name `node_url`: the check and the store
+    /// under one lock, so a registration that finishes after the app connected to another node
+    /// never writes that node's settings over the new one's. Whether it was stored.
+    fn store_if_node(&self, node_url: &str, s: Settings) -> bool {
+        store_if_node(&self.settings, &self.path, node_url, s)
+    }
+}
+
+/// [`AppState::store`] on the settings cell itself (also for tests).
+fn store_in(cell: &Mutex<Option<Settings>>, path: &std::path::Path, s: Option<Settings>) {
+    let mut cur = cell.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Err(e) = settings::save(path, s.as_ref()) {
+        tracing::warn!("cannot save the app settings: {e}");
+    }
+    *cur = s;
+}
+
+/// [`AppState::store_if_node`] on the settings cell itself (also for tests).
+fn store_if_node(
+    cell: &Mutex<Option<Settings>>,
+    path: &std::path::Path,
+    node_url: &str,
+    s: Settings,
+) -> bool {
+    let Ok(mut cur) = cell.lock() else {
+        return false;
+    };
+    if cur.as_ref().map(|c| c.node_url.as_str()) != Some(node_url) {
+        return false;
+    }
+    if let Err(e) = settings::save(path, Some(&s)) {
+        tracing::warn!("cannot save the app settings: {e}");
+    }
+    *cur = Some(s);
+    true
 }
 
 /// Links that would open a second window (`target="_blank"`, a
@@ -264,8 +297,8 @@ async fn register_player(app: AppHandle, s: Settings) {
     let player = app.state::<AppState>().player.clone();
     let s = player::register(s, player).await;
     let state = app.state::<AppState>();
-    if state.current().map(|c| c.node_url) == Some(s.node_url.clone()) {
-        state.store(Some(s));
+    let node_url = s.node_url.clone();
+    if state.store_if_node(&node_url, s) {
         let script = player::output_script();
         if let (false, Some(w)) = (script.is_empty(), app.get_webview_window(MAIN)) {
             let _ = w.eval(script);
@@ -586,6 +619,13 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::Network::Mainnet).map_err(|e| e.to_string())?;
     // Ends the wait after ring_wait::DEADLINE, or on the page's Cancel (ring_cancel).
     let stop = ring_wait::Stop::begin(ring_wait::DEADLINE);
+    // The newest homeserver records first (the identity this device connected with before, when
+    // known), so the grant exchange routes on them and not on the first record a node answered
+    let identity = state
+        .current()
+        .and_then(|c| pm_pubky::homeserver::PublicKey::try_from(c.owner.as_str()).ok());
+    let records = hs.fresh_for_sign_in(identity.as_ref(), None, false).await?;
+    tracing::info!(?records, "Ring: homeserver records before the sign-in");
     let flow = hs
         .start_login_with("pubky-music-desktop", RING_CAPS)
         .map_err(|e| e.to_string())?;
@@ -602,9 +642,20 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     );
     // Only on screen and online: Android 15+ cuts a backgrounded app's network (see ring_wait).
     let page = app.clone();
-    let session = ring_wait::approval(RingFlow(flow), since_trip, &relay, 443, stop, move |s| {
-        let _ = page.emit("ring-state", s);
-    })
+    let session = ring_wait::approval(
+        RingFlow {
+            flow,
+            hs: hs.clone(),
+            identity,
+        },
+        since_trip,
+        &relay,
+        443,
+        stop,
+        move |s| {
+            let _ = page.emit("ring-state", s);
+        },
+    )
     .await?;
     let record = hs
         .read_node_record(&session)
@@ -700,21 +751,27 @@ async fn sign_in_at_node(app: &AppHandle, s: &Settings) -> Result<String, String
 }
 
 /// A Ring sign-in in progress, for [`ring_wait::approval`].
-struct RingFlow(pm_pubky::homeserver::LoginFlow);
+struct RingFlow {
+    flow: pm_pubky::homeserver::LoginFlow,
+    /// The client the flow runs on (its records are the ones the exchange routes on).
+    hs: pm_pubky::homeserver::NodeHomeserver,
+    /// The identity this device connected with before, when known.
+    identity: Option<pm_pubky::homeserver::PublicKey>,
+}
 
 impl ring_wait::Pending for RingFlow {
     type Done = pm_pubky::homeserver::PubkySession;
     /// An error that came before the poll waited for anything is the relay listener's own (no
     /// grant was sent): see [`ring_wait::at_once`].
     async fn poll(&self) -> Result<Option<Self::Done>, ring_wait::Failed> {
-        let (r, at_once) = ring_wait::at_once(self.0.poll()).await;
+        let (r, at_once) = ring_wait::at_once(self.flow.poll()).await;
         r.map_err(|e| {
             ring_wait::Failed::sort(
                 ring_wait::chain(&e),
                 at_once,
                 e.is_transient(),
                 e.is_server_error(),
-                &ring_wait::relay_host(self.0.url()),
+                &ring_wait::relay_host(self.flow.url()),
             )
         })
     }
@@ -722,7 +779,22 @@ impl ring_wait::Pending for RingFlow {
     fn resume(&self) -> Result<Self, String> {
         let hs = pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::Network::Mainnet)
             .map_err(|e| e.to_string())?;
-        hs.resume_login(&self.0).map(RingFlow).map_err(|e| e.to_string())
+        let flow = hs.resume_login(&self.flow).map_err(|e| e.to_string())?;
+        Ok(RingFlow {
+            flow,
+            hs,
+            identity: self.identity.clone(),
+        })
+    }
+    /// Back on screen: the newest records again before the exchange (the ones held from before
+    /// the app went away, and pubky's transport choice on them, may be behind).
+    async fn returned(&self) -> Result<(), String> {
+        let records = self
+            .hs
+            .fresh_for_sign_in(self.identity.as_ref(), None, false)
+            .await?;
+        tracing::info!(?records, "Ring: homeserver records on return");
+        Ok(())
     }
 }
 
@@ -1010,6 +1082,75 @@ fn page_event(app: &tauri::AppHandle, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Connecting saves and sets the settings under the settings lock: while it is held, nothing
+    /// is written (a late registration's store can't land between this save and this set).
+    #[test]
+    fn connecting_saves_and_sets_under_the_settings_lock() {
+        let dir = std::env::temp_dir().join(format!("pm-desktop-store-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let cell = std::sync::Arc::new(Mutex::new(None::<Settings>));
+        let held = cell.lock().unwrap();
+        let writer = {
+            let (cell, path) = (cell.clone(), path.clone());
+            std::thread::spawn(move || {
+                store_in(
+                    &cell,
+                    &path,
+                    Some(Settings {
+                        node_url: "http://b:7788".into(),
+                        ..Settings::default()
+                    }),
+                )
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(!path.exists(), "saved before the lock was taken");
+        drop(held);
+        writer.join().unwrap();
+        let saved: Settings = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.node_url, "http://b:7788");
+        assert_eq!(cell.lock().unwrap().as_ref().unwrap().node_url, "http://b:7788");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A registration that ends after the app connected to another node never writes that
+    /// node's settings over the new one's: the check and the store happen under one lock.
+    #[test]
+    fn a_late_registration_never_replaces_a_newer_connection() {
+        let dir = std::env::temp_dir().join(format!("pm-desktop-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let node = |url: &str, player: &str| Settings {
+            node_url: url.into(),
+            player_address: player.into(),
+            ..Settings::default()
+        };
+        let cell = Mutex::new(Some(node("http://b:7788", "")));
+        // A's registration, late: refused, B stays
+        assert!(!store_if_node(
+            &cell,
+            &path,
+            "http://a:7788",
+            node("http://a:7788", "a-player")
+        ));
+        assert_eq!(cell.lock().unwrap().as_ref().unwrap().node_url, "http://b:7788");
+        assert!(!path.exists(), "nothing written");
+        // B's own: stored
+        assert!(store_if_node(
+            &cell,
+            &path,
+            "http://b:7788",
+            node("http://b:7788", "b-player")
+        ));
+        assert_eq!(cell.lock().unwrap().as_ref().unwrap().player_address, "b-player");
+        let saved: Settings = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.player_address, "b-player");
+        // No side file left behind
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Stands in at the claimed address: answers `/v1/info` as the node would, and hands every
     /// request it gets to the test.

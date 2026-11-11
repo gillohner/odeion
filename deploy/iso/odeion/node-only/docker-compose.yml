@@ -6,7 +6,7 @@ name: pubky-music
 
 services:
   music:
-    image: ${ODEION_IMAGE:-${PM_IMAGE:-ghcr.io/gillohner/pubky-music-node}}:${ODEION_TAG:-${PM_TAG:-edge}}
+    image: ${ODEION_IMAGE:-${PM_IMAGE:-ghcr.io/gillohner/odeion}}:${ODEION_TAG:-${PM_TAG:-edge}}
     restart: unless-stopped
     # The host network, so the node finds speakers (UPnP, Cast, AirPlay, Squeezebox)
     network_mode: host

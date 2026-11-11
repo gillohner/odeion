@@ -86,7 +86,7 @@ async function open(browser, w, inApp) {
   return run;
 }
 const pill = (page) => page.evaluate(() => document.querySelector('#quality .qtext').textContent);
-const pickerLine = async (page) => { await page.click('#zonebtn'); await sleep(300); const t = await page.evaluate((id) => { const b = document.querySelector(`#zonepop [data-zone="${id}"] .sub`); return b ? [...b.childNodes].filter((n) => !(n.classList && n.classList.contains('sr-only'))).map((n) => n.textContent).join('') : null; }, zone.id); return t; };
+const pickerLine = async (page) => { await page.$eval('#zonebtn', (b) => b.click()); await sleep(300); const t = await page.evaluate((id) => { const b = document.querySelector(`#zonepop [data-zone="${id}"] .sub`); return b ? [...b.childNodes].filter((n) => !(n.classList && n.classList.contains('sr-only'))).map((n) => n.textContent).join('') : null; }, zone.id); return t; };
 const closePicker = (page) => page.keyboard.press('Escape');
 const fetches = (st) => st.hits.filter((h) => h.v === '/outputs' && h.m === 'GET').length;
 // The app's own event (this phone), or the node's (every controller)
@@ -120,7 +120,7 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     check(id === OUT, `${at}: the page knows this app's output (${id})`);
 
     // The open Sound panel follows the node: unplugged and plugged while it is open
-    await page.click('#quality'); await page.waitForSelector('#qpanel:not([hidden])'); await sleep(300);
+    await page.$eval('#quality', (q) => q.click()); await page.waitForSelector('#qpanel:not([hidden])'); await sleep(300);
     const pl = await panelLine(page);
     check(pl === 'Shared · FiiO KA17', `${at}: the open Sound panel's Playing on line ("${pl}")`);
     await nodePlug(run, null);

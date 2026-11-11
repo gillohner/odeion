@@ -164,6 +164,85 @@ fn free_name(dest: &std::path::Path, hash: &str) -> Option<std::path::PathBuf> {
     unreachable!("an endless range")
 }
 
+type FolderLocks = std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>;
+
+/// One lock per folder of the mirror: every name `free_name` may choose there (`x.flac`,
+/// `x (2).flac`, …) is in that folder, so two files placed at once never take the same one,
+/// whichever name each asked for. An entry goes when its last holder is done.
+fn mirror_locks() -> &'static FolderLocks {
+    static L: std::sync::OnceLock<FolderLocks> = std::sync::OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+/// A folder's lock, held; its map entry goes with the last holder.
+struct FolderLock {
+    folder: PathBuf,
+    _held: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for FolderLock {
+    fn drop(&mut self) {
+        let mut map = mirror_locks().lock().expect("mirror locks");
+        // The map's and ours: nobody else holds it or waits for it (both clone under this lock)
+        if map.get(&self.folder).is_some_and(|m| Arc::strong_count(m) == 2) {
+            map.remove(&self.folder);
+        }
+    }
+}
+
+/// Whether the map holds `folder`'s lock (tests: other tests' folders may be in it meanwhile).
+#[cfg(test)]
+pub(crate) fn mirror_lock_held(folder: &std::path::Path) -> bool {
+    mirror_locks().lock().expect("mirror locks").contains_key(folder)
+}
+
+async fn lock_folder(folder: &std::path::Path) -> FolderLock {
+    let m = mirror_locks()
+        .lock()
+        .expect("mirror locks")
+        .entry(folder.to_path_buf())
+        .or_default()
+        .clone();
+    FolderLock {
+        folder: folder.to_path_buf(),
+        _held: m.lock_owned().await,
+    }
+}
+
+/// Put `bytes` (content `hash`) at `dest` in the mirror folder without replacing anything: the
+/// same song there already is kept, anything else gets the next free name (`free_name`). Under
+/// the folder's lock from the name to the rename, with a part file of this write's own, so
+/// two uploads of different songs to one path both land, whole, under two names. Returns the
+/// path written, `None` when the same song was there.
+pub(crate) async fn place_in_mirror(
+    dest: &std::path::Path,
+    hash: &str,
+    bytes: Vec<u8>,
+) -> Result<Option<PathBuf>, String> {
+    let _held = lock_folder(dest.parent().unwrap_or(std::path::Path::new("."))).await;
+    let free = {
+        let (dest, hash) = (dest.to_path_buf(), hash.to_string());
+        tokio::task::spawn_blocking(move || free_name(&dest, &hash))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let Some(dest) = free else {
+        return Ok(None);
+    };
+    // Written beside it and moved into place: a failed write leaves no half a song
+    let part = dest.with_file_name(format!(
+        ".{}.{}.part",
+        dest.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        crate::tidal::random_urlsafe(6)
+    ));
+    if let Err(e) = tokio::fs::write(&part, bytes).await {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(e.to_string());
+    }
+    tokio::fs::rename(&part, &dest).await.map_err(|e| e.to_string())?;
+    Ok(Some(dest))
+}
+
 /// What happened to one file.
 pub(crate) enum Stored {
     /// Sent to the homeserver, at this path.
@@ -259,26 +338,7 @@ pub(crate) async fn store(
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        // Never over another file: the same song there already is kept, anything else gets the
-        // next free name
-        let free = {
-            let (dest, hash) = (dest.clone(), hash.clone());
-            tokio::task::spawn_blocking(move || free_name(&dest, &hash))
-                .await
-                .map_err(|e| e.to_string())?
-        };
-        if let Some(dest) = free {
-            // Written beside it and moved into place: a failed write leaves no half a song
-            let part = dest.with_file_name(format!(
-                ".{}.part",
-                dest.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
-            ));
-            if let Err(e) = tokio::fs::write(&part, bytes).await {
-                let _ = tokio::fs::remove_file(&part).await;
-                return Err(e.to_string());
-            }
-            tokio::fs::rename(&part, &dest).await.map_err(|e| e.to_string())?;
-        }
+        place_in_mirror(&dest, &hash, bytes).await?;
         let root = s.mirror_dir.clone();
         let known = s
             .library
@@ -379,46 +439,49 @@ pub(crate) async fn start(
     {
         return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
     }
-    // And the disk it waits on until whole, with what the other uploads still have to send
-    let coming: u64 = s
-        .music_uploads
-        .lock()
-        .expect("uploads")
-        .values()
-        .filter(|u| u.state == "receiving")
-        .map(|u| u.size - u.offset)
-        .sum();
-    if let Some(why) = crate::copy_guard::room_for_staging(&s, &parts_dir(&s))
-        .space()
-        .and_then(|sp| sp.too_little(coming + b.size))
-    {
-        return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
-    }
     tokio::fs::create_dir_all(parts_dir(&s))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let id = crate::tidal::random_urlsafe(12);
-    tokio::fs::write(part_path(&s, &id), b"")
-        .await
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut u = s.music_uploads.lock().expect("uploads");
-    expire(&mut u, &s);
-    u.insert(
-        id.clone(),
-        Upload {
-            id: id.clone(),
-            name,
-            relative_path: b.relative_path.map(|r| r.chars().take(400).collect()),
-            size: b.size,
-            offset: 0,
-            state: "receiving".into(),
-            error: None,
-            full: false,
-            stored_as: None,
-            touched: Some(Instant::now()),
-            writing: false,
-        },
-    );
+    // The disk it waits on until whole, with what the other uploads still have to send: counted,
+    // checked and this upload added in one step under the uploads' lock, so two starts at once
+    // can't both pass on the same room
+    {
+        let room = crate::copy_guard::room_for_staging(&s, &parts_dir(&s));
+        let mut u = s.music_uploads.lock().expect("uploads");
+        expire(&mut u, &s);
+        let coming: u64 = u
+            .values()
+            .filter(|x| x.state == "receiving")
+            .map(|x| x.size - x.offset)
+            .sum();
+        if let Some(why) = room.space().and_then(|sp| sp.too_little(coming + b.size)) {
+            return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
+        }
+        // This empty-file operation must finish before publishing the reservation. An
+        // async filesystem task can outlive a dropped request and recreate an orphan.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(part_path(&s, &id))
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        u.insert(
+            id.clone(),
+            Upload {
+                id: id.clone(),
+                name,
+                relative_path: b.relative_path.map(|r| r.chars().take(400).collect()),
+                size: b.size,
+                offset: 0,
+                state: "receiving".into(),
+                error: None,
+                full: false,
+                stored_as: None,
+                touched: Some(Instant::now()),
+                writing: false,
+            },
+        );
+    }
     Ok(Json(UploadStarted {
         id: Some(id),
         offset: 0,
@@ -568,6 +631,11 @@ async fn finish(s: &Arc<NodeState>, id: &str) {
             ));
         }
         let mut have = present(sync.as_ref()).await?;
+        // Cancelled while the chunks were looked at: nothing goes to the homeserver or the
+        // library (a request already under way can't be called back; this is before it)
+        if get_upload(s, id).is_err() {
+            return Err("cancelled".into());
+        }
         let room = crate::copy_guard::room_for_store(s);
         store(
             s,
