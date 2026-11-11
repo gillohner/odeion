@@ -192,6 +192,10 @@ pub struct NodeState {
             ),
         >,
     >,
+    /// When a controller log in last warmed the homeserver records (`lib::controller_login_start`,
+    /// a route that needs no token): its lookups run one at a time and at most every
+    /// `lib::CONTROLLER_WARM_EVERY`.
+    pub controller_warmed: tokio::sync::Mutex<Option<std::time::Instant>>,
     /// Renewal codes the owner's page got for its next Pubky Ring log in (`POST
     /// /v1/auth/pubky/renewal`): code → when. Good until a renewal succeeds.
     pub renewals: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
@@ -516,6 +520,7 @@ impl NodeState {
             contact: std::sync::RwLock::new(contact),
             login: tokio::sync::Mutex::new(None),
             controller_logins: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            controller_warmed: tokio::sync::Mutex::new(None),
             renewals: Default::default(),
             personal_homeserver: Mutex::new(None),
             upload_jobs: Default::default(),
