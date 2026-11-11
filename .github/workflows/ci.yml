@@ -68,7 +68,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -162,7 +162,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: crates/pm-desktop
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libasound2-dev
+      - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libasound2-dev
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
@@ -223,6 +223,7 @@ jobs:
           key: alsa
       - name: a generic kernel with snd-aloop, and virtme-ng
         run: |
+          bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
           sudo apt-get update
           # The kernel that linux-image-generic points at, without that metapackage: it also pulls in
           # all of linux-firmware and the microcode (hundreds of MB), which the guest does not need and
@@ -278,7 +279,7 @@ jobs:
         with:
           name: node-debug
       - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends squeezelite
+      - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends squeezelite
       - run: python3 -I tools/slim-squeezelite.py target/debug/pm-node /tmp/slim
       - if: failure()
         run: tail -n 50 /tmp/slim/node.log /tmp/slim/squeezelite.log
@@ -326,7 +327,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Audiobookshelf
         run: |
           git clone -q --depth 1 -b "$ABS_TAG" https://github.com/advplyr/audiobookshelf.git /tmp/abs-src
@@ -360,10 +361,11 @@ jobs:
         with:
           name: node-debug
       - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
+      - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
       - name: the node's CI image
         run: |
           cp target/debug/odeiond deploy/docker/entrypoint.sh deploy/bundle/ci/
-          docker build -q -t pubky-music-node:ci deploy/bundle/ci
+          docker build -q --build-arg APT_MIRROR="${APT_FALLBACK_MIRROR:-}" -t pubky-music-node:ci deploy/bundle/ci
           # The image carries ffmpeg with the encoders downloads use
           docker run --rm --entrypoint ffmpeg pubky-music-node:ci -hide_banner -encoders | grep -E ' aac | libmp3lame | libopus ' | wc -l | grep -qx 3
       - name: docker compose up
@@ -469,6 +471,7 @@ jobs:
         run: |
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null
           npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
           npx playwright install --with-deps chromium >/dev/null
       - name: kill and restore the node under two controllers
         run: |
@@ -541,6 +544,7 @@ jobs:
         run: |
           mkdir -p /tmp/tl/data /tmp/pw && cd /tmp/pw && npm init -y >/dev/null
           npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
           npx playwright install --with-deps chromium >/dev/null
           printf 'data_dir = "/tmp/tl/data"\n[api]\nlisten = "127.0.0.1:7791"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n[tidal]\nclient_id = "ci-project-app"\n[auth]\nreturn_page = "http://127.0.0.1:7811/callback"\n' > /tmp/tl/node.toml
           (cd /tmp/tl && HOME=/tmp/tl PM_TIDAL_AUTH_BASE=http://127.0.0.1:7811 PM_TIDAL_LOGIN_BASE=http://127.0.0.1:7811 PM_TIDAL_API_BASE=http://127.0.0.1:7811 \
@@ -589,6 +593,7 @@ jobs:
         run: |
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null
           npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
           npx playwright install --with-deps chromium >/dev/null
       - name: the pages, against fixtures
         env:
@@ -698,6 +703,7 @@ jobs:
           nohup ./target/debug/pm-node -c /tmp/big/node.toml serve > /tmp/big/node.log 2>&1 &
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
           npx playwright install --with-deps chromium >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-perf.js ci-token http://127.0.0.1:7788 --budget $GITHUB_WORKSPACE/tools/perf-budget.json
       - if: failure()
@@ -754,6 +760,7 @@ jobs:
           UI_CONTROLS_REPORT: /tmp/ui-controls-${{ matrix.shard }}.json
         run: |
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
           npx playwright install --with-deps chromium >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-controls.js ci-token http://127.0.0.1:7788
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -844,6 +851,7 @@ jobs:
       - name: Playwright and Chromium
         run: |
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
           npx playwright install --with-deps chromium >/dev/null
       - name: sign-in blocks (other ways, imports, refusal, change, sign out; desktop and phone)
         if: matrix.part == 1
