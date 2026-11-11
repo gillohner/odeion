@@ -5215,7 +5215,13 @@
     // clicked; a click on one that doesn't play does nothing
     const songs = all.filter((t) => !t.card); const at = (k) => Math.max(0, songs.indexOf(all[k]));
     $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, at(Number(b.dataset.splay)), 'replace', ctx.plays_from, b, ctx.fallback); });
-    $$('[data-srow]:not([data-card]):not([data-search])', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback); });
+    // While selecting, a tap on a row ticks it (on phones a long press starts selecting, and the
+    // next taps add songs): it never plays and replaces the queue then. Its box ticks itself
+    $$('[data-srow]:not([data-card]):not([data-search])', box).forEach((r) => r.onclick = (e) => {
+      if (e.target.closest('a,button')) return;
+      if (r.closest('.selecting')) { const c = $('.selbox input', r); if (c && !e.target.closest('.selbox')) { c.checked = !c.checked; c.dispatchEvent(new Event('change', { bubbles: true })); } return; }
+      playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback);
+    });
     fillCards(box);
     // A card's ⋯: open it, copy its link, and the row's own moves (on phones the only way to them)
     $$('[data-cmore]', box).forEach((b) => b.onclick = (e) => {
