@@ -601,7 +601,8 @@ pub fn decide_why(song: &Song) -> (Verdict, Option<String>) {
     stay(Stay::Weak, Some(format!("{rows}:no_strong")))
 }
 
-/// The words that name a version ([`version_gap`]).
+/// The words that name a version, in a reason to stay (how a candidate's version differs from the
+/// file's).
 pub const MARK_WORDS: &[&str] = &[
     "live",
     "remix",
