@@ -96,6 +96,11 @@ impl pm_library::tags::RemoteRead for Slow {
     }
 }
 
+thread_local! {
+    /// When this thread's statement first found the database locked (its busy handler's first call)
+    static LOCKED_SINCE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
 /// Reading a file holds no transaction: another writer (Identify, the API) waits for the scan's
 /// writes only, never for a slow read (it waited for each one, and gave up with "database is
 /// locked" once a read took longer than the busy timeout).
@@ -126,19 +131,29 @@ fn a_slow_read_never_keeps_another_writer_waiting() {
         std::thread::spawn(move || {
             let conn = rusqlite::Connection::open(&db).unwrap();
             conn.busy_handler(Some(|t| {
+                if LOCKED_SINCE.get().is_none() {
+                    LOCKED_SINCE.set(Some(std::time::Instant::now()));
+                }
                 std::thread::sleep(std::time::Duration::from_millis(1));
                 t < 30_000
             }))
             .unwrap();
-            conn.execute_batch("CREATE TABLE IF NOT EXISTS other_writer (n INTEGER)")
-                .unwrap();
+            // As the node's own connections: a commit without an fsync of its own, so a slow disk
+            // on a busy machine is not taken for waiting
+            conn.execute_batch(
+                "PRAGMA synchronous = NORMAL; CREATE TABLE IF NOT EXISTS other_writer (n INTEGER)",
+            )
+            .unwrap();
+            // The longest wait for the lock, from the moment a write found it taken
             let mut longest = std::time::Duration::ZERO;
             let mut n = 0;
             while !stop.load(Ordering::Relaxed) {
-                let t = std::time::Instant::now();
+                LOCKED_SINCE.set(None);
                 conn.execute("INSERT INTO other_writer (n) VALUES (?1)", [n])
                     .unwrap();
-                longest = longest.max(t.elapsed());
+                if let Some(since) = LOCKED_SINCE.take() {
+                    longest = longest.max(since.elapsed());
+                }
                 n += 1;
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
