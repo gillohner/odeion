@@ -897,6 +897,25 @@ def in_app_player(address, track):
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
 
 
+def page_back_to_phone_zone(address):
+    """After the in-app player step: the page back on the phone's own zone on the node, its queue
+    empty and stopped, as the steps before left it. Saved on "This phone" with the shuffled song,
+    the page would show that same song again after the restart, and the UI tour's check that the
+    mini player changes after "Play to" would see no change (the fixture library has one song)."""
+    phone = next((z for z in api("GET", "/v1/zones") if z["output"].startswith(f"net:{address}/")), None)
+    if phone is None:
+        log("no phone zone on the node: the page stays on “This phone”")
+        return
+    api("POST", f"/v1/zones/{phone['id']}/transport", {"action": "stop"})
+    api("DELETE", f"/v1/zones/{phone['id']}/queue")
+    mark = len(logcat())
+    pick(f'="{phone["name"]}', "the phone's own zone")
+    try:
+        until("the page on the phone's own zone", lambda: re.search(r"the page controls this zone zone=(?!browser)\S+", logcat()[mark:]), timeout=20)
+    except RuntimeError:
+        log("the page's zone change was not logged; the tour shows what the mini player says")
+
+
 # The address the app registers: the emulator's own, on the player's usual port
 GUEST = "10.0.2.15:7790"
 # The host end of `adb forward` to the player: one port per relay, so a second relay never
@@ -1147,6 +1166,8 @@ def run(node):
         log("the phone is a zone, plays in real time, and keeps playing in the background")
         in_app_player(address, track)
         log("the in-app player is the app's own: real time, in the background, and it gives the output to the node's zone")
+        if os.environ.get("PM_UI_TOUR"):
+            page_back_to_phone_zone(address)
 
         # Started again with the node saved: it reconnects and the service starts again
         adb("shell", "am", "force-stop", PKG)

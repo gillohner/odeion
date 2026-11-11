@@ -4927,7 +4927,7 @@ dependencies = [
 
 [[package]]
 name = "pm-app-player"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "pm-audio",
@@ -4961,7 +4961,7 @@ dependencies = [
 
 [[package]]
 name = "pm-audio"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "base64 0.22.1",
  "ebur128",

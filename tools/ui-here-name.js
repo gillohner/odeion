@@ -121,7 +121,7 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
       for (let i = 0; i < 30 && !(await moved()); i++) await sleep(100);
       check(await moved(), `${at}: a DAC on the app's output moves the paused bar to ${zone.name}, with a note (${(await text(page, '#zonename')).trim()})`);
       // Chosen again, "This phone" stays (the move is once per DAC): its Output line names the DAC and that zone
-      await page.click('#zonebtn'); await page.waitForSelector('#zonepop:not([hidden])'); await sleep(200);
+      await page.$eval('#zonebtn', (b) => b.click()); await page.waitForSelector('#zonepop:not([hidden])'); await sleep(200);
       await page.click('#zonepop [data-zone="browser"]'); await page.waitForSelector('#npart', { timeout: 5000 }); await sleep(500);
       check((await text(page, '#zonename')).trim() === name, `${at}: "${name}" chosen again stays chosen (${(await text(page, '#zonename')).trim()})`);
       await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
