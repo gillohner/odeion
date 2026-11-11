@@ -99,30 +99,41 @@ impl pm_library::tags::RemoteRead for Slow {
 /// Reading a file holds no transaction: another writer (Identify, the API) waits for the scan's
 /// writes only, never for a slow read (it waited for each one, and gave up with "database is
 /// locked" once a read took longer than the busy timeout).
+///
+/// No wall-clock bound on a write (a slow CI runner stalls one without any lock wait): the writer
+/// counts the writes that start and finish while one read is in progress. A read that kept the
+/// writer waiting lets none of them finish before it ends.
 #[test]
 fn a_slow_read_never_keeps_another_writer_waiting() {
     use pm_library::scan::RemoteEntry;
+    use std::sync::atomic::AtomicU64;
     const READ: std::time::Duration = std::time::Duration::from_millis(700);
+    const FILES: u64 = 3;
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("lib.sqlite");
     let lib = Library::open(&db).unwrap();
     let flac = std::fs::read(fixture()).unwrap();
     let root = PathBuf::from("webdav://share1");
-    let entries: Vec<RemoteEntry> = (0..3)
+    let entries: Vec<RemoteEntry> = (0..FILES)
         .map(|i| RemoteEntry {
             path: root.join(format!("Album/{i:02} song.flac")),
             size: flac.len() as u64,
             mtime: 1_700_000_000,
         })
         .collect();
+    // Odd while a read is in progress: each read's start and end step it once (reads run one
+    // after the other)
+    let reading = Arc::new(AtomicU64::new(0));
     let open = |_: &RemoteEntry| -> std::io::Result<Box<dyn pm_library::tags::RemoteRead>> {
+        reading.fetch_add(1, Ordering::SeqCst);
         std::thread::sleep(READ);
+        reading.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(Slow(std::io::Cursor::new(flac.clone()))))
     };
 
     let stop = Arc::new(AtomicBool::new(false));
     let writer = {
-        let (db, stop) = (db.clone(), stop.clone());
+        let (db, stop, reading) = (db.clone(), stop.clone(), reading.clone());
         std::thread::spawn(move || {
             let conn = rusqlite::Connection::open(&db).unwrap();
             conn.busy_handler(Some(|t| {
@@ -132,27 +143,34 @@ fn a_slow_read_never_keeps_another_writer_waiting() {
             .unwrap();
             conn.execute_batch("CREATE TABLE IF NOT EXISTS other_writer (n INTEGER)")
                 .unwrap();
+            // The reads (by their step) during which a whole write landed
+            let mut reads_with_a_write = std::collections::BTreeSet::new();
             let mut longest = std::time::Duration::ZERO;
             let mut n = 0;
             while !stop.load(Ordering::Relaxed) {
+                let step = reading.load(Ordering::SeqCst);
                 let t = std::time::Instant::now();
                 conn.execute("INSERT INTO other_writer (n) VALUES (?1)", [n])
                     .unwrap();
                 longest = longest.max(t.elapsed());
+                if step % 2 == 1 && reading.load(Ordering::SeqCst) == step {
+                    reads_with_a_write.insert(step);
+                }
                 n += 1;
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            (n, longest)
+            (n, reads_with_a_write.len(), longest)
         })
     };
     let report = Scanner::new(&lib).scan_remote(&root, entries, &open).unwrap();
     stop.store(true, Ordering::Relaxed);
-    let (writes, longest) = writer.join().unwrap();
+    let (writes, reads_with_a_write, longest) = writer.join().unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
-    assert_eq!(report.files_added, 3);
-    assert!(
-        longest < std::time::Duration::from_millis(300),
-        "a write waited {longest:?} (each read takes {READ:?})"
+    assert_eq!(report.files_added, FILES);
+    assert_eq!(
+        reads_with_a_write as u64, FILES,
+        "a write landed during {reads_with_a_write} of {FILES} reads ({writes} writes, the \
+         longest took {longest:?}, each read takes {READ:?})"
     );
     assert!(writes > 10, "{writes} writes");
 }
