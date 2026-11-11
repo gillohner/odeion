@@ -69,7 +69,12 @@ const pressMode = async (page, which) => {
 // settled button lands after it; this one goes as soon as the button has its handler
 const pressNow = (page, which) => until(async () => page.evaluate((which) => { const b = document.querySelector(`#nowplaying:not([hidden]) [data-npt="${which}"]`) || document.querySelector(which === 'shuffle' ? '#shufflebtn' : '#repeatbtn'); if (!b || !b.onclick) return false; b.click(); return true; }, which), 1500);
 const openNp = async (page, w) => { if (await page.locator('#nowplaying:not([hidden])').count()) return; await page.click(w >= 600 && await page.locator('#npart').isVisible() ? '#npart' : '#np'); await page.waitForSelector('#nowplaying:not([hidden])'); await sleep(250); };
-const closeNp = async (page) => { if (!(await page.locator('#nowplaying:not([hidden])').count())) return; await page.keyboard.press('Escape'); await until(async () => !(await page.locator('#nowplaying:not([hidden])').count()), 2000); };
+// (Escape closes an open sheet over a phone's player first, then Now playing)
+const closeNp = async (page) => { for (let k = 0; k < 3 && await page.locator('#nowplaying:not([hidden])').count(); k++) { await page.keyboard.press('Escape'); await until(async () => !(await page.locator('#nowplaying:not([hidden])').count()), 1000); } };
+// Play to: the bar's zone button, or on a phone (no zone button in the bar) the zone named at the top of Now playing
+const openZonePop = async (page, w) => { if (await page.locator('#zonebtn').isVisible()) return page.click('#zonebtn'); await openNp(page, w); await page.click('#npzone'); await page.waitForSelector('#zonepop:not([hidden])'); };
+// Up next: beside the player on wider screens, a sheet behind the dock's Up next on a phone
+const openUpNext = async (page) => { const dq = page.locator('#nowplaying:not([hidden]) .np-dock [data-npsheet="queue"]'); if (await dq.count() && await dq.isVisible() && !(await page.locator('#nowplaying:not([hidden]) [data-npqi]').count())) { await dq.click(); await sleep(300); } };
 const saved = (page) => page.evaluate(() => { try { return { q: JSON.parse(localStorage.getItem('pm.browserQueue') || '[]').map((it) => it.uri), at: JSON.parse(localStorage.getItem('pm.browserAt') || 'null'), shuffle: localStorage.getItem('pm.shuffle'), repeat: localStorage.getItem('pm.repeat') }; } catch { return null; } });
 const title = (uri) => `Song ${uri.split(':')[1]}`;
 const upNext = (page) => page.evaluate(() => [...document.querySelectorAll('#nowplaying:not([hidden]) [data-npqi] .name')].map((e) => e.textContent.trim()));
@@ -320,6 +325,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         await openNp(page, w);
         await pressMode(page, 'shuffle');
         check(await until(async () => { const s = await saved(page); return s.shuffle === 'on' && s.q[0] === inOrder[0] && isPermutation(s.q) && s.q.join() !== inOrder.join(); }, 6000), `${T} shuffle on here: the current song stays first, the rest is drawn (${(await saved(page)).q.join(' ')})`);
+        await openUpNext(page);
         check(await until(async () => { const s = await saved(page); const rows = await upNext(page); return rows.length > 0 && rows.join() === s.q.slice(s.at.index + 1, s.at.index + 1 + rows.length).map(title).join(); }), `${T} …and Now playing's Up next shows the drawn order (${(await upNext(page)).slice(0, 4).join(', ')})`);
         check(allAre((await modes(page)).shuffle, true, 'Shuffle: on'), `${T} …every copy on: ${say((await modes(page)).shuffle)}`);
         // Next, then off: back in order with the current song in its place
@@ -354,7 +360,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         // Move to the zone: shuffle and repeat go along, the items in their original order
         const cur = await until(async () => { const s = await saved(page); return s.at && s.at.index === 0; }, 4000) ? (await saved(page)).q[0] : null;
         const loads = asked('POST', /\/zones\/z1\/load$/).length;
-        await page.click('#zonebtn'); await page.locator('[data-move="z1"]').click();
+        await openZonePop(page, w); await page.locator('[data-move="z1"]').click();
         check(await until(async () => asked('POST', /\/zones\/z1\/load$/).length === loads + 1, 8000), `${T} Move to sends the queue to the zone`);
         const mv = asked('POST', /\/zones\/z1\/load$/)[loads];
         check(!!mv && mv.body.shuffle === true && mv.body.repeat === 'all' && mv.body.items.map((x) => x.uri).join() === inOrder.join() && cur != null && mv.body.items[mv.body.index] && mv.body.items[mv.body.index].uri === cur, `${T} …with shuffle on and repeat all, the items in their original order and the current song's place in it (${mv && JSON.stringify({ shuffle: mv.body.shuffle, repeat: mv.body.repeat, index: mv.body.index, cur })})`);
@@ -363,7 +369,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         await until(async () => (await page.evaluate(() => localStorage.getItem('pm.zone'))) === 'z1', 4000);
         const zq = Z.queue.map((x) => x.uri);
         const back = page.locator('[data-move="browser"]');
-        if (!(await back.isVisible())) { await page.keyboard.press('Escape'); await sleep(300); await page.click('#zonebtn'); }
+        if (!(await back.isVisible())) { await page.keyboard.press('Escape'); await sleep(300); if (!(await back.isVisible())) { await closeNp(page); await openZonePop(page, w); } }
         await back.click();
         check(await until(async () => { const s = await saved(page); return s.shuffle === 'on' && s.q.join() === zq.join(); }, 8000), `${T} a move back here keeps shuffle on (${JSON.stringify((await saved(page)).shuffle)})`);
 
