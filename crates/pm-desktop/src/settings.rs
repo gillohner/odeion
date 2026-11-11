@@ -93,8 +93,12 @@ pub fn save(path: &Path, s: Option<&Settings>) -> anyhow::Result<()> {
     // The file holds the node's token: it is created 0600 under a side name and renamed into
     // place, so it is never readable by others, not even for a moment, and a crash mid-write
     // leaves the old file (security review 2026-10-27, low).
+    // A side name of this write's own: two writes at once (a registration ending as the app
+    // connects elsewhere) never share one half-written file
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("settings");
-    let side = path.with_file_name(format!(".{name}.tmp"));
+    let side = path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()));
     let _ = std::fs::remove_file(&side);
     let written = (|| -> std::io::Result<()> {
         use std::io::Write;

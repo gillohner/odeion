@@ -4849,7 +4849,7 @@ dependencies = [
 
 [[package]]
 name = "pm-appdata"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
@@ -4899,7 +4899,7 @@ dependencies = [
 
 [[package]]
 name = "pm-discovery"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "if-addrs",
  "mdns-sd",
@@ -4910,7 +4910,7 @@ dependencies = [
 
 [[package]]
 name = "pm-endpoint"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -4926,7 +4926,7 @@ dependencies = [
 
 [[package]]
 name = "pm-model"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4937,7 +4937,7 @@ dependencies = [
 
 [[package]]
 name = "pm-offline"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -4952,7 +4952,7 @@ dependencies = [
 
 [[package]]
 name = "pm-out-local"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "alsa",
  "alsa-sys",
@@ -4969,7 +4969,7 @@ dependencies = [
 
 [[package]]
 name = "pm-pubky"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "base32",
  "blake3",
@@ -4993,7 +4993,7 @@ dependencies = [
 
 [[package]]
 name = "pm-remote"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "iroh",
@@ -5003,7 +5003,7 @@ dependencies = [
 
 [[package]]
 name = "pm-stream"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "pm-model",
  "pm-zones",
@@ -5015,7 +5015,7 @@ dependencies = [
 
 [[package]]
 name = "pm-usb-audio"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "libc",
  "serde",
@@ -5023,7 +5023,7 @@ dependencies = [
 
 [[package]]
 name = "pm-zones"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "form_urlencoded",

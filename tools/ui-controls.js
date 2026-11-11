@@ -13,6 +13,7 @@
 // in its own shard's list (a control that appears only after another shard's click would otherwise
 // be clicked by none).
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
+const searchFixture = require('./ui-controls-search');
 const TOKEN = process.argv[2]; const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const [SHARD, SHARDS] = (process.env.UI_SHARD || '1/1').split('/').map(Number);
@@ -34,20 +35,11 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
   try { const pls = await api('/playlists'); const pl = pls.find((p) => p.items > 0); if (pl) views.push('/playlist/' + pl.id); } catch { /* none */ }
   try { const al = await api('/library/albums'); if (al[0]) views.push('/album/lib-' + al[0].id); } catch { /* none */ }
   views.push('/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69');
+  // Optional focused rerun; CI leaves this unset and audits every view above.
+  if (process.env.UI_CONTROLS_VIEWS) views.splice(0, views.length, ...JSON.parse(process.env.UI_CONTROLS_VIEWS));
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: 'dark' });
-  if (process.env.UI_CONTROLS_INPUTS) {
-    const frozen = JSON.parse(require('node:fs').readFileSync(process.env.UI_CONTROLS_INPUTS, 'utf8'));
-    if (frozen.query !== 'queen' || !frozen.sources.length || !frozen.answers.length) throw new Error('invalid control-audit search inputs');
-    await ctx.route(/\/v1\/search\?/, (route) => {
-      const url = new URL(route.request().url());
-      if (url.searchParams.get('q') !== frozen.query) return route.continue();
-      const scope = url.searchParams.get('in') || 'everywhere';
-      const sources = scope === 'everywhere' ? frozen.sources : scope === 'pubky' ? frozen.sources.filter((s) => ['pubky', 'people', 'posts'].includes(s)) : scope.split(',');
-      const answers = frozen.answers.filter((a) => sources.includes(a.source));
-      return route.fulfill({ status: 200, contentType: 'application/x-ndjson', headers: { 'x-pm-sources': sources.join(',') }, body: answers.map((a) => JSON.stringify(a)).join('\n') + '\n' });
-    });
-  } else if (SHARDS > 1) throw new Error('sharded control audits require shared UI_CONTROLS_INPUTS');
+  await searchFixture.install(ctx);
   await ctx.addInitScript((t) => {
     localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser');
     HTMLMediaElement.prototype.play = async function () {};
@@ -62,7 +54,7 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
   let inflight = 0; let lastDone = 0;
   p.on('request', () => { inflight++; });
   for (const ev of ['requestfinished', 'requestfailed']) p.on(ev, () => { inflight = Math.max(0, inflight - 1); lastDone = Date.now(); });
-  const settle = async () => { await p.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {}); await sleep(400); };
+  const settle = async () => { await p.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {}); await searchFixture.settle(p); await sleep(400); };
   // Visible, enabled buttons, one per kind: class, data attributes and wording (digits dropped).
   const kinds = () => p.$$eval('button', (els) => {
     const seen = new Set(); const out = [];
@@ -86,19 +78,6 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
   const seen = []; const clickedSigs = [];
   for (const view of views) {
     await p.goto(BASE + view); await settle();
-    if (process.env.UI_CONTROLS_INPUTS && view === '/search?q=queen') {
-      // Count the actual merged results. Raw hits may be duplicate copies or failed-source
-      // answers, neither of which supplies the controls that this audit must exercise.
-      const rendered = await p.evaluate(() => ({
-        moreSongs: !!document.querySelector('[data-sallsongs]'),
-        songs: document.querySelectorAll('[data-skind="song"] [data-srow]').length,
-        albums: document.querySelectorAll('[data-skind="album"] .tile').length,
-        artists: document.querySelectorAll('[data-skind="artist"] .tile').length,
-      }));
-      if (!rendered.moreSongs || rendered.songs < 6 || rendered.albums < 12 || rendered.artists < 1) {
-        throw new Error('shared search inputs lost rendered control coverage: ' + JSON.stringify(rendered));
-      }
-    }
     const list = await kinds();
     for (const k of list) {
       const lasting = SKIP.test(k.words) || SKIP.test(k.id) || /layoutPick/.test(k.sig);

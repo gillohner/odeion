@@ -67,7 +67,13 @@ tracing = { workspace = true }
 # Soloist: a signal to the child and PR_SET_PDEATHSIG
 libc = "0.2"
 
+[features]
+# Pause and fault points for this crate's own tests (`test_hooks`); never in a release build
+test-hooks = []
+
 [dev-dependencies]
+# This crate's own tests turn its test hooks on (dev-dependencies don't reach normal builds)
+pm-api = { path = ".", features = ["test-hooks"] }
 # Hermetic authenticated homeserver health tests over local HTTPS.
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 rcgen = "0.14"

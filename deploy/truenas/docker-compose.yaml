@@ -6,7 +6,7 @@
 # `user:` below to the dataset's owner). The music dataset is mounted read-only.
 services:
   node:
-    image: ghcr.io/gillohner/pubky-music-node:edge
+    image: ghcr.io/gillohner/odeion:edge
     container_name: pubky-music
     restart: unless-stopped
     # Host networking: UPnP/OpenHome renderers (Linn, Naim, …), Chromecast and endpoints are found

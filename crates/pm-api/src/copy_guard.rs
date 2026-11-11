@@ -294,7 +294,10 @@ fn in_flight(lib: &pm_library::Library) -> std::collections::BTreeMap<String, In
         .unwrap_or_default()
 }
 
-fn note_in_flight(s: &NodeState, remote: &str, entry: Option<InFlight>) {
+/// Note (or forget) an upload in flight. An error writing the note matters before the upload
+/// starts: a copy that can't be recorded isn't sent, or a crash would leave a remote file nobody
+/// settles at the next start.
+fn note_in_flight(s: &NodeState, remote: &str, entry: Option<InFlight>) -> Result<(), String> {
     let lib = s.library.lock().expect("library poisoned");
     let mut all = in_flight(&lib);
     match entry {
@@ -305,11 +308,12 @@ fn note_in_flight(s: &NodeState, remote: &str, entry: Option<InFlight>) {
             all.remove(remote);
         }
     }
-    let _ = if all.is_empty() {
+    let written = if all.is_empty() {
         lib.delete_setting(IN_FLIGHT_KEY).map(drop)
     } else {
         lib.set_setting(IN_FLIGHT_KEY, &serde_json::to_string(&all).expect("serializes"))
     };
+    written.map_err(|e| format!("the copy's record couldn't be written: {e}"))
 }
 
 /// At start: the uploads a stopped node left unsettled. One this node made that the homeserver
@@ -347,7 +351,7 @@ pub async fn settle_in_flight(s: &Arc<NodeState>, tries: u32, every: std::time::
         }
         let settled = e.existed || drop_partial(target.as_ref(), &remote, e.size).await;
         if settled && unchanged() {
-            note_in_flight(s, &remote, None);
+            let _ = note_in_flight(s, &remote, None);
         }
     }
 }
@@ -397,7 +401,7 @@ pub async fn upload_guarded(
         existed: false,
         account: Some(target.account()),
     };
-    note_in_flight(s, remote, Some(record));
+    note_in_flight(s, remote, Some(record)).map_err(Refused::Other)?;
     let failed = match target.upload(remote, bytes, rate).await {
         Ok(()) => match target.stat(remote).await {
             Ok(Some(Some(kept))) if kept == len => None,
@@ -420,12 +424,13 @@ pub async fn upload_guarded(
     };
     match failed {
         None => {
-            note_in_flight(s, remote, None);
+            // The file is whole there: a note that can't be cleared is settled at the next start
+            let _ = note_in_flight(s, remote, None);
             Ok(())
         }
         Some(r) => {
             if drop_partial(target, remote, len).await {
-                note_in_flight(s, remote, None);
+                let _ = note_in_flight(s, remote, None);
             }
             Err(r)
         }
