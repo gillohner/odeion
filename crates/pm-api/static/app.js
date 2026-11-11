@@ -2839,16 +2839,29 @@
   // other way pops it too, and opening a page from inside one replaces it (setView).
   const transients = []; // { open: () => bool, close: (fromBack) => void }
   let popHandled = false; let selfPop = false; let popPending = null; let popResolve = null;
-  const pushTransient = () => { if (history.state && history.state.transient) return; try { history.pushState({ ...(history.state || {}), transient: true }, '', location.pathname + location.search); } catch { /* sandboxed */ } };
+  // A layer over another (a phone's Now playing sheet) gets an entry of its own when it opens, on top of
+  // the one under it. An entry pushed by back's own handler (no tap since) would make the WebView's
+  // back skip the page's entry and leave the page: on Android to the app's connect page, which
+  // connects again and registers the phone's player once more (TASK-android-back-reregister-1111).
+  const pushTransient = (layer) => { const s = history.state || {}; if (s.transient && (!layer || s.layer)) return; try { history.pushState({ ...s, transient: true, layer: !!(layer && s.transient) }, '', location.pathname + location.search); } catch { /* sandboxed */ } };
   // Popping is asynchronous: a page opened right after waits for it (setView), or the pop would undo it.
-  const popTransient = () => { if (transients.some((t) => t.open())) return; if (history.state && history.state.transient && !selfPop) { selfPop = true; popPending = new Promise((r) => { popResolve = r; setTimeout(() => { popPending = null; popResolve = null; r(); }, 600); }); history.back(); } };
+  // `layer`: only a layer's own entry (its layer closed, what is under it stays); otherwise once all are
+  // closed, past a layer's entry too.
+  const popTransient = (layer) => {
+    const s = history.state || {};
+    if (selfPop || !s.transient || (layer ? !s.layer : transients.some((t) => t.open()))) return;
+    selfPop = true; popPending = new Promise((r) => { popResolve = r; setTimeout(() => { popPending = null; popResolve = null; r(); }, 600); });
+    history.go(!layer && s.layer ? -2 : -1);
+  };
   window.addEventListener('popstate', () => {
     if (selfPop) { selfPop = false; popHandled = true; if (popResolve) { popResolve(); popResolve = null; } popPending = null; return; }
     const open = transients.filter((t) => t.open()); if (!open.length) return;
     // A layer over another (a phone's Now playing sheet) closes alone: the next back closes what is under it
     const top = open[open.length - 1];
-    if (top.layer && open.length > 1 && open.slice(0, -1).every((t) => t === npTr)) { top.close(true); pushTransient(); popHandled = true; return; }
+    // (back from the layer's own entry lands on the entry of what is under it: nothing to push again)
+    if (top.layer && open.length > 1 && open.slice(0, -1).every((t) => t === npTr)) { top.close(true); if (!(history.state && history.state.transient)) pushTransient(); popHandled = true; return; }
     open.forEach((t) => t.close(true)); popHandled = true;
+    popTransient(); // (closed from a layer's entry: the entry of what was under it goes too)
   });
 
   // ---- player bar ----------------------------------------------------------
@@ -3442,7 +3455,7 @@
   // The sheet over a phone's player is a layer of its own for back: back closes it first, then Now playing
   const npSheetTr = { layer: true, open: () => !overlay.hidden && npCompact() && !!state.npSheet && !!$('.np-bsheet:not([hidden])', overlay), close: () => closeNpSheet(true) };
   const closeNpSheet = (fromBack) => {
-    const k = transients.indexOf(npSheetTr); if (k >= 0) transients.splice(k, 1);
+    const k = transients.indexOf(npSheetTr); if (k >= 0) { transients.splice(k, 1); if (fromBack !== true) popTransient(true); }
     if (!state.npSheet) return;
     const was = state.npSheet; const sh = $('.np-bsheet', overlay);
     const done = () => { state.npSheetClosing = null; if (state.npSheet !== was) return; state.npSheet = null; renderNowPlaying(); const b = $(`.np-dock [data-npsheet="${was}"]`, overlay); if (b && fromBack !== 'quiet') b.focus({ preventScroll: true }); };
@@ -3461,7 +3474,7 @@
       $('#npq').onclick = () => setView('queue');
       $('#npzone').onclick = () => $('#zonebtn').click();
       { const sb = $('#npsound'); if (sb) sb.onclick = () => openQPanel('#npsound'); }
-      { const k = transients.indexOf(npSheetTr); if (k >= 0) transients.splice(k, 1); }
+      { const k = transients.indexOf(npSheetTr); if (k >= 0) { transients.splice(k, 1); popTransient(true); } }
       if (npCompact()) state.npSheet = null;
       overlay.dataset.layout = `${shellMode()}-${npCompact()}`; overlay.dataset.sheet = ''; overlay.dataset.npuri = '';
       return;
@@ -3612,7 +3625,7 @@
     if ((sheet === 'sources' || (one && sheet === 'more')) && songPage) fillNpSources(songPage, gen);
     // Back closes an open sheet first: its layer is registered whenever one shows (a resize into the
     // phone arrangement with a sheet chosen shows one too), and dropped when none does
-    { const k = transients.indexOf(npSheetTr); if (one && sheet) { if (k < 0) transients.push(npSheetTr); } else if (k >= 0) transients.splice(k, 1); }
+    { const k = transients.indexOf(npSheetTr); if (one && sheet) { if (k < 0 && state.npSheetClosing !== sheet) { transients.push(npSheetTr); pushTransient(true); } } else if (k >= 0) { transients.splice(k, 1); popTransient(true); } }
     fillNpPubky(it, gen);
     loadLyrics(it);
     setArtTint();
@@ -3983,6 +3996,7 @@
     },
   };
   const setView = (v, arg, how = 'push') => {
+    if (how !== 'pop' && how !== 'replace') popTransient(true); // a page opened from a sheet takes Now playing's entry, not the sheet's
     if (popPending && how !== 'pop') return popPending.then(() => setView(v, arg, how)); // a menu's entry is still being popped
     cancelArtistReads(); // the page being left reads no more credits
     { const t = toItem(v, arg); if (t) { v = 'item'; arg = t; } }

@@ -246,6 +246,27 @@ fn run_service(app: &tauri::AppHandle) {
     }
 }
 
+/// The node's page has loaded: the WebView forgets the pages before it (the connect page), so
+/// Back on the node's page goes through the page's own history only, then leaves the app as
+/// Android's Back does. Back onto the connect page connected again: the player service started and
+/// the player registered once more on every Back past the page's first entry
+/// (TASK-android-back-reregister-1111).
+pub fn forget_back_history(window: &tauri::WebviewWindow) {
+    let scheduled = window.with_webview(|wv| {
+        wv.jni_handle().exec(|env, _activity, webview| {
+            if let Err(e) = env.call_method(webview, "clearHistory", "()V", &[]) {
+                if env.exception_check().unwrap_or(false) {
+                    let _ = env.exception_clear();
+                }
+                tracing::debug!("the WebView's back history stays ({e})");
+            }
+        });
+    });
+    if let Err(e) = scheduled {
+        tracing::debug!("cannot reach the WebView for its back history: {e}");
+    }
+}
+
 /// `PlayerService.start(activity, text, zone)`: whether Android took the start.
 fn start_service(
     env: &mut jni021::JNIEnv,

@@ -897,6 +897,10 @@ pub fn run() {
                         return;
                     };
                     if s.origin().as_deref() == Some(payload.url().origin().ascii_serialization().as_str()) {
+                        // Back never leaves the node's page for the connect page before it (which would
+                        // connect again and register the phone's player once more)
+                        #[cfg(target_os = "android")]
+                        android::forget_back_history(&w);
                         let _ = w.eval(token_sync_script(&s.token));
                         // Which output is this app's (a phone's USB DAC shows in its Settings)
                         #[cfg(any(desktop, target_os = "android"))]

@@ -7663,6 +7663,121 @@ mod tests {
         assert!(!stored().contains(second.expose()));
     }
 
+    /// The app registers its player again while its zone plays (it reconnected: Back onto its connect
+    /// page, back on screen, a USB DAC): the same output, so the zone plays on, the same song and
+    /// queue, and its stream to the player is never cut (TASK-android-back-reregister-1111).
+    #[tokio::test]
+    async fn the_same_player_registering_again_leaves_its_zone_playing() {
+        use pm_zones::outputs::NullOutput;
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/song.flac",
+            get(move || {
+                let f = flac.clone();
+                async move { f }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        // The phone's player: a real-time null output, so its zone plays for as long as the song lasts
+        let outs = pm_zones::OutputRegistry::new();
+        outs.register(Arc::new(NullOutput::realtime()));
+        let key = pm_stream::Key::random();
+        let serving = pm_endpoint::Endpoint::new("Pixel 8", outs, key.clone())
+            .spawn(std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let address = serving.addr().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let register = || {
+            let (app, address, key) = (app.clone(), address.clone(), key.clone());
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/outputs/endpoints",
+                    Some(serde_json::json!({"address": address, "key": key.expose()})),
+                )
+                .await
+            }
+        };
+        let (st, outs) = register().await;
+        assert_eq!(st, StatusCode::OK, "{outs}");
+        let out_id = outs[0]["id"].as_str().unwrap().to_string();
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|z| z["output"] == out_id.as_str())
+            .unwrap_or_else(|| panic!("no zone for {out_id}: {zones}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let zone = || {
+            let (app, zid) = (app.clone(), zid.clone());
+            async move { call(&app, "GET", &format!("/v1/zones/{zid}"), None).await.1 }
+        };
+        let queue = || {
+            let (app, zid) = (app.clone(), zid.clone());
+            async move { call(&app, "GET", &format!("/v1/zones/{zid}/queue"), None).await.1 }
+        };
+        let (st, _) = call(&app, "POST", &format!("/v1/zones/{zid}/queue"), Some(serde_json::json!({"items": [
+            {"uri": format!("{base}/song.flac"), "title": "A", "artist": "Band"},
+            {"uri": format!("{base}/song.flac"), "title": "B", "artist": "Band"},
+            {"uri": format!("{base}/song.flac"), "title": "C", "artist": "Band"}], "replace": true, "play": true}))).await;
+        assert_eq!(st, StatusCode::OK);
+        let mut z = serde_json::Value::Null;
+        for _ in 0..100 {
+            z = zone().await;
+            if z["transport"] == "playing" && z["now_playing"]["position_ms"].as_u64().unwrap_or(0) >= 1000 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(z["transport"], "playing", "{z}");
+        let q0 = queue().await;
+        let pos0 = z["now_playing"]["position_ms"].as_u64().unwrap();
+        // The app registers again, twice (a reconnect, then the page's own load), with the same key
+        for _ in 0..2 {
+            let (st, again) = register().await;
+            assert_eq!(st, StatusCode::OK, "{again}");
+            assert_eq!(again[0]["id"], out_id.as_str(), "the same output: {again}");
+        }
+        // Still the one zone on the player's output, playing the same song, on from where it was
+        let (_, zones2) = call(&app, "GET", "/v1/zones", None).await;
+        assert_eq!(
+            zones2
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|z| z["output"] == out_id.as_str())
+                .count(),
+            1,
+            "{zones2}"
+        );
+        let mut last = pos0;
+        for _ in 0..15 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let z = zone().await;
+            assert_eq!(z["transport"], "playing", "the zone stopped after the player registered again: {z}");
+            assert_eq!(z["now_playing"]["item"]["title"], "A", "{z}");
+            assert_eq!(z["queue_index"], 0, "{z}");
+            let pos = z["now_playing"]["position_ms"].as_u64().unwrap_or(0);
+            assert!(pos >= last, "the song started again ({last} -> {pos} ms): {z}");
+            last = pos;
+        }
+        assert!(last > pos0, "the position moved on ({pos0} -> {last} ms)");
+        assert_eq!(queue().await, q0, "the queue is as it was");
+        drop(serving);
+    }
+
     /// an output and a zone, is remembered for the next start, and can be
     /// forgotten again.
     #[tokio::test]
