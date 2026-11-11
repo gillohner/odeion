@@ -3389,13 +3389,22 @@ async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSt
     let hs = s
         .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // The newest records first, so the grant exchange routes on them (the identity signed in
+    // here before, when there is one)
+    let identity = s
+        .sync_handle()
+        .and_then(|h| pubky::PublicKey::try_from(h.z32()).ok());
+    let records = hs
+        .fresh_for_sign_in(identity.as_ref(), None, s.bundled_homeserver().is_some())
+        .await
+        .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
     let flow = hs
         .start_login("pubky-music-node")
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     *s.login.lock().await = Some(flow);
     let qr_svg = qr_svg(&url);
-    Ok(Json(LoginStarted { url, qr_svg }))
+    Ok(Json(LoginStarted { records, url, qr_svg }))
 }
 
 const CONTROLLER_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -3565,18 +3574,33 @@ async fn controller_login_start(
     let device = asked.device;
     // Before any relay wait: an approval kept at the relay is as old as the sign-in it answers
     let access = people::access_started(&s);
-    // Held from the check to the insert: sign-ins started at once can't pass the caps together
-    let mut logins = s.controller_logins.lock().await;
-    logins.retain(|_, (_, at, _, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
-    let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
-        return Err(ApiError::new(
+    // No owner, no sign-in: said before any homeserver lookup, so it doesn't hang on the network
+    let no_owner = || {
+        ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             "the node has no Pubky session loaded: sign it in (Settings → Pubky, or `odeiond login`), or restart it once its homeserver answers",
-        ));
+        )
+    };
+    let Some(identity) = s.sync_handle().map(|h| h.z32().to_string()) else {
+        return Err(no_owner());
     };
     let hs = s
         .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // The newest records first, so the grant exchange routes on them: the owner's, to have them
+    // ready. A listener on another homeserver may approve this log in too, so what is found of
+    // the owner's homeserver never refuses it. Before the sign-ins' lock: these are network
+    // lookups, and the polls of every waiting sign-in take that lock too
+    let identity = pubky::PublicKey::try_from(identity.as_str()).ok();
+    hs.warm_for_sign_in(identity.as_ref(), s.bundled_homeserver().is_some())
+        .await
+        .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
+    // Held from the check to the insert: sign-ins started at once can't pass the caps together
+    let mut logins = s.controller_logins.lock().await;
+    logins.retain(|_, (_, at, _, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
+    let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
+        return Err(no_owner());
+    };
     // The node's own session lacks folders and the owner asked: this log in asks for them too, so
     // the owner's approval renews it (no separate "sign in again")
     let (renews, caps) = login_capabilities(renew_asked, s.sync_handle().is_some_and(|h| h.needs_resign()));
@@ -9601,12 +9625,31 @@ mod tests {
     }
 
     /// Controllers sign in with Pubky Ring; without a node session there is
-    /// no owner to compare against, so the node says so instead of starting.
+    /// no owner to compare against, so the node says so instead of starting: at once, whatever
+    /// the network does (here a PKARR relay that never answers, on the public network).
     #[tokio::test]
     async fn controller_sign_in_needs_the_node_signed_in_first() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), Some("t0k")).await;
+        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://127.0.0.1:{}/", stalled.local_addr().unwrap().port());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((c, _)) = stalled.accept().await {
+                held.push(c);
+            }
+        });
+        let mut b = pubky::PubkyHttpClient::builder();
+        b.pkarr(move |p| {
+            p.no_dht();
+            p.relays(&[relay.as_str()]).unwrap()
+        });
+        s.set_homeserver(pm_pubky::homeserver::NodeHomeserver::from_pubky_on(
+            pubky::Pubky::with_client(b.build().unwrap()),
+            pm_pubky::Network::Mainnet,
+        ));
         let app = router(s);
+        let started = std::time::Instant::now();
         let resp = app
             .clone()
             .oneshot(
@@ -9619,6 +9662,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "no homeserver lookup first: {:?}",
+            started.elapsed()
+        );
         let (st, v) = call(&app, "GET", "/v1/auth/pubky/poll?id=nope", None).await;
         assert_eq!(st, StatusCode::OK, "{v}");
         assert_eq!(v["status"], "expired");
