@@ -324,6 +324,55 @@ struct Marks {
     /// New wipe observations are bound to the vault owner, even when a machine changes users.
     #[serde(default)]
     wipes_by_owner: std::collections::BTreeMap<String, u64>,
+    /// Per vault owner: the blob marks (`blobs`, `signed_seen`, `verified`), so a copy of another
+    /// identity signed in on this node is judged by what was seen of that identity's vault, not
+    /// another's. The unscoped fields above are a node's marks from before: the first owner
+    /// that notes a copy takes them as its own (they were that node's one identity's).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    owners: std::collections::BTreeMap<String, OwnerMarks>,
+}
+
+/// One owner's blob marks ([`Marks::owners`]).
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct OwnerMarks {
+    #[serde(default)]
+    blobs: std::collections::BTreeMap<String, (u64, u64)>,
+    #[serde(default)]
+    signed_seen: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    verified: std::collections::BTreeMap<String, String>,
+}
+
+impl Marks {
+    /// `owner`'s blob marks: its own, else the unscoped ones no owner has taken yet.
+    fn of(&self, owner: &str) -> OwnerMarks {
+        self.owners.get(owner).cloned().unwrap_or_else(|| OwnerMarks {
+            blobs: self.blobs.clone(),
+            signed_seen: self.signed_seen.clone(),
+            verified: self.verified.clone(),
+        })
+    }
+
+    /// Unscoped marks from before go to `owner` when no owner has any yet ([`Vault::keep_marks`]).
+    fn adopt_legacy(&mut self, owner: &str) {
+        let legacy = !self.blobs.is_empty() || !self.signed_seen.is_empty() || !self.verified.is_empty();
+        if legacy && self.owners.is_empty() {
+            self.of_mut(owner);
+        }
+    }
+
+    /// `owner`'s blob marks to change; the unscoped ones, when still there, go to it.
+    fn of_mut(&mut self, owner: &str) -> &mut OwnerMarks {
+        if !self.owners.contains_key(owner) {
+            let taken = OwnerMarks {
+                blobs: std::mem::take(&mut self.blobs),
+                signed_seen: std::mem::take(&mut self.signed_seen),
+                verified: std::mem::take(&mut self.verified),
+            };
+            self.owners.insert(owner.to_string(), taken);
+        }
+        self.owners.get_mut(owner).expect("inserted above")
+    }
 }
 
 /// The hash of an envelope as this node read it (its serialised form), for the marks.
@@ -339,6 +388,23 @@ const OLDER_THAN_SEEN: &str = "it is older than one this node has seen";
 fn marks_file_lock() -> std::sync::MutexGuard<'static, ()> {
     static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
     L.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// [`Vault::check_blob`] against one owner's marks.
+fn check_blob_in(m: &OwnerMarks, service: &str, epoch: u64, revision: u64, signed: bool) -> Result<()> {
+    if !signed && m.signed_seen.contains(service) {
+        return Err(VaultStoreError::Stale {
+            service: service.to_string(),
+            why: "it isn't signed, and a signed copy was seen before",
+        });
+    }
+    if m.blobs.get(service).is_some_and(|seen| (epoch, revision) < *seen) {
+        return Err(VaultStoreError::Stale {
+            service: service.to_string(),
+            why: OLDER_THAN_SEEN,
+        });
+    }
+    Ok(())
 }
 
 fn read_marks(path: &Path) -> std::io::Result<Marks> {
@@ -476,7 +542,14 @@ impl<'a> Vault<'a> {
     /// Remember, in the file at `path`, the newest copy of each blob this node has seen and the
     /// highest sign-out-everywhere marker: a copy the homeserver serves that is older than that
     /// is refused as stale ([`VaultStoreError::Stale`]). Every real client sets this.
+    ///
+    /// A node's marks from before they were kept per owner go to this vault's owner here, the
+    /// first time a vault is opened with them: that is the identity signed in when the node was
+    /// updated, whose marks they were (not whichever identity happens to write one first).
     pub fn keep_marks(mut self, path: &'a Path) -> Self {
+        if let Err(e) = update_marks(path, |m| m.adopt_legacy(&self.owner)) {
+            tracing::debug!("vault: older marks not moved to their owner yet: {e}");
+        }
         self.marks = Some(path);
         self
     }
@@ -490,7 +563,7 @@ impl<'a> Vault<'a> {
     /// taken for it again.
     pub fn seen_signed(&self, service: &str) -> Result<bool> {
         match self.marks {
-            Some(p) => Ok(read_marks(p)?.signed_seen.contains(service)),
+            Some(p) => Ok(read_marks(p)?.of(&self.owner).signed_seen.contains(service)),
             None => Ok(false),
         }
     }
@@ -500,6 +573,7 @@ impl<'a> Vault<'a> {
     fn note_blob(&self, service: &str, epoch: u64, revision: u64, verified: Option<&Envelope>) -> Result<()> {
         if let Some(p) = self.marks {
             update_marks(p, |m| {
+                let m = m.of_mut(&self.owner);
                 let e = m.blobs.entry(service.to_string()).or_insert((0, 0));
                 if (epoch, revision) > *e {
                     *e = (epoch, revision);
@@ -516,7 +590,7 @@ impl<'a> Vault<'a> {
     /// The hash of the newest envelope of `service` this node read and verified, if any.
     fn verified_hash(&self, service: &str) -> Result<Option<String>> {
         match self.marks {
-            Some(p) => Ok(read_marks(p)?.verified.get(service).cloned()),
+            Some(p) => Ok(read_marks(p)?.of(&self.owner).verified.get(service).cloned()),
             None => Ok(None),
         }
     }
@@ -542,7 +616,7 @@ impl<'a> Vault<'a> {
     /// The newest copy of `service` seen (`[epoch, revision]`), if any.
     fn mark_of(&self, service: &str) -> Result<Option<(u64, u64)>> {
         match self.marks {
-            Some(p) => Ok(read_marks(p)?.blobs.get(service).copied()),
+            Some(p) => Ok(read_marks(p)?.of(&self.owner).blobs.get(service).copied()),
             None => Ok(None),
         }
     }
@@ -552,6 +626,7 @@ impl<'a> Vault<'a> {
     pub fn reset_mark(&self, service: &str, epoch: u64, revision: u64, envelope_hash: &str) -> Result<()> {
         if let Some(p) = self.marks {
             update_marks(p, |m| {
+                let m = m.of_mut(&self.owner);
                 m.blobs.insert(service.to_string(), (epoch, revision));
                 m.signed_seen.insert(service.to_string());
                 m.verified.insert(service.to_string(), envelope_hash.to_string());
@@ -562,23 +637,10 @@ impl<'a> Vault<'a> {
 
     /// Refuse a copy older than the newest seen, or an unsigned one where a signed one was seen.
     fn check_blob(&self, service: &str, epoch: u64, revision: u64, signed: bool) -> Result<()> {
-        let Some(p) = self.marks else {
-            return Ok(());
-        };
-        let m = read_marks(p)?;
-        if !signed && m.signed_seen.contains(service) {
-            return Err(VaultStoreError::Stale {
-                service: service.to_string(),
-                why: "it isn't signed, and a signed copy was seen before",
-            });
+        match self.marks {
+            Some(p) => check_blob_in(&read_marks(p)?.of(&self.owner), service, epoch, revision, signed),
+            None => Ok(()),
         }
-        if m.blobs.get(service).is_some_and(|seen| (epoch, revision) < *seen) {
-            return Err(VaultStoreError::Stale {
-                service: service.to_string(),
-                why: OLDER_THAN_SEEN,
-            });
-        }
-        Ok(())
     }
 
     /// When the person last signed out everywhere: the device list's marker, or the higher one
@@ -607,6 +669,19 @@ impl<'a> Vault<'a> {
             kept.max(served)
         })
         .map_err(Into::into)
+    }
+
+    /// The sign-out everywhere this node remembers for this owner (as [`Vault::marker`] keeps it),
+    /// without reading the device list.
+    pub fn remembered_marker(&self) -> Result<Option<u64>> {
+        let Some(p) = self.marks else {
+            return Ok(None);
+        };
+        let m = read_marks(p)?;
+        Ok(m.wipes_by_owner
+            .get(&self.owner)
+            .copied()
+            .max(m.signed_out_everywhere_at))
     }
 
     /// Remember every signed-out client in the file at `path`, and keep trusting none of them
@@ -2392,6 +2467,57 @@ mod tests {
         // The first form of the file (a plain list) still reads
         std::fs::write(&path, serde_json::to_vec(&[r(1, "d")]).unwrap()).unwrap();
         assert_eq!(remember(&[]), [r(1, "d")]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Blob marks are an owner's own: another identity signed in on the same node isn't refused
+    /// as stale by the first one's newer revisions or signed copies. A node's marks from before
+    /// go to the identity that opens its vault first (the one signed in when the node was
+    /// updated), not to one that writes a mark first, and never to a later identity.
+    #[test]
+    fn blob_marks_are_bound_to_their_owner() {
+        let dir = std::env::temp_dir().join(format!("pm-vault-owner-marks-{}", rand_suffix()));
+        let path = dir.join("marks.json");
+        // A node's marks from before: A's (its one identity)
+        update_marks(&path, |m| {
+            m.blobs.insert("tidal".into(), (1, 9));
+            m.signed_seen.insert("tidal".into());
+        })
+        .unwrap();
+        // A's vault opens (`keep_marks`): they are A's now, before any read or write
+        update_marks(&path, |m| m.adopt_legacy("a")).unwrap();
+        let m = read_marks(&path).unwrap();
+        assert!(
+            m.blobs.is_empty() && m.signed_seen.is_empty(),
+            "moved to a: {m:?}"
+        );
+        // B opens later: nothing of A's moves, and B starts with nothing
+        update_marks(&path, |m| m.adopt_legacy("b")).unwrap();
+        let m = read_marks(&path).unwrap();
+        let check =
+            |owner: &str, rev: u64, signed: bool| check_blob_in(&m.of(owner), "tidal", 1, rev, signed);
+        assert!(check("a", 5, true).is_err(), "older than A has seen");
+        assert!(
+            check("a", 11, false).is_err(),
+            "unsigned where A saw a signed one"
+        );
+        assert!(check("a", 10, true).is_ok());
+        assert!(check("b", 5, true).is_ok(), "B's own copy, lower than A's");
+        assert!(check("b", 1, false).is_ok(), "B has seen no signed copy");
+        // B's mark is B's own
+        update_marks(&path, |m| {
+            m.of_mut("b").blobs.insert("tidal".into(), (1, 2));
+        })
+        .unwrap();
+        let m = read_marks(&path).unwrap();
+        assert_eq!(m.of("a").blobs["tidal"], (1, 9));
+        assert_eq!(m.of("b").blobs["tidal"], (1, 2));
+        assert!(check_blob_in(&m.of("b"), "tidal", 1, 1, true).is_err());
+        assert_eq!(
+            m.of("c"),
+            OwnerMarks::default(),
+            "a third owner starts with nothing"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

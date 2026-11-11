@@ -5,6 +5,8 @@ Newest first. Dates are when the change landed on `main`.
 ## Unreleased
 
 - **Usage insights record in the web app, still off unless the owner turns them on.** With the switch on, each signed-in browser records which page was opened and how it loaded, which kind of request it made and how it went, which kind of button was pressed and how, and a script error's kind: never anything typed, names, links, ids, error text or keys. Events wait in memory only and go to this node only. Each person sees a one-time notice and has Settings › You › Privacy (listeners: in their Settings) with Stop for me and Clear mine as separate buttons; the owner has Settings › This node › Usage insights with the switch and Clear all. The account menu says "Usage insights on" while they are.
+- **Last.fm scrobbles stay with the sign-in they were played under.** A play that started before another Last.fm account (or the same one again) signed in is not scrobbled to the new sign-in. Signing out in Settings also drops the scrobbles that were only waiting in memory, and a late "sign in again" answer for an older sign-in no longer marks the current one as broken.
+- **Signing in right after "Sign out everywhere" sticks.** A sign-in made in the same second as the sign-out is no longer treated as older than it and moved aside on the next sync. Signing in again with the same credentials while the vault still holds the old sign-in keeps the new one. What this node has seen of a vault is now kept per identity, so after switching identity the other identity's copies are not refused as stale.
 
 ## 0.2.3
 

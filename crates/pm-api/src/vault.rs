@@ -269,6 +269,10 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
         })
         .await
         .map_err(vault_error)?;
+    // The marker just written: a sign-in from now on gets a later id, also in this second
+    if let Ok(Some(at)) = vault.remembered_marker() {
+        crate::vault_cache::note_wipe(&s.library.lock().expect("library poisoned"), at);
+    }
     crate::test_hooks::pause(|| format!("vault.after_wipe:{}", sync.z32())).await;
     // The accepted clear owns this narrow cleanup across replacement. New sign-ins have a
     // different lineage and survive; an old general sync must never run after retirement.
