@@ -96,6 +96,7 @@ pub mod reviews;
 pub mod roon_import;
 pub mod search;
 pub mod segmented;
+pub(crate) mod send_queue;
 pub mod shared;
 pub mod signin;
 pub mod smart;
@@ -111,6 +112,8 @@ pub mod subsonic;
 pub mod sync;
 pub mod tag_fixes;
 pub mod tags;
+#[doc(hidden)]
+pub mod test_hooks;
 pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
@@ -25615,5 +25618,814 @@ exec sleep 300
             !add_music::mirror_lock_held(&folder),
             "this folder's lock went with its holders"
         );
+    }
+
+
+    /// Two plays ending together, with listens waiting from before: each listen reaches
+    /// ListenBrainz once (the waiting ones are taken by one sender), and when ListenBrainz can't
+    /// take them, every one waits again, none twice, and goes once it is back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_listenbrainz_senders_with_a_backlog_send_each_listen_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        // The account the senders send for (a sender checks it is still the one connected)
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "listenbrainz.account",
+                &serde_json::json!({"token": "LBT", "user": "owner", "submit": true}).to_string(),
+            )
+            .unwrap();
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        *s.listenbrainz_base.write().unwrap() =
+            format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/1/submit-listens",
+            post({
+                let (got, refuse) = (got.clone(), refuse.clone());
+                move |Json(b): Json<serde_json::Value>| {
+                    let (got, refuse) = (got.clone(), refuse.clone());
+                    async move {
+                        // Slow enough that both senders are in flight at once
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        if refuse.load(Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        }
+                        got.lock()
+                            .unwrap()
+                            .extend(b["payload"].as_array().unwrap().iter().cloned());
+                        StatusCode::OK
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let listen = |n: u64| serde_json::json!({"listened_at": n, "track_metadata": {"artist_name": "A", "track_name": format!("T{n}")}});
+        let waiting = serde_json::Value::from((1..=3).map(listen).collect::<Vec<_>>()).to_string();
+        let pending = || {
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting("listenbrainz.pending")
+                .unwrap()
+        };
+        let times = |list: &[serde_json::Value]| {
+            let mut t: Vec<u64> = list.iter().map(|l| l["listened_at"].as_u64().unwrap()).collect();
+            t.sort();
+            t
+        };
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            listenbrainz::send_listens(&s, "LBT", vec![listen(4)]),
+            listenbrainz::send_listens(&s, "LBT", vec![listen(5)])
+        );
+        assert_eq!(times(&got.lock().unwrap()), [1, 2, 3, 4, 5], "each listen once");
+        assert_eq!(pending(), None);
+        // Refused: everything waits again, nothing twice
+        refuse.store(true, Ordering::SeqCst);
+        got.lock().unwrap().clear();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            listenbrainz::send_listens(&s, "LBT", vec![listen(4)]),
+            listenbrainz::send_listens(&s, "LBT", vec![listen(5)])
+        );
+        let left: Vec<serde_json::Value> = serde_json::from_str(&pending().unwrap()).unwrap();
+        assert_eq!(times(&left), [1, 2, 3, 4, 5], "all wait, none twice");
+        // Once ListenBrainz is back, the next send takes them
+        refuse.store(false, Ordering::SeqCst);
+        listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
+        assert_eq!(times(&got.lock().unwrap()), [1, 2, 3, 4, 5]);
+        assert_eq!(pending(), None);
+    }
+
+    /// The same for Last.fm: two senders with a backlog send each scrobble once; refused ones
+    /// all wait again, none twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_lastfm_senders_with_a_backlog_send_each_scrobble_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        const KEY: &str = "0123456789abcdef0123456789abcdef";
+        const SECRET: &str = "fedcba9876543210fedcba9876543210";
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let got: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/",
+            post({
+                let (got, refuse) = (got.clone(), refuse.clone());
+                move |body: String| {
+                    let (got, refuse) = (got.clone(), refuse.clone());
+                    async move {
+                        let p: std::collections::HashMap<String, String> =
+                            url::form_urlencoded::parse(body.as_bytes())
+                                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                .collect();
+                        assert_eq!(p.get("method").map(String::as_str), Some("track.scrobble"), "{p:?}");
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        if refuse.load(Ordering::SeqCst) {
+                            return Json(serde_json::json!({"error": 9, "message": "Invalid session key - Please re-authenticate"}));
+                        }
+                        let tracks: Vec<String> = p
+                            .iter()
+                            .filter(|(k, _)| k.starts_with("track["))
+                            .map(|(_, v)| v.clone())
+                            .collect();
+                        let n = tracks.len();
+                        got.lock().unwrap().extend(tracks);
+                        Json(serde_json::json!({"scrobbles": {"@attr": {"accepted": n, "ignored": 0}}}))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        lastfm::set_api_base(&format!("{base}/"));
+        // The app in this node's own settings, never the process-wide config another test reads
+        let app = serde_json::json!({"api_key": KEY, "api_secret": SECRET, "from": "settings"}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(lastfm::APP_KEY, &app)
+            .unwrap();
+        let session =
+            serde_json::json!({"key": "sess-key-xyz", "user": "listener", "submit": true}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.session", &session)
+            .unwrap();
+        let scrobble =
+            |n: u64| serde_json::json!({"artist": "A", "track": format!("T{n}"), "timestamp": n.to_string()});
+        let waiting = serde_json::Value::from((1..=3).map(scrobble).collect::<Vec<_>>()).to_string();
+        let pending = || s.library.lock().unwrap().get_setting("lastfm.pending").unwrap();
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            lastfm::send_scrobbles(&s, vec![scrobble(4)]),
+            lastfm::send_scrobbles(&s, vec![scrobble(5)])
+        );
+        assert_eq!(
+            sorted(got.lock().unwrap().clone()),
+            ["T1", "T2", "T3", "T4", "T5"],
+            "each once"
+        );
+        assert_eq!(pending(), None);
+        // Refused (the session is marked as broken): everything waits again, nothing twice
+        refuse.store(true, Ordering::SeqCst);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            lastfm::send_scrobbles(&s, vec![scrobble(4)]),
+            lastfm::send_scrobbles(&s, vec![scrobble(5)])
+        );
+        let left: Vec<serde_json::Value> = serde_json::from_str(&pending().unwrap()).unwrap();
+        let left: Vec<String> = left
+            .iter()
+            .map(|x| x["track"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            sorted(left),
+            ["T1", "T2", "T3", "T4", "T5"],
+            "all wait, none twice"
+        );
+    }
+
+    /// A ListenBrainz mock whose submit answers only once let through (`gate`), takes nothing
+    /// whose payload holds a listen at `listened_at == 0`, and keeps what it took.
+    async fn gated_listenbrainz(
+        s: &NodeState,
+    ) -> (
+        Arc<tokio::sync::Semaphore>,
+        Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        Arc<tokio::sync::Semaphore>,
+    ) {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        // The account the senders send for (a sender checks it is still the one connected)
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "listenbrainz.account",
+                &serde_json::json!({"token": "LBT", "user": "owner", "submit": true}).to_string(),
+            )
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        *s.listenbrainz_base.write().unwrap() =
+            format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new()
+            .route(
+                "/1/submit-listens",
+                post({
+                    let (gate, got, entered) = (gate.clone(), got.clone(), entered.clone());
+                    move |h: axum::http::HeaderMap, Json(b): Json<serde_json::Value>| {
+                        let (gate, got, entered) = (gate.clone(), got.clone(), entered.clone());
+                        async move {
+                            entered.add_permits(1);
+                            let Ok(permit) = gate.acquire().await else {
+                                return StatusCode::SERVICE_UNAVAILABLE;
+                            };
+                            permit.forget();
+                            let payload = b["payload"].as_array().unwrap().clone();
+                            if payload.iter().any(|l| l["listened_at"] == 0) {
+                                return StatusCode::SERVICE_UNAVAILABLE;
+                            }
+                            // Which account it went to, with each listen
+                            let token = h
+                                .get("authorization")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+                            got.lock().unwrap().extend(payload.into_iter().map(|mut l| {
+                                l["_to"] = serde_json::json!(token);
+                                l
+                            }));
+                            StatusCode::OK
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/1/validate-token",
+                get(|| async { Json(serde_json::json!({"valid": true, "user_name": "fixture"})) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        (gate, got, entered)
+    }
+
+    fn a_listen(n: u64) -> serde_json::Value {
+        serde_json::json!({"listened_at": n, "track_metadata": {"artist_name": "A", "track_name": format!("T{n}")}})
+    }
+
+    fn waiting_listens(s: &NodeState) -> Vec<u64> {
+        let v: Vec<serde_json::Value> = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("listenbrainz.pending")
+            .unwrap()
+            .map(|j| serde_json::from_str(&j).unwrap())
+            .unwrap_or_default();
+        v.iter().map(|l| l["listened_at"].as_u64().unwrap()).collect()
+    }
+
+    /// A send cut short (the node stopping mid-send: the task is dropped while ListenBrainz
+    /// hasn't answered) loses nothing: every waiting listen, the new one too, is still on disk,
+    /// and the next send takes them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_send_cut_short_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, entered) = gated_listenbrainz(&s).await;
+        crate::send_queue::enqueue(
+            &s.library.lock().unwrap(),
+            "listenbrainz.pending",
+            (1..=3).map(a_listen).collect(),
+            1000,
+        )
+        .unwrap();
+        let send = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(4)]).await })
+        };
+        // Prove the request reached the remote boundary before cancelling; it has not
+        // committed any listens while its gate is closed.
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        assert_eq!(waiting_listens(&s), [1, 2, 3, 4], "counted while sending");
+        send.abort();
+        let _ = send.await;
+        assert_eq!(
+            waiting_listens(&s),
+            [1, 2, 3, 4],
+            "nothing lost when the send stops"
+        );
+        // Dropping a client does not cancel an Axum handler. Permanently refuse that
+        // abandoned request before allowing a retry to commit at a fresh endpoint.
+        gate.close();
+        assert!(got.lock().unwrap().is_empty());
+        let (retry_gate, retried, _) = gated_listenbrainz(&s).await;
+        retry_gate.add_permits(10);
+        listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
+        let mut sent: Vec<u64> = retried
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(sent, [1, 2, 3, 4]);
+        assert!(waiting_listens(&s).is_empty());
+        assert!(
+            got.lock().unwrap().is_empty(),
+            "abandoned request never committed"
+        );
+    }
+
+    /// A listen added while a send is under way waits on disk at once, isn't lost when the send
+    /// ends, and goes with the next sender; nothing is sent twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_added_during_a_send_waits_and_goes_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        let first = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(1)]).await })
+        };
+        for _ in 0..100 {
+            if !waiting_listens(&s).is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // The first send is held at ListenBrainz; a second play ends now
+        let second = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(2)]).await })
+        };
+        for _ in 0..100 {
+            if waiting_listens(&s) == [1, 2] {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            waiting_listens(&s),
+            [1, 2],
+            "the new listen waits on disk at once"
+        );
+        gate.add_permits(10);
+        first.await.unwrap();
+        second.await.unwrap();
+        let mut sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(sent, [1, 2], "each once");
+        assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// When ListenBrainz takes part of the backlog (one chunk of 100 refused, the other taken),
+    /// exactly the refused ones wait.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_the_listens_listenbrainz_refused_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        gate.add_permits(10);
+        crate::send_queue::enqueue(
+            &s.library.lock().unwrap(),
+            "listenbrainz.pending",
+            (0..150).map(a_listen).collect(),
+            1000,
+        )
+        .unwrap();
+        listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
+        assert_eq!(
+            waiting_listens(&s),
+            (0..100).collect::<Vec<u64>>(),
+            "the refused chunk waits"
+        );
+        assert_eq!(got.lock().unwrap().len(), 50, "the other chunk went");
+    }
+
+    /// A sender that waited for its turn while the owner connected another ListenBrainz account
+    /// sends nothing with the old account: the waiting list is the new account's now, and its own
+    /// sender sends it there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waiting_sender_never_sends_the_next_accounts_listens() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        let account =
+            |token: &str| serde_json::json!({"token": token, "user": token, "submit": true}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.account", &account("TOKA"))
+            .unwrap();
+        // A's first sender is held at ListenBrainz with listen 1; A's second waits its turn
+        let first = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "TOKA", vec![a_listen(1)]).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let waiting = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "TOKA", vec![a_listen(2)]).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // The owner connects B; B's play ends
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.account", &account("TOKB"))
+            .unwrap();
+        let b = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "TOKB", vec![a_listen(3)]).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        gate.add_permits(10);
+        first.await.unwrap();
+        waiting.await.unwrap();
+        b.await.unwrap();
+        let to = |token: &str| {
+            let mut v: Vec<u64> = got
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l["_to"] == format!("Token {token}"))
+                .map(|l| l["listened_at"].as_u64().unwrap())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(to("TOKA"), [1], "A's account got only what A's first sender took");
+        assert_eq!(to("TOKB"), [2, 3], "the rest went to the account connected now");
+        assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// Capture the production play future without polling it, then really disconnect and
+    /// reconnect. Neither a different token nor reuse of the same token revives that play.
+    #[tokio::test]
+    async fn an_unpolled_old_play_cannot_enqueue_after_reconnect() {
+        for next_token in ["NEXT", "LBT"] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = state(dir.path(), None).await;
+            let (gate, got, _) = gated_listenbrainz(&s).await;
+            gate.add_permits(10);
+            let old = listenbrainz::send_play(s.clone(), vec![a_listen(1)]);
+            let _ = listenbrainz::disconnect(axum::extract::State(s.clone()))
+                .await
+                .unwrap();
+            let _ = listenbrainz::connect(
+                axum::extract::State(s.clone()),
+                Json(ListenBrainzForm {
+                    token: Some(next_token.into()),
+                    submit: Some(true),
+                }),
+            )
+            .await
+            .unwrap();
+            old.await;
+            assert!(
+                waiting_listens(&s).is_empty(),
+                "old play never entered replacement queue"
+            );
+            listenbrainz::send_listens(&s, next_token, vec![a_listen(2)]).await;
+            let sent: Vec<u64> = got
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|l| l["listened_at"].as_u64().unwrap())
+                .collect();
+            assert_eq!(sent, [2], "only the replacement account's own play was sent");
+            assert!(waiting_listens(&s).is_empty());
+        }
+    }
+
+    /// Failed account lifecycle writes must leave every related setting unchanged and an
+    /// already captured, unpolled counted play deliverable under the still-current account.
+    #[tokio::test]
+    async fn failed_listenbrainz_account_changes_preserve_unpolled_plays() {
+        for generation in [None, Some("generation-A")] {
+            for (disconnect, key) in [
+                (false, "listenbrainz.account"),
+                (false, "vault.lineage.listenbrainz"),
+                (true, "listenbrainz.account"),
+                (true, "listenbrainz.pending"),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let s = state(dir.path(), None).await;
+                let (gate, got, _) = gated_listenbrainz(&s).await;
+                gate.add_permits(10);
+                {
+                    let lib = s.library.lock().unwrap();
+                    if let Some(g) = generation {
+                        lib.set_setting("listenbrainz.send_generation", g).unwrap();
+                    }
+                    lib.set_setting("vault.lineage.listenbrainz", "1-original")
+                        .unwrap();
+                    crate::send_queue::enqueue(&lib, "listenbrainz.pending", vec![a_listen(8)], 1000)
+                        .unwrap();
+                }
+                let snapshot = || {
+                    let lib = s.library.lock().unwrap();
+                    [
+                        "listenbrainz.account",
+                        "listenbrainz.send_generation",
+                        "listenbrainz.pending",
+                        "vault.lineage.listenbrainz",
+                    ]
+                    .map(|key| lib.get_setting(key).unwrap())
+                };
+                let before = snapshot();
+                let old = listenbrainz::send_play(s.clone(), vec![a_listen(1)]);
+                let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+                let (op, row) = if disconnect {
+                    ("DELETE", "OLD")
+                } else {
+                    ("INSERT", "NEW")
+                };
+                db.execute_batch(&format!(
+                    "CREATE TRIGGER reject_account_change BEFORE {op} ON settings WHEN {row}.key = '{key}' BEGIN SELECT RAISE(ABORT, 'fixture persistence failure'); END;"
+                )).unwrap();
+                let failed = if disconnect {
+                    listenbrainz::disconnect(axum::extract::State(s.clone()))
+                        .await
+                        .is_err()
+                } else {
+                    listenbrainz::connect(
+                        axum::extract::State(s.clone()),
+                        Json(ListenBrainzForm {
+                            token: Some("NEXT".into()),
+                            submit: Some(true),
+                        }),
+                    )
+                    .await
+                    .is_err()
+                };
+                assert!(failed, "the injected {key} failure must reach the caller");
+                assert_eq!(snapshot(), before, "all account state rolls back for {key}");
+                db.execute_batch("DROP TRIGGER reject_account_change").unwrap();
+                old.await;
+                let mut sent: Vec<u64> = got
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v["listened_at"].as_u64().unwrap())
+                    .collect();
+                sent.sort();
+                assert_eq!(sent, [1, 8], "the original account can still deliver both plays");
+                assert!(waiting_listens(&s).is_empty());
+            }
+        }
+    }
+
+    /// A new listen the library refuses to store (a failing write) is still sent with the rest,
+    /// from memory: it isn't lost before any try.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_that_cant_be_stored_is_still_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        gate.add_permits(10);
+        let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER no_pending_i BEFORE INSERT ON settings WHEN NEW.key = 'listenbrainz.pending'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;
+             CREATE TRIGGER no_pending_u BEFORE UPDATE ON settings WHEN NEW.key = 'listenbrainz.pending'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+        )
+        .unwrap();
+        listenbrainz::send_listens(&s, "LBT", vec![a_listen(7)]).await;
+        let sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        assert_eq!(sent, [7], "sent from memory");
+    }
+
+    /// The library refuses `key`'s writes until the returned triggers are dropped.
+    fn refuse_writes_of(dir: &std::path::Path, key: &str) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open(dir.join("lib.sqlite")).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TRIGGER no_pending_i BEFORE INSERT ON settings WHEN NEW.key = '{key}'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;
+             CREATE TRIGGER no_pending_u BEFORE UPDATE ON settings WHEN NEW.key = '{key}'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;"
+        ))
+        .unwrap();
+        db
+    }
+
+    fn writes_work_again(db: &rusqlite::Connection) {
+        db.execute_batch("DROP TRIGGER no_pending_i; DROP TRIGGER no_pending_u;")
+            .unwrap();
+    }
+
+    /// A listen the library refused to store is sent from memory; ListenBrainz refuses it, and
+    /// by then the library takes writes again: it is stored to wait for the next send, not lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_sent_from_memory_and_refused_waits_once_storage_is_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, entered) = gated_listenbrainz(&s).await;
+        let db = refuse_writes_of(dir.path(), "listenbrainz.pending");
+        // `listened_at` 0: the mock refuses it
+        let send = listenbrainz::send_listens(&s, "LBT", vec![a_listen(0)]);
+        let drive = async {
+            entered.acquire().await.unwrap().forget();
+            writes_work_again(&db);
+            gate.add_permits(1);
+        };
+        tokio::join!(send, drive);
+        assert!(got.lock().unwrap().is_empty());
+        assert_eq!(waiting_listens(&s), [0], "kept for the next send");
+    }
+
+    /// A full backlog (the cap) and a new listen, ListenBrainz taking everything: every one is
+    /// sent, the oldest too; the cap only holds what is still waiting after a send.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_full_listenbrainz_backlog_and_a_new_listen_are_all_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        gate.add_permits(100);
+        let backlog = serde_json::Value::from((1..=1000).map(a_listen).collect::<Vec<_>>()).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.pending", &backlog)
+            .unwrap();
+        listenbrainz::send_listens(&s, "LBT", vec![a_listen(1001)]).await;
+        let mut sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(
+            sent,
+            (1..=1001).collect::<Vec<u64>>(),
+            "none dropped before it was tried"
+        );
+        assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// A Last.fm mock for this node: each `track.scrobble` answers once let through (`gate`),
+    /// refused while `refuse` is set; the track names it took are in `got`; `entered` counts
+    /// requests that arrived.
+    struct LastfmMock {
+        gate: Arc<tokio::sync::Semaphore>,
+        got: Arc<std::sync::Mutex<Vec<String>>>,
+        refuse: Arc<std::sync::atomic::AtomicBool>,
+        entered: Arc<tokio::sync::Semaphore>,
+    }
+
+    async fn gated_lastfm(s: &NodeState) -> LastfmMock {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let got: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/",
+            post({
+                let (gate, got, refuse, entered) =
+                    (gate.clone(), got.clone(), refuse.clone(), entered.clone());
+                move |body: String| {
+                    let (gate, got, refuse, entered) =
+                        (gate.clone(), got.clone(), refuse.clone(), entered.clone());
+                    async move {
+                        entered.add_permits(1);
+                        gate.acquire().await.unwrap().forget();
+                        if refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                            return Json(serde_json::json!({"error": 11, "message": "Service Offline"}));
+                        }
+                        let tracks: Vec<String> = url::form_urlencoded::parse(body.as_bytes())
+                            .filter(|(k, _)| k.starts_with("track["))
+                            .map(|(_, v)| v.into_owned())
+                            .collect();
+                        let n = tracks.len();
+                        got.lock().unwrap().extend(tracks);
+                        Json(serde_json::json!({"scrobbles": {"@attr": {"accepted": n, "ignored": 0}}}))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        lastfm::set_api_base(&format!("{base}/"));
+        let app = serde_json::json!({
+            "api_key": "0123456789abcdef0123456789abcdef",
+            "api_secret": "fedcba9876543210fedcba9876543210",
+            "from": "settings"
+        })
+        .to_string();
+        let lib = s.library.lock().unwrap();
+        lib.set_setting(lastfm::APP_KEY, &app).unwrap();
+        lib.set_setting(
+            "lastfm.session",
+            &serde_json::json!({"key": "sess-key-xyz", "user": "listener", "submit": true}).to_string(),
+        )
+        .unwrap();
+        LastfmMock {
+            gate,
+            got,
+            refuse,
+            entered,
+        }
+    }
+
+    fn a_scrobble(n: u64) -> serde_json::Value {
+        serde_json::json!({"artist": "A", "track": format!("T{n}"), "timestamp": n.to_string()})
+    }
+
+    fn waiting_scrobbles(s: &NodeState) -> Vec<String> {
+        let v: Vec<serde_json::Value> = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("lastfm.pending")
+            .unwrap()
+            .map(|j| serde_json::from_str(&j).unwrap())
+            .unwrap_or_default();
+        v.iter()
+            .map(|l| l["track"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The same for Last.fm: a scrobble the library refused, sent from memory and refused by
+    /// Last.fm, is stored once the library takes writes again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scrobble_sent_from_memory_and_refused_waits_once_storage_is_back() {
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let LastfmMock {
+            gate,
+            got,
+            refuse,
+            entered,
+        } = gated_lastfm(&s).await;
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let db = refuse_writes_of(dir.path(), "lastfm.pending");
+        let send = lastfm::send_scrobbles(&s, vec![a_scrobble(7)]);
+        let drive = async {
+            entered.acquire().await.unwrap().forget();
+            writes_work_again(&db);
+            gate.add_permits(1);
+        };
+        tokio::join!(send, drive);
+        assert!(got.lock().unwrap().is_empty());
+        assert_eq!(waiting_scrobbles(&s), ["T7"], "kept for the next send");
+    }
+
+    /// The same for Last.fm: a full backlog and a new scrobble are all sent, the oldest too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_full_lastfm_backlog_and_a_new_scrobble_are_all_sent() {
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let LastfmMock { gate, got, .. } = gated_lastfm(&s).await;
+        gate.add_permits(100);
+        let backlog = serde_json::Value::from((1..=1000).map(a_scrobble).collect::<Vec<_>>()).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.pending", &backlog)
+            .unwrap();
+        lastfm::send_scrobbles(&s, vec![a_scrobble(1001)]).await;
+        let mut sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t[1..].parse().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(
+            sent,
+            (1..=1001).collect::<Vec<u64>>(),
+            "none dropped before it was tried"
+        );
+        assert!(waiting_scrobbles(&s).is_empty());
     }
 }

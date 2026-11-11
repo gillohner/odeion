@@ -663,6 +663,85 @@ async fn a_schedule_changed_during_a_run_is_kept_and_runs_dont_overlap() {
     assert!(second.join(v["last_file"].as_str().unwrap()).is_file());
 }
 
+/// A restore that fails on the way leaves the library exactly as it was: everything the restored
+/// library is to hold is put together in a staged copy first, and the live library is replaced
+/// in one step at the very end. A fault between the two (a test marker) returns the error and
+/// changes nothing; without the fault the same restore goes through.
+#[tokio::test]
+async fn a_restore_that_fails_leaves_the_library_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a", None);
+    let b = node(dir.path(), "b", None);
+    let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
+    {
+        let lib = a.library.lock().unwrap();
+        lib.add_bookmark(
+            "fav-a",
+            "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000a",
+            1,
+        )
+        .unwrap();
+        lib.add_tag(
+            "tag-a",
+            "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000a",
+            "calm",
+            1,
+        )
+        .unwrap();
+    }
+    set(&a, "tidal.user", r#"{"access_token":"fixture-a","user_id":"7"}"#);
+    set(&a, "node.contact", "pubky://a");
+    set(&a, "home.location", "47.4,8.5");
+    b.library
+        .lock()
+        .unwrap()
+        .add_bookmark(
+            "fav-b",
+            "https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000b",
+            2,
+        )
+        .unwrap();
+    set(&b, "node.contact", "pubky://b");
+    let (plain, _) = pm_api::backup::make(&b, None).unwrap();
+    let before = snapshot(&a);
+    let marker = a.data_dir().join(pm_api::backup::FAIL_BEFORE_SWAP_MARKER);
+    std::fs::write(&marker, b"").unwrap();
+    let app = router(a.clone());
+    let (st, r) = restore(&app, &plain, None).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{r}");
+    assert_eq!(
+        snapshot(&a),
+        before,
+        "the library changed although the restore failed"
+    );
+    // The node still works as itself: its sign-in, its contact
+    assert_eq!(
+        a.library
+            .lock()
+            .unwrap()
+            .get_setting("tidal.user")
+            .unwrap()
+            .as_deref(),
+        Some(r#"{"access_token":"fixture-a","user_id":"7"}"#)
+    );
+    // Without the fault the same restore goes through: b's library, with a's own sign-in kept
+    std::fs::remove_file(&marker).unwrap();
+    let (st, r) = restore(&app, &plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let after = snapshot(&a);
+    assert_ne!(after, before);
+    assert_eq!(
+        after["favourites"],
+        serde_json::json!(["https://musicbrainz.org/recording/00000000-0000-4000-8000-00000000000b"])
+    );
+    assert_eq!(after["tidal"], before["tidal"], "a sign-in made here stays");
+    assert_eq!(
+        after["contact"],
+        serde_json::json!("pubky://b"),
+        "the backup's settings come in"
+    );
+}
+
 /// The library file inside a backup (the zip's `library.db`).
 fn library_db_of(backup: &[u8]) -> Vec<u8> {
     use std::io::Read;

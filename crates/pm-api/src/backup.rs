@@ -81,6 +81,8 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 const NODE_OWN: &[&str] = &[
     "stream.secret",
     "node.id",
+    // Restoring an older backup must not revive a delayed pre-disconnect sender.
+    "listenbrainz.send_generation",
     SCHEDULE_KEY,
     crate::accounts::OWNER_SESSIONS_TOKEN,
     crate::accounts::OWNER_SESSIONS,
@@ -746,6 +748,27 @@ pub async fn restore(
     Ok(report)
 }
 
+/// A fault a test injects between the merge into the staged copy and the swap (a marker file
+/// in the node's data folder, so it touches that node only): the live library must come through
+/// unchanged.
+/// Only in this crate's own tests (cargo feature `test-hooks`): a release build has no fault point.
+#[cfg(feature = "test-hooks")]
+pub const FAIL_BEFORE_SWAP_MARKER: &str = ".fail-restore-before-swap";
+
+#[cfg(feature = "test-hooks")]
+fn fail_before_swap_for_tests(s: &NodeState) -> Result<(), BackupError> {
+    if s.data_dir().join(FAIL_BEFORE_SWAP_MARKER).is_file() {
+        return Err(BackupError::NotABackup("test fault before the swap".into()));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "test-hooks"))]
+#[inline(always)]
+fn fail_before_swap_for_tests(_: &NodeState) -> Result<(), BackupError> {
+    Ok(())
+}
+
 async fn restore_locked(
     s: &Arc<NodeState>,
     parsed: &Parsed,
@@ -779,81 +802,78 @@ async fn restore_locked(
     // (`people::update`), so none is lost or made to an older copy
     let roster = crate::people::roster_for_restore(s).await;
     crate::people::restored_access(s);
+    // Everything the restored library is to hold is put together in the staged copy first: this
+    // node's own settings, the sign-ins (the sealed part's, else the ones made here), listeners'
+    // own, the carried keys. The live library is replaced in one step at the very end, so an
+    // error anywhere before it leaves the library exactly as it was (never a mixed one)
     let done = (|| -> Result<(), BackupError> {
         let lib = s.library.lock().expect("library poisoned");
-        let keep: Vec<(&str, Option<String>)> = NODE_OWN
-            .iter()
-            .map(|k| Ok((*k, lib.get_setting(k)?)))
-            .collect::<Result<_, BackupError>>()?;
-        let signins_here: Vec<(&str, Option<String>)> = SECRET_SETTINGS
-            .iter()
-            .map(|(k, _)| Ok((*k, lib.get_setting(k)?)))
-            .collect::<Result<_, BackupError>>()?;
-        let people_here = person_signins(&lib)?;
-        let carried_here = carried_of(&lib)?;
-        // Choose the final carried settings, including a sealed roster, in the staged copy.
-        // Reconcile report memberships before replacing the live library: even a later restore
-        // error must not install an unchecked old membership. The roster lock keeps `here`
-        // current throughout; no inbox connection or report text enters this backup path.
-        {
-            let copy = Library::open(&staged)?;
-            let mut kept = Vec::new();
-            for (key, now) in &carried_here {
-                match secrets.as_ref().and_then(|x| x.settings.get(*key)) {
-                    Some(v) => copy.set_setting(key, v)?,
-                    None => kept.push((*key, now.clone())),
-                }
-            }
-            merge_carried(&copy, &kept)?;
-            let here = carried_here
-                .iter()
-                .find(|(key, _)| *key == crate::people::SETTING)
-                .and_then(|(_, value)| value.as_deref());
-            crate::people::restore_report_memberships(&copy, here)?;
-        }
-        lib.restore_from(&staged)?;
-        for (k, v) in keep {
-            match v {
-                Some(v) => lib.set_setting(k, &v)?,
+        let copy = Library::open(&staged)?;
+        for k in NODE_OWN {
+            match lib.get_setting(k)? {
+                Some(v) => copy.set_setting(k, &v)?,
                 None => {
-                    lib.delete_setting(k)?;
+                    copy.delete_setting(k)?;
                 }
             }
         }
         for (key, name) in SECRET_SETTINGS {
             match secrets.as_ref().and_then(|x| x.settings.get(*key)) {
                 Some(v) => {
-                    lib.set_setting(key, v)?;
+                    copy.set_setting(key, v)?;
                     report.signed_in.push((*name).to_string());
                 }
                 None => {
                     // A sign-in made on this node before the restore stays
-                    if let Some((_, Some(v))) = signins_here.iter().find(|(k, _)| k == key) {
-                        lib.set_setting(key, v)?;
+                    if let Some(v) = lib.get_setting(key)? {
+                        copy.set_setting(key, &v)?;
                     }
                 }
             }
         }
         // Listeners' own, each as the owner's: from the sealed backup, else the one made here
         // before the restore (a listener signed in only here keeps it)
-        for (k, v) in &people_here {
-            lib.set_setting(k, v)?;
+        for (k, v) in person_signins(&lib)? {
+            copy.set_setting(&k, &v)?;
         }
         for (k, v) in secrets
             .iter()
             .flat_map(|x| x.settings.iter())
             .filter(|(k, _)| is_person_signin(k))
         {
-            lib.set_setting(k, v)?;
+            copy.set_setting(k, v)?;
         }
-        lib.drop_missing_art()?;
-        report.restored = counts_of(&lib)?;
-        report.missing_folders = lib
+        // Invites with their links, the signup token and parties: from the locked part, else as
+        // they were here (a plain backup restored on this node keeps the links it handed out)
+        let carried_here = carried_of(&lib)?;
+        let mut kept = Vec::new();
+        for (key, now) in &carried_here {
+            match secrets.as_ref().and_then(|x| x.settings.get(*key)) {
+                Some(v) => copy.set_setting(key, v)?,
+                None => kept.push((*key, now.clone())),
+            }
+        }
+        merge_carried(&copy, &kept)?;
+        // Report memberships follow the current roster, never an older grant from the backup:
+        // reconciled in the copy, before it replaces the live library. The roster lock keeps
+        // `here` current throughout; no inbox connection or report text enters this backup path.
+        let here = carried_here
+            .iter()
+            .find(|(key, _)| *key == crate::people::SETTING)
+            .and_then(|(_, value)| value.as_deref());
+        crate::people::restore_report_memberships(&copy, here)?;
+        copy.drop_missing_art()?;
+        report.restored = counts_of(&copy)?;
+        report.missing_folders = copy
             .list_folders()?
             .into_iter()
             .filter(|(p, _)| !p.is_dir())
             .map(|(p, _)| p.to_string_lossy().into_owned())
             .collect();
+        drop(copy);
+        fail_before_swap_for_tests(s)?;
+        // The one step that changes the live library (SQLite's backup API: all or nothing)
+        lib.restore_from(&staged)?;
         Ok(())
     })();
     drop(roster);
