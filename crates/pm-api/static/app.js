@@ -6924,8 +6924,8 @@
             lso.innerHTML = subGroup('librespot', rows.join('')); spotPlayShown();
             const put = async (body, ok) => { try { await api('PUT', '/sources/spotify/librespot', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
             const lsImport = async (text) => { const err = $('#lsfileerr'); err.hidden = true; try { await api('POST', '/sources/spotify/signin/import', { text }); toast('librespot signed in'); render(); } catch (e) { err.textContent = e.message; err.hidden = false; } };
-            const lfp = $('#lsfilepick'); if (lfp) lfp.onsubmit = async (e) => { e.preventDefault(); const file = lfp.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } lsImport(await file.text()); };
-            const lfs = $('#lsfilepaste'); if (lfs) lfs.onsubmit = (e) => { e.preventDefault(); lsImport(lfs.querySelector('textarea').value); };
+            const lfp = $('#lsfilepick'); if (lfp) lfp.onsubmit = async (e) => { e.preventDefault(); const file = lfp.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } return lsImport(await file.text()); };
+            const lfs = $('#lsfilepaste'); if (lfs) lfs.onsubmit = (e) => { e.preventDefault(); return lsImport(lfs.querySelector('textarea').value); };
             // Sign out of librespot by its way, also while the app is the one in use
             const lo = $('#lsout'); if (lo) lo.onclick = async () => { try { await api('DELETE', `/sources/spotify/signin?way=${encodeURIComponent(lsIn.way)}`); toast('librespot signed out'); } catch (e) { toast(e.message, 'error'); } render(); };
             $('#lson').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'librespot is on' : 'librespot is off');
