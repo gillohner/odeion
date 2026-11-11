@@ -33,7 +33,8 @@ const until = async (f, label) => { const t = Date.now(); while (Date.now() - t 
     await go(page, '/album/lib-7');
     await page.locator('#isongs .srow').first().waitFor();
     await page.locator('#iplay').click();
-    const sent = await until(() => state.hits.find((h) => h.m === 'POST' && h.v === '/zones/z1/queue'), 'the list is queued on the zone');
+    // (a page's Play loads the zone's queue with its mode, POST load; an add to a queue is POST queue)
+    const sent = await until(() => state.hits.find((h) => h.m === 'POST' && (h.v === '/zones/z1/load' || h.v === '/zones/z1/queue')), 'the list is queued on the zone');
     const body = sent.body || '';
     assert.doesNotMatch(body, /token=/, 'no sign-in in what is sent: ' + body);
     const q = JSON.parse(body).items;

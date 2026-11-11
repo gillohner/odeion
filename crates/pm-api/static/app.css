@@ -1375,6 +1375,10 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 .transport .mode-btn { color: var(--muted); width: 40px; height: 40px; }
 .transport .mode-btn:hover { color: var(--fg); }
 .transport .mode-btn.on { color: var(--accent-strong); }
+/* Shuffle and repeat on (bar and Now playing): the accent and a dot under the icon, not colour alone */
+.mode-btn { position: relative; }
+.mode-btn.on { color: var(--accent-strong); }
+.mode-btn.on::after { content: ''; position: absolute; left: 50%; bottom: 3px; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: currentColor; }
 .hero .art.round { background: none; box-shadow: none; border-radius: 50%; }
 .tag-wait { padding: 0 6px 0 2px; font-style: italic; }
 .dialog.wide { width: min(640px, calc(100vw - 32px)); }
