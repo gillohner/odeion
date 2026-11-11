@@ -166,6 +166,9 @@ project's old name. **Edge** is built from every change to the code.
   being tested on real phones.
 - Now playing on a phone as one screen, with the mini player on the tabs.
 - Quicker song identification, and reviewing its matches is optional.
+- Songs are matched automatically after each scan, and the node's owner corrects a match with
+  **Wrong match?** in a song's or album's ⋯ menu. An album takes the release its matched songs
+  agree on. It comes with the next release.
 - Copying library folders to your homeserver in the background.
 - Tags in the top card of song, album and artist pages, drawn as in pubky.app.
 - Usage insights for the owner, the node's part: the switch, storage and the summary (off by
@@ -175,7 +178,6 @@ project's old name. **Edge** is built from every change to the code.
 
 **Proposed** (being built)
 
-- Matching new songs automatically after each scan, and **Wrong match?** to correct a match.
 - Android: the phone plays in the app itself, also away from home, with the phone's media
   controls and volume keys.
 - Android: picking songs, albums and playlists to keep on the phone from their ⋯ menu, a storage
