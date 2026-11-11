@@ -100,10 +100,12 @@ class PlayerService : Service() {
             } else {
                 CrashReport.write(this, "The player service could not start", android.util.Log.getStackTraceString(e))
             }
+            running = null
             stopSelf()
             return START_NOT_STICKY
         }
         hold()
+        running = Pair(text, zone)
         idleMs = 0L
         tick.removeCallbacks(watch)
         if (!zone) tick.postDelayed(watch, WATCH_MS)
@@ -145,6 +147,7 @@ class PlayerService : Service() {
     }
 
     override fun onDestroy() {
+        running = null
         tick.removeCallbacks(watch)
         release()
         super.onDestroy()
@@ -163,9 +166,19 @@ class PlayerService : Service() {
             Build.VERSION.SDK_INT >= 31 && e.javaClass.name == "android.app.ForegroundServiceStartNotAllowedException"
         private const val NOTIFY = "android.permission.POST_NOTIFICATIONS"
 
+        /// The notification text and mode of the running service (null: not running).
+        @Volatile
+        private var running: Pair<String, Boolean>? = null
+
         /// Whether Android took the start (false: refused, for example from the background).
         @JvmStatic
         fun start(activity: Activity, text: String, zone: Boolean): Boolean {
+            // The phone as a zone, already running as asked (the app back on screen, a reconnect):
+            // nothing to start again. (The app mode's idle watch counts on every start, so it starts.)
+            if (zone && running == Pair(text, true)) {
+                android.util.Log.d("pubky-music", "player service: zone mode runs already")
+                return true
+            }
             // Android 13+: without this the service still runs, but its notification is hidden.
             // Asked once: someone who said no is not asked again on every launch.
             val prefs = activity.getSharedPreferences("pubky-music", Context.MODE_PRIVATE)
@@ -193,6 +206,8 @@ class PlayerService : Service() {
 
         @JvmStatic
         fun stop(context: Context) {
+            // (a start right after this one is a real start, not "runs already")
+            running = null
             context.stopService(Intent(context, PlayerService::class.java))
         }
     }

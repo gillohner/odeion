@@ -893,10 +893,18 @@ pub fn run() {
                     if !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         return;
                     }
-                    let Some(s) = loads.lock().ok().and_then(|s| s.clone()) else {
+                    let s = loads.lock().ok().and_then(|s| s.clone());
+                    let node_page = s.as_ref().is_some_and(|s| {
+                        s.origin().as_deref() == Some(payload.url().origin().ascii_serialization().as_str())
+                    });
+                    // Back never leaves the node's page for the connect page before it (which would
+                    // connect again and register the phone's player once more)
+                    #[cfg(target_os = "android")]
+                    android::page_finished(&w, node_page);
+                    let Some(s) = s else {
                         return;
                     };
-                    if s.origin().as_deref() == Some(payload.url().origin().ascii_serialization().as_str()) {
+                    if node_page {
                         let _ = w.eval(token_sync_script(&s.token));
                         // Which output is this app's (a phone's USB DAC shows in its Settings)
                         #[cfg(any(desktop, target_os = "android"))]

@@ -175,8 +175,14 @@ const overflow = (page) => page.evaluate(() => {
     check(sh.tabs.join(',') === 'Up next:true,Lyrics:false,More:false' && sh.rows === 7 && sh.border === '0px' && sh.handle && sh.r.bottom <= sh.vh + 0.5 && sh.r.top < 40, `${at}: Up next opens one full-height sheet with a handle and the tab bar (${sh.tabs.join(' ')}; ${sh.rows} rows, no box around them)`);
     await swipe(page, '.np-bsheet .np-sheet-head', 0, 140, [0.5, 0.2]); await sleep(500);
     check(await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), `${at}: a swipe down on its head closes the sheet, Now playing stays`);
+    await sleep(200);
+    check(await page.evaluate(() => !!(history.state && history.state.transient && !history.state.layer)), `${at}: closed by its head, the sheet's history entry goes too (Now playing's stays)`);
     // swipe up opens Up next; a sideways swipe moves to Lyrics; back closes the sheet, then Now playing
+    // (an entry pushed by back's own handler, with no tap since, is one Android's WebView skips: its
+    // next back left the page for the app's connect page, which connected and registered again)
+    await page.evaluate(() => { window.__popPushes = 0; let inPop = false; window.addEventListener('popstate', () => { inPop = true; setTimeout(() => { inPop = false; }, 0); }, true); const push = history.pushState.bind(history); history.pushState = (...a) => { if (inPop) window.__popPushes += 1; return push(...a); }; });
     await swipe(page, '#nowplaying .np-titles', 0, -140); await sleep(500);
+    const ownEntry = await page.evaluate(() => !!(history.state && history.state.transient && history.state.layer));
     check(await page.evaluate(() => !document.querySelector('.np-bsheet').hidden && document.querySelector('.np-bsheet').dataset.tab === 'queue'), `${at}: a swipe up on the player opens Up next`);
     await swipe(page, '.np-bsheet .np-sheet-body', -140, 4); await sleep(1500);
     const ly = await page.evaluate(() => { const s = document.querySelector('.np-bsheet'); const head = s.querySelector('.lyric-head'); const nud = [...s.querySelectorAll('[data-lnudge]')].map((b) => { const r = b.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height), Math.round(r.right)]; }); return { tab: s.dataset.tab, h: [...s.querySelectorAll('h2, h3')].map((x) => x.textContent.trim()).filter((x) => /lyrics/i.test(x)).length, how: head ? head.textContent.trim() : '', nud, right: s.querySelector('.np-sheet-body').getBoundingClientRect().right }; });
@@ -187,6 +193,7 @@ const overflow = (page) => page.evaluate(() => {
     check(await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), `${at}: back closes the sheet first`);
     await page.goBack(); await sleep(500);
     check(await page.evaluate(() => document.querySelector('#nowplaying').hidden && location.pathname.includes('/album/lib-7')), `${at}: the next back closes Now playing, the album page stays`);
+    { const pushes = await page.evaluate(() => window.__popPushes); check(ownEntry && pushes === 0, `${at}: the sheet has a history entry of its own from when it opened (${ownEntry}), none is pushed by back (${pushes})`); }
     // More: Details, Sources, Tags, one Song page link; a toast at the screen's bottom
     await page.click('#np'); await page.waitForSelector('#nowplaying:not([hidden]) .np-dock'); await sleep(300);
     await page.click('.np-dock [data-npsheet="more"]'); await page.waitForSelector('.np-bsheet:not([hidden]) #nppart-tags #nptagadd'); await sleep(600);
