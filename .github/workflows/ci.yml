@@ -618,6 +618,7 @@ jobs:
           ui-tap-highlight.js tap-highlight-shots
           ui-here-name.js here-name-shots
           ui-android-first.js android-first-shots
+          ui-phone-dialog-actions.js phone-dialog-shots
           ui-nowplaying-phone.js nowplaying-phone-shots
           ui-motion.js motion-shots
           ui-redesign.js redesign-shots

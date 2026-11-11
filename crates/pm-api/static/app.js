@@ -556,6 +556,39 @@
         : sv.state === 'error' ? `<span class="warn-text">Not saved${sv.error ? `: ${esc(sv.error)}` : ''}</span>`
           : sv.pending ? `${countOf(sv.pending, 'changes')} to save`
             : `Saved${sv.last_saved_at ? ` · ${ago(sv.last_saved_at)}` : ''}`);
+  // Wrapped phone dialog actions can move below the scrollport on resize or text reflow.
+  // Reveal only the already-focused action; ordinary redraws and manual scrolling stay put.
+  let dialogActionFrame = 0, dialogActionObserver = null;
+  const revealDialogAction = () => {
+    if (dialogActionFrame) return;
+    dialogActionFrame = requestAnimationFrame(() => {
+      dialogActionFrame = 0;
+      const action = document.activeElement;
+      if (shellMode() !== 'phone' || !action?.matches('dialog[open] .dialog-actions .btn')) return;
+      const dialog = action.closest('dialog'), b = action.getBoundingClientRect(), d = dialog.getBoundingClientRect();
+      // The opening animation scales the dialog; rects use that scale, scroll offsets do not.
+      const scale = d.height / dialog.offsetHeight;
+      // Include the four pixels occupied by the keyboard focus outline, rounding outwards.
+      const top = Math.max(0, d.top + dialog.clientTop * scale) + 4 * scale;
+      const bottom = Math.min(innerHeight, d.bottom - dialog.clientTop * scale) - 4 * scale;
+      const delta = b.bottom > bottom ? b.bottom - bottom : b.top < top ? b.top - top : 0;
+      if (delta) dialog.scrollBy({ top: delta > 0 ? Math.ceil(delta / scale) : Math.floor(delta / scale), behavior: 'instant' });
+    });
+  };
+  window.addEventListener('resize', revealDialogAction);
+  document.addEventListener('focusout', () => { if (dialogActionObserver) dialogActionObserver.disconnect(); });
+  document.addEventListener('focusin', (e) => {
+    if (dialogActionObserver) dialogActionObserver.disconnect();
+    if (!window.ResizeObserver || !e.target.matches('dialog[open] .dialog-actions .btn')) return;
+    const dialog = e.target.closest('dialog'), footer = e.target.closest('.dialog-actions');
+    const size = () => `${dialog.clientWidth}:${dialog.clientHeight}:${footer.offsetWidth}:${footer.offsetHeight}`;
+    let previous = size();
+    dialogActionObserver = new ResizeObserver(() => {
+      const next = size();
+      if (next !== previous) { previous = next; revealDialogAction(); }
+    });
+    dialogActionObserver.observe(dialog); dialogActionObserver.observe(footer);
+  });
   // Edit a song's tags on the node (the file is not touched)
   // `e`: GET /library/tracks/{id}/edit: the song's edit (in the fields) and what the file says
   // (shown as each field's placeholder); an empty field is the file's value

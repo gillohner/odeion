@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-11
 
+- **Dialog buttons are easier to tap on phones.** Cancel, Save and other footer actions have targets at least 44 px tall. Crowded actions wrap onto another row, keeping “Back to the file’s tags” fully visible on small screens and with larger text. When the window shrinks or text grows, the focused action stays in view without losing keyboard focus.
+
 - **Search keeps its source when you reopen it.** Reloading or opening a saved search keeps Library, Pubky or the selected service from its link, so you no longer have to select it again. The selected service stays visible on phones and remains a choice for listeners after switching sources. Result updates preserve focus and manual scrolling in the source row. Links without a source still search Everywhere. Going Back while a song page is still loading keeps the restored results visible.
 
 - Search shows when it could not finish and offers Retry, keeping the same words and source. Results already received remain available, retry progress appears immediately, and late replies from a failed attempt cannot replace the recovered results.
