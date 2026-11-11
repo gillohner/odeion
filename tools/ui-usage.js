@@ -69,6 +69,8 @@ const open = async (browser, width, u, opts = {}) => {
   await run.page.setViewportSize({ width, height: width < 600 ? 844 : 900 });
   await run.context.addInitScript(SPY);
   await mockUsage(run.context, u);
+  // The node's events socket, kept to send a library change later
+  await run.context.routeWebSocket(/\/v1\/events/, (ws) => { run.ws = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
   return run;
 };
 // The page goes to the background: what waits is sent now (usage.js flushes on hidden)
@@ -105,7 +107,7 @@ const noOverlap = (page) => page.evaluate(() => {
     for (const width of [390, 768, 1280, 1440]) {
       for (const scheme of width === 1280 ? ['light', 'dark'] : ['light']) {
         const u = newU();
-        const { page, context, state } = await open(browser, width, u);
+        const run = await open(browser, width, u); const { page, context, state } = run;
         await page.emulateMedia({ colorScheme: scheme });
         await fx.go(page, '/library');
         const shown = await page.waitForSelector('.usage-notice', { timeout: 5000 }).then(() => true, () => false);
@@ -125,11 +127,13 @@ const noOverlap = (page) => page.evaluate(() => {
         await page.click('.nav-item[data-view="tracks"]').catch(() => page.click('.nav-item[data-view="library"]')); await sleep(400);
         await hide(page);
         check(await until(() => u.events.length > 0), `on: events reach the node (${u.events.length})`);
-        const before = u.events.filter((e) => e.kind === 'action').length;
-        await page.evaluate(() => { document.querySelector('.nav-item[data-view="albums"]').click(); }); await sleep(300);
-        await hide(page); await sleep(400);
-        const after = u.events.filter((e) => e.kind === 'action').length;
-        check(before > 0 && after === before, `a page's own el.click() records nothing; real presses did (${before} → ${after})`);
+        const before = u.events.length; const actions = u.events.filter((e) => e.kind === 'action').length;
+        // Nobody there: a page's own el.click() and a library change (the page redraws) are not use
+        await sleep(10500);
+        await page.evaluate(() => { document.querySelector('.nav-item[data-view="albums"]').click(); }); await sleep(600);
+        run.ws.send(JSON.stringify({ type: 'library_changed', seq: 1 })); await sleep(800);
+        await hide(page); await sleep(500);
+        check(actions > 0 && u.events.length === before, `a page's own el.click() and a socket redraw record nothing, no page, load or request; real presses did (${actions} presses; ${before} → ${u.events.length}: ${u.events.slice(before).map((e) => e.kind).join(',')})`);
         const kinds = new Set(u.events.map((e) => e.kind));
         check(kinds.has('nav') && kinds.has('action') && kinds.has('api'), `pages, presses and requests are recorded (${[...kinds].join(', ')})`);
         const navs0 = u.events.filter((e) => e.kind === 'nav');
@@ -152,9 +156,6 @@ const noOverlap = (page) => page.evaluate(() => {
         check(!/usage|"kind"|a0000/.test(stored.all) && !stored.cached.some((x) => /\/v1\/usage/.test(x)) && !stored.idb.some((n) => /usage/i.test(n || '')), `nothing of usage is kept in storage (${stored.idb.join(',')})`);
         // Socket redraws: the library changes, the page redraws, nothing new is recorded
         // (only the person's own pages and presses are; checked by the count of nav and action)
-        const navs = u.events.filter((e) => e.kind === 'nav' || e.kind === 'action').length;
-        await page.evaluate(() => window.dispatchEvent(new Event('resize'))); await sleep(200); await hide(page); await sleep(300);
-        check(u.events.filter((e) => e.kind === 'nav' || e.kind === 'action').length === navs, 'a redraw without a press records no page or press');
         // The account menu says it is on
         await page.click('#me'); await sleep(200);
         check(await page.locator('.popover.menu >> text=Usage insights on').count() > 0, 'the account menu says "Usage insights on"');

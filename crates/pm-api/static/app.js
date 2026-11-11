@@ -5870,7 +5870,7 @@
     // slower extras are never held back
     if (!drawing.on) return api(method, path, body, opts);
     if (gen !== navGen) return NEVER();
-    return api(method, path, body, { ...opts, signal: opts.signal || ctl.signal, navRead: true })
+    return api(method, path, body, { ...opts, signal: opts.signal || ctl.signal, navRead: !!drawing.nav })
       .then((r) => (gen === navGen ? r : NEVER()), (e) => (gen === navGen ? Promise.reject(e) : NEVER()));
   };
   const NAV_SKELETON = `<div class="navskel" aria-busy="true"><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div>${skelRows(6)}${SLOW}</div>`;
@@ -5897,7 +5897,7 @@
     const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(() => { capped = true; res(); }, 15000); });
     const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
     const t0 = performance.now(); const shown = state.view;
-    const rendering = render(); navRendering = rendering; drawing = lastDrawing;
+    fromNav = true; let rendering; try { rendering = render(); } finally { fromNav = false; } navRendering = rendering; drawing = lastDrawing;
     // Usage insights: how this page went (drawn, or its code failed or it never drew in 15 s); a
     // newer page first says nothing
     if (window.PM_USAGE) Promise.race([rendering.then(() => 'ok', () => 'failed'), superseded.then(() => null), drawn.then(() => (capped ? 'failed' : 'ok'))]).then((o) => { if (o) PM_USAGE.loaded(shown, o, performance.now() - t0); });
@@ -5906,9 +5906,11 @@
 
   // ---- render --------------------------------------------------------------
   // The page's code reads through its own `api`, tied to the navigation that draws it (navigate above)
-  let lastDrawing = null;
+  // (fromNav: this draw is a page being opened, not a redraw after a socket event or a timer;
+  // usage insights count only the reads of a page opened)
+  let lastDrawing = null; let fromNav = false;
   const render = () => {
-    const drawing = { on: true }; lastDrawing = drawing;
+    const drawing = { on: true, nav: fromNav }; lastDrawing = drawing;
     // A page opened by a press is the page's own reading, not the press's
     const outer = inHandler; inHandler = 0; let p;
     try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }

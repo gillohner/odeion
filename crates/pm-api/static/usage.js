@@ -70,6 +70,9 @@
   const SURFACE_OF = Object.freeze([['.usage-notice', 'notice'], ['dialog', 'dialog'], ['.popover.menu', 'menu'], ['#zonepop', 'zone_pop'], ['#qpanel', 'sound_panel'], ['#volpop', 'sound_panel'], ['#jobpop', 'job_pop'], ['#nowplaying', 'now_playing'], ['.player', 'player_bar']]);
   // ---- limits (the node's own are tighter checks of the same) ----
   const QUEUE_MAX = 200; const PER_MIN = 110; const FLUSH_MS = 15000; const MAX_BODY = 15 * 1024; const MAX_DROPPED = 500;
+  // Pages and requests count only shortly after the person's own press or key (or the page's start,
+  // or Back and Forward): a page's own .click(), a socket redraw or a timer while nobody is there is not use
+  const OWN_MS = 10000;
 
   // ---- state: everything of one sign-in, gone with it ----
   let ctx = null; // the mount's callbacks
@@ -82,6 +85,9 @@
   let opening = null;
   let queue = []; let dropped = 0; let sending = null; let timer = 0;
   let minute = { start: 0, n: 0 };
+  let lastOwn = 0; // when the person last pressed, typed a key or started the page
+  let navView = null; // the page whose opening was recorded: its load is, too
+  const own = (at = Date.now()) => at - lastOwn < OWN_MS;
   const live = () => !!(ctx && token && known && me && me.node_on && me.sharing);
   const excluded = () => !ctx || !token || (ctx.offline && ctx.offline()) || (ctx.view && ctx.view() === 'dashboard');
   const viewport = () => { const s = ctx && ctx.shell ? ctx.shell() : 'desktop'; if (s === 'phone') return 'phone'; return document.documentElement.clientWidth < 1024 ? 'tablet' : 'desktop'; };
@@ -193,6 +199,7 @@
   };
   const surfaceOf = (el) => { for (const [sel, s] of SURFACE_OF) if (el.closest && el.closest(sel)) return s; return 'page'; };
   const onEvent = (e) => {
+    if (e.isTrusted) lastOwn = Date.now();
     if (!e.isTrusted || !ctx || !(e.target instanceof Element)) return;
     const hit = controlOf(e.target, e.type);
     if (!hit) return;
@@ -204,6 +211,8 @@
   // Before app.js's own listeners (some stop the event on the document)
   window.addEventListener('click', onEvent, true);
   window.addEventListener('change', onEvent, true);
+  window.addEventListener('keydown', (e) => { if (e.isTrusted) lastOwn = Date.now(); }, true);
+  window.addEventListener('pointerdown', (e) => { if (e.isTrusted) lastOwn = Date.now(); }, true);
   // A script error: its built-in class, nothing of its message or where it came from
   window.addEventListener('error', (e) => { if (!(e instanceof ErrorEvent)) return; record({ kind: 'exception', class: ERROR_NAMES[e.error && e.error.name] || 'other' }); });
   window.addEventListener('unhandledrejection', (e) => { const n = e.reason && e.reason.name; if (n === 'AbortError') return; record({ kind: 'exception', class: ERROR_NAMES[n] || 'other' }); });
@@ -212,12 +221,19 @@
 
   // ---- the hooks app.js calls ----
   const SHORTCUTS = { search: 'key_search', toggle: 'key_toggle', prev: 'key_prev', next: 'key_next', now_playing: 'key_now_playing', help: 'key_help', escape: 'key_escape' };
-  const nav = (v, how) => { const view = viewOf(v); if (!view || view === 'dashboard') return; record({ kind: 'nav', view, how: has(HOWS, how) ? how : how === 'replace' ? 'redirect' : 'push' }); };
-  const loaded = (v, outcome, t) => { const view = viewOf(v); if (!view || !['ok', 'failed'].includes(outcome)) return; record({ kind: 'load', view, outcome, ms: ms(t) }); };
+  const nav = (v, how) => {
+    const view = viewOf(v); navView = null;
+    if (!view || view === 'dashboard') return;
+    const h = has(HOWS, how) ? how : how === 'replace' ? 'redirect' : 'push';
+    if (h === 'initial' || h === 'pop') lastOwn = Date.now(); else if (!own()) return;
+    navView = view; record({ kind: 'nav', view, how: h });
+  };
+  const loaded = (v, outcome, t) => { const view = viewOf(v); if (!view || view !== navView || !['ok', 'failed'].includes(outcome)) return; navView = null; record({ kind: 'load', view, outcome, ms: ms(t) }); };
   const apiDone = (method, path, status, t) => {
     if (typeof path !== 'string' || status < 0) return;
     const first = path.replace(/^\/+/, '').split(/[/?#]/)[0];
     if (first === 'usage' || /^\/?node\/usage\b/.test(path)) return; // its own requests are not usage
+    if (!own(Date.now() - Math.max(0, t || 0))) return; // (started shortly after the person's own press)
     record({ kind: 'api', area: AREA_OF[first] || 'other', class: method === 'GET' ? 'read' : 'write', outcome: outcomeOf(status), ms: ms(t) });
   };
   const shortcut = (name) => { const c = SHORTCUTS[name]; const view = ctx && viewOf(ctx.view && ctx.view()); if (!c || !view) return; record({ kind: 'action', control: c, view, surface: 'page', via: 'key' }, true); };
@@ -227,7 +243,7 @@
     const t = (opts && opts.token && opts.token()) || '';
     if (ctx && t === token) return;
     if (ctx) end();
-    ctx = opts; token = t; fresh(); me = null; known = false; paused = false;
+    ctx = opts; token = t; fresh(); me = null; known = false; paused = false; lastOwn = Date.now();
     if (excluded()) { known = true; return; }
     readMe();
   };
@@ -260,8 +276,10 @@
   const choose = async (share) => {
     // (Stop holds on this page at once, even before or without the node's answer)
     const was = me; if (!share) { fresh(); if (me) me = { ...me, sharing: false }; }
-    const r = await request('PUT', '/usage/me', share ? { share: true, choice: was ? was.choice : 0 } : { share: false });
+    const t = token;
+    const r = await request('PUT', '/usage/me', share ? { share: true, choice: was ? was.choice : 0 } : { share: false }, { token: t });
     const j = await answer(r);
+    if (t !== token) return null; // another sign-in meanwhile: nothing of this answer is its
     if (!r.ok) { const e = new Error(r.status === 409 ? 'Usage insights changed since this page showed them. Look again.' : 'The node didn’t take that; try again.'); e.status = r.status; if (r.status === 409) await readMe(); throw e; }
     if (share) fresh();
     apply(j); return j;
