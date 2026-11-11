@@ -123,6 +123,13 @@ const overflow = (page) => page.evaluate(() => {
     await sleep(200);
     const selected = await page.evaluate(() => ({ on: document.querySelector('#isongs').classList.contains('selecting'), ticked: [...document.querySelectorAll('#isongs .selbox input')].map((c) => c.checked), menu: !document.querySelector('.popover.menu').hidden }));
     check(selected.on && selected.ticked[1] && selected.ticked.filter(Boolean).length === 1 && !selected.menu, `${at}: a long press starts selecting with that song ticked, no menu (${selected.on}, ${selected.ticked.filter(Boolean).length} ticked)`);
+    // then a tap on another row ticks it too (it doesn't play it and replace the queue)
+    const plays0 = state.hits.filter((h) => h.m === 'POST' && /\/queue$/.test(h.v)).length;
+    await page.locator('#isongs .srow').nth(3).locator('.name').click();
+    await sleep(200);
+    const ticks = await page.evaluate(() => [...document.querySelectorAll('#isongs .selbox input')].map((c) => c.checked));
+    const plays1 = state.hits.filter((h) => h.m === 'POST' && /\/queue$/.test(h.v)).length;
+    check(ticks[1] && ticks[3] && ticks.filter(Boolean).length === 2 && plays1 === plays0, `${at}: while selecting, a tap on a row ticks it and plays nothing (${ticks.filter(Boolean).length} ticked, ${plays1 - plays0} queue replaced)`);
     await page.screenshot({ path: path.join(SHOTS, `album-select-${w}.png`) });
     await page.keyboard.press('Escape'); await page.evaluate(() => { const c = document.querySelector('.selbar [data-sel="cancel"]'); if (c) c.click(); }); await sleep(200);
 
