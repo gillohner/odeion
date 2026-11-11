@@ -1017,25 +1017,29 @@ def offline_playback(node, track):
         adb("shell", "cmd", "connectivity", "airplane-mode", "disable", check=False)
 
 
-def page_to_idle_zone():
-    """After the in-app player step: the page on the null output's zone, stopped and empty. Saved
-    on "This phone" with the shuffled song, the page would show that same song after the restart,
-    and the UI tour's check that the mini player changes after "Play to" would see no change (the
-    fixture library has one song). The phone's own zone is no choice here: the picker leaves it out
-    while it is stopped, and with the page already on it the tour's own playback would change the
-    mini player before "Play to". The null output's zone is always listed (PM_DEV_OUTPUTS)."""
-    nz = next((z for z in api("GET", "/v1/zones") if z["output"] == "null:percent"), None)
-    if nz is None:
-        log("no null output's zone: the page stays on “This phone”")
+def page_to_phone_zone(address, track):
+    """After the in-app player step: the page on the phone's own zone on the node, its queue empty
+    and stopped, as the steps before the in-app player left it (and as on main, where the UI tour
+    starts from there). Saved on "This phone" with the shuffled song, the page would show that same
+    song after the restart, and the UI tour's check that the mini player changes would see no
+    change (the fixture library has one song). The picker lists the phone's zone only while it
+    plays, so the page picks it first (the handover just started it) and the node then stops and
+    empties it."""
+    phone = next((z for z in api("GET", "/v1/zones") if z["output"].startswith(f"net:{address}/")), None)
+    if phone is None:
+        log("no phone zone on the node: the page stays on “This phone”")
         return
-    api("POST", f"/v1/zones/{nz['id']}/transport", {"action": "stop"})
-    api("DELETE", f"/v1/zones/{nz['id']}/queue")
+    if api("GET", f"/v1/zones/{phone['id']}").get("transport") != "playing":
+        api("POST", f"/v1/zones/{phone['id']}/queue", {"track_ids": [track["id"]], "replace": True, "play": True})
+        until("the phone's zone playing (so the picker lists it)", lambda: api("GET", f"/v1/zones/{phone['id']}").get("transport") == "playing", timeout=20)
     mark = len(logcat())
-    pick("Null output (% volume)", "the null output's zone")
+    pick(phone["name"][:20], "the phone's own zone")
     try:
-        until("the page on the null output's zone", lambda: re.search(r"the page controls this zone zone=(?!browser)\S+", logcat()[mark:]), timeout=20)
+        until("the page on the phone's own zone", lambda: re.search(r"the page controls this zone zone=(?!browser)\S+", logcat()[mark:]), timeout=20)
     except RuntimeError:
         log("the page's zone change was not logged; the tour shows what the mini player says")
+    api("POST", f"/v1/zones/{phone['id']}/transport", {"action": "stop"})
+    api("DELETE", f"/v1/zones/{phone['id']}/queue")
 
 
 # The address the app registers: the emulator's own, on the player's usual port
@@ -1289,7 +1293,7 @@ def run(node):
         in_app_player(address, track)
         log("the in-app player is the app's own: real time, in the background, and it gives the output to the node's zone")
         if os.environ.get("PM_UI_TOUR"):
-            page_to_idle_zone()
+            page_to_phone_zone(address, track)
 
         # Started again with the node saved: it reconnects and the service starts again
         adb("shell", "am", "force-stop", PKG)
