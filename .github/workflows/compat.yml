@@ -11,6 +11,7 @@ on:
     paths:
       - tools/ha-check.py
       - tools/ma-check.py
+      - tools/ma-check-provider-test.py
       - integrations/home-assistant/**
       - crates/pm-renderer/**
       - crates/pm-api/src/renderer.rs
@@ -85,6 +86,8 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The check's provider handling, offline (no MA, no node)
+      - run: python3 -I tools/ma-check-provider-test.py
       - run: docker pull -q ${{ matrix.image }}
       - run: cargo build -p pm-node
       - run: python3 -I tools/ma-check.py target/debug/pm-node /tmp/ma ${{ matrix.image }}

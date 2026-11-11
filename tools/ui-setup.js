@@ -294,7 +294,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/artist/lib-900'); await p.waitForSelector('#iabout');
     // (the credit lines are in Details at the foot; the facts one line under the blurb)
     const ab = await p.evaluate(() => { const d = document.querySelector('#idetails'); if (d) d.open = true; const ids = [...document.querySelectorAll('#main > section, #main > .hero')].map((e) => e.id || e.className); const b = document.querySelector('#iblurb'); const cr = document.querySelector('#idetails .credit'); return { order: ids.join(','), lang: b && b.getAttribute('lang'), clamped: b && b.classList.contains('clamp') && b.scrollHeight > b.clientHeight, credit: cr && cr.textContent, links: cr ? [...cr.querySelectorAll('a')].map((a) => a.getAttribute('href')) : [], facts: document.querySelectorAll('#iabout .facts-line .fact').length, icons: [...document.querySelectorAll('.hero .actions .also-icons .also-ico')].map((a) => a.getAttribute('aria-label')), line: (document.querySelector('#ialso') || {}).textContent || '' }; });
-    check(/^hero,iabout,isongs/.test(ab.order), `About sits under the header when there is an article (${ab.order})`);
+    // (the item page's header also has the class item-hero)
+    check(/^hero( item-hero)?,iabout,isongs/.test(ab.order), `About sits under the header when there is an article (${ab.order})`);
     check(ab.lang === 'de' && ab.clamped && ab.facts === 2, `the article in its language, a few lines, then the facts (${ab.lang})`);
     check(/Text: Read more on Wikipedia · CC BY-SA 4\.0/.test(ab.credit) && /Picture: Jane Doe · CC BY-SA 3\.0 · Wikimedia Commons/.test(ab.credit) && ab.links.length === 4 && ab.links.every((h) => /^https:/.test(h)), `with its link and licence, and the photo's Commons credit (${(ab.credit || '').replace(/\s+/g, ' ')})`);
     await p.click('#iblurbmore');
@@ -378,14 +379,14 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]');
       check(await visible(p, '#quality .qsrc svg'), 'the pill carries the provider’s mark');
       check(await waitText(p, '#quality .qtext', 'Played by this browser'), 'and says the browser plays it');
-      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
+      await p.$eval('#quality', (q) => q.click()); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
       check((await p.textContent('#qpanel .qp-zone .name')).trim() === 'This browser' && (await p.textContent('#qpanel .qp-src .name')).trim() === 'Your library', 'the panel: the zone and the source');
       check(/decodes the file itself/.test(await p.textContent('#qpanel')) && await p.locator('#qpanel input[type="range"]').count() === 0, 'no signal path claim for the browser; no volume in the panel (the bar has the one slider)');
       check(await p.getAttribute('#quality', 'aria-expanded') === 'true', 'the pill says the panel is open');
       check(await p.evaluate(() => document.querySelector('#qpanel').contains(document.activeElement)), 'focus moved into the panel');
       await p.keyboard.press('Escape'); check(await gone(p, '#qpanel:not([hidden])'), 'Escape closes it');
       check(await p.evaluate(() => document.activeElement && document.activeElement.id === 'quality'), 'and focus is back on the pill');
-      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
+      await p.$eval('#quality', (q) => q.click()); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
       await p.click('#scrim'); check(await gone(p, '#qpanel:not([hidden])'), 'the scrim closes it too');
       // On a node zone (paused there, moved from the browser): the path in short, the panel in full
       await p.evaluate(() => document.querySelector('audio').pause()); await p.waitForTimeout(300);
@@ -398,7 +399,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(/^FLAC \d+\/[\d.]+ → \d+\/[\d.]+ · Bit-perfect$/.test(pl.text) && /q-bit_perfect/.test(pl.cls), `the pill: format and rate in, out, and the verdict (${pl.text})`);
       check(pl.src && !pl.dsp, 'the provider’s mark, and no DSP badge while no DSP stage is in the path');
       check(pl.dev === nz.name && /^\d+\/[\d.]+$/.test(pl.badge || ''), `the phone form is ready: the device and a quality badge (${pl.dev} · ${pl.badge})`);
-      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp]');
+      await p.$eval('#quality', (q) => q.click()); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp]');
       check((await p.textContent('#qpanel .qp-zone .name')).trim() === nz.name && (await p.textContent('#qpanel .qp-zone .sub')).startsWith('Null output'), 'the panel: zone and device in words');
       check(await p.locator('#qpanel .path-row').count() >= 2, 'the full signal path, stage by stage');
       check(await p.locator('#qpanel [data-dsp]').count() === 4 && await p.locator('#qpanel [data-dsp="eq"]').isDisabled() && !(await p.locator('#qpanel [data-dsp="loudness"]').isDisabled()), 'four DSP switches; EQ is off-limits with no bands set');
@@ -409,10 +410,11 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check((await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`)).loudness === 'off', 'and back off');
       await p.click('#qpdsp'); await p.waitForSelector('#dspbox .card.dsp', { timeout: 10000 }).catch(() => {});
       check(await p.locator('#dspbox .card.dsp').count() === 1, 'All DSP settings opens this zone’s DSP editor');
-      // Phones: the pill shows the device and the badge, not the words
+      // Phones: the mini player is the song and play/pause only (owner, 2026-11-08); the sound panel
+      // opens from Now playing's ···, the quality shows there
       await p.setViewportSize({ width: 390, height: 844 }); await p.waitForTimeout(300);
-      const phone = await p.$eval('#quality', (q) => ({ shown: q.offsetWidth > 0 && getComputedStyle(q).display !== 'none', text: getComputedStyle(q.querySelector('.qtext')).display, short: getComputedStyle(q.querySelector('.qshort')).display, mark: !!q.querySelector('.qsrc svg'), width: q.offsetWidth }));
-      check(phone.shown && phone.text === 'none' && phone.short !== 'none' && phone.mark && phone.width <= 150, `on a phone the pill stays, short: the mark, the device and a badge (${phone.width}px)`);
+      const phone = await p.$eval('#quality', (q) => ({ shown: q.offsetWidth > 0 && getComputedStyle(q).display !== 'none' }));
+      check(!phone.shown, 'on a phone the bar has no sound pill (the song has the room)');
       await p.setViewportSize({ width: 1280, height: 900 });
       // Pressing play answers at once: a slow node, then a node that refuses
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/queue`).catch(() => {});
@@ -505,7 +507,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await p.unroute(/\/v1\/zones\/[^/]+\/transport$/);
       // The DSP switches keep what was set: EQ's switched-off band, crossfeed's values
       await api('PUT', `/zones/${encodeURIComponent(nz.id)}/dsp`, { dither: true, resample: true, dsd_mode: 'auto', loudness: 'off', eq: [{ kind: 'peaking', freq_hz: 100, gain_db: 2, q: 1, enabled: true }, { kind: 'peaking', freq_hz: 1000, gain_db: -2, q: 1, enabled: false }], crossfeed: { level_db: -9, cutoff_hz: 650, delay_us: 280, enabled: true } });
-      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp="eq"]:not([disabled])');
+      await p.$eval('#quality', (q) => q.click()); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp="eq"]:not([disabled])');
       const flip = async (k) => { await p.locator(`#qpanel [data-dsp="${k}"]`).click({ force: true }); await p.waitForSelector(`#qpanel [data-dsp="${k}"]:not([disabled])`); await p.waitForTimeout(200); };
       await flip('eq'); await flip('eq');
       const dsp = await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`);
@@ -689,9 +691,10 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       if (w < 600) {
         const dup = await pp.evaluate(() => { const q = document.querySelector('#quality'); const dev = q && q.querySelector('.qdev'); return !!(dev && getComputedStyle(dev).display !== 'none'); });
         check(!dup, `${w}: the zone's name is not in the sound pill too`);
-        const zn = await pp.$eval('.player .zone-btn span', (e) => ({ shown: getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width >= 40, width: Math.round(e.getBoundingClientRect().width), text: e.textContent })).catch(() => null);
-        check(zn && zn.shown && zn.text, `${w}: the zone button names the zone (${JSON.stringify(zn)})`);
         await pp.click('#np .np-title'); const opened = await visible(pp, '#nowplaying', 8000);
+        // (the phone's bar has no zone button: Now playing names the zone at its top)
+        const zn = await pp.$eval('#npzone .np-zone-name', (e) => ({ width: Math.round(e.getBoundingClientRect().width), text: e.textContent })).catch(() => null);
+        check(zn && zn.width >= 40 && zn.text, `${w}: Now playing names the zone (${JSON.stringify(zn)})`);
         check(opened && await pp.evaluate(() => /^\/(song|item)/.test(location.pathname) === false), `${w}: tapping the bar's title opens Now playing, not the song page`);
         check(await pp.isVisible('#npvol'), `${w}: Now playing has a volume slider`);
         const npv = await pp.$eval('#npvol', (e) => [e.min, e.max, e.value].join(' ')).catch(() => '');

@@ -277,14 +277,15 @@ fn strong_fitting<'a>(
         .filter(move |rec| duration_fits(rec, facts))
 }
 
-/// Bump when identification's decisions change enough that "not found" songs and songs waiting for
-/// review are worth checking again (part of [`input_key`], and [`RULES_VERSION`]).
+/// Bump when identification's decisions change enough that "not found" songs are worth checking
+/// again (part of [`input_key`]; songs waiting for review go by [`RULES_VERSION`]).
 pub const INPUT_VERSION: u32 = 2;
 
 /// The version of identification's rules a song was last checked by (kept with its state): a song
 /// left waiting for review by older rules is checked again once, by the run the node starts on its
-/// own or by "Identify again". The same number as [`INPUT_VERSION`], which a song's input key holds.
-pub const RULES_VERSION: u32 = INPUT_VERSION;
+/// own or by "Identify again". Version 3 settles unsure songs whose evidence is clear on its own
+/// ([`crate::auto_settle`]); [`INPUT_VERSION`] stays, so "not found" songs aren't all checked again.
+pub const RULES_VERSION: u32 = 3;
 
 /// What a song looked like to identification: its file (path, size, time), the tags it is matched
 /// by, and the node's services as the caller describes them (`services`: their addresses, whether
@@ -376,7 +377,8 @@ fn distinct(results: &[AcoustIdResult], min: f32) -> Vec<Seen<'_>> {
             }
         }
     }
-    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    // Best first, ties by recording id: which five are kept never follows AcoustID's order
+    out.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.rec.id.cmp(&b.rec.id)));
     out
 }
 
@@ -1369,5 +1371,40 @@ mod tests {
             decide_with_tags(&answer, &file, 12, &[], Some(&tags)),
             Decision::Suggest(_)
         ));
+    }
+
+    /// Kimi review r2: which five of more equally sure recordings a run keeps as options never
+    /// follows AcoustID's answer order.
+    #[test]
+    fn the_options_kept_do_not_follow_the_answers_order() {
+        let recs: Vec<AcRecording> = (1..=7)
+            .map(|i| AcRecording {
+                id: format!("00000000-0000-4000-8000-{i:012}"),
+                title: Some(format!("Song {i}")),
+                ..Default::default()
+            })
+            .collect();
+        let answer = |recs: Vec<AcRecording>| {
+            vec![AcoustIdResult {
+                id: "a".into(),
+                score: 0.95,
+                recordings: recs,
+            }]
+        };
+        let kept = |d: Decision| match d {
+            Decision::Suggest(c) => {
+                let mut ids: Vec<String> = c.into_iter().map(|c| c.recording.to_string()).collect();
+                ids.sort();
+                ids
+            }
+            other => panic!("{other:?}"),
+        };
+        let forward = kept(decide(&answer(recs.clone()), &FileFacts::default(), 0, None));
+        let mut reversed = recs;
+        reversed.reverse();
+        let backward = kept(decide(&answer(reversed), &FileFacts::default(), 0, None));
+        assert_eq!(forward, backward);
+        assert_eq!(forward.len(), 5);
+        assert_eq!(forward[0], "00000000-0000-4000-8000-000000000001");
     }
 }

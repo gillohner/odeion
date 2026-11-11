@@ -680,3 +680,114 @@ async fn music_assistant_paging_and_extras() {
     .await;
     assert_eq!(r["status"], "ok");
 }
+
+/// A Subsonic client sets the jukebox's list while the zone's shuffle is on: the list plays
+/// shuffled (shuffle stays on and means it), the order sent is kept as the original one, and
+/// shuffle off gives it back.
+#[tokio::test]
+async fn a_jukebox_list_set_with_shuffle_on_plays_shuffled() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    for n in 0..10u32 {
+        write_wav(
+            &music.join(format!("{n:02}.wav")),
+            &format!("T{n}"),
+            "Band",
+            "Album",
+            n + 1,
+            None,
+        );
+    }
+    let db = dir.path().join("lib.sqlite");
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![music.clone()],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: Some("pw".into()),
+            subsonic_user: "alice".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    // One zone on a null output for the jukebox calls
+    let out = std::sync::Arc::new(pm_zones::outputs::NullOutput::new());
+    s.outputs.register(out.clone());
+    let zone = s.create_zone("Test zone", out);
+    let app = router(s.clone());
+    let auth = "u=alice&p=pw&v=1.16.1&c=test&f=json";
+    call(&app, &format!("/rest/startScan?{auth}")).await;
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let r = call(
+        &app,
+        &format!("/rest/search3?query=&songCount=20&artistCount=0&albumCount=0&{auth}"),
+    )
+    .await;
+    let mut songs: Vec<(String, String)> = r["searchResult3"]["song"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| {
+            (
+                x["title"].as_str().unwrap().to_string(),
+                x["id"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    songs.sort_by_key(|(t, _)| t[1..].parse::<u32>().unwrap());
+    assert_eq!(songs.len(), 10, "{r}");
+    let sent: Vec<String> = songs.iter().map(|(t, _)| t.clone()).collect();
+    let ids: String = songs.iter().map(|(_, id)| format!("&id={id}")).collect();
+    zone.set_shuffle(true);
+    let titles = |z: &pm_zones::ZoneState| -> Vec<String> {
+        z.queue
+            .iter()
+            .map(|i| i.title.clone().unwrap_or_default())
+            .collect()
+    };
+    // A shuffle may leave ten items as they were once in 10! tries: set again then
+    let mut played = Vec::new();
+    for _ in 0..3 {
+        let r = call(&app, &format!("/rest/jukeboxControl?action=set{ids}&{auth}")).await;
+        assert_eq!(r["status"], "ok", "{r}");
+        let st = zone.wait_acked().await;
+        assert!(st.shuffle, "shuffle stays on");
+        played = titles(&st);
+        if played != sent {
+            break;
+        }
+    }
+    assert_ne!(played, sent, "plays shuffled");
+    let mut same = played.clone();
+    same.sort_by_key(|t| t[1..].parse::<u32>().unwrap());
+    assert_eq!(same, sent, "the same items");
+    let order = zone.shuffle_order().expect("shuffled");
+    let original: Vec<String> = order.iter().map(|i| played[*i].clone()).collect();
+    assert_eq!(original, sent, "the order sent is the original order");
+    zone.set_shuffle(false);
+    assert_eq!(
+        titles(&zone.wait_acked().await),
+        sent,
+        "shuffle off: the order sent"
+    );
+}

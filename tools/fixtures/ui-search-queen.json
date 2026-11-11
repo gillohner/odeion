@@ -1,0 +1,421 @@
+{
+  "description": "Public queen search captured from an isolated fixture node on 2026-11-09. Stable inventory for the control audit; ui-search.js still checks live search. Artwork and timings omitted.",
+  "q": "queen",
+  "answers": [
+    {
+      "source": "pubky",
+      "status": "error",
+      "error": "Pubky search needs the upstream contact (Settings)",
+      "hits": []
+    },
+    {
+      "source": "library",
+      "status": "ok",
+      "hits": []
+    },
+    {
+      "source": "deezer",
+      "status": "ok",
+      "hits": [
+        {
+          "kind": "artist",
+          "title": "Queen",
+          "id": "deezer-61045802",
+          "page": "https://www.deezer.com/artist/61045802"
+        },
+        {
+          "kind": "artist",
+          "title": "Queen",
+          "id": "deezer-183179807",
+          "page": "https://www.deezer.com/artist/183179807"
+        },
+        {
+          "kind": "artist",
+          "title": "Queen",
+          "id": "deezer-268175642",
+          "page": "https://www.deezer.com/artist/268175642"
+        },
+        {
+          "kind": "album",
+          "title": "Queen Budapest",
+          "subtitle": "Queen",
+          "id": "deezer-1134409491",
+          "page": "https://www.deezer.com/album/1134409491"
+        },
+        {
+          "kind": "album",
+          "title": "A Night At The Opera",
+          "subtitle": "Queen",
+          "id": "deezer-1007321681",
+          "page": "https://www.deezer.com/album/1007321681"
+        },
+        {
+          "kind": "album",
+          "title": "The Platinum Collection",
+          "subtitle": "Queen",
+          "id": "deezer-1007458691",
+          "page": "https://www.deezer.com/album/1007458691"
+        },
+        {
+          "kind": "album",
+          "title": "Bohemian Rhapsody (The Original Soundtrack)",
+          "subtitle": "Queen",
+          "id": "deezer-1007321401",
+          "page": "https://www.deezer.com/album/1007321401"
+        },
+        {
+          "kind": "album",
+          "title": "Greatest Hits II",
+          "subtitle": "Queen",
+          "id": "deezer-1007454451",
+          "page": "https://www.deezer.com/album/1007454451"
+        },
+        {
+          "kind": "album",
+          "title": "Greatest Hits",
+          "subtitle": "Queen",
+          "id": "deezer-1007459321",
+          "page": "https://www.deezer.com/album/1007459321"
+        },
+        {
+          "kind": "album",
+          "title": "News Of The World",
+          "subtitle": "Queen",
+          "id": "deezer-1007451811",
+          "page": "https://www.deezer.com/album/1007451811"
+        },
+        {
+          "kind": "album",
+          "title": "The Game",
+          "subtitle": "Queen",
+          "id": "deezer-1007453881",
+          "page": "https://www.deezer.com/album/1007453881"
+        },
+        {
+          "kind": "album",
+          "title": "Live at Wembley Stadium",
+          "subtitle": "Queen",
+          "id": "deezer-1007460301",
+          "page": "https://www.deezer.com/album/1007460301"
+        },
+        {
+          "kind": "album",
+          "title": "Jazz",
+          "subtitle": "Queen",
+          "id": "deezer-1007455791",
+          "page": "https://www.deezer.com/album/1007455791"
+        },
+        {
+          "kind": "album",
+          "title": "A Day At The Races",
+          "subtitle": "Queen",
+          "id": "deezer-1007320461",
+          "page": "https://www.deezer.com/album/1007320461"
+        },
+        {
+          "kind": "album",
+          "title": "Hot Space",
+          "subtitle": "Queen",
+          "id": "deezer-1007459681",
+          "page": "https://www.deezer.com/album/1007459681"
+        },
+        {
+          "kind": "album",
+          "title": "Made In Heaven",
+          "subtitle": "Queen",
+          "id": "deezer-1007454351",
+          "page": "https://www.deezer.com/album/1007454351"
+        },
+        {
+          "kind": "album",
+          "title": "Innuendo",
+          "subtitle": "Queen",
+          "id": "deezer-1007459291",
+          "page": "https://www.deezer.com/album/1007459291"
+        },
+        {
+          "kind": "album",
+          "title": "Queen II",
+          "subtitle": "Queen",
+          "id": "deezer-1007453341",
+          "page": "https://www.deezer.com/album/1007453341"
+        },
+        {
+          "kind": "album",
+          "title": "The Works",
+          "subtitle": "Queen",
+          "id": "deezer-1007458491",
+          "page": "https://www.deezer.com/album/1007458491"
+        },
+        {
+          "kind": "album",
+          "title": "Sheer Heart Attack",
+          "subtitle": "Queen",
+          "id": "deezer-1007457911",
+          "page": "https://www.deezer.com/album/1007457911"
+        },
+        {
+          "kind": "album",
+          "title": "A Kind Of Magic",
+          "subtitle": "Queen",
+          "id": "deezer-1007320541",
+          "page": "https://www.deezer.com/album/1007320541"
+        },
+        {
+          "kind": "album",
+          "title": "Queen",
+          "subtitle": "Eva",
+          "id": "deezer-99410932",
+          "page": "https://www.deezer.com/album/99410932"
+        },
+        {
+          "kind": "album",
+          "title": "Queen",
+          "subtitle": "Nicki Minaj",
+          "id": "deezer-70729552",
+          "page": "https://www.deezer.com/album/70729552"
+        },
+        {
+          "kind": "song",
+          "title": "Bohemian Rhapsody",
+          "subtitle": "Queen",
+          "id": "deezer-4091937401",
+          "page": "https://www.deezer.com/track/4091937401",
+          "uri": "deezer:track:4091937401",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029604"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Don't Stop Me Now",
+          "subtitle": "Queen",
+          "id": "deezer-4092329741",
+          "page": "https://www.deezer.com/track/4092329741",
+          "uri": "deezer:track:4092329741",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029610"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Under Pressure (feat. David Bowie)",
+          "subtitle": "Queen",
+          "id": "deezer-4091932171",
+          "page": "https://www.deezer.com/track/4091932171",
+          "uri": "deezer:track:4091932171",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029622"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Another One Bites The Dust",
+          "subtitle": "Queen",
+          "id": "deezer-4092324041",
+          "page": "https://www.deezer.com/track/4092324041",
+          "uri": "deezer:track:4092324041",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029605"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "We Will Rock You",
+          "subtitle": "Queen",
+          "id": "deezer-4092312801",
+          "page": "https://www.deezer.com/track/4092312801",
+          "uri": "deezer:track:4092312801",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029618"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Somebody To Love",
+          "subtitle": "Queen",
+          "id": "deezer-4091936611",
+          "page": "https://www.deezer.com/track/4091936611",
+          "uri": "deezer:track:4091936611",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029613"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Killer Queen",
+          "subtitle": "Queen",
+          "id": "deezer-4091936641",
+          "page": "https://www.deezer.com/track/4091936641",
+          "uri": "deezer:track:4091936641",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029606"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "I Want to Break Free",
+          "subtitle": "Queen",
+          "id": "deezer-4092335521",
+          "page": "https://www.deezer.com/track/4092335521",
+          "uri": "deezer:track:4092335521",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71106175"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "I Want It All (Single Version)",
+          "subtitle": "Queen",
+          "id": "deezer-4092323401",
+          "page": "https://www.deezer.com/track/4092323401",
+          "uri": "deezer:track:4092323401",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBCEE1000031"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "The Show Must Go On",
+          "subtitle": "Queen",
+          "id": "deezer-4092326741",
+          "page": "https://www.deezer.com/track/4092326741",
+          "uri": "deezer:track:4092326741",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029636"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Radio Ga Ga",
+          "subtitle": "Queen",
+          "id": "deezer-4092326601",
+          "page": "https://www.deezer.com/track/4092326601",
+          "uri": "deezer:track:4092326601",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029623"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Crazy Little Thing Called Love",
+          "subtitle": "Queen",
+          "id": "deezer-4091936691",
+          "page": "https://www.deezer.com/track/4091936691",
+          "uri": "deezer:track:4091936691",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029612"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "A Kind of Magic",
+          "subtitle": "Queen",
+          "id": "deezer-4092326581",
+          "page": "https://www.deezer.com/track/4092326581",
+          "uri": "deezer:track:4092326581",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029621"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Cool Cat",
+          "subtitle": "Queen",
+          "id": "deezer-4091932161",
+          "page": "https://www.deezer.com/track/4091932161",
+          "uri": "deezer:track:4091932161",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71103440"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Who Wants to Live Forever",
+          "subtitle": "Queen",
+          "id": "deezer-4091936761",
+          "page": "https://www.deezer.com/track/4091936761",
+          "uri": "deezer:track:4091936761",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71106193"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Tavaszi Szél Vizet Áraszt",
+          "subtitle": "Queen",
+          "id": "deezer-4380770221",
+          "page": "https://www.deezer.com/track/4380770221",
+          "uri": "deezer:track:4380770221",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:USSM12603634"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "I Want To Break Free",
+          "subtitle": "Queen",
+          "id": "deezer-4091936741",
+          "page": "https://www.deezer.com/track/4091936741",
+          "uri": "deezer:track:4091936741",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71805978"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "Don't Stop Me Now (...Revisited)",
+          "subtitle": "Queen",
+          "id": "deezer-4091936831",
+          "page": "https://www.deezer.com/track/4091936831",
+          "uri": "deezer:track:4091936831",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71805977"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "I Want to Break Free (Single Remix)",
+          "subtitle": "Queen",
+          "id": "deezer-4092326621",
+          "page": "https://www.deezer.com/track/4092326621",
+          "uri": "deezer:track:4092326621",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71029625"
+          ]
+        },
+        {
+          "kind": "song",
+          "title": "We Will Rock You (Movie Mix)",
+          "subtitle": "Queen",
+          "id": "deezer-4091936711",
+          "page": "https://www.deezer.com/track/4091936711",
+          "uri": "deezer:track:4091936711",
+          "duration_ms": 30000,
+          "keys": [
+            "isrc:GBUM71805976"
+          ]
+        }
+      ]
+    }
+  ]
+}

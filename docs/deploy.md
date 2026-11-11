@@ -28,8 +28,8 @@ It includes ffmpeg (Debian's 5.1 series, pinned by `FFMPEG_VERSION`), so phones 
 download smaller copies (AAC, MP3, Opus) of songs, not only the originals.
 Every setting below is spelled `ODEION_<NAME>` from now on; the `PM_<NAME>` spelling still works for at
 least this release, and when both are set the `ODEION_` one wins, even when empty
-([docs/branding-compatibility.md](branding-compatibility.md)). The image keeps its name,
-`ghcr.io/gillohner/pubky-music-node`.
+([docs/branding-compatibility.md](branding-compatibility.md)). The image is `ghcr.io/gillohner/odeion`;
+it is also published under its old name, `ghcr.io/gillohner/pubky-music-node`, so older installs keep updating.
 
 The entrypoint writes `/data/node.toml` from `PM_*` variables on first start (see
 `deploy/docker/entrypoint.sh`).
@@ -235,7 +235,7 @@ itself on port 7788 (`http://<nas>:7788/`, it asks for the token once); the same
 go into the native app and into Subsonic clients. The image is published on GHCR; the package
 must be public (or the NAS needs registry credentials) for the pull to succeed. The container runs
 as uid 1000, so the data dataset must be writable by that user; the music dataset is read-only.
-Using the form instead: Repository `ghcr.io/gillohner/pubky-music-node`, Tag `edge` (no tag in
+Using the form instead: Repository `ghcr.io/gillohner/odeion`, Tag `edge` (no tag in
 the repository field), the `PM_*` variables, and the two storage mounts. Turn **Host Network** on:
 A renderer on another subnet or VLAN (common with UniFi "IoT" networks) never answers multicast: add it in
 Settings → Outputs → "Add renderer" with its IP (the node sends a unicast M-SEARCH to UDP 1900, so that port

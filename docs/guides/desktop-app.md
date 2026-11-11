@@ -1,7 +1,7 @@
 # The desktop and Android app
 
 The Odeion app is the node's web page in its own window, for macOS, Windows, Linux and
-Android. It connects to a node you have installed (see the [README](../../README.md#choose-how-to-run-it));
+Android. It connects to a node you have installed (see the [README](../../README.md#get-started));
 it doesn't hold your library itself. What it adds over a browser:
 
 - it finds your node on the home network, and from anywhere once the node is signed in to Pubky;

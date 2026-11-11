@@ -323,6 +323,22 @@ impl Output for GroupOutput {
         self.members.iter().all(|m| m.unmute_restores_level())
     }
 
+    /// Per member, each by its own level ([`crate::sink::unmute_each`]): a member that chooses
+    /// its level gets `level`, one that restores its own is never raised, and one whose level
+    /// can't be read stays muted (it may be above the limit). The group came back when any
+    /// member did.
+    async fn unmute_held(
+        &self,
+        level: Volume,
+        max: f32,
+        last: crate::sink::LastLevel<'_>,
+        _sole: bool,
+        safety: &crate::sink::UnmuteSafety,
+    ) -> crate::sink::Unmuted {
+        let members: Vec<&dyn Output> = self.members.iter().map(|m| m.as_ref() as &dyn Output).collect();
+        crate::sink::unmute_each(&members, level, max, last, safety).await
+    }
+
     async fn standby(&self, on: bool) -> Result<(), SinkError> {
         if !self.caps.standby {
             return Err(SinkError::NoStandby(self.id()));
