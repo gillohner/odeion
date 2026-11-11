@@ -240,6 +240,28 @@ async function keyboardControls(browser) {
   } finally { await context.close(); }
 }
 
+// A click leaves focus on its button (Chromium), but the playback keys stay the page's: Space plays
+// or pauses (it doesn't press the clicked button again) and the arrows skip.
+async function clickedControlKeys(browser, width) {
+  const { page, context, state } = await withPlayer(browser, width);
+  try {
+    await fx.go(page, '/library/import');
+    await page.locator('#sidebar [data-view="tracks"]').click();
+    await page.locator('#tracklist').waitFor();
+    assert.equal(await page.locator('#sidebar [data-view="tracks"]').evaluate((e) => e === document.activeElement), true, 'the clicked button keeps focus');
+    await page.keyboard.press('Space');
+    await sleep(150);
+    await page.keyboard.press('ArrowRight');
+    await sleep(150);
+    await page.keyboard.press('ArrowLeft');
+    await sleep(150);
+    assert.deepEqual(transports(state), ['play', 'next', 'previous'], 'playback keys after a click');
+    assert.equal(await page.locator('#tracklist').count(), 1, 'Space did not press the clicked button again');
+    assert.deepEqual(state.errors, []);
+    console.log(`PASS ${width} Space and arrows control playback after a click on a button`);
+  } finally { await context.close(); }
+}
+
 async function navigationShortcut(browser, width, key) {
   const { page, context, state } = await withPlayer(browser, width);
   try {
@@ -321,6 +343,7 @@ async function heldRetry(browser, width, update, theme = 'light', leaveFocus = f
     if (process.env.SEARCH_RECOVERY_CASE === 'sources') { await delayedSources(browser, 'retry'); return; }
     if (process.env.SEARCH_RECOVERY_CASE === 'keyboard') { await recovery(browser, 1280, 'http', 'light', 'Space'); return; }
     if (process.env.SEARCH_RECOVERY_CASE === 'controls') { await keyboardControls(browser); return; }
+    if (process.env.SEARCH_RECOVERY_CASE === 'clicked') { await clickedControlKeys(browser, 1280); return; }
     if (process.env.SEARCH_RECOVERY_CASE === 'shortcut-search') { await navigationShortcut(browser, 1280, '/'); return; }
     if (process.env.SEARCH_RECOVERY_CASE === 'shortcut-help') { await navigationShortcut(browser, 1280, '?'); return; }
     if (process.env.SEARCH_RECOVERY_CASE?.startsWith('held-')) { await heldRetry(browser, 1280, process.env.SEARCH_RECOVERY_CASE.slice(5)); return; }
@@ -334,6 +357,7 @@ async function heldRetry(browser, width, update, theme = 'light', leaveFocus = f
     await lateReplies(browser, true);
     for (const action of ['retry', 'query', 'leave']) await delayedSources(browser, action);
     await keyboardControls(browser);
+    for (const width of [1280, 768]) await clickedControlKeys(browser, width);
     for (const width of [1280, 1024, 768]) for (const key of ['/', '?']) await navigationShortcut(browser, width, key);
     for (const [width, theme] of [[1280, 'light'], [1024, 'dark'], [768, 'light'], [360, 'dark'], [412, 'light']]) {
       for (const update of ['tags', 'sources']) await heldRetry(browser, width, update, theme);

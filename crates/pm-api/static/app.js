@@ -3950,6 +3950,10 @@
   search.addEventListener('input', () => { searchKeys.reset(); clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { search.value = ''; search.blur(); if (state.view === 'search') setView('home'); } });
 
+  // Whether the focused element got its focus from a click on it (not from the keyboard or the page)
+  let pointerDown = { at: 0, target: null }, focusByPointer = false;
+  document.addEventListener('pointerdown', (e) => { pointerDown = { at: performance.now(), target: e.target }; }, true);
+  document.addEventListener('focusin', (e) => { const t = pointerDown.target; focusByPointer = !!t && performance.now() - pointerDown.at < 1000 && (e.target === t || (e.target.contains && e.target.contains(t))); }, true);
   document.addEventListener('keydown', (e) => {
     if (e.defaultPrevented) return;
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
@@ -3958,9 +3962,13 @@
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
     if (row && e.target === row && (e.key === 'Enter' || e.code === 'Space')) { e.preventDefault(); row.click(); return; }
-    // Focused controls own Space/arrows; Search, Help and Now playing stay available.
-    const playbackKey = e.code === 'Space' || e.key === 'ArrowRight' || e.key === 'ArrowLeft';
-    if (playbackKey && e.target.closest('button, a, summary, .clickable[tabindex], [role="button"], [role="tab"], [role="menuitem"], [role="slider"]')) return;
+    // A control reached with the keyboard (or focused by the page) owns Space: it presses it. The one
+    // a click left focused doesn't (Space would press it again): Space plays or pauses there. Arrows
+    // belong only to controls that move with them (tabs, menu items, sliders). Search, Help and Now
+    // playing stay available everywhere.
+    const onControl = e.target.closest('button, a, summary, .clickable[tabindex], [role="button"], [role="tab"], [role="menuitem"], [role="slider"]');
+    if (e.code === 'Space' && onControl && !(focusByPointer && document.activeElement === e.target)) return;
+    if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && e.target.closest('[role="tab"], [role="menuitem"], [role="slider"]')) return;
     if (e.key === '/') { e.preventDefault(); search.focus(); search.select(); return; }
     if (e.code === 'Space') { e.preventDefault(); transport({ action: 'toggle' }); }
     if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey) transport({ action: 'next' });
