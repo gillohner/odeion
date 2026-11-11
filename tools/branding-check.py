@@ -42,6 +42,11 @@ def channel_reads_new_first(src):
     return re.search(r'build_env\(\s*option_env!\("ODEION_UPDATE_CHANNEL"\)\s*,\s*option_env!\("PM_UPDATE_CHANNEL"\)\s*,?\s*\)', src) is not None
 
 
+def rename_entry_listed(changelog):
+    """The rename's own entry, in whichever release section it sits (0.2.3 and on)."""
+    return "**Pubky Music is now Odeion.**" in changelog
+
+
 MARK = "compat: pre-Odeion"
 
 
@@ -214,8 +219,7 @@ for g in ("install-linux.md", "remote-access.md", "desktop-app.md"):
 has("docs/guides/install-linux.md", "odeiond.service", "the Linux guide installs odeiond.service")
 has("docs/branding-compatibility.md", "# Odeion branding and compatibility", "the compatibility inventory exists")
 cl = text("docs/CHANGELOG.md")
-# The rename's own entry, in whichever release it is (0.2.3 and on)
-check("**Pubky Music is now Odeion.**" in cl, "CHANGELOG has the rename's entry (\"Pubky Music is now Odeion\")")
+check(rename_entry_listed(cl), "CHANGELOG has the rename's entry (\"Pubky Music is now Odeion\")")
 
 # ---------------------------------------------------------------- 2. compatibility identities kept
 check(tauri.get("identifier") == "to.synonym.pubkymusic", "the app identifier (Android application id) is unchanged")
@@ -339,6 +343,12 @@ if SELF_TEST:
     check(legacy_left("t.rs", after_done), "self-test: a mark after a finished statement does not count")
     check(legacy_left("t.rs", far), "self-test: a mark more than 3 lines on does not count")
     check(legacy_left("t.rs", plain), "self-test: an unmarked old name fails")
+    # The rename's entry is found after later releases push 0.2.3 down, and missing it fails
+    _later = cl.replace("\n## 0.2.3", "\n## 0.2.5\n\n- Later.\n\n## 0.2.4\n\n- Later.\n\n## 0.2.3", 1)
+    check(_later != cl and rename_entry_listed(_later),
+          "self-test: the rename's entry is found with two newer releases above it")
+    check(not rename_entry_listed(cl.replace("**Pubky Music is now Odeion.**", "")),
+          "self-test: a CHANGELOG without the rename's entry fails")
 
 print(f"\n{len(problems)} problem(s)")
 sys.exit(1 if problems else 0)
