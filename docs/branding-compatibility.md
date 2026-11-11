@@ -93,7 +93,7 @@ everywhere.
 
 ## Settings in the environment: `ODEION_` and `PM_`
 
-Every setting is now `ODEION_<NAME>`; `PM_<NAME>` still works for at least the next release.
+Every setting is now `ODEION_<NAME>`; `PM_<NAME>` still works, at least through 0.2.3 (the release with the rename).
 
 - **One step at start**, `pm_model::brand::apply_env_compat()`, first thing in `odeiond`/`pm-node`,
   `pm-endpoint` and the desktop app (not on Android, which reads no settings), before any other

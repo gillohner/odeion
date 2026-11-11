@@ -226,7 +226,7 @@ Newest first. Dates are when the change landed on `main`.
   - **Each person chooses:** the node's by default; each listener switches in their Settings.
   - Switching keeps every sign-in, the node's and each person's. A play still uses one account, and a listener's own sign-in page never shows the node's account.
 
-- **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
+- **An installer for a whole Odeion box** (owner's ask): `odeion-v<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
   - Then open http://odeion.local:7788 for the usual web setup.
