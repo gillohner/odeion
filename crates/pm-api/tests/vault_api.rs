@@ -1517,8 +1517,14 @@ async fn accepted_clear_preserves_new_same_owner_lineage_through_next_sync() {
     {
         let lib = n.library.lock().unwrap();
         lib.set_setting("listenbrainz.account", account).unwrap();
-        lib.set_setting("vault.lineage.listenbrainz", &format!("{}-new-fixture", wipe + 1))
-            .unwrap();
+        // A sign-in made right after the wipe, through the node's own sign-in path (it gets an id
+        // later than the wipe's marker, also in the same second)
+        pm_api::vault_cache::new_sign_in(&lib, "listenbrainz");
+        let lineage = lib.get_setting("vault.lineage.listenbrainz").unwrap().unwrap();
+        assert!(
+            pm_api::vault_cache::lineage_at(&lineage) > wipe,
+            "{lineage} after {wipe}"
+        );
     }
     let _ = release.send(());
     let (status, r) = clear.await.unwrap();

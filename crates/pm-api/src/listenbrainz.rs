@@ -412,7 +412,7 @@ pub(crate) async fn connect(
         let account = serde_json::to_string(&acct).expect("serializes");
         if body.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
             let generation = uuid::Uuid::new_v4().to_string();
-            let lineage = crate::vault_cache::new_lineage("listenbrainz");
+            let lineage = crate::vault_cache::new_lineage_in(&lib, "listenbrainz");
             lib.update_settings_atomic(&[
                 (GENERATION_KEY, Some(&generation)),
                 (ACCOUNT_KEY, Some(&account)),

@@ -27,6 +27,9 @@ pub const APP_KEY: &str = "lastfm.app";
 /// The signed-in user's session key and name, and whether plays go out (a secret in backups).
 pub const SESSION_KEY: &str = "lastfm.session";
 const PENDING_KEY: &str = "lastfm.pending";
+/// A new id per sign-in (and none signed out): a sign-in again with the same session key is
+/// another sign-in, so what waited in memory for the old one isn't sent for it.
+const GENERATION_KEY: &str = "lastfm.send_generation";
 const PENDING_MAX: usize = 1000;
 pub const API_BASE: &str = "https://ws.audioscrobbler.com/2.0/";
 const AUTH_URL: &str = "https://www.last.fm/api/auth/";
@@ -163,6 +166,59 @@ fn save_session(lib: &pm_library::Library, sess: Option<&Session>) {
     }
 }
 
+/// The sign-in scrobbles go out for: the session's key in this sign-in ([`GENERATION_KEY`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Owner {
+    key: String,
+    generation: Option<String>,
+}
+
+impl Owner {
+    /// The account a scrobble is kept for in memory while the library refuses it.
+    fn label(&self) -> String {
+        format!("{}#{}", self.key, self.generation.as_deref().unwrap_or(""))
+    }
+}
+
+fn owner_in(lib: &pm_library::Library, sess: &Session) -> Owner {
+    Owner {
+        key: sess.key.clone(),
+        generation: lib.get_setting(GENERATION_KEY).ok().flatten(),
+    }
+}
+
+/// The sign-in now, whether or not it sends.
+#[cfg(test)]
+pub(crate) fn current_owner(s: &NodeState) -> Option<Owner> {
+    let lib = s.library.lock().expect("library poisoned");
+    session_of(&lib).map(|x| owner_in(&lib, &x))
+}
+
+/// A sign-in made here (the browser's, or one imported): a new session generation, and a new
+/// sign-in for the vault.
+///
+/// Another Last.fm account than the one before: the scrobbles still waiting on disk were the
+/// other account's plays, so they go (the ones held in memory are the old sign-in's and are
+/// never sent for this one).
+pub(crate) fn signed_in(lib: &pm_library::Library, sess: &Session) {
+    if session_of(lib).is_some_and(|old| old.user != sess.user) {
+        set_pending(lib, &[]);
+    }
+    save_session(lib, Some(sess));
+    let _ = lib.set_setting(GENERATION_KEY, &uuid::Uuid::new_v4().to_string());
+    crate::vault_cache::new_sign_in(lib, "lastfm");
+}
+
+/// Signed out here (`DELETE /v1/lastfm` and Settings' sign-out): the session, what waits on disk
+/// and what waits in memory all go, so a later sign-in (the same account too) sends none of it.
+pub(crate) fn sign_out_here(s: &NodeState) {
+    let lib = s.library.lock().expect("library poisoned");
+    save_session(&lib, None);
+    set_pending(&lib, &[]);
+    let _ = lib.delete_setting(GENERATION_KEY);
+    crate::send_queue::forget_held(&s.node_id, "lastfm");
+}
+
 fn pending(lib: &pm_library::Library) -> Vec<Value> {
     setting::<Vec<Value>>(lib, PENDING_KEY).unwrap_or_default()
 }
@@ -292,11 +348,12 @@ async fn get(s: &NodeState, app: &App, method: &str, params: &[(&str, String)]) 
     Ok(v)
 }
 
-/// A session Last.fm no longer takes is marked, so the card says to sign in again.
-fn note_problem(s: &NodeState, e: &CallError) {
+/// A session Last.fm no longer takes is marked, so the card says to sign in again: only the one
+/// the refused call was made with (a late answer for an older sign-in leaves a newer one alone).
+pub(crate) fn note_problem(s: &NodeState, e: &CallError, sent_as: &Owner) {
     if let CallError::Session(m) = e {
         let lib = s.library.lock().expect("library poisoned");
-        if let Some(mut sess) = session_of(&lib) {
+        if let Some(mut sess) = session_of(&lib).filter(|x| owner_in(&lib, x) == *sent_as) {
             sess.problem = Some(m.clone());
             save_session(&lib, Some(&sess));
         }
@@ -361,23 +418,32 @@ fn scrobble_of(s: &NodeState, item: &pm_zones::QueueItem) -> Option<HashMap<Stri
 
 type PlayKey = (String, String, u64);
 
-/// Plays under way: the scrobble to send once the play counts, and whether it did.
-fn playing() -> &'static Mutex<HashMap<PlayKey, (Value, bool)>> {
-    static P: std::sync::OnceLock<Mutex<HashMap<PlayKey, (Value, bool)>>> = std::sync::OnceLock::new();
+/// A play under way: the scrobble to send once the play counts, whether it did, and the sign-in
+/// it started under (it counts for that one only).
+type Play = (Value, bool, Owner);
+
+fn playing() -> &'static Mutex<HashMap<PlayKey, Play>> {
+    static P: std::sync::OnceLock<Mutex<HashMap<PlayKey, Play>>> = std::sync::OnceLock::new();
     P.get_or_init(Default::default)
 }
 
-fn ready(s: &NodeState) -> Option<(App, Session)> {
-    let lib = s.library.lock().expect("library poisoned");
-    let app = app_of(&lib)?;
-    let sess = session_of(&lib).filter(|x| x.submit && x.problem.is_none())?;
-    Some((app, sess))
+fn ready_in(lib: &pm_library::Library) -> Option<(App, Session, Owner)> {
+    let app = app_of(lib)?;
+    let sess = session_of(lib).filter(|x| x.submit && x.problem.is_none())?;
+    let owner = owner_in(lib, &sess);
+    Some((app, sess, owner))
+}
+
+fn ready(s: &NodeState) -> Option<(App, Session, Owner)> {
+    ready_in(&s.library.lock().expect("library poisoned"))
 }
 
 /// A zone started `item`: tell Last.fm what plays now, and count the play once it has run half
 /// the track or four minutes (its end counts too).
 pub(crate) fn track_started(s: &Arc<NodeState>, zone: Arc<pm_zones::Zone>, item: pm_zones::QueueItem) {
-    let Some((app, sess)) = ready(s) else { return };
+    let Some((app, sess, owner)) = ready(s) else {
+        return;
+    };
     let Some(params) = scrobble_of(s, &item) else {
         return;
     };
@@ -388,7 +454,7 @@ pub(crate) fn track_started(s: &Arc<NodeState>, zone: Arc<pm_zones::Zone>, item:
     playing()
         .lock()
         .expect("lastfm playing")
-        .insert(key.clone(), (scrobble, false));
+        .insert(key.clone(), (scrobble, false, owner.clone()));
     let s = s.clone();
     tokio::spawn(async move {
         let now_playing: Vec<(String, String)> = params
@@ -398,7 +464,7 @@ pub(crate) fn track_started(s: &Arc<NodeState>, zone: Arc<pm_zones::Zone>, item:
             .collect();
         if let Err(e) = call(&s, &app, "track.updateNowPlaying", Some(&sess.key), now_playing).await {
             tracing::debug!("lastfm now playing: {e}");
-            note_problem(&s, &e);
+            note_problem(&s, &e, &owner);
         }
         let need_ms = item.duration_ms.map_or(240_000, |d| (d / 2).min(240_000));
         loop {
@@ -436,51 +502,61 @@ pub(crate) fn track_ended(s: &Arc<NodeState>, zone: &pm_zones::ZoneId, item: &pm
 }
 
 async fn count_once(s: &Arc<NodeState>, key: &PlayKey) {
-    let scrobble = {
+    let (scrobble, owner) = {
         let mut p = playing().lock().expect("lastfm playing");
         match p.get_mut(key) {
-            Some((v, counted)) if !*counted => {
+            Some((v, counted, owner)) if !*counted => {
                 *counted = true;
-                v.clone()
+                (v.clone(), owner.clone())
             }
             _ => return,
         }
     };
-    send_scrobbles(s, vec![scrobble]).await;
+    send_scrobbles_for(s, Some(owner), vec![scrobble]).await;
+}
+
+/// [`send_scrobbles_for`] whatever sign-in is current.
+#[cfg(test)]
+pub(crate) async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
+    send_scrobbles_for(s, None, new).await;
 }
 
 /// Send scrobbles with any that waited ([`crate::send_queue`]): `new` joins the waiting list on
 /// disk first, then one sender at a time sends the list and removes what Last.fm took. What it
 /// couldn't take, and anything added meanwhile, waits for the next send; not connected, they
 /// wait for the owner to sign in again.
-pub(crate) async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
-    // Not stored (the library refused the write): sent from memory with the rest all the same
-    let unstored = match crate::send_queue::enqueue(
-        &s.library.lock().expect("library poisoned"),
-        PENDING_KEY,
-        new,
-        PENDING_MAX,
-    ) {
-        Ok(()) => Vec::new(),
-        Err((e, new)) => {
-            tracing::warn!("lastfm: the new ones couldn't be stored ({e}); sending them now");
-            new
+///
+/// Plays made under the sign-in `played_for` join the list only while
+/// that is still the sign-in (checked with the list's write, under one guard). A play that
+/// started before another account (or the same one again) signed in, or before a sign-out, isn't
+/// sent for the new one (ListenBrainz's account guard).
+pub(crate) async fn send_scrobbles_for(s: &NodeState, played_for: Option<Owner>, new: Vec<Value>) {
+    let (unstored, ready) = {
+        let lib = s.library.lock().expect("library poisoned");
+        if let Some(o) = &played_for {
+            if session_of(&lib).map(|x| owner_in(&lib, &x)).as_ref() != Some(o) {
+                return;
+            }
         }
+        // Not stored (the library refused the write): sent from memory with the rest all the same
+        let unstored = match crate::send_queue::enqueue(&lib, PENDING_KEY, new, PENDING_MAX) {
+            Ok(()) => Vec::new(),
+            Err((e, new)) => {
+                tracing::warn!("lastfm: the new ones couldn't be stored ({e}); sending them now");
+                new
+            }
+        };
+        (unstored, ready_in(&lib))
     };
-    let Some((app, sess)) = ready(s) else {
+    let Some((app, sess, owner)) = ready else {
         return;
     };
     // The account a scrobble is kept for in memory while the library refuses it: this session
-    let who = (s.node_id.as_str(), "lastfm", sess.key.as_str());
+    // in this sign-in
+    let label = owner.label();
+    let who = (s.node_id.as_str(), "lastfm", label.as_str());
     let _one = crate::send_queue::sender(&s.node_id, "lastfm").await;
-    let current = |lib: &pm_library::Library| {
-        session_of(lib)
-            .filter(|x| x.submit && x.problem.is_none())
-            .is_some_and(|c| c.key == sess.key)
-    };
-    // The session and the list together, under the library's lock: a sender that waited while
-    // the owner signed in to another account sends nothing (the list is that account's now; what
-    // only memory had waits there for its own session)
+    let current = |lib: &pm_library::Library| ready_in(lib).is_some_and(|(_, _, o)| o == owner);
     let batch = {
         let lib = s.library.lock().expect("library poisoned");
         if !current(&lib) {
@@ -511,14 +587,14 @@ pub(crate) async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
             }
             Err(e) => {
                 tracing::debug!("lastfm: {e}; keeping {} scrobbles for later", chunk.len());
-                note_problem(s, &e);
+                note_problem(s, &e, &owner);
             }
         }
     }
     // Still this session's list (a refusal just now may have marked a problem: the scrobbles are
     // still its own)
     let lib = s.library.lock().expect("library poisoned");
-    let owns = session_of(&lib).is_some_and(|c| c.key == sess.key);
+    let owns = session_of(&lib).is_some_and(|c| owner_in(&lib, &c) == owner);
     crate::send_queue::settle(&lib, PENDING_KEY, PENDING_MAX, who, owns, batch, &sent);
 }
 
@@ -678,6 +754,7 @@ pub(crate) async fn update(
             lib.delete_setting(APP_KEY)?;
             // The session belonged to that app
             save_session(&lib, None);
+            let _ = lib.delete_setting(GENERATION_KEY);
         } else {
             if k.len() != 32 || !k.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(ApiError::bad_request(
@@ -709,12 +786,8 @@ pub(crate) async fn update(
 
 /// `DELETE /v1/lastfm`: sign out (the app stays).
 pub(crate) async fn disconnect(State(s): State<Arc<NodeState>>) -> ApiResult<LastfmView> {
-    let lib = s.library.lock().expect("library poisoned");
-    save_session(&lib, None);
-    set_pending(&lib, &[]);
     // What waited in memory goes too: a later sign-in to the same account doesn't send it
-    crate::send_queue::forget_held(&s.node_id, "lastfm");
-    drop(lib);
+    sign_out_here(&s);
     Ok(Json(view(&s)))
 }
 
@@ -788,17 +861,16 @@ async fn finish_login(s: &NodeState, token: &str) -> Result<String, String> {
         .ok_or("Last.fm answered without a session")?;
     let user = v["session"]["name"].as_str().unwrap_or("").to_string();
     let lib = s.library.lock().expect("library poisoned");
-    save_session(
+    signed_in(
         &lib,
-        Some(&Session {
+        &Session {
             key: key.into(),
             user: user.clone(),
             submit: true,
             problem: None,
             from: None,
-        }),
+        },
     );
-    crate::vault_cache::new_sign_in(&lib, "lastfm");
     Ok(user)
 }
 
@@ -936,9 +1008,8 @@ impl crate::signin::SignInSource for LastfmSignIn {
     }
 
     fn sign_out_of(&self, s: &NodeState, _who: &crate::accounts::Who, _way: &str) -> Result<(), ApiError> {
-        let lib = s.library.lock().expect("library poisoned");
-        save_session(&lib, None);
-        set_pending(&lib, &[]);
+        // The same as `DELETE /v1/lastfm`: memory-only scrobbles go with the list on disk
+        sign_out_here(s);
         Ok(())
     }
 
@@ -1005,18 +1076,19 @@ impl crate::signin::SignInSource for LastfmSignIn {
         };
         let lib = s.library.lock().expect("library poisoned");
         lib.set_setting(APP_KEY, &serde_json::to_string(&app).expect("app serializes"))?;
-        save_session(
+        signed_in(
             &lib,
-            Some(&Session {
+            &Session {
                 key: imp.session_key.clone(),
                 user,
                 submit: true,
                 problem: None,
                 from: Some(from),
-            }),
+            },
         );
-        crate::vault_cache::new_sign_in(&lib, "lastfm");
+        // Another sign-in: what waited for the one before goes (on disk and in memory)
         set_pending(&lib, &[]);
+        crate::send_queue::forget_held(&s.node_id, "lastfm");
         Ok(way)
     }
 }
