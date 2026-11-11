@@ -66,7 +66,7 @@ device list does too.
 Give the machine a fixed address in the router, so it doesn't change. The node reads your music
 folder (`/music` inside the container) by itself when it starts; **Your library › Node library**
 lists it. Continue with the
-[first steps](../../README.md#first-steps-after-installing).
+[first steps](overview.md#first-steps-after-installing).
 
 To choose the token yourself instead, add `PM_TOKEN: "<a long random string>"` under
 `environment` before the first start (`openssl rand -hex 32` makes one; a password manager can
