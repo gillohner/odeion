@@ -139,12 +139,13 @@ def run(h):
         until("the previous song (or this one's start) after a swipe right", lambda: (1,) if qi() < i1 or (qi() == i1 and pos() < p1 - 1000) else None, timeout=15)
         e = raw()
         log(f"swipe right on the mini player: queue {i1} -> {qi()}")
-        # Swipe up on it: Now playing covers the bar
+        # Swipe up on it: Now playing covers the bar (where the bar was, Now playing has its volume
+        # row: much of it is plain background, 0.16 of the place changed in CI; not opening is 0)
         swipe(W // 2, cy, W // 2, H // 4, 250, settle=1)
-        np, cover = settles(e, (0, y1, W, y2), over=0.2)
+        np, cover = settles(e, (0, y1, W, y2), over=0.1)
         time.sleep(1.5)
         np = raw()
-        assert cover > 0.2, f"a swipe up on the mini player didn't open Now playing ({cover:.3f})"
+        assert cover > 0.1, f"a swipe up on the mini player didn't open Now playing ({cover:.3f})"
         log(f"swipe up on the mini player opens Now playing ({cover:.3f} of the bar's place changed)")
         shot("ui-3-now-playing")
         # Swipe up on the player: the Up next sheet covers its top part
