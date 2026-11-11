@@ -2843,7 +2843,11 @@
   // the one under it. An entry pushed by back's own handler (no tap since) would make the WebView's
   // back skip the page's entry and leave the page: on Android to the app's connect page, which
   // connects again and registers the phone's player once more (TASK-android-back-reregister-1111).
-  const pushTransient = (layer) => { const s = history.state || {}; if (s.transient && (!layer || s.layer)) return; try { history.pushState({ ...s, transient: true, layer: !!(layer && s.transient) }, '', location.pathname + location.search); } catch { /* sandboxed */ } };
+  const pushTransient = (layer) => {
+    // (a layer opened again while its last entry is still being popped: its own entry once that is done)
+    if (layer && selfPop && popPending) { popPending.then(() => { if (transients.some((t) => t.layer && t.open())) pushTransient(true); }); return; }
+    const s = history.state || {}; if (s.transient && (!layer || s.layer)) return; try { history.pushState({ ...s, transient: true, layer: !!(layer && s.transient) }, '', location.pathname + location.search); } catch { /* sandboxed */ }
+  };
   // Popping is asynchronous: a page opened right after waits for it (setView), or the pop would undo it.
   // `layer`: only a layer's own entry (its layer closed, what is under it stays); otherwise once all are
   // closed, past a layer's entry too.
@@ -3996,7 +4000,7 @@
     },
   };
   const setView = (v, arg, how = 'push') => {
-    if (how !== 'pop' && how !== 'replace') popTransient(true); // a page opened from a sheet takes Now playing's entry, not the sheet's
+    if (how !== 'pop') popTransient(true); // a page opened from a sheet takes Now playing's entry, not the sheet's
     if (popPending && how !== 'pop') return popPending.then(() => setView(v, arg, how)); // a menu's entry is still being popped
     cancelArtistReads(); // the page being left reads no more credits
     { const t = toItem(v, arg); if (t) { v = 'item'; arg = t; } }

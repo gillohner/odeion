@@ -206,6 +206,8 @@ class PlayerService : Service() {
 
         @JvmStatic
         fun stop(context: Context) {
+            // (a start right after this one is a real start, not "runs already")
+            running = null
             context.stopService(Intent(context, PlayerService::class.java))
         }
     }

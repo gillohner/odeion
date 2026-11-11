@@ -175,6 +175,8 @@ const overflow = (page) => page.evaluate(() => {
     check(sh.tabs.join(',') === 'Up next:true,Lyrics:false,More:false' && sh.rows === 7 && sh.border === '0px' && sh.handle && sh.r.bottom <= sh.vh + 0.5 && sh.r.top < 40, `${at}: Up next opens one full-height sheet with a handle and the tab bar (${sh.tabs.join(' ')}; ${sh.rows} rows, no box around them)`);
     await swipe(page, '.np-bsheet .np-sheet-head', 0, 140, [0.5, 0.2]); await sleep(500);
     check(await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), `${at}: a swipe down on its head closes the sheet, Now playing stays`);
+    await sleep(200);
+    check(await page.evaluate(() => !!(history.state && history.state.transient && !history.state.layer)), `${at}: closed by its head, the sheet's history entry goes too (Now playing's stays)`);
     // swipe up opens Up next; a sideways swipe moves to Lyrics; back closes the sheet, then Now playing
     // (an entry pushed by back's own handler, with no tap since, is one Android's WebView skips: its
     // next back left the page for the app's connect page, which connected and registered again)
