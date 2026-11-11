@@ -6,6 +6,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-11
 
+- Search shows when it could not finish and offers Retry, keeping the same words and source. Results already received remain available, retry progress appears immediately, and late replies from a failed attempt cannot replace the recovered results.
+- Connected search sources appear even when they finish loading after a retry. Space activates the focused button, and arrow keys in tabs change tabs, without also changing playback.
+- Search and Help keyboard shortcuts work after clicking navigation. Holding Space on Retry still retries once when tags or sources finish loading during the key press.
+
 - **The phone's Library tabs keep your place visible.** Opening a section or returning with Back brings its selected tab into view, with nearby sections ready to tap. Resizing keeps the tab you are using with the keyboard visible, or the selected tab when focus is elsewhere. The tabs have larger touch targets, and updates elsewhere leave your scrolling alone.
 
 - **Signing in as another Pubky identity ends the old one's sync at once.** A sync or a vault pass still running for the identity signed out used to finish: it could bring that identity's playlists, bookmarks or sign-ins onto the node and push the node's changes to the old identity's homeserver. It now stops before its next write, on either side, and the new sign-in's own sync takes over.

@@ -35,6 +35,8 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
   try { const pls = await api('/playlists'); const pl = pls.find((p) => p.items > 0); if (pl) views.push('/playlist/' + pl.id); } catch { /* none */ }
   try { const al = await api('/library/albums'); if (al[0]) views.push('/album/lib-' + al[0].id); } catch { /* none */ }
   views.push('/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69');
+  // Optional focused rerun; CI leaves this unset and audits every view above.
+  if (process.env.UI_CONTROLS_VIEWS) views.splice(0, views.length, ...JSON.parse(process.env.UI_CONTROLS_VIEWS));
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: 'dark' });
   await searchFixture.install(ctx);

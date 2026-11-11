@@ -608,6 +608,7 @@ jobs:
           ui-topbar.js topbar-shots
           ui-busy.js busy-shots
           ui-controls-search-check.js controls-search-shots
+          ui-search-recovery.js search-recovery-shots
           ui-source-policy.js source-policy-shots
           ui-queue-covers.js queue-covers-shots
           ui-versions.js versions-shots

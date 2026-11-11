@@ -3906,33 +3906,44 @@
     (async () => {
       try {
         const r = await fetch(`/v1/search?${new URLSearchParams({ q, in: scope })}`, { headers: state.token ? { authorization: 'Bearer ' + state.token } : {}, signal: run.ctrl.signal });
+        if (!r.ok) throw new Error('Search request failed');
         run.sources = (r.headers.get('x-pm-sources') || '').split(',').filter(Boolean);
         searchChanged(run);
-        setTimeout(() => { for (const src of run.sources) if (!run.answers[src]) run.slow.add(src); searchChanged(run); }, 5000);
+        setTimeout(() => { if (!run.pending) return; for (const src of run.sources) if (!run.answers[src]) run.slow.add(src); searchChanged(run); }, 5000);
         const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
+        const accept = (line) => {
+          if (!line.trim()) return;
+          const a = JSON.parse(line); run.answers[a.source] = a; run.slow.delete(a.source);
+          if (!run.firstAt) run.firstAt = Date.now();
+          searchChanged(run);
+        };
         for (;;) {
           const { value, done } = await reader.read(); if (done) break;
           buf += dec.decode(value, { stream: true });
           let nl;
           while ((nl = buf.indexOf('\n')) >= 0) {
             const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-            if (!line.trim()) continue;
-            const a = JSON.parse(line); run.answers[a.source] = a; run.slow.delete(a.source);
-            if (!run.firstAt) run.firstAt = Date.now();
-            searchChanged(run);
+            accept(line);
           }
         }
-      } catch (e) { if (e.name !== 'AbortError') toast(e.message, 'error'); }
+        accept(buf + dec.decode());
+        if (run.sources.some((src) => !run.answers[src])) throw new Error('Search response incomplete');
+      } catch (e) { if (e.name !== 'AbortError') run.error = true; }
       run.pending = false; run.doneAt = Date.now();
       window.pmLastSearch = { q, scope, first_ms: run.firstAt && run.firstAt - run.startedAt, all_ms: run.doneAt - run.startedAt, sources: Object.fromEntries(Object.values(run.answers).map((a) => [a.source, a.ms])) };
       searchChanged(run);
     })();
     return run;
   };
+  // Retried searches have the same query and scope, but a different run. Old tag replies and
+  // slow-source timers must never replace the new results or change their progress.
+  const displayedSearch = () => state.view === 'search' && state.viewArg && searchRuns.get(`${(state.viewArg.q || '').toLowerCase()}|${state.viewArg.in || 'everywhere'}`);
+  const currentSearch = (run) => !!run && displayedSearch() === run;
   const searchChanged = (run) => {
+    if (!currentSearch(run)) return;
     const prog = $('#sprog'); const total = Math.max(run.sources.length, 1); const got = Object.keys(run.answers).length;
     if (prog) { prog.hidden = !run.pending; prog.firstElementChild.style.width = `${Math.max(8, (got / total) * 100)}%`; }
-    if (state.view === 'search' && state.viewArg && state.viewArg.q === run.q && (state.viewArg.in || 'everywhere') === run.scope) renderSearchBody(run);
+    renderSearchBody(run);
   };
   // Keyboard on the search box (TASK-pinakes-social-ux A1): ↑/↓ walk the results across the
   // groups, Enter opens the one in focus, Shift+Enter plays it; the box keeps the focus and says
@@ -4002,12 +4013,16 @@
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { search.value = ''; search.blur(); if (state.view === 'search') setView('home'); } });
 
   document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented) return;
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
     if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
     if (typing) return;
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
     if (row && e.target === row && (e.key === 'Enter' || e.code === 'Space')) { e.preventDefault(); row.click(); return; }
+    // Focused controls own Space/arrows; Search, Help and Now playing stay available.
+    const playbackKey = e.code === 'Space' || e.key === 'ArrowRight' || e.key === 'ArrowLeft';
+    if (playbackKey && e.target.closest('button, a, summary, .clickable[tabindex], [role="button"], [role="tab"], [role="menuitem"], [role="slider"]')) return;
     if (e.key === '/') { e.preventDefault(); search.focus(); search.select(); return; }
     if (e.code === 'Space') { e.preventDefault(); transport({ action: 'toggle' }); }
     if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey) transport({ action: 'next' });
@@ -5169,9 +5184,11 @@
     return byKind;
   };
   const renderSearchBody = (run) => {
+    if (!currentSearch(run)) return;
     const chips = $('#scopechips'); const box = $('#sresults'); if (!chips || !box) return;
+    const retryFocus = $('[data-sretry]:focus', box);
     const scope = run.scope;
-    if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(run); }).catch(() => { state.sourcesLoading = false; }); }
+    if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(displayedSearch()); }).catch(() => { state.sourcesLoading = false; }); }
     const services = (state.sources || []).filter((x) => x.enabled !== false && (!x.features || x.features.includes('search')) && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
     const scopes = [['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])];
     const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
@@ -5186,8 +5203,8 @@
     const nOn = Object.values(run.facets).filter(Boolean).length;
     const facetRow = facetChips ? `<div class="chips facets" role="group" aria-label="Narrow the results">${facetChips}${nOn ? '<button class="chip sm ghost" data-facet="">Clear</button>' : ''}</div>` : '';
     const facetBar = facetRow && shellMode() === 'phone' ? `<details class="sfilters" ${run.filtersOpen ? 'open' : ''}><summary class="chip">Filters${nOn ? ` · ${nOn}` : ''}</summary>${facetRow}</details>` : facetRow;
-    const problems = run.sources.filter((src) => (run.answers[src] && run.answers[src].status !== 'ok') || (!run.answers[src] && run.slow.has(src)));
-    const pendingAny = run.pending && run.sources.some((src) => !run.answers[src]);
+    const problems = run.sources.filter((src) => (run.answers[src] && run.answers[src].status !== 'ok') || (!run.error && !run.answers[src] && run.slow.has(src)));
+    const pendingAny = run.pending && (!run.sources.length || run.sources.some((src) => !run.answers[src]));
     const skel = (n, tiles) => (tiles ? `<div class="sk-grid">${'<div class="skeleton"></div>'.repeat(n)}</div>` : `<div class="skeleton" style="height:${n * 54}px"></div>`);
     const sections = [];
     const counts = {}; for (const ans of Object.values(run.answers)) for (const [k, c] of ans.counts || []) counts[k] = Math.max(counts[k] || 0, c);
@@ -5217,7 +5234,14 @@
     const notes = problems.length ? `<div class="snotes">${problems.map((src) => { const err = run.answers[src] && run.answers[src].error; const said = err ? short(err, src).replace(/[.\s·]+$/, '') : ''; const why = said && !said.toLowerCase().includes(srcName(src).toLowerCase()) ? `${srcName(src)}: ${said}` : said; const again = !err || /answered 5\d\d|timed? ?out|time-?out|took too long|reach|network|busy|later|didn.t answer|isn.t answering|sending request|refused|dns|connect(ion)? (error|reset|closed)/i.test(err); return `<span class="snote" title="${esc(err || 'still waiting')}">${svcBadge(src)} ${why ? esc(why) : `${esc(srcName(src))} didn’t answer`}${again ? ` · <a data-sretry="${src}">Retry</a>` : ''}</span>`; }).join('')}</div>` : '';
     const nothing = !pendingAny && !SEARCH_KINDS.some(([k]) => byKind[k].length);
     const nothingAtAll = nothing && !(tg && ((tg.mine || []).length || (tg.others || []).length));
-    box.innerHTML = notes + facetBar + (nothingAtAll ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
+    // Keep Retry attached while late tags/sources redraw the results. Replacing it and restoring
+    // focus loses the browser's native Space activation between keydown and keyup.
+    let content = $('#scontent', box);
+    if (!content) { box.innerHTML = '<div id="scontent"></div>'; content = $('#scontent', box); }
+    const failure = $('#sfailure', box);
+    if (run.error && !failure) box.insertAdjacentHTML('afterbegin', '<div class="snotes" id="sfailure"><div class="notice" role="status"><div class="row"><span class="grow">Search couldn’t finish.</span><button class="btn sm" data-sretry>Retry</button></div></div></div>');
+    else if (!run.error && failure) failure.remove();
+    content.innerHTML = notes + facetBar + (nothingAtAll && !run.error ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
     const sf = $('.sfilters', box); if (sf) sf.addEventListener('toggle', () => { run.filtersOpen = sf.open; });
     // A facet chip keeps the focus across the re-render (or it moves to the first chip, after Clear)
     $$('[data-facet]', box).forEach((b) => b.onclick = () => {
@@ -5237,7 +5261,8 @@
     $$('[data-sother]', box).forEach((r) => r.onclick = () => { const [k, n] = r.dataset.sother.split(':'); const h = byKind[k][Number(n)]; if (k === 'person') setView('person', h.id); else if (k === 'playlist' && h.sources.includes('library')) setView('playlist', h.id); else if (h.page) openWeb(h.page); });
     const to = $('[data-sopen="top"]', box); if (to) to.onclick = () => setView('item', { kind: top.kind === 'song' ? 'song' : top.kind, id: top.id });
     const tp = $('[data-splaytop]', box); if (tp) tp.onclick = async (e) => { if (top.kind === 'song') return playSongs([{ ...top, artist: top.subtitle }], 0, 'replace', null, e.currentTarget); try { const pg = await api('GET', `/item/${top.kind}/${top.id}`); playSongs(pg.songs || [], 0, 'replace', pg.plays_from, e.currentTarget, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } };
-    $$('[data-sretry]', box).forEach((b) => b.onclick = () => { searchRuns.delete(`${run.q.toLowerCase()}|${run.scope}`); startSearch(run.q, run.scope); render(); });
+    $$('[data-sretry]', box).forEach((b) => b.onclick = () => { searchRuns.delete(`${run.q.toLowerCase()}|${run.scope}`); startSearch(run.q, run.scope); render(); search.focus(); });
+    if (retryFocus && !retryFocus.isConnected) { const again = $$('[data-sretry]', box).find((b) => b.dataset.sretry === retryFocus.dataset.sretry); (again || search).focus(); }
   };
   // ---- Home (STEWARD-UX-HOME.md): everything Pinakes knows about music, one section per call ----
   const HOME_TITLES = { 'trending-songs': 'Trending songs', 'trending-albums': 'Trending albums', 'trending-artists': 'Trending artists', following: 'From people you follow', tags: 'Tags people use for music', concerts: 'Concerts near you', podcasts: 'Podcasts', yours: 'Yours on Pubky', new: 'New on Pubky' };
@@ -5607,7 +5632,7 @@
   };
   const renderPage = async (api) => {
     // The search box is a combobox over the results page only
-    if (state.view !== 'search') { search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls'); search.removeAttribute('aria-activedescendant'); }
+    if (state.view !== 'search') { search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls'); search.removeAttribute('aria-activedescendant'); $('#sprog').hidden = true; }
     const v = state.view;
     // The dashboard is a full screen of its own (a TV or tablet): no sidebar, bars or player
     document.body.classList.toggle('kiosk', v === 'dashboard');
@@ -6064,7 +6089,7 @@
           const run = startSearch(a.q, scope);
           main.innerHTML = `<div class="page-head"><h2>Results for “${esc(a.q)}”</h2></div><div class="scopechips" id="scopechips"></div><div id="sresults"></div><div id="sresults-said" class="sr-only" aria-live="polite"></div>`;
           search.setAttribute('aria-controls', 'sresults'); search.setAttribute('aria-expanded', 'true');
-          renderSearchBody(run);
+          searchChanged(run);
           break;
         }
         case 'dashboard': {
