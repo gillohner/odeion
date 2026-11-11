@@ -3,7 +3,12 @@
 FROM ubuntu:24.04
 # ffmpeg for download transcodes, as in the release image (Ubuntu 24.04's 6.1 series here)
 ARG FFMPEG_VERSION=7:6.1.*
-RUN apt-get update && apt-get install -y --no-install-recommends libasound2t64 ca-certificates \
+# Set by CI (tools/ci/apt-fallback.sh) when the runner can't resolve the Ubuntu archive hosts
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then \
+        sed -E -i "s#https?://([a-z0-9.-]+\\.)?(archive|security)\\.ubuntu\\.com/ubuntu#$APT_MIRROR#g" /etc/apt/sources.list.d/ubuntu.sources; \
+    fi \
+    && apt-get update && apt-get install -y --no-install-recommends libasound2t64 ca-certificates \
         "ffmpeg=${FFMPEG_VERSION}" \
     && rm -rf /var/lib/apt/lists/* \
     && (userdel -r ubuntu 2>/dev/null || true) && useradd -r -u 1000 -g audio -d /data pm

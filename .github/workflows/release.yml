@@ -150,6 +150,7 @@ jobs:
           node-version: 22
       - if: runner.os == 'Linux'
         run: |
+          bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev \
             libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev \
@@ -374,7 +375,7 @@ jobs:
           key: armv7-${{ hashFiles('Cargo.lock') }}
           restore-keys: armv7-
       - if: runner.os == 'Linux' && matrix.platform != 'linux-armv7'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+        run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - name: build
         shell: bash
         env:
