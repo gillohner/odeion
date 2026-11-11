@@ -531,7 +531,11 @@ fn start_scan(s: &Arc<NodeState>, share: Share) {
                 s2.notify_library();
                 crate::identify::after_scan(&s2, r.files_added + r.files_updated);
             }
-            Err(e) => tracing::warn!(share = %share.name, "WebDAV scan failed: {e}"),
+            Err(e) => {
+                tracing::warn!(share = %share.name, "WebDAV scan failed: {e}");
+                // Songs the settling left while it held the gate are settled still
+                crate::identify::after_scan(&s2, 0);
+            }
         }
     });
 }

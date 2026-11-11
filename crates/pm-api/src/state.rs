@@ -2161,6 +2161,12 @@ impl NodeState {
         let _ = self.events.send(ApiEvent::LibraryChanged);
     }
 
+    /// [`Self::begin_scan`] for a request that awaits while it holds the slot: given back when the
+    /// guard goes, also when the request is dropped midway (a client gone, a proxy's timeout).
+    pub(crate) fn scan_slot(self: &Arc<Self>) -> Option<ScanSlot> {
+        self.begin_scan().then(|| ScanSlot(self.clone()))
+    }
+
     pub fn set_sync(&self, sync: Option<Arc<crate::sync::PubkySync>>) {
         let derived = sync.as_ref().map(|s| profile_url(s.z32()));
         let z32 = sync.as_ref().map(|s| s.z32().to_string());
@@ -2342,6 +2348,15 @@ impl NodeState {
 
     pub fn is_scanning(&self) -> bool {
         *self.scanning.lock().expect("scan flag poisoned")
+    }
+}
+
+/// [`NodeState::scan_slot`]'s guard.
+pub(crate) struct ScanSlot(Arc<NodeState>);
+
+impl Drop for ScanSlot {
+    fn drop(&mut self) {
+        self.0.end_scan();
     }
 }
 

@@ -2317,7 +2317,6 @@ async fn corrections_wait_out_a_restore_or_folder_move() {
     let id = waiting(&s, dir.path(), "M", "Song M", &[fp(1, "Song M", "Band", 0.6)]);
     let correct = |recording: u32| {
         let app = app.clone();
-        let id = id;
         async move {
             call(
                 &app,
@@ -2350,4 +2349,49 @@ async fn corrections_wait_out_a_restore_or_folder_move() {
     assert_eq!(st, StatusCode::OK, "{b}");
     restore.await.unwrap();
     assert_eq!(recording_of(&s, id), Some(rec(1)));
+}
+
+/// Claude review r5: a folder move asked for while a correction goes waits for it (through the
+/// router), then moves.
+#[tokio::test]
+async fn a_folder_move_waits_for_a_correction_going() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let app = router(s.clone());
+    let id = waiting(&s, dir.path(), "N", "Song N", &[fp(1, "Song N", "Band", 0.6)]);
+    let gate = gate_held(&s);
+    let app2 = app.clone();
+    let correction = tokio::spawn(async move {
+        call(
+            &app2,
+            "POST",
+            &format!("/v1/library/tracks/{id}/match"),
+            Some(serde_json::json!({"recording_mbid": rec(1)})),
+        )
+        .await
+    });
+    until("the correction", || s.correcting.load(SeqCst) == 1).await;
+    let to = dir.path().join("moved");
+    std::fs::create_dir_all(&to).unwrap();
+    let app3 = app.clone();
+    let from = dir.path().join("old").display().to_string();
+    let to_text = to.display().to_string();
+    let moving = tokio::spawn(async move {
+        call(
+            &app3,
+            "POST",
+            "/v1/library/folders/move",
+            Some(serde_json::json!({"from": from, "to": to_text})),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!moving.is_finished(), "the move waits for the correction");
+    drop(gate);
+    let (st, b) = correction.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{b}");
+    let (st, b) = moving.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(recording_of(&s, id), Some(rec(1)));
+    until("the move's rescan", || !s.is_scanning()).await;
 }

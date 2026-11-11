@@ -701,17 +701,17 @@ pub async fn restore(
         (Some(_), _, None) if !skip_secrets => return Err(BackupError::NeedsPassphrase.into()),
         _ => None,
     };
-    if !s.begin_scan() {
+    let Some(slot) = s.scan_slot() else {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "a scan is running; restore when it is done",
         ));
-    }
+    };
     // No match correction meanwhile (it would write a file, then a library being replaced)
     let held = s.no_corrections().await;
     let result = restore_locked(s, &parsed, secrets).await;
     drop(held);
-    s.end_scan();
+    drop(slot);
     // The sign-in stores may have been replaced: read again
     crate::accounts::sign_ins_changed();
     let mut report = result?;

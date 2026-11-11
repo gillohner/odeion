@@ -3281,12 +3281,12 @@ async fn move_folder(
     if !to.is_dir() {
         return Err(ApiError::bad_request(format!("{} is not a folder", to.display())));
     }
-    if !s.begin_scan() {
+    let Some(slot) = s.scan_slot() else {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "a scan is running; try again when it is done",
         ));
-    }
+    };
     // No match correction meanwhile (it would write a file under paths being moved)
     let held = s.no_corrections().await;
     let moved = s
@@ -3295,7 +3295,7 @@ async fn move_folder(
         .expect("library poisoned")
         .move_folder(std::path::Path::new(m.from.trim()), &to);
     drop(held);
-    s.end_scan();
+    drop(slot);
     let moved = moved?;
     s.unwatch(std::path::Path::new(m.from.trim()));
     s.watch_more(&to);

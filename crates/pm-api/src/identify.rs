@@ -3017,7 +3017,12 @@ pub(crate) async fn set_match(
     let st = s.clone();
     let out = tokio::task::spawn_blocking(move || correct(&st, id, expect, choice, follow))
         .await
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // The gate it held may have kept songs from the settling: settled now, as after a scan
+    if s.settle_again.load(std::sync::atomic::Ordering::SeqCst) {
+        after_scan(&s, 0);
+    }
+    let out = out?;
     let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
     Ok(Json(out))
 }

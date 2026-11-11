@@ -973,7 +973,9 @@ fn start_scan(s: &Arc<NodeState>, root: Root) {
                 crate::identify::after_scan(&s2, r.files_added + r.files_updated);
             }
             Err(e) => {
-                tracing::warn!(drive = root.provider.name(), folder = %root.name, "drive scan failed: {e}")
+                tracing::warn!(drive = root.provider.name(), folder = %root.name, "drive scan failed: {e}");
+                // Songs the settling left while it held the gate are settled still
+                crate::identify::after_scan(&s2, 0);
             }
         }
     });
