@@ -5720,7 +5720,7 @@
     try {
       // A redraw of the same page while it sorts (the library changed) replaces the list again: the
       // filter goes back after each render, the focus once the newest is done. (A redraw still
-      // loading shows no Sort, so none can start before the sort and end after it.)
+      // loading shows no Sort, so none starts before this sort.)
       const rendered = render(); let drawing = lastDrawing;
       await rendered;
       for (;;) {
