@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-11
+
+- **Shuffle and repeat work like any player's** (owner: "shuffle and repeat buttons don't seem consistent. make sure we have standard media player nav"). Both are modes of the zone, shown the same in the bar, in Now playing (desktop and phone) and on the Queue page: on, a button takes the accent and a dot under its icon, and says so to screen readers. Shuffle on plays what comes next in a random order, the playing song staying; off puts the queue back in its order, the playing song in its place. A page's **Play** plays in order with shuffle off, its **Shuffle** with shuffle on from a random song (album, playlist, smart playlist, artist and song pages, downloads, Home's first play). The mode comes from the node, so another open app sees it change; This browser keeps its own, and a move between it and a zone takes shuffle and repeat along. No toast when a mode changes: the button shows it. `tools/ui-shuffle-repeat.js` checks it at six widths, dark and light.
+- **Play from here (Now playing › Sources) no longer ends in a false error.** On a playing zone the switch worked, but about 20 seconds later the bar said "did not start playing in 20 seconds"; the wait now ends with the node's answer.
+
 ## 0.2.3
 
 ### 2026-11-11
@@ -113,9 +118,6 @@ Newest first. Dates are when the change landed on `main`.
 - **Leaving matches as they are: clearer Undo** (follow-ups from the reviews of "Reviewing matches is optional"). Pressing Undo says at once that the songs are coming back, and on the review page the focus returns to the page, not its body. An album's Undo says it brings back that album's skipped songs (earlier ones too). **Bring back N skipped** asks for a second press, since it undoes every "Leave as is" at once. While Identify runs, the card doesn't offer Skip all unsure (its redraws could take a press twice).
 
 ### 2026-11-06
-
-- **Shuffle and repeat work like any player's** (owner: "shuffle and repeat buttons don't seem consistent. make sure we have standard media player nav"). Both are modes of the zone, shown the same in the bar, in Now playing (desktop and phone) and on the Queue page: on, a button takes the accent and a dot under its icon, and says so to screen readers. Shuffle on plays what comes next in a random order, the playing song staying; off puts the queue back in its order, the playing song in its place. A page's **Play** plays in order with shuffle off, its **Shuffle** with shuffle on from a random song (album, playlist, smart playlist, artist and song pages, downloads, Home's first play). The mode comes from the node, so another open app sees it change; This browser keeps its own, and a move between it and a zone takes shuffle and repeat along. No toast when a mode changes: the button shows it. `tools/ui-shuffle-repeat.js` checks it at six widths, dark and light.
-- **Play from here (Now playing › Sources) no longer ends in a false error.** On a playing zone the switch worked, but about 20 seconds later the bar said "did not start playing in 20 seconds"; the wait now ends with the node's answer.
 
 - **Reviewing matches is optional** (owner: a pile of 7,412 songs "to confirm" read as work owed). The Identify card says "Finished", with the unsure songs as a quiet second line: they play and show as usual, identified or not. **Skip all unsure** leaves them as they are (reviewed without an identity, left alone by the next Identify), with Undo; on the review page each album has **Leave as is**, with Undo; the card counts the songs left as they are and those an older suggestion makes worth a re-check, and offers to bring skipped songs back.
 

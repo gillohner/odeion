@@ -92,6 +92,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         const Z = zoneOf(); const sent = [];
         const fixtures = { '/zones': { body: [Z] }, '/zones/z1': { get body() { return Z; } }, '/zones/z1/queue': { get body() { return Z.queue; } }, '/outputs': { body: [{ id: 'upnp:sp', name: 'Speaker', kind: 'upnp', caps: { hw_volume: 'percent' } }] }, '/smart/s1/tracks': { body: { playlist: { id: 's1', name: 'Mix', rules: [], matches: 'all' }, tracks, matched: N } } };
         for (const t of tracks) fixtures[`/library/tracks/${t.id}`] = { body: t };
+        fixtures['/library/tracks'] = { body: { tracks, next: null } };
         // A page with no songs of its own: discovery finds three library songs for it
         fixtures['/discover/play'] = { body: { plays_from: { service: 'library', label: 'Your library' }, track_ids: [1, 2, 3] } };
         fixtures['/item/album/mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e'] = { body: { kind: 'album', id: 'mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e', title: 'Found elsewhere', section: 'albums', source: 'musicbrainz', target: { uri: 'https://musicbrainz.org/release-group/1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e' }, uri: 'https://example.com/album', open_on: [{ url: 'https://example.com/album' }], songs: [], releases: [], links: [], also_on: [], tags: [] } };
@@ -232,6 +233,14 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         check(await until(async () => sent.slice(n0).some((x) => x.v === '/playlists/c1/play')), `${T} a playlist's Play plays it on the zone`);
         const pl = sent.slice(n0).map((x) => `${x.m} ${x.v}${x.body && 'shuffle' in x.body ? ` ${x.body.shuffle}` : ''}`);
         check(pl.indexOf('PUT /zones/z1/shuffle false') >= 0 && pl.indexOf('PUT /zones/z1/shuffle false') < pl.indexOf('POST /playlists/c1/play'), `${T} …after turning shuffle off (${pl.join(', ')})`);
+        // Tracks › Play all with the zone's shuffle on: like every page's Play, in order with shuffle off
+        Z.shuffle = true; snapshot(); await sleep(150);
+        await fx.go(page, '/tracks'); await page.waitForSelector('#shuffle'); await sleep(200);
+        const tl0 = asked('POST', /\/zones\/z1\/load$/).length;
+        await page.click('#shuffle');
+        check(await until(async () => asked('POST', /\/zones\/z1\/load$/).length === tl0 + 1), `${T} Tracks › Play all loads the zone's queue`);
+        const tl = asked('POST', /\/zones\/z1\/load$/)[tl0];
+        check(!!tl && tl.body.shuffle === false && tl.body.index === 0 && tl.body.items.map((x) => x.uri).join() === inOrder.join(), `${T} …in its order with shuffle off, though the zone had shuffle on (${tl && JSON.stringify({ shuffle: tl.body.shuffle, index: tl.body.index })})`);
 
         // Loads and toggles, one after another in the order asked
         await fx.go(page, '/smart/s1'); await page.waitForSelector('#smplay'); await sleep(200);

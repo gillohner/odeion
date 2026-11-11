@@ -6237,7 +6237,7 @@
             + (f.other.length ? `<section class="section"><div class="section-head"><h3>From other services</h3></div><div id="favother"><div class="skeleton" style="height:56px"></div></div></section>` : '');
           lists.fav = f.tracks;
           const hc = $('[data-hsconnect]', main); if (hc) hc.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) render(); };
-          const fp = $('#favplay'); if (fp) fp.onclick = () => playTracks(f.tracks, true);
+          const fp = $('#favplay'); if (fp) fp.onclick = () => playTracks(f.tracks, true, 'end', { shuffle: false });
           if (f.other.length) { const items = await describe(f.other); const box = $('#favother'); if (box && state.view === 'favourites') { box.innerHTML = discoverRows(items); bindDiscoverRows(items); } }
           break;
         }
@@ -6481,7 +6481,7 @@
             + (d.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(d.albums)}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(d.tracks, { key: 'genre' })}</section>`;
           lists.genre = d.tracks;
-          $('#gplay').onclick = () => playTracks(d.tracks, true);
+          $('#gplay').onclick = () => playTracks(d.tracks, true, 'end', { shuffle: false });
           break;
         }
         case 'tracks': {
@@ -6529,9 +6529,9 @@
             // Play all: what is shown when filtered, else every track (fetched on the press).
             const sh = $('#shuffle');
             if (sh) sh.onclick = async () => {
-              if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true);
+              if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true, 'end', { shuffle: false });
               sh.disabled = true; toast(`Loading ${countOf(total, 'tracks')}…`);
-              try { playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks), true); } catch (e) { toast(e.message, 'error'); }
+              try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
               sh.disabled = false;
             };
           }
@@ -7860,7 +7860,7 @@
           $$('[data-dlalbum]', main).forEach((b) => b.onclick = () => { state.dlAlbum = Number(b.dataset.dlalbum); render(); main.scrollTo && main.scrollTo(0, 0); });
           const dc = $('[data-dlclose]', main); if (dc) dc.onclick = () => { state.dlAlbum = null; render(); };
           $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = lists[k]; if (ts && ts.length) playTracks(ts, true, 'end', { shuffle: k === 'all' }); });
-          $$('[data-dlpl]', main).forEach((b) => b.onclick = () => playTracks(songsOf(pls[Number(b.dataset.dlpl)].track_ids), true));
+          $$('[data-dlpl]', main).forEach((b) => b.onclick = () => playTracks(songsOf(pls[Number(b.dataset.dlpl)].track_ids), true, 'end', { shuffle: false }));
           break;
         }
         case 'settings': {
