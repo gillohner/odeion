@@ -602,6 +602,67 @@ async fn a_backup_leaves_out_the_pending_queue_cleanup_note() {
     );
 }
 
+/// A scheduled backup runs one at a time (a second one asked for meanwhile is told so), and a
+/// schedule changed while a run is under way is kept: the run notes only when it ran and how it
+/// went, never the folder, interval or passphrase it started with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_schedule_changed_during_a_run_is_kept_and_runs_dont_overlap() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), "a", None);
+    let app = router(s.clone());
+    let (first, second) = (dir.path().join("backups-1"), dir.path().join("backups-2"));
+    let (st, v) = json(
+        &app,
+        "PUT",
+        "/v1/backup/schedule",
+        Some(serde_json::json!({"folder": first.to_string_lossy(), "every_hours": 24, "keep": 3})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // The run is held after writing its file (a test marker), long enough to change the schedule
+    let marker = s.data_dir().join(pm_api::backup::HOLD_RUN_MARKER);
+    std::fs::write(&marker, b"").unwrap();
+    let run = {
+        let app = app.clone();
+        tokio::spawn(async move { json(&app, "POST", "/v1/backup/schedule/run", None).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let (st, v) = json(&app, "POST", "/v1/backup/schedule/run", None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "a second run while one is written: {v}");
+    let (st, v) = json(
+        &app,
+        "PUT",
+        "/v1/backup/schedule",
+        Some(serde_json::json!({"folder": second.to_string_lossy(), "every_hours": 6, "keep": 5})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = run.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{v}");
+    std::fs::remove_file(&marker).unwrap();
+    let (_, sch) = json(&app, "GET", "/v1/backup/schedule", None).await;
+    assert_eq!(
+        sch["folder"],
+        serde_json::json!(second.to_string_lossy()),
+        "the change is kept: {sch}"
+    );
+    assert_eq!(
+        (sch["every_hours"].as_u64(), sch["keep"].as_u64()),
+        (Some(6), Some(5))
+    );
+    let file = sch["last_file"].as_str().expect("the run is noted");
+    assert!(
+        first.join(file).is_file(),
+        "the run wrote into the folder it started with"
+    );
+    assert!(sch["last_at"].as_i64().is_some());
+    assert!(sch["last_error"].is_null());
+    // Runs again, now into the new folder
+    let (st, v) = json(&app, "POST", "/v1/backup/schedule/run", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(second.join(v["last_file"].as_str().unwrap()).is_file());
+}
+
 /// The library file inside a backup (the zip's `library.db`).
 fn library_db_of(backup: &[u8]) -> Vec<u8> {
     use std::io::Read;

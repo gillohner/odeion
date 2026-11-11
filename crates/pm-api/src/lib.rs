@@ -11180,6 +11180,7 @@ exec sleep 300
     /// (a zip) into `<data_dir>/bandcamp`, which becomes a library folder and is scanned.
     #[tokio::test]
     async fn bandcamp_streams_and_downloads_purchases_into_the_library() {
+        let _base_guard = bandcamp::API_TEST_LOCK.lock().await;
         use pm_zones::SourceFactory;
         use std::io::Write as _;
         let flac = std::fs::read(concat!(
@@ -11373,7 +11374,14 @@ exec sleep 300
         let mut last = serde_json::Value::Null;
         for _ in 0..100 {
             let (_, d) = call(&app, "GET", "/v1/sources/bandcamp/downloads", None).await;
-            last = d[0].clone();
+            // This purchase's job, by its id (the list is process-wide)
+            last = d
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"] == "p5")
+                .cloned()
+                .unwrap_or_default();
             if last["state"] == "done" || last["state"] == "failed" {
                 break;
             }
@@ -25244,5 +25252,368 @@ exec sleep 300
         let z = serde_json::to_value(&st).unwrap();
         assert_eq!(same_place(&z), title);
         assert_eq!(z["queue_index"].as_u64(), Some(at as u64 - 1));
+    }
+
+
+    /// Progress changes made at once, from many devices, are all kept: the progress document is
+    /// one setting, read and written under one lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn podcast_progress_changes_at_once_are_all_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/podcasts/enabled",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        drop(app);
+        let n = 200u64;
+        let feed = podcasts::Feed {
+            id: "feed1".into(),
+            url: "https://example.com/feed.xml".into(),
+            title: "A show".into(),
+            episodes: (0..n)
+                .map(|i| podcasts::Episode {
+                    id: format!("ep{i}"),
+                    title: format!("Episode {i}"),
+                    url: format!("https://example.com/ep{i}.mp3"),
+                    ..podcasts::Episode::default()
+                })
+                .collect(),
+            ..podcasts::Feed::default()
+        };
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("podcasts.feeds", &serde_json::to_string(&vec![feed]).unwrap())
+            .unwrap();
+        let mut tasks = Vec::new();
+        for i in 0..n {
+            let s = s.clone();
+            tasks.push(tokio::spawn(async move {
+                podcasts::set_progress(
+                    State(s),
+                    Path(format!("ep{i}")),
+                    Json(podcasts::SetProgress {
+                        position_ms: Some(1000 + i),
+                        played: None,
+                    }),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| e.message)
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        let prog: std::collections::HashMap<String, podcasts::Progress> = serde_json::from_str(
+            &s.library
+                .lock()
+                .unwrap()
+                .get_setting("podcasts.progress")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(prog.len(), n as usize, "every change kept");
+        for i in 0..n {
+            assert_eq!(prog[&format!("ep{i}")].position_ms, 1000 + i);
+        }
+    }
+
+    /// Two uploads started at once can't both take the same room on the disk they wait on: the
+    /// room is counted, checked and the upload added in one step.
+    #[tokio::test]
+    async fn two_uploads_started_at_once_cant_both_take_the_same_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        // 300 MB usable: one 200 MB upload fits, two don't
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 5 * GB + 300 * 1024 * 1024,
+            total: 100 * GB,
+        })));
+        let hs = Arc::new(FakeHomeserver::default());
+        *s.copy_seams.lock().unwrap() = (Some(hs), Some(disk));
+        let upload = |name: &str| add_music::NewUpload {
+            name: name.into(),
+            size: 200 * 1024 * 1024,
+            relative_path: None,
+            blake3: None,
+        };
+        let (a, b) = tokio::join!(
+            add_music::start(State(s.clone()), Json(upload("a.flac"))),
+            add_music::start(State(s.clone()), Json(upload("b.flac")))
+        );
+        let statuses: Vec<Option<StatusCode>> = [a, b]
+            .iter()
+            .map(|r| r.as_ref().err().map(|e| e.status))
+            .collect();
+        assert_eq!(
+            statuses.iter().filter(|st| st.is_none()).count(),
+            1,
+            "one start goes through: {statuses:?}"
+        );
+        assert!(
+            statuses.contains(&Some(StatusCode::INSUFFICIENT_STORAGE)),
+            "the other is told there is no room: {statuses:?}"
+        );
+    }
+
+    /// Two different songs for one path in the mirror folder, at once, both land whole under two
+    /// names; the same song twice lands once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_songs_for_one_mirror_path_both_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("song.flac");
+        let (one, two) = (vec![1u8; 4096], vec![2u8; 4096]);
+        let hash = |b: &[u8]| blake3::hash(b).to_hex().to_string();
+        let (h1, h2) = (hash(&one), hash(&two));
+        let (a, b) = tokio::join!(
+            add_music::place_in_mirror(&dest, &h1, one.clone()),
+            add_music::place_in_mirror(&dest, &h2, two.clone())
+        );
+        let (a, b) = (a.unwrap().unwrap(), b.unwrap().unwrap());
+        assert_ne!(a, b, "two names");
+        let mut names: Vec<String> = [&a, &b]
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["song (2).flac", "song.flac"]);
+        let mut contents = vec![std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap()];
+        contents.sort();
+        assert_eq!(contents, [one.clone(), two]);
+        // The same song again: kept as it is, nothing new
+        assert_eq!(
+            add_music::place_in_mirror(&dest, &hash(&one), one).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            2,
+            "no part file left"
+        );
+    }
+
+    /// An upload whose in-flight record can't be written isn't sent: a crash would leave a
+    /// remote file nobody settles at the next start.
+    #[tokio::test]
+    async fn an_upload_whose_record_cant_be_written_is_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let hs = Arc::new(FakeHomeserver::default());
+        let disk = FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 50 * GB,
+            total: 100 * GB,
+        }));
+        let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TRIGGER no_record BEFORE INSERT ON settings WHEN NEW.key = '{k}'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            k = copy_guard::IN_FLIGHT_KEY
+        ))
+        .unwrap();
+        let r = copy_guard::upload_guarded(&s, hs.as_ref(), &disk, "/pub/files/x.flac", vec![1u8; 10], None)
+            .await;
+        assert!(
+            matches!(r, Err(copy_guard::Refused::Other(ref why)) if why.contains("record")),
+            "{r:?}"
+        );
+        assert_eq!(hs.uploads.lock().unwrap().len(), 0, "nothing was sent");
+    }
+
+    /// A Bandcamp purchase download, through the router: the claim is made before any network
+    /// call (a second request for the same purchase while the first looks it up is told it is
+    /// running), and a request dropped mid-lookup (the page closed) ends its claim as a failed
+    /// job, so the purchase can be asked for again at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_bandcamp_download_request_frees_its_purchase() {
+        let _base_guard = bandcamp::API_TEST_LOCK.lock().await;
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new()
+            .route(
+                "/api/fan/2/collection_summary",
+                get(|| async {
+                    Json(serde_json::json!({"fan_id": 77, "collection_summary": {"fan_id": 77, "username": "listener"}}))
+                }),
+            )
+            .route(
+                "/api/fancollection/1/collection_items",
+                post({
+                    let gate = gate.clone();
+                    move || {
+                        let gate = gate.clone();
+                        async move {
+                            // The lookup hangs until the test lets it go
+                            gate.acquire().await.unwrap().forget();
+                            Json(serde_json::json!({"items": [], "more_available": false, "last_token": "0::a::"}))
+                        }
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        bandcamp::set_site_base(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/sources/bandcamp/unofficial",
+            Some(serde_json::json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, u) = call(
+            &app,
+            "PUT",
+            "/v1/sources/bandcamp/unofficial",
+            Some(serde_json::json!({"identity": "identity=7%09abc%3D%3D"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        let id = "pdroptest1";
+        let state_of = |app: Router| async move {
+            let (_, d) = call(&app, "GET", "/v1/sources/bandcamp/downloads", None).await;
+            d.as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"] == id)
+                .map(|j| j["state"].as_str().unwrap().to_string())
+        };
+        let first = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                call(
+                    &app,
+                    "POST",
+                    &format!("/v1/sources/bandcamp/collection/{id}/download"),
+                    None,
+                )
+                .await
+            })
+        };
+        for _ in 0..100 {
+            if state_of(app.clone()).await.as_deref() == Some("queued") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            state_of(app.clone()).await.as_deref(),
+            Some("queued"),
+            "claimed before the lookup"
+        );
+        // A second request meanwhile: already running
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/sources/bandcamp/collection/{id}/download"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        // The first request goes away mid-lookup
+        first.abort();
+        let _ = first.await;
+        assert_eq!(
+            state_of(app.clone()).await.as_deref(),
+            Some("failed"),
+            "the claim ended"
+        );
+        // The purchase can be asked for again: past the claim, into the (still held) lookup
+        let again = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            call(
+                &app,
+                "POST",
+                &format!("/v1/sources/bandcamp/collection/{id}/download"),
+                None,
+            ),
+        )
+        .await;
+        assert!(again.is_err(), "not refused as running: {again:?}");
+        gate.add_permits(10);
+        // Its own job only: the list is process-wide, and another test reads its own from it
+        bandcamp::forget_job(id);
+    }
+
+    /// A scheduled backup whose caller goes away mid-write keeps its lock to its end: a second
+    /// run meanwhile is told one is being written, and the first run's result is noted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scheduled_backup_whose_caller_went_away_still_holds_its_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let folder = dir.path().join("backups");
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/backup/schedule",
+            Some(serde_json::json!({"folder": folder.to_string_lossy(), "every_hours": 24, "keep": 3})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        // The run is held after its write (a test marker) for a moment
+        std::fs::write(s.data_dir().join(backup::HOLD_RUN_MARKER), b"").unwrap();
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            call(&app, "POST", "/v1/backup/schedule/run", None),
+        )
+        .await;
+        assert!(dropped.is_err(), "the first caller went away mid-run");
+        let (st, v) = call(&app, "POST", "/v1/backup/schedule/run", None).await;
+        assert_eq!(
+            st,
+            StatusCode::CONFLICT,
+            "the first run still holds its lock: {v}"
+        );
+        // The first run ends by itself and notes its result
+        let mut noted = serde_json::Value::Null;
+        for _ in 0..100 {
+            let (_, sch) = call(&app, "GET", "/v1/backup/schedule", None).await;
+            if sch["last_file"].is_string() {
+                noted = sch;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(noted["last_file"].is_string(), "the run was noted: {noted}");
+        std::fs::remove_file(s.data_dir().join(backup::HOLD_RUN_MARKER)).unwrap();
+    }
+
+    /// The mirror folder's locks go when their last holder is done, and two files for names in one
+    /// folder at once land under two names.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mirror_folder_locks_are_dropped_and_names_stay_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("Album");
+        std::fs::create_dir_all(&folder).unwrap();
+        // x.flac is taken by another song: a file for x.flac goes to x (2).flac, the name the
+        // other one asks for directly
+        std::fs::write(folder.join("x.flac"), [9u8; 64]).unwrap();
+        let (one, two) = (vec![1u8; 4096], vec![2u8; 4096]);
+        let hash = |b: &[u8]| blake3::hash(b).to_hex().to_string();
+        let (h1, h2) = (hash(&one), hash(&two));
+        let (p1, p2) = (folder.join("x.flac"), folder.join("x (2).flac"));
+        let (a, b) = tokio::join!(
+            add_music::place_in_mirror(&p1, &h1, one.clone()),
+            add_music::place_in_mirror(&p2, &h2, two.clone())
+        );
+        let (a, b) = (a.unwrap().unwrap(), b.unwrap().unwrap());
+        assert_ne!(a, b, "two names");
+        assert_eq!(std::fs::read(&a).unwrap(), one);
+        assert_eq!(std::fs::read(&b).unwrap(), two);
+        assert!(
+            !add_music::mirror_lock_held(&folder),
+            "this folder's lock went with its holders"
+        );
     }
 }

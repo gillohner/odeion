@@ -1031,10 +1031,11 @@ pub struct ScheduleView {
 }
 
 fn load_schedule(s: &NodeState) -> Schedule {
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .get_setting(SCHEDULE_KEY)
+    load_schedule_in(&s.library.lock().expect("library poisoned"))
+}
+
+fn load_schedule_in(lib: &Library) -> Schedule {
+    lib.get_setting(SCHEDULE_KEY)
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_str(&v).ok())
@@ -1045,13 +1046,37 @@ fn load_schedule(s: &NodeState) -> Schedule {
         })
 }
 
-fn save_schedule(s: &NodeState, sch: &Schedule) -> Result<(), ApiError> {
-    s.library.lock().expect("library poisoned").set_setting(
+fn save_schedule_in(lib: &Library, sch: &Schedule) -> Result<(), ApiError> {
+    lib.set_setting(
         SCHEDULE_KEY,
         &serde_json::to_string(sch).expect("schedule serializes"),
     )?;
     Ok(())
 }
+
+/// What a run leaves in the schedule: when it ran and how it went, set on the schedule as it is
+/// now (read and written under one lock), never the folder, passphrase or interval the run
+/// started with, which the owner may have changed meanwhile.
+fn note_run(s: &NodeState, made: &Result<String, String>) {
+    let lib = s.library.lock().expect("library poisoned");
+    let mut sch = load_schedule_in(&lib);
+    sch.last_at = Some(time::OffsetDateTime::now_utc().unix_timestamp());
+    match made {
+        Ok(name) => {
+            sch.last_file = Some(name.clone());
+            sch.last_error = None;
+        }
+        Err(e) => sch.last_error = Some(e.clone()),
+    }
+    let _ = save_schedule_in(&lib, &sch);
+}
+
+/// Said when a scheduled backup is asked for while one is being written.
+pub const RUN_BUSY: &str = "a scheduled backup is being written; wait for it";
+
+/// A test holds a run here (a marker file in the node's data folder), between writing the file
+/// and noting the run, so a schedule change meanwhile can be checked.
+pub const HOLD_RUN_MARKER: &str = ".hold-scheduled-backup";
 
 const FILE_PREFIX: &str = "pubky-music-";
 const FILE_EXT: &str = ".pmbackup";
@@ -1094,42 +1119,61 @@ fn file_name(now: time::OffsetDateTime) -> String {
     )
 }
 
-/// Write one scheduled backup now (and prune).
+/// Write one scheduled backup now (and prune). One at a time: a second run asked for while
+/// one is being written is refused ([`RUN_BUSY`]), not started alongside.
 pub async fn run_scheduled(s: &Arc<NodeState>) -> Result<String, String> {
-    let mut sch = load_schedule(s);
+    let Ok(one) = s.backup_run.clone().try_lock_owned() else {
+        return Err(RUN_BUSY.into());
+    };
+    // The run is a task of its own holding the lock to its end: a caller that goes away (the
+    // page closed, the request dropped) doesn't end the lock while the backup is still being
+    // written, and the run's result is still noted
+    let s = s.clone();
+    tokio::spawn(async move {
+        let _one = one;
+        run_held(&s).await
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn run_held(s: &Arc<NodeState>) -> Result<String, String> {
+    let sch = load_schedule(s);
     if sch.folder.trim().is_empty() {
         return Err("no backup folder set".into());
     }
     let folder = PathBuf::from(sch.folder.trim());
     let st = s.clone();
     let pass = sch.passphrase.clone();
-    let made = tokio::task::spawn_blocking(move || -> Result<String, String> {
-        std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
-        let (bytes, _) = make(&st, pass.as_deref()).map_err(|e| e.to_string())?;
-        let name = file_name(time::OffsetDateTime::now_utc());
-        let tmp = folder.join(format!(".{name}.part"));
-        let _ = std::fs::remove_file(&tmp);
-        write_private(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, folder.join(&name)).map_err(|e| e.to_string())?;
-        Ok(name)
+    let made = tokio::task::spawn_blocking({
+        let folder = folder.clone();
+        move || -> Result<String, String> {
+            std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+            let (bytes, _) = make(&st, pass.as_deref()).map_err(|e| e.to_string())?;
+            let name = file_name(time::OffsetDateTime::now_utc());
+            // A name of this run's own: another process writing to the same folder (a second
+            // node, a manual run during the timer's) never shares its half-written file
+            let tmp = folder.join(format!(".{name}.{}.part", std::process::id()));
+            let _ = std::fs::remove_file(&tmp);
+            write_private(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            std::fs::rename(&tmp, folder.join(&name)).map_err(|e| e.to_string())?;
+            Ok(name)
+        }
     })
     .await
     .map_err(|e| e.to_string())
     .and_then(|r| r);
-    sch.last_at = Some(time::OffsetDateTime::now_utc().unix_timestamp());
+    if s.data_dir().join(HOLD_RUN_MARKER).is_file() {
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    }
     match &made {
         Ok(name) => {
-            sch.last_file = Some(name.clone());
-            sch.last_error = None;
-            let removed = prune(Path::new(sch.folder.trim()), sch.keep as usize);
+            let removed = prune(&folder, sch.keep as usize);
             tracing::info!(file = %name, removed = removed.len(), "scheduled backup written");
         }
-        Err(e) => {
-            sch.last_error = Some(e.clone());
-            tracing::warn!("scheduled backup failed: {e}");
-        }
+        Err(e) => tracing::warn!("scheduled backup failed: {e}"),
     }
-    let _ = save_schedule(s, &sch);
+    note_run(s, &made);
     made
 }
 
@@ -1275,7 +1319,6 @@ pub(crate) async fn put_schedule(
     State(s): State<Arc<NodeState>>,
     Json(u): Json<ScheduleUpdate>,
 ) -> ApiResult<ScheduleView> {
-    let mut sch = load_schedule(&s);
     let folder = u.folder.trim().to_string();
     if !folder.is_empty() {
         let p = Path::new(&folder);
@@ -1286,21 +1329,33 @@ pub(crate) async fn put_schedule(
         }
         std::fs::create_dir_all(p).map_err(|e| ApiError::bad_request(format!("{folder}: {e}")))?;
     }
-    sch.folder = folder;
-    sch.every_hours = u.every_hours.unwrap_or(sch.every_hours).clamp(1, 24 * 30);
-    sch.keep = u.keep.unwrap_or(sch.keep).clamp(1, 365);
-    match u.passphrase {
-        Some(p) if p.is_empty() => sch.passphrase = None,
-        Some(p) => sch.passphrase = Some(p),
-        None => {}
+    // Read, changed and written under one guard: a run noting its result meanwhile
+    // (`note_run`) is never written over with the copy read before it
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        let mut sch = load_schedule_in(&lib);
+        sch.folder = folder;
+        sch.every_hours = u.every_hours.unwrap_or(sch.every_hours).clamp(1, 24 * 30);
+        sch.keep = u.keep.unwrap_or(sch.keep).clamp(1, 365);
+        match u.passphrase {
+            Some(p) if p.is_empty() => sch.passphrase = None,
+            Some(p) => sch.passphrase = Some(p),
+            None => {}
+        }
+        save_schedule_in(&lib, &sch)?;
     }
-    save_schedule(&s, &sch)?;
     get_schedule(State(s)).await
 }
 
 /// `POST /v1/backup/schedule/run`: one scheduled backup now.
 pub(crate) async fn run_schedule(State(s): State<Arc<NodeState>>) -> ApiResult<ScheduleView> {
-    run_scheduled(&s).await.map_err(ApiError::bad_request)?;
+    run_scheduled(&s).await.map_err(|e| {
+        if e == RUN_BUSY {
+            ApiError::new(StatusCode::CONFLICT, e)
+        } else {
+            ApiError::bad_request(e)
+        }
+    })?;
     get_schedule(State(s)).await
 }
 
