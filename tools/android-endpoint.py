@@ -108,6 +108,24 @@ def guest_http_status(host, port):
         proc.stdout.close()
 
 
+def emulator_route(wait=90):
+    """`ip -4 route get 10.0.2.2` on the emulator, once its network is up. Right after boot an API 35
+    emulator can answer "Network is unreachable" for a while (runs 43031386416 and 43031392735
+    failed 2 s after the install); any other answer or error is returned or raised at once."""
+    end = time.monotonic() + wait
+    waited = False
+    while True:
+        try:
+            return adb("shell", "ip", "-4", "route", "get", "10.0.2.2")
+        except RuntimeError as e:
+            if "Network is unreachable" not in str(e) or time.monotonic() > end:
+                raise
+        if not waited:
+            log("the emulator's network is not up yet; waiting for it")
+            waited = True
+        time.sleep(3)
+
+
 def prepare_node_transport():
     """Wire the emulator to this runner's fixture before starting the app, without a fallback.
 
@@ -120,7 +138,7 @@ def prepare_node_transport():
     if node.scheme != "http" or node.hostname not in ("127.0.0.1", "localhost"):
         raise RuntimeError("PM_TEST_NODE must name the HTTP fixture on the runner's loopback")
     port = node.port or 80
-    route = adb("shell", "ip", "-4", "route", "get", "10.0.2.2")
+    route = emulator_route()
     src = re.search(r"\bsrc ([0-9.]+)\b", route)
     if not src:
         raise RuntimeError("cannot find the emulator's LAN address for the fixture")
