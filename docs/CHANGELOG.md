@@ -12,6 +12,7 @@ Newest first. Dates are when the change landed on `main`.
 - **Unmuting an AirPlay speaker respects a volume limit below -30 dB.** AirPlay can't play quieter than -30 dB, so under a zone limit set lower it now stays silent on unmute and says why, instead of coming back at -30 dB.
 - Podcast positions are saved under the same lock as progress changes, so a save can no longer mix an older position with a newer change.
 - **Sorting Albums or Artists keeps your filter when the library changes meanwhile.** A library update that redraws the list while a new sort order loads no longer drops the typed filter or Sort's keyboard focus. Search with no words (the phone's Search tab with an empty box while a search runs) no longer keeps that search's progress line, and the search box no longer points to results that aren't there. A check now guards that phone song rows play with Enter or Space.
+- **Screen readers hear which search source and album quality is chosen.** The row above search results (Everywhere, Library, Pubky, your services) and the quality row on Albums (All, Hi-res, Lossless...) now work like the result filters and Favourites: a named group ("Search in", "Quality") where the chosen chip is announced as pressed. A service that could not search is read as "couldn’t search" instead of "!". The quality chips are plain buttons now, so ← and → change songs there as on the other chips. Nothing changes on screen.
 
 ### 2026-11-11
 
