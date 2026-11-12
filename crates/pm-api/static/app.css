@@ -2293,6 +2293,24 @@ html[data-shell="phone"] #main > .hero.item-hero .actions > #iplay { padding: 0 
 html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle { padding: 0 14px; margin-left: 4px; }
 /* (the narrowest phones: Shuffle is its word, so the three icons keep their 48 px) */
 @media (max-width: 379px) { html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle > .ic { display: none; } }
+/* (and wherever an album's or artist's row is short for its words, on a narrow phone or with a larger font
+   size: Shuffle drops its icon, then Play's and Shuffle's sides tighten and the three icons go 48 → 44 px
+   (three of them, so this frees more than a playlist's tighter gaps), then Play drops its icon, then the
+   gaps and sides tighten once more, so ⋯ stays on the row; the rule above stays for WebViews without container
+   queries. A song's row has no Shuffle and fits as it is.) */
+html[data-shell="phone"] #main > .hero.item-hero { container: ihero / inline-size; }
+@container ihero (width < calc(284px + 5.12em)) { html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #ishuffle > .ic { display: none; } }
+@container ihero (width < calc(258px + 5.12em)) {
+  html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > :is(#iplay, #ishuffle) { padding-left: 10px; padding-right: 10px; }
+  html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #ishuffle { margin-left: 0; }
+  html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > :is(#izone, #ifav, #imore) { width: 44px; min-width: 44px; height: 44px; }
+}
+@container ihero (width < calc(224px + 5.12em)) { html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #iplay > .ic { display: none; } }
+/* (Android's font size as page zoom: 130 % on a 360 px phone lays the page out 277 px wide) */
+@container ihero (width < calc(196px + 5.12em)) {
+  html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) { gap: 2px; }
+  html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > :is(#iplay, #ishuffle) { padding-left: 6px; padding-right: 6px; min-width: 44px; justify-content: center; }
+}
 html[data-shell="phone"] .sk-srow > .icon-btn { display: none; }
 /* (a song row is one tap target on a phone: it plays; its song, artist and album pages are in its ⋯) */
 html[data-shell="phone"] .srow:not(.card-row) :is(.name, .sub) .lnk:not(.vmark) { pointer-events: none; }
