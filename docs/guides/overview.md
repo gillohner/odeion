@@ -140,10 +140,11 @@ Details: [Backups and updates](backup-and-update.md).
 
 ## Where it stands
 
-As of November 2026. The last numbered release is **0.2.3** (11 November 2026), the first under
-the name Odeion. **Edge** is built from every change to the code.
+As of November 2026. The last numbered release is **0.2.4** (12 November 2026); **0.2.3**
+(11 November 2026) was the first under the name Odeion. **Edge** is built from every change to
+the code.
 
-**Live in release 0.2.3**
+**Live in release 0.2.4**
 
 - Library: folder scans, tags, covers, artist pages, search, play history, lyrics.
 - Playback to every speaker kind listed above, grouped zones, per-zone EQ and other sound
@@ -175,23 +176,24 @@ the name Odeion. **Edge** is built from every change to the code.
   question, and **My reports** shows what became of yours.
 - Images under the name `ghcr.io/gillohner/odeion`, and the same images under the old name
   `ghcr.io/gillohner/pubky-music-node` for installs from before the rename.
-
-**Proposed** (being built)
-
 - Android: the phone plays in the app itself, also away from home, with the phone's media
   controls and volume keys.
 - Android: picking songs, albums and playlists to keep on the phone from their ⋯ menu, a storage
   screen, and playing them through the app's own player with no network.
 - Simpler sign-in pages for streaming services.
-- Usage insights, the browser part: the notice, its Settings pages and the recording itself
-  (until then nothing is recorded). [How it works](usage-insights.md).
+- Usage insights, the browser part: the notice, its Settings pages and the recording (off unless
+  the owner turns it on). [How it works](usage-insights.md).
+- Search on Pubky that is about music, with exact ISRC, barcode and MusicBrainz id lookups.
+
+**Proposed** (being built)
+
 - The desktop app's installed name, which is still the old one.
 
 What changed and when: [CHANGELOG](../CHANGELOG.md).
 
 ## Downloads
 
-| | Latest release (0.2.3) | Edge (newest code) |
+| | Latest release (0.2.4) | Edge (newest code) |
 | :-- | :-- | :-- |
 | All files | [releases/latest](https://github.com/gillohner/odeion/releases/latest) | [releases/tag/edge](https://github.com/gillohner/odeion/releases/tag/edge) |
 | macOS (universal) | [.dmg](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-macos-universal.dmg) | [.dmg](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-macos-universal.dmg) |
@@ -199,7 +201,7 @@ What changed and when: [CHANGELOG](../CHANGELOG.md).
 | Linux x86_64 | [.AppImage](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-linux-x86_64.AppImage), [.deb](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-linux-x86_64.deb) | [.AppImage](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-linux-x86_64.AppImage), [.deb](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-linux-x86_64.deb) |
 | Linux arm64 | [.AppImage](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-linux-arm64.AppImage), [.deb](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-linux-arm64.deb) | [.AppImage](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-linux-arm64.AppImage), [.deb](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-linux-arm64.deb) |
 | Android and Google TV | [arm64 .apk](https://github.com/gillohner/odeion/releases/latest/download/pubky-music-android-arm64.apk) | [arm64 .apk](https://github.com/gillohner/odeion/releases/download/edge/pubky-music-android-arm64.apk) |
-| Odeion box installer | [odeion-v0.2.3-amd64.iso](https://github.com/gillohner/odeion/releases/download/v0.2.3/odeion-v0.2.3-amd64.iso) | [odeion-edge-amd64.iso](https://github.com/gillohner/odeion/releases/download/edge/odeion-edge-amd64.iso) |
+| Odeion box installer | [odeion-v0.2.4-amd64.iso](https://github.com/gillohner/odeion/releases/download/v0.2.4/odeion-v0.2.4-amd64.iso) | [odeion-edge-amd64.iso](https://github.com/gillohner/odeion/releases/download/edge/odeion-edge-amd64.iso) |
 | The node, without Docker | `pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz`, `…-windows-x86_64.zip`, `…-macos-arm64.tar.gz` | the same names under edge |
 | Docker image | `ghcr.io/gillohner/odeion:latest` (also as `ghcr.io/gillohner/pubky-music-node:latest`) | `ghcr.io/gillohner/odeion:edge` |
 

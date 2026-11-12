@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+## 0.2.4
+
 ### 2026-11-12
 
 - **The Android app says when Android System WebView is too old.** On a device whose System WebView is older than version 111 (some TV boxes, Android builds without Google Play) pages were drawn wrong with no word why. The app now shows one line, "Update Android System WebView for Odeion to show correctly", with a button to its Google Play page. Nothing changes in a browser or the desktop app. The minimum is in the desktop and Android app guide.
