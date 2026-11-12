@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-12
 
+- **The Android app says when Android System WebView is too old.** On a device whose System WebView is older than version 111 (some TV boxes, Android builds without Google Play) pages were drawn wrong with no word why. The app now shows one line, "Update Android System WebView for Odeion to show correctly", with a button to its Google Play page. Nothing changes in a browser or the desktop app. The minimum is in the desktop and Android app guide.
 - **Pubky Ring sign-in stops before you approve when your homeserver can't be found.** If the record of the identity signed in here is missing, names no homeserver, or can't be looked up, the sign-in says so before showing the code, instead of failing after Ring's approval.
 - **Unmuting an AirPlay speaker respects a volume limit below -30 dB.** AirPlay can't play quieter than -30 dB, so under a zone limit set lower it now stays silent on unmute and says why, instead of coming back at -30 dB.
 - Podcast positions are saved under the same lock as progress changes, so a save can no longer mix an older position with a newer change.

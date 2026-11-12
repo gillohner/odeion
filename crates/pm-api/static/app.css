@@ -450,6 +450,10 @@ html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore) { min-width
 .empty .btn { margin-top: 16px; }
 .notice { padding: 12px 14px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-2); }
 .notice.warn { border-color: rgba(232, 178, 74, 0.4); }
+/* The Android app on an old System WebView (app.js oldWebview): only CSS such a WebView knows, so no
+   gap, inset or :is() here */
+.webview-note { margin: 12px 16px 0; font-size: var(--fs-sm); }
+.webview-note .btn { margin-left: 12px; vertical-align: middle; }
 .notice.resign { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
 .notice.resign span { flex: 1 1 260px; }
 .skeleton { background: linear-gradient(90deg, var(--surface-2), var(--surface-3), var(--surface-2)); background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: var(--r-sm); }

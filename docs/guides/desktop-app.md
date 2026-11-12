@@ -24,6 +24,14 @@ On a computer the installed app still carries its earlier name for now: "Pubky M
 the Dock, the Start menu and the Linux app menu (compat: pre-Odeion name; it is what lets updates
 replace the installed app). Its window says Odeion. On Android the app is called Odeion.
 
+**Android System WebView 111 or newer.** The Android app draws its pages with the device's Android
+System WebView. Phones with Google Play keep it up to date by themselves. On a device where it is older
+than version 111 (some TV boxes, Android builds without Play, emulators), pages are drawn wrong: Now
+playing opens half way down the screen and covers are missing. The app then shows "Update Android
+System WebView for Odeion to show correctly" with a button to its
+[Google Play page](https://play.google.com/store/apps/details?id=com.google.android.webview); update it
+there, or from the device maker's system update, and open the app again.
+
 ## Connect to your node
 
 The app opens on a connect page. Use one of these:

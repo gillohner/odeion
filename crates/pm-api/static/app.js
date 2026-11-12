@@ -11,6 +11,16 @@
   // these (TASK-android-no-browser-wording).
   const appPlatform = () => (window.pmDesktop ? (window.pmDesktop.platform === 'android' ? 'android' : 'desktop') : null);
   const hereName = () => ({ android: 'This phone', desktop: 'This computer' }[appPlatform()] || 'This browser');
+  // The Android app draws this page in Android System WebView. One older than Chrome 111 lacks CSS
+  // the page is built on (color-mix; below 88 also inset, :is() and aspect-ratio: Now playing opens
+  // half way down, covers have no height), so the page says how to put that right, in one line above
+  // the content. Only in the Android app: never in a browser or the desktop app, whatever they are.
+  const MIN_WEBVIEW = 111;
+  const oldWebview = (ua) => { if (appPlatform() !== 'android') return null; const m = /\bChrome\/(\d+)\./.exec(String(ua || '')); return m && Number(m[1]) < MIN_WEBVIEW ? Number(m[1]) : null; };
+  {
+    const v = oldWebview(navigator.userAgent); const page = document.getElementById('main');
+    if (v != null && page) page.insertAdjacentHTML('beforebegin', `<div class="notice warn webview-note" id="webviewnote" role="status" data-webview="${v}"><span>Update Android System WebView for Odeion to show correctly</span><a class="btn sm" href="https://play.google.com/store/apps/details?id=com.google.android.webview" target="_blank" rel="noopener">Open Google Play</a></div>`);
+  }
   // In a sentence: "in this browser", "on this phone", "on this computer"
   const hereIn = () => (appPlatform() ? `on ${hereName().toLowerCase()}` : 'in this browser');
   // "… only in This browser" / "… only on This phone"
