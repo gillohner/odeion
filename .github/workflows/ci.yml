@@ -618,6 +618,7 @@ jobs:
           ui-tablet.js tablet-shots
           ui-topbar.js topbar-shots
           ui-busy.js busy-shots
+          ui-tag-page.js tag-page-shots
           ui-controls-search-check.js controls-search-shots
           ui-search-recovery.js search-recovery-shots
           ui-source-policy.js source-policy-shots

@@ -6675,17 +6675,27 @@
           break;
         }
         case 'tag': {
-          const labels = String(state.viewArg || '').split(',').filter(Boolean);
-          main.innerHTML = backBtn('home', 'Home') + pageHead(labels.map((l) => '#' + l).join(' + ')) + '<div id="tagcotags"></div><div id="tagbody"><div class="skeleton" style="height:400px"></div></div>';
+          // Pinakes matches all of a tag page's labels (match=all), and takes at most 3 that way
+          const MATCH_ALL_MAX = 3;
+          // (a label written twice in a link counts once)
+          const labels = [...new Set(String(state.viewArg || '').split(',').filter(Boolean))];
+          const over = labels.length > MATCH_ALL_MAX;
+          // The picked tags, whatever the answer is (loading, an error, nothing found): tap one for
+          // only that tag, × takes it out (owner, 2026-11-12: "allow removing tags being looked for")
+          const picked = labels.length > 1 ? `<div class="chips" id="tagpicked" role="group" aria-label="Tags looked for" style="margin-bottom:14px">${labels.map((l) => tagChip(l, { attrs: `data-tag-solo="${esc(l)}"`, title: `Only ${l}`, del: `data-tag-rm="${esc(l)}"` })).join('')}</div>` : '';
+          main.innerHTML = backBtn('home', 'Home') + pageHead(labels.map((l) => '#' + l).join(' + ')) + picked + '<div id="tagcotags"></div><div id="tagbody">' + (over ? `<p class="muted small">A tag page matches up to ${MATCH_ALL_MAX} tags.</p>` : '<div class="skeleton" style="height:400px"></div>') + '</div>';
           $('[data-back]', main).onclick = () => goBack('home');
+          $$('[data-tag-rm]', main).forEach((b) => b.onclick = () => setView('tag', labels.filter((l) => l !== b.dataset.tagRm).join(','), 'replace'));
+          $$('[data-tag-solo]', main).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagSolo, 'replace'));
+          // More labels than Pinakes takes (an old link): not asked; one can be removed above
+          if (over) break;
           const sc = await api('GET', `/home/tag?${new URLSearchParams({ labels: labels.join(','), limit: 60 })}`).catch((e) => ({ items: [], tags: [], error: e.message }));
           if (state.view !== 'tag') return;
           sc.items = sc.items || []; sc.tags = sc.tags || [];
-          const co = sc.tags.filter(([l]) => !labels.includes(l)).slice(0, 24);
-          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-add="${esc(l)}"`, title: `Narrow to ${labels.join(', ')} and ${l}` })).join('')}${labels.length > 1 ? labels.map((l) => tagChip(l, { attrs: `data-tag-solo="${esc(l)}"`, title: `Only ${l}`, del: `data-tag-rm="${esc(l)}"` })).join('') : ''}</div>` : '';
+          // Narrowing further only while another label fits
+          const co = labels.length < MATCH_ALL_MAX ? sc.tags.filter(([l]) => !labels.includes(l)).slice(0, 24) : [];
+          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-add="${esc(l)}"`, title: `Narrow to ${labels.join(', ')} and ${l}` })).join('')}</div>` : '';
           $$('[data-tag-add]', main).forEach((b) => b.onclick = () => setView('tag', [...labels, b.dataset.tagAdd].join(',')));
-          $$('[data-tag-rm]', main).forEach((b) => b.onclick = () => setView('tag', labels.filter((l) => l !== b.dataset.tagRm).join(','), 'replace'));
-          $$('[data-tag-solo]', main).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagSolo, 'replace'));
           const el = $('#tagbody'); el.innerHTML = homeBody(sc, 'tag', true); el.classList.add('fadein'); bindHome(el, sc);
           break;
         }
