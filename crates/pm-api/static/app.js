@@ -6349,8 +6349,9 @@
   };
   const listPref = (kind) => { try { return JSON.parse(localStorage.getItem(`pm.list.${kind}`) || '{}'); } catch { return {}; } };
   const setListPref = (kind, p) => { try { localStorage.setItem(`pm.list.${kind}`, JSON.stringify(p)); } catch { /* no storage */ } };
-  // Sorting changes the order of the current matches, keeping the filter and keyboard position.
-  const renderSortedList = async (control) => {
+  // Sorting, a quality chip or Favourites changes which of the current matches show and their
+  // order, keeping the filter and keyboard position (`target` finds the control again).
+  const renderSortedList = async (control, target = '[data-lsort]') => {
     let query = $('#filter')?.value; let focused = document.activeElement === control;
     const gen = navGen;
     // Removing Sort during loading leaves focus on body. Any later focus transfer cancels
@@ -6374,7 +6375,7 @@
         if (drawing === lastDrawing) break;
         drawing = lastDrawing; await drawing.done;
       }
-      if (focused && document.activeElement === document.body) $('[data-lsort]', main)?.focus({ preventScroll: true });
+      if (focused && document.activeElement === document.body) $(target, main)?.focus({ preventScroll: true });
     } finally { document.removeEventListener('focusin', moved, true); document.removeEventListener('input', typed, true); document.removeEventListener('keydown', typed, true); }
   };
   const albumFav = (a) => !!(a.release_mbid && state.favUris && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`));
@@ -6744,9 +6745,9 @@
           const shown = sorted;
           const letters = (lp.sort || 'name') === 'name' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.title)))] : (lp.sort === 'artist' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.album_artist)))] : []);
           main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums') : '') + (isOwner() ? `<button class="btn" data-addmusic>${icon('plus')} Add music</button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
-          $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; render(); });
+          $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; return renderSortedList(b, `[data-focus="${b.dataset.focus}"]`); });
           const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); return renderSortedList(ls); };
-          const lf = $('[data-lfav]', main); if (lf) lf.onclick = () => { setListPref('albums', { ...lp, fav: !lp.fav }); render(); };
+          const lf = $('[data-lfav]', main); if (lf) lf.onclick = () => { setListPref('albums', { ...lp, fav: !lp.fav }); return renderSortedList(lf, '[data-lfav]'); };
           const grid = $('#albumgrid');
           if (grid) {
             let stop = () => {};

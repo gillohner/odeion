@@ -1,4 +1,5 @@
-// Sorting Albums or Artists keeps the typed filter, its matching rows and keyboard focus.
+// Sorting Albums or Artists, or choosing a quality chip or Favourites on Albums, keeps the typed
+// filter, its matching rows and keyboard focus.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-library-sort.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -168,6 +169,43 @@ async function sparseLists(browser) {
   } finally { await context.close(); }
 }
 
+// Albums' quality chips and Favourites narrow the typed filter's matches instead of clearing it,
+// and keyboard focus stays on the chip that was chosen.
+async function albumChips(browser, width) {
+  const mbid = (id) => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`;
+  const tagged = albums.map((a) => ({ ...a, release_mbid: mbid(a.id) }));
+  const formats = tagged.map((a) => ({ album_id: a.id, lossless: [1, 2, 4, 5].includes(a.id), hi_res: false, dsd: false }));
+  const { page, context, state } = await fx.create(browser, width, {
+    fixtures: { ...fixtures, '/library/albums': { body: tagged }, '/library/albums/formats': { body: formats } },
+    favs: [2, 5].map((id) => `https://musicbrainz.org/release/${mbid(id)}`),
+  });
+  const chosen = async (selector, ids, how) => {
+    if (how === 'keyboard') { await page.locator(selector).focus(); await page.keyboard.press('Enter'); } else await page.locator(selector).click();
+    await page.waitForFunction((n) => document.querySelectorAll('#albumgrid .tile').length === n && document.querySelector('.page-head .count')?.dataset.filtered === `${n} shown`, ids.length);
+    await matches(page, 'albums', 'loop', ids);
+    assert.equal(await page.locator(selector).evaluate((e) => e === document.activeElement), true, `${selector}: focus stays on the chosen chip`);
+  };
+  try {
+    await fx.go(page, '/albums');
+    await page.locator('#albumgrid .tile').first().waitFor();
+    await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length > 3);
+    await page.fill('#filter', 'loop');
+    await matches(page, 'albums', 'loop', [1, 2, 3]);
+    await chosen('[data-focus="lossless"]', [1, 2], 'pointer');
+    assert.equal(await page.locator('[data-focus="lossless"]').evaluate((e) => e.classList.contains('on')), true, 'Lossless is the chosen quality');
+    await chosen('[data-lfav]', [2], 'keyboard');
+    assert.equal(await page.locator('[data-lfav]').getAttribute('aria-pressed'), 'true');
+    if (width === 1280) { await fx.cleanCopy(page); await page.screenshot({ path: path.join(shots, `after-album-chips-${width}.png`) }); }
+    await chosen('[data-lfav]', [1, 2], 'keyboard');
+    await chosen('[data-focus=""]', [1, 2, 3], 'keyboard');
+    await page.locator('#filter').press('Escape');
+    assert.equal(await page.locator('#albumgrid .tile').count(), albums.length, 'clearing restores every album');
+    await fx.cleanCopy(page);
+    assert.deepEqual(state.errors, [], 'no page errors');
+    console.log(`PASS album chips ${width}: Lossless and Favourites keep the typed filter and keyboard place`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -180,5 +218,6 @@ async function sparseLists(browser) {
     await delayedSort(browser, 1280, 'search', 'pointer');
     await delayedSort(browser, 1280, 'search', 'history');
     await sparseLists(browser);
+    for (const width of [1280, 1024, 768, 412]) await albumChips(browser, width);
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
