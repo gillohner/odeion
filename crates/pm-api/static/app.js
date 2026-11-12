@@ -6321,6 +6321,26 @@
       const b = at(sel)[i]; if (b && !b.disabled) b.focus({ preventScroll: true });
     };
   };
+  // Albums and Artists drawn again where they stand (the library changed: a scan, an identify run,
+  // an edit) keep the page on screen until the new one is drawn: what is typed in the filter (read
+  // as it is when replaced, so typing meanwhile counts) and its caret, the scroll and the focus.
+  // A chosen A–Z letter is chosen again. `n`: how many rows were drawn (2,000 at most), drawn at
+  // once again so the place is there; the list's own height holds it, so no spacer stays below
+  // (keepPlace's hold) when it got shorter. Opening the page, a sort, a chip or Favourites draws
+  // it from the start (renderSortedList keeps the filter).
+  const keepList = (key, again, rows) => {
+    if (!again || !redrawing(key)) return null;
+    const old = $('#filter', main); const letter = $('[data-az].on', main)?.dataset.az;
+    const kept = { n: Math.min(2000, $$(rows, main).length) }; const place = keepPlace();
+    kept.done = () => {
+      const f = $('#filter', main);
+      if (old && old.value && f && !f.disabled) { f.value = old.value; f.oninput?.(); }
+      const az = letter && $$('[data-az]', main).find((b) => b.dataset.az === letter); if (az && !az.disabled) az.click();
+      place(); if (state.placeHold) state.placeHold(); kept.n = 0;
+      if (old && f && f.value && document.activeElement === f) { try { f.setSelectionRange(old.selectionStart, old.selectionEnd, old.selectionDirection || 'none'); } catch { /* no caret */ } }
+    };
+    return kept;
+  };
 
   // The latest favourites load, so a page that lists favourites can wait for it on a cold start
   let favLoad = null;
@@ -6441,8 +6461,9 @@
     document.addEventListener('keydown', typed, { capture: true, signal: navCtl.signal });
     try {
       // A redraw of the same page while it sorts (the library changed) replaces the list again: the
-      // filter goes back after each render, the focus once the newest is done. (A redraw still
-      // loading shows no Sort, so none starts before this sort.)
+      // filter goes back after each render, the focus once the newest is done. (A redraw that
+      // keeps the page on screen meanwhile, keepList, puts back the filter and focus itself.)
+      state.drawnPage = null; if (state.placeHold) state.placeHold();
       const rendered = render(); let drawing = lastDrawing;
       await rendered;
       for (;;) {
@@ -6840,14 +6861,14 @@
           break;
         }
         case 'albums': {
-          loading();
+          const again = redrawing('albums'); if (!again) loading();
           const albums = await albumsAll();
           if (state.view !== 'albums') return;
           const lp = listPref('albums');
           // Favourites on a cold start: the list waits for the favourites (not "No favourite albums")
           if (lp.fav && favLoad) { await favLoad.catch(() => {}); if (state.view !== 'albums') return; }
           const sorted = sortList('albums', albums.filter((a) => inFocus(a, state.focus) && (!lp.fav || albumFav(a))), lp.sort || 'name');
-          const shown = sorted;
+          const shown = sorted; const kept = keepList('albums', again, '#albumgrid .tile');
           const letters = (lp.sort || 'name') === 'name' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.title)))] : (lp.sort === 'artist' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.album_artist)))] : []);
           main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + (isOwner() ? `<button class="btn" data-addmusic>${icon('plus')} Add music</button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav))) : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; return renderSortedList(b, `[data-focus="${b.dataset.focus}"]`); });
@@ -6856,7 +6877,7 @@
           const grid = $('#albumgrid');
           if (grid) {
             let stop = () => {};
-            const draw = (list) => { stop(); grid.innerHTML = ''; stop = growItems(grid, list, (part) => part.map(tile).join(''), bindTiles); };
+            const draw = (list) => { stop(); grid.innerHTML = ''; stop = growItems(grid, list, (part) => part.map(tile).join(''), bindTiles, Math.max(120, kept ? kept.n : 0)); };
             draw(shown);
             const none = filterNone(grid, 'album');
             const f = $('#filter');
@@ -6868,22 +6889,24 @@
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
           }
+          state.drawnPage = 'albums'; if (kept) kept.done();
           break;
         }
         case 'artists': {
-          loading();
+          const again = redrawing('artists'); if (!again) loading();
           state.artists = await api('GET', '/library/artists');
           if (state.view !== 'artists') return;
           const alp = listPref('artists');
           const artistsSorted = sortList('artists', state.artists, alp.sort || 'name');
           const aletters = (alp.sort || 'name') === 'name' && artistsSorted.length > 40 ? [...new Set(artistsSorted.map((a) => firstLetter(a.name)))] : [];
+          const kept = keepList('artists', again, '#artistlist [data-artist]');
           main.innerHTML = pageHead('Artists', state.artists.length, state.artists.length > 12 ? filterBox('Filter artists') : '') + (state.artists.length ? listControls('artists', alp, aletters) + '<div class="list" id="artistlist"></div>' : emptyState('artist', 'No artists yet', 'Artists come from the tags of scanned files.'));
           const alist = $('#artistlist');
           if (alist) {
             const row = (a) => `<div class="list-row clickable" data-artist="${a.id}"><div class="avatar" style="background:hsl(${hue(a.name)} 35% 28%)">${esc(initials(a.name))}</div><div class="grow"><div class="name">${esc(a.name)}</div><div class="sub">${[a.albums ? countOf(a.albums, 'albums') : '', countOf(a.tracks, 'tracks')].filter(Boolean).join(' · ')}</div></div>${icon('chevron', 'ic chev')}</div>`;
             const bindRows = () => $$('[data-artist]', alist).forEach((el) => el.onclick = () => setView('artist', Number(el.dataset.artist)));
             let stop = () => {};
-            const draw = (list) => { stop(); alist.innerHTML = ''; stop = growItems(alist, list, (part) => part.map(row).join(''), bindRows, 150); };
+            const draw = (list) => { stop(); alist.innerHTML = ''; stop = growItems(alist, list, (part) => part.map(row).join(''), bindRows, Math.max(150, kept ? kept.n : 0)); };
             draw(artistsSorted);
             const none = filterNone(alist, 'artist');
             const f = $('#filter');
@@ -6895,6 +6918,7 @@
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
           }
+          state.drawnPage = 'artists'; if (kept) kept.done();
           break;
         }
         case 'identify': {
@@ -9019,6 +9043,7 @@
       $$('[data-crumb-kind]', main).forEach((b) => b.onclick = () => (b.dataset.asBack ? $('.pagebar > [data-back]', main).click() : setView('item', { kind: b.dataset.crumbKind, id: b.dataset.crumbId })));
       bindTrackRows(main, lists);
     } catch (e) {
+      if (state.drawnPage === v) state.drawnPage = null; // (Albums, Artists: Try again draws it from the start)
       main.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)} <button class="btn sm" id="navretry">Try again</button></div>`;
       $('#navretry', main).onclick = () => render();
     }
