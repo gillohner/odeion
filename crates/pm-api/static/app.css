@@ -1349,6 +1349,11 @@ html[data-shell="phone"] .ptag :is(.chiplink, .chipx) { align-self: stretch; hei
   .src-nav .src-tabrow .set-tab { border-top: 0; }
 }
 @media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition: none; } }
+/* Phone: every on/off switch (Display, Sources, a service's settings) and a section's text action
+   (See all, a playlist's Add one or Edit) take a 44 px tap. They keep their size and place, so
+   nothing moves; an invisible layer centred on each reaches into the empty space around it. */
+html[data-shell="phone"] .section-head .link { position: relative; }
+html[data-shell="phone"] .switch::before, html[data-shell="phone"] .section-head .link::after { content: ""; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: 44px; transform: translate(-50%, -50%); }
 .tf-code { font-size: var(--fs-xl); font-weight: 700; letter-spacing: 0.12em; padding: 4px 10px; border-radius: var(--radius-sm); background: var(--surface-2); }
 /* Guided setup (Sources › Qobuz, TIDAL full tracks): numbered step cards, secret fields with
    Show, a Check's answer in place, and the device code big enough to read across a room */

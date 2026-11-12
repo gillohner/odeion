@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-12
 
+- **On a phone, on/off switches and a section's text buttons are easier to tap.** Every switch (Display, Sources, a service's settings) and a section's text button such as See all or a playlist's Add one now answer a tap anywhere within a finger-sized area (at least 44 px) around them, instead of only on the small switch or the word. They look and sit exactly as before, and the controls next to them keep their own taps.
 - **Pubky Ring sign-in stops before you approve when your homeserver can't be found.** If the record of the identity signed in here is missing, names no homeserver, or can't be looked up, the sign-in says so before showing the code, instead of failing after Ring's approval.
 - **Unmuting an AirPlay speaker respects a volume limit below -30 dB.** AirPlay can't play quieter than -30 dB, so under a zone limit set lower it now stays silent on unmute and says why, instead of coming back at -30 dB.
 - Podcast positions are saved under the same lock as progress changes, so a save can no longer mix an older position with a newer change.
