@@ -644,6 +644,7 @@ jobs:
           ui-offline-play.js offline-play-shots
           ui-android-media.js android-media-shots
           ui-phone-library-targets.js phone-library-targets-shots
+          ui-phone-back-targets.js phone-back-targets-shots
           ui-wrong-match.js wrong-match-shots
           ui-phone-library-nav.js phone-library-nav-shots
           ui-search-scopes.js search-scopes-shots
