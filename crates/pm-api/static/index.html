@@ -71,6 +71,8 @@
     </header>
     <div id="usagenotice" hidden></div>
     <main id="main" class="main" tabindex="-1"></main>
+    <script>/* The Android app draws this page in Android System WebView. One older than Chrome 111 lacks CSS the page is built on (below 88: inset, :is(), aspect-ratio), and below 80 it cannot read app.js at all, so this is here, in plain old JavaScript: one line above the content that says how to put it right. Only in the Android app (window.pmDesktop, set by the app; looked for again once the page has loaded, should it arrive late), never in a browser or the desktop app. */
+(function () { var MIN_WEBVIEW = 111; function check() { var d = window.pmDesktop; if (!d || d.platform !== 'android' || document.getElementById('webviewnote')) return; var m = /\bChrome\/(\d+)\./.exec(String(navigator.userAgent || '')); if (!m || Number(m[1]) >= MIN_WEBVIEW) return; var main = document.getElementById('main'); if (!main) return; var n = document.createElement('div'); n.id = 'webviewnote'; n.className = 'notice warn webview-note'; n.setAttribute('role', 'status'); n.setAttribute('data-webview', m[1]); var s = document.createElement('span'); s.appendChild(document.createTextNode('Update Android System WebView for Odeion to show correctly')); var a = document.createElement('a'); a.className = 'btn sm'; a.href = 'https://play.google.com/store/apps/details?id=com.google.android.webview'; a.target = '_blank'; a.rel = 'noopener'; a.appendChild(document.createTextNode('Open Google Play')); n.appendChild(s); n.appendChild(a); main.parentNode.insertBefore(n, main); } try { check(); document.addEventListener('DOMContentLoaded', check); window.addEventListener('load', check); } catch (e) { /* no note */ } })();</script>
   </div>
 
   <footer class="player">

@@ -11,6 +11,8 @@
   // these (TASK-android-no-browser-wording).
   const appPlatform = () => (window.pmDesktop ? (window.pmDesktop.platform === 'android' ? 'android' : 'desktop') : null);
   const hereName = () => ({ android: 'This phone', desktop: 'This computer' }[appPlatform()] || 'This browser');
+  // (An Android System WebView too old for this page is told so by index.html's own small script,
+  // which also runs where this file cannot be read.)
   // In a sentence: "in this browser", "on this phone", "on this computer"
   const hereIn = () => (appPlatform() ? `on ${hereName().toLowerCase()}` : 'in this browser');
   // "… only in This browser" / "… only on This phone"

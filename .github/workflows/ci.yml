@@ -630,6 +630,7 @@ jobs:
           ui-tap-highlight.js tap-highlight-shots
           ui-here-name.js here-name-shots
           ui-android-first.js android-first-shots
+          ui-old-webview.js old-webview-shots
           ui-phone-dialog-actions.js phone-dialog-shots
           ui-phone-switch-targets.js phone-switch-targets-shots
           ui-nowplaying-phone.js nowplaying-phone-shots
