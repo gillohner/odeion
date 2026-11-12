@@ -287,6 +287,45 @@ async function coldFavourites(browser, width) {
   } finally { await context.close(); }
 }
 
+// Favourites that take long (a listener's first go to their homeserver): the page doesn't sit on
+// its loading placeholder; after 3 s it says the favourites are on their way (not "No favourite
+// albums"), and lists them once they are in
+async function slowFavourites(browser, width) {
+  const mbid = (id) => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`;
+  const tagged = albums.map((a) => ({ ...a, release_mbid: mbid(a.id) }));
+  const { page, context, state } = await fx.create(browser, width, {
+    fixtures: { ...fixtures, '/library/albums': { body: tagged } },
+    favs: [`https://musicbrainz.org/release/${mbid(3)}`],
+    delay: (v) => (v === '/favourites' ? 5500 : 0),
+  });
+  await context.addInitScript(() => localStorage.setItem('pm.list.albums', JSON.stringify({ fav: true })));
+  try {
+    const t = Date.now();
+    await fx.go(page, '/albums');
+    await page.waitForFunction(() => document.querySelector('.empty h3'), null, { timeout: 4500 })
+      .catch(() => assert.fail(`${width}: the page is drawn after about 3 s, not left loading`));
+    assert.ok(Date.now() - t < 5000, `${width}: drawn before the favourites are in`);
+    assert.equal(await page.locator('.empty h3').innerText(), 'Getting your favourites…', `${width}: says they are on their way, not "No favourite albums"`);
+    if (width === 1280) { await fx.cleanCopy(page); await page.screenshot({ path: path.join(shots, `after-albums-fav-slow-${width}.png`) }); }
+    // Another order chosen meanwhile is drawn at once (it doesn't wait another 3 s)
+    const t2 = Date.now();
+    await page.selectOption('[data-lsort]', 'year');
+    await page.waitForFunction(() => document.querySelector('[data-lsort]')?.value === 'year' && document.querySelector('#albumswait'), null, { timeout: 1500 })
+      .catch(() => assert.fail(`${width}: a new order is drawn at once while the favourites are on their way`));
+    assert.ok(Date.now() - t2 < 1500, `${width}: no second wait`);
+    await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length === 1, null, { timeout: 6000 })
+      .catch(() => assert.fail(`${width}: listed once the favourites are in`));
+    assert.deepEqual(await page.locator('#albumgrid .tile').evaluateAll((els) => els.map((e) => Number(e.getAttribute('data-album')))), [3]);
+    assert.equal(await page.locator('.empty').count(), 0);
+    // Drawn again once, not in a loop: the list stays as it is
+    await page.evaluate(() => { window.__grid = document.querySelector('#albumgrid'); });
+    await page.waitForTimeout(3500);
+    assert.equal(await page.evaluate(() => window.__grid.isConnected), true, `${width}: drawn again once, not in a loop`);
+    assert.deepEqual(state.errors, [], 'no page errors');
+    console.log(`PASS slow Favourites ${width}: drawn after 3 s with a note, listed when they come`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -303,5 +342,6 @@ async function coldFavourites(browser, width) {
     for (const width of [1280, 1024, 768, 412]) await emptyAlbums(browser, width);
     await nodeFavAlbum(browser);
     for (const width of [1280, 1024, 768]) await coldFavourites(browser, width);
+    for (const width of [1280, 768]) await slowFavourites(browser, width);
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -6283,7 +6283,7 @@
   const pageHead = (title, count, actions = '') => libNav() + `<div class="page-head"><h2>${esc(title)}${count != null ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
   // One way back (08-item-page.md): history, labelled with the previous page; on a deep link the page's section.
   const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} ${esc((navDepth > 0 && history.state && history.state.backLabel) || label)}</button>`;
-  const loading = () => { main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
+  const loading = () => { if (state.placeHold) state.placeHold(); main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
   // A page drawn again where it stands (its songs still coming, a heart, other sources found) stays
   // on screen until it is drawn anew: no skeleton, so it doesn't jump to the top, and the control
   // that had focus has it again. Opening a page (a link, Back) or Retry draws it from the start.
@@ -6291,40 +6291,67 @@
   const redrawing = (key) => state.drawnPage === key;
   // Before the page's HTML is replaced: where it is scrolled and what had focus in it (its id, else
   // its data attributes and address and its place among its likes). The returned call puts both
-  // back on the new HTML; focus only when nothing else took it meanwhile.
+  // back on the new HTML; focus only when nothing else took it meanwhile. The place is read
+  // before an earlier hold ends: its spacer going would cut a place at the foot short.
   const keepPlace = () => {
-    if (state.placeHold) state.placeHold();
     const a = document.activeElement; const top = main.scrollTop; const tall = main.scrollHeight;
-    const inside = !!a && a !== main && main.contains(a);
-    const sel = !inside ? '' : a.id ? `#${CSS.escape(a.id)}` : a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-') || x.name === 'href').map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
+    // (focus an earlier hold still waits to put back, its part not drawn yet, is wanted here too)
+    const was = state.placeHold && state.placeHold.wants ? state.placeHold.wants() : null;
+    if (state.placeHold) state.placeHold();
     const at = (s) => { try { return $$(s, main); } catch { return []; } };
-    const i = inside ? at(sel).indexOf(a) : -1;
+    let inside = !!a && a !== main && main.contains(a); let sel = ''; let i = -1;
+    if (inside) {
+      // Looked for within its part (the nearest box with an id), so a tile in Similar isn't taken
+      // for the same tile in a release section
+      const box = a.id ? null : a.parentElement && a.parentElement.closest('[id]');
+      const within = box && box !== main && main.contains(box) ? `#${CSS.escape(box.id)} ` : '';
+      sel = a.id ? `#${CSS.escape(a.id)}` : within + a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-') || x.name === 'href').map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
+      i = at(sel).indexOf(a);
+    } else if (was && (!a || a === document.body || a === main)) { ({ sel, i } = was); inside = true; }
     return () => {
       // The parts drawn after the page (Similar, concerts, comments) come back a moment later: until
       // they do (6 s at most; opening a page ends it) the page keeps its height below, so a place
-      // down there isn't cut short
+      // down there isn't cut short, and focus that was in one of them goes back when it is drawn
       let extra = 0;
       const fit = () => { extra = Math.max(0, tall - (main.scrollHeight - extra)); if (extra) { main.style.setProperty('--hold', `${extra}px`); main.dataset.hold = ''; } else { main.style.removeProperty('--hold'); delete main.dataset.hold; } return extra; };
-      if (fit()) {
-        // (a part that shrank first can have cut the place short: back to it, unless they scrolled up)
+      // Done once focus is back, or something else took it meanwhile
+      const refocus = () => {
+        const now = document.activeElement; if (now && now !== document.body && now !== main) return true;
+        const b = at(sel)[i]; if (b && !b.disabled) { b.focus({ preventScroll: true }); return true; }
+        return false;
+      };
+      let held = fit();
+      if (main.scrollTop !== top) { try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } }
+      let want = inside && !refocus();
+      if (held || want) {
+        // (a click or key of theirs meanwhile is where they are now: focus isn't taken back)
+        const mine = () => { want = false; };
+        const acts = ['pointerdown', 'keydown', 'wheel', 'touchstart'];
+        acts.forEach((e) => document.addEventListener(e, mine, { capture: true, passive: true }));
         const mo = new MutationObserver(() => {
-          const cut = main.scrollTop < top && main.scrollTop >= main.scrollHeight - main.clientHeight - 1;
-          const held = fit(); if (cut) { try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } }
-          if (!held) state.placeHold();
+          if (held) {
+            // (a part that shrank first can have cut the place short: back to it, unless they scrolled up)
+            const cut = main.scrollTop < top && main.scrollTop >= main.scrollHeight - main.clientHeight - 1;
+            held = fit(); if (cut) { try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } }
+          }
+          if (want) want = !refocus();
+          if (!held && !want) state.placeHold();
         });
         mo.observe(main, { childList: true, subtree: true });
         const t = setTimeout(() => state.placeHold(), 6000);
-        state.placeHold = () => { mo.disconnect(); clearTimeout(t); main.style.removeProperty('--hold'); delete main.dataset.hold; state.placeHold = null; };
+        state.placeHold = () => { mo.disconnect(); clearTimeout(t); acts.forEach((e) => document.removeEventListener(e, mine, true)); main.style.removeProperty('--hold'); delete main.dataset.hold; state.placeHold = null; };
+        state.placeHold.wants = () => (want ? { sel, i } : null);
       }
-      if (main.scrollTop !== top) { try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } }
-      const now = document.activeElement; if (!inside || (now && now !== document.body && now !== main)) return;
-      const b = at(sel)[i]; if (b && !b.disabled) b.focus({ preventScroll: true });
     };
   };
 
   // The latest favourites load, so a page that lists favourites can wait for it on a cold start
-  let favLoad = null;
-  const loadFavourites = () => (favLoad = api('GET', '/favourites').then((f) => { state.favUris = new Set(f.uris || []); return f; }));
+  let favLoad = null; let favRedraw = null;
+  const loadFavourites = () => {
+    const p = favLoad = api('GET', '/favourites').then((f) => { state.favUris = new Set(f.uris || []); return f; });
+    p.then(() => { p.done = true; }, () => { p.done = true; });
+    return p;
+  };
   // A song not identified yet is a favourite on this node only until "Which song is this?".
   // A listener's go to their own homeserver: the first one asks them to connect it.
   // True once changed; false when they chose not to connect (nothing was changed): callers
@@ -6844,12 +6871,23 @@
           const albums = await albumsAll();
           if (state.view !== 'albums') return;
           const lp = listPref('albums');
-          // Favourites on a cold start: the list waits for the favourites (not "No favourite albums")
-          if (lp.fav && favLoad) { await favLoad.catch(() => {}); if (state.view !== 'albums') return; }
+          // Favourites on a cold start: the list waits for the favourites (not "No favourite albums"),
+          // 3 s at most (a listener's first go to their homeserver can take longer), then is drawn
+          // again once they are in
+          let favLate = false;
+          if (lp.fav && favLoad) {
+            const fl = favLoad;
+            // (once is enough: drawn again meanwhile, by a sort or a chip, it doesn't wait again)
+            if (favRedraw !== fl) await Promise.race([fl.catch(() => {}), new Promise((ok) => setTimeout(ok, 3000))]);
+            if (state.view !== 'albums') return;
+            favLate = !fl.done;
+            // Drawn again when they are in, only while it still says they are on their way
+            if (favLate && favRedraw !== fl) { favRedraw = fl; const again = () => { if (state.view === 'albums' && $('#albumswait', main)) render(); }; fl.then(again, again); }
+          }
           const sorted = sortList('albums', albums.filter((a) => inFocus(a, state.focus) && (!lp.fav || albumFav(a))), lp.sort || 'name');
           const shown = sorted;
           const letters = (lp.sort || 'name') === 'name' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.title)))] : (lp.sort === 'artist' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.album_artist)))] : []);
-          main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + (isOwner() ? `<button class="btn" data-addmusic>${icon('plus')} Add music</button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav))) : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
+          main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + (isOwner() ? `<button class="btn" data-addmusic>${icon('plus')} Add music</button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? (favLate && !shown.length ? `<div id="albumswait">${emptyState('disc', 'Getting your favourites…', 'They show here as soon as they are in.')}</div>` : emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav)))) : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; return renderSortedList(b, `[data-focus="${b.dataset.focus}"]`); });
           const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); return renderSortedList(ls); };
           const lf = $('[data-lfav]', main); if (lf) lf.onclick = () => { setListPref('albums', { ...lp, fav: !lp.fav }); return renderSortedList(lf, '[data-lfav]'); };
@@ -7893,7 +7931,7 @@
           if (!again) loading();
           let pg;
           try { pg = await api('GET', `/item/artist/${encodeURIComponent(id)}${refresh}`); }
-          catch (e) { if (!live()) return; state.drawnPage = null; main.innerHTML = `<div class="pagebar">${backBtn(`item:artist:${id}`, 'Artist')}</div><div class="notice">${esc(e.message)} <button class="btn sm" id="irelretry">Retry</button></div>`; $('[data-back]', main).onclick = () => goBack(`item:artist:${id}`); $('#irelretry', main).onclick = () => { state.viewArg.refresh = 1; render(); }; break; }
+          catch (e) { if (!live()) return; state.drawnPage = null; if (state.placeHold) state.placeHold(); main.innerHTML = `<div class="pagebar">${backBtn(`item:artist:${id}`, 'Artist')}</div><div class="notice">${esc(e.message)} <button class="btn sm" id="irelretry">Retry</button></div>`; $('[data-back]', main).onclick = () => goBack(`item:artist:${id}`); $('#irelretry', main).onclick = () => { state.viewArg.refresh = 1; render(); }; break; }
           if (!live()) return;
           pg.albums = pg.albums || [];
           const g = relGroups(pg.albums); const list = g[key];
@@ -7932,7 +7970,7 @@
           if (!again) loading();
           let pg;
           try { [pg] = await Promise.all([api('GET', `/item/${kind}/${encodeURIComponent(id)}${refresh}`), loadSvcRank()]); }
-          catch (e) { if (!live()) return; state.drawnPage = null; main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          catch (e) { if (!live()) return; state.drawnPage = null; if (state.placeHold) state.placeHold(); main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (!live()) return;
           // The node leaves empty lists out of its answer.
           for (const k of ['songs', 'albums', 'versions', 'also_on', 'about', 'open_on', 'connect']) pg[k] = pg[k] || [];
@@ -8180,6 +8218,8 @@
             // As it is now (the page stays on screen while it is drawn again): a second press undoes the first
             try {
               if (!(await setFavourite(target, !isFav()))) return;
+              // (saved for this item; another page opened meanwhile keeps its own heart)
+              if (state.view !== 'item' || state.viewArg.kind !== kind || state.viewArg.id !== id) return;
               const b = $('#ifav', main); const on = isFav();
               if (b) { b.classList.toggle('on', on); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.innerHTML = icon(on ? 'heart-fill' : 'heart'); }
               render();
