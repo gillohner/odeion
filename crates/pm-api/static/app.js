@@ -3356,6 +3356,7 @@
     const changed = document.documentElement.dataset.shell !== now;
     document.documentElement.dataset.shell = now;
     if (changed && state.view) markTabs();
+    if (changed) $$('.srow [data-ssong], .srow [data-salbum]').forEach((a) => { if (now === 'phone') a.tabIndex = -1; else a.removeAttribute('tabindex'); });
     if (changed) { const pb = $('#peoplebox'); if (pb && pb.reshell) pb.reshell(); }
     if (densePref()) document.documentElement.dataset.dense = '1'; else delete document.documentElement.dataset.dense;
     const up = $('#upstreams');
@@ -3500,9 +3501,11 @@
     const flat = tid != null && !Array.isArray(it.artists) && !Array.isArray((state.trackCache.get('track:' + tid) || {}).artists);
     return `<span${flat ? ` data-credit-track="${esc(tid)}"` : ''}>${credits.map((a, i) => `<a class="lnk" data-artist-credit="${esc(a.name)}"${a.id ? ` data-credit-id="${esc(a.id)}"` : ''} href="${esc(a.id ? '/artist/' + encodeURIComponent(a.id) : '/search?q=' + encodeURIComponent(a.name))}" title="Open ${esc(a.name)}">${esc(a.name)}</a>${i < credits.length - 1 ? esc(a.join) : ''}`).join('')}</span>`;
   };
+  // A click the browser takes elsewhere (a new tab or window): Ctrl, Cmd, Shift, Alt or not the main button
+  const opensElsewhere = (e) => e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
   document.addEventListener('click', (e) => {
     const a = e.target.closest && e.target.closest('[data-artist-credit]');
-    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (!a || opensElsewhere(e)) return;
     e.preventDefault(); e.stopPropagation();
     if (!overlay.hidden) toggleNowPlaying();
     if (a.dataset.creditId) setView('item', { kind: 'artist', id: a.dataset.creditId });
@@ -4933,7 +4936,7 @@
       const fav = isFav(t); const can = trackHasId(t);
       return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}" data-tid="${t.id}">
         <div class="no"><span class="num">${numbers === 'track' ? (t.track_no ?? '') : i + 1}</span><button class="rowplay" data-act="play" title="Play from here">${icon('play')}</button></div>
-        <div class="main-col"><div class="title"><a class="lnk" data-act="song">${esc(t.title)}</a>${dlHas(t.id) ? dlMark() : ''}${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id })}</div></div>
+        <div class="main-col"><div class="title"><a class="lnk" data-act="song" href="${esc(pathFor('item', { kind: 'song', id: trackPageId(t) }))}">${esc(t.title)}</a>${dlHas(t.id) ? dlMark() : ''}${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id })}</div></div>
         ${showAlbum ? `<div class="album-col">${t.album ? `<button class="lnk" data-act="album" data-album="${t.album.id}">${esc(t.album.title)}</button>` : ''}</div>` : ''}
         <div class="fmt-col"><span class="fmt ${LOSSY[t.file && t.file.container] ? 'lossy' : ''}">${esc(fileFormat(t.file))}</span></div>
         <div class="dur">${fmt(t.duration_ms)}</div>
@@ -4968,6 +4971,9 @@
       if (act === 'album') { setView('album', Number(btn.dataset.album)); return; }
       if (act === 'identify') { const t = tracks[i]; if (!t) return; const done = await whichSong(t); if (done) { tracks[i] = done; btn.remove(); toast(`Identified: ${done.title}`); } return; }
       if (act === 'song') {
+        // A real link (Tab reaches it, Enter opens it); Ctrl or middle click opens the page in a new tab
+        if (opensElsewhere(e)) return;
+        e.preventDefault();
         const t0 = (lists[list ? list.dataset.list : 'tr'] || [])[Number(btn.closest('.track').dataset.i)]; if (!t0) return;
         setView('item', { kind: 'song', id: trackPageId(t0) });
         return;
@@ -5280,7 +5286,8 @@
     const c = $('.selbox input', row); if (c && !c.checked) { c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); }
     return !!c;
   };
-  document.addEventListener('contextmenu', (e) => { const row = e.target.closest && e.target.closest('.srow, .track, [data-srow]'); const more = row && row.querySelector('[data-smore], [data-act="more"]'); if (!more || e.target.closest('input, textarea, a[href]')) return; e.preventDefault(); if (longPressSelect(row)) return; more.click(); });
+  // (a song or album name in a row is a link for the keyboard and Ctrl+click; right-click or a long press there is still the row's menu)
+  document.addEventListener('contextmenu', (e) => { const row = e.target.closest && e.target.closest('.srow, .track, [data-srow]'); const more = row && row.querySelector('[data-smore], [data-act="more"]'); if (!more || e.target.closest('input, textarea, a[href]:not([data-act="song"], [data-ssong], [data-salbum])')) return; e.preventDefault(); if (longPressSelect(row)) return; more.click(); });
   // Song rows on touch screens (docs/ux/responsive.md, build step 3): swipe right to play next, left to
   // add to a playlist (the owner's choice); a long press opens the row's menu, also where the browser
   // sends no contextmenu (iOS). Each runs the row's own ⋯ menu, so every kind of song row behaves alike.
@@ -5779,7 +5786,10 @@
   // (`data-np`: what the row plays, so the playing one is marked; `opts.oneArtist`: the album's songs
   // are all by its artist, said once in the header and not on every row)
   const songNpKey = (t) => (t.track_id != null ? `track:${t.track_id}` : t.uri || '');
-  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
+  // On phones a song row is one button (a tap plays it; its names don't take taps, app.css): its song
+  // and album links are not separate Tab stops there
+  const rowLinkTab = () => (shellMode() === 'phone' ? ' tabindex="-1"' : '');
+  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}" href="${esc(pathFor('item', { kind: 'album', id: t.album_id }))}"${rowLinkTab()}>${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
@@ -5864,9 +5874,9 @@
       showMenu(b, [{ title: `${t.title}: versions` }, ...vs.map((v) => ({ label: versionLabel(v) + (v.best ? ' · plays by default' : ''), icon: v.best ? 'check' : 'play',
         run: () => playSongs(songs.map((x) => (x === t ? { ...x, track_id: v.track_id } : x)), at(k), 'replace', ctx.plays_from, b, ctx.fallback) }))], { all: true });
     });
-    $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'song', id: all[Number(a.dataset.ssong)].id }); });
+    $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); if (opensElsewhere(e)) return; e.preventDefault(); setView('item', { kind: 'song', id: all[Number(a.dataset.ssong)].id }); });
     hydrateArtistCredits(box);
-    $$('[data-salbum]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'album', id: all[Number(a.dataset.salbum)].album_id }); });
+    $$('[data-salbum]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); if (opensElsewhere(e)) return; e.preventDefault(); setView('item', { kind: 'album', id: all[Number(a.dataset.salbum)].album_id }); });
     $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = all[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: serviceOfUrl(t.page) || (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null, extra: ctx.rowExtra ? ctx.rowExtra(Number(b.dataset.smore), b.closest('.srow')) : [] }); });
   };
   // One tile for albums and artists: click opens the item page, the hover Play plays it.
