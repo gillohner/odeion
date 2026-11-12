@@ -6006,6 +6006,8 @@
   };
   const renderSearchScopes = (chips, run) => {
     const scope = run.scope;
+    // One choice, like the result filters: a named group whose chosen button is pressed
+    chips.setAttribute('role', 'group'); chips.setAttribute('aria-label', 'Search in');
     const scrollLeft = chips.scrollLeft;
     const focused = document.activeElement;
     const rowBefore = chips.getBoundingClientRect(), focusBefore = focused.parentElement === chips && focused.getBoundingClientRect();
@@ -6020,12 +6022,13 @@
       const named = id !== 'musicbrainz' && Object.prototype.hasOwnProperty.call(SERVICE_NAMES, id);
       if (!scopes.has(id) && (named || saved.sources.includes(id)) && !(state.sources || []).some((x) => x.id === id && x.enabled === false)) scopes.set(id, srcName(id));
     }
-    const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
+    const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" role="img" aria-label="couldn’t search" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
     const buttons = new Map($$('[data-scope-in]', chips).map((b) => [b.dataset.scopeIn, b]));
     const ordered = [];
     for (const [id, name] of scopes) {
       const b = buttons.get(id) || document.createElement('button');
       b.type = 'button'; b.className = `chip scope ${scope === id ? 'on' : ''}`; b.dataset.scopeIn = id;
+      b.setAttribute('aria-pressed', String(scope === id));
       const html = `${['everywhere', 'library', 'pubky'].includes(id) ? '' : svcBadge(id)}${esc(name)} ${scope === 'everywhere' || scope === id ? stat(id === 'everywhere' ? '' : id) : ''}`;
       if (b.innerHTML !== html) b.innerHTML = html;
       ordered.push(b); buttons.delete(id);
@@ -6399,7 +6402,8 @@
     const f = fmtOf(a.id); if (!f) return false;
     switch (focus) { case 'hi_res': return f.hi_res; case 'dsd': return f.dsd; case 'cd': return f.lossless && !f.hi_res && !f.dsd; case 'lossless': return f.lossless; case 'lossy': return !f.lossless; default: return true; }
   };
-  const focusChips = (albums) => `<div class="chips" role="tablist" aria-label="Focus">${FOCUS.map(([k, label]) => { const n = albums.filter((a) => inFocus(a, k)).length; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" role="tab" aria-selected="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
+  // One choice, like Favourites beside it: a named group whose chosen button is pressed
+  const focusChips = (albums) => `<div class="chips" role="group" aria-label="Quality">${FOCUS.map(([k, label]) => { const n = albums.filter((a) => inFocus(a, k)).length; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" aria-pressed="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
 
   // ---- first run (steward next-3, item 2) ------------------------------------
   // Home's "Get started" card: only the steps that matter on this node and to this person
