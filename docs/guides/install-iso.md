@@ -12,7 +12,7 @@ You need:
 
 ## 1. Download and check
 
-From the [releases](https://github.com/gillohner/pubky-music-node/releases), take `odeion-<version>-amd64.iso` and
+From the [releases](https://github.com/gillohner/pubky-music-node/releases), take `odeion-v<version>-amd64.iso` (for example `odeion-v0.2.3-amd64.iso`) and
 its `.sha256` file. To try the newest build of `main` instead, use the `edge` release, which has
 `odeion-edge-amd64.iso`.
 
