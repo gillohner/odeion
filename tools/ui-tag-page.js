@@ -6,7 +6,9 @@
 //   * one tag: no picked row, "Also tagged" adds;
 //   * three tags: no "Also tagged" chips, whatever the node lists;
 //   * four tags (an old link): nothing is asked, the chips and one line are shown, × leads to a page that asks;
-//   * chips wrap: nothing is wider than the screen.
+//   * chips wrap: nothing is wider than the screen;
+//   * keyboard: after × (Enter) focus is on the next × (the one before for the last), on the heading
+//     once one tag is left; after Enter on a picked tag, on the heading; never back on the page.
 //   node tools/ui-tag-page.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -110,6 +112,31 @@ const fits = (r) => r.wide <= 0 && r.right <= r.vw;
       await until(page, () => /On music and live and track/.test(document.querySelector('#tagbody').textContent));
       const r = await read(page);
       check(asked.join('|') === 'music,live,track' && r.solo.join() === 'music,live,track', `${w}: a repeated label counts once (asked ${asked.join('|')}, chips ${r.solo.join()})`);
+      await context.close();
+    }
+    // ---- keyboard: × and a picked tag leave the focus where the user is ----
+    {
+      const { page, context, state } = await open(browser, w, '/tag/music,live,track', (l) => ({ body: { items: [item('On ' + l.join(' and '))], tags: [] } }));
+      const focus = () => page.evaluate(() => { const a = document.activeElement; return a === document.body ? 'body' : a.dataset.tagRm ? 'x:' + a.dataset.tagRm : a.dataset.tagSolo ? 'tag:' + a.dataset.tagSolo : a.matches('.page-head h2') ? 'heading:' + a.textContent.trim() : a.tagName; });
+      const press = async (sel, path) => { await page.focus(sel); await page.keyboard.press('Enter'); await until(page, (p) => decodeURIComponent(location.pathname) === p && !document.querySelector('#tagbody .skeleton'), path); await sleep(100); return focus(); };
+      const mid = await press('[data-tag-rm="live"]', '/tag/music,track');
+      check(mid === 'x:track', `${w}: Enter on a middle × moves focus to the next × (${mid})`);
+      await page.keyboard.press('Shift+Tab');
+      const back = await focus();
+      check(back === 'tag:track', `${w}: Shift+Tab from there goes to its tag, not the top of the page (${back})`);
+      const last = await press('[data-tag-rm="track"]', '/tag/music');
+      check(last.startsWith('heading:'), `${w}: Enter on × with two tags left: focus on the heading (${last})`);
+      await fx.go(page, '/tag/music,live,track'); await page.waitForSelector('[data-tag-rm="track"]');
+      const end = await press('[data-tag-rm="track"]', '/tag/music,live');
+      check(end === 'x:live', `${w}: Enter on the last × moves focus to the one before (${end})`);
+      const solo = await press('[data-tag-solo="live"]', '/tag/live');
+      check(solo.startsWith('heading:') && /#live/.test(solo), `${w}: Enter on a picked tag: focus on the heading of its page (${solo})`);
+      // A click on × keeps the same place too
+      await fx.go(page, '/tag/music,live,track'); await page.waitForSelector('[data-tag-rm="music"]');
+      await page.click('[data-tag-rm="music"]'); await until(page, () => location.pathname.endsWith('/tag/live,track') && !document.querySelector('#tagbody .skeleton'));
+      await sleep(100); const click = await focus();
+      check(click === 'x:live', `${w}: a click on the first × moves focus to the next × (${click})`);
+      check(!state.errors.length, `${w}: no page errors with the keyboard${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
       await context.close();
     }
     // ---- long labels, nothing found ----

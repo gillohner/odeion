@@ -6412,8 +6412,13 @@
     const f = fmtOf(a.id); if (!f) return false;
     switch (focus) { case 'hi_res': return f.hi_res; case 'dsd': return f.dsd; case 'cd': return f.lossless && !f.hi_res && !f.dsd; case 'lossless': return f.lossless; case 'lossy': return !f.lossless; default: return true; }
   };
-  // One choice, like Favourites beside it: a named group whose chosen button is pressed
-  const focusChips = (albums) => `<div class="chips" role="group" aria-label="Quality">${FOCUS.map(([k, label]) => { const n = albums.filter((a) => inFocus(a, k)).length; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" aria-pressed="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
+  // One choice, like Favourites beside it: a named group whose chosen button is pressed. Shown
+  // only when a quality narrows the albums (or one is chosen): no lone All without format data.
+  const focusChips = (albums) => {
+    const counts = FOCUS.map(([k]) => (k ? albums.filter((a) => inFocus(a, k)).length : albums.length));
+    if (!state.focus && !counts.some((n, j) => j && n && n < albums.length)) return '';
+    return `<div class="chips" role="group" aria-label="Quality">${FOCUS.map(([k, label], j) => { const n = counts[j]; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" aria-pressed="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
+  };
 
   // ---- first run (steward next-3, item 2) ------------------------------------
   // Home's "Get started" card: only the steps that matter on this node and to this person
@@ -6697,8 +6702,21 @@
           const picked = labels.length > 1 ? `<div class="chips" id="tagpicked" role="group" aria-label="Tags looked for" style="margin-bottom:14px">${labels.map((l) => tagChip(l, { attrs: `data-tag-solo="${esc(l)}"`, title: `Only ${l}`, del: `data-tag-rm="${esc(l)}"` })).join('')}</div>` : '';
           main.innerHTML = backBtn('home', 'Home') + pageHead(labels.map((l) => '#' + l).join(' + ')) + picked + '<div id="tagcotags"></div><div id="tagbody">' + (over ? `<p class="muted small">A tag page matches up to ${MATCH_ALL_MAX} tags.</p>` : '<div class="skeleton" style="height:400px"></div>') + '</div>';
           $('[data-back]', main).onclick = () => goBack('home');
-          $$('[data-tag-rm]', main).forEach((b) => b.onclick = () => setView('tag', labels.filter((l) => l !== b.dataset.tagRm).join(','), 'replace'));
-          $$('[data-tag-solo]', main).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagSolo, 'replace'));
+          // Either redraws the page: the keyboard stays there, on the next × (the one before for the
+          // last), or on the heading once one tag is left and the row is gone
+          const redraw = (b, rest) => {
+            const focused = document.activeElement === b; const i = labels.indexOf(b.dataset.tagRm);
+            return setView('tag', rest.join(','), 'replace').then(() => {
+              if (!focused || document.activeElement !== document.body || state.view !== 'tag') return;
+              const next = rest.length > 1 && i >= 0 ? rest[Math.min(i, rest.length - 1)] : null;
+              const to = (next != null && $$('[data-tag-rm]', main).find((x) => x.dataset.tagRm === next)) || $('.page-head h2', main);
+              if (!to) return;
+              if (to.tagName === 'H2') to.tabIndex = -1;
+              to.focus({ preventScroll: true });
+            });
+          };
+          $$('[data-tag-rm]', main).forEach((b) => b.onclick = () => redraw(b, labels.filter((l) => l !== b.dataset.tagRm)));
+          $$('[data-tag-solo]', main).forEach((b) => b.onclick = () => redraw(b, [b.dataset.tagSolo]));
           // More labels than Pinakes takes (an old link): not asked; one can be removed above
           if (over) break;
           const sc = await api('GET', `/home/tag?${new URLSearchParams({ labels: labels.join(','), limit: 60 })}`).catch((e) => ({ items: [], tags: [], error: e.message }));
