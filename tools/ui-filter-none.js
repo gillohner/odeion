@@ -64,10 +64,29 @@ async function run(browser, width, kind) {
     await page.fill('#filter', 'zzz');
     await noneLine(page, `No ${k.what} matches “zzz”.`);
     if (kind !== 'tracks') {
-      // A–Z (lists over 40) draws from that letter on, so the line goes
+      // A–Z (lists over 40) jumps within the matches: with none, every letter is off
+      const letters = () => page.$$eval('[data-az]', (bs) => bs.map((b) => `${b.dataset.az}${b.disabled ? '-' : '+'}${b.classList.contains('on') ? '*' : ''}`).join(' '));
+      assert.ok((await letters()).split(' ').every((l) => l.endsWith('-')), `${kind} ${width}: no match, every letter off: ${await letters()}`);
+      // Some matches: only their letters stay on, and a letter draws the matches from it on
+      // ("band 1" finds Loop B and Other 10–19 by artist; artists by name "other 1": Other 10–19)
+      const q = kind === 'albums' ? 'band 1' : 'other 1'; const from = kind === 'albums' ? ['L', 'O'] : ['O'];
+      await page.fill('#filter', q);
+      await page.waitForFunction(([sel, n]) => document.querySelectorAll(sel).length === n, [k.rows, kind === 'albums' ? 11 : 10]);
+      assert.equal(await letters(), (await page.$$eval('[data-az]', (bs) => bs.map((b) => b.dataset.az))).map((l) => `${l}${from.includes(l) ? '+' : '-'}`).join(' '), `${kind} ${width}: only the matches' letters are on`);
       await page.locator('[data-az="O"]').click();
-      await page.waitForFunction((sel) => document.querySelectorAll(sel).length > 0, k.rows);
+      await page.waitForFunction(([sel]) => document.querySelector('[data-az="O"]')?.classList.contains('on') && document.querySelectorAll(sel).length > 0, [k.rows]);
+      const names = await page.$$eval(`${k.rows}`, (els) => els.map((e) => (e.querySelector('.name, .t')?.textContent || e.textContent).trim()));
+      assert.deepEqual(names, Array.from({ length: 10 }, (_, i) => `Other ${10 + i}`), `${kind} ${width}: O jumps within the matches`);
+      assert.equal(await page.$eval('.page-head .count', (c) => c.dataset.filtered), `${kind === 'albums' ? 11 : 10} shown`);
       await noneLine(page, '');
+      // Typing again unmarks the letter and draws all the matches
+      await page.fill('#filter', q.toUpperCase());
+      await page.waitForFunction(([sel, n]) => document.querySelectorAll(sel).length === n && !document.querySelector('.az.on'), [k.rows, kind === 'albums' ? 11 : 10]);
+      // Escape too, and every letter comes back
+      await page.locator('[data-az="O"]').click();
+      await page.waitForFunction(() => document.querySelector('[data-az="O"]')?.classList.contains('on'));
+      await page.locator('#filter').press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.az.on') && [...document.querySelectorAll('[data-az]')].every((b) => !b.disabled));
       await page.fill('#filter', 'zz'); await page.fill('#filter', 'zzz');
       await noneLine(page, `No ${k.what} matches “zzz”.`);
     }

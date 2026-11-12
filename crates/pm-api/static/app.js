@@ -6367,6 +6367,16 @@
     let t = null;
     return (q, n) => { clearTimeout(t); if (q && !n) t = setTimeout(() => { p.textContent = `No ${what} matches “${q}”.`; }, 250); else p.textContent = ''; };
   };
+  // A–Z on a long list jumps within what the filter shows: the matches from that letter on. While a
+  // filter is typed, letters with no match are off; typing (or Escape) unmarks the chosen letter.
+  // `matches()` is the filtered list, `key` an item's letter. Returns what the filter calls with
+  // its new matches.
+  const azJump = (key, matches, draw, none) => {
+    const bs = $$('[data-az]', main);
+    const mark = (on) => bs.forEach((x) => x.classList.toggle('on', x === on));
+    bs.forEach((b) => b.onclick = () => { const list = matches(); const i = list.findIndex((a) => key(a) === b.dataset.az); if (i >= 0) { draw(list.slice(i)); none('', 1); mark(b); } });
+    return (list) => { const have = new Set(list.map(key)); bs.forEach((x) => { x.disabled = !have.has(x.dataset.az); }); mark(null); };
+  };
   // A client-side filter box for long lists: hides rows/tiles whose text does not contain the query.
   // Library list controls (UX review #7): sort, a favourites toggle and an A–Z jump in one row,
   // remembered per list in this browser.
@@ -6805,11 +6815,12 @@
             const draw = (list) => { stop(); grid.innerHTML = ''; stop = growItems(grid, list, (part) => part.map(tile).join(''), bindTiles); };
             draw(shown);
             const none = filterNone(grid, 'album');
-            // A–Z: the list from that letter on (the grid draws as you scroll)
-            $$('[data-az]', main).forEach((b) => b.onclick = () => { const key = lp.sort === 'artist' ? (a) => firstLetter(a.album_artist) : (a) => firstLetter(a.title); const i = shown.findIndex((a) => key(a) === b.dataset.az); if (i >= 0) { draw(shown.slice(i)); none('', 1); $$('[data-az]', main).forEach((x) => x.classList.toggle('on', x === b)); } });
             const f = $('#filter');
+            const matches = () => { const q = (f?.value || '').trim().toLowerCase(); return q ? shown.filter((a) => `${a.title} ${a.album_artist || ''} ${a.year || ''}`.toLowerCase().includes(q)) : shown; };
+            // A–Z: the matches from that letter on (the grid draws as you scroll)
+            const az = azJump(lp.sort === 'artist' ? (a) => firstLetter(a.album_artist) : (a) => firstLetter(a.title), matches, draw, none);
             if (f) {
-              f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? shown.filter((a) => `${a.title} ${a.album_artist || ''} ${a.year || ''}`.toLowerCase().includes(q)) : shown; draw(list); none(f.value.trim(), list.length); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
+              f.oninput = () => { const q = f.value.trim(); const list = matches(); draw(list); az(list); none(q, list.length); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
           }
@@ -6831,11 +6842,12 @@
             const draw = (list) => { stop(); alist.innerHTML = ''; stop = growItems(alist, list, (part) => part.map(row).join(''), bindRows, 150); };
             draw(artistsSorted);
             const none = filterNone(alist, 'artist');
-            $$('[data-az]', main).forEach((b) => b.onclick = () => { const i = artistsSorted.findIndex((a) => firstLetter(a.name) === b.dataset.az); if (i >= 0) { draw(artistsSorted.slice(i)); none('', 1); $$('[data-az]', main).forEach((x) => x.classList.toggle('on', x === b)); } });
-            const als = $('[data-lsort]', main); if (als) als.onchange = () => { setListPref('artists', { ...alp, sort: als.value }); return renderSortedList(als); };
             const f = $('#filter');
+            const matches = () => { const q = (f?.value || '').trim().toLowerCase(); return q ? artistsSorted.filter((a) => a.name.toLowerCase().includes(q)) : artistsSorted; };
+            const az = azJump((a) => firstLetter(a.name), matches, draw, none);
+            const als = $('[data-lsort]', main); if (als) als.onchange = () => { setListPref('artists', { ...alp, sort: als.value }); return renderSortedList(als); };
             if (f) {
-              f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? artistsSorted.filter((a) => a.name.toLowerCase().includes(q)) : artistsSorted; draw(list); none(f.value.trim(), list.length); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
+              f.oninput = () => { const q = f.value.trim(); const list = matches(); draw(list); az(list); none(q, list.length); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
           }
