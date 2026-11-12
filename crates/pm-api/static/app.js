@@ -6405,7 +6405,12 @@
       if (focused && document.activeElement === document.body) $(target, main)?.focus({ preventScroll: true });
     } finally { document.removeEventListener('focusin', moved, true); document.removeEventListener('input', typed, true); document.removeEventListener('keydown', typed, true); }
   };
-  const albumFav = (a) => !!(a.release_mbid && state.favUris && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`));
+  // Albums with nothing to show: says which choice left it empty (Favourites, a quality, or both)
+  const albumsNone = (fav, focus, anyFav) => (fav && focus && anyFav ? ['No favourite albums of this quality', 'None of your favourite albums has a file of this quality.']
+    : fav ? ['No favourite albums', 'Open an album and press its heart to see it here.']
+      : ['No albums of this quality', 'No album has a file of this quality.']);
+  // A hearted album MusicBrainz doesn't know yet is kept on this node as album:<id>
+  const albumFav = (a) => !!(state.favUris && (state.favUris.has(`album:${a.id}`) || (a.release_mbid && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`))));
   const sortList = (kind, list, how) => {
     const by = (f) => [...list].sort((a, b) => String(f(a) || '').localeCompare(String(f(b) || ''), undefined, { sensitivity: 'base', numeric: true }));
     if (kind === 'albums') {
@@ -6420,7 +6425,8 @@
   };
   const firstLetter = (x) => { const c = String(x || '').trim().charAt(0).toUpperCase().normalize('NFKD').charAt(0); return /[A-Z]/.test(c) ? c : '#'; };
   const listControls = (kind, pref, letters) => `<div class="listbar"><label class="small muted">Sort <select class="input sm" data-lsort aria-label="Sort">${LIST_SORTS[kind].map(([k, l]) => `<option value="${k}" ${pref.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${kind === 'albums' ? `<button class="chip ${pref.fav ? 'on' : ''}" data-lfav aria-pressed="${!!pref.fav}">${icon(pref.fav ? 'heart-fill' : 'heart')} Favourites</button>` : ''}${letters.length > 1 ? `<span class="azbar" role="group" aria-label="Jump to a letter">${letters.map((l) => `<button class="az" data-az="${l}">${l}</button>`).join('')}</span>` : ''}</div>`;
-  const filterBox = (placeholder) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}">`;
+  // Off while there is nothing to filter: what was typed stays and applies again once there is
+  const filterBox = (placeholder, off = false) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}"${off ? ' disabled' : ''}>`;
   const bindFilter = (selector) => {
     const f = $('#filter'); if (!f) return;
     f.oninput = () => { const q = f.value.trim().toLowerCase(); let n = 0; $$(selector, main).forEach((el) => { const show = !q || el.textContent.toLowerCase().includes(q); el.hidden = !show; if (show) n++; }); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${n} shown` : ''; };
@@ -6789,7 +6795,7 @@
           const sorted = sortList('albums', albums.filter((a) => inFocus(a, state.focus) && (!lp.fav || albumFav(a))), lp.sort || 'name');
           const shown = sorted;
           const letters = (lp.sort || 'name') === 'name' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.title)))] : (lp.sort === 'artist' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.album_artist)))] : []);
-          main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums') : '') + (isOwner() ? `<button class="btn" data-addmusic>${icon('plus')} Add music</button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', 'Nothing in this focus', 'No album has a file of that quality.') : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
+          main.innerHTML = pageHead('Albums', state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + (isOwner() ? `<button class="btn" data-addmusic>${icon('plus')} Add music</button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav))) : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; return renderSortedList(b, `[data-focus="${b.dataset.focus}"]`); });
           const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); return renderSortedList(ls); };
           const lf = $('[data-lfav]', main); if (lf) lf.onclick = () => { setListPref('albums', { ...lp, fav: !lp.fav }); return renderSortedList(lf, '[data-lfav]'); };
