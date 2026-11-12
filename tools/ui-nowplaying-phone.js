@@ -29,9 +29,11 @@ const queue = TITLES.map((title, i) => ({ id: i + 1, uri: `track:${i + 1}`, titl
 const np = { item: { id: 1, uri: 'track:1', title: 'Come On', artist: 'Dr. Peacock, Sefa', album: 'Frenchcore Worldwide 02', duration_ms: 230000 }, index: 0, position_ms: 61000, duration_ms: 230000, source_format: fmt, output_format: fmt, signal_path: { stages: [{ name: 'decode', in_format: fmt, out_format: fmt, quality: 'bit_perfect', note: null }] }, format: { codec: 'FLAC', lossless: true, service: 'library', preview: false } };
 const zone = { id: 'linn', name: 'Linn Klimax DS3:UPnP AV', output: 'upnp:linn', transport: 'playing', queue, queue_index: 0, queue_version: 1, repeat: 'off', radio: false, error: null, acked: 1, sync: 'single', crossfade_ms: 0, volume: { percent: 20, muted: false }, now_playing: np };
 const albums = Array.from({ length: 8 }, (_, i) => ({ id: 70 + i, title: `Album ${i}`, album_artist: 'Sefa', year: 2017, tracks: 10 }));
+// Mixed qualities, so the Quality row narrows and shows (it hides when every album is the same)
+const formats = albums.map((a, i) => ({ album_id: a.id, label: i % 2 ? '24/96 FLAC' : 'FLAC', hi_res: !!(i % 2), lossless: true, dsd: false }));
 // Synced lyrics: their follower scrolls their own box, never the page (review: it scrolled the one screen)
 const lyrics = { synced: true, source: 'file', lines: Array.from({ length: 40 }, (_, i) => ({ ms: i * 2000, text: `Line ${i + 1} of the song` })) };
-const fixtures = { '/library/tracks/1/lyrics': { body: lyrics }, '/zones': { body: [zone] }, '/outputs': { body: [{ id: 'upnp:linn', name: 'Linn', kind: 'upnp', caps: { hw_volume: 'percent' } }] }, '/zones/linn/queue': { body: queue }, '/library/albums': { body: albums } };
+const fixtures = { '/library/albums/formats': { body: formats }, '/library/tracks/1/lyrics': { body: lyrics }, '/zones': { body: [zone] }, '/outputs': { body: [{ id: 'upnp:linn', name: 'Linn', kind: 'upnp', caps: { hw_volume: 'percent' } }] }, '/zones/linn/queue': { body: queue }, '/library/albums': { body: albums } };
 
 (async () => {
   const browser = await chromium.launch();
