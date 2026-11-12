@@ -651,6 +651,7 @@ jobs:
           ui-search-scopes.js search-scopes-shots
           ui-search-music.js search-music-shots
           ui-library-sort.js library-sort-shots
+          ui-song-links.js song-links-shots
           ui-usage.js usage-shots
           ui-rows-search-sort.js rows-search-sort-shots
           LIST
