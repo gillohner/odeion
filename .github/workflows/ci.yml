@@ -637,6 +637,7 @@ jobs:
           ui-shuffle-repeat.js shuffle-repeat-shots
           ui-redesign.js redesign-shots
           ui-item-about.js item-about-shots
+          ui-rating-hero.js rating-hero-shots
           ui-usb-dac.js usb-dac-shots
           ui-native-player.js native-player-shots
           ui-app-downloads.js app-downloads-shots
