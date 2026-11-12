@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-12
 
+- **On a tag page the tags you picked can always be taken out** (owner: "allow removing tags being looked for"). With two or more tags, each is a chip above the results (tap for only that tag, × to take it out), also while the page loads, when Pubky doesn't answer and when nothing is found; before, the chips were part of "Also tagged" and vanished with it. A tag page holds at most 3 tags, as many as Pubky's index matches together: with 3 picked, "Also tagged" no longer adds a fourth, and an old link with more shows its tags and "A tag page matches up to 3 tags." without asking.
 - **Pubky Ring sign-in stops before you approve when your homeserver can't be found.** If the record of the identity signed in here is missing, names no homeserver, or can't be looked up, the sign-in says so before showing the code, instead of failing after Ring's approval.
 - **Unmuting an AirPlay speaker respects a volume limit below -30 dB.** AirPlay can't play quieter than -30 dB, so under a zone limit set lower it now stays silent on unmute and says why, instead of coming back at -30 dB.
 - Podcast positions are saved under the same lock as progress changes, so a save can no longer mix an older position with a newer change.
