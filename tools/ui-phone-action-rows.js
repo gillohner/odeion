@@ -89,28 +89,34 @@ async function phone(browser, width, android) {
   await context.close();
 }
 
-// A playlist's row on a narrower phone (320 px: Android's larger display size on a 360 px phone) or with
-// a larger font size (Android's 115 % and 130 % in the app's WebView, every font size scaled as Android's text zoom does):
-// Shuffle drops its icon, then the gaps and Play's and Shuffle's sides tighten, then Play drops its
-// icon, and ⋯ stays on the row. Every button keeps its 44 px; at 360 and 412 px with the normal font
-// size the row is as before.
-async function narrow(browser, width, android, k) {
-  const at = `${android ? 'android' : 'browser'} ${width} at ${Math.round(k * 100)} %`;
+// A playlist's row on a narrower phone (320 px: Android's larger display size on a 360 px phone; 277 and
+// 313 px: Android's font size as Chrome's page zoom) or with a larger font size (Android's 115 % and 130 %): Shuffle drops its icon, then the gaps and Play's and
+// Shuffle's sides tighten, then Play drops its icon, and ⋯ stays on the row. Every button keeps its 44 px;
+// at 360 and 412 px with the normal font size the row is as before. The font size is checked two ways:
+// every font size scaled inline (em grows with it), and as the app's WebView applies it, as text zoom (the
+// text grows, em does not; text-size-adjust takes the same path in Chromium).
+const textZoom = (page, k) => page.addStyleTag({ content: `html { -webkit-text-size-adjust: ${Math.round(k * 100)}%; text-size-adjust: ${Math.round(k * 100)}%; }` });
+const scale = (page, k) => page.evaluate((k) => { const all = [document.documentElement, ...document.querySelectorAll('body, body *')]; const fs = all.map((e) => parseFloat(getComputedStyle(e).fontSize)); all.forEach((e, i) => { e.style.fontSize = `${fs[i] * k}px`; }); }, k);
+async function narrow(browser, width, android, k, zoom) {
+  const at = `${android ? 'android' : 'browser'} ${width} at ${Math.round(k * 100)} %${zoom ? ' text zoom' : ''}`;
   const { page, context, state } = await fx.create(browser, width, { mobile: true });
   if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
   state.collections = [fx.summary];
   await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plsongs .srow'); await page.waitForTimeout(300);
-  if (k !== 1) await page.evaluate((k) => { const all = [document.documentElement, ...document.querySelectorAll('body, body *')]; const fs = all.map((e) => parseFloat(getComputedStyle(e).fontSize)); all.forEach((e, i) => { e.style.fontSize = `${fs[i] * k}px`; }); }, k);
+  if (k !== 1) { await (zoom ? textZoom : scale)(page, k); await page.waitForTimeout(100); }
   const r = await row(page, '#main > .hero');
-  const look = await page.evaluate(() => { const ic = (id) => getComputedStyle(document.querySelector(`#${id} > .ic`)).display !== 'none'; return { fs: parseFloat(getComputedStyle(document.querySelector('#plplay')).fontSize), gap: parseFloat(getComputedStyle(document.querySelector('#main > .hero .actions')).columnGap), play: ic('plplay'), shuffle: ic('plshuffle'), pad: parseFloat(getComputedStyle(document.querySelector('#plplay')).paddingLeft) }; });
+  const look = await page.evaluate(() => { const ic = (id) => getComputedStyle(document.querySelector(`#${id} > .ic`)).display !== 'none'; return { fs: parseFloat(getComputedStyle(document.querySelector('#plplay')).fontSize), gap: parseFloat(getComputedStyle(document.querySelector('#main > .hero .actions')).columnGap), play: ic('plplay'), shuffle: ic('plshuffle'), pad: parseFloat(getComputedStyle(document.querySelector('#plplay')).paddingLeft), shufPad: parseFloat(getComputedStyle(document.querySelector('#plshuffle')).paddingLeft) }; });
   check(Math.abs(look.fs - 14 * k) < 0.1, `${at}: Play's words are ${look.fs.toFixed(1)} px (the scaled size held)`);
   check(r.buttons.length === 5 && r.rows === 1 && r.sw <= r.vw, `${at}: a playlist's five buttons stay on one row, ⋯ included (${fmt(r)}, ${r.rows} rows, page ${r.sw} of ${r.vw})`);
-  check(r.buttons.every((b) => b.h >= 44) && r.buttons.filter((b) => b.icon).every((b) => b.w >= 44), `${at}: every button is still a 44 px tap`);
+  check(r.buttons.every((b) => b.h >= 44 && b.w >= 44), `${at}: every button is still a 44 px tap`);
   check(r.buttons.find((b) => b.id === 'plplay').text === 'Play' && r.buttons.find((b) => b.id === 'plshuffle').text === 'Shuffle', `${at}: Play and Shuffle keep their words`);
-  // what gives way, in order; the normal font size at 360/412 px is the row as before
-  const want = { 320: { 1: [4, true], 1.15: [4, false], 1.3: [4, false] }, 340: { 1: [4, true], 1.15: [4, true], 1.3: [4, false] }, 360: { 1: [8, true], 1.15: [4, true], 1.3: [4, true] }, 412: { 1: [8, true], 1.15: [8, true], 1.3: [8, true] } }[width][k];
-  check(look.gap === want[0] && look.play === want[1] && look.shuffle === (width >= 380) && look.pad === (want[0] === 4 ? 10 : 14), `${at}: gap ${look.gap} px (want ${want[0]}), Play's sides ${look.pad} px, Play's icon ${look.play ? 'shown' : 'hidden'} (want ${want[1] ? 'shown' : 'hidden'}), Shuffle's icon ${look.shuffle ? 'shown' : 'hidden'}`);
-  if (k !== 1.15) await page.locator('#main > .hero').screenshot({ path: path.join(SHOTS, `playlist-row-${android ? 'android' : 'browser'}-${width}-${Math.round(k * 100)}.png`) });
+  // what gives way, in order: [the row's gap, Play's icon shown, Shuffle's icon shown]; Play's and Shuffle's
+  // sides follow the gap. The normal font size at 360/412 px is the row as before.
+  const want = { 277: { 1: [2, false] }, 313: { 1: [4, false] }, 320: { 1: [4, true], 1.15: [4, false], 1.3: [4, false] }, 340: { 1: [4, true], 1.15: [4, true], 1.3: [4, false] }, 360: { 1: [8, true], 1.15: [4, true], 1.3: [4, true] }, 385: { 1.3: [8, true, false] }, 412: { 1: [8, true], 1.15: [8, true], 1.3: [8, true] } }[width][k];
+  const shuffle = want[2] ?? width >= 380;
+  const pad = { 2: 6, 4: 10, 8: 14 }[want[0]];
+  check(look.gap === want[0] && look.play === want[1] && look.shuffle === shuffle && look.pad === pad && look.shufPad === pad, `${at}: gap ${look.gap} px (want ${want[0]}), Play's and Shuffle's sides ${look.pad}/${look.shufPad} px (want ${pad}), Play's icon ${look.play ? 'shown' : 'hidden'} (want ${want[1] ? 'shown' : 'hidden'}), Shuffle's icon ${look.shuffle ? 'shown' : 'hidden'} (want ${shuffle ? 'shown' : 'hidden'})`);
+  if (k !== 1.15) await page.locator('#main > .hero').screenshot({ path: path.join(SHOTS, `playlist-row-${android ? 'android' : 'browser'}-${width}-${Math.round(k * 100)}${zoom ? '-textzoom' : ''}.png`) });
   // still one tap: ⋯ opens the playlist's menu
   await page.locator('#plmore').tap(); await page.waitForTimeout(200);
   check(await page.locator('.popover.menu:not([hidden])').count() === 1, `${at}: one tap on ⋯ opens the playlist's menu`);
@@ -122,6 +128,15 @@ async function narrow(browser, width, android, k) {
   try {
     for (const width of [360, 412]) for (const android of [false, true]) await phone(browser, width, android);
     for (const width of [320, 340, 360, 412]) for (const k of [1, 1.15, 1.3]) for (const android of [false, true]) await narrow(browser, width, android, k);
+    // Android's font size as page zoom (Chrome) on a 360 px phone lays the page out narrower: 130 % 277 px, 115 % 313 px
+    for (const width of [277, 313]) for (const android of [false, true]) await narrow(browser, width, android, 1);
+    // Android's font size as the app's WebView applies it, as text zoom: the same steps as above
+    const zoomed = await chromium.launch({ args: ['--blink-settings=textSizeAdjustEnabled=true', '--enable-blink-features=TextSizeAdjust,TextSizeAdjustImprovements'] });
+    try {
+      for (const width of [320, 340, 360, 412]) for (const k of [1.15, 1.3]) await narrow(zoomed, width, true, k, true);
+      // a wide phone at 130 %: only Shuffle's icon gives way
+      await narrow(zoomed, 385, true, 1.3, true);
+    } finally { await zoomed.close(); }
     // Desktop with a mouse: the same rows as before (no 44 px rule, Roon options stay one line of text)
     const { page, context, state } = await fx.create(browser, 1280, {});
     state.collections = [fx.summary];
