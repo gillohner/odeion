@@ -5,11 +5,19 @@
 //! * no auth, CORS open; per-IP budget 120 requests/min, `POST /v1/resolve` 30/min;
 //! * keyset `cursor` + `limit` (max 500), no offsets; cursors die on restart;
 //! * no push: poll `POST /v1/changes/lookup` for the links you hold;
-//! * there is **no** `GET /v1/resources/by-uri` route (the context file mentions
-//!   one; the live daemon answers `400 invalid resource ID` because it matches
-//!   `/v1/resources/{id}`). URIs go through `POST /v1/resources/lookup`;
+//! * `GET /v1/resources/by-uri?uri=` reads one link in any spelling (api_shape 2; an
+//!   older daemon matched the path as `/v1/resources/{id}` and answered 400, which
+//!   [`PinakesClient::resource_by_uri`] still falls back from). Several links at once
+//!   go through `POST /v1/resources/lookup`;
 //! * `POST /v1/changes/lookup` takes `resource_ids`, not URIs;
-//! * `facet` accepts only `tags`;
+//! * `facet` takes `tags`, `type` or both (`type,tags`): counts over the whole
+//!   filtered set, by leaf type;
+//! * `type` takes one schema.org type or up to 10, comma separated (any of them,
+//!   each with its subtypes): [`MUSIC_TYPES`] is the list of a music search;
+//! * `host` takes one host; `key` finds links by an exact id (`isrc:`, `upc:`, `mbid:`);
+//! * `boost=wot_2` (with `viewer`) ranks what the viewer's network referenced higher
+//!   and leaves nothing out; it needs a Nexus that serves the reach set, and an
+//!   instance without one refuses the query (the caller repeats it without);
 //! * join with Nexus by **URL**, never by id;
 //! * text is plain text: escape before rendering as HTML.
 //!
@@ -27,6 +35,25 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const MAX_LIMIT: usize = 500;
+
+/// The card types of a music search, for `type=` (at most 10, subtypes included:
+/// `MusicPlaylist` covers `MusicAlbum` and `MusicRelease`). `Person` is here because
+/// solo artists are `Person` cards.
+pub const MUSIC_TYPES: [&str; 8] = [
+    "MusicRecording",
+    "MusicComposition",
+    "MusicPlaylist",
+    "MusicGroup",
+    "Person",
+    "MusicEvent",
+    "PodcastSeries",
+    "PodcastEpisode",
+];
+
+/// [`MUSIC_TYPES`] as the `type` parameter.
+pub fn music_types() -> String {
+    MUSIC_TYPES.join(",")
+}
 pub const LOOKUP_CHUNK: usize = 500;
 const BUDGET_PER_MINUTE: usize = 120;
 
@@ -466,7 +493,8 @@ pub struct Info {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SearchQuery {
     pub q: Option<String>,
-    /// schema.org type; ancestors match (`Event` matches `MusicEvent`).
+    /// One schema.org type or up to 10, comma separated; ancestors match (`Event`
+    /// matches `MusicEvent`).
     pub type_: Option<String>,
     /// Up to 5 labels, comma separated.
     pub tags: Option<String>,
@@ -475,6 +503,10 @@ pub struct SearchQuery {
     pub author: Option<String>,
     /// `following` with `viewer`.
     pub reach: Option<String>,
+    /// `following`, `friends` or `wot_2` of `viewer`: what that set referenced ranks
+    /// higher, nothing is left out. An instance whose Nexus serves no reach set
+    /// refuses `wot_2`.
+    pub boost: Option<String>,
     pub viewer: Option<String>,
     pub scheme: Option<String>,
     pub host: Option<String>,
@@ -492,7 +524,7 @@ pub struct SearchQuery {
     /// reference-time window.
     pub from: Option<String>,
     pub to: Option<String>,
-    /// `tags` today; `type` from the next core release (answers §2).
+    /// `tags`, `type` or `type,tags`.
     pub facet: Option<String>,
     /// `lat,lon` (needs `radius`, in metres).
     pub near: Option<String>,
@@ -547,6 +579,7 @@ impl SearchQuery {
         push("match", &self.match_);
         push("author", &self.author);
         push("reach", &self.reach);
+        push("boost", &self.boost);
         push("viewer", &self.viewer);
         push("scheme", &self.scheme);
         push("host", &self.host);
