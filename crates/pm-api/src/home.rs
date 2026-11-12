@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 const TTL: Duration = Duration::from_secs(60);
 const LOCATION_KEY: &str = "home.location";
 /// Concerts within this distance of the owner's city.
-const CONCERT_RADIUS_M: u32 = 50_000;
+pub(crate) const CONCERT_RADIUS_M: u32 = 50_000;
 
 /// One Home section.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -83,7 +83,7 @@ fn is_music(kind: &str) -> bool {
 
 /// The owner's key as Pinakes takes it for `author`/`viewer`: bare z-base-32,
 /// without the `pubky` prefix the node's identity carries.
-fn owner(s: &NodeState) -> Option<String> {
+pub(crate) fn owner(s: &NodeState) -> Option<String> {
     s.sync
         .lock()
         .expect("sync lock")

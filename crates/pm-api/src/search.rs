@@ -72,6 +72,13 @@ pub struct SearchHit {
     /// The site a Pubky card is from (`tidal.com`, `open.spotify.com`); a facet and a badge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
+    /// Found by an exact identifier or a pasted link (an ISRC, a barcode, an MBID, a service
+    /// page): the result, not one of several matches.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exact: bool,
+    /// The other sites the same thing is on (an exact hit's group): "Also on".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<String>,
 }
 
 /// One source's answer (one NDJSON line).
@@ -295,7 +302,7 @@ async fn one_source(
             library(s, q, limit, owner).map_err(|e| e.to_string())?,
             Vec::new(),
         )),
-        "pubky" => pubky(s, q, limit).await,
+        "pubky" => pubky(s, q, limit, owner).await,
         "people" => people(s, q, limit).await,
         "posts" => posts(s, q, limit).await,
         other => {
@@ -779,29 +786,245 @@ async fn posts(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String>
     Ok((hits, Vec::new()))
 }
 
-/// Pubky: the text query and, in parallel, the term as tags (STEWARD-FIX-search-tags.md); a
-/// `#tag` term searches tags only (several: all of them).
-async fn pubky(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String> {
+/// A search term that is an exact identifier, not words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Ident {
+    /// A Pinakes `key`: `isrc:<ISRC>`, `upc:<barcode>` or `mbid:<uuid>`.
+    Key(String),
+    /// A pasted page of a music service or MusicBrainz.
+    Link(String),
+}
+
+/// An ISRC, bare or hyphenated: two letters, three letters or digits, seven digits.
+fn isrc_of(t: &str) -> Option<String> {
+    let s: String = t
+        .chars()
+        .filter(|c| *c != '-')
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let b = s.as_bytes();
+    let ok = b.len() == 12
+        && b[..2].iter().all(|c| c.is_ascii_uppercase())
+        && b[2..5]
+            .iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && b[5..].iter().all(|c| c.is_ascii_digit());
+    ok.then_some(s)
+}
+
+/// A barcode's last digit is its GS1 check digit (UPC-A, EAN-13).
+fn gs1_ok(digits: &str) -> bool {
+    if digits.len() < 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let v: Vec<u32> = digits.bytes().map(|b| u32::from(b - b'0')).collect();
+    let (body, check) = v.split_at(v.len() - 1);
+    let sum: u32 = body
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(i, x)| x * if i % 2 == 0 { 3 } else { 1 })
+        .sum();
+    (10 - sum % 10) % 10 == check[0]
+}
+
+/// The music services whose pasted pages are looked up as links.
+fn music_link_host(host: &str) -> bool {
+    let h = host.trim_start_matches("www.");
+    matches!(
+        h,
+        "open.spotify.com"
+            | "deezer.com"
+            | "tidal.com"
+            | "listen.tidal.com"
+            | "music.apple.com"
+            | "music.youtube.com"
+            | "musicbrainz.org"
+            | "bandcamp.com"
+    ) || h.ends_with(".bandcamp.com")
+}
+
+/// What `q` is when it is one exact identifier: an ISRC, a UPC/EAN with a valid check digit, an
+/// MBID (each bare or prefixed `isrc:`, `upc:`/`ean:`, `mbid:`), or a pasted page of Spotify,
+/// Deezer, TIDAL, Apple Music, Bandcamp, YouTube Music or MusicBrainz. Anything else is text.
+pub(crate) fn identifier(q: &str) -> Option<Ident> {
+    let t = q.trim();
+    if t.is_empty() || t.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let lower = t.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("http://") {
+        let u = url::Url::parse(t).ok()?;
+        let host = u.host_str()?.to_ascii_lowercase();
+        // A service's front page is not a thing to look up
+        return (music_link_host(&host) && u.path().len() > 1).then(|| Ident::Link(t.to_string()));
+    }
+    if let Some(rest) = lower.strip_prefix("isrc:") {
+        return isrc_of(rest).map(|i| Ident::Key(format!("isrc:{i}")));
+    }
+    if let Some(rest) = lower.strip_prefix("upc:").or_else(|| lower.strip_prefix("ean:")) {
+        // (Pinakes refuses a barcode whose check digit is wrong: that one is words)
+        let ok = (8..=14).contains(&rest.len()) && gs1_ok(rest);
+        return ok.then(|| Ident::Key(format!("upc:{rest}")));
+    }
+    if let Some(rest) = lower.strip_prefix("mbid:") {
+        let ok = rest.len() == 36 && pm_model::Mbid::parse(rest).is_ok();
+        return ok.then(|| Ident::Key(format!("mbid:{rest}")));
+    }
+    if lower.len() == 36 && pm_model::Mbid::parse(&lower).is_ok() {
+        return Some(Ident::Key(format!("mbid:{lower}")));
+    }
+    if (t.len() == 12 || t.len() == 13) && gs1_ok(t) {
+        return Some(Ident::Key(format!("upc:{t}")));
+    }
+    // A hyphenated ISRC is written CC-XXX-YY-NNNNN; other hyphenated words are text
+    let hyphens = t.matches('-').count();
+    if (hyphens == 0 && t.len() == 12) || (hyphens == 3 && t.len() == 15) {
+        return isrc_of(t).map(|i| Ident::Key(format!("isrc:{i}")));
+    }
+    None
+}
+
+/// Pinakes' `facet=type` counts as Odeion's kinds: types of one kind add up (albums are
+/// `MusicAlbum` and `MusicRelease`), other types are left out.
+pub(crate) fn kind_counts(types: &[pm_pubky::pinakes::TypeFacet]) -> Vec<(String, i64)> {
+    let mut out: Vec<(String, i64)> = Vec::new();
+    for t in types {
+        let Some(kind) = kind_of_type(Some(&t.type_)) else {
+            continue;
+        };
+        match out.iter_mut().find(|(k, _)| k == kind) {
+            Some(c) => c.1 += t.count,
+            None => out.push((kind.to_string(), t.count)),
+        }
+    }
+    out
+}
+
+/// Pinakes instances that refused `boost=wot_2` (their Nexus serves no reach set), by base URL,
+/// with when: not asked again for an hour.
+fn no_boost() -> &'static Mutex<HashMap<String, Instant>> {
+    static NO_BOOST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    NO_BOOST.get_or_init(Default::default)
+}
+const NO_BOOST_TTL: Duration = Duration::from_secs(3600);
+
+/// The text query over music cards, one row per group, with counts by type. With a `viewer`
+/// what their network referenced ranks higher (`boost=wot_2`) where the instance serves it; one
+/// that refuses is remembered and the query repeated once without, so nothing is lost.
+pub(crate) async fn text_search(
+    p: &pm_pubky::pinakes::PinakesClient,
+    q: &str,
+    limit: u32,
+    viewer: Option<String>,
+) -> Result<pm_pubky::pinakes::SearchResponse, pm_pubky::pinakes::PinakesError> {
+    let query = |viewer: Option<String>| pm_pubky::pinakes::SearchQuery {
+        q: Some(q.to_string()),
+        type_: Some(pm_pubky::pinakes::music_types()),
+        collapse: Some("group".into()),
+        facet: Some("type".into()),
+        limit: Some(limit as usize),
+        boost: viewer.as_ref().map(|_| "wot_2".to_string()),
+        viewer,
+        ..Default::default()
+    };
+    let refused = no_boost()
+        .lock()
+        .expect("boost memo")
+        .get(p.base())
+        .is_some_and(|at| at.elapsed() < NO_BOOST_TTL);
+    let Some(viewer) = viewer.filter(|_| !refused) else {
+        return p.search(&query(None)).await;
+    };
+    match p.search(&query(Some(viewer))).await {
+        Err(
+            pm_pubky::pinakes::PinakesError::BadRequest(_)
+            | pm_pubky::pinakes::PinakesError::Status { status: 501, .. },
+        ) => {
+            no_boost()
+                .lock()
+                .expect("boost memo")
+                .insert(p.base().to_string(), Instant::now());
+            p.search(&query(None)).await
+        }
+        r => r,
+    }
+}
+
+/// The sites of an "Also on" list, each once, without `own`.
+fn also_sites(also: &[pm_pubky::pinakes::AlsoOn], own: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for a in also {
+        let Some(site) = a.site.as_deref().filter(|x| !x.is_empty()) else {
+            continue;
+        };
+        if Some(site) != own && !out.iter().any(|o| o == site) {
+            out.push(site.to_string());
+        }
+    }
+    out
+}
+
+/// Pubky, music cards only: the text query and, in parallel, the term as tags
+/// (STEWARD-FIX-search-tags.md) and concerts near the node's saved place; a `#tag` term searches
+/// tags only (several: all of them). A term that is an identifier or a pasted service page
+/// (`identifier`) is looked up exactly instead, in one request, and comes first.
+async fn pubky(s: &Arc<NodeState>, q: &str, limit: u32, owner: bool) -> Result<Found, String> {
     let d = s
         .discovery()
         .ok_or_else(|| "Pubky search needs the upstream contact (Settings)".to_string())?;
     let hashed = hash_tags(q);
     let tags_only = !hashed.is_empty();
-    let labels = if tags_only { hashed } else { tag_labels(q) };
+    let ident = if tags_only { None } else { identifier(q) };
+    let words = !tags_only && ident.is_none();
+    let labels = if tags_only {
+        hashed
+    } else if words {
+        tag_labels(q)
+    } else {
+        Vec::new()
+    };
+    let types = pm_pubky::pinakes::music_types();
+    // The owner's own network; a listener's search is not boosted
+    let viewer = if owner { crate::home::owner(s) } else { None };
+    let exact = async {
+        let found: Vec<(pm_pubky::pinakes::Card, Vec<String>)> = match &ident {
+            Some(Ident::Key(key)) => d
+                .pinakes()
+                .search(&pm_pubky::pinakes::SearchQuery {
+                    type_: Some(types.clone()),
+                    collapse: Some("group".into()),
+                    limit: Some(limit as usize),
+                    ..pm_pubky::pinakes::SearchQuery::key(key)
+                })
+                .await?
+                .items
+                .into_iter()
+                .map(|c| {
+                    let also = also_sites(&c.also_on, c.site.as_deref());
+                    (c, also)
+                })
+                .collect(),
+            // Read only: a search never makes Pinakes fetch a page
+            Some(Ident::Link(uri)) => d
+                .pinakes()
+                .resource_by_uri(uri)
+                .await?
+                .map(|r| {
+                    let also = also_sites(r.also_on(), r.card.site.as_deref());
+                    (r.card, also)
+                })
+                .into_iter()
+                .collect(),
+            None => Vec::new(),
+        };
+        Ok::<_, pm_pubky::pinakes::PinakesError>(found)
+    };
     let text = async {
-        if tags_only {
+        if !words {
             return Ok(None);
         }
-        d.pinakes()
-            .search(&pm_pubky::pinakes::SearchQuery {
-                q: Some(q.to_string()),
-                collapse: Some("group".into()),
-                facet: Some("type".into()),
-                limit: Some(limit as usize),
-                ..Default::default()
-            })
-            .await
-            .map(Some)
+        text_search(d.pinakes(), q, limit, viewer).await.map(Some)
     };
     let by_tag = async {
         if labels.is_empty() {
@@ -811,6 +1034,7 @@ async fn pubky(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String>
             .search(&pm_pubky::pinakes::SearchQuery {
                 tags: Some(labels.join(",")),
                 match_: (tags_only && labels.len() > 1).then(|| "all".to_string()),
+                type_: Some(types.clone()),
                 collapse: Some("group".into()),
                 facet: tags_only.then(|| "type".to_string()),
                 limit: Some(limit as usize),
@@ -819,8 +1043,27 @@ async fn pubky(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String>
             .await
             .map(Some)
     };
-    let (text, by_tag) = tokio::join!(text, by_tag);
-    // The text query decides failure; a tag query that fails only loses the tag hits
+    // Concerts matching the words, from now on, near the node's saved place (Home's Concerts row)
+    let near = async {
+        let loc = crate::home::location(s).filter(|_| words)?;
+        d.pinakes()
+            .search(&pm_pubky::pinakes::SearchQuery {
+                q: Some(q.to_string()),
+                type_: Some("MusicEvent".into()),
+                near: Some(format!("{:.4},{:.4}", loc.lat, loc.lon)),
+                radius: Some(crate::home::CONCERT_RADIUS_M.to_string()),
+                from: Some("now".into()),
+                collapse: Some("group".into()),
+                limit: Some(limit.min(10) as usize),
+                ..Default::default()
+            })
+            .await
+            .ok()
+    };
+    let (exact, text, by_tag, near) = tokio::join!(exact, text, by_tag, near);
+    // The exact lookup or the text query decides failure; a tag query that fails only loses the
+    // tag hits, a concerts query that fails only the concerts near
+    let exact = exact.map_err(|e| e.to_string())?;
     let text = text.map_err(|e| e.to_string())?;
     let by_tag = match by_tag {
         Ok(p) => p,
@@ -830,17 +1073,27 @@ async fn pubky(s: &Arc<NodeState>, q: &str, limit: u32) -> Result<Found, String>
     let facet_page = text.as_ref().or(by_tag.as_ref());
     let counts = facet_page
         .and_then(|p| p.facets.as_ref())
-        .map(|f| {
-            f.types
-                .iter()
-                .filter_map(|t| Some((kind_of_type(Some(&t.type_))?.to_string(), t.count)))
-                .collect()
+        .map(|f| kind_counts(&f.types))
+        .unwrap_or_default();
+    let mut hits: Vec<SearchHit> = exact
+        .iter()
+        .filter_map(|(card, also)| {
+            let mut h = card_hit(card)?;
+            h.exact = true;
+            h.also = also.clone();
+            Some(h)
         })
-        .unwrap_or_default();
-    let mut hits: Vec<SearchHit> = text
-        .as_ref()
-        .map(|p| p.items.iter().filter_map(card_hit).collect())
-        .unwrap_or_default();
+        .collect();
+    // Concerts near come before concerts anywhere; the same page is one row
+    let later = near
+        .iter()
+        .chain(text.iter())
+        .flat_map(|p| p.items.iter().filter_map(card_hit));
+    for h in later {
+        if !hits.iter().any(|x| x.page == h.page) {
+            hits.push(h);
+        }
+    }
     let shown = if tags_only {
         labels
             .iter()
@@ -958,4 +1211,112 @@ async fn service(
         });
     }
     Ok((out, Vec::new()))
+}
+
+#[cfg(test)]
+mod ident_tests {
+    use super::*;
+
+    fn key(k: &str) -> Option<Ident> {
+        Some(Ident::Key(k.to_string()))
+    }
+
+    #[test]
+    fn identifiers_are_recognised_and_near_misses_stay_text() {
+        // ISRC: bare, hyphenated, lower case, prefixed
+        assert_eq!(identifier("USQX91300108"), key("isrc:USQX91300108"));
+        assert_eq!(identifier(" usqx91300108 "), key("isrc:USQX91300108"));
+        assert_eq!(identifier("US-QX9-13-00108"), key("isrc:USQX91300108"));
+        assert_eq!(identifier("isrc:GBUM71029604"), key("isrc:GBUM71029604"));
+        assert_eq!(identifier("ISRC:gb-um7-10-29604"), key("isrc:GBUM71029604"));
+        // Near misses: a 12-letter word, 11 or 13 characters, letters where digits belong,
+        // other hyphenations
+        assert_eq!(identifier("unbelievable"), None);
+        assert_eq!(identifier("USQX9130010"), None);
+        assert_eq!(identifier("USQX913001088"), None);
+        assert_eq!(identifier("USQX9130010X"), None);
+        assert_eq!(identifier("1SQX91300108"), None);
+        assert_eq!(identifier("rock-n-roll-1"), None);
+        assert_eq!(identifier("US-QX91300108"), None);
+        assert_eq!(identifier("isrc:nope"), None);
+        // UPC-A and EAN-13 with a valid check digit; a wrong one, or another length, is text
+        assert_eq!(identifier("036000291452"), key("upc:036000291452"));
+        assert_eq!(identifier("4006381333931"), key("upc:4006381333931"));
+        assert_eq!(identifier("036000291453"), None);
+        assert_eq!(identifier("4006381333930"), None);
+        assert_eq!(identifier("03600029145"), None);
+        assert_eq!(identifier("1999"), None);
+        assert_eq!(identifier("upc:724384960650"), key("upc:724384960650"));
+        assert_eq!(identifier("ean:0724384960650"), key("upc:0724384960650"));
+        assert_eq!(identifier("upc:12ab"), None);
+        assert_eq!(identifier("upc:12345678"), None);
+        assert_eq!(identifier("upc:724384960651"), None);
+        assert_eq!(identifier("mbid:b1a9c0e9d9874042ae9178d6a3267d69"), None);
+        // MBID
+        let mbid = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        assert_eq!(identifier(mbid), key(&format!("mbid:{mbid}")));
+        assert_eq!(identifier(&mbid.to_uppercase()), key(&format!("mbid:{mbid}")));
+        assert_eq!(identifier(&format!("mbid:{mbid}")), key(&format!("mbid:{mbid}")));
+        assert_eq!(identifier("b1a9c0e9-d987-4042-ae91-78d6a3267d6"), None);
+        assert_eq!(identifier("mbid:not-a-uuid"), None);
+        // Pasted pages of music services; other sites, front pages and words are text
+        for link in [
+            "https://open.spotify.com/track/2Foc5Q5nqNiosCNqttzHof",
+            "https://www.deezer.com/en/track/66609426",
+            "https://tidal.com/browse/album/20115564",
+            "https://listen.tidal.com/album/20115564",
+            "https://music.apple.com/us/album/random-access-memories/617154241",
+            "https://daftpunk.bandcamp.com/album/homework",
+            "https://music.youtube.com/watch?v=5NV6Rdv1a3I",
+            "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+        ] {
+            assert_eq!(identifier(link), Some(Ident::Link(link.to_string())), "{link}");
+        }
+        assert_eq!(identifier("https://example.com/track/1"), None);
+        assert_eq!(identifier("https://open.spotify.com/"), None);
+        assert_eq!(identifier("https://notbandcamp.com/album/x"), None);
+        assert_eq!(identifier("https://evil.example/open.spotify.com/track/1"), None);
+        assert_eq!(identifier("daft punk"), None);
+        assert_eq!(identifier("get lucky USQX91300108"), None);
+        assert_eq!(identifier("#USQX91300108"), None);
+        assert_eq!(identifier(""), None);
+    }
+
+    #[test]
+    fn type_counts_add_up_per_kind_and_leave_other_types_out() {
+        let f = |t: &str, count: i64| pm_pubky::pinakes::TypeFacet {
+            type_: t.to_string(),
+            count,
+        };
+        let counts = kind_counts(&[
+            f("MusicGroup", 9),
+            f("MusicAlbum", 3),
+            f("WebPage", 40),
+            f("MusicRelease", 2),
+            f("MusicRecording", 3),
+            f("Person", 1),
+            f("MusicEvent", 4),
+            f("PodcastEpisode", 5),
+            f("VideoObject", 1),
+        ]);
+        assert_eq!(
+            counts,
+            vec![
+                ("artist".to_string(), 10),
+                ("album".to_string(), 5),
+                ("song".to_string(), 3),
+                ("concert".to_string(), 4),
+                ("podcast".to_string(), 5),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_music_types_fit_one_query_and_are_all_shown() {
+        assert!(pm_pubky::pinakes::MUSIC_TYPES.len() <= 10);
+        for t in pm_pubky::pinakes::MUSIC_TYPES {
+            assert!(kind_of_type(Some(t)).is_some(), "{t} has no kind");
+        }
+        assert_eq!(pm_pubky::pinakes::music_types().split(',').count(), 8);
+    }
 }

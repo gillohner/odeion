@@ -5932,11 +5932,11 @@
   const SEARCH_KINDS = [['artist', 'Artists'], ['album', 'Albums'], ['song', 'Songs'], ['playlist', 'Playlists'], ['person', 'People'], ['post', 'Posts'], ['podcast', 'Podcasts'], ['concert', 'Concerts']];
   // Facets (TASK-pinakes-social-ux A2): chips under the scope chips, counted from the merged
   // results in hand; each facet keeps at most one value on, and the rows and tiles filter by them.
-  const SEARCH_FACETS = [['service', 'Source'], ['quality', 'Quality'], ['decade', 'Years'], ['site', 'Site']];
+  const SEARCH_FACETS = [['kind', 'Kind'], ['service', 'Source'], ['quality', 'Quality'], ['decade', 'Years'], ['site', 'Site']];
   const QUALITY_WORDS = { hi_res: 'Hi-res', lossless: 'Lossless', lossy: 'Lossy' };
   // People and posts are Pubky's too: one Source chip for the three
-  const facetValues = (h) => ({ service: [...new Set((h.sources || []).map((x) => (x === 'people' || x === 'posts' ? 'pubky' : x)))], quality: h.quality ? [h.quality] : [], decade: h.year ? [`${Math.floor(h.year / 10) * 10}s`] : [], site: h.site ? [h.site] : [] });
-  const facetWord = (facet, v) => (facet === 'service' ? (v === 'library' ? 'Your library' : v === 'pubky' ? 'Pubky' : srcName(v)) : facet === 'quality' ? QUALITY_WORDS[v] || v : v);
+  const facetValues = (h) => ({ kind: h.kind ? [h.kind] : [], service: [...new Set((h.sources || []).map((x) => (x === 'people' || x === 'posts' ? 'pubky' : x)))], quality: h.quality ? [h.quality] : [], decade: h.year ? [`${Math.floor(h.year / 10) * 10}s`] : [], site: h.site ? [h.site] : [] });
+  const facetWord = (facet, v) => (facet === 'kind' ? (SEARCH_KINDS.find(([k]) => k === v) || [v, v])[1] : facet === 'service' ? (v === 'library' ? 'Your library' : v === 'pubky' ? 'Pubky' : srcName(v)) : facet === 'quality' ? QUALITY_WORDS[v] || v : v);
   const facetsOf = (byKind) => { const counts = Object.fromEntries(SEARCH_FACETS.map(([f]) => [f, new Map()])); for (const list of Object.values(byKind)) for (const h of list) { const fv = facetValues(h); for (const [f] of SEARCH_FACETS) for (const v of fv[f]) counts[f].set(v, (counts[f].get(v) || 0) + 1); } return counts; };
   const passesFacets = (h, on) => SEARCH_FACETS.every(([f]) => !on[f] || facetValues(h)[f].includes(on[f]));
   // A hit "matches" when every word of the query is in its title or subtitle
@@ -5996,7 +5996,7 @@
         found = same;
         if (found && !found.image && h.image) found.image = h.image;
       }
-      if (found) { if (h.tagged && !found.tagged) found.tagged = h.tagged; if (!found.sources.includes(ans.source)) found.sources.push(ans.source); for (const k of h.keys || []) index.set(h.kind + '|' + k, found); continue; }
+      if (found) { if (h.tagged && !found.tagged) found.tagged = h.tagged; if (h.exact) { found.exact = true; found.also = h.also; } if (!found.sources.includes(ans.source)) found.sources.push(ans.source); for (const k of h.keys || []) index.set(h.kind + '|' + k, found); continue; }
       const m = { ...h, sources: [ans.source] };
       byKind[h.kind].push(m);
       for (const k of h.keys || []) index.set(h.kind + '|' + k, m);
@@ -6088,15 +6088,17 @@
     const sections = [];
     const counts = {}; for (const ans of Object.values(run.answers)) for (const [k, c] of ans.counts || []) counts[k] = Math.max(counts[k] || 0, c);
     // A Top result only when it really matches; a fuzzy hit is not promoted
-    const top = [byKind.artist.find((x) => x.sources.includes('library')), byKind.song.find((x) => x.sources.includes('library')), byKind.artist[0], byKind.album[0], byKind.song[0]].find((x) => x && closeMatch(x, run.q));
+    // (the Top result opens an item page: songs, albums and artists have one)
+    const exactHit = ['song', 'album', 'artist'].map((k) => byKind[k].find((x) => x.exact)).find(Boolean);
+    const top = exactHit || [byKind.artist.find((x) => x.sources.includes('library')), byKind.song.find((x) => x.sources.includes('library')), byKind.artist[0], byKind.album[0], byKind.song[0]].find((x) => x && closeMatch(x, run.q));
     const anyHits = SEARCH_KINDS.some(([k]) => byKind[k].length);
     const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => tagChip(t.label, { own: true, count: t.count, attrs: `data-stag="${esc(t.label)}"`, title: `Your tag · ${countOf(t.count, 'items')}` })).join('')}${(tg.others || []).map((l) => tagChip(l, { attrs: `data-stag="${esc(l)}"` })).join('')}</div></section>`);
     if (!top && anyHits && !run.q.includes('#')) sections.push('<p class="muted small" id="snomatch">No exact match. The closest results are below.</p>');
-    if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" data-err="remove">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top">${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Playlist', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div></div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
+    if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" data-err="remove">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top">${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Playlist', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div>${top.also && top.also.length ? `<div class="sub" id="stopalso">Also on ${esc(top.also.join(' · '))}</div>` : ''}</div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
     const songCap = run.allSongs ? 50 : 6;
     for (const [kind, label] of SEARCH_KINDS) {
       const items = byKind[kind];
-      if (!items.length && !pendingAny) continue;
+      if (!items.length && (!pendingAny || (run.facets.kind && run.facets.kind !== kind))) continue;
       const head = `<div class="section-head"><h3>${label}</h3><span class="muted small">${items.length ? items.length : ''}${counts[kind] && counts[kind] > items.length ? ` of ${counts[kind]} on Pubky` : ''}</span></div>`;
       let body;
       if (!items.length) body = skel(kind === 'song' ? 4 : 1, kind === 'album' || kind === 'artist');
