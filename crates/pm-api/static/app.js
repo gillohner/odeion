@@ -6338,20 +6338,31 @@
   const setListPref = (kind, p) => { try { localStorage.setItem(`pm.list.${kind}`, JSON.stringify(p)); } catch { /* no storage */ } };
   // Sorting changes the order of the current matches, keeping the filter and keyboard position.
   const renderSortedList = async (control) => {
-    const query = $('#filter')?.value; let focused = document.activeElement === control;
+    let query = $('#filter')?.value; let focused = document.activeElement === control;
     const gen = navGen;
     // Removing Sort during loading leaves focus on body. Any later focus transfer cancels
     // restoration, even if the person then dismisses that control (Search followed by Escape).
     const moved = () => { focused = false; };
+    // What the person types (or clears with Escape) in the filter meanwhile is what is put back
+    const typed = (e) => { if (!e.target || e.target.id !== 'filter') return; if (e.type === 'input') query = e.target.value; else if (e.key === 'Escape') query = ''; };
     document.addEventListener('focusin', moved, { capture: true, once: true, signal: navCtl.signal });
+    document.addEventListener('input', typed, { capture: true, signal: navCtl.signal });
+    document.addEventListener('keydown', typed, { capture: true, signal: navCtl.signal });
     try {
-      const rendered = render(); const drawing = lastDrawing;
+      // A redraw of the same page while it sorts (the library changed) replaces the list again: the
+      // filter goes back after each render, the focus once the newest is done. (A redraw still
+      // loading shows no Sort, so none starts before this sort.)
+      const rendered = render(); let drawing = lastDrawing;
       await rendered;
-      if (gen !== navGen || drawing !== lastDrawing) return;
-      const filter = $('#filter');
-      if (filter && query != null) { filter.value = query; filter.oninput?.(); }
+      for (;;) {
+        if (gen !== navGen) return;
+        const filter = $('#filter');
+        if (filter && query != null) { filter.value = query; filter.oninput?.(); }
+        if (drawing === lastDrawing) break;
+        drawing = lastDrawing; await drawing.done;
+      }
       if (focused && document.activeElement === document.body) $('[data-lsort]', main)?.focus({ preventScroll: true });
-    } finally { document.removeEventListener('focusin', moved, true); }
+    } finally { document.removeEventListener('focusin', moved, true); document.removeEventListener('input', typed, true); document.removeEventListener('keydown', typed, true); }
   };
   const albumFav = (a) => !!(a.release_mbid && state.favUris && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`));
   const sortList = (kind, list, how) => {
@@ -6534,7 +6545,7 @@
     // A page opened by a press is the page's own reading, not the press's
     const outer = inHandler; inHandler = 0; let p;
     try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }
-    const drawn = () => { drawing.on = false; markDownloads(); }; p.then(drawn, drawn);
+    const drawn = () => { drawing.on = false; markDownloads(); }; drawing.done = p.then(drawn, drawn);
     return p;
   };
   const renderPage = async (api) => {
@@ -6998,7 +7009,13 @@
         }
         case 'search': {
           const a = state.viewArg || {};
-          if (!a.q) { main.innerHTML = emptyState('search', 'Search', 'Type in the box above: your library, your services and Pubky at once. Paste a link to open it.'); break; }
+          // Search with no words while a search still runs (Back, or the Search tab with an empty box):
+          // no progress line and no combobox over results; that search's end changes nothing here
+          if (!a.q) {
+            $('#sprog').hidden = true; searchKeys.reset();
+            search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls');
+            main.innerHTML = emptyState('search', 'Search', 'Type in the box above: your library, your services and Pubky at once. Paste a link to open it.'); break;
+          }
           const scope = a.in || 'everywhere'; state.searchScope = scope;
           if (search.value.trim() !== a.q) search.value = a.q;
           const run = startSearch(a.q, scope);
