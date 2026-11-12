@@ -863,13 +863,13 @@ pub(crate) fn identifier(q: &str) -> Option<Ident> {
         return isrc_of(rest).map(|i| Ident::Key(format!("isrc:{i}")));
     }
     if let Some(rest) = lower.strip_prefix("upc:").or_else(|| lower.strip_prefix("ean:")) {
-        let ok = (8..=14).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_digit());
+        // (Pinakes refuses a barcode whose check digit is wrong: that one is words)
+        let ok = (8..=14).contains(&rest.len()) && gs1_ok(rest);
         return ok.then(|| Ident::Key(format!("upc:{rest}")));
     }
     if let Some(rest) = lower.strip_prefix("mbid:") {
-        return pm_model::Mbid::parse(rest)
-            .is_ok()
-            .then(|| Ident::Key(format!("mbid:{rest}")));
+        let ok = rest.len() == 36 && pm_model::Mbid::parse(rest).is_ok();
+        return ok.then(|| Ident::Key(format!("mbid:{rest}")));
     }
     if lower.len() == 36 && pm_model::Mbid::parse(&lower).is_ok() {
         return Some(Ident::Key(format!("mbid:{lower}")));
@@ -1249,6 +1249,9 @@ mod ident_tests {
         assert_eq!(identifier("upc:724384960650"), key("upc:724384960650"));
         assert_eq!(identifier("ean:0724384960650"), key("upc:0724384960650"));
         assert_eq!(identifier("upc:12ab"), None);
+        assert_eq!(identifier("upc:12345678"), None);
+        assert_eq!(identifier("upc:724384960651"), None);
+        assert_eq!(identifier("mbid:b1a9c0e9d9874042ae9178d6a3267d69"), None);
         // MBID
         let mbid = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
         assert_eq!(identifier(mbid), key(&format!("mbid:{mbid}")));

@@ -6088,7 +6088,8 @@
     const sections = [];
     const counts = {}; for (const ans of Object.values(run.answers)) for (const [k, c] of ans.counts || []) counts[k] = Math.max(counts[k] || 0, c);
     // A Top result only when it really matches; a fuzzy hit is not promoted
-    const exactHit = SEARCH_KINDS.map(([k]) => byKind[k].find((x) => x.exact)).find(Boolean);
+    // (the Top result opens an item page: songs, albums and artists have one)
+    const exactHit = ['song', 'album', 'artist'].map((k) => byKind[k].find((x) => x.exact)).find(Boolean);
     const top = exactHit || [byKind.artist.find((x) => x.sources.includes('library')), byKind.song.find((x) => x.sources.includes('library')), byKind.artist[0], byKind.album[0], byKind.song[0]].find((x) => x && closeMatch(x, run.q));
     const anyHits = SEARCH_KINDS.some(([k]) => byKind[k].length);
     const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => tagChip(t.label, { own: true, count: t.count, attrs: `data-stag="${esc(t.label)}"`, title: `Your tag · ${countOf(t.count, 'items')}` })).join('')}${(tg.others || []).map((l) => tagChip(l, { attrs: `data-stag="${esc(l)}"` })).join('')}</div></section>`);
