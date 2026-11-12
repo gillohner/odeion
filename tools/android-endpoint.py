@@ -505,6 +505,16 @@ def close_now_playing():
         time.sleep(1)
 
 
+# The page-driven checks (the network zone's volume keys, the in-app player, offline) choose zones
+# in the page's zone picker, found through the WebView's accessibility dump. The API 30, 33 and 34
+# emulator images have old WebViews that are never updated: there the dump keeps showing the screen
+# from before Now playing or the picker opened (release run 43114938557: "timed out waiting for
+# Now playing's zone" on 33 and 34, the picker never listed on 30), so those checks run on API 35+
+# (android.yml's phone-as-zone, release.yml's API 35). Phones get WebView updates from Play.
+page_picker = True
+PAGE_PICKER_NOTE = "this emulator's WebView is too old for the page's zone picker in the accessibility dump (API 35+ checks it)"
+
+
 def pick(name, what):
     """Choose a zone in the page's picker. The WebView's accessibility dump can lag behind
     the screen: the picker is closed and opened again (three tries) before giving up."""
@@ -577,6 +587,9 @@ def media_controls(zid, track):
     log("KEYCODE_MEDIA_NEXT reached the node")
 
     # A network zone chosen in the page: the volume keys are its own volume
+    if not page_picker:
+        log(f"network zone volume keys not checked here: {PAGE_PICKER_NOTE}")
+        return
     nz = next((z for z in api("GET", "/v1/zones") if z["output"] == "null:percent"), None)
     assert nz, "no zone on the null output with a percent volume (PM_DEV_OUTPUTS)"
     api("POST", f"/v1/zones/{nz['id']}/volume", {"volume": {"percent": 3}})
@@ -1174,6 +1187,8 @@ def run(node):
 
     sdk = int(adb("shell", "getprop", "ro.build.version.sdk").strip() or 0)
     log(f"Android API {sdk}")
+    global page_picker
+    page_picker = sdk >= 35
     # Android 13+: nothing granted up front; the notification prompt is refused below
     log(adb("install", "-r", *([] if sdk >= 33 else ["-g"]), apk).strip())
     app_node = prepare_node_transport()
@@ -1308,10 +1323,13 @@ def run(node):
                 done, address = until("the player's registration", registered, timeout=90)
                 assert done, f"the node cannot reach the player at {address}"
         log("the phone is a zone, plays in real time, and keeps playing in the background")
-        in_app_player(address, track)
-        log("the in-app player is the app's own: real time, in the background, and it gives the output to the node's zone")
-        if os.environ.get("PM_UI_TOUR"):
-            page_to_phone_zone(address, track)
+        if page_picker:
+            in_app_player(address, track)
+            log("the in-app player is the app's own: real time, in the background, and it gives the output to the node's zone")
+            if os.environ.get("PM_UI_TOUR"):
+                page_to_phone_zone(address, track)
+        else:
+            log(f"in-app player not checked here: {PAGE_PICKER_NOTE}")
 
         # Started again with the node saved: it reconnects and the service starts again
         adb("shell", "am", "force-stop", PKG)
@@ -1360,8 +1378,12 @@ def run(node):
             tap(lambda n: 'text="Continue"' in n, "Continue")
             wait_page("the node's page after the report", relaunch=True)
             log("Continue reconnects to the node")
-        offline_playback(node, track)
-        log("PASS: the phone is a zone, plays in real time and in the background, the in-app player is the app's own, survives a restart, reports a crash, and plays a downloaded song with no network")
+        if page_picker:
+            offline_playback(node, track)
+            log("PASS: the phone is a zone, plays in real time and in the background, the in-app player is the app's own, survives a restart, reports a crash, and plays a downloaded song with no network")
+        else:
+            log(f"offline playback not checked here: {PAGE_PICKER_NOTE}")
+            log("PASS: the phone is a zone, plays in real time and in the background, survives a restart and reports a crash")
     finally:
         lc.terminate()
 
