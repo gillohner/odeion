@@ -1,5 +1,6 @@
-// On a phone every on/off switch, a section's text action (See all, a playlist's Add one) and the
-// Try again in a playlist's "Couldn't find where these songs play." take a 44 px tap, while they keep
+// On a phone every on/off switch, a section's text action (See all, a playlist's Add one), the
+// Try again in a playlist's "Couldn't find where these songs play." and forget beside an address added
+// by hand (Zones and outputs) take a 44 px tap, while they keep
 // their size and place and do not take taps from the controls around them. Try again reads as a link
 // (no button box) at every width.
 // Real candidate assets, isolated responses: node tools/ui-phone-switch-targets.js [repo] [shots]
@@ -18,10 +19,14 @@ const sources = ['tidal', 'qobuz'].map((id, i) => ({ id, name: ['TIDAL', 'Qobuz'
 // Home's Get started card for an owner with no music yet: Hide these steps sits in its head, with
 // the Restore from a backup link just below.
 const firstSteps = { show: true, hidden: false, steps: [{ id: 'music', done: false, optional: false }, { id: 'play', done: false, optional: false }] };
-const fixtures = { '/sources': { body: sources }, '/me/first-steps': { body: firstSteps } };
+// Zones and outputs with four speakers added by address, each with its forget: a Linn (address, MAC
+// and serial) and a description URL wrap, so at 360 and 412 px some forgets sit under others.
+const discovery = { saved_addresses: ['192.168.1.20', '192.168.1.31', '192.168.1.44 00:26:0f:21:3a:9c 1234567', 'http://192.168.1.40:49152/description.xml', '10.0.0.7'], devices: [], renderers: [] };
+const fixtures = { '/sources': { body: sources }, '/me/first-steps': { body: firstSteps }, '/outputs/discovery': { body: discovery } };
 // A playlist whose services didn't answer: its songs show under "Couldn't find where these songs play. Try again".
 const noPlayFrom = { '/playlists/c1/play-from': { status: 500, body: { error: 'services did not answer' } } };
-const TARGETS = '.switch, .section-head .link, .pfnote .link';
+const TARGETS = '.switch, .section-head .link, .pfnote .link, #rendsaved .link';
+const SCALED = '.pfnote, #pfretry, #plsongs .section-head, #plsongs .section-head h3, [data-selstart]';
 const size = (b) => `${b.width.toFixed(1)}×${b.height.toFixed(1)}`;
 
 // Every target on the page, scrolled to the middle of the screen in turn: its visible box, and the
@@ -136,6 +141,29 @@ async function page1(page, at, route, wantMin, scrollTo) {
         await page1(page, at, '/sources', 2, '[data-src-on="tidal"]');
         await page.screenshot({ path: path.join(SHOTS, `sources-${at}.png`) });
 
+        // Zones and outputs: forget beside each address added by hand, with the address box and Add
+        // renderer just above. Each address has a row of its own with its forget on it, so forgets
+        // stack under each other and each keeps its own taps (page1).
+        await page1(page, at, '/settings/playback', 5, '[data-rendrm]');
+        const rows = await page.evaluate(() => [...document.querySelectorAll('[data-rendrm]')].map((b) => {
+          const code = b.previousElementSibling; const bb = b.getBoundingClientRect(); const cb = code.getBoundingClientRect();
+          const others = [...document.querySelectorAll('#rendsaved code')].filter((c) => c !== code && c.getBoundingClientRect().bottom > bb.top && c.getBoundingClientRect().top < bb.bottom);
+          return { own: code.textContent === b.dataset.rendrm, sameRow: bb.top < cb.bottom && bb.bottom > cb.top, alone: !others.length };
+        }));
+        check(rows.length === discovery.saved_addresses.length && rows.every((r) => r.own && r.sameRow && r.alone), `${at}: each address is on a row of its own with its forget beside it (${JSON.stringify(rows.filter((r) => !(r.own && r.sameRow && r.alone)))})`);
+        check(await page.evaluate(() => [...document.querySelectorAll('#rendsaved .rendsep')].every((s) => !s.getClientRects().length)), `${at}: no · between the address rows`);
+        await page.locator('[data-rendrm]').first().evaluate((n) => n.scrollIntoView({ block: 'center', behavior: 'instant' }));
+        await page.screenshot({ path: path.join(SHOTS, `outputs-forget-${at}.png`) });
+        for (const how of ['touch', 'mouse']) {
+          const was = state.hits.filter((h) => h.m === 'DELETE' && h.v.startsWith('/outputs/upnp/')).length;
+          await pressBelow(page, '[data-rendrm]', how);
+          let gone = false;
+          for (let i = 0; i < 20 && !gone; i++) { await page.waitForTimeout(100); gone = state.hits.filter((h) => h.m === 'DELETE' && h.v === '/outputs/upnp/192.168.1.20').length > was; }
+          check(gone, `${at}: a ${how} press just below forget forgets that address`);
+          await page.waitForSelector('[data-rendrm]');
+        }
+
+
         // A playlist's description: Add one.
         await page1(page, at, '/playlist/c1', 1, '#pldesc');
         await page.screenshot({ path: path.join(SHOTS, `playlist-${at}.png`) });
@@ -150,13 +178,18 @@ async function page1(page, at, route, wantMin, scrollTo) {
         state.fixtures = { ...fixtures, ...noPlayFrom };
         await page1(page, at, '/playlist/c1', 2, '#pfretry');
         check(await looksLikeLink(page), `${at}: Try again reads as a link, not a grey button box`);
-        // A larger Android font size moves Try again under Select: Select keeps its taps.
+        // A larger Android font size moves Try again under Select: Select keeps its taps, and Try
+        // again's middle stays its own. Every text around it grows: the note, Try again, the Songs
+        // heading and Select.
         for (const scale of [1.15, 1.3]) {
-          await page.evaluate((k) => { for (const el of document.querySelectorAll('.pfnote, #plsongs .section-head')) { el.style.fontSize = ''; el.style.fontSize = `${parseFloat(getComputedStyle(el).fontSize) * k}px`; } document.querySelector('#pfretry').scrollIntoView({ block: 'center', behavior: 'instant' }); }, scale);
+          const grown = await page.evaluate(([k, sel]) => { const els = [...document.querySelectorAll(sel)]; for (const el of els) el.style.fontSize = ''; const was = els.map((el) => parseFloat(getComputedStyle(el).fontSize)); els.forEach((el, i) => { el.style.fontSize = `${was[i] * k}px`; }); document.querySelector('#pfretry').scrollIntoView({ block: 'center', behavior: 'instant' }); return { all: els.length, grew: els.filter((el, i) => Math.abs(parseFloat(getComputedStyle(el).fontSize) - was[i] * k) < 0.5).length }; }, [scale, SCALED]);
+          check(grown.all >= 5 && grown.grew === grown.all, `${at}: with text at ${Math.round(scale * 100)} %, the note, Try again, the Songs heading and Select all grow (${grown.grew} of ${grown.all})`);
           const s = await stolen(page);
           check(!s.length, `${at}: with text at ${Math.round(scale * 100)} %, Select and the songs keep their taps around Try again${s.length ? ` (${s.join('; ')})` : ''}`);
+          const mid = await page.locator('#pfretry').evaluate((n) => { const b = n.getBoundingClientRect(); const h = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return h === n || n.contains(h) ? 'Try again' : `${h && h.tagName.toLowerCase()} “${h && h.textContent.trim().slice(0, 20)}”`; });
+          check(mid === 'Try again', `${at}: with text at ${Math.round(scale * 100)} %, a tap on Try again's middle reaches it (${mid})`);
         }
-        await page.evaluate(() => { for (const el of document.querySelectorAll('.pfnote, #plsongs .section-head')) el.style.fontSize = ''; });
+        await page.evaluate((sel) => { for (const el of document.querySelectorAll(sel)) el.style.fontSize = ''; }, SCALED);
         await page.locator('#pfretry').evaluate((n) => n.scrollIntoView({ block: 'center', behavior: 'instant' }));
         await page.screenshot({ path: path.join(SHOTS, `playlist-retry-${at}.png`) });
         const asks = () => state.hits.filter((h) => h.v === '/playlists/c1/play-from').length;
@@ -185,6 +218,11 @@ async function page1(page, at, route, wantMin, scrollTo) {
       const r = (await measure(page)).find((t) => t.name === 'Try again');
       check(await looksLikeLink(page), `1024 px desktop: Try again reads as a link (${await page.locator('#pfretry').evaluate((n) => { const c = getComputedStyle(n); return `${c.borderTopWidth} border, ${c.backgroundColor}, ${c.textDecorationLine}`; })})`);
       check(r && r.reachH < 44, `1024 px desktop keeps Try again's compact tap (${r && `${r.reachW}×${r.reachH}`})`);
+      state.fixtures = fixtures;
+      await fx.go(page, '/settings/playback');
+      await page.waitForSelector('[data-rendrm]');
+      const inline = await page.evaluate(() => ({ text: document.querySelector('#rendsaved').textContent, rows: [...document.querySelectorAll('#rendsaved .rendrow')].map((r) => getComputedStyle(r).display) }));
+      check(inline.text.startsWith('Added by address: 192.168.1.20 forget · 192.168.1.31 forget · ') && inline.rows.every((d) => d === 'inline'), `1024 px desktop keeps the addresses in one sentence with · between them (${inline.text.slice(0, 60)}…, ${[...new Set(inline.rows)]})`);
     } finally { await context.close(); }
   } finally { await browser.close(); }
   console.log(`${passed} passed, ${failed} failed`);
