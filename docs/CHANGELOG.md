@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-12
+
+- **On a phone, a playlist's ⋯ stays on its row on narrow screens and with a larger font size.** At 320 or 340 px wide, or at 360 px with Android's font size at 115 % or 130 %, ⋯ used to drop alone onto a second line. Now Shuffle shows only its word, the row's gaps tighten, and on the tightest screens Play shows only its word too, so Play, Shuffle, Play on…, Share and ⋯ stay on one row. Every button is still 44 px. At 360 and 412 px with the normal font size the row looks as before.
+
 ## 0.2.4
 
 ### 2026-11-12

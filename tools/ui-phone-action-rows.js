@@ -1,6 +1,7 @@
 // On a phone the buttons in an action row (a playlist's Play, Shuffle, Play on…, Share and ⋯; the
 // Songs page's Play all) are 44 px taps and a playlist's row stays one row at 360 px, as an album's
-// does; a checkbox's whole line (Import's Roon options) is a 44 px tap. Desktop is unchanged.
+// does, also at 320 px and with a larger font size; a checkbox's whole line (Import's Roon options) is
+// a 44 px tap. Desktop is unchanged.
 // Real candidate assets, isolated responses: node tools/ui-phone-action-rows.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -88,10 +89,39 @@ async function phone(browser, width, android) {
   await context.close();
 }
 
+// A playlist's row on a narrower phone (320 px: Android's larger display size on a 360 px phone) or with
+// a larger font size (Android's 115 % and 130 % in the app's WebView, every font size scaled as Android's text zoom does):
+// Shuffle drops its icon, then the gaps and Play's and Shuffle's sides tighten, then Play drops its
+// icon, and ⋯ stays on the row. Every button keeps its 44 px; at 360 and 412 px with the normal font
+// size the row is as before.
+async function narrow(browser, width, android, k) {
+  const at = `${android ? 'android' : 'browser'} ${width} at ${Math.round(k * 100)} %`;
+  const { page, context, state } = await fx.create(browser, width, { mobile: true });
+  if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+  state.collections = [fx.summary];
+  await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plsongs .srow'); await page.waitForTimeout(300);
+  if (k !== 1) await page.evaluate((k) => { const all = [document.documentElement, ...document.querySelectorAll('body, body *')]; const fs = all.map((e) => parseFloat(getComputedStyle(e).fontSize)); all.forEach((e, i) => { e.style.fontSize = `${fs[i] * k}px`; }); }, k);
+  const r = await row(page, '#main > .hero');
+  const look = await page.evaluate(() => { const ic = (id) => getComputedStyle(document.querySelector(`#${id} > .ic`)).display !== 'none'; return { fs: parseFloat(getComputedStyle(document.querySelector('#plplay')).fontSize), gap: parseFloat(getComputedStyle(document.querySelector('#main > .hero .actions')).columnGap), play: ic('plplay'), shuffle: ic('plshuffle'), pad: parseFloat(getComputedStyle(document.querySelector('#plplay')).paddingLeft) }; });
+  check(Math.abs(look.fs - 14 * k) < 0.1, `${at}: Play's words are ${look.fs.toFixed(1)} px (the scaled size held)`);
+  check(r.buttons.length === 5 && r.rows === 1 && r.sw <= r.vw, `${at}: a playlist's five buttons stay on one row, ⋯ included (${fmt(r)}, ${r.rows} rows, page ${r.sw} of ${r.vw})`);
+  check(r.buttons.every((b) => b.h >= 44) && r.buttons.filter((b) => b.icon).every((b) => b.w >= 44), `${at}: every button is still a 44 px tap`);
+  check(r.buttons.find((b) => b.id === 'plplay').text === 'Play' && r.buttons.find((b) => b.id === 'plshuffle').text === 'Shuffle', `${at}: Play and Shuffle keep their words`);
+  // what gives way, in order; the normal font size at 360/412 px is the row as before
+  const want = { 320: { 1: [4, true], 1.15: [4, false], 1.3: [4, false] }, 340: { 1: [4, true], 1.15: [4, true], 1.3: [4, false] }, 360: { 1: [8, true], 1.15: [4, true], 1.3: [4, true] }, 412: { 1: [8, true], 1.15: [8, true], 1.3: [8, true] } }[width][k];
+  check(look.gap === want[0] && look.play === want[1] && look.shuffle === (width >= 380) && look.pad === (want[0] === 4 ? 10 : 14), `${at}: gap ${look.gap} px (want ${want[0]}), Play's sides ${look.pad} px, Play's icon ${look.play ? 'shown' : 'hidden'} (want ${want[1] ? 'shown' : 'hidden'}), Shuffle's icon ${look.shuffle ? 'shown' : 'hidden'}`);
+  if (k !== 1.15) await page.locator('#main > .hero').screenshot({ path: path.join(SHOTS, `playlist-row-${android ? 'android' : 'browser'}-${width}-${Math.round(k * 100)}.png`) });
+  // still one tap: ⋯ opens the playlist's menu
+  await page.locator('#plmore').tap(); await page.waitForTimeout(200);
+  check(await page.locator('.popover.menu:not([hidden])').count() === 1, `${at}: one tap on ⋯ opens the playlist's menu`);
+  await context.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
     for (const width of [360, 412]) for (const android of [false, true]) await phone(browser, width, android);
+    for (const width of [320, 340, 360, 412]) for (const k of [1, 1.15, 1.3]) for (const android of [false, true]) await narrow(browser, width, android, k);
     // Desktop with a mouse: the same rows as before (no 44 px rule, Roon options stay one line of text)
     const { page, context, state } = await fx.create(browser, 1280, {});
     state.collections = [fx.summary];

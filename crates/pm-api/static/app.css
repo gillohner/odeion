@@ -441,6 +441,17 @@ html[data-shell="phone"] .actions > .btn { min-height: 44px; }
 html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore) { min-width: 44px; padding-left: 10px; padding-right: 10px; justify-content: center; }
 /* (the narrowest phones: a playlist's Shuffle is its word, as on an album, so ⋯ stays on the row) */
 @media (max-width: 379px) { html[data-shell="phone"] .actions > #plshuffle > .ic { display: none; } }
+/* (and wherever the row is short for its words, on a narrow phone or with a larger font size: Shuffle drops its
+   icon, then the row's gaps and Play's and Shuffle's sides tighten, then Play drops its icon, so ⋯ stays on the row;
+   the rule above stays for WebViews without container queries) */
+html[data-shell="phone"] #main > .hero > div:has(> .actions > #plplay) { container: plhero / inline-size; }
+@container plhero (width < calc(276px + 5.4em)) { #plshuffle > .ic { display: none; } }
+@container plhero (width < calc(250px + 5.4em)) {
+  .actions:has(> #plplay) { gap: 4px; }
+  :is(#plplay, #plshuffle) { padding-left: 10px; padding-right: 10px; }
+  #plplay { gap: 6px; }
+}
+@container plhero (width < calc(216px + 5.4em)) { #plplay > .ic { display: none; } }
 /* (a playlist's sharing note: a little air under the taller row) */
 html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 /* Touch screens in the desktop layout (tablets): 40 px targets */
