@@ -463,6 +463,9 @@ html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 .empty .ic { width: 36px; height: 36px; color: var(--muted); margin-bottom: 10px; }
 .empty h3 { color: var(--fg); margin-bottom: 6px; }
 .empty .btn { margin-top: 16px; }
+/* A list filter that matched nothing; empty (and no space) otherwise */
+.filter-none { margin: 16px 0 0; overflow-wrap: anywhere; }
+.filter-none:empty { margin: 0; }
 .notice { padding: 12px 14px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-2); }
 .notice.warn { border-color: rgba(232, 178, 74, 0.4); }
 /* The Android app on an old System WebView (index.html's script): only CSS such a WebView knows, so no
