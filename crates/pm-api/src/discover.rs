@@ -1819,8 +1819,8 @@ pub(crate) async fn search(
         Some("albums") => Some("MusicAlbum".to_string()),
         Some("artists") => Some("MusicGroup".to_string()),
         Some("tracks") => Some("MusicRecording".to_string()),
-        // Music cards only, so the page is not filled by other kinds of links
-        _ => Some(pm_pubky::pinakes::music_types()),
+        // The cards this page shows (`is_music`), so the limit is not spent on kinds dropped below
+        _ => Some(pm_pubky::pinakes::music_card_types()),
     };
     let resp = d
         .pinakes()

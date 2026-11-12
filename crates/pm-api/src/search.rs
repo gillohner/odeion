@@ -208,8 +208,14 @@ pub(crate) async fn search(
             // Each person's answers apart: their own sign-ins (and, for a listener, no owner's
             // playlists) make them differ
             let who = crate::accounts::asking();
+            // One answer per term whatever its case; a pasted link keeps its case (ids in paths
+            // differ by it)
             let key = (
-                q.to_lowercase(),
+                if matches!(identifier(&q), Some(Ident::Link(_))) {
+                    q.clone()
+                } else {
+                    q.to_lowercase()
+                },
                 if owner {
                     src.clone()
                 } else {
@@ -909,6 +915,16 @@ fn no_boost() -> &'static Mutex<HashMap<String, Instant>> {
 }
 const NO_BOOST_TTL: Duration = Duration::from_secs(3600);
 
+/// Whether an error is the instance refusing the boost itself: a 501, or a 400 that names it. Any
+/// other 400 (a term Pinakes won't take) is the search's own error and says nothing about boosts.
+pub(crate) fn boost_refused(e: &pm_pubky::pinakes::PinakesError) -> bool {
+    match e {
+        pm_pubky::pinakes::PinakesError::Status { status: 501, .. } => true,
+        pm_pubky::pinakes::PinakesError::BadRequest(m) => m.contains("boost") || m.contains("wot_2"),
+        _ => false,
+    }
+}
+
 /// The text query over music cards, one row per group, with counts by type. With a `viewer`
 /// what their network referenced ranks higher (`boost=wot_2`) where the instance serves it; one
 /// that refuses is remembered and the query repeated once without, so nothing is lost.
@@ -937,10 +953,7 @@ pub(crate) async fn text_search(
         return p.search(&query(None)).await;
     };
     match p.search(&query(Some(viewer))).await {
-        Err(
-            pm_pubky::pinakes::PinakesError::BadRequest(_)
-            | pm_pubky::pinakes::PinakesError::Status { status: 501, .. },
-        ) => {
+        Err(e) if boost_refused(&e) => {
             no_boost()
                 .lock()
                 .expect("boost memo")
@@ -1008,11 +1021,11 @@ async fn pubky(s: &Arc<NodeState>, q: &str, limit: u32, owner: bool) -> Result<F
             // Read only: a search never makes Pinakes fetch a page
             Some(Ident::Link(uri)) => d
                 .pinakes()
-                .resource_by_uri(uri)
+                .card_with_also_on(uri)
                 .await?
-                .map(|r| {
-                    let also = also_sites(r.also_on(), r.card.site.as_deref());
-                    (r.card, also)
+                .map(|(card, also)| {
+                    let also = also_sites(&also, card.site.as_deref());
+                    (card, also)
                 })
                 .into_iter()
                 .collect(),
@@ -1309,6 +1322,26 @@ mod ident_tests {
                 ("podcast".to_string(), 5),
             ]
         );
+    }
+
+    #[test]
+    fn only_a_refusal_of_the_boost_turns_it_off() {
+        use pm_pubky::pinakes::PinakesError as E;
+        let status = |status: u16| E::Status {
+            status,
+            body: "wot_2 is not supported".into(),
+        };
+        assert!(boost_refused(&status(501)));
+        assert!(boost_refused(&E::BadRequest("boost needs a viewer".into())));
+        assert!(boost_refused(&E::BadRequest(
+            "wot_2 is not supported: the Nexus this instance reads serves no reach set".into()
+        )));
+        // The term's own 400, a failing instance and a missing route say nothing about boosts
+        assert!(!boost_refused(&E::BadRequest(
+            "q is at most 200 characters".into()
+        )));
+        assert!(!boost_refused(&status(500)));
+        assert!(!boost_refused(&E::NotFound));
     }
 
     #[test]

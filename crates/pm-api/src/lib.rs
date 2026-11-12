@@ -8945,7 +8945,12 @@ mod tests {
                     move |Query(q): Query<std::collections::HashMap<String, String>>| {
                         s1.lock().unwrap().push(("search", q.clone()));
                         let card = |id: &str, type_: &str, name: &str| serde_json::json!({"id": id, "uri": format!("https://www.deezer.com/track/{id}"), "status": "ok", "type": type_, "name": name, "site": "Deezer"});
-                        let res = if q.contains_key("boost") {
+                        let res = if q.get("q").map(String::as_str) == Some("refused term") {
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({"error": "q is at most 200 characters"})),
+                            )
+                        } else if q.contains_key("boost") {
                             (
                                 StatusCode::NOT_IMPLEMENTED,
                                 Json(serde_json::json!({"error": "wot_2 is not supported: the Nexus this instance reads serves no reach set"})),
@@ -9104,6 +9109,35 @@ mod tests {
         );
         assert_eq!(a["hits"][0]["page"], LINK);
 
+        // The same page pasted in another case is another link (ids in paths differ by case): asked
+        // again with its own spelling, not answered from the first one's cache
+        let other = LINK.replace("2Foc5Q5nqNiosCNqttzHof", "2foc5q5nqniosCNQTTZHOF");
+        pubky_answer(
+            app.clone(),
+            "/v1/search?q=https%3A%2F%2Fopen.spotify.com%2Ftrack%2F2foc5q5nqniosCNQTTZHOF&in=pubky".into(),
+        )
+        .await;
+        let reqs = asked();
+        assert_eq!(reqs.len(), 1, "{reqs:?}");
+        assert_eq!(reqs[0].1.get("uri"), Some(&other), "{reqs:?}");
+        // ... while words in another case are the cached answer
+        let a = pubky_answer(app.clone(), "/v1/search?q=DAFT%20Punk&in=pubky".into()).await;
+        assert_eq!(a["cached"], true, "{a}");
+        assert!(asked().is_empty());
+
+        // discover/search without a type asks for the cards it shows, no others
+        call(&app, "GET", "/v1/discover/search?q=daft", None).await;
+        let reqs = asked();
+        let text = reqs
+            .iter()
+            .find(|(_, q)| q.contains_key("q"))
+            .expect("a text query");
+        assert_eq!(
+            text.1.get("type").map(String::as_str),
+            Some("MusicRecording,MusicAlbum,MusicGroup,MusicComposition,MusicRelease"),
+            "{reqs:?}"
+        );
+
         // A near miss (a barcode with a wrong check digit) is words: text and tags
         pubky_answer(app.clone(), "/v1/search?q=036000291453&in=pubky".into()).await;
         let reqs = asked();
@@ -9138,9 +9172,19 @@ mod tests {
         pubky_answer(app.clone(), "/v1/search?q=isrc%3AUSQX91300108&in=pubky".into()).await;
         assert_eq!(asked().len(), 1);
 
+        // A 400 that is about the term, not the boost, is the search's error: no second request,
+        // and the boost is still asked for afterwards
+        let d = s.discovery().expect("discovery");
+        let r = crate::search::text_search(d.pinakes(), "refused term", 20, Some("viewer1".into())).await;
+        assert!(
+            matches!(r, Err(pm_pubky::pinakes::PinakesError::BadRequest(_))),
+            "{r:?}"
+        );
+        let reqs = asked();
+        assert_eq!(reqs.len(), 1, "{reqs:?}");
+        assert_eq!(reqs[0].1.get("boost").map(String::as_str), Some("wot_2"));
         // The network boost: an instance that refuses it is asked once more without, and not
         // again with it
-        let d = s.discovery().expect("discovery");
         let r = crate::search::text_search(d.pinakes(), "boosted", 20, Some("viewer1".into()))
             .await
             .expect("the search still answers");
@@ -9156,6 +9200,86 @@ mod tests {
         let reqs = asked();
         assert_eq!(reqs.len(), 1, "remembered: {reqs:?}");
         assert!(!reqs[0].1.contains_key("boost"));
+    }
+
+    /// A pasted link on a Pinakes without `by-uri` (it answers 400): the card comes from `lookup`
+    /// with the "also on" list it carries, in two requests, not three.
+    #[tokio::test]
+    async fn a_pasted_link_on_a_pinakes_without_by_uri_takes_two_requests() {
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        const LINK: &str = "https://open.spotify.com/track/2Foc5Q5nqNiosCNqttzHof";
+        let (s1, s2, s3) = (seen.clone(), seen.clone(), seen.clone());
+        let mock = Router::new()
+            .route(
+                "/v1/resources/lookup",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    s1.lock().unwrap().push(format!("lookup {}", body["uris"]));
+                    async move {
+                        Json(serde_json::json!([{
+                            "id": "r1", "uri": LINK, "status": "ok", "type": "MusicRecording", "name": "Get Lucky", "site": "Spotify",
+                            "also_on": [{"uri": "https://tidal.com/track/20115557", "site": "TIDAL"}]
+                        }]))
+                    }
+                }),
+            )
+            // (an old daemon reads "by-uri" as a resource id)
+            .route(
+                "/v1/resources/{id}",
+                get(move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    s2.lock().unwrap().push(format!("resource {id}"));
+                    async move {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({"error": "invalid resource ID"})),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v1/search",
+                get(move || {
+                    s3.lock().unwrap().push("search".to_string());
+                    async move { Json(serde_json::json!({"items": []})) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let resp = router(s.clone())
+            .oneshot(
+                axum::http::Request::get(
+                    "/v1/search?q=https%3A%2F%2Fopen.spotify.com%2Ftrack%2F2Foc5Q5nqNiosCNqttzHof&in=pubky",
+                )
+                .body(axum::body::Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let a = String::from_utf8_lossy(&body)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v["source"] == "pubky")
+            .expect("pubky answered");
+        assert_eq!(a["status"], "ok", "{a}");
+        assert_eq!(a["hits"][0]["title"], "Get Lucky", "{a}");
+        assert_eq!(a["hits"][0]["exact"], true, "{a}");
+        assert_eq!(a["hits"][0]["also"], serde_json::json!(["TIDAL"]), "{a}");
+        let reqs = seen.lock().unwrap().clone();
+        assert_eq!(
+            reqs,
+            vec!["resource by-uri".to_string(), format!("lookup [\"{LINK}\"]")],
+            "by-uri refused, then one lookup"
+        );
     }
 
     /// Profiles (STEWARD-UX-PEOPLE.md): cards in one batch, a person's page with what they
