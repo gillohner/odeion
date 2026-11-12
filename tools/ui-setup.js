@@ -662,14 +662,11 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           const vis = !!crumb && getComputedStyle(crumb.closest('.crumbs')).display !== 'none';
           return { trail: vis, diff: vis ? Math.round(Math.abs(mid(back) - mid(crumb)) * 10) / 10 : 0, backFont: getComputedStyle(back).fontSize, crumbFont: vis ? getComputedStyle(crumb).fontSize : null, backMb: getComputedStyle(back).marginBottom, barMb: getComputedStyle(bar).marginBottom };
         });
-        // On a phone Back is a 44 px tall target whose -8 px margins keep the bar's own height, so
-        // the gap below the bar is the same 14 px (tools/ui-phone-back-targets.js measures it)
-        const backMb = w < 600 ? '-8px' : '0px';
-        check(m.trail === (w >= 600) && m.diff <= 1.5 && (!m.trail || m.backFont === m.crumbFont) && m.backMb === backMb && m.barMb === '14px', `${w}: back button and breadcrumb line up (${JSON.stringify(m)})`);
+        check(m.trail === (w >= 600) && m.diff <= 1.5 && (!m.trail || m.backFont === m.crumbFont) && m.backMb === '0px' && m.barMb === '14px', `${w}: back button and breadcrumb line up (${JSON.stringify(m)})`);
         // An artist page has no trail: the bar keeps the same gap below
         await pp.goto(BASE + '/artist/lib-7'); await pp.waitForSelector('.pagebar .back', { state: 'attached', timeout: 20000 });
         const n = await pp.evaluate(() => { const bar = document.querySelector('.pagebar'); return { crumbs: !!bar.querySelector('.crumbs'), barMb: getComputedStyle(bar).marginBottom, backMb: getComputedStyle(bar.querySelector('.back')).marginBottom }; });
-        check(!n.crumbs && n.barMb === '14px' && n.backMb === backMb, `${w}: without a trail the bar keeps the same gap below (${JSON.stringify(n)})`);
+        check(!n.crumbs && n.barMb === '14px' && n.backMb === '0px', `${w}: without a trail the bar keeps the same gap below (${JSON.stringify(n)})`);
         await cc.close();
       }
     }

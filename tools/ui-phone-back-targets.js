@@ -1,5 +1,5 @@
 // On a phone every way back and the top bar's Help and Install buttons are full 44 px targets,
-// and the taller Back buttons do not push the page down.
+// and the larger tap area of Back does not move the page: the button keeps its size and margins.
 // Real candidate assets, isolated responses: node tools/ui-phone-back-targets.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -32,6 +32,28 @@ async function tapEdge(page, selector) {
   const b = await page.locator(selector).first().boundingBox();
   await page.touchscreen.tap(b.x + b.width / 2, b.y + b.height - 2);
 }
+
+// The span that a touch reaches the button in, through its centre: what the finger can hit, which
+// can be larger than the visible button.
+const reach = (page, selector) => page.locator(selector).first().evaluate((el) => {
+  const b = el.getBoundingClientRect();
+  const cx = b.left + b.width / 2;
+  const cy = b.top + b.height / 2;
+  const on = (x, y) => { const hit = document.elementFromPoint(x, y); return !!hit && (hit === el || el.contains(hit)); };
+  const out = (step, x, y) => { let d = 0; while (d < 60 && on(x + step[0] * (d + 0.5), y + step[1] * (d + 0.5))) d += 0.5; return d; };
+  return { width: out([-1, 0], cx, cy) + out([1, 0], cx, cy), height: out([0, -1], cx, cy) + out([0, 1], cx, cy), top: cy - out([0, -1], cx, cy), bottom: cy + out([0, 1], cx, cy) };
+});
+
+// A real touch at the bottom edge of what the finger can hit, outside the visible button.
+async function tapReachEdge(page, selector) {
+  const b = await page.locator(selector).first().boundingBox();
+  const r = await reach(page, selector);
+  await page.touchscreen.tap(b.x + b.width / 2, r.bottom - 1.5);
+}
+
+// The button keeps the margins it has on main, so nothing around it moves (tools/ui-setup.js holds
+// the item page's bar to the same).
+const margins = (page, selector) => page.locator(selector).first().evaluate((el) => { const cs = getComputedStyle(el); return `${cs.marginTop} ${cs.marginBottom}`; });
 
 // The content below a Back button starts where it did with the old button (most: the old distance
 // from the top of the button's container, measured on the previous layout), not lower.
@@ -81,33 +103,37 @@ async function noPush(page, selector, at, most) {
         // A playlist page's Back.
         await fx.go(page, '/playlist/c1');
         await page.waitForSelector('#main > .back');
-        const pl = await box(page, '#main > .back');
-        check(big(pl), `${at} playlist: Back at least 44 px (${size(pl)})`);
+        const pl = await reach(page, '#main > .back');
+        check(big(pl), `${at} playlist: Back takes a 44 px tap (${size(pl)})`);
+        check(await margins(page, '#main > .back') === '0px 14px', `${at} playlist: Back keeps its margins`);
         await noPush(page, '#main > .back', `${at} playlist Back`, 51);
         await page.screenshot({ path: path.join(SHOTS, `playlist-${at}.png`) });
-        await tapEdge(page, '#main > .back');
+        await tapReachEdge(page, '#main > .back');
         await page.waitForFunction(() => !location.pathname.startsWith('/playlist/'));
         check(true, `${at} playlist: one edge tap goes back (${await page.evaluate(() => location.pathname)})`);
 
         // An item page's Back, in the bar with its breadcrumbs.
         await fx.go(page, '/album/lib-7');
         await page.waitForSelector('#main .pagebar > .back');
-        const item = await box(page, '#main .pagebar > .back');
-        check(big(item), `${at} album: Back at least 44 px (${size(item)})`);
+        const item = await reach(page, '#main .pagebar > .back');
+        check(big(item), `${at} album: Back takes a 44 px tap (${size(item)})`);
+        check(await margins(page, '#main .pagebar > .back') === '0px 0px', `${at} album: Back keeps its margins`);
+        check(await page.evaluate(() => getComputedStyle(document.querySelector('#main .pagebar')).marginBottom) === '14px', `${at} album: the bar keeps its 14 px gap below`);
         await noPush(page, '#main .pagebar', `${at} album bar`, 43);
         await page.screenshot({ path: path.join(SHOTS, `album-${at}.png`) });
-        await tapEdge(page, '#main .pagebar > .back');
+        await tapReachEdge(page, '#main .pagebar > .back');
         await page.waitForFunction(() => !location.pathname.startsWith('/album/'));
         check(true, `${at} album: one edge tap goes back (${await page.evaluate(() => location.pathname)})`);
 
         // A Settings panel's Back.
         await fx.go(page, '/settings/appearance');
         await page.waitForSelector('#set-appearance .set-back');
-        const set = await box(page, '#set-appearance .set-back');
-        check(big(set), `${at} settings: Back at least 44 px (${size(set)})`);
+        const set = await reach(page, '#set-appearance .set-back');
+        check(big(set), `${at} settings: Back takes a 44 px tap (${size(set)})`);
+        check(await margins(page, '#set-appearance .set-back') === '0px 8px', `${at} settings: Back keeps its margins`);
         await noPush(page, '#set-appearance .set-back', `${at} settings Back`, 47);
         await page.screenshot({ path: path.join(SHOTS, `settings-${at}.png`) });
-        await tapEdge(page, '#set-appearance .set-back');
+        await tapReachEdge(page, '#set-appearance .set-back');
         await page.waitForFunction(() => location.pathname !== '/settings/appearance');
         check(true, `${at} settings: one edge tap goes back (${await page.evaluate(() => location.pathname)})`);
 
@@ -119,7 +145,7 @@ async function noPush(page, selector, at, most) {
     try {
       await fx.go(page, '/playlist/c1');
       await page.waitForSelector('#main > .back');
-      check((await box(page, '#main > .back')).height < 44, '1024 px desktop keeps its compact Back');
+      check((await reach(page, '#main > .back')).height < 44, '1024 px desktop keeps its compact Back');
       check((await box(page, '.topbar .fb-help')).height < 44, '1024 px desktop keeps its compact Help');
     } finally { await context.close(); }
   } finally { await browser.close(); }

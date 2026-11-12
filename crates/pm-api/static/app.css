@@ -1463,12 +1463,11 @@ html[data-shell="phone"] .topbar { padding: 0 6px 0 14px; gap: 6px; }
    beside them (they were 36 px, and Install shrank to 33 px wide in a crowded bar). */
 html[data-shell="phone"] .topbar :is(.fb-help, .install-btn) { flex: none; min-width: 44px; height: 44px; min-height: 44px; justify-content: center; }
 html[data-shell="phone"] .topbar .install-btn { width: 44px; }
-/* Phone: every way back (an item or playlist page's Back, a Settings or Sources panel's Back) is a
-   44 px tall target. The negative margins keep the page where it was: the taller button reaches
-   into the space around it instead of pushing the content down. */
-html[data-shell="phone"] .back { min-height: 44px; margin-top: -8px; margin-bottom: 6px; }
-html[data-shell="phone"] .pagebar .back { margin-top: -8px; margin-bottom: -8px; }
-html[data-shell="phone"] .set-back { min-height: 44px; margin-top: -3px; margin-bottom: 5px; }
+/* Phone: every way back (an item or playlist page's Back, a Settings or Sources panel's Back) takes
+   a 44 px tall tap. The button and its margins stay as they are, so the page doesn't move; an
+   invisible layer centred on it reaches into the space above and below. */
+html[data-shell="phone"] :is(.back, .set-back) { position: relative; }
+html[data-shell="phone"] :is(.back, .set-back)::after { content: ""; position: absolute; left: 0; right: 0; top: 50%; min-width: 44px; height: 44px; transform: translateY(-50%); }
 /* Nothing in the top bar may be wider than the screen: a too-wide bar made the whole page wider,
    and the WebView then panned it sideways (owner's recording, 2026-11-06). The buttons keep their
    size; the rest gives way. The search shrinks down to its magnifier (44 px, .search), also in the
