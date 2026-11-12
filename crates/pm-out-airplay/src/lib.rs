@@ -241,6 +241,10 @@ impl Output for AirPlayOutput {
         airplay_percent(db)
     }
 
+    fn quietest_db(&self) -> Option<f32> {
+        Some(-30.0)
+    }
+
     fn id(&self) -> OutputId {
         OutputId::new("airplay", &self.device.id)
     }

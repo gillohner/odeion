@@ -149,6 +149,31 @@ pub fn refusal(records: &[Freshened], selected: Option<&str>, allow_local: bool)
     None
 }
 
+/// Why a sign-in whose approving identity is known (`identity`, the lookup of its record) must
+/// not start when the homeserver its record names wasn't found (`named` is none): no record
+/// (none on the network and none held here) or one that names no homeserver. The grant would
+/// route nowhere, so Ring's approval would be spent before the sign-in fails and the person
+/// would approve again.
+pub fn unresolved_identity(identity: &Freshened, named: Option<&str>) -> Option<String> {
+    if named.is_some() {
+        return None;
+    }
+    Some(match (identity.from, identity.error.as_deref()) {
+        (From::None, Some(e)) => format!(
+            "the record of {} couldn't be found ({e}); check the connection and try again",
+            short(&identity.key)
+        ),
+        (From::None, None) => format!(
+            "the record of {} couldn't be found; check the connection and try again",
+            short(&identity.key)
+        ),
+        _ => format!(
+            "the record of {} names no homeserver; sign in to its homeserver again in Pubky Ring",
+            short(&identity.key)
+        ),
+    })
+}
+
 fn short(key: &str) -> &str {
     &key[..key.len().min(8)]
 }

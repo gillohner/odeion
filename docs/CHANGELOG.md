@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-12
+
+- **Pubky Ring sign-in stops before you approve when your homeserver can't be found.** If the record of the identity signed in here is missing, names no homeserver, or can't be looked up, the sign-in says so before showing the code, instead of failing after Ring's approval.
+- **Unmuting an AirPlay speaker respects a volume limit below -30 dB.** AirPlay can't play quieter than -30 dB, so under a zone limit set lower it now stays silent on unmute and says why, instead of coming back at -30 dB.
+- Podcast positions are saved under the same lock as progress changes, so a save can no longer mix an older position with a newer change.
+
 ### 2026-11-11
 
 - **Sign-in pages show only what works here, one sign-in per service** (owner: "it is not fully clear if you need to login to one or choose of apis … make sure ui is simpler. remove all options that don't work at the moment"). Each service's sign-in starts with one line saying what you get and what you need (Spotify: Premium and a free developer app). A way that can't be used on this node is not shown at all; one working way is just its button or form, and further ways sit under one closed "Other ways to sign in", a line each. Signed in is one row, "Signed in as … · what it gives", with Change only when another way works. Spotify is two numbered steps (your developer app, then Connect); librespot and Soloist moved to "Other ways to play" and appear only when librespot is installed or Soloist can play on this machine (`GET /v1/sources/spotify/soloist` now says `sound_output`; `DELETE /v1/sources/{source}/signin?way=…` signs out of the way named, so librespot's account can be signed out while the app is the one in use). TIDAL's own device client shows only once one is set; turning full tracks back on preserves the stored session and its sign-out target even when its original sign-in method is unavailable; Qobuz keeps its automatic email/password-only setup and one signed-in row; YouTube's cookies file shows once "On your speakers" is on and yt-dlp is installed or downloadable; Last.fm is two steps; Jamendo no longer shows a notice about apps when nothing can be done; Settings › This node › Service apps lists only apps that can be set or are in use, without "Advanced".
