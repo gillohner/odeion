@@ -1,5 +1,6 @@
 // A library list's filter that matches nothing (Albums, Artists, Tracks) says so under the list,
-// in a status line that is there from the start; matching again, or Escape, empties it.
+// in a status line that is there from the start; matching again, or Escape, empties it. On Tracks
+// (a node search) each keystroke empties it, and only the answer for the text in the box fills it.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-filter-none.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -32,7 +33,10 @@ async function noneLine(page, want) {
 async function run(browser, width, kind) {
   const k = pages[kind];
   const { page, context, state } = await fx.create(browser, width, { fixtures });
-  await context.route(/\/v1\/library\/search\?/, (route) => { words = new URL(route.request().url()).searchParams.get('q'); return route.fallback(); });
+  // `held`: words whose answer waits until the test lets it go (Tracks' search races)
+  const held = new Map();
+  await context.route(/\/v1\/library\/search\?/, async (route) => { const q = new URL(route.request().url()).searchParams.get('q'); if (held.has(q)) await held.get(q).promise; words = q; return route.fallback(); });
+  const hold = (q) => { let release; const promise = new Promise((r) => { release = r; }); held.set(q, { promise, release }); return () => { held.delete(q); release(); }; };
   try {
     await fx.go(page, k.url);
     await page.waitForFunction(([sel, n]) => document.querySelectorAll(sel).length >= n, [k.rows, Math.min(k.all, 12)]);
@@ -99,6 +103,23 @@ async function run(browser, width, kind) {
       await page.waitForFunction(() => document.querySelector('[data-lsort]')?.value === 'added' && document.querySelector('#filter')?.value === 'zzz');
       await noneLine(page, `No ${k.what} matches “zzz”.`);
       assert.equal(await note(page).count(), 1, 'still one line after re-drawing');
+    }
+    if (kind === 'tracks') {
+      // A keystroke empties the line at once, not when its search answers
+      const now = await page.evaluate(() => { const f = document.querySelector('#filter'); f.value = 'zzzz'; f.dispatchEvent(new Event('input', { bubbles: true })); return document.querySelector('.filter-none').textContent; });
+      assert.equal(now, '', `${kind} ${width}: a keystroke empties the no-match line at once`);
+      await noneLine(page, 'No track matches “zzzz”.');
+      // An answer for older text that lands after the next keystroke (before that one's search
+      // starts) says nothing: "zzz" is sent, "song" is typed, then "zzz" answers
+      const letZzz = hold('zzz'); const letSong = hold('song');
+      const sent = page.waitForRequest((r) => /\/v1\/library\/search\?/.test(r.url()) && new URL(r.url()).searchParams.get('q') === 'zzz');
+      await page.fill('#filter', 'zzz'); await sent;
+      await page.fill('#filter', 'song'); letZzz();
+      await page.waitForTimeout(700);
+      assert.equal(await note(page).textContent(), '', `${kind} ${width}: an outdated answer doesn't say "No track matches"`);
+      letSong();
+      await page.waitForFunction(([sel, n]) => document.querySelectorAll(sel).length === n, [k.rows, k.n]);
+      await noneLine(page, '');
     }
     await page.locator('#filter').press('Escape');
     await page.waitForFunction(([sel, n]) => document.querySelectorAll(sel).length >= n, [k.rows, Math.min(k.all, 12)]);

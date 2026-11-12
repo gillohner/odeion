@@ -180,6 +180,8 @@ const routeItems = async (ctx) => {
   await p2.close();
 
   // ---- 130 albums: three pages ----
+  // Each page change waits for the pager to name the new page: the view draws a loading
+  // placeholder first and the pager only once the artist answers.
   await p.goto(BASE + '/artist/tidal-4805920'); await settled();
   sec = await sections();
   check(JSON.stringify(sec.map((s) => [s.key, s.count])) === '[["albums","130"],["eps","3"]]', `130 albums and 3 singles, no empty section (${JSON.stringify(sec.map((s) => [s.key, s.count]))})`);
@@ -189,11 +191,11 @@ const routeItems = async (ctx) => {
   for (let k = 1; k <= 3; k++) {
     v = await viewAll(); seenTitles.push(...v.tiles);
     check(v.info === `Page ${k} of 3 · 130 releases`, `page ${k} of 3 (${v.info}, ${v.tiles.length} tiles)`);
-    if (k < 3) { await p.click('#main [data-relpage="next"]'); await waitFor(p, (n) => new URLSearchParams(location.search).get('page') === String(n) && document.querySelector('#main .grid .tile'), k + 1); }
+    if (k < 3) { await p.click('#main [data-relpage="next"]'); await waitFor(p, (n) => new URLSearchParams(location.search).get('page') === String(n) && (document.querySelector('#main .pager .pageinfo') || {}).textContent?.startsWith(`Page ${n} of 3`) && document.querySelector('#main .grid .tile'), k + 1); }
   }
   check(seenTitles.length === 130 && new Set(seenTitles).size === 130, `every album exactly once across the pages (${seenTitles.length})`);
   check(JSON.stringify(seenTitles) === JSON.stringify(expected(big).albums.map((a) => a.title)), 'newest first across the pages');
-  await p.click('#main [data-relpage="prev"]'); await waitFor(p, () => new URLSearchParams(location.search).get('page') === '2');
+  await p.click('#main [data-relpage="prev"]'); await waitFor(p, () => new URLSearchParams(location.search).get('page') === '2' && (document.querySelector('#main .pager .pageinfo') || {}).textContent?.startsWith('Page 2 of 3'));
   check((await viewAll()).info === 'Page 2 of 3 · 130 releases', 'Previous goes back a page');
   await p.click('#main .back'); await settled();
   check(new URL(p.url()).pathname === '/artist/tidal-4805920', 'Back after paging both ways: the artist');
