@@ -1439,6 +1439,13 @@ html[data-shell="phone"] .chip { min-height: 40px; }
 html[data-shell="phone"] .track .row-actions .icon-btn { width: 40px; height: 40px; }
 html[data-shell="phone"] .q-actions .icon-btn { width: 40px; height: 40px; }
 html[data-shell="phone"] .btn.sm { min-height: 40px; }
+/* Phones: a page's other buttons (Settings › Library's Add folder and Scan now, Import's Check, a
+   notice's Open settings) are 44 px taps, like a dialog's buttons. Back keeps its height so the page
+   under it doesn't move (an invisible layer makes it a 44 px tap), and a small button reaches past
+   its box on a touch screen (below). A hero's Play, Shuffle and icons keep their own sizes (above).
+   An icon button stays square. */
+html[data-shell="phone"] :where(#main) .btn:not(.sm, .back, .set-back, .hero .actions > *) { min-height: 44px; }
+html[data-shell="phone"] :where(#main) .btn.iconic { min-width: 44px; justify-content: center; }
 html[data-shell="phone"] .porder-grip { padding: 12px; margin: -8px 0; }
 html[data-shell="phone"] .taginput { min-height: 40px; }
 @media (pointer: coarse) {
@@ -1809,8 +1816,9 @@ details.set-row.svc-own { display: block; }
 /* My homeserver's buttons: 40 px on phones and on any touch screen */
 html[data-shell="phone"] :is(#hson, #hsoff, [data-hsconnect]) { min-height: 40px; }
 @media (pointer: coarse) { :is(#hson, #hsoff, [data-hsconnect]) { min-height: 40px; } }
-/* The Playlists page's own controls (a listener has the page too): 40 px on phones and on any touch screen */
-html[data-shell="phone"] :is(#plcreate, #plname) { min-height: 40px; }
+/* The Playlists page's own controls (a listener has the page too): 44 px on phones, like the page's
+   other buttons, and 40 px on any other touch screen */
+html[data-shell="phone"] :is(#plcreate, #plname) { min-height: 44px; }
 html[data-shell="phone"] [data-plplay] { min-height: 40px; min-width: 40px; }
 @media (pointer: coarse) { :is(#plcreate, #plname) { min-height: 40px; } [data-plplay] { min-height: 40px; min-width: 40px; } }
 /* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
