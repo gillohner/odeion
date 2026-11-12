@@ -4636,7 +4636,7 @@
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || ((v === 'artist' || v === 'releases') && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
-    main.scrollTop = 0;
+    main.scrollTop = 0; state.drawnPage = null; if (state.placeHold) state.placeHold(); // a page opened is drawn from the start (redrawing, keepPlace)
     return navigate(fresh);
   };
   window.addEventListener('popstate', async (e) => {
@@ -6283,6 +6283,43 @@
   // One way back (08-item-page.md): history, labelled with the previous page; on a deep link the page's section.
   const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} ${esc((navDepth > 0 && history.state && history.state.backLabel) || label)}</button>`;
   const loading = () => { main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
+  // A page drawn again where it stands (its songs still coming, a heart, other sources found) stays
+  // on screen until it is drawn anew: no skeleton, so it doesn't jump to the top, and the control
+  // that had focus has it again. Opening a page (a link, Back) or Retry draws it from the start.
+  // state.drawnPage: the page on screen, set when it is drawn; setView clears it.
+  const redrawing = (key) => state.drawnPage === key;
+  // Before the page's HTML is replaced: where it is scrolled and what had focus in it (its id, else
+  // its data attributes and address and its place among its likes). The returned call puts both
+  // back on the new HTML; focus only when nothing else took it meanwhile.
+  const keepPlace = () => {
+    if (state.placeHold) state.placeHold();
+    const a = document.activeElement; const top = main.scrollTop; const tall = main.scrollHeight;
+    const inside = !!a && a !== main && main.contains(a);
+    const sel = !inside ? '' : a.id ? `#${CSS.escape(a.id)}` : a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-') || x.name === 'href').map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
+    const at = (s) => { try { return $$(s, main); } catch { return []; } };
+    const i = inside ? at(sel).indexOf(a) : -1;
+    return () => {
+      // The parts drawn after the page (Similar, concerts, comments) come back a moment later: until
+      // they do (6 s at most; opening a page ends it) the page keeps its height below, so a place
+      // down there isn't cut short
+      let extra = 0;
+      const fit = () => { extra = Math.max(0, tall - (main.scrollHeight - extra)); if (extra) { main.style.setProperty('--hold', `${extra}px`); main.dataset.hold = ''; } else { main.style.removeProperty('--hold'); delete main.dataset.hold; } return extra; };
+      if (fit()) {
+        // (a part that shrank first can have cut the place short: back to it, unless they scrolled up)
+        const mo = new MutationObserver(() => {
+          const cut = main.scrollTop < top && main.scrollTop >= main.scrollHeight - main.clientHeight - 1;
+          const held = fit(); if (cut) { try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } }
+          if (!held) state.placeHold();
+        });
+        mo.observe(main, { childList: true, subtree: true });
+        const t = setTimeout(() => state.placeHold(), 6000);
+        state.placeHold = () => { mo.disconnect(); clearTimeout(t); main.style.removeProperty('--hold'); delete main.dataset.hold; state.placeHold = null; };
+      }
+      if (main.scrollTop !== top) { try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } }
+      const now = document.activeElement; if (!inside || (now && now !== document.body && now !== main)) return;
+      const b = at(sel)[i]; if (b && !b.disabled) b.focus({ preventScroll: true });
+    };
+  };
 
   const loadFavourites = async () => { const f = await api('GET', '/favourites'); state.favUris = new Set(f.uris || []); return f; };
   // A song not identified yet is a favourite on this node only until "Which song is this?".
@@ -7843,10 +7880,11 @@
           const refresh = state.viewArg.refresh ? '?refresh=1' : ''; delete state.viewArg.refresh;
           // The next page's Back label, even when this one fails to load
           state.relTitle = (REL_SECTIONS.find(([k]) => k === key) || [, 'Releases'])[1];
-          loading();
+          const pageKey = `releases:${id}:${section}`; const again = !refresh && redrawing(pageKey);
+          if (!again) loading();
           let pg;
           try { pg = await api('GET', `/item/artist/${encodeURIComponent(id)}${refresh}`); }
-          catch (e) { if (!live()) return; main.innerHTML = `<div class="pagebar">${backBtn(`item:artist:${id}`, 'Artist')}</div><div class="notice">${esc(e.message)} <button class="btn sm" id="irelretry">Retry</button></div>`; $('[data-back]', main).onclick = () => goBack(`item:artist:${id}`); $('#irelretry', main).onclick = () => { state.viewArg.refresh = 1; render(); }; break; }
+          catch (e) { if (!live()) return; state.drawnPage = null; main.innerHTML = `<div class="pagebar">${backBtn(`item:artist:${id}`, 'Artist')}</div><div class="notice">${esc(e.message)} <button class="btn sm" id="irelretry">Retry</button></div>`; $('[data-back]', main).onclick = () => goBack(`item:artist:${id}`); $('#irelretry', main).onclick = () => { state.viewArg.refresh = 1; render(); }; break; }
           if (!live()) return;
           pg.albums = pg.albums || [];
           const g = relGroups(pg.albums); const list = g[key];
@@ -7856,6 +7894,7 @@
           const page = Math.min(Math.max(1, Math.floor(Number(state.viewArg.page) || 1)), pages);
           const shown = list.slice((page - 1) * REL_PAGE, page * REL_PAGE);
           const stuck = (state.viewArg.tries || 0) >= 12;
+          const place = again ? keepPlace() : null;
           main.innerHTML = `<div class="pagebar">${backBtn(`item:artist:${id}`, name)}</div>`
             + `<div class="page-head"><div><div class="eyebrow">${esc(name)}</div><h1>${esc(title)}</h1></div></div>`
             + `<div id="ialbums" class="relsecs">${relStatus(pg, stuck)}`
@@ -7865,6 +7904,7 @@
           bindItemTiles($('#ialbums', main), shown, 'album');
           $$('[data-relpage]', main).forEach((b) => b.onclick = () => setView('releases', { id, section, page: page + (b.dataset.relpage === 'next' ? 1 : -1) }, 'replace'));
           { const rr = $('#irelretry', main); if (rr) rr.onclick = () => { state.viewArg.tries = 0; state.viewArg.refresh = 1; render(); }; }
+          state.drawnPage = pageKey; if (place) place();
           if (pg.pending && !stuck) { const tries = (state.viewArg.tries || 0) + 1; setTimeout(() => { if (!live()) return; state.viewArg.tries = tries; render(); }, 3000); }
           break;
         }
@@ -7879,10 +7919,11 @@
           if (!live()) return;
           // Retry asks the node to fetch the service's lists again, once
           const refresh = state.viewArg.refresh ? '?refresh=1' : ''; delete state.viewArg.refresh;
-          loading();
+          const pageKey = `item:${kind}:${id}`; const again = !refresh && redrawing(pageKey);
+          if (!again) loading();
           let pg;
           try { [pg] = await Promise.all([api('GET', `/item/${kind}/${encodeURIComponent(id)}${refresh}`), loadSvcRank()]); }
-          catch (e) { if (!live()) return; main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          catch (e) { if (!live()) return; state.drawnPage = null; main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (!live()) return;
           // The node leaves empty lists out of its answer.
           for (const k of ['songs', 'albums', 'versions', 'also_on', 'about', 'open_on', 'connect']) pg[k] = pg[k] || [];
@@ -7927,7 +7968,7 @@
           if (localRef && songOwn.needsMatch) unmatched();
           else if (!songRef && linkRef) ht.note = `Tags here go on this ${linkName} link only: no MusicBrainz ${kind} is known for it here.`;
           state.heroTagsOpen = { page: `${kind}:${id}`, set: ht.open };
-          const favKey = pg.uri; const fav = !!(state.favUris && ((favKey && state.favUris.has(favKey)) || (target.track_id != null && state.favUris.has(`track:${target.track_id}`)) || (target.album_id != null && state.favUris.has(`album:${target.album_id}`)) || (target.artist_id != null && state.favUris.has(`artist:${target.artist_id}`))));
+          const favKey = pg.uri; const isFav = () => !!(state.favUris && ((favKey && state.favUris.has(favKey)) || (target.track_id != null && state.favUris.has(`track:${target.track_id}`)) || (target.album_id != null && state.favUris.has(`album:${target.album_id}`)) || (target.artist_id != null && state.favUris.has(`artist:${target.artist_id}`)))); const fav = isFav();
           const sectionName = { albums: 'Albums', artists: 'Artists', tracks: 'Tracks', home: 'Home', playlists: 'Playlists' }[pg.section] || 'Home';
           const pf = pg.plays_from;
           const where = pf ? (pf.service === 'library' ? 'your library' : (SERVICE_NAMES[pf.service] || pf.service) + (pf.mode === 'preview' ? ' (previews)' : '')) : null;
@@ -8012,6 +8053,7 @@
             const blurbText = (at && at.text) || p.blurb;
             return `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${blurbText ? `<p class="blurb${clamp ? ' clamp' : ''}" id="iblurb"${at && at.lang ? ` lang="${esc(at.lang)}"` : ''}>${esc(blurbText)}</p>${clamp ? '<button type="button" class="lnk small" id="iblurbmore" aria-controls="iblurb" aria-expanded="false" hidden>More</button>' : ''}` : ''}${aboutCredit(p)}${p.about.length ? `<dl class="kv">${p.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : fileFact(f)}</dd>`).join('')}</dl>` : blurbText ? '' : empty('Nothing more is known yet.')}</section>`;
           };
+          const place = again ? keepPlace() : null;
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
@@ -8126,7 +8168,13 @@
           $('#izone').onclick = (e) => showMenu(e.currentTarget, [{ title: 'Play on' }, ...zoneList().map((z) => ({ label: z.name, icon: 'zone', run: () => { state.zone = z.id; try { localStorage.setItem('pm.zone', z.id); } catch { /* */ } renderZoneName(); renderBar(); playAll(false); } }))]);
           $('#ifav').onclick = async () => {
             // A file not matched yet: "Which song is this?" first, then the heart
-            try { if (await setFavourite(target, !fav)) render(); } catch (er) { toast(er.message, 'error'); }
+            // As it is now (the page stays on screen while it is drawn again): a second press undoes the first
+            try {
+              if (!(await setFavourite(target, !isFav()))) return;
+              const b = $('#ifav', main); const on = isFav();
+              if (b) { b.classList.toggle('on', on); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.innerHTML = icon(on ? 'heart-fill' : 'heart'); }
+              render();
+            } catch (er) { toast(er.message, 'error'); }
           };
           const extra = [...(commentUri ? [{ label: 'Post about this…', icon: 'notes', run: () => postAbout(commentUri, pg.title) }] : [])];
           $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, dl: kind === 'album' && /^lib-\d+$/.test(String(id)) ? { kind: 'album', id: String(id).slice(4), sub: pg.artist && pg.artist.name, songs: (songs || []).length } : null, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, alsoHere: iconAlso ? alsoHere.map(({ v, k }) => ({ label: instName(v), svc: alsoSvc(v), k })) : [], switchTo: (k) => setView('item', { kind, id: pg.also_on[k].page }), path: `/${kind}/${id}`, uri: pg.uri, extra });
@@ -8137,6 +8185,7 @@
           const smore = $('[data-srcmore]', main); if (smore) smore.onclick = () => { const rest = smore.nextElementSibling; rest.hidden = false; smore.remove(); const first = $('a[href], button', rest); if (first) first.focus(); };
           $$('[data-vpage]', main).forEach((a) => a.onclick = inAppClick(() => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page })));
           const csec = $('#icomments'); if (csec) mountComments(csec);
+          state.drawnPage = pageKey; if (place) place();
           // Not while someone types a comment: the render would take the box away under them
           if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (!live()) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.reading ? 4000 : 3000); }
           // About from open sources comes in the background: ask for the page again and redraw only

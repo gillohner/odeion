@@ -226,6 +226,8 @@ html { -webkit-tap-highlight-color: transparent; }
 
 .main { flex: 1; overflow: auto; padding: 24px 24px 32px; scroll-behavior: smooth; }
 .main > * + * { margin-top: 28px; }
+/* A page drawn again keeps its height below until its later parts are back (app.js keepPlace) */
+.main[data-hold]::after { content: ''; display: block; height: var(--hold, 0); }
 
 /* ---- player bar ---- */
 .player {
