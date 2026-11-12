@@ -1,7 +1,7 @@
 // Song and album names in song lists are real links, like the artist names beside them: Tab reaches
 // them, Enter opens the page, and Ctrl+click opens it in a new tab while this page stays put;
 // Alt+click is a plain click (not the browser's download).
-// Covers the library's track rows (Tracks) and the song rows of collections, search and item pages.
+// Covers the library's track rows (Songs) and the song rows of collections, search and item pages.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-song-links.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
