@@ -437,9 +437,13 @@ html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44p
 /* Phones and narrow windows: Play and Shuffle keep their words; Play on… is its icon, so ♡ and ⋯ stay on the row (UX sweep A16) */
 html[data-shell="phone"] .hero-zone .lbl { display: none; }
 @media (max-width: 900px) { .hero-zone .lbl { display: none; } }
-html[data-shell="phone"] .actions > .btn { min-height: 40px; }
-html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore) { min-width: 40px; padding-left: 10px; padding-right: 10px; justify-content: center; }
-/* Touch screens in the desktop layout (tablets): the same 40 px targets */
+html[data-shell="phone"] .actions > .btn { min-height: 44px; }
+html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore) { min-width: 44px; padding-left: 10px; padding-right: 10px; justify-content: center; }
+/* (the narrowest phones: a playlist's Shuffle is its word, as on an album, so ⋯ stays on the row) */
+@media (max-width: 379px) { html[data-shell="phone"] .actions > #plshuffle > .ic { display: none; } }
+/* (a playlist's sharing note: a little air under the taller row) */
+html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
+/* Touch screens in the desktop layout (tablets): 40 px targets */
 @media (pointer: coarse) {
   .actions > .btn { min-height: 40px; }
   .actions > :is(.hero-zone, #imore, #plmore) { min-width: 40px; padding-left: 10px; padding-right: 10px; justify-content: center; }
@@ -1116,6 +1120,8 @@ a.btn { text-decoration: none; }
 /* Move from Roon */
 #roonmove input[type=file] { margin: 8px 0; max-width: 100%; }
 #roonmove .check { display: block; margin: 4px 0; }
+/* Phones: a checkbox's whole line is a 44 px tap (the box itself is 13 px; Roon, DSP, ListenBrainz, people) */
+html[data-shell="phone"] label.check { min-height: 44px; }
 .steps { padding-left: 18px; margin: 4px 0 8px; }
 .roonfile { border-top: 1px solid var(--line); padding: 10px 0 4px; }
 .roonfile .name { font-weight: 600; overflow-wrap: anywhere; }
