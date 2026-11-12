@@ -50,6 +50,20 @@ pub const MUSIC_TYPES: [&str; 8] = [
     "PodcastEpisode",
 ];
 
+/// The card types [`Card::is_music`] keeps: songs, albums and artists.
+pub const MUSIC_CARD_TYPES: [&str; 5] = [
+    "MusicRecording",
+    "MusicAlbum",
+    "MusicGroup",
+    "MusicComposition",
+    "MusicRelease",
+];
+
+/// [`MUSIC_CARD_TYPES`] as the `type` parameter.
+pub fn music_card_types() -> String {
+    MUSIC_CARD_TYPES.join(",")
+}
+
 /// [`MUSIC_TYPES`] as the `type` parameter.
 pub fn music_types() -> String {
     MUSIC_TYPES.join(",")
@@ -272,10 +286,9 @@ impl Card {
     }
 
     pub fn is_music(&self) -> bool {
-        matches!(
-            self.type_.as_deref(),
-            Some("MusicRecording" | "MusicAlbum" | "MusicGroup" | "MusicComposition" | "MusicRelease")
-        )
+        self.type_
+            .as_deref()
+            .is_some_and(|t| MUSIC_CARD_TYPES.contains(&t))
     }
 }
 
@@ -790,6 +803,26 @@ impl PinakesClient {
                     None => Ok(None),
                 }
             }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// One URI's card with its "also on" list, for a search: `GET /v1/resources/by-uri`, and on a
+    /// daemon without that route (it answers 400) the card from `lookup` with the list it carries,
+    /// so never more than two requests. `None` when Pinakes has not seen the link; never fetches.
+    pub async fn card_with_also_on(&self, uri: &str) -> Result<Option<(Card, Vec<AlsoOn>)>, PinakesError> {
+        let url = crate::nexus::with_query(&self.url("/resources/by-uri"), &[("uri", uri)]);
+        let resp = self.send(|| self.http.get(&url)).await?;
+        match Self::json::<ResourceDetail>(resp).await {
+            Ok(d) => {
+                let also = d.also_on().to_vec();
+                Ok(Some((d.card, also)))
+            }
+            Err(PinakesError::NotFound) => Ok(None),
+            Err(PinakesError::BadRequest(_)) => Ok(self.card_for_uri(uri).await?.map(|c| {
+                let also = c.also_on.clone();
+                (c, also)
+            })),
             Err(e) => Err(e),
         }
     }

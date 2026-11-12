@@ -31,6 +31,12 @@ const ANSWERS = {
       hit('concert', 'Daft Punk Tribute @ Kaufleuten', '2026-12-05', 1, 'Songkick'), hit('podcast', 'The Daft Punk Story', 'Podcast', 1, 'Apple Podcasts'),
     ] },
   ],
+  'every kind': [
+    { source: 'library', status: 'ok', ms: 2, hits: [{ kind: 'playlist', title: 'Road trip', subtitle: '12 songs', id: 'c1', keys: [] }] },
+    { source: 'pubky', status: 'ok', ms: 50, hits: [hit('artist', 'Kind Artist', 'Spotify', 21, 'Spotify'), hit('album', 'Kind Album', 'Someone', 22, 'Deezer'), hit('song', 'Kind Song', 'Someone', 23, 'TIDAL'), hit('podcast', 'Kind Podcast', 'Podcast', 24, 'Apple Podcasts'), hit('concert', 'Kind Concert', '2026-12-09', 25, 'Songkick')] },
+    { source: 'people', status: 'ok', ms: 30, hits: [{ kind: 'person', title: 'Kind Person', id: 'person-1', keys: [] }] },
+    { source: 'posts', status: 'ok', ms: 30, hits: [{ kind: 'post', title: 'Kind post about music', subtitle: 'someone', id: 'post-1', page: 'https://pubky.app/post/a/1', keys: [] }] },
+  ],
   lol: [
     { source: 'library', status: 'ok', ms: 2, hits: [] },
     { source: 'pubky', status: 'ok', ms: 60, counts: [['song', 2], ['artist', 1]], hits: [hit('song', 'LOL', 'Basshunter', 4, 'Spotify'), hit('song', 'Lola', 'The Kinks', 5, 'Deezer'), hit('artist', 'Lolo Zouaï', 'Spotify', 2, 'Spotify')] },
@@ -95,6 +101,16 @@ const openFilters = async (page) => { if (await page.$('details.sfilters:not([op
       check(back.kinds.length >= 5, `${w} daft punk: pressing it again shows every kind (${back.kinds.join()})`);
       check(asked.length === 1, `${w} daft punk: one search request, filters ask nothing (${asked.length})`);
       check(!state.errors.length, `${w} daft punk: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
+      await context.close();
+    }
+    // ---- eight kinds: the Kind filter lists every one (the other filters keep their six) ----
+    {
+      const { page, context } = await open(browser, w, 'every kind');
+      await openFilters(page);
+      const r = await read(page);
+      check(r.kindChips.length === 8 && ['Artists', 'Albums', 'Songs', 'Playlists', 'People', 'Posts', 'Podcasts', 'Concerts'].every((l) => r.kindChips.some((c) => c.startsWith(l))), `${w} every kind: the Kind filter lists all eight (${r.kindChips.join(' | ')})`);
+      check(r.wide <= 0, `${w} every kind: nothing wider than the screen (${r.wide})`);
+      await page.screenshot({ path: path.join(SHOTS, `every-kind-${w}.png`) });
       await context.close();
     }
     // ---- a short query ----

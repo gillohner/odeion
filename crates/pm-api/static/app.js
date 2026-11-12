@@ -4663,8 +4663,10 @@
   // ---- one search, scoped, streamed per source (STEWARD-UX-HOME.md "Search") ----
   const searchRuns = new Map(); // `${q}|${scope}` → { q, scope, sources, answers, startedAt, firstAt, doneAt, ctrl }
   const SEARCH_TTL = 5 * 60 * 1000;
+  // One run per term and scope, whatever its case; a pasted link keeps its case (ids in paths differ by it)
+  const searchKey = (q, scope) => `${/^https?:\/\//i.test(q || '') ? q : (q || '').toLowerCase()}|${scope}`;
   const startSearch = (q, scope) => {
-    const key = `${q.toLowerCase()}|${scope}`;
+    const key = searchKey(q, scope);
     const old = searchRuns.get(key);
     if (old && (old.pending || Date.now() - old.startedAt < SEARCH_TTL)) return old;
     for (const r of searchRuns.values()) if (r.pending && r !== old) { try { r.ctrl.abort(); } catch { /* */ } r.pending = false; }
@@ -4707,7 +4709,7 @@
   };
   // Retried searches have the same query and scope, but a different run. Old tag replies and
   // slow-source timers must never replace the new results or change their progress.
-  const displayedSearch = () => state.view === 'search' && state.viewArg && searchRuns.get(`${(state.viewArg.q || '').toLowerCase()}|${state.viewArg.in || 'everywhere'}`);
+  const displayedSearch = () => state.view === 'search' && state.viewArg && searchRuns.get(searchKey(state.viewArg.q, state.viewArg.in || 'everywhere'));
   const currentSearch = (run) => !!run && displayedSearch() === run;
   const searchChanged = (run) => {
     if (!currentSearch(run)) return;
@@ -6100,7 +6102,7 @@
     run.facets = run.facets || {};
     const facetCounts = facetsOf(allKinds);
     const byKind = Object.fromEntries(Object.entries(allKinds).map(([k, list]) => [k, list.filter((h) => passesFacets(h, run.facets))]));
-    const facetChips = SEARCH_FACETS.map(([f, label]) => { const vals = [...facetCounts[f].entries()].sort((a, b) => b[1] - a[1]); if (vals.length < 2 && !run.facets[f]) return ''; return `<span class="facet" data-facet-group="${f}"><span class="muted small">${label}</span>${vals.slice(0, 6).map(([v, n]) => `<button class="chip sm ${run.facets[f] === v ? 'on' : ''}" data-facet="${f}:${esc(v)}" aria-pressed="${run.facets[f] === v}">${esc(facetWord(f, v))} <span class="muted">${n}</span></button>`).join('')}</span>`; }).filter(Boolean).join('');
+    const facetChips = SEARCH_FACETS.map(([f, label]) => { const vals = [...facetCounts[f].entries()].sort((a, b) => b[1] - a[1]); if (vals.length < 2 && !run.facets[f]) return ''; return `<span class="facet" data-facet-group="${f}"><span class="muted small">${label}</span>${(f === 'kind' ? vals : vals.slice(0, 6)).map(([v, n]) => `<button class="chip sm ${run.facets[f] === v ? 'on' : ''}" data-facet="${f}:${esc(v)}" aria-pressed="${run.facets[f] === v}">${esc(facetWord(f, v))} <span class="muted">${n}</span></button>`).join('')}</span>`; }).filter(Boolean).join('');
     // On phones the facets fold behind Filters (the results come first; UX sweep 11-01, A9)
     const nOn = Object.values(run.facets).filter(Boolean).length;
     const facetRow = facetChips ? `<div class="chips facets" role="group" aria-label="Narrow the results">${facetChips}${nOn ? '<button class="chip sm ghost" data-facet="">Clear</button>' : ''}</div>` : '';
@@ -6165,7 +6167,7 @@
     $$('[data-sother]', box).forEach((r) => r.onclick = () => { const [k, n] = r.dataset.sother.split(':'); const h = byKind[k][Number(n)]; if (k === 'person') setView('person', h.id); else if (k === 'playlist' && h.sources.includes('library')) setView('playlist', h.id); else if (h.page) openWeb(h.page); });
     const to = $('[data-sopen="top"]', box); if (to) to.onclick = () => setView('item', { kind: top.kind === 'song' ? 'song' : top.kind, id: top.id });
     const tp = $('[data-splaytop]', box); if (tp) tp.onclick = async (e) => { if (top.kind === 'song') return playSongs([{ ...top, artist: top.subtitle }], 0, 'replace', null, e.currentTarget); try { const pg = await api('GET', `/item/${top.kind}/${top.id}`); playSongs(pg.songs || [], 0, 'replace', pg.plays_from, e.currentTarget, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } };
-    $$('[data-sretry]', box).forEach((b) => b.onclick = () => { searchRuns.delete(`${run.q.toLowerCase()}|${run.scope}`); startSearch(run.q, run.scope); render(); search.focus(); });
+    $$('[data-sretry]', box).forEach((b) => b.onclick = () => { searchRuns.delete(searchKey(run.q, run.scope)); startSearch(run.q, run.scope); render(); search.focus(); });
     if (retryFocus && !retryFocus.isConnected) { const again = $$('[data-sretry]', box).find((b) => b.dataset.sretry === retryFocus.dataset.sretry); (again || search).focus(); }
   };
   // ---- Home (STEWARD-UX-HOME.md): everything Pinakes knows about music, one section per call ----
