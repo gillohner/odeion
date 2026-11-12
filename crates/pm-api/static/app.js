@@ -3503,8 +3503,9 @@
     const flat = tid != null && !Array.isArray(it.artists) && !Array.isArray((state.trackCache.get('track:' + tid) || {}).artists);
     return `<span${flat ? ` data-credit-track="${esc(tid)}"` : ''}>${credits.map((a, i) => `<a class="lnk" data-artist-credit="${esc(a.name)}"${a.id ? ` data-credit-id="${esc(a.id)}"` : ''} href="${esc(a.id ? '/artist/' + encodeURIComponent(a.id) : '/search?q=' + encodeURIComponent(a.name))}" title="Open ${esc(a.name)}">${esc(a.name)}</a>${i < credits.length - 1 ? esc(a.join) : ''}`).join('')}</span>`;
   };
-  // A click the browser takes elsewhere (a new tab or window): Ctrl, Cmd, Shift, Alt or not the main button
-  const opensElsewhere = (e) => e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
+  // A click the browser takes elsewhere (a new tab or window): Ctrl, Cmd, Shift or not the main button.
+  // Not Alt: Alt+click on a link downloads the page in Chrome and Edge, so it stays in the app.
+  const opensElsewhere = (e) => e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey;
   // A link with an address (Tab reaches it): a plain click or Enter runs `go` inside the app, a click the
   // browser takes elsewhere opens the address in a new tab
   const hrefAttr = (to) => (to ? ` href="${esc(to)}"` : '');
@@ -6284,7 +6285,9 @@
   const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} ${esc((navDepth > 0 && history.state && history.state.backLabel) || label)}</button>`;
   const loading = () => { main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
 
-  const loadFavourites = async () => { const f = await api('GET', '/favourites'); state.favUris = new Set(f.uris || []); return f; };
+  // The latest favourites load, so a page that lists favourites can wait for it on a cold start
+  let favLoad = null;
+  const loadFavourites = () => (favLoad = api('GET', '/favourites').then((f) => { state.favUris = new Set(f.uris || []); return f; }));
   // A song not identified yet is a favourite on this node only until "Which song is this?".
   // A listener's go to their own homeserver: the first one asks them to connect it.
   // True once changed; false when they chose not to connect (nothing was changed): callers
@@ -6373,7 +6376,7 @@
   // its new matches.
   const azJump = (key, matches, draw, none) => {
     const bs = $$('[data-az]', main);
-    const mark = (on) => bs.forEach((x) => x.classList.toggle('on', x === on));
+    const mark = (on) => bs.forEach((x) => { x.classList.toggle('on', x === on); x.setAttribute('aria-pressed', String(x === on)); });
     bs.forEach((b) => b.onclick = () => { const list = matches(); const i = list.findIndex((a) => key(a) === b.dataset.az); if (i >= 0) { draw(list.slice(i)); none('', 1); mark(b); } });
     return (list) => { const have = new Set(list.map(key)); bs.forEach((x) => { x.disabled = !have.has(x.dataset.az); }); mark(null); };
   };
@@ -6420,7 +6423,9 @@
     : fav ? ['No favourite albums', 'Open an album and press its heart to see it here.']
       : ['No albums of this quality', 'No album has a file of this quality.']);
   // A hearted album MusicBrainz doesn't know yet is kept on this node as album:<id>
-  const albumFav = (a) => !!(state.favUris && (state.favUris.has(`album:${a.id}`) || (a.release_mbid && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`))));
+  // An album's heart: kept on the node (album:<id>), or on its release or its release group (the
+  // album page and Discover heart the group)
+  const albumFav = (a) => !!(state.favUris && (state.favUris.has(`album:${a.id}`) || (a.release_mbid && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`)) || (a.release_group_mbid && state.favUris.has(`https://musicbrainz.org/release-group/${a.release_group_mbid}`))));
   const sortList = (kind, list, how) => {
     const by = (f) => [...list].sort((a, b) => String(f(a) || '').localeCompare(String(f(b) || ''), undefined, { sensitivity: 'base', numeric: true }));
     if (kind === 'albums') {
@@ -6434,7 +6439,7 @@
     return by((a) => a.name);
   };
   const firstLetter = (x) => { const c = String(x || '').trim().charAt(0).toUpperCase().normalize('NFKD').charAt(0); return /[A-Z]/.test(c) ? c : '#'; };
-  const listControls = (kind, pref, letters) => `<div class="listbar"><label class="small muted">Sort <select class="input sm" data-lsort aria-label="Sort">${LIST_SORTS[kind].map(([k, l]) => `<option value="${k}" ${pref.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${kind === 'albums' ? `<button class="chip ${pref.fav ? 'on' : ''}" data-lfav aria-pressed="${!!pref.fav}">${icon(pref.fav ? 'heart-fill' : 'heart')} Favourites</button>` : ''}${letters.length > 1 ? `<span class="azbar" role="group" aria-label="Jump to a letter">${letters.map((l) => `<button class="az" data-az="${l}">${l}</button>`).join('')}</span>` : ''}</div>`;
+  const listControls = (kind, pref, letters) => `<div class="listbar"><label class="small muted">Sort <select class="input sm" data-lsort aria-label="Sort">${LIST_SORTS[kind].map(([k, l]) => `<option value="${k}" ${pref.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${kind === 'albums' ? `<button class="chip ${pref.fav ? 'on' : ''}" data-lfav aria-pressed="${!!pref.fav}">${icon(pref.fav ? 'heart-fill' : 'heart')} Favourites</button>` : ''}${letters.length > 1 ? `<span class="azbar" role="group" aria-label="Jump to a letter">${letters.map((l) => `<button class="az" data-az="${l}" aria-pressed="false">${l}</button>`).join('')}</span>` : ''}</div>`;
   // Off while there is nothing to filter: what was typed stays and applies again once there is
   const filterBox = (placeholder, off = false) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}"${off ? ' disabled' : ''}>`;
   const bindFilter = (selector) => {
@@ -6802,6 +6807,8 @@
           const albums = await albumsAll();
           if (state.view !== 'albums') return;
           const lp = listPref('albums');
+          // Favourites on a cold start: the list waits for the favourites (not "No favourite albums")
+          if (lp.fav && favLoad) { await favLoad.catch(() => {}); if (state.view !== 'albums') return; }
           const sorted = sortList('albums', albums.filter((a) => inFocus(a, state.focus) && (!lp.fav || albumFav(a))), lp.sort || 'name');
           const shown = sorted;
           const letters = (lp.sort || 'name') === 'name' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.title)))] : (lp.sort === 'artist' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.album_artist)))] : []);

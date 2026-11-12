@@ -260,6 +260,33 @@ async function nodeFavAlbum(browser) {
   } finally { await context.close(); }
 }
 
+// Favourites chosen on Albums, on a cold start: the list waits for the favourites to arrive instead
+// of saying "No favourite albums". A heart on an album's release group (the album page, Discover
+// and New releases heart the group) lists it too, like a heart on its release.
+async function coldFavourites(browser, width) {
+  const mbid = (id) => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`;
+  const group = (id) => `11111111-0000-4000-8000-${String(id).padStart(12, '0')}`;
+  const tagged = albums.map((a) => ({ ...a, release_mbid: mbid(a.id), release_group_mbid: group(a.id) }));
+  const { page, context, state } = await fx.create(browser, width, {
+    fixtures: { ...fixtures, '/library/albums': { body: tagged } },
+    favs: [`https://musicbrainz.org/release/${mbid(2)}`, `https://musicbrainz.org/release-group/${group(5)}`],
+    delay: (v) => (v === '/favourites' ? 700 : 0),
+  });
+  await context.addInitScript(() => localStorage.setItem('pm.list.albums', JSON.stringify({ fav: true })));
+  try {
+    await fx.go(page, '/albums');
+    await page.waitForFunction(() => document.querySelector('#albumgrid .tile, .empty h3'));
+    assert.equal(await page.locator('.empty').count(), 0, `${width}: no "No favourite albums" while the favourites are on their way`);
+    assert.equal(await page.locator('[data-lfav]').getAttribute('aria-pressed'), 'true', 'Favourites is still chosen');
+    assert.deepEqual(await page.locator('#albumgrid .tile').evaluateAll((els) => els.map((e) => Number(e.getAttribute('data-album')))), [2, 5], `${width}: the release's and the release group's hearts are both listed`);
+    assert.equal(await page.locator('.page-head .count').innerText(), '2 of 45');
+    assert.equal(await page.locator('#filter').isDisabled(), false, 'the filter works');
+    if (width === 1280) { await fx.cleanCopy(page); await page.screenshot({ path: path.join(shots, `after-albums-fav-cold-${width}.png`) }); }
+    assert.deepEqual(state.errors, [], 'no page errors');
+    console.log(`PASS cold Favourites ${width}: waits for the favourites, lists release-group hearts`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -275,5 +302,6 @@ async function nodeFavAlbum(browser) {
     for (const width of [1280, 1024, 768, 412]) await albumChips(browser, width);
     for (const width of [1280, 1024, 768, 412]) await emptyAlbums(browser, width);
     await nodeFavAlbum(browser);
+    for (const width of [1280, 1024, 768]) await coldFavourites(browser, width);
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

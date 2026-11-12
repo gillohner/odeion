@@ -1,5 +1,6 @@
 // Song and album names in song lists are real links, like the artist names beside them: Tab reaches
-// them, Enter opens the page, and Ctrl+click opens it in a new tab while this page stays put.
+// them, Enter opens the page, and Ctrl+click opens it in a new tab while this page stays put;
+// Alt+click is a plain click (not the browser's download).
 // Covers the library's track rows (Tracks) and the song rows of collections, search and item pages.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-song-links.js [repo] [shots]
@@ -72,6 +73,14 @@ async function trackRows(browser, width) {
     await page.goBack();
     await page.locator(link).waitFor();
     await newTab(run, link, href, '/tracks', `tracks ${width}`);
+    // Alt+click is a plain click here (Chrome and Edge would download the page instead)
+    await mark(page);
+    await page.locator(link).click({ modifiers: ['Alt'] });
+    await page.waitForFunction((h) => location.pathname === h, href, { timeout: 3000 }).catch(() => {});
+    assert.equal(path0(page), href, `tracks ${width}: Alt+click opens the song page`);
+    await inApp(page, `tracks ${width} Alt+click`);
+    await page.goBack();
+    await page.locator(link).waitFor();
     await rowMenu(page, link, `tracks ${width}`);
     await fx.cleanCopy(page);
     assert.deepEqual(state.errors, [], `tracks ${width}: no page errors`);

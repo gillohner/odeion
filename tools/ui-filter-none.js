@@ -78,6 +78,9 @@ async function run(browser, width, kind) {
       const names = await page.$$eval(`${k.rows}`, (els) => els.map((e) => (e.querySelector('.name, .t')?.textContent || e.textContent).trim()));
       assert.deepEqual(names, Array.from({ length: 10 }, (_, i) => `Other ${10 + i}`), `${kind} ${width}: O jumps within the matches`);
       assert.equal(await page.$eval('.page-head .count', (c) => c.dataset.filtered), `${kind === 'albums' ? 11 : 10} shown`);
+      // The chosen letter says so to a screen reader too, and only that one
+      assert.deepEqual(await page.$$eval('[data-az]', (bs) => bs.filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.dataset.az)), ['O'], `${kind} ${width}: O is pressed`);
+      assert.ok(await page.$$eval('[data-az]', (bs) => bs.every((b) => ['true', 'false'].includes(b.getAttribute('aria-pressed')))), `${kind} ${width}: every letter says whether it is pressed`);
       await noneLine(page, '');
       // Typing again unmarks the letter and draws all the matches
       await page.fill('#filter', q.toUpperCase());
@@ -86,7 +89,7 @@ async function run(browser, width, kind) {
       await page.locator('[data-az="O"]').click();
       await page.waitForFunction(() => document.querySelector('[data-az="O"]')?.classList.contains('on'));
       await page.locator('#filter').press('Escape');
-      await page.waitForFunction(() => !document.querySelector('.az.on') && [...document.querySelectorAll('[data-az]')].every((b) => !b.disabled));
+      await page.waitForFunction(() => !document.querySelector('.az.on') && [...document.querySelectorAll('[data-az]')].every((b) => !b.disabled && b.getAttribute('aria-pressed') === 'false'));
       await page.fill('#filter', 'zz'); await page.fill('#filter', 'zzz');
       await noneLine(page, `No ${k.what} matches “zzz”.`);
     }
