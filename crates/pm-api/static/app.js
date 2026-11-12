@@ -6354,6 +6354,15 @@
     more();
     return n < items.length ? growList(box, more) : () => {};
   };
+  // A list's filter that matches nothing says so under the list (the count alone read "0 shown").
+  // The line is there, empty, from the start so a screen reader hears it when it fills; it fills
+  // once typing pauses (not at each key), and empties at once. No filter box: does nothing.
+  const filterNone = (box, what) => {
+    if (!box || !$('#filter')) return () => {};
+    const p = document.createElement('p'); p.className = 'muted small filter-none'; p.setAttribute('role', 'status'); box.after(p);
+    let t = null;
+    return (q, n) => { clearTimeout(t); if (q && !n) t = setTimeout(() => { p.textContent = `No ${what} matches “${q}”.`; }, 250); else p.textContent = ''; };
+  };
   // A client-side filter box for long lists: hides rows/tiles whose text does not contain the query.
   // Library list controls (UX review #7): sort, a favourites toggle and an A–Z jump in one row,
   // remembered per list in this browser.
@@ -6785,11 +6794,12 @@
             let stop = () => {};
             const draw = (list) => { stop(); grid.innerHTML = ''; stop = growItems(grid, list, (part) => part.map(tile).join(''), bindTiles); };
             draw(shown);
+            const none = filterNone(grid, 'album');
             // A–Z: the list from that letter on (the grid draws as you scroll)
-            $$('[data-az]', main).forEach((b) => b.onclick = () => { const key = lp.sort === 'artist' ? (a) => firstLetter(a.album_artist) : (a) => firstLetter(a.title); const i = shown.findIndex((a) => key(a) === b.dataset.az); if (i >= 0) { draw(shown.slice(i)); $$('[data-az]', main).forEach((x) => x.classList.toggle('on', x === b)); } });
+            $$('[data-az]', main).forEach((b) => b.onclick = () => { const key = lp.sort === 'artist' ? (a) => firstLetter(a.album_artist) : (a) => firstLetter(a.title); const i = shown.findIndex((a) => key(a) === b.dataset.az); if (i >= 0) { draw(shown.slice(i)); none('', 1); $$('[data-az]', main).forEach((x) => x.classList.toggle('on', x === b)); } });
             const f = $('#filter');
             if (f) {
-              f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? shown.filter((a) => `${a.title} ${a.album_artist || ''} ${a.year || ''}`.toLowerCase().includes(q)) : shown; draw(list); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
+              f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? shown.filter((a) => `${a.title} ${a.album_artist || ''} ${a.year || ''}`.toLowerCase().includes(q)) : shown; draw(list); none(f.value.trim(), list.length); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
           }
@@ -6810,11 +6820,12 @@
             let stop = () => {};
             const draw = (list) => { stop(); alist.innerHTML = ''; stop = growItems(alist, list, (part) => part.map(row).join(''), bindRows, 150); };
             draw(artistsSorted);
-            $$('[data-az]', main).forEach((b) => b.onclick = () => { const i = artistsSorted.findIndex((a) => firstLetter(a.name) === b.dataset.az); if (i >= 0) { draw(artistsSorted.slice(i)); $$('[data-az]', main).forEach((x) => x.classList.toggle('on', x === b)); } });
+            const none = filterNone(alist, 'artist');
+            $$('[data-az]', main).forEach((b) => b.onclick = () => { const i = artistsSorted.findIndex((a) => firstLetter(a.name) === b.dataset.az); if (i >= 0) { draw(artistsSorted.slice(i)); none('', 1); $$('[data-az]', main).forEach((x) => x.classList.toggle('on', x === b)); } });
             const als = $('[data-lsort]', main); if (als) als.onchange = () => { setListPref('artists', { ...alp, sort: als.value }); return renderSortedList(als); };
             const f = $('#filter');
             if (f) {
-              f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? artistsSorted.filter((a) => a.name.toLowerCase().includes(q)) : artistsSorted; draw(list); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
+              f.oninput = () => { const q = f.value.trim().toLowerCase(); const list = q ? artistsSorted.filter((a) => a.name.toLowerCase().includes(q)) : artistsSorted; draw(list); none(f.value.trim(), list.length); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
           }
@@ -7039,14 +7050,16 @@
             browse();
             const f = $('#filter'); let timer = null;
             if (f) {
+              const none = filterNone(box, 'track');
               f.oninput = () => {
                 clearTimeout(timer);
                 timer = setTimeout(async () => {
                   const q = f.value.trim(); const mine = ++run; const c = $('.page-head .count');
-                  if (!q) { browse(); if (c) c.dataset.filtered = ''; return; }
+                  if (!q) { browse(); none('', 0); if (c) c.dataset.filtered = ''; return; }
                   const r = await api('GET', `/library/search?${new URLSearchParams({ q, sources: 0, limit: 500 })}`).catch((e) => { toast(e.message, 'error'); return null; });
+                  if (!r && mine === run) none('', 1);
                   if (!r || mine !== run || state.view !== 'tracks') return;
-                  reset(); append(r.tracks);
+                  reset(); append(r.tracks); none(q, r.tracks.length);
                   const note = $('#tracknote'); note.hidden = r.tracks.length < 500; note.textContent = 'The first 500 matches: type more to narrow them down.';
                   if (c) c.dataset.filtered = `${r.tracks.length}${r.tracks.length === 500 ? '+' : ''} shown`;
                 }, 200);

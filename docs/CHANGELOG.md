@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-12
+
+- **A library filter that finds nothing says so.** On Albums, Artists and Tracks, typing a word that matches nothing used to leave an empty page with only "0 shown" beside the title. Now a line under the list says "No album matches “…”" (or artist, or track), and screen readers hear it. Matching again, or Escape, takes it away.
+
 ## 0.2.4
 
 ### 2026-11-12
