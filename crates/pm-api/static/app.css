@@ -1681,7 +1681,8 @@ html[data-shell="phone"] #jobpop, html[data-shell="phone"] #volpop { width: auto
 .listbar select.input { width: auto; padding: 4px 8px; font-size: var(--fs-sm); height: auto; margin-left: 4px; }
 .azbar { display: flex; flex-wrap: wrap; gap: 2px; }
 .az { background: none; border: 0; color: var(--muted); font: inherit; font-size: var(--fs-xs); font-weight: 600; min-width: 22px; height: 26px; border-radius: var(--r-sm); cursor: pointer; }
-.az:hover { background: var(--surface-2); color: var(--fg); }
+.az:hover:not(:disabled) { background: var(--surface-2); color: var(--fg); }
+.az:disabled { opacity: .35; cursor: default; }
 .az.on { background: var(--accent-soft); color: var(--accent-strong); }
 @media (max-width: 720px) { .azbar { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; } }
 /* Playlist art: a 2×2 mosaic of its album covers */

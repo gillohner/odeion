@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-12
 
+- **A–Z on Albums and Artists stays inside what you filtered.** With a word typed in the filter, pressing a letter used to show the whole list from that letter, including albums or artists that don't match, while the count still read "4 shown". Now the letter jumps to the first match starting with it, and letters with no match are dimmed and can't be pressed. Typing again or Escape clears the chosen letter.
 - **On a phone, a playlist's ⋯ stays on its row on narrow screens and with a larger font size.** At 320 or 340 px wide, or at 360 px with Android's font size at 115 % or 130 %, ⋯ used to drop alone onto a second line. Now Shuffle shows only its word, the row's gaps tighten, and on the tightest screens Play shows only its word too, so Play, Shuffle, Play on…, Share and ⋯ stay on one row. Every button is still 44 px. At 360 and 412 px with the normal font size the row looks as before.
 - **A library filter that finds nothing says so.** On Albums, Artists and Tracks, typing a word that matches nothing used to leave an empty page with only "0 shown" beside the title. Now a line under the list says "No album matches “…”" (or artist, or track), and screen readers hear it. Matching again, or Escape, takes it away.
 
