@@ -449,15 +449,22 @@ html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore) { min-width
 @media (max-width: 379px) { html[data-shell="phone"] .actions > #plshuffle > .ic { display: none; } }
 /* (and wherever the row is short for its words, on a narrow phone or with a larger font size: Shuffle drops its
    icon, then the row's gaps and Play's and Shuffle's sides tighten, then Play drops its icon, so ⋯ stays on the row;
-   the rule above stays for WebViews without container queries) */
+   the rule above stays for WebViews without container queries. The steps count the words' width in ch, not em: the
+   app's WebView applies Android's font size as text zoom, which grows the text and ch but leaves em as it was;
+   9.7ch is about 5.4em in Arial or Roboto.) */
 html[data-shell="phone"] #main > .hero > div:has(> .actions > #plplay) { container: plhero / inline-size; }
-@container plhero (width < calc(276px + 5.4em)) { #plshuffle > .ic { display: none; } }
-@container plhero (width < calc(250px + 5.4em)) {
+@container plhero (width < calc(276px + 9.7ch)) { #plshuffle > .ic { display: none; } }
+@container plhero (width < calc(250px + 9.7ch)) {
   .actions:has(> #plplay) { gap: 4px; }
   :is(#plplay, #plshuffle) { padding-left: 10px; padding-right: 10px; }
   #plplay { gap: 6px; }
 }
-@container plhero (width < calc(216px + 5.4em)) { #plplay > .ic { display: none; } }
+@container plhero (width < calc(216px + 9.7ch)) { #plplay > .ic { display: none; } }
+/* (Android's font size in Chrome, as page zoom: 130 % on a 360 px phone lays the page out 277 px wide) */
+@container plhero (width < calc(190px + 9.7ch)) {
+  .actions:has(> #plplay) { gap: 2px; }
+  :is(#plplay, #plshuffle) { padding-left: 6px; padding-right: 6px; min-width: 44px; justify-content: center; }
+}
 /* (a playlist's sharing note: a little air under the taller row) */
 html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 /* Touch screens in the desktop layout (tablets): 40 px targets */
