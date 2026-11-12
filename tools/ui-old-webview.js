@@ -6,6 +6,9 @@
 //     outside the app (target=_blank); it stays on every page and fits a phone;
 //   * 111 and newer, a user agent without a Chrome version, the desktop app and a plain browser
 //     (whatever its version) get nothing.
+//   * the check is index.html's own script in plain old JavaScript, so it also runs where app.js cannot
+//     be read (below Chrome 80): the note shows with app.js failing, and the script has no newer syntax;
+//   * a marker that arrives after that script (an app that sets it late) still gets the note.
 //   node tools/ui-old-webview.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -22,6 +25,8 @@ const LINE = 'Update Android System WebView for Odeion to show correctly';
 // [what, user agent, the app's platform (null: a browser), the version the note should name (null: no note)]
 const CASES = [
   ['Android app, WebView 83 (the API 30 emulator image)', wv('83.0.4103.106'), 'android', 83],
+  ['Android app, WebView 74 (cannot read app.js)', wv('74.0.3729.186'), 'android', 74, 'no-app-js'],
+  ['Android app, WebView 83, the marker set late', wv('83.0.4103.106'), 'android', 83, 'late'],
   ['Android app, WebView 87', wv('87.0.4280.101'), 'android', 87],
   ['Android app, WebView 110', wv('110.0.5481.153'), 'android', 110],
   ['Android app, WebView 111', wv('111.0.5563.116'), 'android', null],
@@ -37,14 +42,25 @@ const CASES = [
 
 (async () => {
   const browser = await chromium.launch();
-  for (const [what, ua, platform, want] of CASES) {
+  // The script itself: nothing an old WebView cannot read
+  {
+    const html = fs.readFileSync(path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-api/static/index.html'), 'utf8');
+    const m = /<script>\/\* The Android app draws this page[\s\S]*?\*\/([\s\S]*?)<\/script>/.exec(html);
+    const newer = m ? (m[1].match(/=>|`|\?\.|\?\?|\b(?:const|let|class|async|await)\b|\.\.\./g) || []) : ['no script'];
+    check(m && !newer.length, `index.html's check uses no syntax newer than ES5 (${newer.join(' ') || 'none'})`);
+    check(m && html.indexOf(m[0]) > html.indexOf('id="main"') && html.indexOf(m[0]) < html.indexOf('src="/app.js"'), 'it comes after #main and before app.js');
+  }
+  for (const [what, ua, platform, want, how] of CASES) {
     const w = platform === 'android' || /Android/.test(ua) ? 390 : 1280;
     const { page, context, state } = await fx.create(browser, w, { mobile: w === 390 });
-    await context.addInitScript(([agent, plat]) => {
+    await context.addInitScript(([agent, plat, late]) => {
       Object.defineProperty(Navigator.prototype, 'userAgent', { get: () => agent, configurable: true });
-      if (plat) window.pmDesktop = { platform: plat, version: '0.0.0' };
-    }, [ua, platform]);
-    await fx.go(page, '/'); await page.waitForSelector('#main'); await sleep(500);
+      const mark = () => { if (plat && !window.pmDesktop) window.pmDesktop = { platform: plat, version: '0.0.0' }; };
+      if (late) document.addEventListener('readystatechange', mark); else mark();
+    }, [ua, platform, how === 'late']);
+    // (a WebView that cannot read app.js: the file fails here as it does there)
+    if (how === 'no-app-js') await page.route('**/app.js', (r) => r.fulfill({ contentType: 'text/javascript', body: 'var broken = a ?. ;' }));
+    await fx.go(page, '/'); await page.waitForSelector('#main', { state: 'attached' }); await sleep(500);
     const read = () => page.evaluate(() => {
       const n = document.querySelector('#webviewnote'); if (!n) return { count: document.querySelectorAll('.webview-note').length };
       const a = n.querySelector('a'); const main = document.querySelector('#main'); const b = n.getBoundingClientRect();
@@ -57,14 +73,14 @@ const CASES = [
       check(r.count === 1 && r.text === LINE && r.version === String(want), `${what}: one line, "${r.text}" (read as ${r.version})`);
       check(r.href === PLAY && r.target === '_blank' && r.label === 'Open Google Play', `${what}: a button to the WebView's Google Play page, opened outside the app (${r.label})`);
       check(r.aboveMain && r.visible && r.role === 'status', `${what}: above the content, announced as a status`);
-      check(r.wide <= 0 && r.right <= r.vw && r.linkH >= 32, `${what}: fits the phone, the button is ${r.linkH} px tall (page ${r.wide})`);
+      if (how !== 'no-app-js') check(r.wide <= 0 && r.right <= r.vw && r.linkH >= 32, `${what}: fits the phone, the button is ${r.linkH} px tall (page ${r.wide})`);
       if (want === 83) {
         await page.screenshot({ path: path.join(SHOTS, 'old-webview-390.png') });
         // It stays while moving through the app
         for (const p of ['/search', '/library', '/settings']) { await fx.go(page, p); await page.waitForSelector('#main'); await sleep(300); const s = await read(); check(s.count === 1 && s.visible && s.wide <= 0, `${what}: still there on ${p}`); }
       }
     }
-    check(!state.errors.length, `${what}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
+    if (how !== 'no-app-js') check(!state.errors.length, `${what}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();
   }
   await browser.close();
