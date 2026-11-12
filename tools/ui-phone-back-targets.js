@@ -27,12 +27,6 @@ const box = (page, selector) => page.locator(selector).first().evaluate((el) => 
 const big = (b) => b.width >= 44 && b.height >= 44;
 const size = (b) => `${b.width.toFixed(1)}×${b.height.toFixed(1)}`;
 
-// A real touch near the bottom edge verifies the whole target, not just its label.
-async function tapEdge(page, selector) {
-  const b = await page.locator(selector).first().boundingBox();
-  await page.touchscreen.tap(b.x + b.width / 2, b.y + b.height - 2);
-}
-
 // The span that a touch reaches the button in, through its centre: what the finger can hit, which
 // can be larger than the visible button.
 const reach = (page, selector) => page.locator(selector).first().evaluate((el) => {
@@ -95,9 +89,13 @@ async function noPush(page, selector, at, most) {
         check(search.width >= 120, `${at}: the search field keeps room to type (${search.width.toFixed(0)} px)`);
         check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${at}: no sideways overflow`);
         await page.screenshot({ path: path.join(SHOTS, `topbar-${at}.png`), clip: { x: 0, y: 0, width, height: 80 } });
-        await tapEdge(page, '.topbar .fb-help');
-        await page.waitForSelector('.topbar .fb-help[aria-expanded="true"]');
-        check(true, `${at}: one edge tap opens Help`);
+        // 42 px below its top: past the bottom of the old 36 px button, so this press needs the 44 px one
+        // (a mouse press, since a touch there is snapped onto a nearby button anyway).
+        const help = await page.locator('.topbar .fb-help').first().boundingBox();
+        check(await page.evaluate(([x, y]) => { const h = document.elementFromPoint(x, y); return !!h && !!h.closest('.fb-help'); }, [help.x + help.width / 2, help.y + 42]), `${at}: Help reaches 42 px below its top`);
+        await page.mouse.click(help.x + help.width / 2, help.y + 42);
+        await page.waitForSelector('.topbar .fb-help[aria-expanded="true"]', { timeout: 3000 }).catch(() => {});
+        check(await page.locator('.topbar .fb-help[aria-expanded="true"]').count() === 1, `${at}: one press near Help's bottom edge opens Help`);
         await page.keyboard.press('Escape');
 
         // A playlist page's Back.
@@ -136,6 +134,18 @@ async function noPush(page, selector, at, most) {
         await tapReachEdge(page, '#set-appearance .set-back');
         await page.waitForFunction(() => location.pathname !== '/settings/appearance');
         check(true, `${at} settings: one edge tap goes back (${await page.evaluate(() => location.pathname)})`);
+
+        // A Sources panel's Back (a phone shows one source at a time, under the list).
+        await fx.go(page, '/sources/library');
+        await page.waitForSelector('[data-src-back]');
+        const src = await reach(page, '[data-src-back]');
+        check(big(src), `${at} sources: Back takes a 44 px tap (${size(src)})`);
+        check(await margins(page, '[data-src-back]') === '0px 8px', `${at} sources: Back keeps its margins`);
+        await noPush(page, '[data-src-back]', `${at} sources Back`, 47);
+        await page.screenshot({ path: path.join(SHOTS, `sources-${at}.png`) });
+        await tapReachEdge(page, '[data-src-back]');
+        await page.waitForFunction(() => location.pathname === '/sources');
+        check(true, `${at} sources: one edge tap goes back to the list`);
 
         check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
       } finally { await context.close(); }
