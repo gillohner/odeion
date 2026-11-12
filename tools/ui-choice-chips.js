@@ -1,6 +1,8 @@
 // Choice chips say which one is chosen, the same way everywhere: the search source row
 // (Everywhere, Library, Pubky, services) and the Albums quality row (All, Hi-res, Lossless...)
 // are labelled groups of buttons with a pressed state, like the result filters and Favourites.
+// The quality row shows only when a quality narrows the albums: no lone All without format data,
+// none when every album has the same quality.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-choice-chips.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -84,12 +86,31 @@ async function albumQuality(browser, width) {
   } finally { await run.context.close(); }
 }
 
+// No format data, or every album the same quality: no chip would narrow the grid, so no row
+async function albumQualityHidden(browser, width) {
+  const same = albums.map((a) => ({ album_id: a.id, label: 'FLAC', hi_res: false, lossless: true, dsd: false }));
+  for (const [what, list] of [['no format data', []], ['all CD quality', same]]) {
+    const run = await fx.create(browser, width, { fixtures: { '/library/albums': { body: albums }, '/library/albums/formats': { body: list } } });
+    const { page, state } = run;
+    try {
+      await fx.go(page, '/albums');
+      await page.locator('#albumgrid .tile').first().waitFor();
+      assert.equal(await page.locator('#albumgrid .tile').count(), albums.length, `albums ${width} ${what}: every album shows`);
+      assert.equal(await page.locator('[data-focus]').count(), 0, `albums ${width} ${what}: no quality row`);
+      assert.equal(await page.locator('[role="group"][aria-label="Quality"]').count(), 0, `albums ${width} ${what}: no empty Quality group`);
+      assert.equal(await page.locator('[data-lsort]').count(), 1, `albums ${width} ${what}: Sort is still there`);
+      if (width === 1280 && !list.length) await page.screenshot({ path: path.join(shots, `albums-no-formats-${width}.png`) });
+      assert.deepEqual(state.errors, [], `albums ${width} ${what}: no page errors`);
+    } finally { await run.context.close(); }
+  }
+}
+
 (async () => {
   const browser = await chromium.launch();
   let failed = 0;
   try {
     for (const width of WIDTHS) {
-      for (const [name, check] of [['search sources', searchSources], ['album quality', albumQuality]]) {
+      for (const [name, check] of [['search sources', searchSources], ['album quality', albumQuality], ['album quality hidden', albumQualityHidden]]) {
         try { await check(browser, width); console.log(`ok   ${name} ${width}`); } catch (e) { failed++; console.log(`FAIL ${name} ${width}: ${e.message.split('\n')[0]}`); }
       }
     }
