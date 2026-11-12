@@ -8,6 +8,7 @@ Newest first. Dates are when the change landed on `main`.
 
 - **On a phone, a playlist's ⋯ stays on its row on narrow screens and with a larger font size.** At 320 or 340 px wide, or at 360 px with Android's font size at 115 % or 130 %, ⋯ used to drop alone onto a second line. Now Shuffle shows only its word, the row's gaps tighten, and on the tightest screens Play shows only its word too, so Play, Shuffle, Play on…, Share and ⋯ stay on one row. Every button is still 44 px. At 360 and 412 px with the normal font size the row looks as before.
 - **A library filter that finds nothing says so.** On Albums, Artists and Tracks, typing a word that matches nothing used to leave an empty page with only "0 shown" beside the title. Now a line under the list says "No album matches “…”" (or artist, or track), and screen readers hear it. Matching again, or Escape, takes it away.
+- **Albums with Favourites on say why they are empty, and list every album you hearted.** With no favourite album, the page now says "No favourite albums" and how to add one, instead of "No album has a file of that quality" (with Favourites and a quality chosen, it says neither matches). The filter box is greyed out while there is nothing to filter and keeps what you typed, which applies again when you turn Favourites off. An album you hearted before MusicBrainz knew it now shows under Favourites too.
 
 ## 0.2.4
 

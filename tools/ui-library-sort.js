@@ -1,5 +1,5 @@
 // Sorting Albums or Artists, or choosing a quality chip or Favourites on Albums, keeps the typed
-// filter, its matching rows and keyboard focus.
+// filter, its matching rows and keyboard focus; an empty Albums view says which choice emptied it.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-library-sort.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -206,6 +206,60 @@ async function albumChips(browser, width) {
   } finally { await context.close(); }
 }
 
+// Albums left empty by Favourites (or Favourites and a quality) say so, not "no file of that
+// quality"; the filter is off meanwhile but keeps its text, which applies again on the way back.
+async function emptyAlbums(browser, width) {
+  const mbid = (id) => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`;
+  const tagged = albums.map((a) => ({ ...a, release_mbid: mbid(a.id) }));
+  const formats = tagged.map((a) => ({ album_id: a.id, lossless: [1, 2, 4, 5].includes(a.id), hi_res: false, dsd: false }));
+  const run = async (favs, steps, title, text) => {
+    const { page, context, state } = await fx.create(browser, width, {
+      fixtures: { ...fixtures, '/library/albums': { body: tagged }, '/library/albums/formats': { body: formats } },
+      favs: favs.map((id) => `https://musicbrainz.org/release/${mbid(id)}`),
+    });
+    try {
+      await fx.go(page, '/albums');
+      await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length > 3);
+      await page.fill('#filter', 'loop');
+      for (const sel of steps) { await page.locator(sel).click(); await page.waitForFunction((s) => document.querySelector(s)?.getAttribute('aria-pressed') === 'true', sel); }
+      await page.locator('.empty h3').waitFor();
+      assert.equal(await page.locator('.empty h3').innerText(), title, `${width}: the empty state names the choice`);
+      assert.equal(await page.locator('.empty p').innerText(), text);
+      assert.equal(await page.locator('#filter').inputValue(), 'loop', 'the typed filter is kept');
+      assert.equal(await page.locator('#filter').isDisabled(), true, 'nothing to filter: the box is off');
+      if (width === 1280 && steps.length === 1) { await fx.cleanCopy(page); await page.screenshot({ path: path.join(shots, `after-albums-fav-empty-${width}.png`) }); }
+      await page.locator('[data-lfav]').click();
+      await page.waitForFunction(() => document.querySelector('[data-lfav]')?.getAttribute('aria-pressed') === 'false' && document.querySelector('#albumgrid .tile'));
+      assert.equal(await page.locator('#filter').isDisabled(), false, 'the filter works again');
+      await page.waitForFunction(() => document.querySelector('.page-head .count')?.dataset.filtered?.endsWith(' shown'));
+      assert.equal(await page.locator('#filter').inputValue(), 'loop');
+      assert.equal(await page.locator('#albumgrid .tile').count(), steps.length === 1 ? 3 : 2, 'the kept filter applies again');
+      assert.deepEqual(state.errors, [], 'no page errors');
+    } finally { await context.close(); }
+  };
+  const none = ['No favourite albums', 'Open an album and press its heart to see it here.'];
+  await run([], ['[data-lfav]'], ...none);
+  await run([3], ['[data-focus="lossless"]', '[data-lfav]'], 'No favourite albums of this quality', 'None of your favourite albums has a file of this quality.');
+  // No favourite at all: Favourites is what empties it, whatever the quality
+  await run([], ['[data-focus="lossless"]', '[data-lfav]'], ...none);
+  console.log(`PASS empty albums ${width}: Favourites and Favourites + quality say why, the filter keeps its text`);
+}
+
+// An album hearted before MusicBrainz knew it is kept on the node as album:<id>; Favourites shows it
+async function nodeFavAlbum(browser) {
+  const { page, context, state } = await fx.create(browser, 1280, { fixtures, favs: ['album:2'] });
+  try {
+    await fx.go(page, '/albums');
+    await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length > 3);
+    await page.locator('[data-lfav]').click();
+    await page.waitForFunction(() => document.querySelector('[data-lfav]')?.getAttribute('aria-pressed') === 'true' && document.querySelectorAll('#albumgrid .tile').length === 1);
+    assert.equal(await page.locator('#albumgrid .tile').getAttribute('data-album'), '2', 'the node-kept favourite is listed');
+    assert.equal(await page.locator('.page-head .count').innerText(), '1 of 45');
+    assert.deepEqual(state.errors, [], 'no page errors');
+    console.log('PASS Favourites lists an album hearted before MusicBrainz knew it');
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -219,5 +273,7 @@ async function albumChips(browser, width) {
     await delayedSort(browser, 1280, 'search', 'history');
     await sparseLists(browser);
     for (const width of [1280, 1024, 768, 412]) await albumChips(browser, width);
+    for (const width of [1280, 1024, 768, 412]) await emptyAlbums(browser, width);
+    await nodeFavAlbum(browser);
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

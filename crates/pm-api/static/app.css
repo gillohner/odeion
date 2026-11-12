@@ -956,6 +956,7 @@ html[data-shell="phone"] .popover:not([hidden]):not(.menu), .popover.menu.sheet:
 .lnk:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
 .srow .num { width: 24px; text-align: right; flex: none; }
 .input.filter { width: 200px; max-width: 100%; }
+.input.filter:disabled { opacity: 0.45; cursor: not-allowed; }
 .hbody { min-height: 48px; }
 .blurb { max-width: 72ch; line-height: 1.6; color: var(--fg-2); margin: 0 0 12px; }
 /* Where the About text and picture come from, and their licences */
