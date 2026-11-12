@@ -104,6 +104,14 @@ const fits = (r) => r.wide <= 0 && r.right <= r.vw;
       check(!state.errors.length, `${w}: no page errors with four tags${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
       await context.close();
     }
+    // ---- a label written twice counts once ----
+    {
+      const { page, context, asked } = await open(browser, w, '/tag/music,music,live,track', (l) => ({ body: { items: [item('On ' + l.join(' and '))], tags: [] } }));
+      await until(page, () => /On music and live and track/.test(document.querySelector('#tagbody').textContent));
+      const r = await read(page);
+      check(asked.join('|') === 'music,live,track' && r.solo.join() === 'music,live,track', `${w}: a repeated label counts once (asked ${asked.join('|')}, chips ${r.solo.join()})`);
+      await context.close();
+    }
     // ---- long labels, nothing found ----
     {
       const long = ['a-rather-long-tag-label-that-has-to-wrap', 'another-quite-long-label-for-a-phone', 'third'];

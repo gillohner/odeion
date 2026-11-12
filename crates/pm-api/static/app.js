@@ -6675,7 +6675,8 @@
         case 'tag': {
           // Pinakes matches all of a tag page's labels (match=all), and takes at most 3 that way
           const MATCH_ALL_MAX = 3;
-          const labels = String(state.viewArg || '').split(',').filter(Boolean);
+          // (a label written twice in a link counts once)
+          const labels = [...new Set(String(state.viewArg || '').split(',').filter(Boolean))];
           const over = labels.length > MATCH_ALL_MAX;
           // The picked tags, whatever the answer is (loading, an error, nothing found): tap one for
           // only that tag, × takes it out (owner, 2026-11-12: "allow removing tags being looked for")
