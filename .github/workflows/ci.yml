@@ -618,9 +618,11 @@ jobs:
           ui-tablet.js tablet-shots
           ui-topbar.js topbar-shots
           ui-busy.js busy-shots
+          ui-tag-page.js tag-page-shots
           ui-controls-search-check.js controls-search-shots
           ui-search-recovery.js search-recovery-shots
           ui-source-policy.js source-policy-shots
+          ui-choice-chips.js choice-chips-shots
           ui-queue-covers.js queue-covers-shots
           ui-versions.js versions-shots
           ui-similar-tiles.js similar-shots
@@ -636,15 +638,18 @@ jobs:
           ui-shuffle-repeat.js shuffle-repeat-shots
           ui-redesign.js redesign-shots
           ui-item-about.js item-about-shots
+          ui-rating-hero.js rating-hero-shots
           ui-usb-dac.js usb-dac-shots
           ui-native-player.js native-player-shots
           ui-app-downloads.js app-downloads-shots
           ui-offline-play.js offline-play-shots
           ui-android-media.js android-media-shots
           ui-phone-library-targets.js phone-library-targets-shots
+          ui-phone-back-targets.js phone-back-targets-shots
           ui-wrong-match.js wrong-match-shots
           ui-phone-library-nav.js phone-library-nav-shots
           ui-search-scopes.js search-scopes-shots
+          ui-search-music.js search-music-shots
           ui-library-sort.js library-sort-shots
           ui-usage.js usage-shots
           ui-rows-search-sort.js rows-search-sort-shots

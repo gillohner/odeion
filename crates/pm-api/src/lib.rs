@@ -8927,6 +8927,237 @@ mod tests {
         assert_eq!(sug["others"], serde_json::json!(["chicago"]));
     }
 
+    /// Pubky search is music only, looks identifiers and pasted service pages up exactly, adds
+    /// concerts near the node's place, and stays within its request budget
+    /// (TASK-music-search-pinakes-1112).
+    #[tokio::test]
+    async fn pubky_search_is_music_only_knows_identifiers_and_counts_its_requests() {
+        type Seen = Arc<std::sync::Mutex<Vec<(&'static str, std::collections::HashMap<String, String>)>>>;
+        let seen: Seen = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        const LINK: &str = "https://open.spotify.com/track/2Foc5Q5nqNiosCNqttzHof";
+        let (s1, s2) = (seen.clone(), seen.clone());
+        let mock = Router::new()
+            .route(
+                "/v1/search",
+                get(
+                    move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        s1.lock().unwrap().push(("search", q.clone()));
+                        let card = |id: &str, type_: &str, name: &str| serde_json::json!({"id": id, "uri": format!("https://www.deezer.com/track/{id}"), "status": "ok", "type": type_, "name": name, "site": "Deezer"});
+                        let res = if q.contains_key("boost") {
+                            (
+                                StatusCode::NOT_IMPLEMENTED,
+                                Json(serde_json::json!({"error": "wot_2 is not supported: the Nexus this instance reads serves no reach set"})),
+                            )
+                        } else if q.get("key").map(String::as_str) == Some("isrc:USQX91300108") {
+                            (
+                                StatusCode::OK,
+                                Json(serde_json::json!({"items": [{
+                                    "id": "r1", "uri": LINK, "status": "ok", "type": "MusicRecording", "name": "Get Lucky", "site": "Spotify",
+                                    "group": {"id": "g1", "size": 3},
+                                    "also_on": [
+                                        {"uri": "https://www.deezer.com/track/66609426", "site": "Deezer"},
+                                        {"uri": "https://open.spotify.com/track/other", "site": "Spotify"},
+                                        {"uri": "https://tidal.com/track/20115557", "site": "TIDAL"},
+                                        {"uri": "https://www.deezer.com/track/2", "site": "Deezer"}
+                                    ]
+                                }]})),
+                            )
+                        } else if q.contains_key("near") {
+                            (
+                                StatusCode::OK,
+                                Json(serde_json::json!({"items": [{"id": "e1", "uri": "https://www.songkick.com/concerts/1", "status": "ok", "type": "MusicEvent", "name": "Noah Kahan @ Hallenstadion", "site": "Songkick", "start": "2026-12-01T19:00:00Z"}]})),
+                            )
+                        } else if q.contains_key("q") {
+                            (
+                                StatusCode::OK,
+                                Json(serde_json::json!({
+                                    "items": [card("1", "MusicRecording", "Around the World"), card("2", "MusicAlbum", "Homework")],
+                                    "facets": {"type": [
+                                        {"type": "MusicRecording", "count": 7},
+                                        {"type": "MusicAlbum", "count": 3},
+                                        {"type": "WebPage", "count": 40},
+                                        {"type": "MusicRelease", "count": 2}
+                                    ]}
+                                })),
+                            )
+                        } else {
+                            (StatusCode::OK, Json(serde_json::json!({"items": []})))
+                        };
+                        async move { res }
+                    },
+                ),
+            )
+            .route(
+                "/v1/resources/by-uri",
+                get(
+                    move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        s2.lock().unwrap().push(("by-uri", q.clone()));
+                        async move {
+                            Json(serde_json::json!({
+                                "id": "r1", "uri": LINK, "status": "ok", "type": "MusicRecording", "name": "Get Lucky", "site": "Spotify",
+                                "details": {"also_on": [
+                                    {"uri": "https://tidal.com/track/20115557", "site": "TIDAL"},
+                                    {"uri": "https://www.deezer.com/track/66609426", "site": "Deezer"}
+                                ]}
+                            }))
+                        }
+                    },
+                ),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let pubky_answer = |app: Router, uri: String| async move {
+            let resp = app
+                .oneshot(
+                    axum::http::Request::get(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            String::from_utf8_lossy(&body)
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .find(|v| v["source"] == "pubky")
+                .expect("pubky answered")
+        };
+        let asked = || std::mem::take(&mut *seen.lock().unwrap());
+        let types = pm_pubky::pinakes::music_types();
+
+        // Words: the text query and the tag query, both over music types only; counts add up per kind
+        let a = pubky_answer(app.clone(), "/v1/search?q=daft%20punk&in=pubky".into()).await;
+        let reqs = asked();
+        assert_eq!(reqs.len(), 2, "text and tags: {reqs:?}");
+        for (_, q) in &reqs {
+            assert_eq!(q.get("type"), Some(&types), "{q:?}");
+            assert_eq!(q.get("collapse").map(String::as_str), Some("group"), "{q:?}");
+            assert!(!q.contains_key("boost") && !q.contains_key("viewer"), "{q:?}");
+        }
+        let text = reqs
+            .iter()
+            .find(|(_, q)| q.contains_key("q"))
+            .expect("a text query");
+        assert_eq!(text.1.get("facet").map(String::as_str), Some("type"));
+        assert!(reqs
+            .iter()
+            .any(|(_, q)| q.get("tags").map(String::as_str) == Some("daftpunk,daft-punk")));
+        assert_eq!(a["status"], "ok", "{a}");
+        assert_eq!(a["hits"][0]["title"], "Around the World", "{a}");
+        assert!(
+            a["hits"][0].get("exact").is_none(),
+            "a text hit is not exact: {a}"
+        );
+        assert_eq!(a["counts"], serde_json::json!([["song", 7], ["album", 5]]), "{a}");
+
+        // The same search again is the cached answer: nothing asked
+        let a = pubky_answer(app.clone(), "/v1/search?q=daft%20punk&in=pubky".into()).await;
+        assert_eq!(a["cached"], true, "{a}");
+        assert!(asked().is_empty());
+
+        // An ISRC: one exact lookup by key, no text or tag query; the hit is first, with Also on
+        let a = pubky_answer(app.clone(), "/v1/search?q=usqx91300108&in=pubky".into()).await;
+        let reqs = asked();
+        assert_eq!(reqs.len(), 1, "{reqs:?}");
+        assert_eq!(reqs[0].0, "search");
+        assert_eq!(
+            reqs[0].1.get("key").map(String::as_str),
+            Some("isrc:USQX91300108")
+        );
+        assert_eq!(reqs[0].1.get("type"), Some(&types));
+        assert!(!reqs[0].1.contains_key("q") && !reqs[0].1.contains_key("tags"));
+        assert_eq!(a["hits"][0]["title"], "Get Lucky", "{a}");
+        assert_eq!(a["hits"][0]["exact"], true, "{a}");
+        assert_eq!(
+            a["hits"][0]["also"],
+            serde_json::json!(["Deezer", "TIDAL"]),
+            "{a}"
+        );
+        assert_eq!(a["hits"][0]["kind"], "song");
+
+        // A pasted Spotify page: one read by URI (never a resolve), first with Also on
+        let a = pubky_answer(
+            app.clone(),
+            "/v1/search?q=https%3A%2F%2Fopen.spotify.com%2Ftrack%2F2Foc5Q5nqNiosCNqttzHof&in=pubky".into(),
+        )
+        .await;
+        let reqs = asked();
+        assert_eq!(reqs.len(), 1, "{reqs:?}");
+        assert_eq!(reqs[0].0, "by-uri");
+        assert_eq!(reqs[0].1.get("uri").map(String::as_str), Some(LINK));
+        assert_eq!(a["hits"][0]["exact"], true, "{a}");
+        assert_eq!(
+            a["hits"][0]["also"],
+            serde_json::json!(["TIDAL", "Deezer"]),
+            "{a}"
+        );
+        assert_eq!(a["hits"][0]["page"], LINK);
+
+        // A near miss (a barcode with a wrong check digit) is words: text and tags
+        pubky_answer(app.clone(), "/v1/search?q=036000291453&in=pubky".into()).await;
+        let reqs = asked();
+        assert_eq!(reqs.len(), 2, "{reqs:?}");
+        assert!(reqs.iter().all(|(_, q)| !q.contains_key("key")));
+
+        // With the node's place saved, concerts near it come too: three requests, never more
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/home/location",
+            Some(serde_json::json!({"lat": 47.37, "lon": 8.54, "city": "Zurich"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let a = pubky_answer(app.clone(), "/v1/search?q=noah%20kahan&in=pubky".into()).await;
+        let reqs = asked();
+        assert_eq!(reqs.len(), 3, "text, tags and concerts near: {reqs:?}");
+        let near = reqs
+            .iter()
+            .find(|(_, q)| q.contains_key("near"))
+            .expect("a concerts query");
+        assert_eq!(near.1.get("type").map(String::as_str), Some("MusicEvent"));
+        assert_eq!(near.1.get("near").map(String::as_str), Some("47.3700,8.5400"));
+        assert_eq!(near.1.get("radius").map(String::as_str), Some("50000"));
+        assert_eq!(near.1.get("from").map(String::as_str), Some("now"));
+        assert_eq!(near.1.get("q").map(String::as_str), Some("noah kahan"));
+        let hits = a["hits"].as_array().unwrap();
+        assert_eq!(hits[0]["kind"], "concert", "concerts near come first: {a}");
+        assert_eq!(hits[0]["title"], "Noah Kahan @ Hallenstadion");
+        // An identifier asks for no concerts
+        pubky_answer(app.clone(), "/v1/search?q=isrc%3AUSQX91300108&in=pubky".into()).await;
+        assert_eq!(asked().len(), 1);
+
+        // The network boost: an instance that refuses it is asked once more without, and not
+        // again with it
+        let d = s.discovery().expect("discovery");
+        let r = crate::search::text_search(d.pinakes(), "boosted", 20, Some("viewer1".into()))
+            .await
+            .expect("the search still answers");
+        assert_eq!(r.items.len(), 2);
+        let reqs = asked();
+        assert_eq!(reqs.len(), 2, "{reqs:?}");
+        assert_eq!(reqs[0].1.get("boost").map(String::as_str), Some("wot_2"));
+        assert_eq!(reqs[0].1.get("viewer").map(String::as_str), Some("viewer1"));
+        assert!(!reqs[1].1.contains_key("boost") && !reqs[1].1.contains_key("viewer"));
+        crate::search::text_search(d.pinakes(), "boosted again", 20, Some("viewer1".into()))
+            .await
+            .unwrap();
+        let reqs = asked();
+        assert_eq!(reqs.len(), 1, "remembered: {reqs:?}");
+        assert!(!reqs[0].1.contains_key("boost"));
+    }
+
     /// Profiles (STEWARD-UX-PEOPLE.md): cards in one batch, a person's page with what they
     /// tagged, avatars served by the node, and the faces behind a song's tags.
     #[tokio::test]

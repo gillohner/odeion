@@ -5252,7 +5252,7 @@
   // Ratings are 1–10: five stars in halves (7 shows three and a half).
   const starsText = (v) => (v ? `${Math.floor(v / 2) || ''}${v % 2 ? '½' : ''}` : '');
   const starFill = (v, n) => (!v ? 0 : v >= 2 * n ? 2 : v === 2 * n - 1 ? 1 : 0);
-  const reviewRow = (r) => { const v = r ? r.rating : null; return `<div class="reviewrow"><span class="eyebrow">My rating</span><span class="stars" id="stars" role="group" aria-label="My rating, in half stars">${[1, 2, 3, 4, 5].map((n) => `<span class="star f${starFill(v, n)}"><span class="glyph" aria-hidden="true">★</span><button class="half l" data-rate="${2 * n - 1}" aria-pressed="${v === 2 * n - 1}" aria-label="${n - 1 ? `${n - 1} and a half stars` : 'Half a star'}" title="${starsText(2 * n - 1)}"></button><button class="half r" data-rate="${2 * n}" aria-pressed="${v === 2 * n}" aria-label="${n} star${n === 1 ? '' : 's'}" title="${n}"></button></span>`).join('')}</span><span class="ratingval" id="ratingval">${v ? `${starsText(v)} of 5` : ''}</span><button class="btn sm ghost" id="notesbtn">${r && r.text ? 'Edit notes' : 'Add notes'}</button>${r && r.text ? `<div class="notes" id="notes">${esc(r.text)}</div>` : ''}<div class="notes-edit" id="notesedit" hidden><textarea class="input" id="notestext" rows="3" placeholder="Notes, kept privately on your homeserver">${esc(r ? r.text : '')}</textarea><div class="actions" style="margin-top:8px"><button class="btn primary sm" id="notessave">Save</button><button class="btn sm ghost" id="notescancel">Cancel</button></div></div></div>`; }; // lint-allow-glyph: the stars are the rating component's own styled glyphs
+  const reviewRow = (r) => { const v = r ? r.rating : null; return `<div class="reviewrow"><span class="eyebrow">My rating</span><span class="stars" id="stars" role="group" aria-label="My rating, in half stars">${[1, 2, 3, 4, 5].map((n) => `<span class="star f${starFill(v, n)}"><span class="glyph" aria-hidden="true">★</span><button class="half l" data-rate="${2 * n - 1}" aria-pressed="${v === 2 * n - 1}" aria-label="${n - 1 ? `${n - 1} and a half stars` : 'Half a star'}" title="${starsText(2 * n - 1)}"></button><button class="half r" data-rate="${2 * n}" aria-pressed="${v === 2 * n}" aria-label="${n} star${n === 1 ? '' : 's'}" title="${n}"></button></span>`).join('')}</span><span class="ratingval" id="ratingval">${v ? `${starsText(v)} of 5` : ''}</span><button class="btn sm ghost" id="notesbtn">${r && r.text ? 'Edit notes' : 'Add notes'}</button>${r && r.text ? `<div class="notes clamp" id="notes">${esc(r.text)}</div><button type="button" class="lnk small notes-more" id="notesmore" aria-controls="notes" aria-expanded="false" hidden>More</button>` : ''}<div class="notes-edit" id="notesedit" hidden><textarea class="input" id="notestext" rows="3" placeholder="Notes, kept privately on your homeserver">${esc(r ? r.text : '')}</textarea><div class="actions" style="margin-top:8px"><button class="btn primary sm" id="notessave">Save</button><button class="btn sm ghost" id="notescancel">Cancel</button></div></div></div>`; }; // lint-allow-glyph: the stars are the rating component's own styled glyphs
   const bindReviewRow = (ref, r) => {
     const stars = $('#stars'); if (!stars) return;
     const save = async (rating, text) => { try { if (rating == null && !text) await api('DELETE', '/reviews?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString()); else await api('PUT', '/reviews', { ...ref, rating, text }); toast('Review saved'); render(); } catch (e) { toast(e.message, 'error'); } };
@@ -5266,8 +5266,16 @@
     });
     stars.onmouseleave = () => paint(cur);
     stars.addEventListener('focusout', () => paint(cur));
-    $('#notesbtn').onclick = () => { $('#notesedit').hidden = false; $('#notesbtn').hidden = true; if ($('#notes')) $('#notes').hidden = true; $('#notestext').focus(); };
-    $('#notescancel').onclick = () => { $('#notesedit').hidden = true; $('#notesbtn').hidden = false; if ($('#notes')) $('#notes').hidden = false; };
+    // Saved notes show their first lines; More shows them all (measured again when the width or the
+    // text size changes, as the About blurb is)
+    const notes = $('#notes'); const more = $('#notesmore');
+    const syncMore = () => { if (notes && more && !notes.hidden && notes.classList.contains('clamp')) more.hidden = !(notes.scrollHeight > notes.clientHeight + 2); };
+    if (notes && more) {
+      more.onclick = () => { const open = notes.classList.toggle('clamp') === false; more.textContent = open ? 'Less' : 'More'; more.setAttribute('aria-expanded', String(open)); };
+      syncMore(); if (window.ResizeObserver) new ResizeObserver(syncMore).observe(notes);
+    }
+    $('#notesbtn').onclick = () => { $('#notesedit').hidden = false; $('#notesbtn').hidden = true; if (notes) { notes.hidden = true; more.hidden = true; } $('#notestext').focus(); };
+    $('#notescancel').onclick = () => { $('#notesedit').hidden = true; $('#notesbtn').hidden = false; if (notes) { notes.hidden = false; more.hidden = notes.classList.contains('clamp'); syncMore(); } $('#notesbtn').focus(); };
     $('#notessave').onclick = () => save(r ? r.rating : null, $('#notestext').value.trim());
   };
   // A small anchored menu (track ⋯, album actions). One at a time; Esc or the scrim closes it.
@@ -5934,11 +5942,11 @@
   const SEARCH_KINDS = [['artist', 'Artists'], ['album', 'Albums'], ['song', 'Songs'], ['playlist', 'Playlists'], ['person', 'People'], ['post', 'Posts'], ['podcast', 'Podcasts'], ['concert', 'Concerts']];
   // Facets (TASK-pinakes-social-ux A2): chips under the scope chips, counted from the merged
   // results in hand; each facet keeps at most one value on, and the rows and tiles filter by them.
-  const SEARCH_FACETS = [['service', 'Source'], ['quality', 'Quality'], ['decade', 'Years'], ['site', 'Site']];
+  const SEARCH_FACETS = [['kind', 'Kind'], ['service', 'Source'], ['quality', 'Quality'], ['decade', 'Years'], ['site', 'Site']];
   const QUALITY_WORDS = { hi_res: 'Hi-res', lossless: 'Lossless', lossy: 'Lossy' };
   // People and posts are Pubky's too: one Source chip for the three
-  const facetValues = (h) => ({ service: [...new Set((h.sources || []).map((x) => (x === 'people' || x === 'posts' ? 'pubky' : x)))], quality: h.quality ? [h.quality] : [], decade: h.year ? [`${Math.floor(h.year / 10) * 10}s`] : [], site: h.site ? [h.site] : [] });
-  const facetWord = (facet, v) => (facet === 'service' ? (v === 'library' ? 'Your library' : v === 'pubky' ? 'Pubky' : srcName(v)) : facet === 'quality' ? QUALITY_WORDS[v] || v : v);
+  const facetValues = (h) => ({ kind: h.kind ? [h.kind] : [], service: [...new Set((h.sources || []).map((x) => (x === 'people' || x === 'posts' ? 'pubky' : x)))], quality: h.quality ? [h.quality] : [], decade: h.year ? [`${Math.floor(h.year / 10) * 10}s`] : [], site: h.site ? [h.site] : [] });
+  const facetWord = (facet, v) => (facet === 'kind' ? (SEARCH_KINDS.find(([k]) => k === v) || [v, v])[1] : facet === 'service' ? (v === 'library' ? 'Your library' : v === 'pubky' ? 'Pubky' : srcName(v)) : facet === 'quality' ? QUALITY_WORDS[v] || v : v);
   const facetsOf = (byKind) => { const counts = Object.fromEntries(SEARCH_FACETS.map(([f]) => [f, new Map()])); for (const list of Object.values(byKind)) for (const h of list) { const fv = facetValues(h); for (const [f] of SEARCH_FACETS) for (const v of fv[f]) counts[f].set(v, (counts[f].get(v) || 0) + 1); } return counts; };
   const passesFacets = (h, on) => SEARCH_FACETS.every(([f]) => !on[f] || facetValues(h)[f].includes(on[f]));
   // A hit "matches" when every word of the query is in its title or subtitle
@@ -5998,7 +6006,7 @@
         found = same;
         if (found && !found.image && h.image) found.image = h.image;
       }
-      if (found) { if (h.tagged && !found.tagged) found.tagged = h.tagged; if (!found.sources.includes(ans.source)) found.sources.push(ans.source); for (const k of h.keys || []) index.set(h.kind + '|' + k, found); continue; }
+      if (found) { if (h.tagged && !found.tagged) found.tagged = h.tagged; if (h.exact) { found.exact = true; found.also = h.also; } if (!found.sources.includes(ans.source)) found.sources.push(ans.source); for (const k of h.keys || []) index.set(h.kind + '|' + k, found); continue; }
       const m = { ...h, sources: [ans.source] };
       byKind[h.kind].push(m);
       for (const k of h.keys || []) index.set(h.kind + '|' + k, m);
@@ -6008,6 +6016,8 @@
   };
   const renderSearchScopes = (chips, run) => {
     const scope = run.scope;
+    // One choice, like the result filters: a named group whose chosen button is pressed
+    chips.setAttribute('role', 'group'); chips.setAttribute('aria-label', 'Search in');
     const scrollLeft = chips.scrollLeft;
     const focused = document.activeElement;
     const rowBefore = chips.getBoundingClientRect(), focusBefore = focused.parentElement === chips && focused.getBoundingClientRect();
@@ -6022,12 +6032,13 @@
       const named = id !== 'musicbrainz' && Object.prototype.hasOwnProperty.call(SERVICE_NAMES, id);
       if (!scopes.has(id) && (named || saved.sources.includes(id)) && !(state.sources || []).some((x) => x.id === id && x.enabled === false)) scopes.set(id, srcName(id));
     }
-    const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
+    const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" role="img" aria-label="couldn’t search" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
     const buttons = new Map($$('[data-scope-in]', chips).map((b) => [b.dataset.scopeIn, b]));
     const ordered = [];
     for (const [id, name] of scopes) {
       const b = buttons.get(id) || document.createElement('button');
       b.type = 'button'; b.className = `chip scope ${scope === id ? 'on' : ''}`; b.dataset.scopeIn = id;
+      b.setAttribute('aria-pressed', String(scope === id));
       const html = `${['everywhere', 'library', 'pubky'].includes(id) ? '' : svcBadge(id)}${esc(name)} ${scope === 'everywhere' || scope === id ? stat(id === 'everywhere' ? '' : id) : ''}`;
       if (b.innerHTML !== html) b.innerHTML = html;
       ordered.push(b); buttons.delete(id);
@@ -6090,15 +6101,17 @@
     const sections = [];
     const counts = {}; for (const ans of Object.values(run.answers)) for (const [k, c] of ans.counts || []) counts[k] = Math.max(counts[k] || 0, c);
     // A Top result only when it really matches; a fuzzy hit is not promoted
-    const top = [byKind.artist.find((x) => x.sources.includes('library')), byKind.song.find((x) => x.sources.includes('library')), byKind.artist[0], byKind.album[0], byKind.song[0]].find((x) => x && closeMatch(x, run.q));
+    // (the Top result opens an item page: songs, albums and artists have one)
+    const exactHit = ['song', 'album', 'artist'].map((k) => byKind[k].find((x) => x.exact)).find(Boolean);
+    const top = exactHit || [byKind.artist.find((x) => x.sources.includes('library')), byKind.song.find((x) => x.sources.includes('library')), byKind.artist[0], byKind.album[0], byKind.song[0]].find((x) => x && closeMatch(x, run.q));
     const anyHits = SEARCH_KINDS.some(([k]) => byKind[k].length);
     const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => tagChip(t.label, { own: true, count: t.count, attrs: `data-stag="${esc(t.label)}"`, title: `Your tag · ${countOf(t.count, 'items')}` })).join('')}${(tg.others || []).map((l) => tagChip(l, { attrs: `data-stag="${esc(l)}"` })).join('')}</div></section>`);
     if (!top && anyHits && !run.q.includes('#')) sections.push('<p class="muted small" id="snomatch">No exact match. The closest results are below.</p>');
-    if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" data-err="remove">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top">${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Playlist', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div></div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
+    if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" data-err="remove">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top">${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Playlist', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div>${top.also && top.also.length ? `<div class="sub" id="stopalso">Also on ${esc(top.also.join(' · '))}</div>` : ''}</div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
     const songCap = run.allSongs ? 50 : 6;
     for (const [kind, label] of SEARCH_KINDS) {
       const items = byKind[kind];
-      if (!items.length && !pendingAny) continue;
+      if (!items.length && (!pendingAny || (run.facets.kind && run.facets.kind !== kind))) continue;
       const head = `<div class="section-head"><h3>${label}</h3><span class="muted small">${items.length ? items.length : ''}${counts[kind] && counts[kind] > items.length ? ` of ${counts[kind]} on Pubky` : ''}</span></div>`;
       let body;
       if (!items.length) body = skel(kind === 'song' ? 4 : 1, kind === 'album' || kind === 'artist');
@@ -6401,7 +6414,8 @@
     const f = fmtOf(a.id); if (!f) return false;
     switch (focus) { case 'hi_res': return f.hi_res; case 'dsd': return f.dsd; case 'cd': return f.lossless && !f.hi_res && !f.dsd; case 'lossless': return f.lossless; case 'lossy': return !f.lossless; default: return true; }
   };
-  const focusChips = (albums) => `<div class="chips" role="tablist" aria-label="Focus">${FOCUS.map(([k, label]) => { const n = albums.filter((a) => inFocus(a, k)).length; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" role="tab" aria-selected="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
+  // One choice, like Favourites beside it: a named group whose chosen button is pressed
+  const focusChips = (albums) => `<div class="chips" role="group" aria-label="Quality">${FOCUS.map(([k, label]) => { const n = albums.filter((a) => inFocus(a, k)).length; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" aria-pressed="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
 
   // ---- first run (steward next-3, item 2) ------------------------------------
   // Home's "Get started" card: only the steps that matter on this node and to this person
@@ -6675,17 +6689,27 @@
           break;
         }
         case 'tag': {
-          const labels = String(state.viewArg || '').split(',').filter(Boolean);
-          main.innerHTML = backBtn('home', 'Home') + pageHead(labels.map((l) => '#' + l).join(' + ')) + '<div id="tagcotags"></div><div id="tagbody"><div class="skeleton" style="height:400px"></div></div>';
+          // Pinakes matches all of a tag page's labels (match=all), and takes at most 3 that way
+          const MATCH_ALL_MAX = 3;
+          // (a label written twice in a link counts once)
+          const labels = [...new Set(String(state.viewArg || '').split(',').filter(Boolean))];
+          const over = labels.length > MATCH_ALL_MAX;
+          // The picked tags, whatever the answer is (loading, an error, nothing found): tap one for
+          // only that tag, × takes it out (owner, 2026-11-12: "allow removing tags being looked for")
+          const picked = labels.length > 1 ? `<div class="chips" id="tagpicked" role="group" aria-label="Tags looked for" style="margin-bottom:14px">${labels.map((l) => tagChip(l, { attrs: `data-tag-solo="${esc(l)}"`, title: `Only ${l}`, del: `data-tag-rm="${esc(l)}"` })).join('')}</div>` : '';
+          main.innerHTML = backBtn('home', 'Home') + pageHead(labels.map((l) => '#' + l).join(' + ')) + picked + '<div id="tagcotags"></div><div id="tagbody">' + (over ? `<p class="muted small">A tag page matches up to ${MATCH_ALL_MAX} tags.</p>` : '<div class="skeleton" style="height:400px"></div>') + '</div>';
           $('[data-back]', main).onclick = () => goBack('home');
+          $$('[data-tag-rm]', main).forEach((b) => b.onclick = () => setView('tag', labels.filter((l) => l !== b.dataset.tagRm).join(','), 'replace'));
+          $$('[data-tag-solo]', main).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagSolo, 'replace'));
+          // More labels than Pinakes takes (an old link): not asked; one can be removed above
+          if (over) break;
           const sc = await api('GET', `/home/tag?${new URLSearchParams({ labels: labels.join(','), limit: 60 })}`).catch((e) => ({ items: [], tags: [], error: e.message }));
           if (state.view !== 'tag') return;
           sc.items = sc.items || []; sc.tags = sc.tags || [];
-          const co = sc.tags.filter(([l]) => !labels.includes(l)).slice(0, 24);
-          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-add="${esc(l)}"`, title: `Narrow to ${labels.join(', ')} and ${l}` })).join('')}${labels.length > 1 ? labels.map((l) => tagChip(l, { attrs: `data-tag-solo="${esc(l)}"`, title: `Only ${l}`, del: `data-tag-rm="${esc(l)}"` })).join('') : ''}</div>` : '';
+          // Narrowing further only while another label fits
+          const co = labels.length < MATCH_ALL_MAX ? sc.tags.filter(([l]) => !labels.includes(l)).slice(0, 24) : [];
+          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-add="${esc(l)}"`, title: `Narrow to ${labels.join(', ')} and ${l}` })).join('')}</div>` : '';
           $$('[data-tag-add]', main).forEach((b) => b.onclick = () => setView('tag', [...labels, b.dataset.tagAdd].join(',')));
-          $$('[data-tag-rm]', main).forEach((b) => b.onclick = () => setView('tag', labels.filter((l) => l !== b.dataset.tagRm).join(','), 'replace'));
-          $$('[data-tag-solo]', main).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagSolo, 'replace'));
           const el = $('#tagbody'); el.innerHTML = homeBody(sc, 'tag', true); el.classList.add('fadein'); bindHome(el, sc);
           break;
         }
@@ -7927,6 +7951,7 @@
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
             + `<div class="hero item-hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
+              ${myReview !== undefined ? reviewRow(myReview) : ''}
               <div class="hmatch-slot" id="hmatch"></div>
               </div></div>`
             + (aboutTop ? aboutTopHtml(pg) : '')
@@ -7938,7 +7963,6 @@
             + '<div id="iconcerts-slot"></div>'
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + '<div id="isimilar-slot"></div>'
-            + (myReview !== undefined ? `<section class="section" id="ireview">${reviewRow(myReview)}</section>` : '')
             + '<div id="icollections-slot"></div>'
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + (aboutTop ? aboutDetailsHtml(pg) : aboutHtml(pg));

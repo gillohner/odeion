@@ -686,7 +686,10 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .star .half.r { right: 0; border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .star .half:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .ratingval { color: var(--muted); font-size: var(--fs-sm); margin-right: 8px; min-width: 4.5em; }
-.notes { flex-basis: 100%; color: var(--fg-2); white-space: pre-wrap; max-width: 560px; }
+.notes { flex-basis: 100%; color: var(--fg-2); white-space: pre-wrap; max-width: 560px; overflow-wrap: anywhere; }
+.notes.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.notes[hidden] { display: none; }
+.notes-more { margin-top: -6px; }
 .notes-edit { flex-basis: 100%; max-width: 560px; }
 .notes-edit textarea { resize: vertical; font: inherit; }
 
@@ -1463,6 +1466,15 @@ html[data-shell="phone"] .shell { grid-template-columns: minmax(0, 1fr); grid-te
 html[data-shell="phone"] .sidebar, html[data-shell="phone"] .menu-btn { display: none; }
 html[data-shell="phone"] .me-btn { display: inline-flex; flex: none; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
 html[data-shell="phone"] .topbar { padding: 0 6px 0 14px; gap: 6px; }
+/* Phone: the top bar's Help and Install buttons are full 44 px targets like the account button
+   beside them (they were 36 px, and Install shrank to 33 px wide in a crowded bar). */
+html[data-shell="phone"] .topbar :is(.fb-help, .install-btn) { flex: none; min-width: 44px; height: 44px; min-height: 44px; justify-content: center; }
+html[data-shell="phone"] .topbar .install-btn { width: 44px; }
+/* Phone: every way back (an item or playlist page's Back, a Settings or Sources panel's Back) takes
+   a 44 px tall tap. The button and its margins stay as they are, so the page doesn't move; an
+   invisible layer centred on it reaches into the space above and below. */
+html[data-shell="phone"] :is(.back, .set-back) { position: relative; }
+html[data-shell="phone"] :is(.back, .set-back)::after { content: ""; position: absolute; left: 0; right: 0; top: 50%; min-width: 44px; height: 44px; transform: translateY(-50%); }
 /* Nothing in the top bar may be wider than the screen: a too-wide bar made the whole page wider,
    and the WebView then panned it sideways (owner's recording, 2026-11-06). The buttons keep their
    size; the rest gives way. The search shrinks down to its magnifier (44 px, .search), also in the
@@ -2206,7 +2218,7 @@ html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.eyebrow,
 html[data-shell="phone"] #main > .hero.item-hero h1 { font-size: var(--fs-xl); line-height: 1.2; overflow-wrap: anywhere; }
 html[data-shell="phone"] #main > .hero.item-hero .sub { font-size: var(--fs-md); }
 html[data-shell="phone"] #main > .hero.item-hero .eyebrow { font-size: var(--fs-2xs); }
-html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.htags, .actions, .hmatch-slot, .also-icons, .hero-tags) { grid-column: 1 / -1; }
+html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.htags, .actions, .reviewrow, .hmatch-slot, .also-icons, .hero-tags) { grid-column: 1 / -1; }
 html[data-shell="phone"] #main > .hero.item-hero .actions { margin-top: 12px !important; gap: 8px; flex-wrap: wrap; }
 /* (Also on and Open in: a row of their own under Play and the icons) */
 html[data-shell="phone"] #main > .hero.item-hero .actions > .also-icons { order: 4; flex: 1 0 100%; margin: 0; }

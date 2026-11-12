@@ -388,11 +388,11 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       const co = page.locator('#tagcotags .ptag').first();
       assert.equal(await bgOf(co), tagRgba(tagColour('hardcore'), 0.3));
       assert.doesNotMatch(await co.innerText(), /#/);
-      await page.goto(BASE + '/tag/frenchcore,hardcore'); await page.locator('#tagcotags [data-tag-solo]').first().waitFor();
-      assert.equal(await page.locator('#tagcotags [data-tag-rm]').count(), 2, 'each chosen tag has ×');
-      assert.equal(await page.locator('#tagcotags span.ptag.own').count(), 0, 'chosen tags are a filter, not yours');
-      await page.locator('#tagcotags [data-tag-rm="hardcore"]').click(); await page.waitForURL(/\/tag\/frenchcore$/);
-      await page.goto(BASE + '/tag/frenchcore,hardcore'); await page.locator('#tagcotags [data-tag-solo="hardcore"]').click(); await page.waitForURL(/\/tag\/hardcore$/);
+      await page.goto(BASE + '/tag/frenchcore,hardcore'); await page.locator('#tagpicked [data-tag-solo]').first().waitFor();
+      assert.equal(await page.locator('#tagpicked [data-tag-rm]').count(), 2, 'each chosen tag has ×');
+      assert.equal(await page.locator('#tagpicked span.ptag.own').count(), 0, 'chosen tags are a filter, not yours');
+      await page.locator('#tagpicked [data-tag-rm="hardcore"]').click(); await page.waitForURL(/\/tag\/frenchcore$/);
+      await page.goto(BASE + '/tag/frenchcore,hardcore'); await page.locator('#tagpicked [data-tag-solo="hardcore"]').click(); await page.waitForURL(/\/tag\/hardcore$/);
       await page.route(/\/v1\/search\/tags\?/, (r) => r.fulfill({ json: { mine: [{ label: 'frenchcore', count: 3 }], others: ['frenchtek'] } }));
       await page.goto(BASE + '/search?q=frenc'); await page.locator('#stags .ptag').first().waitFor({ timeout: 20000 });
       assert.equal(await bgOf(page.locator('#stags .ptag.own').first()), tagRgba(tagColour('frenchcore'), 0.3));
