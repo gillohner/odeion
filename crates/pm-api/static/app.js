@@ -7073,10 +7073,12 @@
             const f = $('#filter'); let timer = null;
             if (f) {
               const none = filterNone(box, 'track');
+              // Each keystroke empties the no-match line and outdates the search in flight, so only the
+              // answer for the text in the box can say "No track matches".
               f.oninput = () => {
-                clearTimeout(timer);
+                clearTimeout(timer); const mine = ++run; none('', 1);
                 timer = setTimeout(async () => {
-                  const q = f.value.trim(); const mine = ++run; const c = $('.page-head .count');
+                  const q = f.value.trim(); const c = $('.page-head .count');
                   if (!q) { browse(); none('', 0); if (c) c.dataset.filtered = ''; return; }
                   const r = await api('GET', `/library/search?${new URLSearchParams({ q, sources: 0, limit: 500 })}`).catch((e) => { toast(e.message, 'error'); return null; });
                   if (!r && mine === run) none('', 1);
