@@ -96,6 +96,8 @@ async function phone(browser, width, android) {
 // every font size scaled inline (em grows with it), and as the app's WebView applies it, as text zoom (the
 // text grows, em does not; text-size-adjust takes the same path in Chromium).
 const textZoom = (page, k) => page.addStyleTag({ content: `html { -webkit-text-size-adjust: ${Math.round(k * 100)}%; text-size-adjust: ${Math.round(k * 100)}%; }` });
+// 10em and 10ch in the playlist row's container, in px
+const units = (page) => page.evaluate(() => { const h = document.querySelector('#main > .hero > div:has(> .actions > #plplay)'); const w = (v) => { const p = document.createElement('div'); p.style.cssText = `position:absolute;visibility:hidden;height:0;width:${v}`; h.append(p); const r = p.getBoundingClientRect().width; p.remove(); return r; }; return { em: w('10em'), ch: w('10ch') }; });
 const scale = (page, k) => page.evaluate((k) => { const all = [document.documentElement, ...document.querySelectorAll('body, body *')]; const fs = all.map((e) => parseFloat(getComputedStyle(e).fontSize)); all.forEach((e, i) => { e.style.fontSize = `${fs[i] * k}px`; }); }, k);
 async function narrow(browser, width, android, k, zoom) {
   const at = `${android ? 'android' : 'browser'} ${width} at ${Math.round(k * 100)} %${zoom ? ' text zoom' : ''}`;
@@ -103,7 +105,14 @@ async function narrow(browser, width, android, k, zoom) {
   if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
   state.collections = [fx.summary];
   await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plsongs .srow'); await page.waitForTimeout(300);
+  const units0 = zoom && await units(page);
   if (k !== 1) { await (zoom ? textZoom : scale)(page, k); await page.waitForTimeout(100); }
+  // text zoom is what the steps are written for: the text and ch grow with it, em stays as it was (if a later
+  // Chromium scaled em too, these cases would no longer test the app's path)
+  if (zoom) {
+    const u = await units(page);
+    check(u.em === units0.em && Math.abs(u.ch / units0.ch - k) < 0.05, `${at}: em stays (10em ${units0.em} → ${u.em} px) and ch grows with the text (10ch ${units0.ch} → ${u.ch} px)`);
+  }
   const r = await row(page, '#main > .hero');
   const look = await page.evaluate(() => { const ic = (id) => getComputedStyle(document.querySelector(`#${id} > .ic`)).display !== 'none'; return { fs: parseFloat(getComputedStyle(document.querySelector('#plplay')).fontSize), gap: parseFloat(getComputedStyle(document.querySelector('#main > .hero .actions')).columnGap), play: ic('plplay'), shuffle: ic('plshuffle'), pad: parseFloat(getComputedStyle(document.querySelector('#plplay')).paddingLeft), shufPad: parseFloat(getComputedStyle(document.querySelector('#plshuffle')).paddingLeft) }; });
   check(Math.abs(look.fs - 14 * k) < 0.1, `${at}: Play's words are ${look.fs.toFixed(1)} px (the scaled size held)`);
@@ -112,7 +121,7 @@ async function narrow(browser, width, android, k, zoom) {
   check(r.buttons.find((b) => b.id === 'plplay').text === 'Play' && r.buttons.find((b) => b.id === 'plshuffle').text === 'Shuffle', `${at}: Play and Shuffle keep their words`);
   // what gives way, in order: [the row's gap, Play's icon shown, Shuffle's icon shown]; Play's and Shuffle's
   // sides follow the gap. The normal font size at 360/412 px is the row as before.
-  const want = { 277: { 1: [2, false] }, 313: { 1: [4, false] }, 320: { 1: [4, true], 1.15: [4, false], 1.3: [4, false] }, 340: { 1: [4, true], 1.15: [4, true], 1.3: [4, false] }, 360: { 1: [8, true], 1.15: [4, true], 1.3: [4, true] }, 385: { 1.3: [8, true, false] }, 412: { 1: [8, true], 1.15: [8, true], 1.3: [8, true] } }[width][k];
+  const want = { 277: { 1: [2, false] }, 300: { 1.3: [2, false] }, 313: { 1: [4, false] }, 320: { 1: [4, true], 1.15: [4, false], 1.3: [4, false] }, 340: { 1: [4, true], 1.15: [4, true], 1.3: [4, false] }, 360: { 1: [8, true], 1.15: [4, true], 1.3: [4, true] }, 385: { 1.3: [8, true, false] }, 412: { 1: [8, true], 1.15: [8, true], 1.3: [8, true] } }[width][k];
   const shuffle = want[2] ?? width >= 380;
   const pad = { 2: 6, 4: 10, 8: 14 }[want[0]];
   check(look.gap === want[0] && look.play === want[1] && look.shuffle === shuffle && look.pad === pad && look.shufPad === pad, `${at}: gap ${look.gap} px (want ${want[0]}), Play's and Shuffle's sides ${look.pad}/${look.shufPad} px (want ${pad}), Play's icon ${look.play ? 'shown' : 'hidden'} (want ${want[1] ? 'shown' : 'hidden'}), Shuffle's icon ${look.shuffle ? 'shown' : 'hidden'} (want ${shuffle ? 'shown' : 'hidden'})`);
@@ -136,6 +145,8 @@ async function narrow(browser, width, android, k, zoom) {
       for (const width of [320, 340, 360, 412]) for (const k of [1.15, 1.3]) await narrow(zoomed, width, true, k, true);
       // a wide phone at 130 %: only Shuffle's icon gives way
       await narrow(zoomed, 385, true, 1.3, true);
+      // a narrow phone (300 px) at 130 %: the fourth step, as for the 277 px page zoom above
+      await narrow(zoomed, 300, true, 1.3, true);
     } finally { await zoomed.close(); }
     // Desktop with a mouse: the same rows as before (no 44 px rule, Roon options stay one line of text)
     const { page, context, state } = await fx.create(browser, 1280, {});
