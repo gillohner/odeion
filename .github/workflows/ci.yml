@@ -665,6 +665,7 @@ jobs:
           ui-item-redraw.js item-redraw-shots
           ui-songs-name.js songs-name-shots
           ui-phone-library-head.js phone-library-head-shots
+          ui-song-menus.js song-menus-shots
           LIST
       # feedback.js on a test page, the node mocked: text stays text, a draft is its sign-in's,
       # only ticked details are sent. It takes <token> <mock> <shots>, not the list's <repo> <shots>
