@@ -2,7 +2,8 @@
 // page heading, its filter box, empty state and no-match line, the Back button of a song page),
 // as the Library chips, search and collections already say. Favourites and a genre page count and
 // head their songs the same way (so do Genres and the empty Queue and Playlists pages), and none of
-// these pages says "track" anywhere a person reads.
+// these pages says "track" anywhere a person reads. The words the app counts songs with elsewhere
+// (a scan done, a backup restored, songs added, Sources, Settings, bulk tags) say songs too.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-songs-name.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -31,6 +32,15 @@ const noTrack = async (page, where) => {
 };
 // The page heading's own words, without its count
 const heading = (page) => page.locator('main .page-head h2').first().evaluate((h) => h.firstChild.textContent);
+
+// Counts said where a page can't easily be driven here (toasts after an import or a bulk tag, a
+// restored backup), read from the app's code: none counts "tracks"
+function countWords() {
+  const app = fs.readFileSync(path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-api/static/app.js'), 'utf8');
+  const counts = [...app.matchAll(/countOf\([^;]*?,\s*'tracks?'\)|nOf\([^;]*?,\s*'tracks?',/g)].map((m) => m[0]);
+  assert.deepEqual(counts, [], 'no count says "tracks"');
+  console.log('PASS counts said elsewhere (songs added, a restored backup, bulk tags) say songs');
+}
 
 async function run(browser, width) {
   const T = `${width}`;
@@ -80,6 +90,16 @@ async function run(browser, width) {
       await page.locator('main [data-genre]').first().waitFor();
       assert.match(await page.locator('main [data-genre]').first().innerText(), /\b2 songs\b/, `${T}: Genres counts songs`);
       await noTrack(page, `${T} Genres`);
+      // A scan that ends says how many songs the library has
+      state.fixtures['/info'] = { body: { name: 'Fixture node', offline: false, scanning: true, library: { tracks: 20, albums: 1, artists: 2, files: 20, missing_files: 0 } } };
+      await fx.go(page, '/tracks');
+      await page.waitForFunction(() => document.querySelectorAll('#tracklist .track').length >= 12);
+      await page.waitForTimeout(300);
+      state.fixtures['/info'] = { body: { name: 'Fixture node', offline: false, scanning: false, library: { tracks: 1234, albums: 1, artists: 2, files: 1234, missing_files: 0 } } };
+      await page.waitForFunction(() => /Library up to date/.test(document.querySelector('#toast')?.textContent || ''), null, { timeout: 6000 })
+        .catch(() => assert.fail(`${T}: the scan-done toast shows`));
+      assert.equal(await page.locator('#toast').textContent(), 'Library up to date: 1,234 songs', `${T}: the scan-done toast counts songs`);
+      delete state.fixtures['/info'];
       assert.deepEqual(state.errors, [], 'no page errors');
     } finally { await context.close(); }
   }
@@ -111,6 +131,7 @@ async function run(browser, width) {
 }
 
 (async () => {
+  countWords();
   const browser = await chromium.launch();
   try {
     for (const width of [1280, 1024, 768]) await run(browser, width);
