@@ -1005,6 +1005,12 @@ details.idetails > summary h3 { margin: 0; }
 details.idetails > .credit, details.idetails > .kv { margin-top: 12px; }
 .blurb.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 4px; }
 #iblurbmore { display: inline-block; margin-bottom: 8px; }
+/* On a phone the article's opening under the hero is 2 lines, so the first Top song shows on the first
+   screen (the music first, owner 2026-11-05); More still shows it all. More is a 44 px tap: an
+   invisible layer reaches past its 20 px line, so nothing on the page moves */
+html[data-shell="phone"] .about-top .blurb.clamp { -webkit-line-clamp: 2; }
+html[data-shell="phone"] #iblurbmore { position: relative; }
+html[data-shell="phone"] #iblurbmore::before { content: ''; position: absolute; inset: -12px -8px; }
 .credit a { color: inherit; text-decoration: underline; }
 /* "Also on" next to Play/Shuffle: one icon per service */
 .also-icons { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-left: 4px; }
