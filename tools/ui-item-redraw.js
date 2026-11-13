@@ -210,6 +210,26 @@ async function laterParts(browser, width) {
     await page.locator('#isimilar [data-tile="2"]').waitFor({ timeout: 6000 });
     await page.waitForTimeout(150);
     assert.equal(await page.locator('#isimilar [data-tile="2"]').evaluate((el) => el === document.activeElement), true, `${where}: the Similar tile has focus again after two slow redraws (${await active(page)})`);
+    // A page that keeps asking while Similar never comes back in time: the hold still ends 20 s after
+    // it began (each redraw used to start its 6 s again, so blank space could stay ~40 s)
+    if (width === WIDTHS[0]) {
+      fixtures[ITEM].body = artist(true);
+      state.delay = 0;
+      await fx.go(page, `/artist/${ID}`);
+      await page.locator('#isimilar [data-tile="2"]').waitFor();
+      await page.waitForTimeout(300);
+      state.delay = (v) => (v === ITEM ? LATE : v === `${ITEM}/extras` ? 4500 : 0);
+      await page.evaluate(() => { const m = document.querySelector('#main'); window.__held = 0; new MutationObserver(() => { if (!window.__held && m.hasAttribute('data-hold')) window.__held = Date.now(); }).observe(m, { attributes: true, attributeFilter: ['data-hold'] }); });
+      await scrollTo(page, await page.evaluate(() => { const m = document.querySelector('#main'); return m.scrollHeight - m.clientHeight; }));
+      await page.waitForFunction(() => window.__held, null, { timeout: 8000 }).catch(() => assert.fail(`${where}: held while Similar is on its way (the case this checks)`));
+      const began = await page.evaluate(() => window.__held);
+      await page.waitForFunction((b) => Date.now() > b + 20600, began, { timeout: 25000, polling: 200 });
+      const late = state.hits.filter((h) => h.v === ITEM && h.m === 'GET' && h.at > began + 15000).length;
+      assert.ok(late >= 1, `${where}: the page was asked again past 15 s (the case this checks)`);
+      assert.equal(await page.locator('#isimilar').count(), 0, `${where}: Similar still on its way after 20 s (the case this checks)`);
+      assert.equal(await page.evaluate(() => document.querySelector('#main').hasAttribute('data-hold')), false, `${where}: the hold ends 20 s after it began, however often the page is asked again`);
+      state.delay = 0;
+    }
     // An error drawn instead of the page ends the hold: no blank space held under the notice
     fixtures[ITEM].body = artist(true);
     state.delay = 0;

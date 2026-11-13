@@ -6297,6 +6297,10 @@
     const a = document.activeElement; const top = main.scrollTop; const tall = main.scrollHeight;
     // (focus an earlier hold still waits to put back, its part not drawn yet, is wanted here too)
     const was = state.placeHold && state.placeHold.wants ? state.placeHold.wants() : null;
+    // (a page drawn again while its hold is on holds on from when that hold began: 6 s after each
+    // redraw, so a part slower than the next ask still comes back to the place, but 20 s at most
+    // in all, so a page that keeps asking (every 3-4 s while a service reads) doesn't hold on)
+    const began = state.placeHold && state.placeHold.began;
     if (state.placeHold) state.placeHold();
     const at = (s) => { try { return $$(s, main); } catch { return []; } };
     let inside = !!a && a !== main && main.contains(a); let sel = ''; let i = -1;
@@ -6310,8 +6314,9 @@
     } else if (was && (!a || a === document.body || a === main)) { ({ sel, i } = was); inside = true; }
     return () => {
       // The parts drawn after the page (Similar, concerts, comments) come back a moment later: until
-      // they do (6 s at most; opening a page ends it) the page keeps its height below, so a place
-      // down there isn't cut short, and focus that was in one of them goes back when it is drawn
+      // they do (6 s at most, 20 s across redraws; opening a page ends it) the page keeps its
+      // height below, so a place down there isn't cut short, and focus that was in one of them goes
+      // back when it is drawn
       let extra = 0;
       const fit = () => { extra = Math.max(0, tall - (main.scrollHeight - extra)); if (extra) { main.style.setProperty('--hold', `${extra}px`); main.dataset.hold = ''; } else { main.style.removeProperty('--hold'); delete main.dataset.hold; } return extra; };
       // Done once focus is back, or something else took it meanwhile
@@ -6338,26 +6343,29 @@
           if (!held && !want) state.placeHold();
         });
         mo.observe(main, { childList: true, subtree: true });
-        const t = setTimeout(() => state.placeHold(), 6000);
+        const since = began || Date.now();
+        const t = setTimeout(() => state.placeHold(), Math.max(0, Math.min(Date.now() + 6000, since + 20000) - Date.now()));
         state.placeHold = () => { mo.disconnect(); clearTimeout(t); acts.forEach((e) => document.removeEventListener(e, mine, true)); main.style.removeProperty('--hold'); delete main.dataset.hold; state.placeHold = null; };
-        state.placeHold.wants = () => (want ? { sel, i } : null);
+        state.placeHold.wants = () => (want ? { sel, i } : null); state.placeHold.began = since;
       }
     };
   };
   // Albums and Artists drawn again where they stand (the library changed: a scan, an identify run,
   // an edit) keep the page on screen until the new one is drawn: what is typed in the filter (read
   // as it is when replaced, so typing meanwhile counts) and its caret, the scroll and the focus.
-  // A chosen A–Z letter is chosen again. `n`: how many rows were drawn (2,000 at most), drawn at
-  // once again so the place is there; the list's own height holds it, so no spacer stays below
-  // (keepPlace's hold) when it got shorter. Opening the page, a sort, a chip or Favourites draws
-  // it from the start (renderSortedList keeps the filter).
+  // A chosen A–Z letter is chosen again. `n`: how many rows were drawn, drawn at once again (the
+  // first part only) so the place is there; the list's own height holds it, so no spacer stays
+  // below (keepPlace's hold) when it got shorter. `none`: the no-match line as it was, so it isn't
+  // said again when nothing changed. Opening the page, a sort, a chip or Favourites draws it from
+  // the start (renderSortedList keeps the filter).
   const keepList = (key, again, rows) => {
     if (!again || !redrawing(key)) return null;
     const old = $('#filter', main); const letter = $('[data-az].on', main)?.dataset.az;
-    const kept = { n: Math.min(2000, $$(rows, main).length) }; const place = keepPlace();
+    const kept = { n: $$(rows, main).length, none: $('.filter-none', main)?.textContent || '' }; const place = keepPlace();
     kept.done = () => {
       const f = $('#filter', main);
-      if (old && old.value && f && !f.disabled) { f.value = old.value; f.oninput?.(); }
+      // (a filter that is off, nothing to filter just now, keeps its text for when it is on again)
+      if (old && old.value && f) { f.value = old.value; if (!f.disabled) f.oninput?.(); }
       const az = letter && $$('[data-az]', main).find((b) => b.dataset.az === letter); if (az && !az.disabled) az.click();
       place(); if (state.placeHold) state.placeHold(); kept.n = 0;
       if (old && f && f.value && document.activeElement === f) { try { f.setSelectionRange(old.selectionStart, old.selectionEnd, old.selectionDirection || 'none'); } catch { /* no caret */ } }
@@ -6365,6 +6373,12 @@
     return kept;
   };
 
+  // Each draw of Albums and Artists is numbered: one that answers after a newer one was drawn (two
+  // library changes, or a change and a sort, answered out of order) is dropped before it changes
+  // anything, an error of its own too, so the newer list stays. (Only once drawn: changes coming
+  // faster than a list loads still draw each answer, the page is never left on its placeholder.)
+  const pageGen = { albums: 0, artists: 0 }; const pageShown = { albums: 0, artists: 0 };
+  const listStale = (v, mine) => state.view !== v || mine < pageShown[v];
   // The latest favourites load, so a page that lists favourites can wait for it on a cold start
   let favLoad = null; let favRedraw = null;
   const loadFavourites = () => {
@@ -6439,20 +6453,28 @@
     return () => { done = true; io.disconnect(); sentinel.remove(); };
   };
   // The same over items already in memory: `html(slice, start)` draws a part; `bind()` wires it.
-  const growItems = (box, items, html, bind, step = 120) => {
+  // `first`: how many the first part draws (a list drawn again where it stands: as many as before).
+  const growItems = (box, items, html, bind, step = 120, first = step) => {
     let n = 0;
-    const more = () => { const part = items.slice(n, n + step); if (part.length) { box.insertAdjacentHTML('beforeend', html(part, n)); n += part.length; if (bind) bind(); } return n < items.length; };
+    const more = () => { const part = items.slice(n, n + (n ? step : first)); if (part.length) { box.insertAdjacentHTML('beforeend', html(part, n)); n += part.length; if (bind) bind(); } return n < items.length; };
     more();
     return n < items.length ? growList(box, more) : () => {};
   };
   // A list's filter that matches nothing says so under the list (the count alone read "0 shown").
   // The line is there, empty, from the start so a screen reader hears it when it fills; it fills
   // once typing pauses (not at each key), and empties at once. No filter box: does nothing.
-  const filterNone = (box, what) => {
+  // `said`: the line as it was before the list was drawn again; it is there at once and not said
+  // again while the same filter still matches nothing.
+  const filterNone = (box, what, said = '') => {
     if (!box || !$('#filter')) return () => {};
-    const p = document.createElement('p'); p.className = 'muted small filter-none'; p.setAttribute('role', 'status'); box.after(p);
+    const p = document.createElement('p'); p.className = 'muted small filter-none'; p.setAttribute('role', 'status'); p.textContent = said; box.after(p);
     let t = null;
-    return (q, n) => { clearTimeout(t); if (q && !n) t = setTimeout(() => { p.textContent = `No ${what} matches “${q}”.`; }, 250); else p.textContent = ''; };
+    return (q, n) => {
+      clearTimeout(t);
+      if (!q || n) { p.textContent = ''; return; }
+      const line = `No ${what} matches “${q}”.`;
+      if (p.textContent !== line) t = setTimeout(() => { p.textContent = line; }, 250);
+    };
   };
   // A–Z on a long list jumps within what the filter shows: the matches from that letter on. While a
   // filter is typed, letters with no match are off; typing (or Escape) unmarks the chosen letter.
@@ -6532,9 +6554,15 @@
     f.oninput = () => { const q = f.value.trim().toLowerCase(); let n = 0; $$(selector, main).forEach((el) => { const show = !q || el.textContent.toLowerCase().includes(q); el.hidden = !show; if (show) n++; }); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${n} shown` : ''; };
     f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
   };
+  // (a load started before a newer one, or before the albums were let go (the library changed),
+  // doesn't keep its answer: forgetAlbums)
+  let albumsLoad = null;
+  const forgetAlbums = () => { state.albums = null; albumsLoad = null; };
   const albumsAll = async () => {
     if (!state.albums) {
-      const [albums, formats] = await Promise.all([pageAll('/library/albums', (a) => a.id), api('GET', '/library/albums/formats').catch(() => [])]);
+      const load = albumsLoad = Promise.all([pageAll('/library/albums', (a) => a.id), api('GET', '/library/albums/formats').catch(() => [])]);
+      const [albums, formats] = await load;
+      if (load !== albumsLoad) return albums;
       state.albums = albums; state.formats = new Map(formats.map((f) => [f.album_id, f]));
     }
     return state.albums;
@@ -6708,7 +6736,7 @@
     // The dashboard is a full screen of its own (a TV or tablet): no sidebar, bars or player
     document.body.classList.toggle('kiosk', v === 'dashboard');
     endSelect();
-    const lists = {};
+    const lists = {}; let listMine = 0; // (Albums, Artists: this draw's number, pageGen)
     try {
       switch (v) {
         case 'home': {
@@ -6888,9 +6916,10 @@
           break;
         }
         case 'albums': {
+          const mine = listMine = ++pageGen.albums;
           const again = redrawing('albums'); if (!again) loading();
           const albums = await albumsAll();
-          if (state.view !== 'albums') return;
+          if (listStale('albums', mine)) return;
           const lp = listPref('albums');
           // Favourites on a cold start: the list waits for the favourites (not "No favourite albums"),
           // 3 s at most (a listener's first go to their homeserver can take longer), then is drawn
@@ -6900,11 +6929,13 @@
             const fl = favLoad;
             // (once is enough: drawn again meanwhile, by a sort or a chip, it doesn't wait again)
             if (favRedraw !== fl) await Promise.race([fl.catch(() => {}), new Promise((ok) => setTimeout(ok, 3000))]);
-            if (state.view !== 'albums') return;
+            if (listStale('albums', mine)) return;
             favLate = !fl.done;
-            // Drawn again when they are in, only while it still says they are on their way
-            if (favLate && favRedraw !== fl) { favRedraw = fl; const again = () => { if (state.view === 'albums' && $('#albumswait', main)) render(); }; fl.then(again, again); }
+            // Drawn again when they are in, while it still shows Favourites (those listed already
+            // can be joined by new ones; drawn where it stands, keepList)
+            if (favLate && favRedraw !== fl) { favRedraw = fl; const again = () => { if (state.view === 'albums' && listPref('albums').fav) render(); }; fl.then(again, again); }
           }
+          pageShown.albums = mine;
           const sorted = sortList('albums', albums.filter((a) => inFocus(a, state.focus) && (!lp.fav || albumFav(a))), lp.sort || 'name');
           const shown = sorted; const kept = keepList('albums', again, '#albumgrid .tile');
           const letters = (lp.sort || 'name') === 'name' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.title)))] : (lp.sort === 'artist' && shown.length > 40 ? [...new Set(shown.map((a) => firstLetter(a.album_artist)))] : []);
@@ -6915,9 +6946,9 @@
           const grid = $('#albumgrid');
           if (grid) {
             let stop = () => {};
-            const draw = (list) => { stop(); grid.innerHTML = ''; stop = growItems(grid, list, (part) => part.map(tile).join(''), bindTiles, Math.max(120, kept ? kept.n : 0)); };
+            const draw = (list) => { stop(); grid.innerHTML = ''; stop = growItems(grid, list, (part) => part.map(tile).join(''), bindTiles, 120, Math.max(120, kept ? kept.n : 0)); };
             draw(shown);
-            const none = filterNone(grid, 'album');
+            const none = filterNone(grid, 'album', kept && kept.none);
             const f = $('#filter');
             const matches = () => { const q = (f?.value || '').trim().toLowerCase(); return q ? shown.filter((a) => `${a.title} ${a.album_artist || ''} ${a.year || ''}`.toLowerCase().includes(q)) : shown; };
             // A–Z: the matches from that letter on (the grid draws as you scroll)
@@ -6931,9 +6962,11 @@
           break;
         }
         case 'artists': {
+          const mine = listMine = ++pageGen.artists;
           const again = redrawing('artists'); if (!again) loading();
-          state.artists = await api('GET', '/library/artists');
-          if (state.view !== 'artists') return;
+          const artistList = await api('GET', '/library/artists');
+          if (listStale('artists', mine)) return;
+          pageShown.artists = mine; state.artists = artistList;
           const alp = listPref('artists');
           const artistsSorted = sortList('artists', state.artists, alp.sort || 'name');
           const aletters = (alp.sort || 'name') === 'name' && artistsSorted.length > 40 ? [...new Set(artistsSorted.map((a) => firstLetter(a.name)))] : [];
@@ -6944,9 +6977,9 @@
             const row = (a) => `<div class="list-row clickable" data-artist="${a.id}"><div class="avatar" style="background:hsl(${hue(a.name)} 35% 28%)">${esc(initials(a.name))}</div><div class="grow"><div class="name">${esc(a.name)}</div><div class="sub">${[a.albums ? countOf(a.albums, 'albums') : '', countOf(a.tracks, 'songs')].filter(Boolean).join(' · ')}</div></div>${icon('chevron', 'ic chev')}</div>`;
             const bindRows = () => $$('[data-artist]', alist).forEach((el) => el.onclick = () => setView('artist', Number(el.dataset.artist)));
             let stop = () => {};
-            const draw = (list) => { stop(); alist.innerHTML = ''; stop = growItems(alist, list, (part) => part.map(row).join(''), bindRows, Math.max(150, kept ? kept.n : 0)); };
+            const draw = (list) => { stop(); alist.innerHTML = ''; stop = growItems(alist, list, (part) => part.map(row).join(''), bindRows, 150, Math.max(150, kept ? kept.n : 0)); };
             draw(artistsSorted);
-            const none = filterNone(alist, 'artist');
+            const none = filterNone(alist, 'artist', kept && kept.none);
             const f = $('#filter');
             const matches = () => { const q = (f?.value || '').trim().toLowerCase(); return q ? artistsSorted.filter((a) => a.name.toLowerCase().includes(q)) : artistsSorted; };
             const az = azJump((a) => firstLetter(a.name), matches, draw, none);
@@ -8889,7 +8922,7 @@
           };
           const when = (t) => (t ? new Date(t * 1000).toLocaleString() : 'never');
           const nOf = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-          const countsLine = (c) => `${nOf(c.tracks, 'track', 'tracks')} (${c.identified} identified) · ${nOf(c.playlists, 'playlist', 'playlists')} · ${nOf(c.favourites, 'favourite', 'favourites')} · ${nOf(c.tags, 'tag', 'tags')} · ${nOf(c.plays, 'play', 'plays')}`;
+          const countsLine = (c) => `${nOf(c.tracks, 'song', 'songs')} (${c.identified} identified) · ${nOf(c.playlists, 'playlist', 'playlists')} · ${nOf(c.favourites, 'favourite', 'favourites')} · ${nOf(c.tags, 'tag', 'tags')} · ${nOf(c.plays, 'play', 'plays')}`;
           const loadSched = async () => {
             const box = $('#bksched'); if (!box) return;
             let sc; try { sc = await api('GET', '/backup/schedule'); } catch (er) { box.innerHTML = `<p class="muted small">${esc(er.message)}</p>`; return; }
@@ -8927,7 +8960,7 @@
                   ${r.signed_in.length ? `<p class="small">Signed in again: ${esc(r.signed_in.join(', '))}.</p>` : ''}${r.sign_in_again.length ? `<p class="small">Sign in again: ${esc(r.sign_in_again.join(', '))}.</p>` : ''}${r.notes.map((n) => `<p class="small muted">${esc(n)}</p>`).join('')}
                   ${r.missing_folders.map((m, k) => `<div class="toolbar" style="margin-top:8px"><span class="small">Not on this computer: <code>${esc(m)}</code>. Where is that music now?</span><input class="input" data-mvto="${k}" placeholder="/path/to/the/music" aria-label="New place of ${esc(m)}"><button class="btn sm" data-mv="${k}">Use this folder</button></div>`).join('')}</div>`;
                 $$('[data-mv]', out).forEach((mb) => mb.onclick = async () => { const k = Number(mb.dataset.mv); const to = $(`[data-mvto="${k}"]`, out).value.trim(); if (!to) return; try { const m = await api('POST', '/library/folders/move', { from: r.missing_folders[k], to }); toast(`${m.moved_files} files found in their new place`); mb.closest('.toolbar').remove(); } catch (er) { toast(er.message, 'error'); } });
-                b.textContent = 'Restored'; state.pubkyUser = undefined; state.albums = null; homeCache.clear(); toast('Backup restored');
+                b.textContent = 'Restored'; state.pubkyUser = undefined; forgetAlbums(); homeCache.clear(); toast('Backup restored');
               } catch (er) { toast(er.message, 'error'); b.disabled = false; b.textContent = 'Restore this backup'; delete b.dataset.armed; }
             };
           };
@@ -9083,6 +9116,7 @@
       $$('[data-crumb-kind]', main).forEach((b) => b.onclick = () => (b.dataset.asBack ? $('.pagebar > [data-back]', main).click() : setView('item', { kind: b.dataset.crumbKind, id: b.dataset.crumbId })));
       bindTrackRows(main, lists);
     } catch (e) {
+      if (listMine && listStale(v, listMine)) return; // (an older list's error over a newer list)
       if (state.drawnPage === v) state.drawnPage = null; // (Albums, Artists: Try again draws it from the start)
       main.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)} <button class="btn sm" id="navretry">Try again</button></div>`;
       $('#navretry', main).onclick = () => render();
@@ -9168,7 +9202,7 @@
     ws.send(JSON.stringify({ type: 'ping', id: link.pingId }));
   };
   const onLibraryChanged = () => {
-    state.albums = null;
+    forgetAlbums();
     api('GET', '/info').then((i) => { state.info = i; watchScan(i); if (link.up) setConn('ok', nodeLabel()); }).catch(() => {});
     if (['albums', 'tracks', 'artists', 'home', 'favourites', 'album', 'artist', 'playlists', 'playlist'].includes(state.view)) render();
   };
@@ -9315,8 +9349,8 @@
     // A scan that ends says so, with what it could not read (fresh-eyes review)
     if (was && info && !info.scanning && info.library) {
       const ls = info.last_scan; const n = info.library.tracks;
-      toast(`Library up to date: ${n.toLocaleString()} ${n === 1 ? 'track' : 'tracks'}${ls && ls.error_count ? `. ${ls.error_count} ${ls.error_count === 1 ? 'file' : 'files'} could not be read (Your library › Node library)` : ''}`, ls && ls.error_count ? 'error' : '');
-      state.albums = null;
+      toast(`Library up to date: ${countOf(n.toLocaleString(), 'songs')}${ls && ls.error_count ? `. ${ls.error_count} ${ls.error_count === 1 ? 'file' : 'files'} could not be read (Your library › Node library)` : ''}`, ls && ls.error_count ? 'error' : '');
+      forgetAlbums();
       if (state.view === 'settings' || state.view === 'albums' || state.view === 'tracks') render();
     }
     if (info && info.scanning) scanTimer = setTimeout(async () => { try { const i = await api('GET', '/info'); state.info = i; setConn(true, `${i.name} · ${countOf(i.library.tracks, 'songs')}`); watchScan(i); } catch { showScanning(false); } }, 2000);

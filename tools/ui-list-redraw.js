@@ -3,7 +3,12 @@
 // filter (typing meanwhile counts) with its caret and focus, the place a long list was scrolled
 // to (and the focused album), and a chosen A–Z letter. Going elsewhere meanwhile isn't undone;
 // opening the page again still starts it empty. (A sort still draws from the start: the
-// "no Sort while a redraw loads" check in ui-rows-search-sort.js.)
+// "no Sort while a redraw loads" check in ui-rows-search-sort.js.) Two answers out of order (a
+// redraw's list still coming when a sort is chosen) never put the older list or its error back,
+// and changes coming faster than a list loads still draw each answer; a filter
+// that matches nothing isn't announced again when the list is drawn again; a filter that is off
+// (Favourites on, none shown) keeps its text; and Favourites still on when a slow favourites load
+// comes in shows the new ones beside those already listed.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-list-redraw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -26,10 +31,11 @@ const pages = {
 async function run(browser, width, kind) {
   const k = pages[kind];
   const { page, context, state } = await fx.create(browser, width, { fixtures });
-  // The list's next answer can be held until the test lets it go
+  // The list's next answer can be held until the test lets it go (`old`: then answered with the
+  // list as it was when asked, however the library changed meanwhile)
   let gate = null;
-  await context.route(k.list, async (route) => { const g = gate; if (g) { g.entered(); await g.p; } return route.fallback(); });
-  const hold = () => { const g = {}; g.p = new Promise((r) => { g.open = r; }); g.in = new Promise((r) => { g.entered = r; }); gate = g; return g; };
+  await context.route(k.list, async (route) => { const g = gate; if (g) { const old = g.old; g.entered(); await g.p; if (old) return route.fulfill({ status: old.status || 200, contentType: 'application/json', body: JSON.stringify(old.status ? { error: 'The library did not answer' } : old) }); } return route.fallback(); });
+  const hold = (old) => { const g = { old }; g.p = new Promise((r) => { g.open = r; }); g.in = new Promise((r) => { g.entered = r; }); gate = g; return g; };
   let socket = null;
   await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
   const changed = () => socket.send(JSON.stringify({ type: 'library_changed' }));
@@ -126,14 +132,119 @@ async function run(browser, width, kind) {
     await page.waitForFunction(([sel]) => document.querySelectorAll(sel).length >= 12, [k.rows]);
     assert.equal(await page.locator('#filter').inputValue(), '', `${kind} ${width}: opened again, the filter is empty`);
     assert.equal(await page.evaluate(() => document.querySelector('main').scrollTop), 0, `${kind} ${width}: opened again, at the top`);
+
+    // 6. A filter that matches nothing: drawn again, its line is there at once and isn't said again
+    // (a screen reader heard it once); a new filter that matches nothing is said
+    await page.fill('#filter', 'zzz');
+    const line = `No ${kind === 'albums' ? 'album' : 'artist'} matches “zzz”.`;
+    await page.waitForFunction((t) => document.querySelector('.filter-none')?.textContent === t, line);
+    await page.evaluate(() => { window.__said = 0; new MutationObserver((ms) => { for (const m of ms) { const t = m.target.nodeType === 3 ? m.target.parentElement : m.target; if (t && t.classList && t.classList.contains('filter-none')) window.__said++; } }).observe(document.querySelector('main'), { childList: true, subtree: true, characterData: true }); });
+    await markBox(); changed(); await redrawn(); await sleep(600);
+    assert.equal(await page.locator('.filter-none').textContent(), line, `${kind} ${width}: the no-match line stays`);
+    assert.equal(await page.evaluate(() => window.__said), 0, `${kind} ${width}: the same no-match line isn't said again when drawn again`);
+    await page.locator('#filter').press('End'); await page.keyboard.type('q');
+    await page.waitForFunction((t) => document.querySelector('.filter-none')?.textContent === t, line.replace('zzz', 'zzzq'));
+    assert.ok(await page.evaluate(() => window.__said) > 0, `${kind} ${width}: a new no-match line is said`);
+    await page.locator('#filter').press('Escape');
+
+    // 7. Two answers out of order: a redraw's list still on its way when a sort is chosen (the
+    // library changed meanwhile) never puts its older list back over the sorted, newer one
+    const key = kind === 'albums' ? '/library/albums' : '/library/artists';
+    const full = fixtures[key].body;
+    await page.waitForFunction(([sel]) => document.querySelectorAll(sel).length >= 12, [k.rows]);
+    const g3 = hold(full); changed(); await g3.in; gate = null;
+    fixtures[key].body = full.slice(0, 200);
+    await page.selectOption('[data-lsort]', 'added');
+    await page.waitForFunction(([sel, a]) => document.querySelector('.page-head .count')?.textContent === '200' && document.querySelector(sel)?.getAttribute(a) === '200', [k.rows, k.attr]);
+    g3.open(); await sleep(600);
+    assert.equal(await page.locator('.page-head .count').textContent(), '200', `${kind} ${width}: the older answer doesn't replace the newer list`);
+    assert.equal(await page.locator(k.rows).first().getAttribute(k.attr), '200', `${kind} ${width}: still sorted, newest first`);
+    // Opened again: the newer list too (the older answer didn't replace what the page keeps)
+    await open(k.nav);
+    await page.waitForFunction((v) => location.pathname === `/${v}` && !document.querySelector('main .sk-grid'), k.nav);
+    await open(kind);
+    await page.waitForFunction(([sel]) => document.querySelectorAll(sel).length >= 12, [k.rows]);
+    assert.equal(await page.locator('.page-head .count').textContent(), '200', `${kind} ${width}: opened again, the newer list`);
+    // An older answer that fails doesn't put its error over the newer list either
+    const g4 = hold({ status: 500 }); changed(); await g4.in; gate = null;
+    await page.selectOption('[data-lsort]', 'name');
+    await page.waitForFunction(([sel, a]) => document.querySelector(sel)?.getAttribute(a) === '1', [k.rows, k.attr]);
+    g4.open(); await sleep(600);
+    assert.equal(await page.locator('#navretry').count(), 0, `${kind} ${width}: an older answer's error isn't drawn over the newer list`);
+    assert.equal(await page.locator(k.rows).first().getAttribute(k.attr), '1', `${kind} ${width}: the newer list stays`);
+    fixtures[key].body = full;
+
+    // 9. Changes coming faster than the list loads: each answer is drawn as it comes, the page
+    // isn't left on its loading placeholder until they stop
+    await open(k.nav);
+    await page.waitForFunction((v) => location.pathname === `/${v}` && !document.querySelector('main .sk-grid'), k.nav);
+    changed(); await sleep(400); // (the albums kept in memory are let go: the list is asked for)
+    const g5 = hold(); await open(kind); await g5.in;
+    const g6 = hold(); changed(); await g6.in; gate = null;
+    g5.open();
+    await page.waitForFunction(([sel]) => document.querySelectorAll(sel).length >= 12, [k.rows], { timeout: 4000 })
+      .catch(() => assert.fail(`${kind} ${width}: the first answer is drawn while a newer one is on its way`));
+    g6.open();
+    await page.waitForFunction(([sel]) => document.querySelectorAll(sel).length >= 12 && !document.querySelector('main .sk-grid'), [k.rows]);
+
+    // 8. Favourites on with none shown turns the filter off: its text stays through a redraw and
+    // filters again once Favourites is off
+    if (kind === 'albums') {
+      await page.fill('#filter', 'loop');
+      await page.waitForFunction(([sel]) => document.querySelectorAll(sel).length === 3, [k.rows]);
+      await page.locator('[data-lfav]').click();
+      await page.waitForFunction(() => document.querySelector('#filter')?.disabled && document.querySelector('#filter').value === 'loop');
+      await page.evaluate(() => { document.querySelector('.page-head').dataset.old = '1'; });
+      changed();
+      await page.waitForFunction(() => { const h = document.querySelector('.page-head'); return h && !h.dataset.old; });
+      await sleep(200);
+      assert.equal(await page.locator('#filter').inputValue(), 'loop', `${kind} ${width}: the filter that is off keeps its text when drawn again`);
+      await page.locator('[data-lfav]').click();
+      await page.waitForFunction(([sel]) => !document.querySelector('#filter')?.disabled && document.querySelectorAll(sel).length === 3, [k.rows]);
+      assert.equal(await page.locator('#filter').inputValue(), 'loop', `${kind} ${width}: and filters again once Favourites is off`);
+    }
     assert.deepEqual(state.errors, [], 'no page errors');
     console.log(`PASS ${kind} ${width}: drawn again where it stands, the filter, caret, focus and scroll stay`);
   } finally { if (gate) gate.open(); await context.close(); }
 }
 
+// Favourites on, some listed already: a heart saved while the favourites are slow to come (over
+// the 3 s Albums waits) shows its album once they are in, drawn where it stands
+async function lateFavourites(browser, width) {
+  const tracks = [{ ...fx.track, id: 1, title: 'Song 1' }];
+  const favs = (uris) => ({ body: { uris, tracks: [], albums: [], artists: [], other: [] } });
+  const fix = { ...fixtures, '/library/tracks': { body: { tracks, next: null } }, '/favourites': favs(['album:1']) };
+  const { page, context, state } = await fx.create(browser, width, { fixtures: fix, tracks });
+  await context.addInitScript(() => localStorage.setItem('pm.list.albums', JSON.stringify({ fav: true })));
+  const tiles = () => page.locator('#albumgrid .tile').evaluateAll((els) => els.map((e) => e.getAttribute('data-album')));
+  try {
+    await fx.go(page, '/albums');
+    await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length === 1);
+    await fx.go(page, '/tracks');
+    await page.locator('#tracklist [data-act="fav"]').first().waitFor();
+    // Hearted elsewhere meanwhile: album 2 comes with the next favourites, 6 s late
+    fix['/favourites'] = favs(['album:1', 'album:2']);
+    state.delay = (v, m) => (v === '/favourites' && m === 'GET' ? 6000 : 0);
+    await page.locator('#tracklist [data-act="fav"]').first().click();
+    const open = page.locator('.nav-item[data-view="albums"]');
+    await (await open.isVisible() ? open : page.locator('[data-libnav="albums"]')).click();
+    await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length >= 1, null, { timeout: 6000 });
+    assert.deepEqual(await tiles(), ['1'], `late favourites ${width}: the favourites listed already show first (the case this checks)`);
+    await page.locator('#albumgrid .tile').first().focus();
+    await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length === 2, null, { timeout: 8000 })
+      .catch(() => assert.fail(`late favourites ${width}: the new favourite shows once they are in`));
+    assert.deepEqual((await tiles()).sort(), ['1', '2'], `late favourites ${width}: both favourites`);
+    assert.equal(await page.locator('.page-head .count').textContent(), '2 of 300', `late favourites ${width}: the count follows`);
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-album')), '1', `late favourites ${width}: the focused album keeps focus`);
+    assert.deepEqual(state.errors, [], 'no page errors');
+    await page.screenshot({ path: path.join(shots, `albums-${width}-late-favourite.png`) });
+    console.log(`PASS late favourites ${width}: a favourite that comes late joins those listed`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
-    for (const width of [1280, 1024, 768]) for (const kind of Object.keys(pages)) await run(browser, width, kind);
+    for (const width of [1280, 1024, 768]) { for (const kind of Object.keys(pages)) await run(browser, width, kind); await lateFavourites(browser, width); }
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
