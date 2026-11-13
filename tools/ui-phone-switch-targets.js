@@ -151,6 +151,8 @@ async function page1(page, at, route, wantMin, scrollTo) {
           return { own: code.textContent === b.dataset.rendrm, sameRow: bb.top < cb.bottom && bb.bottom > cb.top, alone: !others.length };
         }));
         check(rows.length === discovery.saved_addresses.length && rows.every((r) => r.own && r.sameRow && r.alone), `${at}: each address is on a row of its own with its forget beside it (${JSON.stringify(rows.filter((r) => !(r.own && r.sameRow && r.alone)))})`);
+        const unnamed = await page.evaluate(() => [...document.querySelectorAll('[data-rendrm]')].filter((b) => b.getAttribute('aria-label') !== `Forget ${b.dataset.rendrm}`).map((b) => b.getAttribute('aria-label')));
+        check(!unnamed.length, `${at}: each forget is named by its address for a screen reader ("Forget 192.168.1.20")${unnamed.length ? ` (${unnamed.join(', ')})` : ''}`);
         check(await page.evaluate(() => [...document.querySelectorAll('#rendsaved .rendsep')].every((s) => !s.getClientRects().length)), `${at}: no · between the address rows`);
         await page.locator('[data-rendrm]').first().evaluate((n) => n.scrollIntoView({ block: 'center', behavior: 'instant' }));
         await page.screenshot({ path: path.join(SHOTS, `outputs-forget-${at}.png`) });
@@ -182,8 +184,24 @@ async function page1(page, at, route, wantMin, scrollTo) {
         // again's middle stays its own. Every text around it grows: the note, Try again, the Songs
         // heading and Select.
         for (const scale of [1.15, 1.3]) {
-          const grown = await page.evaluate(([k, sel]) => { const els = [...document.querySelectorAll(sel)]; for (const el of els) el.style.fontSize = ''; const was = els.map((el) => parseFloat(getComputedStyle(el).fontSize)); els.forEach((el, i) => { el.style.fontSize = `${was[i] * k}px`; }); document.querySelector('#pfretry').scrollIntoView({ block: 'center', behavior: 'instant' }); return { all: els.length, grew: els.filter((el, i) => Math.abs(parseFloat(getComputedStyle(el).fontSize) - was[i] * k) < 0.5).length }; }, [scale, SCALED]);
-          check(grown.all >= 5 && grown.grew === grown.all, `${at}: with text at ${Math.round(scale * 100)} %, the note, Try again, the Songs heading and Select all grow (${grown.grew} of ${grown.all})`);
+          // Measured on screen: how wide each one's words are drawn, before and after (a stylesheet size
+          // with !important would keep them as they were).
+          const grown = await page.evaluate(([k, sel]) => {
+            const els = [...document.querySelectorAll(sel)];
+            const drawn = (el) => {
+              const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT); let w = 0;
+              for (let n = walk.nextNode(); n; n = walk.nextNode()) if (n.textContent.trim()) { const r = document.createRange(); r.selectNodeContents(n); for (const b of r.getClientRects()) w += b.width; }
+              return w;
+            };
+            for (const el of els) el.style.fontSize = '';
+            const was = els.map((el) => parseFloat(getComputedStyle(el).fontSize));
+            const before = els.map(drawn);
+            els.forEach((el, i) => { el.style.fontSize = `${was[i] * k}px`; });
+            document.querySelector('#pfretry').scrollIntoView({ block: 'center', behavior: 'instant' });
+            const after = els.map(drawn);
+            return { all: els.length, grew: els.filter((el, i) => before[i] > 0 && after[i] >= before[i] * (1 + (k - 1) * 0.6)).length, sizes: els.map((el, i) => `${before[i].toFixed(1)}→${after[i].toFixed(1)}`).join(', ') };
+          }, [scale, SCALED]);
+          check(grown.all >= 5 && grown.grew === grown.all, `${at}: with text at ${Math.round(scale * 100)} %, the note, Try again, the Songs heading and Select all grow on screen (${grown.grew} of ${grown.all}: ${grown.sizes})`);
           const s = await stolen(page);
           check(!s.length, `${at}: with text at ${Math.round(scale * 100)} %, Select and the songs keep their taps around Try again${s.length ? ` (${s.join('; ')})` : ''}`);
           const mid = await page.locator('#pfretry').evaluate((n) => { const b = n.getBoundingClientRect(); const h = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return h === n || n.contains(h) ? 'Try again' : `${h && h.tagName.toLowerCase()} “${h && h.textContent.trim().slice(0, 20)}”`; });
