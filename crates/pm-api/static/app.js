@@ -1930,10 +1930,16 @@
       if (cur && !isLiveRadio(cur)) localStorage.setItem('pm.browserAt', JSON.stringify({ index: keep.indexOf(keep.find((x) => x.id === cur.id)), pos: Math.floor(audio.currentTime || 0) }));
     } catch { /* storage unavailable */ }
   }, 2000);
-  // Back where it was, paused: the song in the bar and its position
-  const restoreBrowserQueue = () => {
+  // The saved song and its position, if it is still in the queue (whose stream links are rebuilt:
+  // they carry the token)
+  const savedBrowserAt = () => {
     for (const it of state.browserQueue) if (!it.stream && it.track_id == null) { const u = streamUrlFor(it.uri); if (u) it.stream = u; }
     let at = null; try { at = JSON.parse(localStorage.getItem('pm.browserAt') || 'null'); } catch { /* none */ }
+    return at && state.browserQueue[at.index] ? at : null;
+  };
+  // Back where it was, paused: the song in the bar and its position
+  const restoreBrowserQueue = () => {
+    const at = savedBrowserAt();
     const it = at && state.browserQueue[at.index];
     if (!it) return;
     state.browserIndex = at.index;
@@ -2693,7 +2699,8 @@
     const name = zid === BROWSER ? hereName() : (state.zones[zid] || {}).name;
     const on = name && zoneList().length > 1 ? ` on ${name}` : '';
     if (isOffline()) toast('The queue is empty: play one of your downloads');
-    else if (state.info && state.info.library && state.info.library.tracks > 0) toast(`The queue is empty${on}`, '', { label: 'Shuffle my music', run: () => shuffleMyMusic(zid) });
+    // (the note stays a while: songs queued meanwhile are not replaced by the shuffle)
+    else if (state.info && state.info.library && state.info.library.tracks > 0) toast(`The queue is empty${on}`, '', { label: 'Shuffle my music', run: () => (queueEmpty(zid) ? shuffleMyMusic(zid) : toast(`The queue has songs now${on}: press Play`)) });
     else toast('The queue is empty: search for something to play');
   };
   // A node zone stopped, with nothing in its queue and nothing playing (the node would only answer
@@ -2701,11 +2708,24 @@
   // fetched must say empty too, should its event be late; with no queue fetched for it yet (just
   // switched to, or another zone's kept while This browser was in use) Play goes to the node, so a
   // false "empty" can't offer a shuffle that replaces songs it has.
-  const zoneEmpty = (z) => !!z && z.transport === 'stopped' && !z.now_playing && !hasQueue(z) && (z.id !== state.zone || (z.id === state.queueZone && !(state.queue || []).length));
+  // A queue change of this app's still on its way (Add to queue on an empty zone) counts as songs.
+  const zoneEmpty = (z) => !!z && z.transport === 'stopped' && !z.now_playing && !hasQueue(z) && !zoneBusy.get(z.id) && (z.id !== state.zone || (z.id === state.queueZone && !(state.queue || []).length));
+  // (a zone gone meanwhile: the shuffle goes, and the node says it is gone)
+  const queueEmpty = (zid) => (zid === BROWSER ? !state.browserQueue.length : !state.zones[zid] || zoneEmpty(state.zones[zid]));
   const transport = async (action) => {
     const steps = ['toggle', 'play', 'next', 'previous'].includes(action.action);
     if (isBrowser()) {
       if (steps && !state.browserQueue.length) { emptyQueue(); return; }
+      // Right after a reload the saved song and place come back when the node's events connect. A
+      // press before that (or with the node out of reach) goes on from them: Play plays the saved
+      // song from where it was, Next and Previous move from it (before, all three started song 1,
+      // and the saver then kept that). (Already counted when it first started: no second play.)
+      const at = ['toggle', 'next', 'previous'].includes(action.action) && state.browserIndex < 0 ? savedBrowserAt() : null;
+      if (at) {
+        const i = action.action === 'next' ? at.index + 1 : action.action === 'previous' && at.pos <= 3 ? Math.max(0, at.index - 1) : at.index;
+        if (i === at.index) state.browserQueue[i].moved = true;
+        browserPlay(i, action.action === 'toggle' ? at.pos : 0); renderBar(); return;
+      }
       // Songs queued while nothing played (Add to queue, Play next): Play starts the queue at its
       // first song (before, it played nothing and showed Pause)
       if (action.action === 'toggle' && !state.browserQueue[state.browserIndex]) { browserPlay(0); return; }
@@ -2845,6 +2865,7 @@
   // One change of a zone's mode or queue at a time from this app, in the order asked (a toggle,
   // a page's Play or Shuffle, a playlist's shuffle off): the last one asked is the node's last word
   const zoneOps = new Map();
+  const zoneBusy = new Map(); // (per zone: how many of them are asked and not done yet)
   // `fn(turn)` runs when the ones asked before it are done. What it goes on to load (discovery finding
   // songs, the library read for a page's rows) runs inside its turn, given `turn`, rather than waiting
   // on itself. A turn over 60 s is cut: its requests take `turn.signal`, so none of its answers lands
@@ -2859,6 +2880,9 @@
       const t = setTimeout(() => ac.abort(why), TURN_MS);
       return Promise.resolve().then(() => fn(mine)).finally(() => { clearTimeout(t); mine.open = false; });
     });
+    zoneBusy.set(zid, (zoneBusy.get(zid) || 0) + 1);
+    const done = () => { const n = zoneBusy.get(zid) - 1; if (n > 0) zoneBusy.set(zid, n); else zoneBusy.delete(zid); };
+    run.then(done, done);
     zoneOps.set(zid, run.catch(() => {})); return run;
   };
   // The zone a change goes to: its turn's when it runs inside one (the zone in use may have changed

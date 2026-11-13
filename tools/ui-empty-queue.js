@@ -8,6 +8,9 @@
 // A paused zone still takes Play; another zone's fetched queue doesn't count for the one in use, and
 // with none fetched for the zone in use yet, or an older answer landing late, Play goes to the node.
 // The note names the zone whenever there is more than one place to play.
+// After a reload, Play, Next and Previous in This browser pressed before the node's events are in
+// (or with the node out of reach) go on from the saved song and place, not song 1. The note's Shuffle
+// my music checks again when pressed, and a queue change of this app's on its way counts as songs.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-empty-queue.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -302,6 +305,130 @@ async function lateQueueAnswer(browser, width) {
   } finally { await context.close(); }
 }
 
+// A 60 s mono WAV (16 kHz), served with ranges, so the saved place can be seeked to and played
+const WAV = (() => { const rate = 16000, n = rate * 60, b = Buffer.alloc(44 + n * 2); b.write('RIFF'); b.writeUInt32LE(b.length - 8, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(n * 2, 40); return b; })();
+const serveWav = (r) => {
+  const m = /bytes=(\d+)-(\d*)/.exec(r.request().headers().range || '');
+  const a = m ? Number(m[1]) : 0, z = m && m[2] ? Math.min(Number(m[2]), WAV.length - 1) : WAV.length - 1;
+  return r.fulfill({ status: m ? 206 : 200, contentType: 'audio/wav', headers: { 'accept-ranges': 'bytes', 'content-length': String(z - a + 1), ...(m ? { 'content-range': `bytes ${a}-${z}/${WAV.length}` } : {}) }, body: WAV.subarray(a, z + 1) });
+};
+
+async function playAfterReload(browser, width, button) {
+  // 12. A reload with a saved queue in This browser (Song 3 at 0:30) and Play (or Next) pressed
+  // before the node's events connect: Play goes on with Song 3 from 0:30 and the saved place still
+  // names it; Next goes to the song after it; Previous (past 0:03) starts it again from the top.
+  // (Before, all three started Song 1 and the saver kept that.)
+  const { page, context, state } = await fx.create(browser, width, { fixtures, realAudio: true });
+  const saved = tracks.map((t) => ({ id: t.id, uri: `track:${t.id}`, track_id: t.id, title: t.title, artist: 'Sefa', album: 'Journey', duration_ms: 60000 }));
+  await context.addInitScript(([q]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 2, pos: 30 })); }, [JSON.stringify(saved)]);
+  if (button === '#next') await context.addInitScript(([q]) => { localStorage.setItem('pm.browserAt', JSON.stringify({ index: 0, pos: 30 })); }, [null]);
+  // (the event connection opens and stays silent: no snapshot, so nothing is restored by it)
+  await context.routeWebSocket(/\/v1\/events/, () => {});
+  await page.route(/\/v1\/library\/tracks\/\d+\/file/, serveWav);
+  try {
+    await fx.go(page, '/queue');
+    await page.waitForSelector('#toggle');
+    await sleep(500);
+    assert.equal(await page.evaluate(() => pmPlayer.now().index), -1, `${width}: nothing restored yet (the events are not in)`);
+    await hideToast(page);
+    await page.click(button);
+    const want = button === '#next' ? 2 : 3;
+    for (let i = 0; i < 100; i++) { const n = await page.evaluate(() => pmPlayer.now()); if (!n.paused && n.time > 0) break; await sleep(50); }
+    const now = await page.evaluate(() => pmPlayer.now());
+    assert.match(now.src, new RegExp(`/v1/library/tracks/${want}/file`), `${width}: ${button} plays Song ${want} (${now.src})`);
+    assert.equal(now.paused, false, `${width}: ${button}: it plays`);
+    if (button === '#toggle') assert.ok(now.time >= 29 && now.time < 40, `${width}: Play goes on from 0:30 (${now.time})`);
+    if (button === '#prev') assert.ok(now.time < 10, `${width}: Previous starts Song 3 from the top (${now.time})`);
+    await sleep(2500); // (the saver writes every 2 s)
+    const at = await page.evaluate(() => JSON.parse(localStorage.getItem('pm.browserAt') || 'null'));
+    assert.equal(at && at.index, want - 1, `${width}: the saved place names Song ${want} (${JSON.stringify(at)})`);
+    if (button === '#toggle') assert.ok(at.pos >= 30, `${width}: the saved position is 0:30 or later (${JSON.stringify(at)})`);
+    if (button === '#toggle') assert.ok(!state.hits.some((h) => h.v === '/library/history'), `${width}: the saved song, counted when it first started, is not counted again`);
+    assert.ok(!/queue is empty/.test((await toastNow(page)).text), `${width}: no empty-queue note`);
+    if (button === '#toggle') await page.screenshot({ path: path.join(shots, `play-after-reload-${width}.png`) });
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
+async function playAfterReloadNoNode(browser, width) {
+  // 12b. The same with the node out of reach (the song's file can't be read): Play says the song
+  // did not start, and the saved place still names Song 3 at 0:30 (not 0:00)
+  const { page, context, state } = await fx.create(browser, width, { fixtures, realAudio: true });
+  const saved = tracks.map((t) => ({ id: t.id, uri: `track:${t.id}`, track_id: t.id, title: t.title, artist: 'Sefa', album: 'Journey', duration_ms: 60000 }));
+  await context.addInitScript(([q]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 2, pos: 30 })); }, [JSON.stringify(saved)]);
+  await context.routeWebSocket(/\/v1\/events/, () => {});
+  await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => r.abort());
+  try {
+    await fx.go(page, '/queue');
+    await page.waitForSelector('#toggle');
+    await sleep(500);
+    await hideToast(page);
+    await page.click('#toggle');
+    for (let i = 0; i < 60 && !/did not start|can.t play/.test((await toastNow(page)).text); i++) await sleep(50);
+    assert.match((await toastNow(page)).text, /Song 3. did not start/, `${width}: Play says Song 3 did not start (${JSON.stringify(await toastNow(page))})`);
+    await sleep(4500); // (two saver ticks and the one retry)
+    const at = await page.evaluate(() => JSON.parse(localStorage.getItem('pm.browserAt') || 'null'));
+    assert.deepEqual(at, { index: 2, pos: 30 }, `${width}: the saved place is kept (${JSON.stringify(at)})`);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
+async function shuffleRechecked(browser, width) {
+  // 13. The empty-queue note stays a while: a song queued on the zone meanwhile (from another device)
+  // is not replaced by the note's Shuffle my music, which says the queue has songs now instead
+  const Z = { ...zoneBase, id: 'z1', name: 'Kitchen', output: 'upnp:k' };
+  const song = { id: 1, uri: 'track:1', title: 'Song 1' };
+  const zf = { ...fixtures, '/zones': { body: [Z] }, '/zones/z1': { body: Z }, '/zones/z1/queue': { body: [] }, '/zones/z1/load': { body: Z }, '/outputs': { body: [{ id: 'upnp:k', name: 'Kitchen', kind: 'upnp', caps: { hw_volume: 'percent' } }] } };
+  const { page, context, state } = await fx.create(browser, width, { fixtures: zf, zone: 'z1' });
+  let sock = null;
+  await context.routeWebSocket(/\/v1\/events/, (ws) => { sock = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [Z] })); });
+  try {
+    await fx.go(page, '/queue');
+    await page.waitForFunction(() => /Kitchen/.test(document.querySelector('#zonebtn')?.textContent || ''));
+    for (let i = 0; i < 40 && !state.hits.some((h) => h.v === '/zones/z1/queue'); i++) await sleep(50);
+    await sleep(200);
+    await hideToast(page);
+    await page.click('#toggle');
+    assert.equal((await toastNow(page)).act, 'Shuffle my music', `${width}: the note offers Shuffle my music`);
+    // (another device adds a song while the note is up)
+    zf['/zones/z1/queue'].body = [song];
+    sock.send(JSON.stringify({ type: 'zone', seq: 1, state: { ...Z, queue: [song], queue_index: 0, queue_version: 2 } }));
+    await page.waitForFunction(() => /Song 1/.test(document.querySelector('main')?.textContent || ''));
+    const asked = state.hits.length;
+    await page.click('#toast .toast-act');
+    await sleep(400);
+    assert.ok(!state.hits.slice(asked).some((h) => h.v === '/library/tracks' && /limit=200/.test(h.q)), `${width}: no shuffle asked for`);
+    assert.deepEqual(zonePosts(state, 'z1', asked), [], `${width}: Kitchen's queue is not replaced`);
+    assert.equal((await toastNow(page)).text, 'The queue has songs now on Kitchen: press Play', `${width}: says the queue has songs now`);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
+async function pendingAdd(browser, width) {
+  // 14. A node zone with an empty queue and this app's Add to queue still on its way: Play is sent
+  // to the node (no note offering a shuffle that would replace the song being added)
+  const Z = { ...zoneBase, id: 'z2', name: 'Study', output: 'upnp:s' };
+  const { page, context, state } = await twoZones(browser, width, [{ ...Z, id: 'z1', name: 'Kitchen', output: 'upnp:k' }], { '/zones/z1/queue': { body: [] } });
+  try {
+    await fx.go(page, '/tracks');
+    await page.waitForSelector('#tracklist .track');
+    for (let i = 0; i < 40 && !state.hits.some((h) => h.v === '/zones/z1/queue'); i++) await sleep(50);
+    await sleep(200);
+    state.delay = (v, m) => (v === '/zones/z1/queue' && m === 'POST' ? 3000 : 0);
+    const row = page.locator('#tracklist .track').nth(0);
+    await row.hover(); await row.locator('[data-act="add"]').click();
+    await sleep(200);
+    await hideToast(page);
+    await page.click('#toggle');
+    await sleep(200);
+    assert.ok(!/queue is empty/.test((await toastNow(page)).text), `${width}: no empty-queue note while the Add is on its way`);
+    assert.equal(zonePosts(state, 'z1').filter((v) => v === '/zones/z1/transport').length, 1, `${width}: Play is sent (${JSON.stringify(zonePosts(state, 'z1'))})`);
+    state.delay = 0;
+    await sleep(3100);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
 async function offline(browser, width) {
   // 7. Offline (the Android app with no node): no Shuffle my music, the downloads have no song list
   const { page } = await fx.create(browser, width, { offline: true, fixtures });
@@ -322,7 +449,7 @@ async function offline(browser, width) {
   let failed = 0;
   try {
     for (const width of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [1280, 1024, 768])) {
-      for (const [name, fn] of [['empty browser queue', browserZone], ['queued then Play', queuedThenPlay], ['no songs', noSongs], ['empty node zone', nodeZone], ['node zone, late event', nodeZoneLateEvent], ['shuffle on the card\'s zone', shuffleOnTheCardsZone], ['shuffle keeps its zone', shuffleKeepsItsZone], ['paused zone, switched zone', pausedAndSwitched], ['late queue answer', lateQueueAnswer], ['offline', offline]]) {
+      for (const [name, fn] of [['empty browser queue', browserZone], ['queued then Play', queuedThenPlay], ['no songs', noSongs], ['empty node zone', nodeZone], ['node zone, late event', nodeZoneLateEvent], ['shuffle on the card\'s zone', shuffleOnTheCardsZone], ['shuffle keeps its zone', shuffleKeepsItsZone], ['paused zone, switched zone', pausedAndSwitched], ['late queue answer', lateQueueAnswer], ['Play after a reload', (b, w) => playAfterReload(b, w, '#toggle')], ['Next after a reload', (b, w) => playAfterReload(b, w, '#next')], ['Previous after a reload', (b, w) => playAfterReload(b, w, '#prev')], ['Play after a reload, node out of reach', playAfterReloadNoNode], ['Shuffle checked again', shuffleRechecked], ['Add on its way', pendingAdd], ['offline', offline]]) {
         try { await fn(browser, width); console.log(`PASS ${width} ${name}`); } catch (e) { failed++; console.log(`FAIL ${width} ${name}: ${e.message}`); }
       }
     }
