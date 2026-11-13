@@ -1706,6 +1706,10 @@ html[data-shell="phone"] .popover:not(.menu)::before, .popover.menu.sheet::befor
   background: var(--line-strong); background-clip: content-box; border-radius: 2px; z-index: 1;
 }
 .popover.menu.sheet { padding-top: 0; overscroll-behavior: contain; }
+/* A finger-sized row: each item of a menu sheet and each row of the collection picker is 44 px tall
+   (they were 38 and 32). These rows sit flush, so they grow instead of taking the coarse-pointer
+   reach below, which would take taps from the row beside them */
+html[data-shell="phone"] .popover.menu.sheet .pop-item, html[data-shell="phone"] .picker .list-row { min-height: 44px; }
 html[data-shell="phone"] #jobpop, html[data-shell="phone"] #volpop { width: auto; }
 .popover.sheet-drag { transition: none !important; }
 .picker { max-height: 50vh; overflow: auto; margin: 10px 0; }

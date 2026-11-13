@@ -1,4 +1,5 @@
-// Phone dialog actions fit inside their sheet and have at least 44 px touch targets.
+// Phone dialog actions fit inside their sheet and have at least 44 px touch targets; so do the
+// items of a row's ⋯ sheet and the rows of the collection picker.
 // node tools/ui-phone-dialog-actions.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -44,6 +45,30 @@ async function measure(page, label) {
   });
   check(m.targets, `${label}: targets at least 44 px (${m.sizes})`);
   check(m.contained && m.separate && m.reachable, `${label}: every action fits, without clipping, overlap or blocked edges`);
+  check(!m.overflow, `${label}: no horizontal overflow`);
+}
+
+// A stack of flush rows (a menu sheet's items, the collection picker's rows): each is at least
+// 44 px tall, and nothing (such as a neighbour's tap reach) covers its top or bottom edge. Each row
+// is scrolled into its own list first (on a short screen the sheet scrolls).
+async function measureRows(page, selector, label) {
+  await page.locator(selector).first().waitFor();
+  const m = await page.evaluate((selector) => {
+    const rows = [...document.querySelectorAll(selector)].filter((r) => r.offsetParent);
+    const out = rows.map((r) => {
+      r.scrollIntoView({ block: 'nearest' });
+      const b = r.getBoundingClientRect();
+      return { h: b.height, hit: [b.top + 1, b.bottom - 1].every((y) => r.contains(document.elementFromPoint(b.left + b.width / 2, y))) };
+    });
+    return {
+      sizes: out.map((o) => o.h.toFixed(1)).join(', '),
+      tall: out.length > 0 && out.every((o) => o.h >= 44),
+      hit: out.length > 0 && out.every((o) => o.hit),
+      overflow: document.documentElement.scrollWidth > innerWidth,
+    };
+  }, selector);
+  check(m.tall, `${label}: every row at least 44 px tall (${m.sizes})`);
+  check(m.hit, `${label}: each row's top and bottom edge are its own`);
   check(!m.overflow, `${label}: no horizontal overflow`);
 }
 
@@ -171,6 +196,16 @@ async function auditFocusedReflow(browser) {
         check(new URL(page.url()).pathname === '/library', `${at}: one edge tap cancels Add music on the same page`);
 
         await fx.go(page, '/tracks');
+        // At the default text size: the row's ⋯ sheet, then the collection picker it opens
+        // (a fresh install's picker has one row, New playlist)
+        await page.locator('.track [data-act="more"]').first().tap();
+        await measureRows(page, '.popover.menu.sheet:not([hidden]) .pop-item', `${at} row menu sheet`);
+        await page.locator('.popover.menu .pop-item').filter({ hasText: /^Add to (playlist|collection)/ }).tap();
+        await measureRows(page, 'dialog[open] #pplist .list-row', `${at} collection picker rows`);
+        await page.screenshot({ path: path.join(SHOTS, `picker-${at}.png`) });
+        await page.locator('dialog[open] [data-ppclose]').tap();
+        await closed(page);
+
         await openTags(page);
         await measure(page, `${at} Edit tags`);
         await page.screenshot({ path: path.join(SHOTS, `edit-tags-${at}.png`) });
@@ -241,6 +276,31 @@ async function auditFocusedReflow(browser) {
       await page.evaluate(() => document.documentElement.dataset.shell = 'phone');
       await measure(page, 'forced phone layout');
     } finally { await context.close(); }
+    // A short phone screen: the row's ⋯ sheet scrolls, and every item is still 44 px and its own
+    for (const android of [false, true]) {
+      const short = await fx.create(browser, 360, { mobile: true });
+      try {
+        await short.context.addInitScript((a) => { if (a) window.pmDesktop = { platform: 'android', version: 'fixture' }; }, android);
+        await short.page.setViewportSize({ width: 360, height: 568 });
+        await fx.go(short.page, '/tracks');
+        await short.page.locator('.track [data-act="more"]').first().tap();
+        const label = `${android ? 'android' : 'browser'}-360x568 row menu sheet`;
+        await measureRows(short.page, '.popover.menu.sheet:not([hidden]) .pop-item', label);
+        check(await short.page.locator('.popover.menu.sheet:not([hidden])').evaluate((s) => s.scrollHeight > s.clientHeight && s.scrollTop > 0), `${label}: scrolls to reach its last item`);
+      } finally { await short.context.close(); }
+    }
+    // A mouse window keeps its compact menu and picker rows
+    const desk = await fx.create(browser, 1280, { collections: [fx.summary] });
+    try {
+      await fx.go(desk.page, '/tracks');
+      await desk.page.locator('.track').first().hover();
+      await desk.page.locator('.track [data-act="more"]').first().click();
+      const item = desk.page.locator('.popover.menu:not([hidden]) .pop-item').first();
+      await item.waitFor();
+      check(await item.evaluate((b) => !b.closest('.popover').classList.contains('sheet') && b.getBoundingClientRect().height < 44), '1280 px desktop keeps its compact menu items');
+      await desk.page.locator('.popover.menu .pop-item').filter({ hasText: /^Add to (playlist|collection)/ }).click();
+      check(await desk.page.locator('dialog[open] #pplist .list-row').first().evaluate((r) => r.getBoundingClientRect().height < 44), '1280 px desktop keeps its compact picker rows');
+    } finally { await desk.context.close(); }
   } finally { await browser.close(); }
   console.log(`\n${passed} passed; ${failed} failed`);
   if (failed) process.exitCode = 1;
