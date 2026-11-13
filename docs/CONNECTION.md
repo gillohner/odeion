@@ -122,6 +122,10 @@ Today a node is reached outside the LAN over HTTPS (the address it publishes on 
     -- target/debug/pm-node --config node.toml serve
   ```
 
+  It checks its arguments before it starts anything: exactly the token, the address and the shots dir, then `--`
+  and the node command. Anything else stops it with a usage line and exit code 2. `tools/ui-reconnect-args.js`
+  (CI, `connection` job) checks this with a stub in place of process start, so nothing is started.
+
   Measured on 2026-10-21, against a local debug build:
 
   | Check | Result |
