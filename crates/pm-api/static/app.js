@@ -2679,20 +2679,26 @@
       refreshQueue();
     } catch (e) { if (replace) startFail(e.message, false, wait); else toast(e.message, 'error'); }
   };
-  // Up to 200 of the library's songs (albums or not: untagged files have none), shuffled, on the
-  // zone in use: Get started's Shuffle my music, and an empty queue's Play
-  const shuffleMyMusic = async () => { const r = await api('GET', '/library/tracks?limit=200'); await playTracks(r.tracks, true, 'end', { shuffle: true }); };
+  // Up to 200 of the library's songs (albums or not: untagged files have none), shuffled, on zone
+  // `zid` (default the zone in use): Get started's Shuffle my music, and an empty queue's Play. The
+  // zone is the one asked for when it was offered, in its turn: a card on Zones that is not the zone
+  // in use, or a switch of zone while the songs are read, can't replace another zone's queue
+  const shuffleMyMusic = (zid = state.zone) => zoneOp(zid, async (turn) => { const r = await api('GET', '/library/tracks?limit=200', undefined, { signal: turn.signal }); await playTracks(r.tracks, true, 'end', { shuffle: true, turn }); });
   // Play, Previous or Next with nothing in the queue and nothing playing says so (before, nothing
   // happened at all) and offers the library shuffled when there is one (not offline: the
   // downloads have no list of the library's songs to shuffle)
-  const emptyQueue = () => {
+  // (on zone `zid`, the one whose Play was pressed: named when it is not the zone in use, a card on Zones)
+  const emptyQueue = (zid = state.zone) => {
+    const on = zid !== state.zone && state.zones[zid] ? ` on ${state.zones[zid].name}` : '';
     if (isOffline()) toast('The queue is empty: play one of your downloads');
-    else if (state.info && state.info.library && state.info.library.tracks > 0) toast('The queue is empty', '', { label: 'Shuffle my music', run: shuffleMyMusic });
+    else if (state.info && state.info.library && state.info.library.tracks > 0) toast(`The queue is empty${on}`, '', { label: 'Shuffle my music', run: () => shuffleMyMusic(zid) });
     else toast('The queue is empty: search for something to play');
   };
-  // A node zone with nothing in its queue and nothing playing (the node would only answer "queue is
-  // empty"). The zone in use's queue as last fetched counts too, should its event be late.
-  const zoneEmpty = (z) => !!z && !z.now_playing && !hasQueue(z) && !(z.id === state.zone && (state.queue || []).length);
+  // A node zone stopped, with nothing in its queue and nothing playing (the node would only answer
+  // "queue is empty"; a playing or paused one still takes Pause). The zone in use's queue as last
+  // fetched counts too, should its event be late (only if fetched for it: not another zone's, fetched
+  // before a switch, nor an old one kept while This browser was in use).
+  const zoneEmpty = (z) => !!z && z.transport === 'stopped' && !z.now_playing && !hasQueue(z) && !(z.id === state.zone && z.id === state.queueZone && (state.queue || []).length);
   const transport = async (action) => {
     const steps = ['toggle', 'play', 'next', 'previous'].includes(action.action);
     if (isBrowser()) {
@@ -2805,7 +2811,9 @@
   };
   const refreshQueue = async (rerender = true) => {
     if (!isBrowser()) {
-      try { state.queue = await api('GET', `/zones/${state.zone}/queue`); } catch { state.queue = []; }
+      const zid = state.zone;
+      try { state.queue = await api('GET', `/zones/${zid}/queue`); } catch { state.queue = []; }
+      state.queueZone = zid;
     }
     if (rerender && state.view === 'queue') render();
     if (!$('#nowplaying').hidden) renderNowPlaying();
@@ -8483,7 +8491,7 @@
           }).join('')}</div>`;
           const zoneTransport = async (zid, action) => {
             if (zid === BROWSER) { const keep = state.zone; state.zone = BROWSER; try { await transport({ action }); } finally { state.zone = keep; } return; }
-            if (['toggle', 'next', 'previous'].includes(action) && zoneEmpty(state.zones[zid])) { emptyQueue(); return; }
+            if (['toggle', 'next', 'previous'].includes(action) && zoneEmpty(state.zones[zid])) { emptyQueue(zid); return; }
             if (action === 'toggle') action = (state.zones[zid] || {}).transport === 'playing' ? 'pause' : 'play';
             try { const zs2 = await api('POST', `/zones/${encodeURIComponent(zid)}/transport`, { action }, { repeat: action === 'next' || action === 'previous' }); state.zones[zs2.id] = zs2; render(); } catch (e) { toast(e.message, 'error'); }
           };
