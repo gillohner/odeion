@@ -647,6 +647,7 @@ jobs:
           ui-native-player.js native-player-shots
           ui-app-downloads.js app-downloads-shots
           ui-offline-play.js offline-play-shots
+          ui-downloads-rows.js downloads-rows-shots
           ui-android-media.js android-media-shots
           ui-phone-library-targets.js phone-library-targets-shots
           ui-phone-back-targets.js phone-back-targets-shots
