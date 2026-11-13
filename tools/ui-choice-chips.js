@@ -2,7 +2,9 @@
 // (Everywhere, Library, Pubky, services) and the Albums quality row (All, Hi-res, Lossless...)
 // are labelled groups of buttons with a pressed state, like the result filters and Favourites.
 // The quality row shows only when a quality narrows the albums: no lone All without format data,
-// none when every album has the same quality.
+// none when every album has the same quality. On a phone (360/412 px, browser and the Android app)
+// the quality row is one sideways-scrolling row that fades at its end, and a quality chosen from
+// off screen is still in view, pressed, after the page redraws.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-choice-chips.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -86,6 +88,53 @@ async function albumQuality(browser, width) {
   } finally { await run.context.close(); }
 }
 
+// A phone: the Quality row takes one line (not two or three), so the albums start higher; its end
+// fades while more qualities are off to the right; a chip tapped after a swipe stays in view
+async function albumQualityPhone(browser, width, android) {
+  const at = `albums ${android ? 'android' : 'browser'} ${width}`;
+  const many = Array.from({ length: 40 }, (_, i) => ({ id: i + 1, title: `Album ${i + 1}`, album_artist: 'Band', year: 2000 + (i % 20), tracks: 1 }));
+  // Every quality has albums, so all six chips show: All, Hi-res, DSD, CD quality, Lossless, Lossy
+  const fmts = many.map((a) => ({ album_id: a.id, hi_res: a.id % 5 === 0, dsd: a.id % 13 === 0, lossless: a.id % 4 !== 0 }));
+  const run = await fx.create(browser, width, { mobile: true, fixtures: { '/library/albums': { body: many }, '/library/albums/formats': { body: fmts } } });
+  const { page, state, context } = run;
+  if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+  try {
+    await fx.go(page, '/albums');
+    await page.locator('#albumgrid .tile').first().waitFor();
+    const row = '.chips:has([data-focus])';
+    const look = () => page.locator(row).evaluate((el) => {
+      const box = el.getBoundingClientRect(), chips = [...el.querySelectorAll('.chip')].map((c) => c.getBoundingClientRect());
+      const on = el.querySelector('[aria-pressed="true"]').getBoundingClientRect();
+      const head = document.querySelector('.main > .page-head').getBoundingClientRect();
+      return { gap: Math.round(chips[0].top - head.bottom), lines: new Set(chips.map((c) => Math.round(c.top))).size, chips: chips.length, fades: el.classList.contains('more-right'), scrolls: el.scrollWidth > el.clientWidth,
+        onInView: on.left >= box.left - 1 && on.right <= box.right + 1 && on.left >= 0 && on.right <= innerWidth, overflow: document.documentElement.scrollWidth - innerWidth };
+    });
+    const open = await look();
+    assert.equal(open.chips, 6, `${at}: all six qualities show`);
+    assert.equal(open.lines, 1, `${at}: the Quality chips are one row, not ${open.lines}`);
+    assert.ok(open.scrolls && open.fades, `${at}: the row scrolls sideways and its end fades while more qualities are off to the right`);
+    assert.ok(open.onInView, `${at}: All is chosen and in view`);
+    // The room kept for a finger's reach above and below the chips doesn't push them down
+    assert.ok(open.gap <= 12, `${at}: the chips sit 12 px under the page head, as before (${open.gap} px)`);
+    assert.ok(open.overflow <= 0, `${at}: nothing wider than the screen (${open.overflow} px)`);
+    oneChosen(await chipRow(page, row), at, 'Quality', /^All/);
+    // Swipe to the last quality and tap it: the page redraws, and the chosen chip is still in view
+    const lossy = page.locator('[data-focus="lossy"]');
+    await lossy.scrollIntoViewIfNeeded(); await lossy.tap();
+    await page.locator('[data-focus="lossy"][aria-pressed="true"]').waitFor();
+    await page.waitForFunction(() => { const el = document.querySelector('.qualchips'); const on = el && el.querySelector('[aria-pressed="true"]'); if (!on) return false; const b = el.getBoundingClientRect(), c = on.getBoundingClientRect(); return c.left >= b.left - 1 && c.right <= b.right + 1; }, null, { timeout: 3000 }).catch(() => {});
+    const after = await look();
+    assert.equal(after.lines, 1, `${at} after Lossy: still one row`);
+    assert.ok(after.onInView, `${at} after Lossy: the chosen quality is in view, not scrolled off`);
+    oneChosen(await chipRow(page, row), `${at} after Lossy`, 'Quality', /^Lossy/);
+    assert.equal(await page.locator('#albumgrid .tile').count(), many.filter((a) => a.id % 4 === 0).length, `${at}: Lossy shows the lossy albums`);
+    await page.evaluate(() => { document.querySelector('#main').scrollTop = 0; });
+    await page.screenshot({ path: path.join(shots, `albums-quality-${android ? 'android' : 'browser'}-${width}.png`) });
+    await fx.cleanCopy(page);
+    assert.deepEqual(state.errors, [], `${at}: no page errors`);
+  } finally { await context.close(); }
+}
+
 // No format data, or every album the same quality: no chip would narrow the grid, so no row
 async function albumQualityHidden(browser, width) {
   const same = albums.map((a) => ({ album_id: a.id, label: 'FLAC', hi_res: false, lossless: true, dsd: false }));
@@ -113,6 +162,10 @@ async function albumQualityHidden(browser, width) {
       for (const [name, check] of [['search sources', searchSources], ['album quality', albumQuality], ['album quality hidden', albumQualityHidden]]) {
         try { await check(browser, width); console.log(`ok   ${name} ${width}`); } catch (e) { failed++; console.log(`FAIL ${name} ${width}: ${e.message.split('\n')[0]}`); }
       }
+    }
+    for (const width of [360, 412]) for (const android of [false, true]) {
+      const name = `album quality phone ${android ? 'android' : 'browser'} ${width}`;
+      try { await albumQualityPhone(browser, width, android); console.log(`ok   ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}: ${e.message.split('\n')[0]}`); }
     }
   } finally { await browser.close(); }
   if (failed) { console.error(`${failed} choice chip check(s) failed`); process.exit(1); }

@@ -3367,18 +3367,19 @@
   };
   window.addEventListener('resize', () => { if (shellFor(window.innerWidth, layoutPref()) !== shellMode()) applyShell(); });
   // A scrolling chip row fades at its end only while more chips are off to the right (touch layouts)
-  const CHIP_ROWS = '.libnav, .scopechips, .np-sheet-tabs';
+  const CHIP_ROWS = '.libnav, .scopechips, .np-sheet-tabs, .qualchips';
   const fadeRow = (el) => el.classList.toggle('more-right', el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
-  // A newly drawn Library row starts around the current section. Remember its size so
-  // unrelated updates leave a person's swipe alone; resizing keeps keyboard focus in view.
+  // A newly drawn Library row (or Albums' Quality row on a phone) starts around the current
+  // section or the chosen quality. Remember its size so unrelated updates leave a person's swipe
+  // alone; resizing keeps keyboard focus in view.
   const libraryNavSizes = new WeakMap();
-  const revealLibrarySection = (el) => {
+  const revealChosenChip = (el) => {
     const width = el.clientWidth;
     if (!width) { libraryNavSizes.delete(el); return; }
     const size = `${width}:${el.scrollWidth}`;
     if (libraryNavSizes.get(el) === size) return;
     const focused = document.activeElement;
-    const current = el.contains(focused) && focused.matches('[data-libnav]') ? focused : $('[aria-current="page"]', el);
+    const current = el.contains(focused) && focused.matches('[data-libnav], [data-focus]') ? focused : $('[aria-current="page"], [aria-pressed="true"]', el);
     if (!current) return;
     libraryNavSizes.set(el, size);
     const row = el.getBoundingClientRect(), chip = current.getBoundingClientRect();
@@ -3386,7 +3387,7 @@
     el.scrollLeft += chip.left - row.left - (width - chip.width) / 2;
   };
   let fadeQueued = false;
-  const fadeRows = () => { if (fadeQueued) return; fadeQueued = true; requestAnimationFrame(() => { fadeQueued = false; $$(CHIP_ROWS).forEach((el) => { if (el.matches('.libnav')) revealLibrarySection(el); fadeRow(el); }); }); };
+  const fadeRows = () => { if (fadeQueued) return; fadeQueued = true; requestAnimationFrame(() => { fadeQueued = false; $$(CHIP_ROWS).forEach((el) => { if (el.matches('.libnav, .qualchips')) revealChosenChip(el); fadeRow(el); }); }); };
   document.addEventListener('scroll', (e) => { if (e.target instanceof Element && e.target.matches(CHIP_ROWS)) fadeRow(e.target); }, true);
   window.addEventListener('resize', fadeRows);
   new MutationObserver(fadeRows).observe(document.body, { childList: true, subtree: true });
@@ -6615,7 +6616,7 @@
   const focusChips = (albums) => {
     const counts = FOCUS.map(([k]) => (k ? albums.filter((a) => inFocus(a, k)).length : albums.length));
     if (!state.focus && !counts.some((n, j) => j && n && n < albums.length)) return '';
-    return `<div class="chips" role="group" aria-label="Quality">${FOCUS.map(([k, label], j) => { const n = counts[j]; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" aria-pressed="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
+    return `<div class="chips qualchips" role="group" aria-label="Quality">${FOCUS.map(([k, label], j) => { const n = counts[j]; return (k && !n) ? '' : `<button class="chip ${state.focus === k ? 'on' : ''}" data-focus="${k}" aria-pressed="${state.focus === k}">${label}${k ? ` <span class="count">${n}</span>` : ''}</button>`; }).join('')}</div>`;
   };
 
   // ---- first run (steward next-3, item 2) ------------------------------------
