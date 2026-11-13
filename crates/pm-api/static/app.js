@@ -124,11 +124,12 @@
   const tokenQ = () => (state.token ? '?token=' + encodeURIComponent(state.token) : '');
   // `svc`: where it plays from, as a badge in the cover's corner (coverBadge); none when null.
   // `quiet`: the badge is decoration (the art sits in a button that names the source itself).
-  const art = (albumId, title, cls = '', svc = null, quiet = false) => {
+  // `inner`: markup placed over the cover (a tile's Play), inside the cover so it is positioned on it.
+  const art = (albumId, title, cls = '', svc = null, quiet = false, inner = '') => {
     const h = hue(title);
     const bg = `background:linear-gradient(135deg, hsl(${h} 38% 30%), hsl(${(h + 40) % 360} 42% 18%))`;
     const img = albumId ? `<img loading="lazy" alt="" src="/v1/library/albums/${albumId}/cover${tokenQ()}" data-err="remove">` : '';
-    return `<div class="art ${cls}" style="${bg}"><span>${esc(initials(title))}</span>${img}${coverBadge(svc, quiet)}</div>`;
+    return `<div class="art ${cls}" style="${bg}"><span>${esc(initials(title))}</span>${img}${coverBadge(svc, quiet)}${inner}</div>`;
   };
   // A playlist's art (UX review #8): four album covers as a 2×2 mosaic, one cover, or its initials
   // on a gradient; never an empty square.
@@ -5029,7 +5030,7 @@
   };
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
-  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}${dlAlbum(a.id) ? dlMark() : ''}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
+  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true, `<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span>`)}<div class="t">${esc(a.title)}${dlAlbum(a.id) ? dlMark() : ''}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
   // People on Pubky (STEWARD-UX-PEOPLE.md): profiles from Nexus via the node, cached here too.
   const profileCache = new Map();
   const loadProfiles = async (ids) => {
@@ -5529,7 +5530,9 @@
   const albumGrid = (albums) => `<div class="grid">${albums.map(tile).join('')}</div>`;
   const strip = (title, albums, more) => (!albums || !albums.length) ? '' : `<section class="section"><div class="section-head"><h3>${esc(title)}</h3>${more ? `<button class="link" data-more="${more}">See all</button>` : ''}</div><div class="strip">${albums.map(tile).join('')}</div></section>`;
   const bindTiles = () => {
-    $$('[data-tileplay]', main).forEach((p) => p.onclick = async (e) => {
+    // Only library album tiles (tile()): other grids' tiles carry a list index in data-tileplay and
+    // bind their own Play before this runs after every page.
+    $$('.tile[data-album] [data-tileplay]', main).forEach((p) => p.onclick = async (e) => {
       e.stopPropagation();
       try { const r = await api('GET', `/library/albums/${p.dataset.tileplay}/tracks`); playTracks(r.tracks, true); } catch (er) { toast(er.message, 'error'); }
     });

@@ -519,6 +519,9 @@ html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 .tile:hover .tile-play, .tile:focus-within .tile-play { opacity: 1; transform: none; }
 .tile-play:hover { background: var(--accent-strong); }
 .tile-play .ic { width: 20px; height: 20px; }
+/* A touch screen has no hover: show a tile's Play (it is live either way) at a full 44 px target, so
+   an album plays in one tap from its cover; a tap elsewhere on the tile still opens it. */
+@media (hover: none) { .tile-play { opacity: 1; transform: none; width: 44px; height: 44px; right: 8px; bottom: 8px; } }
 
 /* ---- track rows ---- */
 .tracks { border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--line); }
