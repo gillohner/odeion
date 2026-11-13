@@ -5432,25 +5432,27 @@
     }
     const radioItem = seeds.length && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { const seed = single || seeds[Math.floor(Math.random() * seeds.length)]; try { await playTracks([seed], true); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; toast(`Radio from “${seed.title}”: similar music follows`); if (state.view === 'queue') render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     const nav = single ? [
+      // (the song's own page first, as in itemMenu)
+      { label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: trackPageId(single) }) },
       ...(single.artists && single.artists[0] && single.artists[0].id != null ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: 'lib-' + single.artists[0].id }) }] : []),
       ...(single.album && single.album.id != null ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: 'lib-' + single.album.id }) }] : []),
-      { label: 'Song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: trackPageId(single) }) },
-      { label: 'Copy link', icon: 'compass', run: () => copyLink(`/song/${trackPageId(single)}`) },
     ] : [];
     const items = [
+      // The same order and words as a song's ⋯ on its page, an album or search (itemMenu)
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
-      ...favItem,
+      { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl.id, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } }) },
       ...(single && single.id != null ? dlItem('track', single.id, single.title, artists(single)) : []),
+      ...favItem,
+      ...radioItem,
+      ...nav,
+      ...versionItems,
+      // The owner's library: edit tags on the node, take the song out (Your library › Node library)
+      ...(single && single.id != null && isOwner() ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.id, single.title) }] : []),
       // Phones hide the "Match" chip in song rows (no room), so matching is offered here too
       ...(single && single.id != null && !trackHasId(single) && isOwner() ? [{ label: 'Which song is this?…', icon: 'search', run: async () => { const done = await whichSong(single); if (done) { toast(`Identified: ${done.title}`); render(); } } }] : []),
       ...(single && canFixMatch(single) ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: [single.id] }) }] : []),
-      { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl.id, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } }) },
-      ...radioItem,
-      ...versionItems,
-      ...nav,
-      // The owner's library: edit tags on the node, take the song out (Your library › Node library)
-      ...(single && single.id != null && isOwner() ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.id, single.title) }] : []),
+      ...(single ? [{ label: 'Copy link', icon: 'copy', run: () => copyLink(`/song/${trackPageId(single)}`) }] : []),
       ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(tracks.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: tracks.map((t) => t.id) }) }] : []),
     ];
     showMenu(anchor, items);
@@ -5756,7 +5758,7 @@
       ...(isOwner() && /^\/album\/lib-\d+$/.test(o.path || '') ? [{ label: 'Rename album…', icon: 'disc', run: () => editAlbumTags(Number(o.path.split('-').pop()), o.title) }] : []),
       // A library song's or album's match corrected: the Confirm matches view for its songs
       ...(isOwner() && trackIds.length && /^\/(song|album)\//.test(o.path || '') ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: trackIds.slice(0, 500) }) }] : []),
-      ...(o.path ? [{ label: 'Copy link', icon: 'compass', run: () => copyLink(o.path) }] : []),
+      ...(o.path ? [{ label: 'Copy link', icon: 'copy', run: () => copyLink(o.path) }] : []),
       // Library files only: services' songs are not the user's files
       ...(state.pubkyUser && trackIds.length ? [{ label: trackIds.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(trackIds.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: trackIds }) }] : []),
     ]);
@@ -7378,7 +7380,7 @@
           const songCount = songs.filter((t) => !t.card).length; const linkCount = songs.length - songCount;
           const chip = (t) => t.unavailable ? `<span class="chip srcchip none" title="${esc(t.unavailable)}">${icon('close')}<span>Unavailable</span></span>` : t.plays ? `<span class="chip srcchip${t.pinned ? ' pinned' : ''}" title="${esc(t.plays.label)}${t.pinned ? ' · the author’s pick' : ''}">${svcBadge(t.plays.service)}<span>${esc(srcName(t.plays.service))}</span>${t.pinned ? icon('pin') : ''}</span>` : '';
           main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic((sp.play_from.items || []).map((r) => r.image), sp.summary.name)}<div><div class="eyebrow">Shared playlist · by <code>${esc(who)}</code></div><h1>${esc(sp.summary.name)}</h1><p class="sub">${countOf(songCount, 'songs')}${linkCount ? ` · ${countOf(linkCount, 'links')}` : ''} · ${playable.length} play here</p>
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="shplay" ${playable.length ? '' : 'disabled title="None of these songs is on your services"'}>${icon('play')} Play</button><button class="btn" id="shcopy">${icon('plus')} Save a copy</button><button class="btn ghost" id="shlink" title="Copy the pubky:// link">${icon('external')} Copy link</button></div></div></div>`
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="shplay" ${playable.length ? '' : 'disabled title="None of these songs is on your services"'}>${icon('play')} Play</button><button class="btn" id="shcopy">${icon('plus')} Save a copy</button><button class="btn ghost" id="shlink" title="Copy the pubky:// link">${icon('copy')} Copy link</button></div></div></div>`
             + `<section class="section" id="shsongs"><div class="section-head"><h3>Songs</h3><span class="muted small">where each plays from on your node</span></div>${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => (t.unavailable ? 'unavail' : ''), extra: (t) => chip(t) }) : emptyState('playlist', 'This playlist is empty', '')}</section>`
             + (sp.summary.description ? `<section class="section"><div class="section-head"><h3>About</h3></div><p>${esc(sp.summary.description)}</p></section>` : '');
           bindSongRows($('#shsongs'), songs, {});
