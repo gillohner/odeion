@@ -1,5 +1,5 @@
-// A library list's filter that matches nothing (Albums, Artists, Tracks) says so under the list,
-// in a status line that is there from the start; matching again, or Escape, empties it. On Tracks
+// A library list's filter that matches nothing (Albums, Artists, Songs) says so under the list,
+// in a status line that is there from the start; matching again, or Escape, empties it. On Songs
 // (a node search) each keystroke empties it, and only the answer for the text in the box fills it.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-filter-none.js [repo] [shots]
@@ -23,7 +23,7 @@ const fixtures = {
 const pages = {
   albums: { url: '/albums', rows: '#albumgrid .tile', what: 'album', some: 'loop', n: 3, all: 45 },
   artists: { url: '/artists', rows: '#artistlist [data-artist]', what: 'artist', some: 'loop', n: 3, all: 45 },
-  tracks: { url: '/tracks', rows: '#tracklist .track', what: 'track', some: 'song', n: 3, all: 20 },
+  tracks: { url: '/tracks', rows: '#tracklist .track', what: 'song', some: 'song', n: 3, all: 20 },
 };
 const note = (page) => page.locator('.filter-none');
 async function noneLine(page, want) {
@@ -108,7 +108,7 @@ async function run(browser, width, kind) {
       // A keystroke empties the line at once, not when its search answers
       const now = await page.evaluate(() => { const f = document.querySelector('#filter'); f.value = 'zzzz'; f.dispatchEvent(new Event('input', { bubbles: true })); return document.querySelector('.filter-none').textContent; });
       assert.equal(now, '', `${kind} ${width}: a keystroke empties the no-match line at once`);
-      await noneLine(page, 'No track matches “zzzz”.');
+      await noneLine(page, 'No song matches “zzzz”.');
       // An answer for older text that lands after the next keystroke (before that one's search
       // starts) says nothing: "zzz" is sent, "song" is typed, then "zzz" answers
       const letZzz = hold('zzz'); const letSong = hold('song');

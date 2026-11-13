@@ -46,7 +46,7 @@ const stepDone = (p, n) => p.evaluate((i) => { const s = document.querySelectorA
   else { await p.fill('#setupfolder', process.env.PM_MUSIC_DIR || process.env.HOME + '/Music'); await p.click('#setupadd'); }
   await waitFor(p, () => { const s = document.querySelector('#h-setup .setup-step'); return s && s.classList.contains('done'); }, null, 60000).catch(() => null);
   check(await stepDone(p, 1), 'step 1 is ticked once the files are read');
-  check(/\d+ tracks?/.test(await p.textContent('#h-setup')), 'the card says how many tracks came in');
+  check(/\d+ songs?/.test(await p.textContent('#h-setup')), 'the card says how many songs came in');
 
   // 2. Play: in this browser
   await p.click('#setupplay');
