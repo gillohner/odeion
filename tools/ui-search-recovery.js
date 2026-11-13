@@ -21,8 +21,8 @@ const hit = { kind: 'song', id: 'lib-1', title: fx.track.title, subtitle: 'Sefa,
 const answer = (hits = [hit]) => JSON.stringify({ source: 'library', status: 'ok', hits, counts: [] });
 const response = (body, sources = 'library') => ({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': sources }, body });
 const zone = { id: 'z1', name: 'Living room', output: 'upnp:fixture', transport: 'paused', queue: [{ id: 1, uri: 'track:1', title: hit.title }], queue_index: 0, queue_version: 1, repeat: 'off', radio: false, sync: 'single', volume: { percent: 20, muted: false }, now_playing: { item: { id: 1, uri: 'track:1', title: hit.title, artist: 'Sefa', duration_ms: 240000 }, index: 0, position_ms: 1000, duration_ms: 240000 } };
-async function withPlayer(browser, width) {
-  const run = await fx.create(browser, width, { zone: zone.id, fixtures: { '/zones': { body: [zone] }, '/zones/z1/transport': { body: zone } } });
+async function withPlayer(browser, width, opts = {}) {
+  const run = await fx.create(browser, width, { ...opts, zone: zone.id, fixtures: { '/zones': { body: [zone] }, '/zones/z1/transport': { body: zone } } });
   await run.context.routeWebSocket(/\/v1\/events/, (ws) => {
     ws.onMessage((m) => { const j = JSON.parse(m); if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); });
     ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] }));
@@ -61,7 +61,7 @@ async function recovery(browser, width, mode, theme = 'light', key = 'Enter') {
     await page.screenshot({ path: path.join(shots, `${mode}-${width}-${theme}.png`) });
     assert.match(await page.locator('#sresults').innerText(), /Search couldn.t finish/, `${mode}: persistent search failure`);
     assert.doesNotMatch(await page.locator('#sresults').innerText(), /Nothing matched/, 'failure is not an empty result');
-    const retry = page.locator('#sresults button[data-sretry]');
+    const retry = page.locator('#sfailure button[data-sretry]');
     assert.equal(await retry.count(), 1, 'one retry button');
     if (mode === 'partial' || mode === 'incomplete') {
       assert.ok((await page.locator('#sresults').innerText()).includes(hit.title), 'received results stay available');
@@ -143,7 +143,7 @@ async function lateReplies(browser, whileFailed = false) {
   await context.route(/\/v1\/search\?/, (route) => route.fulfill(response(++attempts === 1 ? '{broken\n' : answer() + '\n')));
   try {
     await fx.go(page, '/search?q=Journey');
-    const retry = page.locator('#sresults button[data-sretry]');
+    const retry = page.locator('#sfailure button[data-sretry]');
     await retry.focus();
     if (whileFailed) {
       // The failed run's own tag reply can add tags without discarding keyboard focus.
@@ -182,9 +182,9 @@ async function delayedSources(browser, action) {
   await context.route(/\/v1\/search\?/, (route) => route.fulfill(response(++calls === 1 ? '{broken\n' : answer() + '\n')));
   try {
     await fx.go(page, '/search?q=Journey');
-    await page.locator('button[data-sretry]').waitFor();
+    await page.locator('#sfailure button[data-sretry]').waitFor();
     assert.equal(await page.locator('[data-scope-in="tidal"]').count(), 0);
-    if (action === 'retry') await page.locator('button[data-sretry]').click();
+    if (action === 'retry') await page.locator('#sfailure button[data-sretry]').click();
     else if (action === 'query') { await page.fill('#search', 'New query'); await page.press('#search', 'Enter'); }
     else { await page.locator('#sidebar [data-view="tracks"]').click(); await page.locator('#tracklist').waitFor(); }
     if (action !== 'leave') await page.locator('#sresults .srow').first().waitFor();
@@ -196,7 +196,7 @@ async function delayedSources(browser, action) {
     } else {
       await page.locator('[data-scope-in="tidal"]').waitFor();
       assert.match(await page.locator('#sresults').innerText(), /Journey Through Time/);
-      assert.equal(await page.locator('button[data-sretry]').count(), 0, 'source discovery does not restore the failed run');
+      assert.equal(await page.locator('#sfailure button[data-sretry]').count(), 0, 'source discovery does not restore the failed run');
       assert.equal(await page.locator('#search').inputValue(), action === 'query' ? 'New query' : 'Journey');
       await page.locator('[data-scope-in="tidal"]').click();
       await until(page, () => window.pmLastSearch?.scope === 'tidal', 'discovered source is usable');
@@ -305,7 +305,7 @@ async function heldRetry(browser, width, update, theme = 'light', leaveFocus = f
   });
   try {
     await fx.go(page, '/search?q=Journey');
-    const retry = page.locator('#sresults button[data-sretry]');
+    const retry = page.locator('#sfailure button[data-sretry]');
     await retry.focus();
     const original = await retry.elementHandle();
     await page.keyboard.down('Space');
@@ -313,7 +313,7 @@ async function heldRetry(browser, width, update, theme = 'light', leaveFocus = f
     releaseUpdate();
     await page.locator(update === 'tags' ? '#stags [data-stag="late arrival"]' : '[data-scope-in="tidal"]').waitFor();
     assert.match(await page.locator('#sresults').innerText(), /Journey Through Time/, 'late update keeps partial results');
-    const sameButton = await original.evaluate((e) => e === document.querySelector('#sresults button[data-sretry]') && e.isConnected);
+    const sameButton = await original.evaluate((e) => e === document.querySelector('#sfailure button[data-sretry]') && e.isConnected);
     await page.screenshot({ path: path.join(shots, `held-${update}-${width}-${theme}${leaveFocus ? '-search' : ''}.png`) });
     await page.keyboard.up('Space');
     await sleep(150);
@@ -336,6 +336,95 @@ async function heldRetry(browser, width, update, theme = 'light', leaveFocus = f
   } finally { releaseUpdate(); releaseRetry(); await context.close(); }
 }
 
+// One source fails and the rest answer: that source's line has its own Retry. On a phone it is the
+// app's small button (it was a 29x17 px link no keyboard could reach): a 44 px reach, Tab gets
+// there, Enter or a tap searches again with the same words and scope, and a source that can't be
+// helped by trying again (a Premium plan) gets no Retry.
+async function sourceRetry(browser, width, android = false) {
+  const at = `${width}${android ? ' android' : ''}`;
+  const { page, context, state } = await withPlayer(browser, width, { mobile: width < 600 });
+  if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+  const long = 'Spotify took too long to answer while the network was slow and busy, so some songs from it are missing here';
+  const line = (source, error) => JSON.stringify({ source, status: 'error', error, hits: [], counts: [] }) + '\n';
+  const requests = [];
+  await context.route(/\/v1\/search\?/, (route) => {
+    const u = new URL(route.request().url());
+    if (u.searchParams.get('in') !== 'everywhere') return route.fulfill(response(answer() + '\n'));
+    requests.push({ q: u.searchParams.get('q'), scope: u.searchParams.get('in') });
+    return route.fulfill(response(answer() + '\n' + line('spotify', long) + line('tidal', 'TIDAL needs a paid plan for this'), 'library,spotify,tidal'));
+  });
+  try {
+    await fx.go(page, '/search?q=Journey&in=everywhere');
+    const retry = page.locator('.snote button[data-sretry="spotify"]');
+    await retry.waitFor();
+    assert.equal(await page.locator('#sfailure').count(), 0, `${at}: a single source failing is not a failed search`);
+    assert.equal(await page.locator('.snote [data-sretry]').count(), 1, `${at}: only the source that may answer next time has a Retry`);
+    assert.match(await page.locator('.snote').filter({ hasText: 'TIDAL' }).innerText(), /paid plan/, `${at}: the TIDAL line still says why`);
+    const m = await retry.evaluate((b) => {
+      const r = b.getBoundingClientRect(), reach = getComputedStyle(b, '::before');
+      const grow = reach.content === 'none' ? [0, 0] : [-parseFloat(reach.top) - parseFloat(reach.bottom), -parseFloat(reach.left) - parseFloat(reach.right)];
+      const note = b.closest('.snote').getBoundingClientRect();
+      return { h: r.height + grow[0], w: r.width + grow[1], inside: r.left >= note.left - 0.5 && r.right <= note.right + 0.5 && r.right <= innerWidth, overflow: document.documentElement.scrollWidth - innerWidth };
+    });
+    if (width < 600) {
+      assert.ok(m.h >= 44 && m.w >= 44, `${at}: Retry reaches 44x44 px (${Math.round(m.w)}x${Math.round(m.h)})`);
+      assert.equal(m.inside, true, `${at}: Retry stays on its own line, on screen, beside a long reason`);
+    }
+    assert.ok(m.overflow <= 0, `${at}: no sideways scroll (${m.overflow} px)`);
+    await page.locator('#search').focus();
+    let tabs = 0;
+    while (tabs < 30 && !(await retry.evaluate((b) => b === document.activeElement))) { await page.keyboard.press('Tab'); tabs++; }
+    assert.ok(tabs < 30, `${at}: Tab reaches the source's Retry`);
+    await page.screenshot({ path: path.join(shots, `source-retry-${width}${android ? '-android' : ''}.png`) });
+    await page.keyboard.press('Enter');
+    await until(page, () => document.activeElement?.id === 'search', 'focus returns to search');
+    await page.locator('.snote button[data-sretry="spotify"]').waitFor();
+    assert.deepEqual(requests, [{ q: 'Journey', scope: 'everywhere' }, { q: 'Journey', scope: 'everywhere' }], `${at}: Enter searches again, same words and scope`);
+    if (width < 600) {
+      await page.locator('.snote button[data-sretry="spotify"]').tap();
+      await until(page, () => document.activeElement?.id === 'search', 'focus returns to search after a tap');
+      await page.locator('.snote button[data-sretry="spotify"]').waitFor();
+      assert.equal(requests.length, 3, `${at}: a tap searches again`);
+    }
+    assert.deepEqual(transports(state), [], `${at}: Retry never controls playback`);
+    assert.deepEqual(state.errors, []);
+    console.log(`PASS ${at} a failed source's Retry: ${Math.round(m.w)}x${Math.round(m.h)} px reach, Tab ${tabs}, Enter${width < 600 ? ' and tap' : ''} search again`);
+  } finally { await context.close(); }
+}
+
+// Space presses a button on its release. A late reply (here the search's tags) that redraws the
+// results while Space is held must keep that source's Retry in place, or the press is lost.
+async function heldSourceRetry(browser, width) {
+  const { page, context, state } = await withPlayer(browser, width, { mobile: width < 600 });
+  let releaseTags;
+  const tagsGate = new Promise((resolve) => { releaseTags = resolve; });
+  await context.route(/\/v1\/search\/tags\?/, async (route) => { await tagsGate; return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ mine: [], others: ['late arrival'] }) }); });
+  const requests = [];
+  await context.route(/\/v1\/search\?/, (route) => {
+    const u = new URL(route.request().url());
+    if (u.searchParams.get('in') !== 'everywhere') return route.fulfill(response(answer() + '\n'));
+    requests.push(u.searchParams.get('q'));
+    return route.fulfill(response(answer() + '\n' + JSON.stringify({ source: 'spotify', status: 'error', error: 'spotify: operation timed out', hits: [], counts: [] }) + '\n', 'library,spotify'));
+  });
+  try {
+    await fx.go(page, '/search?q=Journey&in=everywhere');
+    const retry = page.locator('.snote button[data-sretry="spotify"]');
+    await retry.focus();
+    const original = await retry.elementHandle();
+    await page.keyboard.down('Space');
+    releaseTags();
+    await page.locator('#stags [data-stag="late arrival"]').waitFor();
+    const same = await original.evaluate((e) => e.isConnected && e === document.activeElement);
+    assert.equal(same, true, `${width}: the late tags keep the focused Retry in place`);
+    await page.keyboard.up('Space');
+    await until(page, () => document.activeElement?.id === 'search', 'Space on Retry searches again');
+    assert.equal(requests.length, 2, `${width}: Space held across a redraw still searches again`);
+    assert.deepEqual(transports(state), [], `${width}: held Space never controls playback`);
+    assert.deepEqual(state.errors, []);
+    console.log(`PASS ${width} held Space on a source's Retry across late tags: one more search, no playback`);
+  } finally { releaseTags(); await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -346,12 +435,16 @@ async function heldRetry(browser, width, update, theme = 'light', leaveFocus = f
     if (process.env.SEARCH_RECOVERY_CASE === 'clicked') { await clickedControlKeys(browser, 1280); return; }
     if (process.env.SEARCH_RECOVERY_CASE === 'shortcut-search') { await navigationShortcut(browser, 1280, '/'); return; }
     if (process.env.SEARCH_RECOVERY_CASE === 'shortcut-help') { await navigationShortcut(browser, 1280, '?'); return; }
+    if (process.env.SEARCH_RECOVERY_CASE === 'source') { for (const w of [360, 412]) for (const a of [false, true]) await sourceRetry(browser, w, a); await sourceRetry(browser, 1280); for (const w of [1280, 360]) await heldSourceRetry(browser, w); return; }
     if (process.env.SEARCH_RECOVERY_CASE?.startsWith('held-')) { await heldRetry(browser, 1280, process.env.SEARCH_RECOVERY_CASE.slice(5)); return; }
     for (const [width, theme] of [[1280, 'dark'], [1024, 'light'], [768, 'dark'], [360, 'light'], [412, 'dark']]) {
       await recovery(browser, width, 'http', theme);
       await recovery(browser, width, 'http', theme, 'Space');
     }
     for (const mode of ['network', 'malformed', 'partial', 'incomplete']) await recovery(browser, 1280, mode);
+    for (const width of [360, 412]) for (const android of [false, true]) await sourceRetry(browser, width, android);
+    await sourceRetry(browser, 1280);
+    for (const width of [1280, 360]) await heldSourceRetry(browser, width);
     await healthyAndCancelled(browser);
     await lateReplies(browser);
     await lateReplies(browser, true);
