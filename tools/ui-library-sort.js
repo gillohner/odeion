@@ -306,6 +306,8 @@ async function slowFavourites(browser, width) {
       .catch(() => assert.fail(`${width}: the page is drawn after about 3 s, not left loading`));
     assert.ok(Date.now() - t < 5000, `${width}: drawn before the favourites are in`);
     assert.equal(await page.locator('.empty h3').innerText(), 'Getting your favourites…', `${width}: says they are on their way, not "No favourite albums"`);
+    // No count beside the note until they are in ("0 of 45" said none were hearted)
+    assert.equal(await page.locator('.page-head .count').count(), 0, `${width}: no count while the favourites are on their way, not "0 of 45"`);
     if (width === 1280) { await fx.cleanCopy(page); await page.screenshot({ path: path.join(shots, `after-albums-fav-slow-${width}.png`) }); }
     // Another order chosen meanwhile is drawn at once (it doesn't wait another 3 s)
     const t2 = Date.now();
@@ -313,10 +315,12 @@ async function slowFavourites(browser, width) {
     await page.waitForFunction(() => document.querySelector('[data-lsort]')?.value === 'year' && document.querySelector('#albumswait'), null, { timeout: 1500 })
       .catch(() => assert.fail(`${width}: a new order is drawn at once while the favourites are on their way`));
     assert.ok(Date.now() - t2 < 1500, `${width}: no second wait`);
+    assert.equal(await page.locator('.page-head .count').count(), 0, `${width}: still no count after another order is chosen`);
     await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length === 1, null, { timeout: 6000 })
       .catch(() => assert.fail(`${width}: listed once the favourites are in`));
     assert.deepEqual(await page.locator('#albumgrid .tile').evaluateAll((els) => els.map((e) => Number(e.getAttribute('data-album')))), [3]);
     assert.equal(await page.locator('.empty').count(), 0);
+    assert.equal(await page.locator('.page-head .count').innerText(), '1 of 45', `${width}: the count says how many are hearted once they are in`);
     // Drawn again once, not in a loop: the list stays as it is
     await page.evaluate(() => { window.__grid = document.querySelector('#albumgrid'); });
     await page.waitForTimeout(3500);
