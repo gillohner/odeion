@@ -8,7 +8,8 @@
 //   * no raw URL, MusicBrainz id or file path above the songs;
 //   * Details is the page's last section, holds the ids, links and credits, and is closed on a phone;
 //   * on a phone the songs' heading is within the first screen after the hero;
-// and an artist without an article keeps About at the end, whole, as before.
+// and an artist without an article keeps About at the end, whole, as before. On a phone (360x640 to
+// 412x915, browser and Android app) the article's opening is 2 lines and More a 44 px tap; 4 lines from 600 px.
 //   node tools/ui-item-about.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -33,12 +34,14 @@ const pages = {
   artist: { ...base, kind: 'artist', id: 'lib-31', target: { artist_id: 31 }, title: 'Calvin Russell', artist: null, album: null, year: null, songs, about: artistAbout, about_text, image_credit, albums: [{ id: 'lib-7', title: 'Crossroad', artist: 'Calvin Russell', year: 1997, image: null }] },
   album: { ...base, kind: 'album', id: 'lib-7', target: { album_id: 7 }, title: 'Crossroad', artist: { name: 'Calvin Russell', id: 'lib-31' }, album: null, year: 1997, songs, about: [ref('MusicBrainz', MBID, `https://musicbrainz.org/release-group/${MBID}`), fact('Released', '1997-03-01'), fact('Label', 'SPV'), ref('Wikipedia', WIKI, WIKI)], about_text, image_credit: null },
   song: { ...base, kind: 'song', id: 'lib-100', target: { track_id: 100 }, title: 'Song 1', artist: { name: 'Calvin Russell', id: 'lib-31' }, album: { title: 'Crossroad', id: 'lib-7' }, year: 1997, songs: [], albums: [{ id: 'lib-7', title: 'Crossroad', artist: 'Calvin Russell', year: 1997, image: null }], about: [ref('Format', 'FLAC'), ref('File', '/music/calvin/song1.flac'), ref('MusicBrainz', MBID, `https://musicbrainz.org/recording/${MBID}`), ref('Identified by', 'tags')], about_text, image_credit: null },
+  short: { ...base, kind: 'artist', id: 'lib-33', target: { artist_id: 33 }, title: 'Short Facts', artist: null, album: null, year: null, songs, about: [fact('In your library', '1 album · 8 songs'), fact('Origin', 'Austin'), fact('Active', '1978–2011')], about_text, image_credit: null },
   plain: { ...base, kind: 'artist', id: 'lib-32', target: { artist_id: 32 }, title: 'No Article', artist: null, album: null, year: null, songs, about: [ref('MusicBrainz', MBID, `https://musicbrainz.org/artist/${MBID}`), fact('In your library', '1 album · 8 songs')], about_text: null, image_credit: null, blurb: null },
 };
 const fixtures = {};
 for (const [k, p] of Object.entries(pages)) { fixtures[`/item/${p.kind}/${p.id}`] = { body: p }; fixtures[`/item/${p.kind}/${p.id}/extras`] = { body: { collections: [], related: [], concerts: [], similar: [] } }; }
 fixtures['/library/artists/31/similar'] = { body: { artists: [] } };
 fixtures['/library/artists/32/similar'] = { body: { artists: [] } };
+fixtures['/library/artists/33/similar'] = { body: { artists: [] } };
 for (const s of songs) fixtures[`/library/tracks/${s.track_id}`] = { body: { ...fx.track, id: s.track_id, title: s.title } };
 const RAW = new RegExp(`https?://|${MBID}|/music/calvin`);
 
@@ -90,6 +93,44 @@ const RAW = new RegExp(`https?://|${MBID}|/music/calvin`);
     await fx.go(page, `/${p.kind}/${p.id}`); await page.waitForSelector('#iabout'); await sleep(400);
     const r = await page.evaluate(() => { const ids = [...document.querySelectorAll('#main > .section, #main > details.section')].map((s) => s.id); const a = document.querySelector('#iabout'); return { ids, last: ids[ids.length - 1], text: a.innerText, details: !!document.querySelector('#idetails') }; });
     check(r.last === 'iabout' && !r.details && /MusicBrainz/.test(r.text) && /In your library/.test(r.text), `no article: About is whole and last (${r.ids.join(' → ')})`);
+    await context.close();
+  }
+  // On a phone the article's opening is 2 lines (4 on tablets and computers), so the first Top song
+  // comes a screen sooner; More is a 44 px tap that moves nothing, and the Wikipedia link keeps its own
+  for (const [w, h, android, key] of [[360, 640, false], [360, 800, false], [360, 800, true], [360, 800, true, 'short'], [412, 915, true], [820, 1180, false], [1280, 900, false]]) {
+    const p = pages[key || 'artist']; const phone = w < 600;
+    const { page, context, state } = await fx.create(browser, w, { fixtures, mobile: phone, touch: w < 1025 });
+    if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+    await page.setViewportSize({ width: w, height: h });
+    await fx.go(page, `/${p.kind}/${p.id}`); await page.waitForSelector('#iabout'); await sleep(400);
+    const at = `${key ? `${key}-facts artist` : 'artist'} at ${w}x${h}${android ? ' (Android app)' : ''}`;
+    const r = await page.evaluate(() => {
+      const q = (s) => document.querySelector(s); const bl = q('#iblurb'); const more = q('#iblurbmore'); const wiki = q('#iabout .wikilink');
+      const lh = parseFloat(getComputedStyle(bl).lineHeight); const m = more.getBoundingClientRect(); const wk = wiki.getBoundingClientRect();
+      const isMore = (x, y) => { const el = document.elementFromPoint(x, y); return !!el && !!el.closest('#iblurbmore'); };
+      const cx = m.left + m.width / 2; const cy = m.top + m.height / 2;
+      const fold = Math.min(innerHeight, ...[...document.querySelectorAll('footer.player, #bottomnav')].filter((e) => e.getClientRects().length).map((e) => e.getBoundingClientRect().top));
+      const row = q('#isongs .list-row, #isongs .song-row');
+      return { lines: Math.round(bl.clientHeight / lh), moreH: Math.round(m.height),
+        reach: [isMore(cx, cy - 21), isMore(cx, cy + 21), isMore(m.left - 6, cy), isMore(m.right + 6, cy)],
+        wikiOwn: (() => { const el = document.elementFromPoint(wk.left + 1, wk.top + wk.height / 2); return !!el && !!el.closest('.wikilink'); })(),
+        below: { x: cx, y: cy + 18 }, fold: Math.round(fold), song1Bottom: row ? Math.round(row.getBoundingClientRect().bottom) : null,
+        sw: document.documentElement.scrollWidth - innerWidth };
+    });
+    check(r.lines === (phone ? 2 : 4), `${at}: the article's opening is ${phone ? 2 : 4} lines (${r.lines})`);
+    check(r.moreH <= 24, `${at}: More still looks like a small link (${r.moreH} px tall)`);
+    check(r.wikiOwn, `${at}: the Wikipedia link still takes its own tap, right up to its left edge`);
+    check(r.sw <= 0, `${at}: no sideways scroll (${r.sw})`);
+    if (phone) {
+      check(r.reach.every(Boolean), `${at}: More is a 44 px tap, 21 px above and below its middle and 6 px to its sides (${r.reach})`);
+      // (a one-line facts line at 360x800 is where 2 lines instead of 4 brings the first song out from under the mini player)
+      if (w === 412 || key === 'short') check(r.song1Bottom != null && r.song1Bottom <= r.fold, `${at}: the first Top song is whole above the mini player (${r.song1Bottom} <= ${r.fold})`);
+      await page.touchscreen.tap(r.below.x, r.below.y); await sleep(200);
+      const open = await page.evaluate(() => !document.querySelector('#iblurb').classList.contains('clamp') && document.querySelector('#iblurbmore').getAttribute('aria-expanded') === 'true');
+      check(open, `${at}: a tap just under More shows the whole article`);
+    }
+    check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
+    await page.screenshot({ path: path.join(SHOTS, `artist-blurb-${key ? `${key}-` : ''}${w}x${h}${android ? '-android' : ''}.png`) });
     await context.close();
   }
   await browser.close();
