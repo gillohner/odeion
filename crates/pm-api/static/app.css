@@ -453,8 +453,19 @@ html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore) { min-width
    icon, then the row's gaps and Play's and Shuffle's sides tighten, then Play drops its icon, so ⋯ stays on the row;
    the rule above stays for WebViews without container queries. The steps count the words' width in ch, not em: the
    app's WebView applies Android's font size as text zoom, which grows the text and ch but leaves em as it was;
-   9.7ch is about 5.4em in Arial or Roboto.) */
-html[data-shell="phone"] #main > .hero > div:has(> .actions > #plplay) { container: plhero / inline-size; }
+   9.7ch is about 5.4em in Arial or Roboto. The container is the whole header, as wide as the row.) */
+html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) { container: plhero / inline-size; }
+/* A collection (phones): the album page's compact header (the cover beside the kind, name and count; the
+   button row and the sharing note under them, full width), so its first songs show on the first screen.
+   The empty last row under the words takes the rest of the cover's height, so the words keep to the top. */
+html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) { grid-template-columns: 112px minmax(0, 1fr); grid-template-rows: auto auto auto 1fr; gap: 4px 16px; align-items: start; }
+html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) > .art { width: 112px; grid-row: 1 / span 4; }
+html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) > div:not(.art) { display: contents; }
+html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) > div:not(.art) > :is(.eyebrow, h1, .sub) { grid-column: 2; margin: 0; min-width: 0; }
+html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) > div:not(.art) > :is(.actions, p.muted) { grid-column: 1 / -1; }
+html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) h1 { font-size: var(--fs-xl); line-height: 1.2; overflow-wrap: anywhere; }
+html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) .sub { font-size: var(--fs-md); }
+html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) .eyebrow { font-size: var(--fs-2xs); }
 @container plhero (width < calc(276px + 9.7ch)) { #plshuffle > .ic { display: none; } }
 @container plhero (width < calc(250px + 9.7ch)) {
   .actions:has(> #plplay) { gap: 4px; }
