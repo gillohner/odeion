@@ -448,6 +448,9 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
+      # No browser or node needed: bad arguments must stop the script before it starts anything
+      - name: the reconnect check refuses bad arguments
+        run: node tools/ui-reconnect-args.js
       - name: a node config and a four-minute track
         run: |
           mkdir -p /tmp/pc/data /tmp/pc/music /tmp/pc/shots
