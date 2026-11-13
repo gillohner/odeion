@@ -3885,13 +3885,16 @@
   // The heart in the title row and the Tags sheet, for the song on screen. The heart draws at once
   // from the known favourites; an answer that comes back after a newer render is dropped.
   let npGen = 0;
+  // Now Playing's heart painted again from the known favourites (a heart pressed elsewhere)
+  let npHeartPaint = () => {};
   const fillNpPubky = async (it, gen = npGen) => {
     const live = () => gen === npGen;
     const tid = it.track_id ?? (/^track:(\d+)$/.exec(it.uri || '') || [])[1];
     const songPage = npPageId(it.uri);
     const pageUri = songPage && !/^lib-/.test(songPage) ? uriOf('song', songPage) : null;
     let t = null;
-    let fav = tid != null ? state.favUris.has(`track:${tid}`) : pageUri ? state.favUris.has(pageUri) : false;
+    const favNow = () => (t ? isFav(t) : tid != null ? state.favUris.has(`track:${tid}`) : pageUri ? state.favUris.has(pageUri) : false);
+    let fav = favNow();
     const ref = () => (tid != null ? { track_id: Number(tid) } : pageUri ? { uri: pageUri } : null);
     const drawHeart = () => {
       const h = $('#npheart', overlay); if (!h || !live()) return;
@@ -3899,11 +3902,12 @@
       const word = fav ? 'In favourites' : 'Add to favourites';
       const had = document.activeElement && document.activeElement.id === 'npfav';
       h.innerHTML = `<button class="icon-btn np-heart ${fav ? 'on' : ''}" id="npfav" aria-pressed="${fav}" aria-label="${word}" title="${word}">${icon(fav ? 'heart-fill' : 'heart')}</button>`;
-      $('#npfav', overlay).onclick = async () => { try { if (await setFavourite(ref(), !fav)) { fav = !fav; drawHeart(); } } catch (e) { toast(e.message, 'error'); } };
+      $('#npfav', overlay).onclick = async () => { const want = !fav; try { if (await setFavourite(ref(), want)) { fav = want; drawHeart(); } } catch (e) { toast(e.message, 'error'); } };
       if (had) $('#npfav', overlay).focus({ preventScroll: true });
       npRestore();
     };
     drawHeart();
+    npHeartPaint = () => { if (!live()) return; const on = favNow(); if (on !== fav) { fav = on; drawHeart(); } };
     if (tid != null) { try { t = await api('GET', `/library/tracks/${tid}`); } catch { t = null; } if (!live()) return; if (t) { fav = isFav(t); drawHeart(); } }
     if (!$('#nppubky', overlay)) return;
     const target = t ? { track_id: Number(tid) } : pageUri ? { uri: pageUri } : null;
@@ -4951,7 +4955,7 @@
         <div class="fmt-col"><span class="fmt ${LOSSY[t.file && t.file.container] ? 'lossy' : ''}">${esc(fileFormat(t.file))}</span></div>
         <div class="dur">${fmt(t.duration_ms)}</div>
         <div class="row-actions">
-          <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}">${icon(fav ? 'heart-fill' : 'heart')}</button>
+          <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(fav, t.title))}">${icon(fav ? 'heart-fill' : 'heart')}</button>
           <button class="icon-btn" data-act="next" title="Play next">${icon('playnext')}</button>
           <button class="icon-btn" data-act="add" title="Add to queue">${icon('plus')}</button>
           <button class="icon-btn" data-act="more" title="More">${icon('more')}</button>
@@ -4995,7 +4999,7 @@
       else if (act === 'more') trackMenu(btn, [tracks[i]]);
       else if (act === 'fav') {
         const on = btn.classList.contains('on');
-        try { if (await setFavourite({ track_id: tracks[i].id }, !on)) { btn.classList.toggle('on', !on); btn.innerHTML = icon(!on ? 'heart-fill' : 'heart'); btn.title = !on ? 'Remove from favourites' : 'Add to favourites'; } }
+        try { if (await setFavourite({ track_id: tracks[i].id }, !on)) setHeart(btn, !on, tracks[i].title); }
         catch (er) { toast(er.message, 'error'); }
       }
     });
@@ -5818,8 +5822,7 @@
   const heartWords = (on, title) => `${on ? 'Remove' : 'Add'} ${title} ${on ? 'from' : 'to'} favourites`;
   // A song row's heart, the heart a row on Songs has: filled when the song is bookmarked (shown
   // then without hover, on a touch screen too), an outline you reach by hovering the row with a
-  // mouse. One click to bookmark where the ⋯ menu used to take two. It says which song it is for,
-  // which the one on Songs does not (it is alone on its page, these are not).
+  // mouse. One click to bookmark where the ⋯ menu used to take two. It says which song it is for.
   const songHeart = (t, k) => `<button class="icon-btn heart${songFav(t) ? ' on' : ''}" data-sfav="${k}" title="${songFav(t) ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(songFav(t), t.title))}">${icon(songFav(t) ? 'heart-fill' : 'heart')}</button>`;
   // The heart turned over without redrawing anything around it
   const setHeart = (b, on, title) => { b.classList.toggle('on', on); b.innerHTML = icon(on ? 'heart-fill' : 'heart'); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.setAttribute('aria-label', heartWords(on, title)); };
@@ -5911,22 +5914,14 @@
     // The row's heart: saves and turns over in place, so a long list never redraws under you.
     // Its press goes through busy() like every other (the spinner, one save per press, and the
     // keyboard keeps the button — disabling it mid-press would drop focus to the top of the page).
-    $$('[data-sfav]', box).forEach((b) => b.onclick = async (e) => {
+    $$('[data-sfav]', box).forEach((b) => { heartSong.set(b, all[Number(b.dataset.sfav)]); b.onclick = async (e) => {
       e.stopPropagation(); e.preventDefault();
       const t = all[Number(b.dataset.sfav)]; if (!t) return;
       const ref = t.track_id != null ? { track_id: t.track_id } : { uri: t.page || (t.id ? uriOf('song', t.id) : null) };
       if (ref.uri == null && ref.track_id == null) { toast('This song has no address to save yet'); return; }
       const on = !b.classList.contains('on');
       if (await setFavourite(ref, on)) setHeart(b, on, t.title);
-    });
-    // On a cold start the bookmarks can still be on their way (a listener's go to their homeserver
-    // takes longer than the page), so every heart here is painted again as soon as they are in —
-    // only the hearts, so nothing moves under you.
-    if (favLoad && !favLoad.done) {
-      const fl = favLoad;
-      const paint = () => { if (!box.isConnected) return; $$('[data-sfav]', box).forEach((b) => { const t = all[Number(b.dataset.sfav)]; if (t) setHeart(b, songFav(t), t.title); }); };
-      fl.then(paint, paint);
-    }
+    }; });
     $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); if (opensElsewhere(e)) return; e.preventDefault(); setView('item', { kind: 'song', id: all[Number(a.dataset.ssong)].id }); });
     hydrateArtistCredits(box);
     $$('[data-salbum]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); if (opensElsewhere(e)) return; e.preventDefault(); setView('item', { kind: 'album', id: all[Number(a.dataset.salbum)].album_id }); });
@@ -6417,10 +6412,32 @@
   const listStale = (v, mine) => state.view !== v || mine < pageShown[v];
   // The latest favourites load, so a page that lists favourites can wait for it on a cold start
   let favLoad = null; let favRedraw = null;
+  // Only the latest load's answer counts: on a cold start a slow first answer that lands after a
+  // heart was pressed would otherwise put back the list without that bookmark. An older load
+  // waits for the latest and answers with it.
   const loadFavourites = () => {
-    const p = favLoad = api('GET', '/favourites').then((f) => { state.favUris = new Set(f.uris || []); return f; });
+    const p = favLoad = api('GET', '/favourites').then((f) => {
+      if (p !== favLoad) return favLoad;
+      state.favUris = new Set(f.uris || []); paintHearts(); return f;
+    }, (e) => { if (p !== favLoad) return favLoad; throw e; });
     p.then(() => { p.done = true; }, () => { p.done = true; });
     return p;
+  };
+  // The song hearts on screen (song rows, Library › Songs rows, Now Playing) painted again from the
+  // favourites just in, and only the hearts, so nothing moves under you: a song saved from one row
+  // turns over in its other rows and in Now Playing, and bookmarks that arrive after the page (a
+  // cold start) fill them in. (A page's own hearts, album and artist ones, are drawn with the page.)
+  const heartSong = new WeakMap();
+  const paintHearts = () => {
+    $$('[data-sfav]').forEach((b) => { const t = heartSong.get(b); if (t) setHeart(b, songFav(t), t.title); });
+    $$('.track [data-act="fav"]').forEach((b) => { const list = b.closest('[data-list]'); const t = (rowLists[list ? list.dataset.list : 'tr'] || [])[Number(b.closest('.track').dataset.i)]; if (t) setHeart(b, isFav(t), t.title); });
+    npHeartPaint();
+  };
+  // No favourites here any more (the homeserver disconnected): a load still on its way is no longer
+  // the latest, so it can't put them back
+  const clearFavourites = () => {
+    const p = favLoad = Promise.resolve({ uris: [], albums: [], tracks: [], artists: [], other: [] }); p.done = true;
+    state.favUris = new Set(); paintHearts();
   };
   // A song not identified yet is a favourite on this node only until "Which song is this?".
   // A listener's go to their own homeserver: the first one asks them to connect it.
@@ -6945,7 +6962,7 @@
             + (f.artists.length ? `<section class="section"><div class="section-head"><h3>Artists</h3></div><div class="chips">${f.artists.map((a) => `<button class="chip" data-artist="${a.id}">${esc(a.name)}</button>`).join('')}</div></section>` : '')
             + (f.tracks.length ? `<section class="section"><div class="section-head"><h3>Songs</h3></div>${trackRows(f.tracks, { key: 'fav' })}</section>` : '')
             + (f.other.length ? `<section class="section"><div class="section-head"><h3>From other services</h3></div><div id="favother"><div class="skeleton" style="height:56px"></div></div></section>` : '');
-          lists.fav = f.tracks;
+          lists.fav = f.tracks; bindTrackRows(main, lists); // (its rows work while the rest is still coming)
           const hc = $('[data-hsconnect]', main); if (hc) hc.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) render(); };
           const fp = $('#favplay'); if (fp) fp.onclick = () => playTracks(f.tracks, true, 'end', { shuffle: false });
           if (f.other.length) { const items = await describe(f.other); const box = $('#favother'); if (box && state.view === 'favourites') { box.innerHTML = discoverRows(items); bindDiscoverRows(items); } }
@@ -8710,7 +8727,7 @@
               else signinChooser(src === 'tidal' ? tidalSigninCfg(body) : spotifySigninCfg(body));
             }));
             const hon = $('#hson'); if (hon) hon.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) { loadFavourites().catch(() => {}); render(); } };
-            const hoff = $('#hsoff'); if (hoff) hoff.onclick = async () => { hoff.disabled = true; try { await api('DELETE', '/me/homeserver'); toast('Disconnected: your homeserver keeps your bookmarks'); state.favUris = new Set(); render(); } catch (e) { hoff.disabled = false; toast(e.message, 'error'); } };
+            const hoff = $('#hsoff'); if (hoff) hoff.onclick = async () => { hoff.disabled = true; try { await api('DELETE', '/me/homeserver'); toast('Disconnected: your homeserver keeps your bookmarks'); clearFavourites(); render(); } catch (e) { hoff.disabled = false; toast(e.message, 'error'); } };
             $$('[data-mysrc]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/me/sources', { use: b.dataset.mysrc }); toast(b.dataset.mysrc === 'own' ? 'You play with your own sign-ins' : 'You play through this node’s sign-ins'); render(); } catch (e) { toast(e.message, 'error'); } });
             break;
           }
@@ -9403,7 +9420,7 @@
         setConn(true, `Offline · ${countOf(state.info.library.tracks, 'songs')} on this device`);
         try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
         state.sources = []; state.zones = {}; state.zonesSeen = true; state.zone = BROWSER;
-        loadFavourites().catch(() => { state.favUris = new Set(); });
+        loadFavourites().catch(() => { state.favUris = new Set(); paintHearts(); });
         renderZoneName(); renderBar();
         link.loaded = true;
         if (!OFFLINE_VIEWS.has(state.view)) setView('downloads', undefined, 'replace'); else render();
