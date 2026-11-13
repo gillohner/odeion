@@ -46,10 +46,12 @@ const fixtures = { '/library/albums/formats': { body: formats }, '/library/track
       await context.addInitScript((t) => { localStorage.setItem('pm.zone', 'linn'); localStorage.setItem('pm.theme', t); window.pmDesktop = { platform: 'android', version: '0.0.0' }; }, theme);
       // The library page: the mini player on the tabs, the tabs to the bottom, the header's gap
       await fx.go(page, '/albums'); await page.waitForSelector('#main .grid .tile'); await sleep(400);
+      // The gap is measured to the first chip: on a touch phone the row's box also holds the chips'
+      // tap reach (padding), which is not a visible gap
       const lib = await page.evaluate(() => {
         const r = (s) => document.querySelector(s).getBoundingClientRect(); const cs = (s) => getComputedStyle(document.querySelector(s));
         const head = document.querySelector('#main > .page-head'); const chips = head && head.nextElementSibling;
-        return { player: r('.player'), nav: r('.bottomnav'), vh: innerHeight, pbg: cs('.player').backgroundColor, nbg: cs('.bottomnav').backgroundColor, pradius: cs('.player').borderTopLeftRadius, gap: head && chips && chips.matches('.chips') ? Math.round(chips.getBoundingClientRect().top - head.getBoundingClientRect().bottom) : null };
+        return { player: r('.player'), nav: r('.bottomnav'), vh: innerHeight, pbg: cs('.player').backgroundColor, nbg: cs('.bottomnav').backgroundColor, pradius: cs('.player').borderTopLeftRadius, gap: head && chips && chips.matches('.chips') && chips.querySelector('.chip') ? Math.round(chips.querySelector('.chip').getBoundingClientRect().top - head.getBoundingClientRect().bottom) : null };
       });
       check(Math.abs(lib.player.bottom - lib.nav.top) <= 0.5 && lib.player.left === 0 && lib.player.right === w && lib.pbg === lib.nbg && lib.pradius === '0px', `${at}: the mini player sits on the tabs as one surface (gap ${Math.round(lib.nav.top - lib.player.bottom)} px, ${lib.player.left}..${lib.player.right}, ${lib.pbg} / ${lib.nbg})`);
       check(Math.abs(lib.nav.bottom - lib.vh) <= 0.5, `${at}: the tabs reach the screen's bottom (${Math.round(lib.nav.bottom)} of ${lib.vh})`);
