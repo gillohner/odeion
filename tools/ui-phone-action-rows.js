@@ -1,7 +1,8 @@
 // On a phone the buttons in an action row (a playlist's Play, Shuffle, Play on…, Share and ⋯; the
 // Songs page's Play all) are 44 px taps and a playlist's row stays one row at 360 px, as an album's
 // does, also at 320 px and with a larger font size; a checkbox's whole line (Import's Roon options) is
-// a 44 px tap. Desktop is unchanged.
+// a 44 px tap. A playlist has the album page's compact header (the cover beside its name), so its first
+// song shows on the first screen. Desktop is unchanged.
 // Real candidate assets, isolated responses: node tools/ui-phone-action-rows.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -48,6 +49,17 @@ async function phone(browser, width, android) {
   const gap = await page.evaluate(() => { const a = document.querySelector('#main > .hero .actions'); const p = a.nextElementSibling; return p ? p.getBoundingClientRect().top - Math.max(...[...a.children].filter((b) => b.getClientRects().length).map((b) => b.getBoundingClientRect().bottom)) : null; });
   check(gap != null && gap >= 6, `${at}: the sharing note sits ${gap != null ? gap.toFixed(1) : '?'} px under the row (at least 6)`);
   await page.screenshot({ path: path.join(SHOTS, `playlist-${android ? 'android' : 'browser'}-${width}.png`) });
+  // The album page's compact header: a 112 px cover beside the kind, name and count, the row under it, and
+  // on a 360x640 / 412x732 phone the first song starts on the first screen (it started at y 634 under the
+  // 180 px cover on a row of its own, below the visible area at 519 / 611)
+  await page.setViewportSize({ width, height: width === 360 ? 640 : 732 }); await page.waitForTimeout(200);
+  const hd = await page.evaluate(() => { const b = (q) => { const e = document.querySelector(q); if (!e) return null; const r = e.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, w: r.width }; }; const s = document.querySelector('#plsongs .srow'); return { art: b('#main > .hero > .art'), h1: b('#main > .hero h1'), eyebrow: b('#main > .hero .eyebrow'), sub: b('#main > .hero .sub'), play: b('#plplay'), note: b('#main > .hero .actions + p.muted'), main: b('#main'), song: s && b('#plsongs .srow'), songName: s && s.querySelector('.name').textContent.trim() }; });
+  const beside = hd.art && [hd.eyebrow, hd.h1, hd.sub].every((e) => e && e.left >= hd.art.right + 8 && e.top < hd.art.bottom);
+  check(hd.art && Math.round(hd.art.w) === 112 && beside, `${at}: a playlist's header is compact, its kind, name and count beside its 112 px cover (cover ${hd.art && hd.art.w.toFixed(0)} px, name at x ${hd.h1 && hd.h1.left.toFixed(0)})`);
+  check(hd.play && hd.play.top >= hd.art.bottom && hd.note && Math.abs(hd.note.left - hd.art.left) < 1 && hd.note.top > hd.play.bottom, `${at}: Play's row and the sharing note sit under the cover, full width`);
+  check(hd.song && hd.song.top < hd.main.bottom, `${at}: its first song ("${hd.songName}") starts on the first screen (y ${hd.song && hd.song.top.toFixed(0)}, visible to ${hd.main.bottom.toFixed(0)})`);
+  await page.screenshot({ path: path.join(SHOTS, `playlist-header-${android ? 'android' : 'browser'}-${width}.png`) });
+  await page.setViewportSize({ width, height: 900 }); await page.waitForTimeout(100);
   // still one tap: ⋯ opens the playlist's menu
   await page.locator('#plmore').tap(); await page.waitForTimeout(200);
   check(await page.locator('.popover.menu:not([hidden])').count() === 1, `${at}: one tap on ⋯ opens the playlist's menu`);
@@ -97,7 +109,7 @@ async function phone(browser, width, android) {
 // text grows, em does not; text-size-adjust takes the same path in Chromium).
 const textZoom = (page, k) => page.addStyleTag({ content: `html { -webkit-text-size-adjust: ${Math.round(k * 100)}%; text-size-adjust: ${Math.round(k * 100)}%; }` });
 // 10em and 10ch in the playlist row's container, in px
-const units = (page) => page.evaluate(() => { const h = document.querySelector('#main > .hero > div:has(> .actions > #plplay)'); const w = (v) => { const p = document.createElement('div'); p.style.cssText = `position:absolute;visibility:hidden;height:0;width:${v}`; h.append(p); const r = p.getBoundingClientRect().width; p.remove(); return r; }; return { em: w('10em'), ch: w('10ch') }; });
+const units = (page) => page.evaluate(() => { const h = document.querySelector('#main > .hero:has(> div > .actions > #plplay)'); const w = (v) => { const p = document.createElement('div'); p.style.cssText = `display:block;position:absolute;visibility:hidden;height:0;width:${v}`; h.append(p); const r = p.getBoundingClientRect().width; p.remove(); return r; }; return { em: w('10em'), ch: w('10ch') }; });
 const scale = (page, k) => page.evaluate((k) => { const all = [document.documentElement, ...document.querySelectorAll('body, body *')]; const fs = all.map((e) => parseFloat(getComputedStyle(e).fontSize)); all.forEach((e, i) => { e.style.fontSize = `${fs[i] * k}px`; }); }, k);
 async function narrow(browser, width, android, k, zoom) {
   const at = `${android ? 'android' : 'browser'} ${width} at ${Math.round(k * 100)} %${zoom ? ' text zoom' : ''}`;
@@ -154,6 +166,8 @@ async function narrow(browser, width, android, k, zoom) {
     await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plsongs .srow'); await page.waitForTimeout(300);
     const d = await row(page, '#main > .hero');
     check(d.buttons.length >= 5 && d.buttons.every((b) => b.h < 44) && d.rows === 1, `desktop 1280: a playlist's row is unchanged (${fmt(d)})`);
+    const dart = await page.evaluate(() => { const a = document.querySelector('#main > .hero > .art').getBoundingClientRect(); const h = document.querySelector('#main > .hero h1').getBoundingClientRect(); return { w: a.width, beside: h.left > a.right }; });
+    check(dart.w === 220 && dart.beside, `desktop 1280: a playlist's header keeps its 220 px cover beside the words (${dart.w} px)`);
     await fx.go(page, '/library/import'); await page.waitForSelector('#roonfav'); await page.waitForTimeout(300);
     const dh = await page.evaluate(() => [...document.querySelectorAll('#main label.check:has(#roonfav, #roonpl, #roontags)')].map((l) => l.getBoundingClientRect().height));
     check(dh.length === 3 && dh.every((h) => h < 30), `desktop 1280: Roon's options stay lines of text (${dh.map((h) => h.toFixed(0)).join(' ')})`);
