@@ -326,6 +326,70 @@ async function slowFavourites(browser, width) {
   } finally { await context.close(); }
 }
 
+// A tile's Play sits on its own cover and plays that album (it used to be placed against the page,
+// all tiles' Plays stacked in one spot at the window's corner, and a click there played the last
+// album). On a touch screen, with no hover, the Play shows at a 44 px target; with a mouse it shows on
+// hover only. A real click or tap (not a forced one) is what proves where it is.
+async function tilePlay(browser, width, mobile) {
+  const songsOf = Object.fromEntries(albums.map((a) => [`/library/albums/${a.id}/tracks`, { body: { tracks: [{ ...fx.track, id: 1000 + a.id, album: { id: a.id, title: a.title } }] } }]));
+  const { page, context, state } = await fx.create(browser, width, { mobile, fixtures: { ...fixtures, ...songsOf } });
+  const at = `${width}${mobile ? ' touch' : ''}`;
+  try {
+    await fx.go(page, '/albums');
+    await page.waitForFunction((n) => document.querySelectorAll('#albumgrid .tile').length === n, albums.length);
+    const tiles = await page.locator('#albumgrid .tile').evaluateAll((els) => els.slice(0, 6).map((t) => {
+      const plays = t.querySelectorAll('.tile-play'), p = plays[0], art = t.querySelector('.art');
+      const r = p.getBoundingClientRect(), a = art.getBoundingClientRect();
+      return { id: Number(t.dataset.album), plays: plays.length, onCover: p.parentElement === art && r.left >= a.left && r.right <= a.right && r.top >= a.top && r.bottom <= a.bottom, w: r.width, h: r.height, opacity: Number(getComputedStyle(p).opacity) };
+    }));
+    for (const t of tiles) assert.ok(t.plays === 1 && t.onCover, `${at}: album ${t.id}'s Play sits on its own cover (${JSON.stringify(t)})`);
+    if (mobile) assert.ok(tiles.every((t) => t.opacity === 1 && t.w >= 44 && t.h >= 44), `${at}: Play shown at 44 px without hover (${JSON.stringify(tiles[0])})`);
+    else assert.ok(tiles.every((t) => t.opacity === 0), `${at}: Play hidden until hover`);
+    const tile = page.locator('#albumgrid .tile').nth(3), want = tiles[3].id;
+    await tile.scrollIntoViewIfNeeded();
+    if (!mobile) await tile.hover();
+    const box = await tile.locator('.tile-play').boundingBox();
+    const x = box.x + box.width / 2, y = box.y + box.height / 2;
+    assert.equal(await page.evaluate(([x, y]) => document.elementFromPoint(x, y)?.closest('.tile')?.dataset.album, [x, y]), String(want), `${at}: nothing covers the 4th album's Play`);
+    const n0 = state.hits.length;
+    if (mobile) await page.touchscreen.tap(x, y); else await page.mouse.click(x, y);
+    const asked = () => state.hits.slice(n0).map((h) => h.v).filter((v) => /^\/library\/albums\/\d+\/tracks$/.test(v));
+    for (let i = 0; i < 30 && !asked().length; i++) await page.waitForTimeout(100);
+    await page.waitForTimeout(300);
+    assert.deepEqual(asked(), [`/library/albums/${want}/tracks`], `${at}: the Play on the 4th tile plays that album`);
+    assert.equal(new URL(page.url()).pathname, '/albums', `${at}: playing from a tile stays on Albums`);
+    if (width === 360 || width === 1280) await page.screenshot({ path: path.join(shots, `after-albums-tile-play-${width}.png`) });
+    await fx.cleanCopy(page);
+    assert.deepEqual(state.errors, [], 'no page errors');
+    console.log(`PASS tile Play ${at}: on its own cover, plays its album`);
+  } finally { await context.close(); }
+}
+
+// Other tile grids (Home's See all, tag and item pages) keep their own Play: the library-album Play
+// binding that runs after every page used to take theirs over and ask for a library album by the
+// tile's place in the list. Now that the Play shows on a touch screen this matters on a phone.
+async function seeAllTilePlay(browser, width, mobile) {
+  const items = [0, 1, 2].map((i) => ({ kind: 'album', uri: `https://musicbrainz.org/release-group/0000000${i}-0000-4000-8000-000000000000`, title: `Trending ${i}`, artist: 'Sefa' }));
+  const { page, context, state } = await fx.create(browser, width, { mobile, fixtures: { ...fixtures, '/home/trending-albums': { body: { section: 'trending-albums', items, tags: [] } } } });
+  const at = `${width}${mobile ? ' touch' : ''}`;
+  try {
+    await fx.go(page, '/home/trending-albums');
+    const tile = page.locator('#hsfull .tile').nth(1);
+    await tile.waitFor();
+    await tile.scrollIntoViewIfNeeded();
+    if (!mobile) await tile.hover();
+    const box = await tile.locator('.tile-play').boundingBox();
+    const n0 = state.hits.length;
+    if (mobile) await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2); else await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    const asked = () => state.hits.slice(n0).filter((h) => h.v === '/discover/play' || /^\/library\/albums\/\d+\/tracks$/.test(h.v));
+    for (let i = 0; i < 30 && !asked().length; i++) await page.waitForTimeout(100);
+    await page.waitForTimeout(300);
+    const got = asked().map((h) => h.v + (h.v === '/discover/play' ? decodeURIComponent(h.q) : ''));
+    assert.ok(got.length && got.every((v) => v.startsWith('/discover/play') && v.includes(items[1].uri)), `${at}: See all's 2nd Play plays that album, not a library album (${JSON.stringify(got)})`);
+    console.log(`PASS See all tile Play ${at}: plays its own item`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -343,5 +407,9 @@ async function slowFavourites(browser, width) {
     await nodeFavAlbum(browser);
     for (const width of [1280, 1024, 768]) await coldFavourites(browser, width);
     for (const width of [1280, 768]) await slowFavourites(browser, width);
+    for (const width of [1280, 1024, 768]) await tilePlay(browser, width, false);
+    for (const width of [360, 412]) await tilePlay(browser, width, true);
+    await seeAllTilePlay(browser, 1280, false);
+    await seeAllTilePlay(browser, 360, true);
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
