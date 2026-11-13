@@ -101,7 +101,8 @@ const list = (bs) => bs.map((b) => `${b.name} ${b.width.toFixed(0)}×${b.height.
     // and Import a row of its own, so the playlists start two rows higher at 320/360 px. Desktop
     // keeps its one long link box.
     const toolbar = (page) => page.evaluate(() => {
-      const box = (s) => { const el = document.querySelector(s); const b = el.getBoundingClientRect(); return { top: b.top, left: b.left, right: b.right, width: b.width, height: b.height }; };
+      // A listener's Playlists page has no Import button: file is null there.
+      const box = (s) => { const el = document.querySelector(s); if (!el) return null; const b = el.getBoundingClientRect(); return { top: b.top, left: b.left, right: b.right, width: b.width, height: b.height }; };
       return { name: box('#plname'), create: box('#plcreate'), file: box('label.file-btn'), link: box('#plshared'), open: box('#plopenshared'), first: box('[data-pl]'),
         ellipsis: getComputedStyle(document.querySelector('#plshared')).textOverflow, hint: document.querySelector('#plshared').placeholder, label: document.querySelector('#plshared').getAttribute('aria-label'), overflow: document.documentElement.scrollWidth > innerWidth };
     });
@@ -121,13 +122,70 @@ const list = (bs) => bs.map((b) => `${b.name} ${b.width.toFixed(0)}×${b.height.
         check(t.link.height === 44 && t.name.height === 44, `${at} /playlists: both boxes are 44 px tall like their buttons (${t.name.height}, ${t.link.height})`);
         check(t.ellipsis === 'ellipsis', `${at} /playlists: a cut-off hint in the link box ends in …`);
         check(t.link.top - t.name.top < 140 && t.first.top - t.open.top < 120, `${at} /playlists: the controls take three rows, then the playlists (rows at ${[t.name, t.file, t.link, t.first].map((b) => b.top.toFixed(0)).join(', ')})`);
-        check(t.hint.startsWith('Shared playlist') && t.label === 'Open a shared playlist', `${at} /playlists: the link box's hint starts with what it is for, and it has a name ("${t.hint}")`);
+        check(t.hint.startsWith('Shared playlist') && t.label === 'Shared playlist link', `${at} /playlists: the link box's hint starts with what it is for, and it has a name ("${t.hint}")`);
         check(t.open.right <= width && t.create.right <= width && !t.overflow, `${at} /playlists: no sideways overflow`);
         await page.locator('#plname').fill('Road trip');
         await page.locator('#plcreate').tap();
         for (let i = 0; i < 30 && !state.hits.some((h) => h.v === '/playlists' && h.m === 'POST'); i++) await page.waitForTimeout(50);
         check(state.hits.some((h) => h.v === '/playlists' && h.m === 'POST' && /Road trip/.test(h.body || '')), `${at} /playlists: typing a name and one tap on Create makes the playlist`);
         await page.screenshot({ path: path.join(SHOTS, `${at}-playlists-toolbar.png`) });
+      } finally { await context.close(); }
+    }
+    // Every control in the Playlists toolbar still does its job with taps and the keyboard on a phone,
+    // for the owner (with Import) and for a listener (no Import: the toolbar has two rows).
+    for (const role of ['owner', 'listener']) for (const android of [false, true]) {
+      const at = `${role}-${android ? 'android' : 'browser'}-360`;
+      const { page, context, state } = await fx.create(browser, 360, { mobile: true, role });
+      state.collections = [fx.summary];
+      const sent = (v, m) => state.hits.filter((h) => h.v === v && h.m === m).length;
+      const wait = async (fn) => { for (let i = 0; i < 30 && !fn(); i++) await page.waitForTimeout(50); return fn(); };
+      try {
+        if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+        await fx.go(page, '/playlists');
+        await page.waitForSelector('[data-pl]');
+        const t = await toolbar(page);
+        check(role === 'owner' ? !!t.file : t.file === null, `${at} /playlists: Import is ${role === 'owner' ? 'shown' : 'not shown'}`);
+        check(Math.abs(t.create.top - t.name.top) < 1 && Math.abs(t.open.top - t.link.top) < 1 && !t.overflow, `${at} /playlists: each box shares its row with its button`);
+        if (!t.file) check(t.link.top - t.name.top < 80, `${at} /playlists: without Import the link row comes straight under the name row (${t.name.top.toFixed(0)}, ${t.link.top.toFixed(0)})`);
+        // Both boxes have a name, and an empty box's button says what to type, by that name.
+        const named = await page.evaluate(() => ({ name: document.querySelector('#plname').getAttribute('aria-label'), create: [document.querySelector('#plcreate').disabled, document.querySelector('#plcreate').title], open: [document.querySelector('#plopenshared').disabled, document.querySelector('#plopenshared').title] }));
+        check(named.name === 'New playlist name', `${at} /playlists: the name box is named "New playlist name" (${named.name})`);
+        check(named.create[0] && named.create[1] === 'Type in “New playlist name” first', `${at} /playlists: an empty name box keeps Create off and says why ("${named.create[1]}")`);
+        check(named.open[0] && named.open[1] === 'Type in “Shared playlist link” first', `${at} /playlists: an empty link box keeps Open off and says why by the box's name, not its long hint ("${named.open[1]}")`);
+        // Enter in the name box creates.
+        let was = sent('/playlists', 'POST');
+        await page.locator('#plname').tap();
+        await page.keyboard.type('Night bus');
+        await page.keyboard.press('Enter');
+        check(await wait(() => sent('/playlists', 'POST') > was) && /Night bus/.test(state.hits.filter((h) => h.v === '/playlists' && h.m === 'POST').pop().body || ''), `${at} /playlists: a name and Enter makes the playlist`);
+        // The page is drawn again with an empty name box once the playlist is made.
+        await page.waitForFunction(() => { const n = document.querySelector('#plname'); return n && !n.value; });
+        // A tap on Open, and Enter in the link box, each look the link up once.
+        const KEY = 'pubky://8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo/pub/pubky.app/collections/c1';
+        for (const how of ['tap', 'Enter']) {
+          was = sent('/shared/resolve', 'GET');
+          await page.locator('#plshared').fill(KEY);
+          if (how === 'tap') await page.locator('#plopenshared').tap(); else await page.locator('#plshared').press('Enter');
+          check(await wait(() => sent('/shared/resolve', 'GET') === was + 1) && state.hits.filter((h) => h.v === '/shared/resolve').pop().q.includes(encodeURIComponent(KEY)), `${at} /playlists: a link and ${how === 'tap' ? 'a tap on Open' : 'Enter'} looks the link up`);
+          await page.waitForSelector('#plshared');
+        }
+        // Choosing a file in Import sends it.
+        if (t.file) {
+          was = sent('/playlists/import/file', 'POST');
+          await page.locator('#plimport').setInputFiles({ name: 'trip.m3u', mimeType: 'audio/x-mpegurl', buffer: Buffer.from('#EXTM3U\n/music/a.flac\n') });
+          check(await wait(() => sent('/playlists/import/file', 'POST') === was + 1) && state.hits.filter((h) => h.v === '/playlists/import/file').pop().q.includes('trip.m3u'), `${at} /playlists: choosing a file in Import sends it`);
+        }
+        check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
+      } finally { await context.close(); }
+    }
+    // Radio's search box has a name too, and an empty one's Search says what to type by that name.
+    {
+      const { page, context } = await fx.create(browser, 360, { mobile: true, fixtures: { '/radio/stations': { body: { stations: [] } } } });
+      try {
+        await fx.go(page, '/radio');
+        await page.waitForSelector('#rsearch');
+        const r = await page.evaluate(() => ({ label: document.querySelector('#rq').getAttribute('aria-label'), off: document.querySelector('#rsearch').disabled, hint: document.querySelector('#rsearch').title }));
+        check(r.label === 'Station search' && r.off && r.hint === 'Type in “Station search” first', `360 /radio: the search box is named and an empty one's Search says "${r.hint}"`);
       } finally { await context.close(); }
     }
     {
