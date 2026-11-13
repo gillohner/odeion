@@ -5,7 +5,9 @@
 // of it when it has none, nor offline. A node zone with an empty queue (the bar and its card on
 // Zones) says the same instead of sending Play, unless its queue as fetched has songs; Shuffle my
 // music then plays on that zone (a card's, This browser's), whichever zone is in use when it starts.
-// A paused zone still takes Play; another zone's fetched queue doesn't count for the one in use.
+// A paused zone still takes Play; another zone's fetched queue doesn't count for the one in use, and
+// with none fetched for the zone in use yet, or an older answer landing late, Play goes to the node.
+// The note names the zone whenever there is more than one place to play.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-empty-queue.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -104,11 +106,13 @@ async function nodeZone(browser, width) {
     await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [Z] })); });
     await fx.go(page, '/queue');
     await page.waitForFunction(() => /Kitchen/.test(document.querySelector('#zonebtn')?.textContent || ''));
+    for (let i = 0; i < 40 && !state.hits.some((h) => h.v === '/zones/z1/queue'); i++) await sleep(50);
+    await sleep(200);
     for (const id of ['#toggle', '#next', '#prev']) {
       await hideToast(page);
       await page.click(id);
       const t = await toastNow(page);
-      assert.equal(t.text.replace(t.act || '', '').trim(), 'The queue is empty', `${width}: ${id} on an empty node zone says so (${JSON.stringify(t)})`);
+      assert.equal(t.text.replace(t.act || '', '').trim(), 'The queue is empty on Kitchen', `${width}: ${id} on an empty node zone says so (${JSON.stringify(t)})`);
       assert.equal(t.act, 'Shuffle my music', `${width}: ${id} offers Shuffle my music`);
     }
     // The zone's card on Zones: the same
@@ -184,6 +188,7 @@ async function shuffleOnTheCardsZone(browser, width) {
     await page.locator('[data-zcard="browser"] [data-zt="toggle"]').click();
     t = await toastNow(page);
     assert.equal(t.act, 'Shuffle my music', `${width}: This browser's Play on an empty queue offers Shuffle my music (${JSON.stringify(t)})`);
+    assert.ok(t.text.startsWith('The queue is empty on This browser'), `${width}: the note names This browser (${JSON.stringify(t)})`);
     await page.click('#toast .toast-act');
     await page.waitForFunction(() => document.querySelector('audio')?.getAttribute('src'));
     await sleep(300);
@@ -215,8 +220,9 @@ async function shuffleKeepsItsZone(browser, width) {
 }
 
 async function pausedAndSwitched(browser, width) {
-  // 10. A paused zone with nothing in its queue still takes Play/Pause (sent, no note); and the queue
-  // fetched for Kitchen does not count for Study after a switch, while Study's own is on its way
+  // 10. A paused zone with nothing in its queue still takes Play/Pause (sent, no note); after a switch
+  // to Study, Kitchen's fetched queue does not count for it: while Study's own is on its way Play goes
+  // to the node (no note to tempt a shuffle); once it is in, empty, Play says so
   const late = { ...Z1, queue: [] }; // (Kitchen's event says empty; its fetched queue has Song 1)
   const { page, context, state } = await twoZones(browser, width, [late, Z2, Z3], { '/zones/z1/queue': { body: [{ id: 1, uri: 'track:1', title: 'Song 1' }] } });
   try {
@@ -236,10 +242,63 @@ async function pausedAndSwitched(browser, width) {
     await page.waitForFunction(() => /Study/.test(document.querySelector('#zonebtn')?.textContent || ''));
     await hideToast(page);
     await page.click('#toggle');
+    for (let i = 0; i < 40 && !zonePosts(state, 'z2').length; i++) await sleep(50);
+    assert.deepEqual(zonePosts(state, 'z2'), ['/zones/z2/transport'], `${width}: Study's Play, its queue not yet in, is sent`);
+    assert.ok(!/queue is empty/.test((await toastNow(page)).text), `${width}: no empty-queue note before Study's queue is in`);
+    state.delay = 0;
+    await sleep(1700);
+    await hideToast(page);
+    await page.click('#toggle');
     const t = await toastNow(page);
-    assert.ok(t.text.startsWith('The queue is empty'), `${width}: Study's Play says its queue is empty, Kitchen's songs aside (${JSON.stringify(t)})`);
+    assert.ok(t.text.startsWith('The queue is empty on Study'), `${width}: Study's Play says its queue is empty, Kitchen's songs aside (${JSON.stringify(t)})`);
     await sleep(300);
-    assert.deepEqual(zonePosts(state, 'z2'), [], `${width}: nothing sent to Study`);
+    assert.deepEqual(zonePosts(state, 'z2'), ['/zones/z2/transport'], `${width}: nothing more sent to Study`);
+  } finally { await context.close(); }
+}
+
+async function lateQueueAnswer(browser, width) {
+  // 11. Kitchen's queue answer held back and landing after a newer one: it is dropped. (a) Switched to
+  // Study (stopped, its event late: empty; its fetched queue has a song): Play on Study is sent, no
+  // note. (b) Back to Kitchen, whose newer fetch has a song: the held, older, empty answer landing
+  // last doesn't make Play say "empty" and offer a shuffle that would replace Kitchen's song.
+  const song = [{ id: 1, uri: 'track:1', title: 'Song 1' }];
+  const k = { ...Z1, queue: [], queue_index: null }; // (both zones' events late: empty)
+  const { page, context, state } = await twoZones(browser, width, [k, Z2], { '/zones/z2/queue': { body: song } });
+  let held = 0, heldSent = 0;
+  // (waits until the held answer has reached the page, so Play is pressed after it, not on a clock)
+  const heldLanded = async (n) => { for (let i = 0; i < 200 && heldSent < n; i++) await sleep(50); assert.equal(heldSent, n, `${width}: the held answer was sent`); await sleep(300); };
+  await page.route('**/v1/zones/z1/queue', async (r) => {
+    // The first of Kitchen's fetches answers 2.5 s late with an old, empty queue; later ones at once
+    if (held++ === 0) { await sleep(2500); await r.fulfill({ status: 200, contentType: 'application/json', body: '[]' }).catch(() => {}); heldSent++; return; }
+    return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(song) });
+  });
+  try {
+    await fx.go(page, '/zones');
+    await page.locator('[data-zcard="z2"] [data-zsel="z2"]').click();
+    await page.waitForFunction(() => /Study/.test(document.querySelector('#zonebtn')?.textContent || ''));
+    await heldLanded(1);
+    await hideToast(page);
+    await page.click('#toggle');
+    for (let i = 0; i < 40 && !zonePosts(state, 'z2').length; i++) await sleep(50);
+    assert.deepEqual(zonePosts(state, 'z2'), ['/zones/z2/transport'], `${width}: Study's Play is sent, Kitchen's late answer aside`);
+    assert.ok(!/queue is empty/.test((await toastNow(page)).text), `${width}: no empty-queue note on Study`);
+    // (b) Reloaded on Kitchen (its fetch held), to Study and back: a newer fetch has the song
+    held = 0;
+    await fx.go(page, '/zones');
+    await page.waitForFunction(() => /Kitchen/.test(document.querySelector('#zonebtn')?.textContent || ''));
+    await page.locator('[data-zcard="z2"] [data-zsel="z2"]').click();
+    await page.waitForFunction(() => /Study/.test(document.querySelector('#zonebtn')?.textContent || ''));
+    await page.locator('[data-zcard="z1"] [data-zsel="z1"]').click();
+    await page.waitForFunction(() => /Kitchen/.test(document.querySelector('#zonebtn')?.textContent || ''));
+    assert.ok(held >= 2, `${width}: Kitchen's queue was asked for again while the first answer was held (${held})`);
+    await heldLanded(2);
+    await hideToast(page);
+    await page.click('#toggle');
+    for (let i = 0; i < 40 && !zonePosts(state, 'z1').length; i++) await sleep(50);
+    assert.deepEqual(zonePosts(state, 'z1'), ['/zones/z1/transport'], `${width}: Kitchen's Play is sent, its older empty answer dropped`);
+    assert.ok(!/queue is empty/.test((await toastNow(page)).text), `${width}: no empty-queue note on Kitchen`);
+    await page.screenshot({ path: path.join(shots, `late-queue-answer-${width}.png`) });
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
   } finally { await context.close(); }
 }
 
@@ -263,7 +322,7 @@ async function offline(browser, width) {
   let failed = 0;
   try {
     for (const width of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [1280, 1024, 768])) {
-      for (const [name, fn] of [['empty browser queue', browserZone], ['queued then Play', queuedThenPlay], ['no songs', noSongs], ['empty node zone', nodeZone], ['node zone, late event', nodeZoneLateEvent], ['shuffle on the card\'s zone', shuffleOnTheCardsZone], ['shuffle keeps its zone', shuffleKeepsItsZone], ['paused zone, switched zone', pausedAndSwitched], ['offline', offline]]) {
+      for (const [name, fn] of [['empty browser queue', browserZone], ['queued then Play', queuedThenPlay], ['no songs', noSongs], ['empty node zone', nodeZone], ['node zone, late event', nodeZoneLateEvent], ['shuffle on the card\'s zone', shuffleOnTheCardsZone], ['shuffle keeps its zone', shuffleKeepsItsZone], ['paused zone, switched zone', pausedAndSwitched], ['late queue answer', lateQueueAnswer], ['offline', offline]]) {
         try { await fn(browser, width); console.log(`PASS ${width} ${name}`); } catch (e) { failed++; console.log(`FAIL ${width} ${name}: ${e.message}`); }
       }
     }

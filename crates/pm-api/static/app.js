@@ -2687,18 +2687,21 @@
   // Play, Previous or Next with nothing in the queue and nothing playing says so (before, nothing
   // happened at all) and offers the library shuffled when there is one (not offline: the
   // downloads have no list of the library's songs to shuffle)
-  // (on zone `zid`, the one whose Play was pressed: named when it is not the zone in use, a card on Zones)
+  // (on zone `zid`, the one whose Play was pressed: named whenever there is more than one place to
+  // play, so the note still says which zone after a switch, and This browser's card says so too)
   const emptyQueue = (zid = state.zone) => {
-    const on = zid !== state.zone && state.zones[zid] ? ` on ${state.zones[zid].name}` : '';
+    const name = zid === BROWSER ? hereName() : (state.zones[zid] || {}).name;
+    const on = name && zoneList().length > 1 ? ` on ${name}` : '';
     if (isOffline()) toast('The queue is empty: play one of your downloads');
     else if (state.info && state.info.library && state.info.library.tracks > 0) toast(`The queue is empty${on}`, '', { label: 'Shuffle my music', run: () => shuffleMyMusic(zid) });
     else toast('The queue is empty: search for something to play');
   };
   // A node zone stopped, with nothing in its queue and nothing playing (the node would only answer
-  // "queue is empty"; a playing or paused one still takes Pause). The zone in use's queue as last
-  // fetched counts too, should its event be late (only if fetched for it: not another zone's, fetched
-  // before a switch, nor an old one kept while This browser was in use).
-  const zoneEmpty = (z) => !!z && z.transport === 'stopped' && !z.now_playing && !hasQueue(z) && !(z.id === state.zone && z.id === state.queueZone && (state.queue || []).length);
+  // "queue is empty"; a playing or paused one still takes Pause). For the zone in use, its queue as
+  // fetched must say empty too, should its event be late; with no queue fetched for it yet (just
+  // switched to, or another zone's kept while This browser was in use) Play goes to the node, so a
+  // false "empty" can't offer a shuffle that replaces songs it has.
+  const zoneEmpty = (z) => !!z && z.transport === 'stopped' && !z.now_playing && !hasQueue(z) && (z.id !== state.zone || (z.id === state.queueZone && !(state.queue || []).length));
   const transport = async (action) => {
     const steps = ['toggle', 'play', 'next', 'previous'].includes(action.action);
     if (isBrowser()) {
@@ -2809,11 +2812,20 @@
       } catch (e) { startFail(e.message, true, wait); toast(e.message, 'error'); } finally { doneMode(shufflePending, zid, mine); }
     } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
+  // The queue of the zone in use, fetched: only the last one asked counts, and only while its zone
+  // is still in use (an older answer, a zone switched from, landing late keeps the newer one). A
+  // queue fetched for another zone, or before a time in This browser, no longer counts as this one's.
+  let queueAsk = 0, queueDropped = false;
   const refreshQueue = async (rerender = true) => {
+    if (state.queueZone !== state.zone) state.queueZone = null;
     if (!isBrowser()) {
-      const zid = state.zone;
-      try { state.queue = await api('GET', `/zones/${zid}/queue`); } catch { state.queue = []; }
-      state.queueZone = zid;
+      const zid = state.zone; const ask = ++queueAsk;
+      // (a failed fetch shows no songs, but says nothing of the zone's queue: Play still goes to the node)
+      let q = null; try { q = await api('GET', `/zones/${zid}/queue`); } catch { /* shown empty */ }
+      if (ask !== queueAsk || zid !== state.zone) { queueDropped = true; return; }
+      state.queue = q || []; state.queueZone = q ? zid : null;
+      // (the Queue page drew what it had when its own, older answer was dropped: drawn again now)
+      if (queueDropped) { queueDropped = false; rerender = true; }
     }
     if (rerender && state.view === 'queue') render();
     if (!$('#nowplaying').hidden) renderNowPlaying();
