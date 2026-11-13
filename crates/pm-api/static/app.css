@@ -1082,6 +1082,19 @@ html[data-shell="phone"] #iblurbmore::before { content: ''; position: absolute; 
 .srcchip.wait { padding: 5px 9px; }
 .srcchip .spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.8s linear infinite; }
 @media (prefers-reduced-motion: reduce) { .srcchip .spin { animation: none; } }
+/* A song row's heart (every song list but Songs, which has its own). With a mouse it waits for the
+   row, so a quiet list stays quiet; a song you have already favourited keeps its filled heart
+   without hover, so you can see at a glance which songs are yours. On a touch screen there is nothing to
+   hover, so only a bookmarked song's heart shows (docs/ux/responsive.md: "song rows show the heart (when
+   on) and the menu without hover"). The phone shell keeps its two-control row. */
+.srow > .heart.on { color: #ff6b8a; }
+@media (hover: hover) {
+  .srow > .heart { opacity: 0; transition: opacity var(--dur-fast); }
+  .srow:hover > .heart, .srow:focus-within > .heart, .srow > .heart.on, .srow > .heart:focus-visible { opacity: 1; }
+}
+@media (pointer: coarse) { .srow > .heart:not(.on) { display: none; } }
+html[data-shell="phone"] .srow > .heart { display: none; }
+
 /* Row reorder buttons outside the queue (playlist songs), and the up chevron everywhere */
 .ic.up { transform: rotate(180deg); }
 .q-actions { display: inline-flex; gap: 2px; flex: none; }
@@ -1785,7 +1798,7 @@ body.kiosk .main { padding: 0; }
 .selcount { font-weight: 600; margin-right: 4px; }
 html[data-shell="phone"] .selbar { bottom: calc(57px + 70px + env(safe-area-inset-bottom)); left: 12px; right: 12px; transform: none; justify-content: center; }
 .selecting .srow:has(.selbox input:checked) { background: var(--accent-soft); }
-@media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow [data-smore] { display: none; } }
+@media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow [data-sfav], .selecting .srow [data-smore] { display: none; } }
 /* One way back (UX review, sweep A17): phones have the back link only; the desktop layout (tablets
    too) has the trail, and Back only where it goes somewhere the trail doesn't */
 html[data-shell="desktop"] .pagebar > .dupback { display: none; }

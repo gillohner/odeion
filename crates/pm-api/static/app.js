@@ -5771,7 +5771,7 @@
     const uris = (o.songs || []).map((t) => t.page || (t.id && (uriOf('song', t.id) || null))).filter(Boolean);
     const trackIds = (o.songs || []).filter((t) => t.track_id != null).map((t) => t.track_id);
     const single = (o.songs || []).length === 1 ? o.songs[0] : null;
-    const singleFav = !!(single && ((single.track_id != null && state.favUris.has(`track:${single.track_id}`)) || (single.page && state.favUris.has(single.page)) || (single.id && state.favUris.has(uriOf('song', single.id) || ''))));
+    const singleFav = !!(single && songFav(single));
     // The page you are on: no "Go to" it
     const onThis = (kind, pid) => state.view === 'item' && state.viewArg && state.viewArg.kind === kind && (state.viewArg.id === pid);
     const addTo = (pl) => (trackIds.length === (o.songs || []).length && trackIds.length ? addToPlaylist(pl.id, trackIds.map((id) => ({ id })), null) : addToPlaylist(pl.id, [], uris.length ? uris : o.uri ? [o.uri] : []));
@@ -5851,7 +5851,19 @@
   // On phones a song row is one button (a tap plays it; its names don't take taps, app.css): its song
   // and album links are not separate Tab stops there
   const rowLinkTab = () => (shellMode() === 'phone' ? ' tabindex="-1"' : '');
-  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}" href="${esc(pathFor('item', { kind: 'album', id: t.album_id }))}"${rowLinkTab()}>${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
+  // Whether a song row's song is one of your favourites: by its library track, by its page (a
+  // canonical URI) or by the URI its page id stands for — the three keys /favourites answers with
+  // (the same three `itemMenu` uses for a single song, so the row and its ⋯ menu always agree).
+  const songFav = (t) => !!(state.favUris && ((t.track_id != null && state.favUris.has(`track:${t.track_id}`)) || (t.page && state.favUris.has(t.page)) || (t.id && state.favUris.has(uriOf('song', t.id) || ''))));
+  const heartWords = (on, title) => `${on ? 'Remove' : 'Add'} ${title} ${on ? 'from' : 'to'} favourites`;
+  // A song row's heart, the heart a row on Songs has: filled when the song is bookmarked (shown
+  // then without hover, on a touch screen too), an outline you reach by hovering the row with a
+  // mouse. One click to bookmark where the ⋯ menu used to take two. It says which song it is for,
+  // which the one on Songs does not (it is alone on its page, these are not).
+  const songHeart = (t, k) => `<button class="icon-btn heart${songFav(t) ? ' on' : ''}" data-sfav="${k}" title="${songFav(t) ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(songFav(t), t.title))}">${icon(songFav(t) ? 'heart-fill' : 'heart')}</button>`;
+  // The heart turned over without redrawing anything around it
+  const setHeart = (b, on, title) => { b.classList.toggle('on', on); b.innerHTML = icon(on ? 'heart-fill' : 'heart'); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.setAttribute('aria-label', heartWords(on, title)); };
+  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}" href="${esc(pathFor('item', { kind: 'album', id: t.album_id }))}"${rowLinkTab()}>${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
@@ -5936,6 +5948,25 @@
       showMenu(b, [{ title: `${t.title}: versions` }, ...vs.map((v) => ({ label: versionLabel(v) + (v.best ? ' · plays by default' : ''), icon: v.best ? 'check' : 'play',
         run: () => playSongs(songs.map((x) => (x === t ? { ...x, track_id: v.track_id } : x)), at(k), 'replace', ctx.plays_from, b, ctx.fallback) }))], { all: true });
     });
+    // The row's heart: saves and turns over in place, so a long list never redraws under you.
+    // Its press goes through busy() like every other (the spinner, one save per press, and the
+    // keyboard keeps the button — disabling it mid-press would drop focus to the top of the page).
+    $$('[data-sfav]', box).forEach((b) => b.onclick = async (e) => {
+      e.stopPropagation(); e.preventDefault();
+      const t = all[Number(b.dataset.sfav)]; if (!t) return;
+      const ref = t.track_id != null ? { track_id: t.track_id } : { uri: t.page || (t.id ? uriOf('song', t.id) : null) };
+      if (ref.uri == null && ref.track_id == null) { toast('This song has no address to save yet'); return; }
+      const on = !b.classList.contains('on');
+      if (await setFavourite(ref, on)) setHeart(b, on, t.title);
+    });
+    // On a cold start the bookmarks can still be on their way (a listener's go to their homeserver
+    // takes longer than the page), so every heart here is painted again as soon as they are in —
+    // only the hearts, so nothing moves under you.
+    if (favLoad && !favLoad.done) {
+      const fl = favLoad;
+      const paint = () => { if (!box.isConnected) return; $$('[data-sfav]', box).forEach((b) => { const t = all[Number(b.dataset.sfav)]; if (t) setHeart(b, songFav(t), t.title); }); };
+      fl.then(paint, paint);
+    }
     $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); if (opensElsewhere(e)) return; e.preventDefault(); setView('item', { kind: 'song', id: all[Number(a.dataset.ssong)].id }); });
     hydrateArtistCredits(box);
     $$('[data-salbum]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); if (opensElsewhere(e)) return; e.preventDefault(); setView('item', { kind: 'album', id: all[Number(a.dataset.salbum)].album_id }); });
