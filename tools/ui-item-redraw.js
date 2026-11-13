@@ -149,6 +149,101 @@ async function releasesPage(browser, width) {
   } finally { await run.context.close(); }
 }
 
+// The parts drawn after the page (Similar here) when they are slow or focused: a place at the foot
+// holds across two redraws while Similar takes longer than the next ask; focus on a Similar tile
+// goes back once Similar is drawn again; an error drawn instead of the page ends the hold; a heart
+// saved after another page opened leaves that page's heart alone.
+const B = 'lib-90';
+const other = { kind: 'artist', id: B, title: 'Neighbour 1', source: 'library', section: 'artists', uri: 'https://musicbrainz.org/artist/22222222-2222-2222-2222-222222222222', target: { uri: 'https://musicbrainz.org/artist/22222222-2222-2222-2222-222222222222' }, songs: [], albums: [], versions: [], also_on: [], tags: [], connect: [], open_on: [], about: [], releases: [], links: [] };
+async function laterParts(browser, width) {
+  const fixtures = { [ITEM]: { body: artist(true) }, [`${ITEM}/extras`]: { body: { collections: [], related: [], concerts: [], similar } }, [`/item/artist/${B}`]: { body: other }, [`/item/artist/${B}/extras`]: { body: { collections: [], related: [], concerts: [], similar: [] } } };
+  const run = await fx.create(browser, width, { fixtures, delay: 0 });
+  const { page, state } = run;
+  const where = `later parts ${width}`;
+  try {
+    await fx.go(page, `/artist/${ID}`);
+    await page.locator('#isimilar [data-tile="2"]').waitFor();
+    await page.waitForTimeout(300);
+    // Focus on the third Similar tile: back on it once Similar is drawn again
+    state.delay = late;
+    await page.locator('#isimilar [data-tile="2"]').focus();
+    await nextRedraw(page, state, `${where} focus`);
+    await page.locator('#isimilar [data-tile="2"]').waitFor();
+    await page.waitForTimeout(150);
+    assert.equal(await page.locator('#isimilar [data-tile="2"]').evaluate((el) => el === document.activeElement), true, `${where}: the Similar tile has focus again once Similar is back (${await active(page)})`);
+    // The next answer brings singles too (a release section more above Similar): focus still waits
+    // for the Similar tile, not the same tile in the new section
+    fixtures[ITEM].body = { ...artist(true), albums: [...albums, ...Array.from({ length: 4 }, (_, k) => ({ id: `tidal-${800 + k}`, title: `Single ${k + 1}`, year: 2024, release_type: 'single', page: `https://tidal.com/album/${800 + k}` }))] };
+    await page.locator('#isimilar [data-tile="2"]').focus();
+    await nextRedraw(page, state, `${where} new section`);
+    assert.ok(await page.locator('#ialbums [data-tile="2"]').count() >= 2, `${where}: a release section more (the case this checks)`);
+    assert.equal(await page.evaluate(() => !!document.activeElement.closest('#ialbums')), false, `${where}: focus isn't put on a release tile (${await active(page)})`);
+    await page.locator('#isimilar [data-tile="2"]').waitFor();
+    await page.waitForTimeout(150);
+    assert.equal(await page.locator('#isimilar [data-tile="2"]').evaluate((el) => el === document.activeElement), true, `${where}: the Similar tile has focus once Similar is back (${await active(page)})`);
+    fixtures[ITEM].body = artist(true);
+    await nextRedraw(page, state, `${where} section gone`);
+    await page.locator('#isimilar [data-tile="2"]').waitFor();
+    // Similar slower than the next ask: the foot of the page holds across both redraws
+    state.delay = (v) => (v === ITEM ? LATE : v === `${ITEM}/extras` ? 4500 : 0);
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    const foot = await page.evaluate(() => { const m = document.querySelector('#main'); return m.scrollHeight - m.clientHeight; });
+    await scrollTo(page, foot);
+    await nextRedraw(page, state, `${where} slow 1`);
+    assert.equal(await page.locator('#isimilar').count(), 0, `${where}: drawn again before Similar is back (the case this checks)`);
+    await nextRedraw(page, state, `${where} slow 2`);
+    assert.equal(await page.locator('#isimilar').count(), 0, `${where}: Similar still on its way at the second redraw (the case this checks)`);
+    assert.ok(Math.abs(await top(page) - foot) < 2, `${where}: the place at the foot holds across a second redraw (${await top(page)} of ${foot})`);
+    // Focus on a Similar tile while Similar is slower than the next ask: still wanted after a second
+    // redraw, and back on the tile when Similar comes with the last one
+    state.delay = 0;
+    await fx.go(page, `/artist/${ID}`);
+    await page.locator('#isimilar [data-tile="2"]').waitFor();
+    await page.waitForTimeout(300);
+    state.delay = (v) => (v === ITEM ? LATE : v === `${ITEM}/extras` ? 4500 : 0);
+    await page.locator('#isimilar [data-tile="2"]').focus();
+    await nextRedraw(page, state, `${where} slow focus 1`);
+    await nextRedraw(page, state, `${where} slow focus 2`);
+    assert.equal(await page.locator('#isimilar').count(), 0, `${where}: Similar still on its way at the second redraw (the case this checks)`);
+    fixtures[ITEM].body = artist(false);
+    await nextRedraw(page, state, `${where} slow focus 3`);
+    await page.locator('#isimilar [data-tile="2"]').waitFor({ timeout: 6000 });
+    await page.waitForTimeout(150);
+    assert.equal(await page.locator('#isimilar [data-tile="2"]').evaluate((el) => el === document.activeElement), true, `${where}: the Similar tile has focus again after two slow redraws (${await active(page)})`);
+    // An error drawn instead of the page ends the hold: no blank space held under the notice
+    fixtures[ITEM].body = artist(true);
+    state.delay = 0;
+    await fx.go(page, `/artist/${ID}`);
+    await page.locator('#isimilar [data-tile="2"]').waitFor();
+    await page.waitForTimeout(300);
+    state.delay = (v) => (v === ITEM ? LATE : v === `${ITEM}/extras` ? 4500 : 0);
+    await scrollTo(page, await page.evaluate(() => { const m = document.querySelector('#main'); return m.scrollHeight - m.clientHeight; }));
+    await nextRedraw(page, state, `${where} before the error`);
+    assert.equal(await page.evaluate(() => document.querySelector('#main').hasAttribute('data-hold')), true, `${where}: held while Similar is on its way (the case this checks)`);
+    fixtures[ITEM] = { status: 502, body: { error: 'The service did not answer' } };
+    state.delay = 0;
+    await page.waitForFunction(() => document.querySelector('#main .notice') && !document.querySelector('#iplay'), null, { timeout: 6000 })
+      .catch(() => assert.fail(`${where}: the error is drawn`));
+    assert.equal(await page.evaluate(() => document.querySelector('#main').hasAttribute('data-hold')), false, `${where}: the error notice ends the hold`);
+    // A heart saved after another page opened: that page keeps its own heart and isn't drawn again
+    fixtures[ITEM] = { body: artist(false) };
+    await fx.go(page, `/artist/${ID}`);
+    await page.locator('#isimilar [data-tile="0"]').waitFor();
+    state.delay = (v, m) => (v === '/favourites' && m === 'PUT' ? 1500 : 0);
+    await page.locator('#ifav').click();
+    await page.waitForTimeout(100);
+    await page.locator('#isimilar [data-tile="0"]').click();
+    await page.waitForFunction((t) => document.querySelector('.item-hero h1')?.textContent.includes(t), other.title, { timeout: 5000 });
+    const bAsks = state.hits.filter((h) => h.v === `/item/artist/${B}` && h.m === 'GET').length;
+    for (let t = 0; !state.hits.some((h) => h.v === '/favourites' && h.m === 'PUT') && t < 60; t++) await page.waitForTimeout(50);
+    await page.waitForTimeout(1500 + 600);
+    assert.equal(await page.locator('#ifav').getAttribute('title'), 'Add to favourites', `${where}: the other page's heart stays its own`);
+    assert.equal(state.hits.filter((h) => h.v === `/item/artist/${B}` && h.m === 'GET').length, bAsks, `${where}: the other page isn't drawn again by the earlier heart`);
+    await fx.cleanCopy(page);
+    assert.deepEqual(state.errors, [], `${where}: no page errors`);
+  } finally { await run.context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   let failed = 0; let passed = 0;
@@ -160,6 +255,7 @@ async function releasesPage(browser, width) {
     for (const width of WIDTHS) {
       await run(`${width}: artist page asked again keeps scroll and focus; the heart keeps focus`, () => artistPage(browser, width));
       await run(`${width}: View all asked again keeps scroll and focus`, () => releasesPage(browser, width));
+      await run(`${width}: slow or focused Similar, an error and a late heart`, () => laterParts(browser, width));
     }
   } finally { await browser.close(); }
   console.log(`${passed} passed, ${failed} failed`);

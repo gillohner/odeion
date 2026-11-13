@@ -114,7 +114,9 @@ async function run(browser, width, kind) {
       const letZzz = hold('zzz'); const letSong = hold('song');
       const sent = page.waitForRequest((r) => /\/v1\/library\/search\?/.test(r.url()) && new URL(r.url()).searchParams.get('q') === 'zzz');
       await page.fill('#filter', 'zzz'); await sent;
-      await page.fill('#filter', 'song'); letZzz();
+      // (the read waits for the "zzz" answer to reach the page, however late it is sent)
+      const zzzIn = page.waitForResponse((r) => /\/v1\/library\/search\?/.test(r.url()) && new URL(r.url()).searchParams.get('q') === 'zzz');
+      await page.fill('#filter', 'song'); letZzz(); await zzzIn;
       await page.waitForTimeout(700);
       assert.equal(await note(page).textContent(), '', `${kind} ${width}: an outdated answer doesn't say "No track matches"`);
       letSong();
