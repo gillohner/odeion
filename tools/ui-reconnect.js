@@ -5,10 +5,29 @@
 //   PM_NULL_OUTPUT=realtime node /path/to/tools/ui-reconnect.js <token> <http://127.0.0.1:7799> <shots dir> -- <pm-node> --config <node.toml> serve
 // The script starts and kills the node itself (the command after `--`). The node needs at least one track
 // longer than a minute and a `null-output` zone; PM_NULL_OUTPUT=realtime makes the null output play in real time.
-const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
+// The arguments are checked before anything starts: exactly three before `--` and a node command after it, else
+// a usage line and exit 2 (tools/ui-reconnect-args.js). Without the check, a missing `--` made the node command
+// the whole argv, so the script started itself again and again.
 const { spawn } = require('child_process');
-const [TOKEN, BASE, OUT] = process.argv.slice(2, 5);
-const NODE = process.argv.slice(process.argv.indexOf('--') + 1);
+const USAGE = 'usage: node tools/ui-reconnect.js <token> <http://host:port> <shots dir> -- <pm-node> [args...]';
+const parseArgs = (argv) => {
+  const sep = argv.indexOf('--', 2);
+  if (sep === -1) return { error: 'no `--` before the node command' };
+  if (sep !== 5) return { error: 'expected exactly <token> <url> <shots dir> before `--`' };
+  const [token, base, out] = argv.slice(2, 5);
+  if (!token || !out) return { error: 'the token and the shots dir must not be empty' };
+  let url = null;
+  try { url = new URL(base); } catch { /* checked below */ }
+  if (!url || !/^https?:$/.test(url.protocol)) return { error: 'the url must be http:// or https://' };
+  const node = argv.slice(sep + 1);
+  if (!node.length || !node[0]) return { error: 'no node command after `--`' };
+  return { token, base, out, node };
+};
+const CHILD_MARK = 'PM_UI_RECONNECT_CHILD'; // set for the node it starts: the script refuses to run under itself
+if (require.main !== module) { module.exports = { parseArgs, USAGE }; return; }
+const args = process.env[CHILD_MARK] ? { error: 'started by ui-reconnect.js itself' } : parseArgs(process.argv);
+if (args.error) { console.error(`ui-reconnect.js: ${args.error}\n${USAGE}`); process.exit(2); }
+const { token: TOKEN, base: BASE, out: OUT, node: NODE } = args;
 const ZONE = process.env.ZONE || 'null-output';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const api = async (method, path, body) => {
@@ -16,12 +35,25 @@ const api = async (method, path, body) => {
   const t = await r.text(); return t ? JSON.parse(t) : null;
 };
 let node = null;
+const nodeRunning = () => Boolean(node && node.pid && node.exitCode === null && node.signalCode === null);
+// The node runs in its own process group, so a wrapper (`sh -c …`, `cargo run …`) is stopped with what it started.
+const killGroup = () => { try { process.kill(-node.pid, 'SIGKILL'); } catch { /* already gone */ } };
+// Whatever way the script ends (a failed check, an exception, Ctrl+C), the node it started does not outlive it.
+process.on('exit', () => { if (nodeRunning()) killGroup(); });
+for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143]]) process.on(sig, () => process.exit(code));
 const startNode = async () => {
-  node = spawn(NODE[0], NODE.slice(1), { stdio: 'ignore', env: process.env });
-  for (let i = 0; i < 100; i++) { try { await api('GET', '/info'); return; } catch { await sleep(100); } }
-  throw new Error('node did not start');
+  let failedToStart = null;
+  node = spawn(NODE[0], NODE.slice(1), { stdio: 'ignore', detached: true, env: { ...process.env, [CHILD_MARK]: '1' } });
+  node.once('error', (e) => { failedToStart = 'the node command did not start: ' + e.code; });
+  node.once('exit', () => { failedToStart = failedToStart || 'the node command exited at start'; });
+  for (let i = 0; i < 100 && !failedToStart; i++) { try { await api('GET', '/info'); break; } catch { await sleep(100); } }
+  // An answer from another node on the same port doesn't count: ours must still be running.
+  await sleep(200);
+  if (failedToStart) throw new Error(failedToStart);
+  if (!nodeRunning()) throw new Error('the node command exited at start');
+  try { await api('GET', '/info'); } catch { throw new Error('node did not start'); }
 };
-const killNode = () => new Promise((r) => { node.once('exit', r); node.kill('SIGKILL'); });
+const killNode = () => new Promise((r) => { if (!nodeRunning()) return r(); node.once('exit', r); killGroup(); });
 const until = async (what, fn, ms = 60000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await fn()) return Date.now() - t; await sleep(25); } throw new Error('timed out: ' + what); };
 const connState = (p) => p.$eval('#conn', (e) => e.dataset.state || '');
 const barTitle = (p) => p.$eval('#np .np-title', (e) => e.textContent);
@@ -38,6 +70,7 @@ const check = (ok, msg) => { console.log((ok ? 'ok    ' : 'FAILED ') + msg); if 
   }
   if (!tracks.length) throw new Error('needs a track longer than a minute');
   await api('POST', `/zones/${ZONE}/queue`, { track_ids: [tracks[0].id], replace: true, play: true });
+  const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
   const b = await chromium.launch();
   const pages = [];
   for (const [w, h, name] of [[1280, 800, 'desktop'], [390, 844, 'phone']]) {
@@ -114,4 +147,4 @@ const check = (ok, msg) => { console.log((ok ? 'ok    ' : 'FAILED ') + msg); if 
   await b.close();
   await killNode();
   process.exitCode = failed ? 1 : 0;
-})().catch(async (e) => { console.error(e); if (node) node.kill('SIGKILL'); process.exit(1); });
+})().catch((e) => { console.error(e); process.exit(1); }); // the exit handler stops the node
