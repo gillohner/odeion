@@ -964,6 +964,11 @@ html[data-shell="phone"] .popover:not([hidden]):not(.menu), .popover.menu.sheet:
 .chips.win { display: inline-flex; gap: 4px; margin-left: 10px; }
 .chips.win .chip { padding: 2px 10px; font-size: var(--fs-xs); }
 .chips.win .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+/* Phones: Home's Trending heads keep the title and See all on one line and give Today / This week /
+   This month a row of their own under it (beside the title, the title and the chips both broke onto
+   two lines) */
+html[data-shell="phone"] .section-head:has(> .chips.win) { flex-wrap: wrap; row-gap: 8px; }
+html[data-shell="phone"] .section-head > .chips.win { order: 1; flex: 1 0 100%; margin: 0; }
 
 /* Classes the design lint found without a rule (tools/design-lint.js) */
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
