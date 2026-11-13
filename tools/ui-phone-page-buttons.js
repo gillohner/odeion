@@ -1,6 +1,7 @@
 // On a phone a page's plain buttons (Settings › Library's Add folder and Scan now, Import's Check
 // and Import, an empty page's Open settings) are 44 px taps, like a dialog's; an icon button stays
-// square, Back keeps its height so the page doesn't move, and desktop keeps its compact buttons.
+// square, Back keeps its height so the page doesn't move, and desktop keeps its compact buttons. On the
+// Playlists page each box shares its row with its button, so the playlists start higher.
 // Real candidate assets, isolated responses: node tools/ui-phone-page-buttons.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -94,6 +95,49 @@ const list = (bs) => bs.map((b) => `${b.name} ${b.width.toFixed(0)}×${b.height.
         const back = await page.locator('#set-appearance .set-back').evaluate((el) => el.getBoundingClientRect().height);
         check(back < 40, `${at}: Settings Back keeps its height (${back.toFixed(1)} px)`);
         check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
+      } finally { await context.close(); }
+    }
+    // The Playlists page on a phone: each box shares its row with its button (name + Create, link + Open)
+    // and Import a row of its own, so the playlists start two rows higher at 320/360 px. Desktop
+    // keeps its one long link box.
+    const toolbar = (page) => page.evaluate(() => {
+      const box = (s) => { const el = document.querySelector(s); const b = el.getBoundingClientRect(); return { top: b.top, left: b.left, right: b.right, width: b.width, height: b.height }; };
+      return { name: box('#plname'), create: box('#plcreate'), file: box('label.file-btn'), link: box('#plshared'), open: box('#plopenshared'), first: box('[data-pl]'),
+        ellipsis: getComputedStyle(document.querySelector('#plshared')).textOverflow, hint: document.querySelector('#plshared').placeholder, label: document.querySelector('#plshared').getAttribute('aria-label'), overflow: document.documentElement.scrollWidth > innerWidth };
+    });
+    for (const width of [320, 360, 412]) for (const android of [false, true]) {
+      const at = `${android ? 'android' : 'browser'}-${width}`;
+      const { page, context, state } = await fx.create(browser, width, { mobile: true });
+      state.collections = [fx.summary];
+      try {
+        if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+        await fx.go(page, '/playlists');
+        await page.waitForSelector('[data-pl]');
+        const t = await toolbar(page);
+        check(Math.abs(t.create.top - t.name.top) < 1 && t.create.left > t.name.right, `${at} /playlists: Create sits beside the name box (name ${t.name.top.toFixed(0)}, Create ${t.create.top.toFixed(0)})`);
+        check(Math.abs(t.open.top - t.link.top) < 1 && t.open.left > t.link.right, `${at} /playlists: Open sits beside the link box (link ${t.link.top.toFixed(0)}, Open ${t.open.top.toFixed(0)})`);
+        check(t.file.top >= t.name.top + 44, `${at} /playlists: Import keeps a row of its own under them`);
+        check(t.name.width >= 150 && t.link.width >= 150, `${at} /playlists: the boxes stay wide enough to type in (${t.name.width.toFixed(0)}, ${t.link.width.toFixed(0)} px)`);
+        check(t.link.height === 44 && t.name.height === 44, `${at} /playlists: both boxes are 44 px tall like their buttons (${t.name.height}, ${t.link.height})`);
+        check(t.ellipsis === 'ellipsis', `${at} /playlists: a cut-off hint in the link box ends in …`);
+        check(t.link.top - t.name.top < 140 && t.first.top - t.open.top < 120, `${at} /playlists: the controls take three rows, then the playlists (rows at ${[t.name, t.file, t.link, t.first].map((b) => b.top.toFixed(0)).join(', ')})`);
+        check(t.hint.startsWith('Shared playlist') && t.label === 'Open a shared playlist', `${at} /playlists: the link box's hint starts with what it is for, and it has a name ("${t.hint}")`);
+        check(t.open.right <= width && t.create.right <= width && !t.overflow, `${at} /playlists: no sideways overflow`);
+        await page.locator('#plname').fill('Road trip');
+        await page.locator('#plcreate').tap();
+        for (let i = 0; i < 30 && !state.hits.some((h) => h.v === '/playlists' && h.m === 'POST'); i++) await page.waitForTimeout(50);
+        check(state.hits.some((h) => h.v === '/playlists' && h.m === 'POST' && /Road trip/.test(h.body || '')), `${at} /playlists: typing a name and one tap on Create makes the playlist`);
+        await page.screenshot({ path: path.join(SHOTS, `${at}-playlists-toolbar.png`) });
+      } finally { await context.close(); }
+    }
+    {
+      const { page, context } = await fx.create(browser, 1024, { collections: [fx.summary] });
+      try {
+        await fx.go(page, '/playlists');
+        await page.waitForSelector('[data-pl]');
+        const t = await toolbar(page);
+        check(Math.abs(t.name.width - 260) < 1 && Math.abs(t.create.top - t.file.top) < 1, `1024 px desktop keeps the name box at 260 px with Create and Import beside it`);
+        check(t.link.top > t.name.top + 40 && t.link.width > 600, `1024 px desktop keeps the link box on its own long row (${t.link.width.toFixed(0)} px)`);
       } finally { await context.close(); }
     }
     // The desktop layout keeps its compact buttons.

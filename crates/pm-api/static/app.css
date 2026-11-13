@@ -1859,8 +1859,12 @@ html[data-shell="phone"] :is(#hson, #hsoff, [data-hsconnect]) { min-height: 40px
 @media (pointer: coarse) { :is(#hson, #hsoff, [data-hsconnect]) { min-height: 40px; } }
 /* The Playlists page's own controls (a listener has the page too): 44 px on phones, like the page's
    other buttons, and 40 px on any other touch screen */
-html[data-shell="phone"] :is(#plcreate, #plname) { min-height: 44px; }
+html[data-shell="phone"] :is(#plcreate, #plname, #plshared) { min-height: 44px; }
 html[data-shell="phone"] [data-plplay] { min-height: 40px; min-width: 40px; }
+#plshared { flex: 1; min-width: 240px; }
+/* On a phone each box shares its row with its button (name + Create, link + Open), so the playlists
+   start two rows higher; Import keeps a row of its own. A long hint ends in … */
+html[data-shell="phone"] :is(#plname, #plshared) { flex: 1 1 160px; width: auto; min-width: 0; text-overflow: ellipsis; }
 @media (pointer: coarse) { :is(#plcreate, #plname) { min-height: 40px; } [data-plplay] { min-height: 40px; min-width: 40px; } }
 /* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
 .nav-item.nav-offline { display: none; }
