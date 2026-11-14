@@ -185,6 +185,11 @@ def run(h):
         # The page to that zone: Zones, its card's Play to (the first card), then Home
         adb("shell", "input", "tap", str(zones[0]), str(zones[1]))
         time.sleep(3)
+        # (on a phone Zones opens scrolled to the zone in use, which here is the page's own "This
+        # phone", the last card: the first card is off screen. A finger pulls the page back to its
+        # top, at the cards' left, clear of their volume sliders; a touch keeps the page where it is.)
+        for _ in range(3):
+            swipe(W * 15 // 100, H * 35 // 100, W * 15 // 100, H * 75 // 100, 300, settle=1)
         shot("ui-0-zones")
         pick = zone_pick(out / "ui-0-zones.png")
         if pick and pick[0] == "selected":
