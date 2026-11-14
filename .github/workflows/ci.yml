@@ -684,6 +684,11 @@ jobs:
       - name: problem reports (Help "?", the report dialog and My reports; mocked node)
         if: matrix.shard == 1
         run: cd /tmp/pw && node "$GITHUB_WORKSPACE/tools/ui-feedback.js" ci-token mock /tmp/pm/feedback-shots < /dev/null
+      # ui-identify-fixture.js serves the page's files itself and answers /v1: it takes <static>
+      # <shots>, not the list's <repo> <shots>
+      - name: Identify and confirm matches (own loopback server)
+        if: matrix.shard == 2
+        run: cd /tmp/pw && node "$GITHUB_WORKSPACE/tools/ui-identify-fixture.js" "$GITHUB_WORKSPACE/crates/pm-api/static" /tmp/pm/identify-fixture-shots < /dev/null
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
