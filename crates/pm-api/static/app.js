@@ -3467,6 +3467,7 @@
     if (changed) $$('.srow [data-ssong], .srow [data-salbum]').forEach((a) => { if (now === 'phone') a.tabIndex = -1; else a.removeAttribute('tabindex'); });
     if (changed) { const pb = $('#peoplebox'); if (pb && pb.reshell) pb.reshell(); }
     if (changed && state.view === 'zones') render(); // (its cards are laid out for the shell)
+    if (changed && state.view === 'search') { const run = displayedSearch(); if (run) renderSearchBody(run); } // (Filters folds only on a phone)
     if (densePref()) document.documentElement.dataset.dense = '1'; else delete document.documentElement.dataset.dense;
     const up = $('#upstreams');
     if (up) { if (now === 'desktop') { if (up.parentElement !== $('#sidebar')) $('#sidebar').appendChild(up); } else if (up.parentElement !== $('.topbar')) $('.topbar').insertBefore(up, $('#me')); }
@@ -6188,14 +6189,18 @@
     }
     return byKind;
   };
-  const renderSearchScopes = (chips, run) => {
+  // Where the row and its focused button are before a redraw (taken before the phone's Filters button
+  // comes or goes beside the row and changes its width)
+  const scopeRowBefore = (chips) => {
+    const focused = document.activeElement;
+    const rowBefore = chips.getBoundingClientRect(), focusBefore = focused.parentElement === chips && focused.getBoundingClientRect();
+    return { scrollLeft: chips.scrollLeft, focused, focusWasVisible: focusBefore && focusBefore.left >= Math.max(0, rowBefore.left) && focusBefore.right <= Math.min(innerWidth, rowBefore.right) };
+  };
+  const renderSearchScopes = (chips, run, before = scopeRowBefore(chips)) => {
     const scope = run.scope;
     // One choice, like the result filters: a named group whose chosen button is pressed
     chips.setAttribute('role', 'group'); chips.setAttribute('aria-label', 'Search in');
-    const scrollLeft = chips.scrollLeft;
-    const focused = document.activeElement;
-    const rowBefore = chips.getBoundingClientRect(), focusBefore = focused.parentElement === chips && focused.getBoundingClientRect();
-    const focusWasVisible = focusBefore && focusBefore.left >= Math.max(0, rowBefore.left) && focusBefore.right <= Math.min(innerWidth, rowBefore.right);
+    const { scrollLeft, focused, focusWasVisible } = before;
     const services = (state.sources || []).filter((x) => x.enabled !== false && (!x.features || x.features.includes('search')) && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
     const scopes = new Map([['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])]);
     // A listener does not read the owner's /sources. A requested service uses its public name,
@@ -6259,7 +6264,6 @@
     const retryFocus = $('[data-sretry]:focus', box);
     const scope = run.scope;
     if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(displayedSearch()); }).catch(() => { state.sourcesLoading = false; }); }
-    renderSearchScopes(chips, run);
     const allKinds = mergeSearch(run);
     run.facets = run.facets || {};
     const facetCounts = facetsOf(allKinds);
@@ -6268,7 +6272,23 @@
     // On phones the facets fold behind Filters (the results come first; UX sweep 11-01, A9)
     const nOn = Object.values(run.facets).filter(Boolean).length;
     const facetRow = facetChips ? `<div class="chips facets" role="group" aria-label="Narrow the results">${facetChips}${nOn ? '<button class="chip sm ghost" data-facet="">Clear</button>' : ''}</div>` : '';
-    const facetBar = facetRow && shellMode() === 'phone' ? `<details class="sfilters" ${run.filtersOpen ? 'open' : ''}><summary class="chip">Filters${nOn ? ` · ${nOn}` : ''}</summary>${facetRow}</details>` : facetRow;
+    // Their Filters button ends the source row (outside its "Search in" group), so the results
+    // start right under the sources; the same button stays across redraws and keeps the focus
+    const fold = facetRow && shellMode() === 'phone';
+    const facetBar = fold ? `<div class="sfilters" id="sfacets"${run.filtersOpen ? '' : ' hidden'}>${facetRow}</div>` : facetRow;
+    const rowBefore = scopeRowBefore(chips);
+    let fbtn = $('#sbar > [data-sfilters]');
+    // (a focused Filters leaving a phone hands the focus to the filters it opened, now with the results)
+    const filtersFocused = !fold && fbtn && fbtn === document.activeElement;
+    if (!fold) fbtn?.remove();
+    else {
+      if (!fbtn) { fbtn = document.createElement('button'); fbtn.type = 'button'; fbtn.className = 'chip sfilt'; fbtn.dataset.sfilters = ''; fbtn.setAttribute('aria-controls', 'sfacets'); chips.after(fbtn); }
+      const label = `Filters${nOn ? ` · ${nOn}` : ''}`; if (fbtn.textContent !== label) fbtn.textContent = label;
+      fbtn.setAttribute('aria-expanded', String(!!run.filtersOpen));
+      fbtn.onclick = () => { run.filtersOpen = !run.filtersOpen; fbtn.setAttribute('aria-expanded', String(run.filtersOpen)); const p = $('#sfacets'); if (p) p.hidden = !run.filtersOpen; };
+    }
+    // (after Filters takes its place, so the chosen source is revealed in the row's final width)
+    renderSearchScopes(chips, run, rowBefore);
     const problems = run.sources.filter((src) => (run.answers[src] && run.answers[src].status !== 'ok') || (!run.error && !run.answers[src] && run.slow.has(src)));
     const pendingAny = run.pending && (!run.sources.length || run.sources.some((src) => !run.answers[src]));
     const skel = (n, tiles) => (tiles ? `<div class="sk-grid">${'<div class="skeleton"></div>'.repeat(n)}</div>` : `<div class="skeleton" style="height:${n * 54}px"></div>`);
@@ -6315,7 +6335,7 @@
     const kept = $(':scope > .snotes', content);
     if (notes && kept && kept.pmNotes === notes) { [...content.childNodes].forEach((n) => { if (n !== kept) n.remove(); }); kept.insertAdjacentHTML('afterend', rest); }
     else { content.innerHTML = notes + rest; const n = $(':scope > .snotes', content); if (n) n.pmNotes = notes; }
-    const sf = $('.sfilters', box); if (sf) sf.addEventListener('toggle', () => { run.filtersOpen = sf.open; });
+    if (filtersFocused && document.activeElement === document.body) ($('#sresults .facets [data-facet]') || $('#scopechips [aria-pressed="true"]'))?.focus({ preventScroll: true });
     // A facet chip keeps the focus across the re-render (or it moves to the first chip, after Clear)
     $$('[data-facet]', box).forEach((b) => b.onclick = () => {
       const key = b.dataset.facet; const [f, ...rest] = key.split(':'); const v = rest.join(':');
@@ -7446,7 +7466,7 @@
           const scope = a.in || 'everywhere'; state.searchScope = scope;
           if (search.value.trim() !== a.q) search.value = a.q;
           const run = startSearch(a.q, scope);
-          main.innerHTML = `<div class="page-head shead"><h2>Results for “${esc(a.q)}”</h2></div><div class="scopechips" id="scopechips"></div><div id="sresults"></div><div id="sresults-said" class="sr-only" aria-live="polite"></div>`;
+          main.innerHTML = `<div class="page-head shead"><h2>Results for “${esc(a.q)}”</h2></div><div class="sbar" id="sbar"><div class="scopechips" id="scopechips"></div></div><div id="sresults"></div><div id="sresults-said" class="sr-only" aria-live="polite"></div>`;
           search.setAttribute('aria-controls', 'sresults'); search.setAttribute('aria-expanded', 'true');
           searchChanged(run);
           break;
