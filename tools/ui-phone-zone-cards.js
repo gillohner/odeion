@@ -141,7 +141,8 @@ const open = async (page) => { await fx.go(page, '/zones'); await page.waitForSe
         await page.waitForFunction(() => !document.querySelector('#main .zone-card'), null, { timeout: 3000 }).catch(() => {});
         await page.goBack();
         await page.waitForSelector('#main .zone-card.on', { timeout: 3000 }).catch(() => {});
-        await page.waitForTimeout(400);
+        await page.waitForFunction(() => Math.round(document.querySelector('#main').scrollTop) === 120, null, { timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(200); // and it stays there
         check(await page.evaluate(() => Math.round(document.querySelector('#main').scrollTop)) === 120, `${at}: Back to Zones is where they left it (${await page.evaluate(() => Math.round(document.querySelector('#main').scrollTop))})`);
         // Left at its top, Back to Zones is at its top too (not scrolled down to the zone in use)
         const toTop = () => page.evaluate(() => { const m = document.querySelector('#main'); m.style.scrollBehavior = 'auto'; m.scrollTop = 0; m.style.scrollBehavior = ''; });

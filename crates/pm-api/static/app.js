@@ -4550,6 +4550,8 @@
 
   // ---- views ---------------------------------------------------------------
   const main = $('#main');
+  // Puts the page at a place at once: .main scrolls smoothly, so a page opened (or Back) would glide there
+  const mainTo = (top) => { try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } };
   // (their own touch, wheel or key on the page comes before Zones showing the zone in use)
   ['pointerdown', 'wheel', 'touchstart', 'keydown'].forEach((e) => main.addEventListener(e, () => { state.zoneInView = false; }, { passive: true }));
   // Settings, one topic per tab (STEWARD-UX-SETTINGS.md)
@@ -4751,7 +4753,7 @@
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || ((v === 'artist' || v === 'releases') && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
-    main.scrollTop = 0; state.drawnPage = null; if (state.placeHold) state.placeHold(); // a page opened is drawn from the start (redrawing, keepPlace)
+    mainTo(0); state.drawnPage = null; if (state.placeHold) state.placeHold(); // a page opened is drawn from the start (redrawing, keepPlace)
     state.zoneInView = v === 'zones' && how !== 'pop'; // Zones opened (not Back): show the zone in use
     return navigate(fresh);
   };
@@ -4767,7 +4769,7 @@
     // meanwhile (this navigation's generation and code, taken before anything else can start)
     const gen = navGen; const drawnAll = navRendering;
     await going; await drawnAll;
-    if (st.scroll && gen === navGen) main.scrollTop = st.scroll;
+    if (st.scroll && gen === navGen) mainTo(st.scroll);
   });
   // The back arrow: one step back when there is in-app history, else the parent page.
   const goBack = (fallback) => { if (navDepth > 0) history.back(); else if (fallback && fallback.startsWith('item:')) { const [, kind, ...id] = fallback.split(':'); setView('item', { kind, id: id.join(':') }); } else setView(fallback || 'home'); };
@@ -8683,7 +8685,7 @@
           if (inUse && !redrawing('zones')) {
             state.drawnPage = 'zones';
             if (phone && state.zoneInView) {
-              // (from where the card is in the page: the scroll to the top setView began may still be under way)
+              // (from where the card is in the page)
               const m = main.getBoundingClientRect(); const r = inUse.getBoundingClientRect(); const gap = 14;
               const down = Math.max(0, Math.min(r.bottom - m.top + main.scrollTop + gap - main.clientHeight, r.top - m.top + main.scrollTop - gap));
               try { main.scrollTo({ top: down, behavior: 'instant' }); } catch { main.scrollTop = down; }

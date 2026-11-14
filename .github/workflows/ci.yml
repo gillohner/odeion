@@ -678,6 +678,7 @@ jobs:
           ui-browser-place.js browser-place-shots
           ui-browser-keys.js browser-keys-shots
           ui-browser-midsong.js browser-midsong-shots
+          ui-back-place.js back-place-shots
           LIST
       # feedback.js on a test page, the node mocked: text stays text, a draft is its sign-in's,
       # only ticked details are sent. It takes <token> <mock> <shots>, not the list's <repo> <shots>
