@@ -243,9 +243,30 @@ async function bookmarked(browser, width, android) {
   await context.close();
 }
 
+// A song playing in Songs: the moving bars before its title keep their 12 px (and 6 px gap), also
+// when the song isn't matched yet (its title holds the Match mark, which makes it a flex line) and the
+// title is long; before, the bars were squeezed to 5-8 px there. The room is read from where the
+// title's words start, since a pseudo element's computed width stays 12px however wide it is drawn.
+const UTRACKS = [{ ...fx.track, id: 1, title: 'Journey Through Time (Extended Anniversary Remaster 2024) Part One', mbid: null, canonical_uri: null }, { ...fx.track, id: 2, title: 'Second Song', mbid: null, canonical_uri: null }];
+async function playingBars(browser, width, mobile) {
+  const at = `${mobile ? 'phone' : 'desktop'} ${width}`;
+  const { page, context, state } = await fx.create(browser, width, { mobile, tracks: UTRACKS });
+  await fx.go(page, '/tracks'); await page.waitForSelector('#tracklist .track .idmark', { state: 'attached' }); await page.waitForTimeout(300);
+  const r = await page.evaluate(() => [...document.querySelectorAll('#tracklist .track')].map((row) => {
+    row.classList.add('cur'); const t = row.querySelector('.title'); const a = t.querySelector('.lnk');
+    const room = a.getBoundingClientRect().left - t.getBoundingClientRect().left; row.classList.remove('cur');
+    return { name: a.textContent.slice(0, 12), mark: !!t.querySelector('.idmark'), room: Math.round(room * 10) / 10 };
+  }));
+  check(r.length === 2 && r.every((x) => x.mark && x.room >= 17.5), `${at}: a playing song not matched yet keeps its 12 px bars before the title, long title or not (${r.map((x) => `${x.name}: ${x.room} px`).join(', ')})`);
+  check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
+  await context.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
+    for (const width of [360, 412]) await playingBars(browser, width, true);
+    await playingBars(browser, 1280, false);
     for (const width of [360, 412]) for (const android of [false, true]) await phone(browser, width, android);
     for (const width of [360, 412]) for (const android of [false, true]) await queue(browser, width, android);
     for (const width of [360, 412]) for (const android of [false, true]) await bookmarked(browser, width, android);
@@ -283,11 +304,20 @@ async function bookmarked(browser, width, android) {
     await dq.context.close();
     // Settings › Layout › Phone on an 800 px window: the mark, and no heart button beside it
     const wide = await fx.create(browser, 800, { tracks: BTRACKS, favs: ['track:1'] });
+    await wide.page.mouse.move(790, 5); // (the pointer off the rows: nothing hovered)
     await wide.context.addInitScript(() => { localStorage.setItem('pm.layout', 'phone'); });
     await fx.go(wide.page, '/tracks'); await wide.page.waitForSelector('#tracklist .track .heart.on', { state: 'attached' }); await wide.page.waitForTimeout(300);
     const wm = await marks(wide.page, '#tracklist .track', '.title');
     const wb = await wide.page.evaluate(() => [document.documentElement.dataset.shell, [...document.querySelectorAll('#tracklist .track [data-act="fav"]')].filter((b) => b.getClientRects().length).length]);
     check(wb[0] === 'phone' && wm[0].shown && wb[1] === 0, `phone layout at 800: the heart mark (${wm[0].shown}) and no heart button beside it (${wb[1]} shown, shell ${wb[0]})`);
+    // …and every row's ⋯ is there without a hover, as on a phone, bookmarked song or not, with Play
+    // next and Add to queue in it rather than beside it (before, a row showed nothing until hovered)
+    const wr = await wide.page.evaluate(() => [...document.querySelectorAll('#tracklist .track')].map((row) => { const m = row.querySelector('[data-act="more"]'); const ra = row.querySelector('.row-actions'); return { fav: !!row.querySelector('.heart.on'), see: getComputedStyle(ra).opacity === '1' && getComputedStyle(m).opacity === '1' && m.getClientRects().length > 0 && !row.matches(':hover'), shown: [...ra.querySelectorAll('.icon-btn')].filter((b) => b.getClientRects().length).map((b) => b.dataset.act).join('+') }; }));
+    check(wr.length === 4 && wr[0].fav && wr.every((x) => x.see && x.shown === 'more'), `phone layout at 800: every row shows ⋯ without a hover, and only ⋯ (${wr.map((x) => `${x.fav ? '♥' : ''}${x.see ? 'seen' : 'unseen'}:${x.shown}`).join(' ')})`);
+    await wide.page.locator('#tracklist .track').nth(1).locator('[data-act="more"]').click();
+    await wide.page.locator('.popover.menu:not([hidden]) .pop-item').first().waitFor();
+    const items = await wide.page.locator('.popover.menu:not([hidden]) .pop-item').allTextContents();
+    check(items.some((t) => /Play next/.test(t)) && items.some((t) => /Add to queue/.test(t)), `phone layout at 800: ⋯ holds Play next and Add to queue (${items.map((t) => t.trim()).join(' | ')})`);
     await wide.context.close();
     // Desktop: a bookmarked song keeps its heart button in the row, and no mark after the title
     const dbm = await fx.create(browser, 1280, { tracks: BTRACKS, favs: ['track:1'] });

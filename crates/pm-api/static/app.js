@@ -1934,7 +1934,9 @@
       if (j !== lastSavedQueue) { lastSavedQueue = j; localStorage.setItem('pm.browserQueue', j); }
       const cur = state.browserQueue[state.browserIndex];
       // (the song itself with its place: the queue can change before the place comes back)
-      if (cur && !isLiveRadio(cur)) localStorage.setItem('pm.browserAt', JSON.stringify({ index: state.browserQueue.slice(0, state.browserIndex).filter((it) => !isLiveRadio(it)).length, id: cur.id, pos: Math.floor(audio.currentTime || 0) }));
+      // (a song brought back that hasn't opened, its file not answering: still where it was left)
+      const r = state.restoredAt; const pos = r && r.it === cur && audio.readyState < 1 ? r.pos : audio.currentTime;
+      if (cur && !isLiveRadio(cur)) localStorage.setItem('pm.browserAt', JSON.stringify({ index: state.browserQueue.slice(0, state.browserIndex).filter((it) => !isLiveRadio(it)).length, id: cur.id, pos: Math.floor(pos || 0) }));
     } catch { /* storage unavailable */ }
   };
   setInterval(saveBrowserQueue, 2000);
@@ -1958,9 +1960,18 @@
     const it = at && state.browserQueue[at.index];
     if (!it) return;
     state.browserIndex = at.index;
+    state.restoredAt = { it, pos: at.pos };
     audio.preload = 'metadata';
     browserSrc(it);
-    if (at.pos > 0) audio.addEventListener('loadedmetadata', () => { if (state.browserQueue[state.browserIndex] !== it) return; try { audio.currentTime = at.pos; } catch { /* not seekable */ } renderBar(); }, { once: true });
+    // Once it opens, at its place (moved by a seek meanwhile), and from then on an ordinary song: a
+    // later break picks up where it broke. A play that took over first (Play on a file that didn't
+    // open, from its place or a seek's) is left where it is
+    audio.addEventListener('loadedmetadata', () => {
+      const r = state.restoredAt; if (!r || r.it !== it || state.browserQueue[state.browserIndex] !== it) return;
+      state.restoredAt = null;
+      if (r.pos > 0) { try { audio.currentTime = r.pos; } catch { /* not seekable */ } }
+      renderBar();
+    }, { once: true });
     renderBar();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
@@ -2542,6 +2553,7 @@
   const hitItem = (h, album) => ({ uri: h.uri || `${h.source || 'tidal'}:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
   const browserPlay = (i, startAt = 0) => {
     const it = state.browserQueue[i];
+    state.restoredAt = null;
     // A pick-up still due for a song that broke off mid-song is off: this play is the one on. A
     // new play gets its own pick-up; a retry of the same song where it was keeps the one it used.
     if (state.midRetry) { clearTimeout(state.midRetry.timer); state.midRetry.timer = null; if (!(state.midRetry.it === it && startAt > 0)) state.midRetry = null; }
@@ -2633,7 +2645,8 @@
   // Previous takes it to the place asked for at once (before, it was pulled back there too)
   const cancelPickUp = () => { const m = state.midRetry; if (!m || !m.timer) return null; clearTimeout(m.timer); m.timer = null; return m; };
   const browserPause = () => { if (cancelPickUp()) state.midRetry = null; audio.pause(); };
-  const browserSeek = (t) => { const m = cancelPickUp(); const up = m && state.browserQueue[state.browserIndex] === m.it && !(state.natOn && nat.held); if (up) audio.src = m.src; audio.currentTime = t; if (up) audio.play().catch(() => {}); };
+  // (a song brought back that hasn't opened: a seek moves the place Play starts it from)
+  const browserSeek = (t) => { const r = state.restoredAt; if (r && r.it === state.browserQueue[state.browserIndex]) r.pos = t; const m = cancelPickUp(); const up = m && state.browserQueue[state.browserIndex] === m.it && !(state.natOn && nat.held); if (up) audio.src = m.src; audio.currentTime = t; if (up) audio.play().catch(() => {}); };
   // Play on a song whose stream broke off opens it again where it was: at once when its pick-up is
   // still due (before, Play went on and the pick-up opened it a second time 1.5 s later), and when
   // the pick-up is off or used (a Pause or a failed Move in the wait: before, Play went on with the
@@ -2641,6 +2654,11 @@
   // start's own retry: Play does not open it a second time.)
   const browserResume = () => {
     const i = state.browserIndex; const it = state.browserQueue[i]; const m = cancelPickUp();
+    // A song brought back after a reload whose file didn't open (the node busy just then): Play
+    // starts it where it was left, with the start's own retry and message (before, Play did
+    // nothing and said nothing: no start had run, so there was no retry to wait for)
+    const r = state.restoredAt;
+    if (it && r && r.it === it && audio.error && audio.readyState < 1) { it.moved = true; browserPlay(i, r.pos); return; }
     const at = m && m.it === it ? m.at : audio.error && audio.error.code !== 4 ? audio.currentTime : null;
     if (it && at != null) { it.moved = true; browserPlay(i, at); return; }
     audio.play().catch(() => {});
