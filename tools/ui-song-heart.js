@@ -11,7 +11,8 @@
 // carries on down the row; bookmarks that arrive after the page fill the hearts in by themselves;
 // while you pick songs on a narrow window the heart stands aside with the row's other controls; a
 // collection's fuller row still fits at 700 px; and the phone shell keeps its two-control row (the
-// phone lane owns < 600 px).
+// phone lane owns < 600 px). A service's album page (source-item, its "Favourite" button) says it
+// to a screen reader the same way: aria-pressed, before and after a press, and back again.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-song-heart.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -394,6 +395,46 @@ async function nowPlaying(browser) {
   } finally { await context.close(); }
 }
 
+// A service's page of its own (SoundCloud here: Sources › SoundCloud › Your likes › the set; the
+// services MusicBrainz maps, like Spotify, open the shared item page instead), its
+// "Favourite"/"Favourited" button
+async function sourceItem(browser, width) {
+  const url = 'https://soundcloud.com/sefa/sets/journey';
+  const item = { title: 'Journey', creator: 'Sefa', year: 2020, url, image: null, tracks: [{ url: 'https://soundcloud.com/sefa/first', title: 'First', duration_ms: 200000, format: 'mp3' }] };
+  const { page, state } = await fx.create(browser, width, { fixtures: {
+    '/sources': { body: [{ id: 'soundcloud', name: 'SoundCloud', enabled: true, status: 'signed in' }] },
+    '/sources/soundcloud/likes': { body: { tracks: [], playlists: [{ id: 'abc', title: 'Journey', creator: 'Sefa' }] } },
+    '/sources/soundcloud/playlists': { body: [] },
+    '/sources/soundcloud/items/abc': { body: item },
+  } });
+  // The node's favourites: a press puts the album's URL in or takes it out
+  let favs = [];
+  await page.route('**/v1/favourites**', (r) => {
+    const m = r.request().method();
+    if (m === 'PUT') favs = [url]; else if (m === 'DELETE') favs = [];
+    return r.fulfill({ contentType: 'application/json', body: JSON.stringify(m === 'PUT' ? { uri: url } : { uris: favs, tracks: [], albums: [], artists: [], other: [] }) });
+  });
+  try {
+    await fx.go(page, '/sources/soundcloud');
+    await page.click('[data-sitem="abc"]');
+    await page.waitForSelector('#aheart');
+    const read = () => page.evaluate(() => { const b = document.querySelector('#aheart'); return { pressed: b.getAttribute('aria-pressed'), text: b.textContent.trim() }; });
+    let h = await read();
+    assert.deepEqual(h, { pressed: 'false', text: 'Favourite' }, `${width} source page: not a favourite, said as not pressed (${JSON.stringify(h)})`);
+    await page.click('#aheart');
+    await page.waitForFunction(() => document.querySelector('#aheart') && document.querySelector('#aheart').textContent.trim() === 'Favourited');
+    h = await read();
+    assert.deepEqual(h, { pressed: 'true', text: 'Favourited' }, `${width} source page: pressed once, a favourite and said as pressed (${JSON.stringify(h)})`);
+    await page.screenshot({ path: path.join(shots, `source-item-${width}.png`) });
+    await page.click('#aheart');
+    await page.waitForFunction(() => document.querySelector('#aheart') && document.querySelector('#aheart').textContent.trim() === 'Favourite');
+    h = await read();
+    assert.equal(h.pressed, 'false', `${width} source page: pressed again, not pressed (${JSON.stringify(h)})`);
+    assert.deepEqual(state.errors, []);
+    ok(`${width} px: a service's own page says its Favourite button is pressed or not`);
+  } finally { await page.context().close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -410,6 +451,8 @@ async function nowPlaying(browser) {
     await elsewhere(browser);
     await songsRow(browser);
     await nowPlaying(browser);
+    await sourceItem(browser, 1280);
+    await sourceItem(browser, 768);
     console.log('song heart: all ok');
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });

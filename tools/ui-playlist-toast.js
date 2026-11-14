@@ -4,7 +4,8 @@
 // songs), each against a second playlist so the name can't be a default. Also: nothing else is
 // said in the toast's place (no "Added to playlist"), and the "stays on this node" note counts
 // only the songs not matched yet, from an album page too (its songs carry their page id, lib-<n>
-// until matched).
+// until matched). The same note follows "Created “…”" when the songs go into a new playlist
+// (Add to playlist… › New playlist), from a Songs row and an album's ⋯.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-playlist-toast.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -52,6 +53,23 @@ const toastAfterPick = async (page, state, open, what, width) => {
   return { said, body: JSON.parse(sent[0].body || '{}') };
 };
 
+// Add to playlist… › New playlist (its default name), then the toast and what was sent
+const createNew = async (page, state, open, what, width) => {
+  state.collections = [quiet, road];
+  const before = state.hits.length;
+  await open();
+  await page.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Add to playlist…' }).click();
+  await page.waitForSelector('dialog #pplist [data-ppnew]');
+  await page.evaluate(() => { const t = document.querySelector('#toast'); t.classList.remove('show'); t.textContent = ''; });
+  await page.click('dialog #pplist [data-ppnew]');
+  await page.waitForFunction(() => document.querySelector('#toast').classList.contains('show') && /^Created/.test(document.querySelector('#toast').textContent.trim()));
+  const said = (await page.locator('#toast').textContent()).trim();
+  const sent = state.hits.slice(before).filter((h) => h.m === 'POST' && h.v === '/playlists');
+  assert.equal(sent.length, 1, `${width} ${what}: one new playlist made`);
+  return { said, body: JSON.parse(sent[0].body || '{}') };
+};
+
 async function run(browser, width) {
   const { page, state } = await fx.create(browser, width, { fixtures, collections: [quiet, road] });
   try {
@@ -80,8 +98,20 @@ async function run(browser, width) {
     assert.deepEqual(c.body, { track_ids: [1, 2] }, `${width} album ⋯: both songs sent (${JSON.stringify(c.body)})`);
     assert.ok(![a.said, b.said, b2.said, c.said].some((s) => /added to playlist/i.test(s)), `${width}: no toast says just "playlist"`);
 
+    // 4. New playlist: "Created “…”" and the same note. (The fixture's new playlist is "Music
+    // and notes", the name a Songs row's toast takes from the answer.)
+    const made = await createNew(page, state, async () => { await fx.go(page, '/tracks'); await page.waitForSelector('#tracklist .track'); const row = page.locator('#tracklist .track', { hasText: 'Second Song' }); await row.hover(); await row.locator('[data-act="more"]').click({ force: true }); }, 'Songs row new (not matched)', width);
+    assert.equal(made.said, 'Created “Music and notes”. It stays on this node until you pick which song it is (the ?).', `${width} Songs row, new playlist, not matched: the note follows Created (${made.said})`);
+    assert.deepEqual(made.body.track_ids, [2], `${width} Songs row, new playlist: the song sent (${JSON.stringify(made.body)})`);
+    const made1 = await createNew(page, state, async () => { const row = page.locator('#tracklist .track', { hasText: fx.track.title }).first(); await row.hover(); await row.locator('[data-act="more"]').click({ force: true }); }, 'Songs row new (matched)', width);
+    assert.equal(made1.said, 'Created “Music and notes”', `${width} Songs row, new playlist, matched: no note (${made1.said})`);
+    const madeAlbum = await createNew(page, state, async () => { await fx.go(page, '/album/lib-7'); await page.waitForSelector('#imore'); await page.click('#imore'); }, 'album ⋯ new', width);
+    await page.screenshot({ path: path.join(shots, `after-album-new-${width}.png`) });
+    assert.equal(madeAlbum.said, 'Created “Journey”. 1 stays on this node until you pick which song it is (the ?).', `${width} album ⋯, new playlist: only the unmatched one in the note (${madeAlbum.said})`);
+    assert.deepEqual(madeAlbum.body, { name: 'Journey', track_ids: [1, 2] }, `${width} album ⋯, new playlist: both songs sent (${JSON.stringify(madeAlbum.body)})`);
+
     assert.deepEqual(state.errors, [], `${width}: no page errors`);
-    console.log(`ok   ${width}: ${a.said} | ${b.said} | ${b2.said} | ${c.said}`);
+    console.log(`ok   ${width}: ${a.said} | ${b.said} | ${b2.said} | ${c.said} | ${made.said} | ${made1.said} | ${madeAlbum.said}`);
   } finally {
     await page.context().close();
   }
