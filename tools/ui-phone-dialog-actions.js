@@ -1,5 +1,5 @@
 // Phone dialog actions fit inside their sheet and have at least 44 px touch targets; so do the
-// items of a row's ⋯ sheet and the rows of the collection picker.
+// items of a row's ⋯ sheet and the rows of the collection picker, which opens with no keyboard.
 // node tools/ui-phone-dialog-actions.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -70,6 +70,50 @@ async function measureRows(page, selector, label) {
   check(m.tall, `${label}: every row at least 44 px tall (${m.sizes})`);
   check(m.hit, `${label}: each row's top and bottom edge are its own`);
   check(!m.overflow, `${label}: no horizontal overflow`);
+}
+
+// On a phone the collection picker's heading takes the first focus, so neither a keyboard comes
+// up over the list nor the Android app shows the field focused with no keyboard; a tap on the
+// field still focuses it and filters.
+async function pickerFirstFocus(page, at) {
+  const f = await page.evaluate(() => ({ seen: window.pickerFocus.join(' '), now: document.activeElement.matches('dialog[open] h2[tabindex="-1"]') }));
+  check(f.now && !/\bppq\b/.test(f.seen), `${at} collection picker: the heading has the first focus, the field never had it (${f.seen})`);
+  await page.locator('dialog[open] #ppq').tap();
+  await page.keyboard.type('Road');
+  const after = await page.evaluate(() => ({ field: document.activeElement.id === 'ppq', row: document.querySelector('dialog[open] [data-ppnew]').textContent }));
+  check(after.field && /Road/.test(after.row), `${at} collection picker: a tap on the field focuses it and filters (${after.row.trim()})`);
+  await page.locator('dialog[open] #ppq').fill('');
+}
+
+// A narrow window used with a keyboard has the phone layout too. Keys pressed on the picker's
+// heading stay in the dialog (no play/pause, next, Now playing or a second dialog behind it), a
+// character typed there goes to the field, and Escape still closes the picker.
+async function auditPickerKeys(browser) {
+  const { page, context, state } = await fx.create(browser, 500);
+  try {
+    await fx.go(page, '/tracks');
+    check(await page.evaluate(() => document.documentElement.dataset.shell === 'phone'), '500 px keyboard window: phone layout');
+    await page.evaluate(() => { window.reached = []; document.addEventListener('keydown', (e) => { if (e.target.matches('dialog h2')) window.reached.push(e.key); }); });
+    await page.locator('.track [data-act="more"]').first().click();
+    await page.locator('.popover.menu .pop-item').filter({ hasText: /^Add to (playlist|collection)/ }).click();
+    await page.locator('dialog[open] #pplist .list-row').first().waitFor();
+    check(await page.evaluate(() => document.activeElement.matches('dialog[open] h2')), '500 px keyboard window: the picker opens on its heading');
+    const before = state.hits.length;
+    await page.evaluate(() => { window.reached = []; });
+    for (const key of ['Space', 'ArrowRight', 'ArrowLeft']) { await page.locator('dialog[open] h2').focus(); await page.keyboard.press(key); }
+    const k = await page.evaluate(() => ({ reached: window.reached.join(' '), np: !document.querySelector('#nowplaying').hidden }));
+    check(!k.reached && !k.np && state.hits.length === before, `500 px keyboard window: Space and the arrows on the heading reach no shortcut (${k.reached || 'none'})`);
+    await page.locator('dialog[open] #ppq').fill('');
+    await page.locator('dialog[open] h2').focus();
+    await page.keyboard.type('n?');
+    const t = await page.evaluate(() => ({ reached: window.reached.join(' '), field: document.querySelector('dialog[open] #ppq').value, focus: document.activeElement.id, np: !document.querySelector('#nowplaying').hidden, dialogs: document.querySelectorAll('dialog[open]').length, row: document.querySelector('dialog[open] [data-ppnew]').textContent.trim() }));
+    check(t.field === 'n?' && t.focus === 'ppq' && /n\?/.test(t.row), `500 px keyboard window: typing on the heading types into the field (“${t.field}”, ${t.row})`);
+    check(!t.np && t.dialogs === 1 && !t.reached, `500 px keyboard window: N and ? open nothing behind the picker (reached: ${t.reached || 'none'})`);
+    await page.locator('dialog[open] h2').focus();
+    await page.keyboard.press('Escape');
+    await closed(page);
+    check(!state.hits.some((h) => h.v.startsWith('/playlists') && h.m !== 'GET'), '500 px keyboard window: Escape on the heading closes the picker and changes nothing');
+  } finally { await context.close(); }
 }
 
 // Read geometry as it is. In particular, no locator action may scroll the target
@@ -200,9 +244,11 @@ async function auditFocusedReflow(browser) {
         // (a fresh install's picker has one row, New playlist)
         await page.locator('.track [data-act="more"]').first().tap();
         await measureRows(page, '.popover.menu.sheet:not([hidden]) .pop-item', `${at} row menu sheet`);
+        await page.evaluate(() => { window.pickerFocus = []; document.addEventListener('focusin', (e) => window.pickerFocus.push(e.target.id || e.target.tagName), true); });
         await page.locator('.popover.menu .pop-item').filter({ hasText: /^Add to (playlist|collection)/ }).tap();
         await measureRows(page, 'dialog[open] #pplist .list-row', `${at} collection picker rows`);
         await page.screenshot({ path: path.join(SHOTS, `picker-${at}.png`) });
+        await pickerFirstFocus(page, at);
         await page.locator('dialog[open] [data-ppclose]').tap();
         await closed(page);
 
@@ -265,6 +311,7 @@ async function auditFocusedReflow(browser) {
       } finally { await context.close(); }
     }
     await auditFocusedReflow(browser);
+    await auditPickerKeys(browser);
     const { page, context } = await fx.create(browser, 599, { mobile: true });
     try {
       await fx.go(page, '/library');
@@ -300,6 +347,7 @@ async function auditFocusedReflow(browser) {
       check(await item.evaluate((b) => !b.closest('.popover').classList.contains('sheet') && b.getBoundingClientRect().height < 44), '1280 px desktop keeps its compact menu items');
       await desk.page.locator('.popover.menu .pop-item').filter({ hasText: /^Add to (playlist|collection)/ }).click();
       check(await desk.page.locator('dialog[open] #pplist .list-row').first().evaluate((r) => r.getBoundingClientRect().height < 44), '1280 px desktop keeps its compact picker rows');
+      check(await desk.page.evaluate(() => document.activeElement.id === 'ppq'), '1280 px desktop: the picker opens with the focus in Find a playlist');
     } finally { await desk.context.close(); }
   } finally { await browser.close(); }
   console.log(`\n${passed} passed; ${failed} failed`);

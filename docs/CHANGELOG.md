@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-14
+
+- **On a phone, Add to playlist… opens without the keyboard.** The search box at its top took the focus as soon as it opened, so a phone browser raised its keyboard over the list, which on most phones is one tap away, and in the Android app the box showed as focused with no keyboard at all, as Search once did. On a phone the list now opens with nothing typed and no keyboard; a tap on “Find a playlist” opens the keyboard and filters as before. With a keyboard, the letters you type go into the box, and Space or the arrow keys don’t play, pause or skip the song behind it. Tablets and computers still put the cursor in the box. Test: `tools/ui-phone-dialog-actions.js`.
+
 ### 2026-11-13
 
 - **When one music service doesn’t answer a search, its Retry is a real button.** If, say, Spotify took too long, its line under the search box ended in a small grey “Retry” link, 29 × 17 px on a phone, that looked like plain text and that the keyboard could not reach. It is now the same small Retry button as when the whole search fails: easy to hit with a finger, reachable with Tab, and Enter or a tap searches again with the same words. A service that can’t be helped by trying again (one that needs a paid plan) still says why, with no Retry.
