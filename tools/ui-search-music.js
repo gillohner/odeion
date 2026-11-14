@@ -70,10 +70,10 @@ const read = (page) => page.evaluate(() => {
     kinds: all('#sresults [data-skind]').map((s) => s.dataset.skind), heads: Object.fromEntries(all('#sresults [data-skind]').map((s) => [s.dataset.skind, s.querySelector('.section-head').innerText.replace(/\s+/g, ' ').trim()])),
     facetGroups: all('[data-facet-group]').map((g) => g.dataset.facetGroup), kindChips: all('[data-facet^="kind:"]').map((b) => b.innerText.replace(/\s+/g, ' ').trim()),
     top: q('#stop') ? q('#stop .name').innerText.trim() : null, also: q('#stopalso') ? q('#stopalso').innerText.trim() : null, nomatch: !!q('#snomatch'),
-    wide: document.documentElement.scrollWidth - innerWidth, filters: !!q('details.sfilters'),
+    wide: document.documentElement.scrollWidth - innerWidth, filters: !!q('[data-sfilters]'),
   };
 });
-const openFilters = async (page) => { if (await page.$('details.sfilters:not([open]) > summary')) { await page.click('details.sfilters > summary'); await sleep(150); } };
+const openFilters = async (page) => { if (await page.$('[data-sfilters][aria-expanded="false"]')) { await page.click('[data-sfilters]'); await sleep(150); } };
 
 (async () => {
   const browser = await chromium.launch();

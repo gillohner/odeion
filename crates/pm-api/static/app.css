@@ -224,7 +224,9 @@ html { -webkit-tap-highlight-color: transparent; }
 .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.main { flex: 1; overflow: auto; padding: 24px 24px 32px; scroll-behavior: smooth; }
+/* position: the page scrolls inside .main, so screen-reader-only text (absolute) is placed in it too
+   instead of past the end of the document, which made the whole document scrollable on Search */
+.main { position: relative; flex: 1; overflow: auto; padding: 24px 24px 32px; scroll-behavior: smooth; }
 .main > * + * { margin-top: 28px; }
 /* A page drawn again keeps its height below until its later parts are back (app.js keepPlace) */
 .main[data-hold]::after { content: ''; display: block; height: var(--hold, 0); }
@@ -921,6 +923,8 @@ html[data-shell="phone"] .idbar { max-width: none; }
 .sprog { position: absolute; left: 14px; right: 14px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
 .sprog > span { display: block; height: 100%; width: 8%; background: var(--accent); transition: width var(--dur-slow) var(--ease); }
 .scopechips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 16px; }
+/* The source row's box: only a phone puts something beside it (its Filters button, app.js renderSearchBody) */
+.sbar { display: contents; }
 .chip.scope { display: inline-flex; align-items: center; gap: 6px; }
 .chip.scope.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
 .chip.scope .cnt { font-size: var(--fs-xs); color: var(--muted); }
@@ -985,9 +989,6 @@ html[data-shell="phone"] .popover:not([hidden]):not(.menu), .popover.menu.sheet:
 .list-row .ic.right { transform: rotate(-90deg); color: var(--muted); }
 .snotes { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; }
 .sfilters { margin: 0 0 12px; }
-.sfilters > summary { list-style: none; cursor: pointer; }
-.sfilters > summary::-webkit-details-marker { display: none; }
-.sfilters[open] > summary { margin-bottom: 8px; }
 .snote { font-size: var(--fs-xs); color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
 .snote .src-badge.ico { width: 18px; height: 18px; }
 .chips.win { display: inline-flex; gap: 4px; margin-left: 10px; }
@@ -1770,7 +1771,14 @@ html[data-shell="phone"] #jobpop, html[data-shell="phone"] #volpop { width: auto
 /* Search on a phone: the words stay in the search box at the top, so "Results for …" is said only to
    screen readers (the page keeps its heading) and the results start right under the source chips */
 html[data-shell="phone"] .page-head.shead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-html[data-shell="phone"] .scopechips + #sresults { margin-top: 12px; }
+html[data-shell="phone"] .sbar + #sresults { margin-top: 12px; }
+/* …and Filters ends that row instead of taking a line of its own above the results: the sources
+   scroll beside it (faded at its edge), it keeps the 14 px page margin on the right; its top is the
+   chips' top (4 px: margin 4 + padding 0, or -4 + 8 where the chips reach for a finger) */
+html[data-shell="phone"] .sbar { display: flex; align-items: center; gap: 8px; margin: 0; }
+html[data-shell="phone"] .sbar > .scopechips { flex: 1 1 auto; min-width: 0; margin-bottom: 0; }
+html[data-shell="phone"] .sbar > .scopechips:not(:last-child) { margin-right: 0; }
+html[data-shell="phone"] .sbar > .sfilt { flex: none; align-self: flex-start; margin-top: 4px; }
 /* Albums: the Quality chips are one scrolling row on a phone, so the first albums show on the
    first screen; the chosen quality is scrolled into view after each draw (app.js revealChosenChip) */
 html[data-shell="phone"] .qualchips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -14px; margin-right: -14px; padding: 0 14px; scroll-padding-inline: 14px; }
