@@ -32,6 +32,9 @@ const playing = (p) => waitFor(p, () => { const a = document.querySelector('audi
   await p.close();
 
   p = await ctx.newPage();
+  // A fresh start, nothing queued: the first page saved its song as it closed, and the song put
+  // back in the bar would ask for the file (and get the two error answers) before the click
+  await p.addInitScript(() => { localStorage.removeItem('pm.browserQueue'); localStorage.removeItem('pm.browserAt'); });
   let failed = 0;
   await p.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => { if (failed < 2) { failed++; return r.fulfill({ status: 503, contentType: 'text/html', body: '<h1>Bad gateway</h1>' }); } return r.continue(); });
   const toasts = []; await p.exposeFunction('pmNote', (t) => toasts.push(t));

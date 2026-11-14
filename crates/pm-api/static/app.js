@@ -1373,8 +1373,11 @@
   const ACCOUNT_KEYS = ['pm.token', 'pm.zone', 'pm.browserQueue', 'pm.browserAt', 'pm.setupHidden', 'pm.bar'];
   // The auth middleware's answer to a missing or wrong token (lib.rs `auth`)
   const NODE_REFUSED = 'missing or wrong bearer token';
+  // Set once the page forgot the account (log out, session ended): the page is about to reload,
+  // and its last queue save must not write the old account's queue back
+  let accountForgotten = false;
   const forgetAccount = () => {
-    const mine = state.token; state.token = '';
+    const mine = state.token; state.token = ''; accountForgotten = true;
     if (window.PM_FEEDBACK) PM_FEEDBACK.reset(); // a draft or open report goes with the sign-in
     if (window.PM_USAGE) PM_USAGE.end(); // and anything usage insights still had (never sent after)
     try {
@@ -1921,7 +1924,10 @@
   // links are rebuilt on load (they carry the token), live radio is not kept.
   let lastSavedQueue = '';
   const isLiveRadio = (it) => it.album === 'Internet radio' && /^https?:/.test(it.uri || '');
-  setInterval(() => {
+  // Every 2 s, and at once when the page is hidden or closed (a phone's app is usually ended in
+  // the background, so a song queued just before would otherwise be gone after a reload)
+  const saveBrowserQueue = () => {
+    if (accountForgotten) return;
     try {
       const keep = state.browserQueue.filter((it) => !isLiveRadio(it)).map((it) => { const { stream, nativeNo, ...rest } = it; return rest; });
       const j = JSON.stringify(keep);
@@ -1930,7 +1936,10 @@
       // (the song itself with its place: the queue can change before the place comes back)
       if (cur && !isLiveRadio(cur)) localStorage.setItem('pm.browserAt', JSON.stringify({ index: state.browserQueue.slice(0, state.browserIndex).filter((it) => !isLiveRadio(it)).length, id: cur.id, pos: Math.floor(audio.currentTime || 0) }));
     } catch { /* storage unavailable */ }
-  }, 2000);
+  };
+  setInterval(saveBrowserQueue, 2000);
+  window.addEventListener('pagehide', saveBrowserQueue);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveBrowserQueue(); });
   // The saved song and its position, if it is still in the queue (whose stream links are rebuilt:
   // they carry the token). The song is found by its id, the saved index only a hint: Shuffle, Play
   // next or a Queue page edit before the place comes back (right after a reload) moves it, and the
@@ -4334,7 +4343,7 @@
       { label: 'Dashboard', note: 'Full screen, for a TV or tablet', icon: 'external', run: () => window.open(`/now-playing?zone=${encodeURIComponent(state.zone)}`, '_blank', 'noopener') },
       { label: sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel(), icon: 'moon', run: () => setTimeout(() => showMenu(b, [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]), 0) },
       ...(isBrowser() ? [] : [{ label: 'DSP', note: 'Equaliser, crossfeed, room correction', icon: 'settings', run: () => { state.dspOpen = state.zone; setView('settings', 'playback'); } }]),
-      ...(songPage ? [{ label: 'Song page', note: 'Sources, versions, tags', icon: 'compass', run: () => setView('item', { kind: 'song', id: songPage }) }] : []),
+      ...(songPage ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: songPage }) }] : []),
     ]); };
     bindNpLinks(overlay, it, () => toggleNowPlaying());
     $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => { transport({ action: 'play', index: Number(b.dataset.npqi) }); setTimeout(renderNowPlaying, 500); });
