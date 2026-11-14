@@ -29,6 +29,25 @@ struct Gate {
     waiting: AtomicU64,
     /// Calls of `take` so far (for `hang`: opens of `hang:` items).
     taken: AtomicU64,
+    /// For `hang`: threads that ran a `hang:` open and have exited (see [`OpenThreadEnd`]).
+    ended: AtomicU64,
+}
+
+/// Counts a thread that ran a `hang:` open once it has exited. Thread-local destructors run
+/// after the thread's closure has returned, so by then the zone's own end-of-open bookkeeping on
+/// that thread (its "still running" flag) is done: a test that waits for `ended` knows the zone
+/// sees the open as finished, with no timing involved.
+struct OpenThreadEnd(Arc<Gate>);
+
+impl Drop for OpenThreadEnd {
+    fn drop(&mut self) {
+        self.0.ended.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+thread_local! {
+    static OPEN_THREAD_END: std::cell::RefCell<Option<OpenThreadEnd>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 impl Gate {
@@ -169,6 +188,10 @@ struct Factory {
 impl SourceFactory for Factory {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError> {
         if item.uri.starts_with("hang:") {
+            OPEN_THREAD_END.with(|t| {
+                t.borrow_mut()
+                    .get_or_insert_with(|| OpenThreadEnd(self.hang.clone()));
+            });
             self.hang.take();
             return Err(SourceError::Open {
                 uri: item.uri.clone(),
@@ -784,8 +807,12 @@ async fn queue_changes_keep_one_open_ahead_in_flight() {
             "round {i}: one open ahead in flight"
         );
     }
-    // The given-up open ends: then the next item is opened ahead, still one at a time
+    // The given-up open ends: then the next item is opened ahead, still one at a time. Blocks
+    // flow only once its thread has exited: the open ahead starts at the first block after
+    // that, and blocks granted while the thread was still ending would play out with none
+    // started (the engine then waits for a block, the test for an open)
     r.hang.allow(1);
+    wait_for(|| r.hang.ended.load(Ordering::SeqCst) == 1).await;
     r.gate.allow(2);
     played += 200;
     wait_for(|| r.rec.samples.lock().unwrap().len() >= played).await;
