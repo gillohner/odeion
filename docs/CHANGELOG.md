@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-14
+
+- **Your keyboard's and lock screen's media keys work like the player bar's buttons.** When this browser plays, the Play, Next and Previous keys now do what the bar's buttons do. Right after a reload, Play goes on with the song you were on, from where you were, and Next plays the song after it; before, Play did nothing and Next and Previous started the first song. Previous after the first 3 seconds starts the song again, as the bar's Previous does, instead of jumping to the song before.
+- **A song that needs a second try starts where it should.** When a song doesn't start (the node busy for a moment) and is tried again, the second try now opens it where it was going to start, so a song you were resuming no longer starts over at 0:00. The second try also no longer counts as a second play in your history.
+- **Pressing Shuffle my music twice starts one shuffle.** With an empty queue in this browser, a second press of Shuffle my music while the first shuffle was still reading your library started a second shuffle that replaced the first one's songs, and Play pressed meanwhile offered the shuffle again. Now the first shuffle simply starts.
+
 ### 2026-11-13
 
 - **When one music service doesn’t answer a search, its Retry is a real button.** If, say, Spotify took too long, its line under the search box ended in a small grey “Retry” link, 29 × 17 px on a phone, that looked like plain text and that the keyboard could not reach. It is now the same small Retry button as when the whole search fails: easy to hit with a finger, reachable with Tab, and Enter or a tap searches again with the same words. A service that can’t be helped by trying again (one that needs a paid plan) still says why, with no Retry.
