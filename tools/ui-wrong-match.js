@@ -70,8 +70,15 @@ async function phoneLayout(page, at) {
       if (mb) { const b = mb.getBoundingClientRect(); out.mbTop = hit(b.x + 10, b.y + 2); out.mbBottom = hit(b.x + 10, b.bottom - 2); }
       return out;
     });
+    // each song's MusicBrainz search: field and Search side by side, 44 px, the placeholder's words inside the field
+    const finds = [...document.querySelectorAll('#main form[data-find]')].map((f) => {
+      const i = f.querySelector('input'); const b = f.querySelector('button'); const ib = i.getBoundingClientRect(); const bb = b.getBoundingClientRect();
+      const cs = getComputedStyle(i); const c = document.createElement('canvas').getContext('2d'); c.font = `${cs.fontSize} ${cs.fontFamily}`;
+      return { input: Math.round(ib.height), button: Math.round(bb.height), oneLine: Math.abs(ib.y - bb.y) < 1 && bb.x >= ib.right, inside: bb.right <= f.getBoundingClientRect().right + 0.5,
+        fits: c.measureText(i.placeholder).width <= i.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), gap: Math.round(f.getBoundingClientRect().y - f.previousElementSibling.getBoundingClientRect().bottom) };
+    });
     document.querySelector('#main').scrollTo({ top: 0, behavior: 'instant' });
-    return { how: how ? { open: how.open, sum: how.querySelector('summary').getBoundingClientRect().height, introShown: document.querySelector('.idintro').checkVisibility() } : null, rows, edges, firstRadio, over: document.documentElement.scrollWidth - innerWidth };
+    return { finds, how:how ? { open: how.open, sum: how.querySelector('summary').getBoundingClientRect().height, introShown: document.querySelector('.idintro').checkVisibility() } : null, rows, edges, firstRadio, over: document.documentElement.scrollWidth - innerWidth };
   });
   check(!!m.how && !m.how.open && !m.how.introShown, `${at}: the explanation is folded under the title (${JSON.stringify(m.how)})`);
   check(!!m.how && m.how.sum >= 44, `${at}: its summary is a 44 px target (${m.how && m.how.sum})`);
@@ -87,6 +94,12 @@ async function phoneLayout(page, at) {
   const bad = m.edges.filter((e) => e.top !== `label:${e.id}` || e.bottom !== `label:${e.id}` || ('mbTop' in e && (e.mbTop !== 'mb' || e.mbBottom !== 'mb')));
   check(!bad.length, `${at}: each target's top and bottom edge hit that target (${JSON.stringify(bad[0] || null)})`);
   check(m.over <= 0, `${at}: no sideways scroll (${m.over})`);
+  // (main at 360: a 260 px field, Search 40 px on a line of its own, the placeholder's words fit; the field touched No change)
+  const f = m.finds;
+  check(f.length >= 2 && f.every((x) => x.oneLine && x.inside), `${at}: each MusicBrainz search is one line, Search beside the field (${JSON.stringify(f)})`);
+  check(f.length >= 2 && f.every((x) => x.input >= 44 && x.button >= 44), `${at}: its field and Search are 44 px tall (${f.map((x) => `${x.input}/${x.button}`).join(' ')})`);
+  check(f.length >= 2 && f.every((x) => x.fits), `${at}: the field's placeholder fits in it`);
+  check(f.length >= 2 && f.every((x) => x.gap >= 6), `${at}: the search stands apart from No change above it (${f.map((x) => x.gap).join(',')})`);
 }
 
 const menuLabels = async (page) => page.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim()));

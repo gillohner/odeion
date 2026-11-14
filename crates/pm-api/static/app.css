@@ -2409,6 +2409,11 @@ html[data-shell="phone"] .hmatch-btn { min-height: 48px; }
 html[data-shell="phone"] .idhow > summary { min-height: 44px; }
 html[data-shell="phone"] .idpick > label.grow { min-height: 44px; justify-content: center; }
 html[data-shell="phone"] .idpick > .idmb { min-height: 44px; margin: -8px 0; }
+/* (and its MusicBrainz search is one line: the field takes the room Search leaves, both 44 px, a little
+   apart from No change above it; a fixed 260 px field put Search on a line of its own at 360 px) */
+html[data-shell="phone"] .idrow form[data-find] { flex-wrap: nowrap; margin-top: 8px; }
+html[data-shell="phone"] .idrow form[data-find] .input { flex: 1 1 auto; width: auto; min-width: 0; min-height: 44px; }
+html[data-shell="phone"] .idrow form[data-find] .btn { flex: none; min-height: 44px; }
 html[data-shell="phone"] #main > .hero.item-hero .actions { gap: 4px; }
 html[data-shell="phone"] #main > .hero.item-hero .actions > #iplay { padding: 0 18px 0 14px; }
 html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle { padding: 0 14px; margin-left: 4px; }
