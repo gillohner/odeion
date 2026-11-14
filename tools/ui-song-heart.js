@@ -261,6 +261,134 @@ async function phone(browser, width) {
   } finally { await context.close(); }
 }
 
+// 8. One song in two rows (an album and its bonus disc, a search and a collection: the same song
+// is often listed twice). Saving it from one row turns the other row's heart over too, at once,
+// and a slow first favourites answer (a cold start: asked for before the save, answered after it)
+// does not put the old list back and turn the hearts out again.
+// The node's favourites, answered from what they were when each GET was asked (a slow answer is
+// the old list); `hold`: the first GET waits for release().
+async function favRoute(page, { start = [], hold = false } = {}) {
+  const favs = new Set(start); const asks = []; let release = () => {}; let sent = () => {};
+  const held = new Promise((ok) => { release = ok; }); const answered = new Promise((ok) => { sent = ok; });
+  await page.route('**/v1/favourites*', async (route) => {
+    const m = route.request().method(); asks.push(m);
+    const body = (b) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+    if (m === 'PUT') { favs.add('track:1'); favs.add(fx.SONG); return body({ uri: fx.SONG }); }
+    if (m === 'DELETE') { favs.clear(); return body({}); }
+    const uris = [...favs];
+    const first = hold && asks.filter((x) => x === 'GET').length === 1;
+    if (first) await held;
+    await body({ uris, tracks: [], albums: [], artists: [], other: [] });
+    if (first) sent();
+  });
+  // answered: the held answer has been sent
+  return { release, asks, answered };
+}
+const twice = { '/item/album/lib-7': { body: { ...albumPage, songs: [songRow, { ...songRow, no: 2 }], total_ms: 480000 } }, '/item/album/lib-7/extras': fixtures['/item/album/lib-7/extras'] };
+async function elsewhere(browser) {
+  const { page, context, state } = await fx.create(browser, 1280, { fixtures: twice });
+  try {
+    const node = await favRoute(page, { hold: true });
+    await fx.go(page, '/album/lib-7');
+    await page.waitForSelector(`${ROW}:nth-child(2) [data-sfav]`);
+    const H1 = `${ROW}:nth-child(1) [data-sfav]`; const H2 = `${ROW}:nth-child(2) [data-sfav]`;
+    assert.equal(node.asks.filter((m) => m === 'GET').length, 1, 'the first favourites answer is still on its way');
+    await page.evaluate((s) => { document.querySelector(s).dataset.probe = 'same-node'; }, ROW);
+    await page.locator(ROW).first().hover();
+    await page.click(H1);
+    await page.waitForFunction((s) => document.querySelector(s).classList.contains('on'), H1, { timeout: 4000 });
+    await page.waitForFunction((s) => document.querySelector(s).classList.contains('on'), H2, { timeout: 2000 }).catch(() => {});
+    const two = await heartState(page, H2);
+    assert.deepEqual([two.on, two.icon, two.label], [true, 'heart-fill', `Remove ${fx.track.title} from favourites`], `the same song's other row turns over at once (${JSON.stringify(two)})`);
+    await page.screenshot({ path: path.join(shots, 'album-1280-two-rows-saved.png') });
+    // The old answer (no bookmarks) lands now, after the save
+    node.release();
+    await node.answered;
+    await page.waitForTimeout(300);
+    const after = [await heartState(page, H1), await heartState(page, H2)];
+    assert.deepEqual(after.map((h) => h.on), [true, true], `a slow first answer does not turn the hearts out again (${JSON.stringify(after)})`);
+    assert.equal(node.asks.filter((m) => m === 'PUT').length, 1, 'one click, one save');
+    await page.click(`${ROW}:nth-child(2) [data-smore]`);
+    await page.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+    const labels = await menuLabels(page);
+    assert.ok(labels.includes('Remove from favourites'), `the other row's ⋯ menu agrees (${labels.join(' · ')})`);
+    await closeMenu(page);
+    assert.equal(await page.evaluate((s) => document.querySelector(s).dataset.probe, ROW), 'same-node', 'only the hearts were painted, not the list');
+    // Taken out from the second row: the first turns back too
+    await page.locator(`${ROW}:nth-child(2)`).hover();
+    await page.click(H2);
+    await page.waitForFunction((s) => !document.querySelector(s).classList.contains('on'), H1, { timeout: 4000 });
+    await fx.cleanCopy(page);
+    assert.deepEqual(state.errors, []);
+    ok('1280 px: a song in two rows turns over in both, and a slow first favourites answer does not undo the save');
+  } finally { await context.close(); }
+}
+
+// 9. Library › Songs' own heart (`.track`): it says which song it is for, and bookmarks that
+// arrive after the list is drawn (a cold start) fill it in without drawing the row again.
+async function songsRow(browser) {
+  const { page, context, state } = await fx.create(browser, 1280, { fixtures });
+  try {
+    const node = await favRoute(page, { start: ['track:1', fx.SONG], hold: true });
+    await fx.go(page, '/tracks');
+    const T = '.track [data-act="fav"]';
+    await page.waitForSelector(T, { state: 'attached' });
+    await page.waitForTimeout(300);
+    let h = await heartState(page, T);
+    assert.deepEqual([h.on, h.label], [false, `Add ${fx.track.title} to favourites`], `the Songs heart says which song (${JSON.stringify(h)})`);
+    await page.evaluate((s) => { document.querySelector(s).closest('.track').dataset.probe = 'same-node'; }, T);
+    node.release();
+    await page.waitForFunction((s) => document.querySelector(s).classList.contains('on'), T, { timeout: 4000 }).catch(() => {});
+    h = await heartState(page, T);
+    assert.deepEqual([h.on, h.icon, h.label], [true, 'heart-fill', `Remove ${fx.track.title} from favourites`], `it fills in once they are in (${JSON.stringify(h)})`);
+    assert.equal(await page.evaluate((s) => document.querySelector(s).closest('.track').dataset.probe, T), 'same-node', 'the row was not drawn again');
+    await page.locator('.track').first().hover();
+    await page.click(T);
+    await page.waitForFunction((s) => !document.querySelector(s).classList.contains('on'), T, { timeout: 4000 });
+    assert.deepEqual(node.asks.filter((m) => m !== 'GET'), ['DELETE'], 'one click, one removal');
+    assert.equal((await heartState(page, T)).label, `Add ${fx.track.title} to favourites`);
+    await page.screenshot({ path: path.join(shots, 'songs-1280-late.png') });
+    await fx.cleanCopy(page);
+    assert.deepEqual(state.errors, []);
+    ok('1280 px: the Songs row heart says which song it is for and fills in when the bookmarks arrive late');
+  } finally { await context.close(); }
+}
+
+// 10. Now Playing's heart: bookmarks that arrive after it is drawn fill it in, and its own press
+// still turns it over once per press.
+const SAVED = JSON.stringify([{ id: 1, uri: 'track:1', track_id: 1, title: fx.track.title, artist: 'Sefa', album: 'Journey', duration_ms: 240000 }]);
+async function nowPlaying(browser) {
+  const { page, context, state } = await fx.create(browser, 1280, { fixtures });
+  try {
+    await context.addInitScript((saved) => { localStorage.setItem('pm.zone', 'browser'); localStorage.setItem('pm.browserQueue', saved); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 0, pos: 12 })); }, SAVED);
+    const node = await favRoute(page, { start: ['track:1', fx.SONG], hold: true });
+    await fx.go(page, '/library');
+    await page.waitForSelector('#npart');
+    await page.click('#npart');
+    await page.waitForSelector('#nowplaying:not([hidden]) #npfav');
+    await page.waitForTimeout(500);
+    const np = () => page.evaluate(() => { const b = document.querySelector('#npfav'); return b && { on: b.classList.contains('on'), pressed: b.getAttribute('aria-pressed'), label: b.getAttribute('aria-label') }; });
+    assert.equal((await np()).on, false, 'the bookmarks are still on their way');
+    node.release();
+    await page.waitForFunction(() => document.querySelector('#npfav')?.classList.contains('on'), null, { timeout: 4000 }).catch(() => {});
+    let h = await np();
+    assert.deepEqual([h.on, h.pressed, h.label], [true, 'true', 'In favourites'], `Now Playing's heart fills in once they are in (${JSON.stringify(h)})`);
+    // Its own press: out, then in again, one request each
+    await page.click('#npfav');
+    await page.waitForFunction(() => !document.querySelector('#npfav')?.classList.contains('on'), null, { timeout: 4000 });
+    await page.click('#npfav');
+    await page.waitForFunction(() => document.querySelector('#npfav')?.classList.contains('on'), null, { timeout: 4000 });
+    await page.waitForTimeout(300);
+    h = await np();
+    assert.equal(h.on, true, 'pressed twice: in favourites again');
+    assert.deepEqual(node.asks.filter((m) => m !== 'GET'), ['DELETE', 'PUT'], 'one request per press');
+    await page.screenshot({ path: path.join(shots, 'nowplaying-1280-late.png') });
+    await fx.cleanCopy(page);
+    assert.deepEqual(state.errors, []);
+    ok('1280 px: Now Playing\'s heart fills in when the bookmarks arrive late, and its press still turns it over');
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -274,6 +402,9 @@ async function phone(browser, width) {
     await late(browser);
     await phone(browser, 360);
     await phone(browser, 412);
+    await elsewhere(browser);
+    await songsRow(browser);
+    await nowPlaying(browser);
     console.log('song heart: all ok');
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });
