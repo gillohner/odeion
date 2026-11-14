@@ -8657,7 +8657,7 @@
           const facts = [d.synced_at ? `Last synced ${ago(d.synced_at)}` : '', fileSize(d.bytes), d.queued ? `${countOf(d.queued, 'plays and hearts')} to send when your node is back` : ''].filter(Boolean).join(' · ');
           const head = pageHead('Downloads', d.tracks.length || null) + `<p class="muted small dl-note" role="status">Offline: playing what this device keeps. ${esc(facts)}</p>`;
           if (!d.tracks.length) { main.innerHTML = head + '<div class="empty">' + icon('download') + '<h3>Nothing on this device yet</h3><p>When your node is back, keep albums and playlists here to play them without it.</p></div>'; break; }
-          const lists = {};
+          // (its lists are render's own: the rows are bound to them after the switch)
           const albumOpen = d.albums.find((a) => a.id === state.dlAlbum);
           const albumTile = (a) => `<button class="tile" data-dlalbum="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true)}<div class="t">${esc(a.title)}</div><div class="a">${countOf(a.track_ids.length, 'songs')}</div>${coverFrom('library')}</button>`;
           let html = head;
@@ -8673,7 +8673,6 @@
           lists.all = [...d.tracks].sort((a, b) => String(a.title).localeCompare(String(b.title)));
           html += `<section class="section"><div class="section-head"><h3>All songs <span class="muted small">${d.tracks.length}</span></h3><button class="btn sm ghost" data-dlplay="all">${icon('shuffle')} Shuffle</button></div>${trackRows(lists.all, { key: 'all' })}</section>`;
           main.innerHTML = html;
-          bindTrackRows(main, lists);
           $$('[data-dlalbum]', main).forEach((b) => b.onclick = () => { state.dlAlbum = Number(b.dataset.dlalbum); render(); main.scrollTo && main.scrollTo(0, 0); });
           const dc = $('[data-dlclose]', main); if (dc) dc.onclick = () => { state.dlAlbum = null; render(); };
           $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = lists[k]; if (ts && ts.length) playTracks(ts, true, 'end', { shuffle: k === 'all' }); });
