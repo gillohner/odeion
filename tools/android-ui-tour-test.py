@@ -52,14 +52,37 @@ class PlayToSpotTests(unittest.TestCase):
     def test_next_card_play_to_is_not_the_first_cards(self):
         # When OCR misses the first card's "selected", the next card's Play to (below the second
         # state pill) is still not taken; nor is "Nothing playing" a card's top
+        with self.ocr_edited(lambda ln: None if ln.rstrip().upper().endswith("SELECTED") else ln):
+            self.assertIsNone(tour.zone_pick(FIX / "zones-api35-selected.png"))
+
+    def ocr_edited(self, edit):
+        """subprocess.run with tesseract's TSV lines changed by edit (a line in, a line or None out)."""
         real = subprocess.run
 
-        def without_selected(*a, **k):
+        def run(*a, **k):
             r = real(*a, **k)
-            keep = [ln for ln in r.stdout.splitlines() if not ln.rstrip().upper().endswith("SELECTED")]
+            keep = [e for e in (edit(ln) for ln in r.stdout.splitlines()) if e is not None]
             return subprocess.CompletedProcess(r.args, r.returncode, "\n".join(keep) + "\n", r.stderr)
 
-        with mock.patch.object(tour.subprocess, "run", without_selected):
+        return mock.patch.object(tour.subprocess, "run", run)
+
+    def test_second_card_pill_missed_too(self):
+        # OCR misses the first card's "selected" and the second card's state pill: where the first
+        # card ends is not known, so the next card's Play to (about (264, 475)) is not taken
+        def drop(ln):
+            word = ln.rstrip().rsplit("\t", 1)[-1].upper()
+            return None if word in ("SELECTED", "STOPPED") else ln
+
+        with self.ocr_edited(drop):
+            self.assertIsNone(tour.zone_pick(FIX / "zones-api35-selected.png"))
+            self.assertIsNone(tour.play_to_spot(FIX / "zones-api35-selected.png"))
+
+    def test_selected_works_is_not_the_pill(self):
+        # A word "Selected" (a song called Selected Works) on the first card is not its pill
+        def title_case(ln):
+            return ln[:-len("SELECTED")] + "Selected" if ln.rstrip().endswith("SELECTED") else ln
+
+        with self.ocr_edited(title_case):
             self.assertIsNone(tour.zone_pick(FIX / "zones-api35-selected.png"))
 
     def test_no_play_to(self):

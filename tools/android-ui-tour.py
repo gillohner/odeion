@@ -50,7 +50,9 @@ def zone_pick(png):
     Play to in screen pixels; ("selected", (x, y)) when the card says "selected" (the page plays to
     that zone already, so the card has no Play to); or None. Only the first card counts: what lies
     below the second card's state pill is another zone's (on a phone, shorter cards bring the next
-    card's Play to into view). The words of every page mode are read together: one mode can read
+    card's Play to into view). So a find counts only between the first two state pills read; with
+    fewer than two read, where the first card ends is not known and nothing counts (None: the tour
+    taps the usual place). The words of every page mode are read together: one mode can read
     "Play to" where another reads only "selected" (API 35 with the phone's zone selected)."""
     plays, picked, states = [], [], []
 
@@ -74,7 +76,7 @@ def zone_pick(png):
             word = re.sub(r"[^A-Za-z]", "", r["text"])
             if word in CARD_STATES:
                 states.append(mid(r)[1])
-            elif word.upper() == "SELECTED":
+            elif word == "SELECTED":  # (the pill's word, not a song called Selected Works)
                 picked.append(mid(r))
         for a, b in zip(words, words[1:]):
             if a["text"].strip() == "Play" and b["text"].strip().lower() == "to" and line(a) == line(b):
@@ -85,9 +87,12 @@ def zone_pick(png):
     # (the same pill read by several modes is one card: a few pixels apart at most)
     tops = sorted(states)
     cards = [y for i, y in enumerate(tops) if i == 0 or y - tops[i - 1] > 12]
-    below = cards[1] if len(cards) > 1 else None
+    if len(cards) < 2:
+        # (one pill read: the second card's may be the one OCR missed, and its Play to in view)
+        return None
+    top, below = cards[0] - 12, cards[1]
     found = [(p[1], p[0], "play to") for p in plays] + [(p[1], p[0], "selected") for p in picked]
-    found = [f for f in found if below is None or f[0] < below]
+    found = [f for f in found if top <= f[0] < below]
     if not found:
         return None
     y, x, kind = min(found)
@@ -191,7 +196,7 @@ def run(h):
                 # (where the API 35 image has it: on a phone the card's Play to ends the
                 # now-playing line, at the card's right; a card's "selected" sits there too)
                 spot = (W * 825 // 1000, H * 398 // 1000)
-                log(f"Play to not read on the Zones page; tapping its usual place {spot}")
+                log(f"Play to not read inside the first zone card; tapping its usual place {spot}")
             else:
                 spot = pick[1]
                 log(f"Play to read on the Zones page at {spot}")
