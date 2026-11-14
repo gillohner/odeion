@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-14
+
+- **After a reload, This browser comes back on the song you were listening to, even if you shuffled or edited the queue first.** This browser remembers the song you were on and where in it, and brings it back paused when the page reconnects to the node. It remembered only the song's position in the queue: pressing Shuffle, or removing or moving a song on the Queue page, in the moment before the page reconnected made it come back on whichever song now sat at that position, from where the saved song was, and then remember that one instead. Pressing Play or Next in that moment had the same problem. It now remembers the song itself and finds it wherever it moved to, so Play goes on with that song from where you left it and Next plays the one after it; if you removed it, nothing comes back in its place.
+
 ### 2026-11-13
 
 - **When one music service doesn’t answer a search, its Retry is a real button.** If, say, Spotify took too long, its line under the search box ended in a small grey “Retry” link, 29 × 17 px on a phone, that looked like plain text and that the keyboard could not reach. It is now the same small Retry button as when the whole search fails: easy to hit with a finger, reachable with Tab, and Enter or a tap searches again with the same words. A service that can’t be helped by trying again (one that needs a paid plan) still says why, with no Retry.

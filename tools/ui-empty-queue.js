@@ -368,7 +368,7 @@ async function playAfterReloadNoNode(browser, width) {
     assert.match((await toastNow(page)).text, /Song 3. did not start/, `${width}: Play says Song 3 did not start (${JSON.stringify(await toastNow(page))})`);
     await sleep(4500); // (two saver ticks and the one retry)
     const at = await page.evaluate(() => JSON.parse(localStorage.getItem('pm.browserAt') || 'null'));
-    assert.deepEqual(at, { index: 2, pos: 30 }, `${width}: the saved place is kept (${JSON.stringify(at)})`);
+    assert.deepEqual(at, { index: 2, id: 3, pos: 30 }, `${width}: the saved place is kept, naming Song 3 (${JSON.stringify(at)})`);
     assert.deepEqual(state.errors, [], `${width}: no page errors`);
   } finally { await context.close(); }
 }

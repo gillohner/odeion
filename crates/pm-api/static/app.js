@@ -1927,15 +1927,21 @@
       const j = JSON.stringify(keep);
       if (j !== lastSavedQueue) { lastSavedQueue = j; localStorage.setItem('pm.browserQueue', j); }
       const cur = state.browserQueue[state.browserIndex];
-      if (cur && !isLiveRadio(cur)) localStorage.setItem('pm.browserAt', JSON.stringify({ index: keep.indexOf(keep.find((x) => x.id === cur.id)), pos: Math.floor(audio.currentTime || 0) }));
+      // (the song itself with its place: the queue can change before the place comes back)
+      if (cur && !isLiveRadio(cur)) localStorage.setItem('pm.browserAt', JSON.stringify({ index: state.browserQueue.slice(0, state.browserIndex).filter((it) => !isLiveRadio(it)).length, id: cur.id, pos: Math.floor(audio.currentTime || 0) }));
     } catch { /* storage unavailable */ }
   }, 2000);
   // The saved song and its position, if it is still in the queue (whose stream links are rebuilt:
-  // they carry the token)
+  // they carry the token). The song is found by its id, the saved index only a hint: Shuffle, Play
+  // next or a Queue page edit before the place comes back (right after a reload) moves it, and the
+  // song at the old index is another one. (A place saved before the id was kept: by its index.)
   const savedBrowserAt = () => {
     for (const it of state.browserQueue) if (!it.stream && it.track_id == null) { const u = streamUrlFor(it.uri); if (u) it.stream = u; }
     let at = null; try { at = JSON.parse(localStorage.getItem('pm.browserAt') || 'null'); } catch { /* none */ }
-    return at && state.browserQueue[at.index] ? at : null;
+    if (!at || typeof at !== 'object') return null;
+    const q = state.browserQueue; const hint = Number.isInteger(at.index) ? at.index : -1;
+    const index = at.id == null ? hint : q[hint] && q[hint].id === at.id ? hint : q.findIndex((it) => it.id === at.id);
+    return q[index] ? { index, pos: Number(at.pos) || 0 } : null;
   };
   // Back where it was, paused: the song in the bar and its position
   const restoreBrowserQueue = () => {
@@ -1945,7 +1951,7 @@
     state.browserIndex = at.index;
     audio.preload = 'metadata';
     browserSrc(it);
-    if (at.pos > 0) audio.addEventListener('loadedmetadata', () => { if (state.browserIndex !== at.index) return; try { audio.currentTime = at.pos; } catch { /* not seekable */ } renderBar(); }, { once: true });
+    if (at.pos > 0) audio.addEventListener('loadedmetadata', () => { if (state.browserQueue[state.browserIndex] !== it) return; try { audio.currentTime = at.pos; } catch { /* not seekable */ } renderBar(); }, { once: true });
     renderBar();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
