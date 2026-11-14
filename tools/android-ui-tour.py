@@ -13,9 +13,9 @@ the page is pointed at it (Zones, its card's Play to). Then everything goes as a
 The WebView's accessibility tree, which `uiautomator` reads, is not kept up to date after the page
 changes by itself (Chrome turns its accessibility off again when no service uses it), so it is read
 only on the first screen: the places of the mini player and the Home and Zones tabs. Play to (on
-the phone's card, the first) is found by reading the Zones screenshot (OCR, play_to_spot): its
-place differs between WebViews. What the gestures did is
-checked with the node (its queue moves on and back) and on the screen itself, comparing raw
+the phone's card, the first) is found by reading the Zones screenshot (OCR, zone_pick): its
+place differs between WebViews, and when that card already says selected nothing is tapped.
+What the gestures did is checked with the node (its queue moves on and back) and on the screen itself, comparing raw
 screenshots of the part that must change (or must not). Each
 step's screenshot is ui-*.png; the gesture run is recorded in ui-tour.mp4 when the emulator can.
 After that recording is saved, android-native-pages.py captures the populated Album and
@@ -40,12 +40,26 @@ from pathlib import Path
 PLAY_TO_PSMS = ("11", "3", "6", "12")
 
 
-def play_to_spot(png):
-    """The centre (x, y) of the topmost "Play to" on a screenshot of the Zones page, in screen
-    pixels, or None. Read from the picture (OCR): the WebView's accessibility tree is stale by now,
-    and the button's place depends on the WebView (API 30's wraps it under the transport row, at
-    the card's left; API 35's keeps it at the right of the volume line)."""
-    found = []
+# A zone card's state pill, on its title line: the second one read is the second card's top.
+CARD_STATES = ("PLAYING", "PAUSED", "STOPPED", "ERROR")
+
+
+def zone_pick(png):
+    """What the first zone card offers on a screenshot of the Zones page, read from the picture
+    (OCR: the WebView's accessibility tree is stale by now): ("play to", (x, y)), the centre of its
+    Play to in screen pixels; ("selected", (x, y)) when the card says "selected" (the page plays to
+    that zone already, so the card has no Play to); or None. Only the first card counts: what lies
+    below the second card's state pill is another zone's (on a phone, shorter cards bring the next
+    card's Play to into view). The words of every page mode are read together: one mode can read
+    "Play to" where another reads only "selected" (API 35 with the phone's zone selected)."""
+    plays, picked, states = [], [], []
+
+    def mid(r):
+        return int(r["left"]) + int(r["width"]) // 2, int(r["top"]) + int(r["height"]) // 2
+
+    def line(r):
+        return r["block_num"], r["par_num"], r["line_num"]
+
     for psm in PLAY_TO_PSMS:
         try:
             tsv = subprocess.run(["tesseract", str(png), "stdout", "--psm", psm, "tsv"],
@@ -54,16 +68,39 @@ def play_to_spot(png):
             continue
         words = [r for r in csv.DictReader(io.StringIO(tsv), delimiter="\t", quoting=csv.QUOTE_NONE)
                  if r.get("level") == "5" and (r.get("text") or "").strip()]
+        for r in words:
+            # (the pills are upper case on the screen: "Nothing playing" or a song called Paused
+            # is not a card's top)
+            word = re.sub(r"[^A-Za-z]", "", r["text"])
+            if word in CARD_STATES:
+                states.append(mid(r)[1])
+            elif word.upper() == "SELECTED":
+                picked.append(mid(r))
         for a, b in zip(words, words[1:]):
-            line = lambda r: (r["block_num"], r["par_num"], r["line_num"])  # noqa: E731
             if a["text"].strip() == "Play" and b["text"].strip().lower() == "to" and line(a) == line(b):
                 left, top = int(a["left"]), min(int(a["top"]), int(b["top"]))
                 right = int(b["left"]) + int(b["width"])
                 bottom = max(int(a["top"]) + int(a["height"]), int(b["top"]) + int(b["height"]))
-                found.append(((left + right) // 2, (top + bottom) // 2))
-        if found:
-            break
-    return min(found, key=lambda p: (p[1], p[0])) if found else None
+                plays.append(((left + right) // 2, (top + bottom) // 2))
+    # (the same pill read by several modes is one card: a few pixels apart at most)
+    tops = sorted(states)
+    cards = [y for i, y in enumerate(tops) if i == 0 or y - tops[i - 1] > 12]
+    below = cards[1] if len(cards) > 1 else None
+    found = [(p[1], p[0], "play to") for p in plays] + [(p[1], p[0], "selected") for p in picked]
+    found = [f for f in found if below is None or f[0] < below]
+    if not found:
+        return None
+    y, x, kind = min(found)
+    return kind, (x, y)
+
+
+def play_to_spot(png):
+    """The centre (x, y) of the first zone card's Play to on a screenshot of the Zones page, or None
+    (none read, or the card is the selected one: zone_pick says which). Its place depends on the
+    WebView (API 30's wraps it under the transport row, at the card's left; API 35's keeps it at the
+    right of the volume line)."""
+    pick = zone_pick(png)
+    return pick[1] if pick and pick[0] == "play to" else None
 
 
 def run(h):
@@ -144,15 +181,22 @@ def run(h):
         adb("shell", "input", "tap", str(zones[0]), str(zones[1]))
         time.sleep(3)
         shot("ui-0-zones")
-        spot = play_to_spot(out / "ui-0-zones.png")
-        if spot is None:
-            # (where the API 35 image has it with the CI's two zones)
-            spot = (W * 644 // 1000, H * 556 // 1000)
-            log(f"Play to not read on the Zones page; tapping its usual place {spot}")
+        pick = zone_pick(out / "ui-0-zones.png")
+        if pick and pick[0] == "selected":
+            # (an earlier step left the page on the phone's zone: its card has no Play to, and the
+            # topmost Play to on the screen is another zone's)
+            log(f"the phone's card already says selected at {pick[1]}; no Play to to tap")
         else:
-            log(f"Play to read on the Zones page at {spot}")
-        adb("shell", "input", "tap", str(spot[0]), str(spot[1]))
-        time.sleep(2)
+            if pick is None:
+                # (where the API 35 image has it: on a phone the card's Play to ends the
+                # now-playing line, at the card's right; a card's "selected" sits there too)
+                spot = (W * 825 // 1000, H * 398 // 1000)
+                log(f"Play to not read on the Zones page; tapping its usual place {spot}")
+            else:
+                spot = pick[1]
+                log(f"Play to read on the Zones page at {spot}")
+            adb("shell", "input", "tap", str(spot[0]), str(spot[1]))
+            time.sleep(2)
         adb("shell", "input", "tap", str(home[0]), str(home[1]))
         time.sleep(3)
         b = raw()
