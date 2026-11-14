@@ -2697,7 +2697,9 @@
   // `zid` (default the zone in use): Get started's Shuffle my music, and an empty queue's Play. The
   // zone is the one asked for when it was offered, in its turn: a card on Zones that is not the zone
   // in use, or a switch of zone while the songs are read, can't replace another zone's queue
-  const shuffleMyMusic = (zid = state.zone) => zoneOp(zid, async (turn) => { const r = await api('GET', '/library/tracks?limit=200', undefined, { signal: turn.signal }); await playTracks(r.tracks, true, 'end', { shuffle: true, turn }); });
+  // (pressed again while This browser's shuffle still reads the library, from the note, Get started
+  // or anywhere else: nothing, its songs are on their way)
+  const shuffleMyMusic = (zid = state.zone) => (zid === BROWSER && zoneBusy.get(BROWSER) ? Promise.resolve() : zoneOp(zid, async (turn) => { const r = await api('GET', '/library/tracks?limit=200', undefined, { signal: turn.signal }); await playTracks(r.tracks, true, 'end', { shuffle: true, turn }); }));
   // Play, Previous or Next with nothing in the queue and nothing playing says so (before, nothing
   // happened at all) and offers the library shuffled when there is one (not offline: the
   // downloads have no list of the library's songs to shuffle)
@@ -2707,9 +2709,8 @@
     const name = zid === BROWSER ? hereName() : (state.zones[zid] || {}).name;
     const on = name && zoneList().length > 1 ? ` on ${name}` : '';
     if (isOffline()) toast('The queue is empty: play one of your downloads');
-    // (the note stays a while: songs queued meanwhile are not replaced by the shuffle; pressed again
-    // while This browser's shuffle still reads the library, nothing: its songs are on their way)
-    else if (state.info && state.info.library && state.info.library.tracks > 0) toast(`The queue is empty${on}`, '', { label: 'Shuffle my music', run: () => (zid === BROWSER && zoneBusy.get(BROWSER) ? undefined : queueEmpty(zid) ? shuffleMyMusic(zid) : toast(`The queue has songs now${on}: press Play`)) });
+    // (the note stays a while: songs queued meanwhile are not replaced by the shuffle)
+    else if (state.info && state.info.library && state.info.library.tracks > 0) toast(`The queue is empty${on}`, '', { label: 'Shuffle my music', run: () => (queueEmpty(zid) ? shuffleMyMusic(zid) : toast(`The queue has songs now${on}: press Play`)) });
     else toast('The queue is empty: search for something to play');
   };
   // A node zone stopped, with nothing in its queue and nothing playing (the node would only answer
@@ -2769,8 +2770,11 @@
       state.browserQueue = [{ id: Date.now(), uri: st.url, stream: st.url, title: st.name, artist: [st.country, (st.tags || []).slice(0, 3).join(', ')].filter(Boolean).join(' · '), album: 'Internet radio', duration_ms: 0 }];
       browserPlay(0); toast(`Tuning to ${st.name}`); return;
     }
-    startWait('play', state.zone, st.name, true);
-    try { await api('POST', '/radio/play', { zone: state.zone, station: st }); startSent(); toast(`Tuning to ${st.name}`); refreshQueue(); } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
+    // (in the zone's turn, like a page's Play: while it is on its way the zone's Play doesn't take the
+    // queue for empty and offer a shuffle, and it goes after the zone's changes asked before it)
+    const zid = state.zone;
+    const wait = startWait('play', zid, st.name, true, true);
+    try { await zoneOp(zid, (t) => { startSending(wait, zid); return api('POST', '/radio/play', { zone: zid, station: st }, { signal: t.signal }); }); startSent(wait); toast(`Tuning to ${st.name}`); refreshQueue(); } catch (e) { startFail(e.message, true, wait); toast(e.message, 'error'); }
   };
   // A listener's own collection as what this library has of it, in its order: a song as itself, a
   // library album as its songs (as the node's Play on a zone queues it); `out` counts the items
