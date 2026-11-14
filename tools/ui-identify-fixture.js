@@ -309,6 +309,17 @@ const server = http.createServer(async (req, res) => {
       check(card.review && /^Review 6 unsure$/.test(card.review.text) && !card.review.primary && card.runPrimary, `${W} Identify stays the main button; "${card.review && card.review.text}" is a plain one`);
       check(/6 unsure \(2 to re-check\)/.test(card.legend) && /3 left as they are/.test(card.legend) && !/^.*\b2 to re-check\b(?!\))/.test(card.legend.replace(/\(2 to re-check\)/, '')), `${W} the legend counts unsure (with those to re-check among them, not again) and left as they are (${card.legend.slice(0, 120)})`);
       check(card.skipAll && card.unskip === 'Bring back 3 skipped', `${W} "Skip all unsure" and "Bring back 3 skipped" are offered`);
+      // The legend's "6 unsure" opens the review: a button keys and screen readers reach (before, an
+      // <a> with no href), named for what it does; on a phone a 44 px tap that moves nothing
+      const key = await page.evaluate((phone) => {
+        const b = document.querySelector('#idbox .idlegend [data-view="identify"]'); if (!b) return null;
+        b.scrollIntoView({ block: 'center', behavior: 'instant' });
+        const r = b.getBoundingClientRect(); const cx = r.left + r.width / 2; const cy = r.top + r.height / 2;
+        const hit = (y) => { const e = document.elementFromPoint(cx, y); return !!e && (e === b || b.contains(e)); };
+        return { tag: b.tagName, type: b.type, label: b.getAttribute('aria-label'), text: b.textContent.trim(), h: Math.round(r.height), underline: getComputedStyle(b).textDecorationLine, tap: phone ? hit(cy - 20) && hit(cy + 20) : null, at: phone ? [cy - 20, cy + 20].map((y) => { const e = document.elementFromPoint(cx, y); return e ? e.tagName + (e.id ? '#' + e.id : '') + '.' + e.className : null; }) : null, pos: getComputedStyle(b).position, shell: document.documentElement.dataset.shell };
+      }, name === 'phone');
+      check(!!key && key.tag === 'BUTTON' && key.type === 'button' && key.text === '6 unsure (2 to re-check)' && key.label === 'Review 6 unsure (2 to re-check)' && /underline/.test(key.underline), `${W} the legend's unsure count is a button named "Review …" that reads as a link (${JSON.stringify(key)})`);
+      if (name === 'phone') check(!!key && key.shell === 'phone' && key.tap === true, `${W} …a 44 px tap on a phone: 20 px above and below its middle still press it (${key && key.h} px line)`);
       // "Bring back 3 skipped" undoes every Leave as is: a second press to confirm
       await page.locator('#idunskip').dblclick(); await sleep(300);
       check(asked('POST', '/library/suggestions/unskip').length === 0 && /Press again/.test(await page.locator('#idunskip').textContent()), `${W} "Bring back" asks a second press first, a double-click being one (${await page.locator('#idunskip').textContent()})`);
@@ -450,6 +461,14 @@ const server = http.createServer(async (req, res) => {
         check(await until(async () => await page.evaluate(() => [...document.querySelectorAll('[data-album] [data-skip], [data-album] [data-reject], #idskipall')].every((b) => !b.disabled))), `${W} …and the buttons take presses again after the answer`);
       }
 
+      // Keys: the legend's unsure count takes the focus (in the Tab order) and Enter opens the review
+      fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: skipRoutes() });
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#idbox .idlegend [data-view="identify"]').count()) === 1);
+      const reachable = await page.evaluate(() => { const b = document.querySelector('#idbox .idlegend [data-view="identify"]'); b.focus(); return document.activeElement === b && b.tabIndex >= 0; });
+      await page.evaluate(() => document.querySelector('#idbox .idlegend').scrollIntoView({ block: 'center', behavior: 'instant' })); await shot('legend-focused');
+      await page.keyboard.press('Enter');
+      check(reachable && await until(async () => page.evaluate(() => location.pathname === '/identify')), `${W} the legend's unsure count takes the focus and Enter opens the review (${await page.evaluate(() => location.pathname)})`);
       check(!errors.length, `${W} no page errors ${errors.slice(0, 3).join(' | ')}`);
       check(!outside.length, `${W} nothing asked outside the loopback server ${outside.slice(0, 3).join(' ')}`);
       await ctx.close();
