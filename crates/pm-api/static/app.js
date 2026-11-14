@@ -2736,9 +2736,15 @@
   // `zid` (default the zone in use): Get started's Shuffle my music, and an empty queue's Play. The
   // zone is the one asked for when it was offered, in its turn: a card on Zones that is not the zone
   // in use, or a switch of zone while the songs are read, can't replace another zone's queue
-  // (pressed again while This browser's shuffle still reads the library, from the note, Get started
-  // or anywhere else: nothing, its songs are on their way)
-  const shuffleMyMusic = (zid = state.zone) => (zid === BROWSER && zoneBusy.get(BROWSER) ? Promise.resolve() : zoneOp(zid, async (turn) => { const r = await api('GET', '/library/tracks?limit=200', undefined, { signal: turn.signal }); await playTracks(r.tracks, true, 'end', { shuffle: true, turn }); }));
+  // (pressed again while one for the same zone is on its way, from the note, Get started or anywhere
+  // else: nothing, its songs are coming; before, a node zone's second one replaced the first's.
+  // This browser's also waits for any other change of its own on its way)
+  const shuffling = new Set();
+  const shuffleMyMusic = (zid = state.zone) => {
+    if (shuffling.has(zid) || (zid === BROWSER && zoneBusy.get(BROWSER))) return Promise.resolve();
+    shuffling.add(zid);
+    return zoneOp(zid, async (turn) => { const r = await api('GET', '/library/tracks?limit=200', undefined, { signal: turn.signal }); await playTracks(r.tracks, true, 'end', { shuffle: true, turn }); }).finally(() => shuffling.delete(zid));
+  };
   // Play, Previous or Next with nothing in the queue and nothing playing says so (before, nothing
   // happened at all) and offers the library shuffled when there is one (not offline: the
   // downloads have no list of the library's songs to shuffle)
@@ -8878,7 +8884,7 @@
           lists.all = [...d.tracks].sort((a, b) => String(a.title).localeCompare(String(b.title)));
           html += `<section class="section"><div class="section-head"><h3>All songs <span class="muted small">${d.tracks.length}</span></h3><button class="btn sm ghost" data-dlplay="all">${icon('shuffle')} Shuffle</button></div>${trackRows(lists.all, { key: 'all' })}</section>`;
           main.innerHTML = html;
-          $$('[data-dlalbum]', main).forEach((b) => b.onclick = () => { state.dlAlbum = Number(b.dataset.dlalbum); render(); main.scrollTo && main.scrollTo(0, 0); });
+          $$('[data-dlalbum]', main).forEach((b) => b.onclick = () => { state.dlAlbum = Number(b.dataset.dlalbum); render(); mainTo(0); });
           const dc = $('[data-dlclose]', main); if (dc) dc.onclick = () => { state.dlAlbum = null; render(); };
           $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = lists[k]; if (ts && ts.length) playTracks(ts, true, 'end', { shuffle: k === 'all' }); });
           $$('[data-dlpl]', main).forEach((b) => b.onclick = () => playTracks(songsOf(pls[Number(b.dataset.dlpl)].track_ids), true, 'end', { shuffle: false }));
