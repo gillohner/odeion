@@ -52,6 +52,43 @@ function fixtures(state) {
   return f;
 }
 
+// On a phone (2026-11-14): the explanation is folded under the title (as Confirm matches' is), every
+// choice's label - the tap target, the radio is 20 px - is at least 44 px, and so is each MusicBrainz
+// link, with no target inside another's box; the edges of a short label still choose it.
+async function phoneLayout(page, at) {
+  const m = await page.evaluate(() => {
+    const r = (e) => { const b = e.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height, b: b.bottom, r: b.right }; };
+    const how = document.querySelector('#main details.idhow');
+    const rows = [...document.querySelectorAll('#main .idpick')].map((o) => ({ label: r(o.querySelector('label')), text: o.querySelector('label').textContent.trim().slice(0, 24), mb: o.querySelector('.idmb') ? r(o.querySelector('.idmb')) : null }));
+    // what a finger on each edge of a target hits (2 px inside it)
+    const hit = (x, y) => { const e = document.elementFromPoint(x, y); return e ? (e.closest('.idmb') ? 'mb' : e.closest('.idpick > label') ? `label:${e.closest('.idpick > label').htmlFor}` : e.tagName) : null; };
+    const firstRadio = document.querySelector('#main .idpick input[type=radio]').getBoundingClientRect().y;
+    const edges = [...document.querySelectorAll('#main .idpick')].map((o) => {
+      o.scrollIntoView({ block: 'center', behavior: 'instant' });
+      const l = o.querySelector('label').getBoundingClientRect(); const mb = o.querySelector('.idmb');
+      const out = { id: o.querySelector('label').htmlFor, top: hit(l.x + 20, l.y + 2), bottom: hit(l.x + 20, l.bottom - 2) };
+      if (mb) { const b = mb.getBoundingClientRect(); out.mbTop = hit(b.x + 10, b.y + 2); out.mbBottom = hit(b.x + 10, b.bottom - 2); }
+      return out;
+    });
+    document.querySelector('#main').scrollTo({ top: 0, behavior: 'instant' });
+    return { how: how ? { open: how.open, sum: how.querySelector('summary').getBoundingClientRect().height, introShown: document.querySelector('.idintro').checkVisibility() } : null, rows, edges, firstRadio, over: document.documentElement.scrollWidth - innerWidth };
+  });
+  check(!!m.how && !m.how.open && !m.how.introShown, `${at}: the explanation is folded under the title (${JSON.stringify(m.how)})`);
+  check(!!m.how && m.how.sum >= 44, `${at}: its summary is a 44 px target (${m.how && m.how.sum})`);
+  // (main: 362 px at 390, 379 at 360; folded: 304)
+  check(m.firstRadio < 340, `${at}: the first choice is high on the first screen (radio at y=${Math.round(m.firstRadio)})`);
+  const short = m.rows.filter((o) => o.label.h < 43.5).map((o) => `${o.text} ${Math.round(o.label.h)}`);
+  check(m.rows.length >= 6 && !short.length, `${at}: every choice is at least 44 px tall (${m.rows.length} choices; short: ${short.join(' | ') || 'none'})`);
+  const mbs = m.rows.filter((o) => o.mb);
+  const smallMb = mbs.filter((o) => o.mb.h < 43.5).map((o) => Math.round(o.mb.h));
+  check(mbs.length >= 2 && !smallMb.length, `${at}: every MusicBrainz link is at least 44 px tall (${mbs.length} links; short: ${smallMb.join(',') || 'none'})`);
+  const lap = mbs.filter((o) => o.mb.y < o.label.b - 0.5).length;
+  check(!lap, `${at}: no MusicBrainz link reaches into its choice's label (${lap})`);
+  const bad = m.edges.filter((e) => e.top !== `label:${e.id}` || e.bottom !== `label:${e.id}` || ('mbTop' in e && (e.mbTop !== 'mb' || e.mbBottom !== 'mb')));
+  check(!bad.length, `${at}: each target's top and bottom edge hit that target (${JSON.stringify(bad[0] || null)})`);
+  check(m.over <= 0, `${at}: no sideways scroll (${m.over})`);
+}
+
 const menuLabels = async (page) => page.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim()));
 
 (async () => {
@@ -90,6 +127,8 @@ const menuLabels = async (page) => page.$$eval('.popover.menu:not([hidden]) .pop
         check(/not written into your file/.test(await page.locator('.idrow[data-track="101"]').textContent()), `${at}: and that its IDs wait for the owner`);
         check(/or correct the tags/.test(await page.locator('.idrow[data-track="103"]').textContent()) && await page.locator('.idrow[data-track="103"] input').count() === 0, `${at}: a song matched by its tags is corrected in the file`);
         check(/stay on it/.test(await page.locator('.idintro').textContent()), `${at}: Pubky tags on the old match are said to stay`);
+        if (w < 600) await phoneLayout(page, at);
+        else check(await page.locator('#main details.idhow').count() === 0 && await page.locator('#main p.idintro').isVisible(), `${at}: a wide screen keeps the explanation open`);
         // Another option for song 1, a search and Not matched for song 2
         await page.locator(`.idrow[data-track="101"] input[value="${rec(2)}"]`).check();
         const find = page.locator('.idrow[data-track="102"] form[data-find]');
@@ -122,6 +161,38 @@ const menuLabels = async (page) => page.$$eval('.popover.menu:not([hidden]) .pop
         check(JSON.parse(put.body).auto_match === false, `${at}: as auto_match false (${put.body})`);
         if (w === 1280) await page.screenshot({ path: path.join(SHOTS, `settings-auto-${w}.png`) });
       }
+      check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
+      await context.close();
+    }
+  }
+  // The phone widths, in a browser and in the Android app, opened from the album's menu
+  for (const w of [360, 412]) {
+    for (const android of [false, true]) {
+      const { page, context, state } = await fx.create(browser, w, { role: 'owner', fixtures: fixtures({ auto: true }), mobile: true });
+      if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+      const at = `phone ${w}${android ? ' Android' : ''}`;
+      await fx.go(page, '/album/lib-7'); await page.waitForSelector('#imore');
+      await page.click('#imore'); await until(async () => (await menuLabels(page)).length > 0);
+      await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Wrong match?' }).first().click();
+      check(await until(async () => (await page.locator('.idrow').count()) === 3), `${at}: Wrong match? opens`);
+      await phoneLayout(page, at);
+      // a finger on the bottom edge of "No change" chooses it, on the top edge of "Not matched" too
+      const tapEdge = async (sel, edge) => { const b = await page.locator(sel).boundingBox(); await page.mouse.click(b.x + 30, edge === 'top' ? b.y + 2 : b.y + b.height - 2); };
+      await tapEdge('label[for="fx-101-none"]', 'top');
+      check(await page.locator('#fx-101-none').isChecked(), `${at}: the top edge of Not matched chooses it`);
+      await tapEdge('label[for="fx-101-same"]', 'bottom');
+      check(await page.locator('#fx-101-same').isChecked(), `${at}: the bottom edge of No change chooses it`);
+      const folded = await page.locator('#main details.idhow > summary').count() === 1;
+      if (folded) await page.locator('#main details.idhow > summary').click();
+      check(folded && await page.locator('#main .idintro').isVisible() && /stay on it/.test(await page.locator('#main .idintro').textContent()), `${at}: the folded explanation opens with a tap`);
+      // a MusicBrainz search redraws the page: the opened explanation stays open
+      const find = page.locator('.idrow[data-track="102"] form[data-find]');
+      await find.locator('input').fill('right song band'); await find.locator('button').click();
+      await until(async () => (await page.locator(`.idrow[data-track="102"] input[value="${rec(13)}"]`).count()) === 1);
+      check(await page.locator(`.idrow[data-track="102"] input[value="${rec(13)}"]`).count() === 1 && await page.locator('#main details.idhow[open]').count() === 1, `${at}: after a MusicBrainz search the opened explanation is still open`);
+      await fx.cleanCopy(page);
+      if (folded) await page.locator('#main details.idhow > summary').click();
+      await page.screenshot({ path: path.join(SHOTS, `wrong-match-phone-${w}${android ? '-android' : ''}.png`) });
       check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
       await context.close();
     }
