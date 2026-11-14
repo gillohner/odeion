@@ -1760,6 +1760,10 @@ html[data-shell="phone"] #jobpop, html[data-shell="phone"] #volpop { width: auto
   .scopechips::-webkit-scrollbar { display: none; }
   .scopechips .chip { flex: none; }
 }
+/* Search on a phone: the words stay in the search box at the top, so "Results for …" is said only to
+   screen readers (the page keeps its heading) and the results start right under the source chips */
+html[data-shell="phone"] .page-head.shead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+html[data-shell="phone"] .scopechips + #sresults { margin-top: 12px; }
 /* Albums: the Quality chips are one scrolling row on a phone, so the first albums show on the
    first screen; the chosen quality is scrolled into view after each draw (app.js revealChosenChip) */
 html[data-shell="phone"] .qualchips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -14px; margin-right: -14px; padding: 0 14px; scroll-padding-inline: 14px; }

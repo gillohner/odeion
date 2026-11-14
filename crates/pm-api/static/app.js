@@ -7412,7 +7412,7 @@
           const scope = a.in || 'everywhere'; state.searchScope = scope;
           if (search.value.trim() !== a.q) search.value = a.q;
           const run = startSearch(a.q, scope);
-          main.innerHTML = `<div class="page-head"><h2>Results for “${esc(a.q)}”</h2></div><div class="scopechips" id="scopechips"></div><div id="sresults"></div><div id="sresults-said" class="sr-only" aria-live="polite"></div>`;
+          main.innerHTML = `<div class="page-head shead"><h2>Results for “${esc(a.q)}”</h2></div><div class="scopechips" id="scopechips"></div><div id="sresults"></div><div id="sresults-said" class="sr-only" aria-live="polite"></div>`;
           search.setAttribute('aria-controls', 'sresults'); search.setAttribute('aria-expanded', 'true');
           searchChanged(run);
           break;
