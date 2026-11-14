@@ -5498,16 +5498,19 @@
     // A click outside only closes the menu (it does not also press what is under it).
     setTimeout(() => { const outside = (e) => { if (menuEl.hidden) { document.removeEventListener('click', outside, true); return; } if (!menuEl.contains(e.target)) { e.stopPropagation(); e.preventDefault(); document.removeEventListener('click', outside, true); closeMenu(); } }; document.addEventListener('click', outside, true); }, 0);
   };
-  const addToPlaylist = async (playlistId, tracks, uris) => {
+  // The toast names the playlist picked (as a new one's "Created “…”" does), so with many of them
+  // you can tell which row the tap hit
+  const addToPlaylist = async (pl, tracks, uris) => {
     // Songs not identified yet go in too, kept on this node until they are
     const localN = uris ? 0 : tracks.filter((t) => t && !trackHasId(t)).length;
-    try { await api('POST', `/playlists/${encodeURIComponent(playlistId)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast((n === 1 ? 'Added to playlist' : `${countOf(n, 'songs')} added to playlist`) + (localN ? `. ${localN === n ? (n === 1 ? 'It stays' : 'They stay') : `${localN} stay`} on this node until you pick which song ${localN === 1 ? 'it is' : 'each is'} (the ?).` : '')); }
+    const to = pl.name ? `“${pl.name}”` : 'playlist';
+    try { await api('POST', `/playlists/${encodeURIComponent(pl.id)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast((n === 1 ? `Added to ${to}` : `${countOf(n, 'songs')} added to ${to}`) + (localN ? `. ${localN === n ? (n === 1 ? 'It stays' : 'They stay') : `${localN} stay`} on this node until you pick which song ${localN === 1 ? 'it is' : 'each is'} (the ?).` : '')); }
     catch (e) { toast(e.message, 'error'); }
   };
   // "Add to playlist" for canonical URLs (Internet Archive files): the same menu, by uris.
   const uriMenu = async (anchor, uris, name) => {
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
-    return playlistPicker((pl) => addToPlaylist(pl.id, [], uris), name || 'New playlist', async (n) => { try { await api('POST', '/playlists', { name: n, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${n}”`); } catch (e) { toast(e.message, 'error'); } });
+    return playlistPicker((pl) => addToPlaylist(pl, [], uris), name || 'New playlist', async (n) => { try { await api('POST', '/playlists', { name: n, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${n}”`); } catch (e) { toast(e.message, 'error'); } });
   };
   const trackMenu = async (anchor, tracks) => {
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
@@ -5531,7 +5534,7 @@
       // The same order and words as a song's ⋯ on its page, an album or search (itemMenu)
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
-      { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl.id, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } }) },
+      { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } }) },
       ...(single && single.id != null ? dlItem('track', single.id, single.title, artists(single)) : []),
       ...favItem,
       ...radioItem,
@@ -5830,7 +5833,7 @@
     const singleFav = !!(single && songFav(single));
     // The page you are on: no "Go to" it
     const onThis = (kind, pid) => state.view === 'item' && state.viewArg && state.viewArg.kind === kind && (state.viewArg.id === pid);
-    const addTo = (pl) => (trackIds.length === (o.songs || []).length && trackIds.length ? addToPlaylist(pl.id, trackIds.map((id) => ({ id })), null) : addToPlaylist(pl.id, [], uris.length ? uris : o.uri ? [o.uri] : []));
+    const addTo = (pl) => (trackIds.length === (o.songs || []).length && trackIds.length ? addToPlaylist(pl, trackIds.map((id) => ({ id })), null) : addToPlaylist(pl, [], uris.length ? uris : o.uri ? [o.uri] : []));
     showMenu(anchorEl, [{ title: o.title || 'Item' },
       { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
@@ -9438,7 +9441,7 @@
         const parts = [['identified', c.identified, 'identified'], ['suggested', c.suggested, c.outdated ? `unsure (${n(c.outdated)} to re-check)` : 'unsure'], ['skipped', c.skipped, 'left as they are'], ['unknown', c.unknown, 'not found'], ['unchecked', c.unchecked, 'not checked yet']].map(([k, v, w]) => [k, Number(v || 0), w]);
         const said = parts.filter(([, v]) => v).map(([, v, w]) => `${n(v)} ${w}`).join(', ');
         const bar = `<div class="idbar" role="img" aria-label="${esc(c.total ? `${n(c.total)} ${c.total === 1 ? 'song' : 'songs'}: ${said}` : 'No songs yet')}">${parts.filter(([, v]) => v).map(([k, v]) => `<span class="idseg ${k}" style="flex-basis:${((v / Math.max(c.total, 1)) * 100).toFixed(3)}%"></span>`).join('')}</div>`;
-        const legend = parts.filter(([, v]) => v).map(([k, v, w]) => `<span class="idkey"><span class="idswatch ${k}" aria-hidden="true"></span>${k === 'suggested' ? `<a data-view="identify">${n(v)} ${w}</a>` : `${n(v)} ${w}`}</span>`).join(' ');
+        const legend = parts.filter(([, v]) => v).map(([k, v, w]) => `<span class="idkey"><span class="idswatch ${k}" aria-hidden="true"></span>${k === 'suggested' ? `<button class="lnk" type="button" data-view="identify" aria-label="Review ${n(v)} ${w}">${n(v)} ${w}</button>` : `${n(v)} ${w}`}</span>`).join(' ');
         return `${bar}<p class="small idlegend">${c.total ? `${n(c.total)} ${c.total === 1 ? 'song' : 'songs'}:` : ''}${legend ? ` <span class="idkeys">${legend}</span>` : ''}</p>`;
       })()}
       ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.title_artist, 'by their exact title, artist and length'], [c.by.auto, 'picked automatically <span class="pill" data-auto>auto</span>'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
