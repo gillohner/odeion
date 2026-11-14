@@ -2387,6 +2387,11 @@ html[data-shell="phone"] .hmatch-btn { min-height: 48px; }
   .idopt { background: none; border-radius: 0; padding: 8px 0; border-top: 1px solid var(--line); }
   .idrow { padding: 12px; }
 }
+/* (a phone: each choice is a 44 px target - its label is, the radio is 20 px - and the MusicBrainz link
+   takes the row's gap above it and padding below it for its 44 px, so a row grows by 8 px, not 24) */
+html[data-shell="phone"] .idhow > summary { min-height: 44px; }
+html[data-shell="phone"] .idpick > label.grow { min-height: 44px; justify-content: center; }
+html[data-shell="phone"] .idpick > .idmb { min-height: 44px; margin: -8px 0; }
 html[data-shell="phone"] #main > .hero.item-hero .actions { gap: 4px; }
 html[data-shell="phone"] #main > .hero.item-hero .actions > #iplay { padding: 0 18px 0 14px; }
 html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle { padding: 0 14px; margin-left: 4px; }

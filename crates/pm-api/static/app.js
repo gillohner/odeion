@@ -4971,7 +4971,10 @@
       return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms), (t.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div>${cur ? '' : '<p class="small muted">No match now.</p>'}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${body}</div></div>`;
     };
     const draw = () => {
-      const intro = `<p class="muted small idintro">Pick the right recording, search MusicBrainz for it, or choose Not matched. The match you replace is never picked again for this song. ${esc(files)} Tags you already published on Pubky for the old match stay on it.</p>`;
+      const say = `Pick the right recording, search MusicBrainz for it, or choose Not matched. The match you replace is never picked again for this song. ${esc(files)} Tags you already published on Pubky for the old match stay on it.`;
+      // (on a phone it folds under the title, as Confirm matches' does, so the first choice is on the first screen)
+      const opened = !!$('#main details.idhow[open]'); // (a search redraws the page: an opened fold stays open)
+      const intro = shellMode() === 'phone' ? `<details class="idhow small"${opened ? ' open' : ''}><summary class="muted">How fixing a match works</summary><p class="muted idintro">${say}</p></details>` : `<p class="muted small idintro">${say}</p>`;
       const albumHtml = (a, ai) => `<section class="section idalbum" data-album="${ai}"><div class="section-head"><h3>${esc(a.album || a.key.split('/').filter(Boolean).slice(-1)[0] || 'Library')}${a.artist ? ` <span class="muted small">${esc(a.artist)}</span>` : ''}</h3><span class="muted small">${countOf(a.songs.length, 'songs')}</span></div><div class="list">${a.songs.map(songHtml).join('')}</div><div class="actions idconfirm"><button class="btn primary" type="button" data-fixsave="${ai}">Save</button><span class="small muted" role="status" data-fixout="${ai}"></span></div></section>`;
       main.innerHTML = pageHead('Wrong match?', page.songs) + intro + page.albums.map(albumHtml).join('');
       $$('.idrow input[type=radio]', main).forEach((r) => r.onchange = () => chosen.set(Number(r.name.slice(3)), r.value));

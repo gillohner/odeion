@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-14
+
+- **On a phone, Wrong match? shows its choices sooner, and each is easy to tap.** A paragraph of explanation sat between the title and the first choice. On a phone it now folds under “How fixing a match works”, as Confirm matches already does, so the first choice is about 60–75 px higher. One tap opens it, and it stays open after a MusicBrainz search. Each choice is at least 44 px tall: “No change” was a 17 px line, and “Not matched” was 37 px. Each MusicBrainz link is now 44 px tall instead of 20 px, and takes the space around it rather than growing the row. Tablets and computers are unchanged. Test: `tools/ui-wrong-match.js`.
+
 ### 2026-11-13
 
 - **When one music service doesn’t answer a search, its Retry is a real button.** If, say, Spotify took too long, its line under the search box ended in a small grey “Retry” link, 29 × 17 px on a phone, that looked like plain text and that the keyboard could not reach. It is now the same small Retry button as when the whole search fails: easy to hit with a finger, reachable with Tab, and Enter or a tap searches again with the same words. A service that can’t be helped by trying again (one that needs a paid plan) still says why, with no Retry.
