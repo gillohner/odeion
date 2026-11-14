@@ -2535,7 +2535,7 @@
     const it = state.browserQueue[i];
     // A pick-up still due for a song that broke off mid-song is off: this play is the one on. A
     // new play gets its own pick-up; a retry of the same song where it was keeps the one it used.
-    if (state.midRetry) { clearTimeout(state.midRetry.timer); if (!(state.midRetry.it === it && startAt > 0)) state.midRetry = null; }
+    if (state.midRetry) { clearTimeout(state.midRetry.timer); state.midRetry.timer = null; if (!(state.midRetry.it === it && startAt > 0)) state.midRetry = null; }
     // The end of the queue: the last song stays on the bar, stopped, ready to play again
     if (!it && i >= state.browserQueue.length && state.browserQueue.length) { audio.pause(); try { audio.currentTime = 0; } catch { /* not loaded */ } renderBar(); return; }
     if (!it) { audio.pause(); if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } state.browserIndex = -1; renderBar(); return; }
@@ -2591,7 +2591,7 @@
   if (hasMediaSession) {
     // (the bar's steps: right after a reload they go on from the saved song, and Previous past
     // 0:03 starts the song again; before, Next and Previous went from song 1)
-    const handlers = { play: () => { if (audio.paused) browserStep({ action: 'toggle' }); }, pause: () => audio.pause(), nexttrack: () => browserStep({ action: 'next' }), previoustrack: () => browserStep({ action: 'previous' }), seekto: (d) => { if (d && typeof d.seekTime === 'number') audio.currentTime = d.seekTime; } };
+    const handlers = { play: () => { if (audio.paused) browserStep({ action: 'toggle' }); }, pause: () => browserPause(), nexttrack: () => browserStep({ action: 'next' }), previoustrack: () => browserStep({ action: 'previous' }), seekto: (d) => { if (d && typeof d.seekTime === 'number') browserSeek(d.seekTime); } };
     for (const [k, f] of Object.entries(handlers)) { try { navigator.mediaSession.setActionHandler(k, f); } catch { /* unsupported action */ } }
     audio.addEventListener('play', () => { try { navigator.mediaSession.playbackState = 'playing'; } catch { /* ignore */ } });
     audio.addEventListener('pause', () => { try { navigator.mediaSession.playbackState = 'paused'; } catch { /* ignore */ } });
@@ -2608,14 +2608,23 @@
     if (state.ytOn) return;
     const i = state.browserIndex; const it = state.browserQueue[i]; const at = audio.currentTime;
     if (i < 0 || !it || !audio.src || !(at > 0)) return;
+    // (a song that didn't open at all, as at a resume place: that is the start's own retry)
+    if (audio.readyState < 1 || (audio.error && audio.error.code === 4)) return;
     // (once per play of this song: a new play, even of another song at the same place, starts afresh)
     state.midRetry = state.midRetry && state.midRetry.it === it ? state.midRetry : { it, n: 0 };
     const mine = state.midRetry;
     if (mine.n >= 1) return;
     mine.n++;
-    // (only while this play is still the one on: a song started meanwhile keeps playing)
-    const src = audio.src; mine.timer = setTimeout(() => { if (state.browserIndex !== i || state.browserQueue[i] !== it || (state.natOn && nat.held)) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
+    // (only while this play is still the one on: a song started meanwhile keeps playing; songs
+    // taken out or moved before it in the queue meanwhile don't matter)
+    mine.src = audio.src; mine.timer = setTimeout(() => { mine.timer = null; if (state.browserQueue[state.browserIndex] !== it || (state.natOn && nat.held)) return; audio.src = mine.src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
   });
+  // A pick-up still due is off when the listener pauses (the bar, a media key, the sleep timer, a
+  // Move): before, 1.5 s later the song went back to where it broke off and played. A seek or
+  // Previous takes it to the place asked for at once (before, it was pulled back there too)
+  const cancelPickUp = () => { const m = state.midRetry; if (!m || !m.timer) return null; clearTimeout(m.timer); m.timer = null; return m; };
+  const browserPause = () => { if (cancelPickUp()) state.midRetry = null; audio.pause(); };
+  const browserSeek = (t) => { const m = cancelPickUp(); const up = m && state.browserQueue[state.browserIndex] === m.it && !(state.natOn && nat.held); if (up) audio.src = m.src; audio.currentTime = t; if (up) audio.play().catch(() => {}); };
   // For tests (tools/ui-youtube.js): queue items in the current zone, read the browser engine
   window.pmPlayer = { play: (items) => playSourceItems(items, true), now: () => ({ youtube: !!state.ytOn, index: state.browserIndex, paused: audio.paused, time: audio.currentTime, src: audio.src }) };
   audio.addEventListener('timeupdate', () => { nativeAhead(); if (isBrowser()) renderBar(); });
@@ -2751,10 +2760,10 @@
     // Songs queued while nothing played (Add to queue, Play next): Play starts the queue at its
     // first song (before, it played nothing and showed Pause)
     if (action.action === 'toggle' && !state.browserQueue[state.browserIndex]) { browserPlay(0); return; }
-    if (action.action === 'toggle') { if (audio.paused) audio.play().catch(() => {}); else audio.pause(); }
+    if (action.action === 'toggle') { if (audio.paused) audio.play().catch(() => {}); else browserPause(); }
     else if (action.action === 'next') browserPlay(state.browserIndex + 1);
-    else if (action.action === 'previous') { if (audio.currentTime > 3) audio.currentTime = 0; else browserPlay(Math.max(0, state.browserIndex - 1)); }
-    else if (action.action === 'seek') audio.currentTime = action.position_ms / 1000;
+    else if (action.action === 'previous') { if (audio.currentTime > 3) browserSeek(0); else browserPlay(Math.max(0, state.browserIndex - 1)); }
+    else if (action.action === 'seek') browserSeek(action.position_ms / 1000);
     else if (action.action === 'play' && action.index != null) browserPlay(action.index);
     renderBar();
   };
@@ -2772,7 +2781,12 @@
       const st = await api('POST', `/zones/${state.zone}/transport`, action, { repeat: action.action === 'next' || action.action === 'previous' });
       state.zones[st.id] = st;
       renderBar();
-    } catch (e) { if (state.starting && state.starting.zone === zt.id) startFail(e.message, true); toast(e.message, 'error'); }
+    } catch (e) {
+      // (Play pressed on an empty queue while a station or a page's Play is still on its way to the
+      // zone: the node has no queue yet and says so; that start's own wait goes on and says how it went)
+      if (action.action === 'play' && zoneBusy.get(zt.id) && !(zt.queue && zt.queue.length)) return;
+      if (state.starting && state.starting.zone === zt.id) startFail(e.message, true); toast(e.message, 'error');
+    }
   };
   const playStation = async (st) => {
     if (isBrowser()) {
@@ -3223,7 +3237,7 @@
         const index = cur ? queue.indexOf(cur) : -1;
         const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
         // Pause here first: the node may take seconds to open the track, and both would play meanwhile
-        if (transport === 'playing') { audio.pause(); resume = true; }
+        if (transport === 'playing') { browserPause(); resume = true; }
         const zs = await zoneOp(target, (t) => api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: index >= 0 ? index : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), shuffle: browserShuffle(), radio: false }, { signal: t.signal }));
         state.zones[zs.id] = zs;
         if (transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
@@ -4436,7 +4450,7 @@
   const setSleep = async (seconds) => {
     if (isBrowser()) {
       clearTimeout(state.browserSleepTimer);
-      if (seconds) { state.sleepAt[BROWSER] = Date.now() + seconds * 1000; state.browserSleepTimer = setTimeout(() => { audio.pause(); delete state.sleepAt[BROWSER]; renderNowPlaying(); }, seconds * 1000); } else delete state.sleepAt[BROWSER];
+      if (seconds) { state.sleepAt[BROWSER] = Date.now() + seconds * 1000; state.browserSleepTimer = setTimeout(() => { browserPause(); delete state.sleepAt[BROWSER]; renderNowPlaying(); }, seconds * 1000); } else delete state.sleepAt[BROWSER];
       toast(seconds ? `Sleeping in ${Math.round(seconds / 60)} minutes` : 'Sleep timer off'); renderNowPlaying(); return;
     }
     try { const v = await api('PUT', `/zones/${encodeURIComponent(state.zone)}/sleep`, { seconds }); if (v.ends_at_ms) state.sleepAt[state.zone] = v.ends_at_ms; else delete state.sleepAt[state.zone]; toast(seconds ? `Sleeping in ${Math.round(seconds / 60)} minutes` : 'Sleep timer off'); renderNowPlaying(); } catch (e) { toast(e.message, 'error'); }
