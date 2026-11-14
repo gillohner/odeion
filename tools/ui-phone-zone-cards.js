@@ -4,6 +4,8 @@
 // Each "Play to" names its zone. Desktop keeps Play to and the note in the controls line, and the
 // cards move between the two when the window crosses the phone width. Opening Zones on a phone
 // scrolls the zone in use up above the mini player; redraws, Play to and Back keep the place.
+// On a phone's touch screen a slider (a card's volume, Now playing's seek and volume) is a 44 px
+// tall touch with nothing moved, and a swipe that starts on it scrolls without changing the volume.
 // Real candidate assets, isolated responses: node tools/ui-phone-zone-cards.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -49,12 +51,12 @@ const cards = (page) => page.evaluate(() => [...document.querySelectorAll('#main
 }));
 
 const setup = async (browser, width, android, zone = 'linn-upnp') => {
-  const { context, page } = await fx.create(browser, width, { mobile: width < 600, fixtures: { '/zones': { body: zones }, '/outputs': { body: outputs } } });
+  const { context, page, state } = await fx.create(browser, width, { mobile: width < 600, fixtures: { '/zones': { body: zones }, '/outputs': { body: outputs }, '/zones/linn-upnp/volume': { body: {} }, '/zones/tv/volume': { body: {} } } });
   await context.addInitScript((z) => localStorage.setItem('pm.zone', z), zone);
   const sock = {};
   await context.routeWebSocket(/\/v1\/events/, (ws) => { sock.ws = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones })); });
   if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
-  return { context, page, sock };
+  return { context, page, sock, state };
 };
 // Where the zone in use is against the page's visible part (above the mini player), and the scroll
 const inUse = (page) => page.evaluate(() => {
@@ -170,6 +172,72 @@ const open = async (page) => { await fx.go(page, '/zones'); await page.waitForSe
         await page.waitForTimeout(600);
         const x = await inUse(page);
         check(x.shown, `${at}: Zones in the bottom bar while on Zones shows the zone in use (${x.top}-${x.bottom}, fold ${x.fold})`);
+      } finally { await context.close(); }
+    }
+    // On a phone's touch screen a volume slider is a 44 px tall touch, not an 18 px strip, and the card is
+    // drawn as before; a swipe up or down that starts on it scrolls the page and leaves the volume
+    // as it was, while a tap or a drag sideways still sets it
+    for (const width of [360, 412]) for (const android of [false, true]) {
+      const at = `${android ? 'android' : 'browser'}-${width} (touch)`;
+      const { context, page, state } = await setup(browser, width, android);
+      try {
+        await page.setViewportSize({ width, height: width === 360 ? 640 : 732 });
+        await open(page);
+        const cdp = await context.newCDPSession(page);
+        const touch = async (x0, y0, x1, y1) => {
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: x0, y: y0 }] });
+          for (let i = 1; i <= 10; i++) { await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x0 + ((x1 - x0) * i) / 10, y: y0 + ((y1 - y0) * i) / 10 }] }); await page.waitForTimeout(16); }
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+          await page.waitForTimeout(400);
+        };
+        const sent = () => state.hits.filter((h) => h.m === 'POST' && h.v === '/zones/linn-upnp/volume').length;
+        const slider = () => page.evaluate(() => {
+          const e = document.querySelector('[data-zcard="linn-upnp"] input[type=range]'); e.scrollIntoView({ block: 'center', behavior: 'instant' });
+          const b = e.getBoundingClientRect(); const cx = b.left + b.width / 2, cy = b.top + b.height / 2;
+          const on = (x, y) => { const h = document.elementFromPoint(x, y); return !!h && (h === e || e.contains(h)); };
+          let up = 0; while (up < 40 && on(cx, cy - up - 1)) up++; let dn = 0; while (dn < 40 && on(cx, cy + dn + 1)) dn++;
+          const c = e.closest('.zone-card');
+          return { x: b.left, w: b.width, cy, tall: up + dn + 1, value: e.value, card: c.getBoundingClientRect().height, ctl: c.querySelector('.zc-controls').getBoundingClientRect().height, coarse: matchMedia('(pointer: coarse)').matches };
+        });
+        const s0 = await slider();
+        check(s0.coarse && s0.tall >= 44, `${at}: the volume slider takes a touch 44 px tall (${s0.tall} px)`);
+        // The same card with an 18 px slider (as before): the same heights
+        const was = await page.evaluate(() => {
+          const st = document.createElement('style'); st.textContent = 'input[type=range] { height: 18px !important; margin: 0 !important; vertical-align: baseline !important; }'; document.head.append(st);
+          const c = document.querySelector('[data-zcard="linn-upnp"]'); const r = { card: c.getBoundingClientRect().height, ctl: c.querySelector('.zc-controls').getBoundingClientRect().height, tall: c.querySelector('input[type=range]').getBoundingClientRect().height };
+          st.remove(); return r;
+        });
+        check(was.tall === 18 && Math.abs(s0.card - was.card) < 0.5 && Math.abs(s0.ctl - was.ctl) < 0.5, `${at}: the card is drawn as before (${Math.round(was.card)} → ${Math.round(s0.card)} px, controls ${Math.round(was.ctl)} → ${Math.round(s0.ctl)} px)`);
+        // A swipe up that starts on the slider, far from its knob: the page scrolls, no volume is sent
+        const top0 = await page.evaluate(() => document.querySelector('#main').scrollTop);
+        await touch(s0.x + s0.w * 0.9, s0.cy, s0.x + s0.w * 0.9, s0.cy - 200);
+        const top1 = await page.evaluate(() => document.querySelector('#main').scrollTop);
+        const v1 = await page.evaluate(() => document.querySelector('[data-zcard="linn-upnp"] input[type=range]').value);
+        check(top1 > top0 + 50, `${at}: a swipe up from the slider scrolls the page (${Math.round(top0)} → ${Math.round(top1)})`);
+        check(sent() === 0 && v1 === s0.value, `${at}: …and leaves the volume as it was (${sent()} sent, slider ${s0.value} → ${v1})`);
+        // A tap on the slider still sets the volume, and so does a drag sideways
+        const s1 = await slider();
+        await touch(s1.x + s1.w * 0.7, s1.cy, s1.x + s1.w * 0.7, s1.cy);
+        check(sent() === 1, `${at}: a tap on the slider sets the volume (${sent()} sent)`);
+        const s2 = await slider();
+        await touch(s2.x + s2.w * 0.2, s2.cy, s2.x + s2.w * 0.5, s2.cy);
+        check(sent() === 2, `${at}: a drag sideways sets the volume (${sent()} sent)`);
+        await page.screenshot({ path: path.join(SHOTS, `zones-touch-${android ? 'android' : 'browser'}-${width}.png`) });
+        // Now playing's seek and volume take the same tall touch (the buttons just above the volume
+        // keep their own reach, a few px into it)
+        await page.click('#np'); await page.waitForSelector('#nowplaying:not([hidden]) .np-transport'); await page.waitForTimeout(400);
+        const np = await page.evaluate(() => Object.fromEntries(['#npseek', '#npvol'].map((sel) => {
+          const e = document.querySelector(sel); const b = e.getBoundingClientRect(); const cx = b.left + b.width / 2, cy = b.top + b.height / 2;
+          const on = (x, y) => { const h = document.elementFromPoint(x, y); return !!h && (h === e || e.contains(h)); };
+          let up = 0; while (up < 40 && on(cx, cy - up - 1)) up++; let dn = 0; while (dn < 40 && on(cx, cy + dn + 1)) dn++;
+          return [sel, up + dn + 1];
+        })));
+        const npAt = () => page.evaluate(() => ['#npseek', '.np-times', '.np-transport', '.np-vol'].map((sel) => { const b = document.querySelector(sel).getBoundingClientRect(); return Math.round((b.top + b.height / 2) * 10) / 10; }).join(' '));
+        const npNow = await npAt();
+        await page.evaluate(() => { const st = document.createElement('style'); st.id = 'was18'; st.textContent = 'input[type=range] { height: 18px !important; margin: 0 !important; vertical-align: baseline !important; }'; document.head.append(st); });
+        const npWas = await npAt(); await page.evaluate(() => document.querySelector('#was18').remove());
+        check(npNow === npWas, `${at}: Now playing's seek, times, buttons and volume stay where they were (${npWas} → ${npNow})`);
+        check(np['#npseek'] >= 44 && np['#npvol'] >= 40, `${at}: Now playing's seek and volume take a tall touch (${np['#npseek']} / ${np['#npvol']} px)`);
       } finally { await context.close(); }
     }
     // Desktop: Play to and the note stay in the controls line; crossing to a phone width moves them
