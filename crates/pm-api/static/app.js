@@ -4536,6 +4536,8 @@
 
   // ---- views ---------------------------------------------------------------
   const main = $('#main');
+  // (their own touch, wheel or key on the page comes before Zones showing the zone in use)
+  ['pointerdown', 'wheel', 'touchstart', 'keydown'].forEach((e) => main.addEventListener(e, () => { state.zoneInView = false; }, { passive: true }));
   // Settings, one topic per tab (STEWARD-UX-SETTINGS.md)
   // Side tabs: a vertical tab list beside one panel per tab (Settings; Sources reuses it). On a
   // phone the list is a page of its own and each tab a page with Back. `tabs`: [[key, label, icon,
@@ -4736,6 +4738,7 @@
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
     main.scrollTop = 0; state.drawnPage = null; if (state.placeHold) state.placeHold(); // a page opened is drawn from the start (redrawing, keepPlace)
+    state.zoneInView = v === 'zones' && how !== 'pop'; // Zones opened (not Back): show the zone in use
     return navigate(fresh);
   };
   window.addEventListener('popstate', async (e) => {
@@ -8655,6 +8658,21 @@
           $$('[data-zsel]', main).forEach((b) => b.onclick = () => { state.zone = b.dataset.zsel; localStorage.setItem('pm.zone', state.zone); renderZoneName(); renderBar(); refreshQueue(); render(); });
           $$('[data-zone-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(b.dataset.zoneDel)}`); toast('Group removed'); if (state.zone === b.dataset.zoneDel) { ensureZone(); renderZoneName(); } render(); } catch (e) { toast(e.message, 'error'); } });
           $('#zgroup').onclick = () => setView('settings', 'playback');
+          // Zones opened on a phone (a tab, a link, a reload; not Back or Forward): the zone in use
+          // is on screen, not under the mini player (five zones put it a screen down). Once, when
+          // its card is first drawn, and not after they touched or scrolled the page: a redraw,
+          // a Play to, or a place they scrolled to stays where it is.
+          const inUse = $('.zone-card.on', main);
+          if (inUse && !redrawing('zones')) {
+            state.drawnPage = 'zones';
+            if (phone && state.zoneInView) {
+              // (from where the card is in the page: the scroll to the top setView began may still be under way)
+              const m = main.getBoundingClientRect(); const r = inUse.getBoundingClientRect(); const gap = 14;
+              const down = Math.max(0, Math.min(r.bottom - m.top + main.scrollTop + gap - main.clientHeight, r.top - m.top + main.scrollTop - gap));
+              try { main.scrollTo({ top: down, behavior: 'instant' }); } catch { main.scrollTop = down; }
+            }
+            state.zoneInView = false;
+          }
           break;
         }
         case 'add-music': {
