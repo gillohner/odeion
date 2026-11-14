@@ -2617,7 +2617,7 @@
     mine.n++;
     // (only while this play is still the one on: a song started meanwhile keeps playing; songs
     // taken out or moved before it in the queue meanwhile don't matter)
-    mine.src = audio.src; mine.timer = setTimeout(() => { mine.timer = null; if (state.browserQueue[state.browserIndex] !== it || (state.natOn && nat.held)) return; audio.src = mine.src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
+    mine.src = audio.src; mine.at = at; mine.timer = setTimeout(() => { mine.timer = null; if (state.browserQueue[state.browserIndex] !== it || (state.natOn && nat.held)) return; audio.src = mine.src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
   });
   // A pick-up still due is off when the listener pauses (the bar, a media key, the sleep timer, a
   // Move): before, 1.5 s later the song went back to where it broke off and played. A seek or
@@ -2625,6 +2625,17 @@
   const cancelPickUp = () => { const m = state.midRetry; if (!m || !m.timer) return null; clearTimeout(m.timer); m.timer = null; return m; };
   const browserPause = () => { if (cancelPickUp()) state.midRetry = null; audio.pause(); };
   const browserSeek = (t) => { const m = cancelPickUp(); const up = m && state.browserQueue[state.browserIndex] === m.it && !(state.natOn && nat.held); if (up) audio.src = m.src; audio.currentTime = t; if (up) audio.play().catch(() => {}); };
+  // Play on a song whose stream broke off opens it again where it was: at once when its pick-up is
+  // still due (before, Play went on and the pick-up opened it a second time 1.5 s later), and when
+  // the pick-up is off or used (a Pause or a failed Move in the wait: before, Play went on with the
+  // broken stream, silent while the bar said playing). (A song that never opened, error 4, is the
+  // start's own retry: Play does not open it a second time.)
+  const browserResume = () => {
+    const i = state.browserIndex; const it = state.browserQueue[i]; const m = cancelPickUp();
+    const at = m && m.it === it ? m.at : audio.error && audio.error.code !== 4 ? audio.currentTime : null;
+    if (it && at != null) { it.moved = true; browserPlay(i, at); return; }
+    audio.play().catch(() => {});
+  };
   // For tests (tools/ui-youtube.js): queue items in the current zone, read the browser engine
   window.pmPlayer = { play: (items) => playSourceItems(items, true), now: () => ({ youtube: !!state.ytOn, index: state.browserIndex, paused: audio.paused, time: audio.currentTime, src: audio.src }) };
   audio.addEventListener('timeupdate', () => { nativeAhead(); if (isBrowser()) renderBar(); });
@@ -2760,7 +2771,7 @@
     // Songs queued while nothing played (Add to queue, Play next): Play starts the queue at its
     // first song (before, it played nothing and showed Pause)
     if (action.action === 'toggle' && !state.browserQueue[state.browserIndex]) { browserPlay(0); return; }
-    if (action.action === 'toggle') { if (audio.paused) audio.play().catch(() => {}); else browserPause(); }
+    if (action.action === 'toggle') { if (audio.paused) browserResume(); else browserPause(); }
     else if (action.action === 'next') browserPlay(state.browserIndex + 1);
     else if (action.action === 'previous') { if (audio.currentTime > 3) browserSeek(0); else browserPlay(Math.max(0, state.browserIndex - 1)); }
     else if (action.action === 'seek') browserSeek(action.position_ms / 1000);
@@ -3275,8 +3286,8 @@
       if (!zonePop.hidden) renderZonePop(); else toast(`Moved to ${name}`);
     } catch (e) {
       moving = false;
-      if (resume) audio.play().catch(() => {});
       startFail(e.message, true);
+      if (resume) browserResume();
       if (!zonePop.hidden) renderZonePop(e.message); else toast(e.message, 'error');
     } finally { moving = false; }
   };

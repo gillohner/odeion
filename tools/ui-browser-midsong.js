@@ -14,7 +14,14 @@
 // - An earlier song taken out of the queue in the 1.5 s doesn't stop the pick-up (before, the song
 //   on, now one place up, was never picked up).
 // - A saved song that doesn't open at all where it was (the node sent no audio) is opened again
-//   once, by the start's own retry (before, the pick-up opened it a second time as well).
+//   once, by the start's own retry (before, the pick-up opened it a second time as well); Play
+//   pressed again before that retry adds no other open.
+// - Play pressed after Pause in the 1.5 s opens the broken song again where it was paused (before,
+//   Play went on with the broken stream: silent while the bar said playing).
+// - Play pressed in the 1.5 s on a song that broke off paused opens it where it broke off at once,
+//   and the pick-up does not open it a second time.
+// - A Move to a zone in the 1.5 s that the zone refuses opens the song again here where it was
+//   (before, the page went on with the broken stream).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-browser-midsong.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -41,19 +48,28 @@ const playing = async (page) => { for (let i = 0; i < 100; i++) { const n = awai
 const past = async (page, s) => { for (let i = 0; i < 100; i++) { const n = await now(page); if (!n.paused && n.time > s) return n; await sleep(50); } return now(page); };
 const songOf = (src) => Number((/\/v1\/library\/tracks\/(\d+)\/file/.exec(src || '') || [])[1] || 0);
 
-// Every song the page's <audio> is given, in order (the pick-up gives it the broken song again)
+// Every song the page's <audio> is given, in order (the pick-up gives it the broken song again).
+// window.__broken: the element says a network error (MEDIA_ERR_NETWORK), as a real break leaves
+// it, until it is given a song again
 const watchSrc = () => {
   const d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
-  window.__srcs = [];
-  Object.defineProperty(HTMLMediaElement.prototype, 'src', { configurable: true, get() { return d.get.call(this); }, set(v) { window.__srcs.push(String(v)); d.set.call(this, v); } });
+  const e = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'error');
+  window.__srcs = []; window.__broken = false;
+  Object.defineProperty(HTMLMediaElement.prototype, 'src', { configurable: true, get() { return d.get.call(this); }, set(v) { window.__srcs.push(String(v)); window.__broken = false; d.set.call(this, v); } });
+  Object.defineProperty(HTMLMediaElement.prototype, 'error', { configurable: true, get() { return window.__broken ? { code: 2, message: 'network' } : e.get.call(this); } });
 };
 const srcs = (page) => page.evaluate(() => window.__srcs.slice());
 // The stream breaking off, as the page's player hears it
 const breakOff = (page) => page.evaluate(() => document.querySelector('#browser').dispatchEvent(new Event('error')));
+// …and left broken, as a real break leaves the element (paused: it stopped there)
+const breakOffBroken = (page, paused) => page.evaluate((p) => { const el = document.querySelector('#browser'); if (p) el.pause(); window.__broken = true; el.dispatchEvent(new Event('error')); }, paused);
 
-async function open(browser, width) {
-  const run = await fx.create(browser, width, { fixtures, realAudio: true });
+async function open(browser, width, zones) {
+  const zf = zones ? { '/zones': { body: zones }, ...Object.fromEntries(zones.map((z) => [`/zones/${z.id}`, { body: z }])), '/outputs': { body: zones.map((z) => ({ id: z.output, name: z.name, kind: 'upnp', caps: { hw_volume: 'percent' } })) } } : {};
+  const run = await fx.create(browser, width, { fixtures: { ...fixtures, ...zf }, realAudio: true });
   await run.context.addInitScript(watchSrc);
+  // (the node's zones, as its events give them)
+  if (zones) await run.context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones })); });
   await run.page.route(/\/v1\/library\/tracks\/\d+\/file/, serveWav);
   await fx.go(run.page, '/tracks');
   await run.page.waitForSelector('#tracklist .track');
@@ -261,9 +277,100 @@ async function savedNotOpened(browser, width) {
     await fx.go(page, '/queue');
     await page.waitForSelector('.queue [data-qrow]');
     await page.click('#toggle');
+    // (Play pressed again while the start's retry is due: that retry is the one that opens it)
+    for (let i = 0; i < 40 && !(await page.evaluate(() => { const e = document.querySelector('#browser').error; return !!e && e.code === 4; })); i++) await sleep(50);
+    await sleep(300);
+    await page.click('#toggle');
     await sleep(3500); // (past the pick-up and the start's retry)
     const opened = (await srcs(page)).map(songOf).filter((n) => n === 2).length;
-    assert.equal(opened, 2, `${width}: Song 2 opened twice, by Play and the start's retry (${opened})`);
+    assert.equal(opened, 2, `${width}: Song 2 opened twice, by Play and the start's retry; a second Play in the wait adds none (${opened})`);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
+async function pauseThenPlay(browser, width) {
+  // 8. Song 2 breaks off at 0:02 (the stream gone), Pause is pressed in the 1.5 s, then Play: the
+  // song is opened again where it was paused and plays on from there, once (before, Play went on
+  // with the broken stream, silent while the bar said playing)
+  const { page, context, state, playRow } = await open(browser, width);
+  try {
+    await playRow(1);
+    await past(page, 2);
+    const given = (await srcs(page)).length;
+    await breakOffBroken(page, false);
+    await page.click('#toggle');
+    const p = await now(page);
+    assert.equal(p.paused, true, `${width}: Pause pauses`);
+    await page.click('#toggle');
+    assert.deepEqual((await srcs(page)).slice(given).map(songOf), [2], `${width}: Play opens Song 2 again at once`);
+    const n = await playing(page);
+    assert.equal(songOf(n.src), 2, `${width}: Song 2 plays (${n.src})`);
+    assert.ok(n.time >= p.time - 0.3 && n.time < p.time + 3, `${width}: from where it was paused (${p.time} -> ${n.time})`);
+    await sleep(2000); // (past where the pick-up was due)
+    assert.deepEqual((await srcs(page)).slice(given).map(songOf), [2], `${width}: opened once`);
+    assert.equal((await now(page)).paused, false, `${width}: and plays on`);
+    await page.screenshot({ path: path.join(shots, `pause-then-play-${width}.png`) });
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
+async function playInTheWait(browser, width) {
+  // 9. Song 2 breaks off at 0:02 and stops there; Play is pressed before its pick-up is due: the
+  // song is opened again where it broke off at once, and the pick-up does not open it a second time
+  // (before, Play went on with the broken stream and 1.5 s later the pick-up opened it again)
+  const { page, context, state, playRow } = await open(browser, width);
+  try {
+    await playRow(1);
+    await past(page, 2);
+    const given = (await srcs(page)).length;
+    await breakOffBroken(page, true);
+    const at = (await now(page)).time;
+    const said = Date.now();
+    await page.click('#toggle');
+    const opened = (await srcs(page)).slice(given).map(songOf);
+    assert.ok(Date.now() - said < 1200, `${width}: Play before the pick-up was due (${Date.now() - said} ms)`);
+    assert.deepEqual(opened, [2], `${width}: Play opens Song 2 again at once`);
+    const n = await playing(page);
+    assert.ok(n.time >= at - 0.3 && n.time < at + 3, `${width}: from where it broke off (${at} -> ${n.time})`);
+    await sleep(2000); // (past the pick-up)
+    assert.deepEqual((await srcs(page)).slice(given).map(songOf), [2], `${width}: the pick-up does not open it again`);
+    const later = await now(page);
+    assert.equal(later.paused, false, `${width}: it plays on`);
+    assert.ok(later.time > n.time + 1, `${width}: not pulled back (${n.time} -> ${later.time})`);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
+async function failedMoveInTheWait(browser, width) {
+  // 10. Song 2 breaks off at 0:02 and, in the 1.5 s, Move here is pressed for a zone that refuses
+  // it: the song is opened again here where it was and plays on (before, the page went on with the
+  // broken stream)
+  const Z = { id: 'z1', name: 'Kitchen', output: 'upnp:k', transport: 'stopped', now_playing: null, queue: [], queue_index: null, queue_version: 1, repeat: 'off', shuffle: false, radio: false, error: null, acked: 0, volume: { percent: 40 } };
+  const { page, context, state, playRow } = await open(browser, width, [Z]);
+  try {
+    let loads = 0;
+    await page.route(/\/v1\/zones\/z1\/load(\?|$)/, (r) => { loads++; return r.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'Kitchen is not open to listeners' }) }); });
+    await playRow(1);
+    await past(page, 2);
+    await page.click('#zonebtn');
+    const move = page.locator('#zonepop [data-move="z1"]');
+    await move.waitFor();
+    const given = (await srcs(page)).length;
+    await breakOffBroken(page, false);
+    const at = (await now(page)).time;
+    const said = Date.now();
+    await move.click();
+    for (let i = 0; i < 40 && !loads; i++) await sleep(25);
+    assert.equal(loads, 1, `${width}: the move is asked for`);
+    assert.ok(Date.now() - said < 1200, `${width}: refused before the pick-up was due (${Date.now() - said} ms)`);
+    const n = await playing(page);
+    assert.deepEqual((await srcs(page)).slice(given).map(songOf), [2], `${width}: Song 2 is opened again here`);
+    assert.ok(n.time >= at - 0.3 && n.time < at + 3, `${width}: from where it was (${at} -> ${n.time})`);
+    await sleep(2000);
+    const later = await now(page);
+    assert.equal(later.paused, false, `${width}: and plays on`);
+    assert.deepEqual((await srcs(page)).slice(given).map(songOf), [2], `${width}: opened once`);
+    await page.screenshot({ path: path.join(shots, `failed-move-in-the-wait-${width}.png`) });
     assert.deepEqual(state.errors, [], `${width}: no page errors`);
   } finally { await context.close(); }
 }
@@ -273,7 +380,7 @@ async function savedNotOpened(browser, width) {
   let failed = 0;
   try {
     for (const width of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [1280, 1024, 768])) {
-      for (const [name, fn] of [['a song started meanwhile keeps playing', staleMidSong], ['a later song at the same place is picked up', laterSongPickedUp], ['the same song started again', samePlayedAgain], ['Pause in the wait stays paused', pausedStaysPaused], ['Previous in the wait', previousInTheWait], ['a seek in the wait', seekInTheWait], ['an earlier song removed in the wait', earlierSongRemoved], ['a saved song that does not open', savedNotOpened]]) {
+      for (const [name, fn] of [['a song started meanwhile keeps playing', staleMidSong], ['a later song at the same place is picked up', laterSongPickedUp], ['the same song started again', samePlayedAgain], ['Pause in the wait stays paused', pausedStaysPaused], ['Previous in the wait', previousInTheWait], ['a seek in the wait', seekInTheWait], ['an earlier song removed in the wait', earlierSongRemoved], ['a saved song that does not open', savedNotOpened], ['Pause then Play in the wait', pauseThenPlay], ['Play in the wait', playInTheWait], ['a failed Move in the wait', failedMoveInTheWait]]) {
         try { await Promise.race([fn(browser, width), sleep(60000).then(() => { throw new Error('timed out after 60 s'); })]); console.log(`PASS ${width} ${name}`); } catch (e) { failed++; console.log(`FAIL ${width} ${name}: ${e.message}`); }
       }
     }
