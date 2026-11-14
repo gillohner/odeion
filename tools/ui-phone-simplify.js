@@ -299,7 +299,11 @@ const overflow = (page) => page.evaluate(() => {
     await page.keyboard.press('Escape'); await sleep(400);
     check(await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), `${at}: Escape closes the sheet first`);
     // Sound from ···: the panel, and the focus back on ··· after it
-    await page.click('#npmore'); await page.click('.popover.menu:not([hidden]) >> text=Sound'); await page.waitForSelector('#qpanel:not([hidden])'); await sleep(100);
+    await page.click('#npmore'); await page.waitForSelector('.popover.menu:not([hidden])');
+    // the song page has the words every other song menu uses
+    const npItems = await page.$$eval('.popover.menu:not([hidden]) .pop-item', (b) => b.map((x) => x.textContent.replace(/\s+/g, ' ').trim()));
+    check(npItems.some((t) => t === 'Go to song page') && !npItems.some((t) => /^Song page/.test(t)), `${at}: Now playing's ··· says "Go to song page", as every song menu does (${npItems.join(' · ')})`);
+    await page.click('.popover.menu:not([hidden]) >> text=Sound'); await page.waitForSelector('#qpanel:not([hidden])'); await sleep(100);
     const inPanel = await page.evaluate(() => document.querySelector('#qpanel').contains(document.activeElement));
     await page.keyboard.press('Escape'); await sleep(300);
     check(inPanel && await page.evaluate(() => document.querySelector('#qpanel').hidden && document.activeElement && document.activeElement.id === 'npmore' && document.querySelector('#npmore').getAttribute('aria-expanded') !== 'true'), `${at}: Sound opens from Now playing's ··· with the focus in it, and the focus comes back to ··· (in the panel: ${inPanel})`);

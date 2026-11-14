@@ -3,7 +3,8 @@
 // Queue page Remove pressed before that moves the songs, and the place still comes back on the
 // saved song (before, whatever now sat at the old index came back from the old position, and the
 // saver kept it). Play or Next pressed before that goes on from the saved song too. A saved song no longer in the queue brings nothing back; a place saved before
-// the song was named still comes back by its index.
+// the song was named still comes back by its index. A queue change is saved at once when the page
+// is hidden or goes (not only every 2 s), except after the session ended.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-browser-place.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -176,6 +177,70 @@ async function backOnSong3(page, width, index, label, shot) {
         await sleep(800);
         assert.equal((await now(page)).index, -1, 'nothing comes back');
         assert.deepEqual(state.errors, [], 'no page errors');
+      } finally { await context.close(); }
+    });
+    // 6. The queue is saved at once when the page goes (a reload, a phone's app ended in the
+    // background), not only every 2 s: a song removed just before is still gone after the reload.
+    // (Songs 1-3 are seeded once per tab, so the reload reads what the page itself saved.)
+    const seededOnce = async (width, opts = {}) => {
+      const r = await fx.create(browser, width, { fixtures, ...opts });
+      await r.context.addInitScript((q) => { if (!sessionStorage.getItem('seeded')) { sessionStorage.setItem('seeded', '1'); localStorage.setItem('pm.browserQueue', q); } }, JSON.stringify(saved));
+      await fx.go(r.page, '/queue');
+      await r.page.waitForSelector('.queue [data-qrow]');
+      await until(async () => (await queueIds(r.page)).length === 3, 'Songs 1-3 are in the queue');
+      await sleep(2300); // (a saver tick has written Songs 1-3)
+      return r;
+    };
+    const savedIds = (page) => page.evaluate(() => JSON.parse(localStorage.getItem('pm.browserQueue') || '[]').map((x) => x.id));
+    for (const width of [1280, 360]) {
+      await check(`${width}: a song removed just before a reload is still gone after it`, async () => {
+        const { page, context, state } = await seededOnce(width, width < 600 ? { mobile: true } : {});
+        try {
+          const t0 = Date.now();
+          // (a phone's Remove is in the row's ⋯)
+          if (width < 600) { await page.locator('.list.queue [data-qmore]').first().tap(); await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from queue' }).tap(); } else await page.click('[data-qrm="0"]');
+          await until(async () => JSON.stringify(await queueIds(page)) === '[2,3]', 'Song 1 is removed');
+          assert.deepEqual(await savedIds(page), [1, 2, 3], 'no saver tick has saved the Remove yet');
+          await page.reload();
+          assert.ok(Date.now() - t0 < 1500, `the reload came before a saver tick (${Date.now() - t0} ms)`);
+          await page.waitForSelector('.queue [data-qrow]');
+          await sleep(300);
+          assert.deepEqual(await queueIds(page), [2, 3], `${width}: the queue after the reload is as left`);
+          if (width === 360) await page.screenshot({ path: path.join(shots, 'removed-then-reloaded-360.png') });
+          assert.deepEqual(state.errors, [], 'no page errors');
+        } finally { await context.close(); }
+      });
+    }
+    await check('1280: a song removed just before the page is hidden is saved at once', async () => {
+      const { page, context, state } = await seededOnce(1280);
+      try {
+        await page.click('[data-qrm="0"]');
+        await until(async () => JSON.stringify(await queueIds(page)) === '[2,3]', 'Song 1 is removed');
+        const ids = await page.evaluate(() => {
+          Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+          document.dispatchEvent(new Event('visibilitychange'));
+          return JSON.parse(localStorage.getItem('pm.browserQueue') || '[]').map((x) => x.id);
+        });
+        assert.deepEqual(ids, [2, 3], `saved as soon as the page is hidden (${JSON.stringify(ids)})`);
+        assert.deepEqual(state.errors, [], 'no page errors');
+      } finally { await context.close(); }
+    });
+    // 7. A session that ends forgets the account's queue: the save as the page goes does not write
+    // it back for whoever logs in next
+    await check('1280: an ended session\'s queue is not saved back as the page reloads', async () => {
+      const { page, context } = await seededOnce(1280);
+      try {
+        assert.deepEqual(await savedIds(page), [1, 2, 3], 'Songs 1-3 saved before');
+        await page.route(/\/v1\/library\/tracks(\?|$)/, (r) => r.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: 'missing or wrong bearer token' }) }), { times: 1 });
+        // (a change not saved yet, so the save as the page goes would have something to write)
+        await page.click('[data-qrm="0"]');
+        await until(async () => JSON.stringify(await queueIds(page)) === '[2,3]', 'Song 1 is removed');
+        await page.evaluate(() => { window.oldPage = true; });
+        await page.click('.nav-item[data-view="tracks"]');
+        // (the page reloads on the 401; read the storage from the new page, before its own first save)
+        await until(() => page.evaluate(() => !window.oldPage && document.readyState !== 'loading').catch(() => false), 'the page reloads');
+        const ids = await savedIds(page);
+        assert.deepEqual(ids, [], `the old queue is gone after the reload (${JSON.stringify(ids)})`);
       } finally { await context.close(); }
     });
   } finally { await browser.close(); }
