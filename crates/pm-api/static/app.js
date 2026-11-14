@@ -2551,7 +2551,8 @@
     browserSrc(it);
     // (a retry opens the song where it was)
     if (startAt > 0) audio.currentTime = startAt;
-    state.browserRetry = state.browserRetry && state.browserRetry.i === i ? state.browserRetry : { i, n: 0 };
+    // (counted per song: another song at the same place in a new queue gets its own retry)
+    state.browserRetry = state.browserRetry && state.browserRetry.it === it ? state.browserRetry : { it, n: 0 };
     if (!(state.starting && state.starting.zone === BROWSER)) startWait('play', BROWSER, it.title || '');
     nativeAhead();
     audio.play().catch(async (e) => {
@@ -2563,7 +2564,9 @@
       // instead of the file (owner, 2026-10-22: a library FLAC during a big copy)
       let why = `its source sent no audio ${hereName().toLowerCase()} can play`;
       try { const r = await fetch(audio.src, { headers: { range: 'bytes=0-1' } }); const ct = r.headers.get('content-type') || ''; if (!r.ok) why = `the node answered ${r.status}${r.status >= 500 ? ' (busy or not reachable just now)' : ''}`; else if (!/^audio\/|octet-stream|mpegurl|video\/mp2t/.test(ct)) why = `the node sent ${ct.split(';')[0] || 'something'} instead of audio`; } catch { why = 'the node did not answer'; }
-      if (state.browserRetry.n < 1 && state.browserIndex === i) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex === i) { it.moved = true; browserPlay(i, startAt); } }, 2000); return; }
+      // (only while this song is still the one on: another queue started meanwhile keeps its song)
+      const still = () => state.browserIndex === i && state.browserQueue[i] === it;
+      if (state.browserRetry.n < 1 && still()) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (still()) { it.moved = true; browserPlay(i, startAt); } }, 2000); return; }
       toast(`“${it.title || 'This song'}” can't play here: ${why}.${it.track_id != null ? '' : ' Try another version on the song\u2019s page.'}`, 'error');
     });
     // A song moved in from a zone was counted there already
@@ -2617,7 +2620,8 @@
     if (state.natOn && nat.held) { toast(`“${it.title || 'This song'}” did not start: ${why}.`); return; } // paused meanwhile: the next play opens it
     // (counted per song: another song at the same place in a new queue gets its own retry)
     state.nativeRetry = state.nativeRetry && state.nativeRetry.it === it ? state.nativeRetry : { it, n: 0 };
-    if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; browserPlay(i, at); }, 2000); return; }
+    // (the retry is the same play: not counted again; nor run when another song is on by then)
+    if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex !== i || state.browserQueue[i] !== it || (state.natOn && nat.held)) return; it.moved = true; browserPlay(i, at); }, 2000); return; }
     toast(`“${it.title || 'This song'}” can't play here: ${why}.`, 'error');
   };
   nat.addEventListener('nativefailed', (e) => { const d = (e && e.detail) || {}; const why = (typeof d === 'string' ? d : d.why) || 'it did not start'; if (!state.natOn || state.browserIndex < 0) return; if (state.starting && state.starting.zone === BROWSER) startFail(why, true); nativeRetry(state.browserIndex, why, d.at || 0); renderBar(); });
