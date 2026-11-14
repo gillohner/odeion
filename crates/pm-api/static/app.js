@@ -5780,9 +5780,13 @@
   // The ⋯ menu, the same on a page's hero and on every song row.
   // "Add to playlist…" (UX review #3): one dialog instead of every playlist in the menu: a search
   // field, "New playlist" first, then your playlists, most recently changed first.
+  // On a phone the heading takes the first focus, not the search field: a phone browser would
+  // raise its keyboard over a list that is usually one tap, and the Android app's WebView shows
+  // the field focused with no keyboard (as Search did). A tap on the field opens the keyboard.
   const playlistPicker = (add, newName, makeNew) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
-    d.innerHTML = `<h2>Add to playlist</h2><input class="input" id="ppq" placeholder="Find a playlist" aria-label="Find a playlist" autocomplete="off"><div class="list compact picker" id="pplist"></div><div class="dialog-actions"><button class="btn ghost" data-ppclose>Cancel</button></div>`;
+    const phone = shellMode() === 'phone';
+    d.innerHTML = `<h2${phone ? ' tabindex="-1"' : ''}>Add to playlist</h2><input class="input" id="ppq" placeholder="Find a playlist" aria-label="Find a playlist" autocomplete="off"><div class="list compact picker" id="pplist"></div><div class="dialog-actions"><button class="btn ghost" data-ppclose>Cancel</button></div>`;
     document.body.appendChild(d);
     const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
     const done = (fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(); };
@@ -5795,10 +5799,13 @@
       $$('[data-ppi]', d).forEach((b) => b.onclick = async () => { const pl = list[Number(b.dataset.ppi)]; done(); await add(pl); });
     };
     $('#ppq', d).oninput = draw; draw();
+    // Keys pressed on that heading stay in the dialog (Space, the arrows and N don't reach the
+    // app's shortcuts behind it); a character typed there goes to the field.
+    if (phone) $('h2', d).onkeydown = (e) => { e.stopPropagation(); if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) $('#ppq', d).focus(); };
     $('[data-ppclose]', d).onclick = () => done();
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
-    $('#ppq', d).focus();
+    $(phone ? 'h2' : '#ppq', d).focus();
   });
   const itemMenu = async (anchorEl, o) => {
     await pubkyUser();
