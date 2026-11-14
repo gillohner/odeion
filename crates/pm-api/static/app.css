@@ -840,7 +840,9 @@ html[data-shell="phone"] .list.queue .qgrip::before { content: ''; position: abs
 .plays { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--fg-2); padding: 2px 8px 2px 3px; border-radius: var(--r-pill); background: var(--surface-2); border: 1px solid var(--line); white-space: nowrap; }
 .plays svg { width: 14px; height: 14px; fill: currentColor; }
 .plays.none { color: var(--muted); border-style: dashed; }
-.plays.none a { color: var(--accent-strong); cursor: pointer; }
+/* Connect <service>, for what none of your services has: the same link in a chip and on an item page */
+a[data-view="sources"] { color: var(--accent-strong); cursor: pointer; text-decoration: none; }
+a[data-view="sources"]:hover { text-decoration: underline; }
 .playsfrom { margin-top: 10px; display: flex; align-items: center; gap: 8px; }
 .playsfrom .plays { font-size: var(--fs-sm); padding: 4px 10px 4px 5px; }
 .list-row > .plays { margin-right: 6px; }
