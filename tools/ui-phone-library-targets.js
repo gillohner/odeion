@@ -1,4 +1,6 @@
 // Library's section tabs and Add music entry points have comfortable phone targets.
+// Albums' and Artists' A–Z letters too: each reaches 44 px tall and letters sit edge to edge, the
+// strip fades at its end while more letters are off to the right, and nothing on the page moves.
 // Real candidate assets, isolated responses: node tools/ui-phone-library-targets.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -49,9 +51,72 @@ async function chosen(page, tab) {
   await page.waitForSelector(`#libpanel[aria-labelledby="libtab-${tab}"]`);
 }
 
+// A long library (26 letters, 78 albums and artists), so the A–Z strip shows and scrolls sideways.
+const NAMES = ['Abba', 'Blur', 'Cream', 'Doors', 'Eels', 'Faust', 'Genesis', 'Hole', 'Iggy', 'Jet', 'Kiss', 'Love', 'Muse', 'Nena', 'Oasis', 'Pixies', 'Queen', 'Rush', 'Sade', 'Toto', 'U2', 'Vangelis', 'Wire', 'Xtc', 'Yes', 'Zappa'];
+const longLibrary = {
+  '/library/albums': { body: Array.from({ length: 78 }, (_, i) => ({ id: i + 1, title: `${NAMES[i % 26]} ${Math.floor(i / 26) + 1}`, album_artist: NAMES[i % 26], year: 2000, tracks: 1 })) },
+  '/library/albums/formats': { body: [] },
+  '/library/artists': { body: Array.from({ length: 78 }, (_, i) => ({ id: i + 1, name: `${NAMES[i % 26]} ${Math.floor(i / 26) + 1}`, albums: 1, tracks: 1 })) },
+};
+
+async function azStrip(browser, width, android) {
+  const { page, context, state } = await fx.create(browser, width, { mobile: true, fixtures: longLibrary });
+  try {
+    if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+    // below: the list's distance under the letters on main (the reach must not push it down)
+    for (const [route, first, below] of [['/albums', '#albumgrid .tile', 28], ['/artists', '#artistlist > *', 29]]) {
+      const at = `${android ? 'android' : 'browser'}-${width} ${route} A–Z`;
+      await fx.go(page, route);
+      await page.locator('.azbar .az').first().waitFor();
+      await page.locator(first).first().waitFor();
+      await page.waitForFunction(() => document.querySelector('.azbar').classList.contains('more-right'), null, { timeout: 2000 }).catch(() => {});
+      const s = await page.evaluate((first) => {
+        const bar = document.querySelector('.azbar'), az = [...bar.querySelectorAll('.az')];
+        // The finger's reach of each of the first letters, found by what a touch at each point hits
+        const reach = az.slice(0, 6).map((x) => {
+          const c = x.getBoundingClientRect(), cx = c.left + c.width / 2, cy = c.top + c.height / 2;
+          let up = 0, down = 0;
+          for (let d = 1; d < 40; d++) { if (document.elementFromPoint(cx, cy - d)?.closest('.az') === x) up = d; if (document.elementFromPoint(cx, cy + d)?.closest('.az') === x) down = d; }
+          return up + down + 1;
+        });
+        // Between two neighbours a touch still lands on a letter, not the strip around them
+        const gaps = az.slice(0, 6).map((x) => { const c = x.getBoundingClientRect(); return !!document.elementFromPoint(c.right + 0.5, c.top + c.height / 2)?.closest('.az'); });
+        const letters = az.map((x) => x.getBoundingClientRect()), top = Math.min(...letters.map((c) => c.top)), bottom = Math.max(...letters.map((c) => c.bottom));
+        const above = [...document.querySelectorAll('.listbar > :not(.azbar)')].map((el) => el.getBoundingClientRect().bottom);
+        const box = bar.getBoundingClientRect();
+        // The gap above the letters stays the Sort line's (Favourites' own reach reaches 8 px down into it)
+        const gapFree = az.slice(0, 12).every((x) => { const c = x.getBoundingClientRect(); for (let y = Math.max(...above) + 0.5; y < c.top - 1; y++) if (document.elementFromPoint(c.left + c.width / 2, y)?.closest('.az')) return false; return true; });
+        return { reach, gaps, gapFree, width: Math.min(...letters.slice(0, 6).map((c) => c.width)), fades: bar.classList.contains('more-right'), lines: new Set(letters.map((c) => Math.round(c.top))).size,
+          stripTop: box.top, aboveBottom: Math.max(...above), gapAbove: Math.round(top - Math.max(...above)), gapBelow: Math.round(document.querySelector(first).getBoundingClientRect().top - bottom),
+          overflow: document.documentElement.scrollWidth - innerWidth };
+      }, first);
+      check(s.lines === 1 && s.reach.every((h) => h >= 44), `${at}: each letter reaches at least 44 px tall (${s.reach.join(', ')})`);
+      check(s.width >= 28 && s.gaps.every(Boolean), `${at}: letters are ${s.width.toFixed(1)} px wide and edge to edge, no dead gap between two`);
+      check(s.fades, `${at}: the strip fades at its end while more letters are off to the right`);
+      check(s.stripTop >= s.aboveBottom - 0.5 && s.gapFree, `${at}: the letters' reach leaves the Sort line and the gap under it alone (strip ${s.stripTop.toFixed(1)}, line ${s.aboveBottom.toFixed(1)})`);
+      // The reach is room taken from margins: the letters and the list sit where they were
+      check(s.gapAbove === 8 && s.gapBelow <= below, `${at}: the letters sit 8 px under Sort and the list ${s.gapBelow} px under them, as before`);
+      check(s.overflow <= 0, `${at}: nothing wider than the screen (${s.overflow} px)`);
+      // A press at the bottom of the reach, at the letter's right edge, jumps to that letter. A mouse
+      // press, because a touch there would be snapped onto the letter by the browser even without a reach
+      const b = await page.locator('[data-az="B"]').boundingBox();
+      await page.mouse.click(b.x + b.width - 1, b.y + b.height + 16);
+      await page.locator('[data-az="B"][aria-pressed="true"]').waitFor({ timeout: 2000 }).catch(() => {});
+      const jumped = await page.locator(first).first().innerText();
+      check(await page.locator('[data-az="B"]').getAttribute('aria-pressed') === 'true' && /Blur 1/.test(jumped), `${at}: a press at the bottom of B's reach jumps to B (${jumped.replace(/\s+/g, ' ').trim()})`);
+      await page.locator('.azbar').evaluate((el) => { el.scrollLeft = el.scrollWidth; });
+      await page.waitForFunction(() => !document.querySelector('.azbar').classList.contains('more-right'), null, { timeout: 2000 }).catch(() => {});
+      check(!await page.locator('.azbar').evaluate((el) => el.classList.contains('more-right')), `${at}: scrolled to Z, the strip no longer fades`);
+      if (route === '/albums') await page.screenshot({ path: path.join(SHOTS, `az-${android ? 'android' : 'browser'}-${width}.png`) });
+    }
+    check(!state.errors.length, `${android ? 'android' : 'browser'}-${width} A–Z: no page errors (${state.errors.join('; ')})`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
+    for (const width of [360, 412]) for (const android of [false, true]) await azStrip(browser, width, android);
     for (const width of [360, 412]) for (const android of [false, true]) for (const theme of ['light', 'dark']) {
       const at = `${android ? 'android' : 'browser'}-${width}-${theme}`;
       const { page, context, state } = await fx.create(browser, width, { mobile: true, fixtures });

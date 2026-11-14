@@ -3437,7 +3437,7 @@
   };
   window.addEventListener('resize', () => { if (shellFor(window.innerWidth, layoutPref()) !== shellMode()) applyShell(); });
   // A scrolling chip row fades at its end only while more chips are off to the right (touch layouts)
-  const CHIP_ROWS = '.libnav, .scopechips, .np-sheet-tabs, .qualchips';
+  const CHIP_ROWS = '.libnav, .scopechips, .np-sheet-tabs, .qualchips, .azbar';
   const fadeRow = (el) => el.classList.toggle('more-right', el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
   // A newly drawn Library row (or Albums' Quality row on a phone) starts around the current
   // section or the chosen quality. Remember its size so unrelated updates leave a person's swipe
