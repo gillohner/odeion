@@ -198,8 +198,9 @@ const overflow = (page) => page.evaluate(() => {
     await page.click('#np'); await page.waitForSelector('#nowplaying:not([hidden]) .np-dock'); await sleep(300);
     await page.click('.np-dock [data-npsheet="more"]'); await page.waitForSelector('.np-bsheet:not([hidden]) #nppart-tags #nptagadd'); await sleep(600);
     await page.screenshot({ path: path.join(SHOTS, `sheet-more-${w}.png`) });
-    const more = await page.evaluate(() => { const s = document.querySelector('.np-bsheet'); return { parts: [...s.querySelectorAll('.np-part h3')].map((x) => x.textContent.trim()), links: [...s.querySelectorAll('button, a')].filter((b) => /Song page/.test(b.textContent)).length, pathBox: getComputedStyle(s.querySelector('.path')).borderTopWidth, pathBg: getComputedStyle(s.querySelector('.path-head')).backgroundColor }; });
-    check(more.parts.join(',') === 'Details,Sources,Tags' && more.links <= 1 && more.pathBox === '0px', `${at}: More holds Details, Sources and Tags (${more.parts.join(', ')}), ${more.links} Song page link, the status as plain text`);
+    const more = await page.evaluate(() => { const s = document.querySelector('.np-bsheet'); return { parts: [...s.querySelectorAll('.np-part h3')].map((x) => x.textContent.trim()), links: [...s.querySelectorAll('button, a')].filter((b) => /song page/i.test(b.textContent)).map((b) => b.textContent.trim()), pathBox: getComputedStyle(s.querySelector('.path')).borderTopWidth, pathBg: getComputedStyle(s.querySelector('.path-head')).backgroundColor }; });
+    check(more.parts.join(',') === 'Details,Sources,Tags' && more.links.length <= 1 && more.pathBox === '0px', `${at}: More holds Details, Sources and Tags (${more.parts.join(', ')}), ${more.links.length} song page link, the status as plain text`);
+    check(more.links.join('|') === 'Go to song page', `${at}: More's song page link says "Go to song page", as every song menu does (${more.links.join(' · ')})`);
     await page.fill('#nptagadd', 'test'); await page.press('#nptagadd', 'Enter'); await page.waitForSelector('#toast.show');
     const t2 = await page.evaluate(() => ({ t: document.querySelector('#toast').getBoundingClientRect(), vh: innerHeight }));
     check(t2.t.bottom <= t2.vh - 8 && t2.t.bottom >= t2.vh - 40, `${at}: in Now playing the toast sits at the screen's bottom (${Math.round(t2.t.bottom)} of ${t2.vh}), not mid-screen`);
@@ -372,6 +373,14 @@ const overflow = (page) => page.evaluate(() => {
     await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); });
     await fx.go(page, '/albums'); await page.waitForSelector('#npart'); await sleep(500);
     await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden]) .np-sheet-tabs'); await sleep(300);
+    // the wide Now playing's Sources and Tags sheets end with the same "Go to song page"
+    const pageLinks = {};
+    for (const k of ['sources', 'tags']) {
+      await page.click(`.np-sheet-tabs [data-npsheet="${k}"]`);
+      await until(() => page.evaluate(() => [...document.querySelectorAll('#nowplaying button')].some((b) => /song page/i.test(b.textContent))));
+      pageLinks[k] = await page.evaluate(() => [...document.querySelectorAll('#nowplaying button')].filter((b) => b.getClientRects().length && /song page/i.test(b.textContent)).map((b) => b.textContent.trim()));
+    }
+    check(pageLinks.sources.join('|') === 'Go to song page' && pageLinks.tags.join('|') === 'Go to song page', `1024: Now playing's Sources and Tags say "Go to song page" (${pageLinks.sources.join(' · ')} / ${pageLinks.tags.join(' · ')})`);
     await page.click('.np-sheet-tabs [data-npsheet="lyrics"]'); await sleep(300);
     await page.setViewportSize({ width: 680, height: 800 }); await sleep(700);
     const shown = await page.evaluate(() => { const s = document.querySelector('.np-bsheet'); return s && !s.hidden ? s.dataset.tab : null; });

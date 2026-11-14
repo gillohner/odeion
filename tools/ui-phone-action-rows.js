@@ -195,11 +195,60 @@ async function queue(browser, width, android) {
   await context.close();
 }
 
+// A bookmarked song on a phone: its row's heart button is hidden there (two controls a row), so a small
+// filled heart follows its title, in Songs' rows and in every other song list, and goes when ⋯ removes
+// the bookmark. It is a mark, not a button; a screen reader hears "Bookmarked". Not on desktop.
+const BTRACKS = [{ ...fx.track, id: 1, title: 'Journey Through Time (Extended Anniversary Remaster 2024)' }, ...['Second Song', 'Third Song', 'Fourth Song'].map((title, i) => ({ ...fx.track, id: i + 2, title, mbid: null, canonical_uri: null }))];
+// an album whose songs have no pages of their own (no id): the titles are plain text
+const BFIX = { '/item/album/lib-9': { body: { ...album, id: 'lib-9', songs: [{ track_id: 1, title: 'Journey Through Time (Extended Anniversary Remaster 2024)', artist: 'Sefa', duration_ms: 240000, no: 1 }, { track_id: 2, title: 'Second Song', artist: 'Sefa', duration_ms: 240000, no: 2 }] } } };
+const marks = (page, rows, title) => page.evaluate(([rows, title]) => [...document.querySelectorAll(rows)].map((row) => {
+  const t = row.querySelector(title); const a = t.querySelector('.lnk, .ntext') || t; const m = getComputedStyle(t, '::after'); const tr = t.getBoundingClientRect(); const ar = a.getBoundingClientRect();
+  const shown = m.content !== 'none' && m.display !== 'none' && parseFloat(m.width) >= 10;
+  return { name: a.textContent.trim().slice(0, 14), shown, content: m.content, w: parseFloat(m.width), inside: ar.right + 6 + parseFloat(m.width || 0) <= tr.right + 0.5, clipped: a.scrollWidth > a.clientWidth + 1, rowH: Math.round(row.getBoundingClientRect().height) };
+}), [rows, title]);
+async function bookmarked(browser, width, android) {
+  const at = `${android ? 'android' : 'browser'} ${width}`;
+  const { page, context, state } = await fx.create(browser, width, { mobile: true, tracks: BTRACKS, favs: ['track:1', 'track:3'], fixtures: { ...fixtures, ...BFIX } });
+  if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+  await fx.go(page, '/tracks'); await page.waitForSelector('#tracklist .track .heart.on', { state: 'attached' }); await page.waitForTimeout(300);
+  let m = await marks(page, '#tracklist .track', '.title');
+  check(m.map((x) => x.shown).join() === 'true,false,true,false', `${at}: Songs: the two bookmarked songs show a heart after the title, the others none (${m.map((x) => `${x.name}:${x.shown}`).join(' ')})`);
+  check(m[0].inside && m[0].clipped && m[2].inside, `${at}: a long title gives way to the heart (title cut ${m[0].clipped}, heart inside the row ${m[0].inside})`);
+  check(m.every((x) => x.rowH === m[1].rowH), `${at}: rows keep one height (${m.map((x) => x.rowH).join(' ')})`);
+  check(/Bookmarked/.test(m[0].content), `${at}: a screen reader hears "Bookmarked" (${m[0].content})`);
+  const hb = await page.evaluate(() => [...document.querySelectorAll('#tracklist .track [data-act="fav"]')].filter((b) => b.getClientRects().length).length);
+  const ov = await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
+  check(hb === 0 && ov[0] <= ov[1], `${at}: still no heart button in the row (${hb}), nothing wider than the screen (${ov[0]} of ${ov[1]})`);
+  await page.screenshot({ path: path.join(SHOTS, `bookmarked-songs-${android ? 'android' : 'browser'}-${width}.png`) });
+  // another song list (an album page's rows): the same mark
+  await fx.go(page, '/album/lib-7'); await page.waitForSelector('.srow'); await page.waitForTimeout(400);
+  const s = await marks(page, '.srow', '.name');
+  check(s.length === 1 && s[0].shown && s[0].inside, `${at}: an album page's bookmarked song shows the same heart (${JSON.stringify(s)})`);
+  // a song with no page of its own has its title as plain text: it gives way to the heart the same way
+  await fx.go(page, '/album/lib-9'); await page.waitForSelector('.srow'); await page.waitForTimeout(400);
+  const p = await marks(page, '.srow', '.name');
+  check(p.length === 2 && p[0].shown && p[0].inside && p[0].clipped && !p[1].shown, `${at}: a bookmarked song without a page (its title plain text) shows the heart too, its long title cut (${JSON.stringify(p[0])})`);
+  await fx.go(page, '/tracks'); await page.waitForSelector('#tracklist .track .heart.on', { state: 'attached' }); await page.waitForTimeout(300);
+  // the song playing: its moving bars before the title keep their 12 px beside the heart
+  const eq = await page.evaluate(() => { const r = document.querySelector('#tracklist .track'); r.classList.add('cur'); const w = getComputedStyle(r.querySelector('.title'), '::before').width; r.classList.remove('cur'); return w; });
+  check(eq === '12px', `${at}: a bookmarked song playing keeps its 12 px bars before the title (${eq})`);
+  // ⋯ → Remove from favourites: the mark goes
+  await page.locator('#tracklist .track').nth(2).locator('[data-act="more"]').tap();
+  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from favourites' }).tap();
+  await page.waitForFunction(() => !document.querySelectorAll('#tracklist .track')[2].querySelector('.heart.on'), null, { timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(200);
+  m = await marks(page, '#tracklist .track', '.title');
+  check(!m[2].shown, `${at}: ⋯ → Remove from favourites takes its heart away (${m.map((x) => `${x.name}:${x.shown}`).join(' ')})`);
+  check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
+  await context.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
     for (const width of [360, 412]) for (const android of [false, true]) await phone(browser, width, android);
     for (const width of [360, 412]) for (const android of [false, true]) await queue(browser, width, android);
+    for (const width of [360, 412]) for (const android of [false, true]) await bookmarked(browser, width, android);
     for (const width of [320, 340, 360, 412]) for (const k of [1, 1.15, 1.3]) for (const android of [false, true]) await narrow(browser, width, android, k);
     // Android's font size as page zoom (Chrome) on a 360 px phone lays the page out narrower: 130 % 277 px, 115 % 313 px
     for (const width of [277, 313]) for (const android of [false, true]) await narrow(browser, width, android, 1);
@@ -232,6 +281,20 @@ async function queue(browser, width, android) {
     const dqr = await dq.page.evaluate(() => { const row = document.querySelectorAll('.list.queue .list-row')[1]; const a = row.querySelector('.q-actions'); return { acts: a.getClientRects().length > 0 && getComputedStyle(a).opacity === '1', buttons: a.querySelectorAll('button').length, more: row.querySelector('[data-qmore]')?.getClientRects().length ?? 0 }; });
     check(dqr.acts && dqr.buttons === 3 && dqr.more === 0, `desktop 1280: a hovered queue row shows Move up / Move down / Remove and no ⋯ (${JSON.stringify(dqr)})`);
     await dq.context.close();
+    // Settings › Layout › Phone on an 800 px window: the mark, and no heart button beside it
+    const wide = await fx.create(browser, 800, { tracks: BTRACKS, favs: ['track:1'] });
+    await wide.context.addInitScript(() => { localStorage.setItem('pm.layout', 'phone'); });
+    await fx.go(wide.page, '/tracks'); await wide.page.waitForSelector('#tracklist .track .heart.on', { state: 'attached' }); await wide.page.waitForTimeout(300);
+    const wm = await marks(wide.page, '#tracklist .track', '.title');
+    const wb = await wide.page.evaluate(() => [document.documentElement.dataset.shell, [...document.querySelectorAll('#tracklist .track [data-act="fav"]')].filter((b) => b.getClientRects().length).length]);
+    check(wb[0] === 'phone' && wm[0].shown && wb[1] === 0, `phone layout at 800: the heart mark (${wm[0].shown}) and no heart button beside it (${wb[1]} shown, shell ${wb[0]})`);
+    await wide.context.close();
+    // Desktop: a bookmarked song keeps its heart button in the row, and no mark after the title
+    const dbm = await fx.create(browser, 1280, { tracks: BTRACKS, favs: ['track:1'] });
+    await fx.go(dbm.page, '/tracks'); await dbm.page.waitForSelector('#tracklist .track .heart.on'); await dbm.page.waitForTimeout(300);
+    const dm = await marks(dbm.page, '#tracklist .track', '.title');
+    check(dm.every((x) => !x.shown), `desktop 1280: no heart mark after a title (${dm.map((x) => `${x.name}:${x.shown}`).join(' ')}); the row's heart button shows`);
+    await dbm.context.close();
   } finally { await browser.close(); }
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
