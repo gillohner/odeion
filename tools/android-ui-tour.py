@@ -187,9 +187,16 @@ def run(h):
         time.sleep(3)
         # (on a phone Zones opens scrolled to the zone in use, which here is the page's own "This
         # phone", the last card: the first card is off screen. A finger pulls the page back to its
-        # top, at the cards' left, clear of their volume sliders; a touch keeps the page where it is.)
-        for _ in range(3):
+        # top, at the cards' left, clear of their volume sliders, until the page stops moving; a
+        # touch keeps the page where it is.)
+        cards = (0, H * 20 // 100, W, H * 75 // 100)
+        last = raw()
+        for _ in range(8):
             swipe(W * 15 // 100, H * 35 // 100, W * 15 // 100, H * 75 // 100, 300, settle=1)
+            pulled = raw()
+            if changed(last, pulled, cards) < 0.01:
+                break
+            last = pulled
         shot("ui-0-zones")
         pick = zone_pick(out / "ui-0-zones.png")
         if pick and pick[0] == "selected":
