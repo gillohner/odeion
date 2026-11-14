@@ -1557,7 +1557,7 @@ html[data-shell="phone"] .np-vol { display: flex; }
 .libnav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
 /* A chip row that scrolls says so: its end fades, and chips snap into place (UX sweep 11-01, A15) */
 html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs, .qualchips) { scroll-snap-type: x proximity; }
-html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs, .qualchips).more-right { mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs, .qualchips, .azbar).more-right { mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
 .libnav > *, .scopechips > *, .np-sheet-tabs > * { scroll-snap-align: start; }
 .libnav::-webkit-scrollbar { display: none; }
 .libnav .chip { flex: none; }
@@ -1775,6 +1775,12 @@ html[data-shell="phone"] .qualchips .chip { flex: none; scroll-snap-align: cente
 .az:disabled { opacity: .35; cursor: default; }
 .az.on { background: var(--accent-soft); color: var(--accent-strong); }
 @media (max-width: 720px) { .azbar { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; } }
+/* On a phone the A–Z strip fades at its end like the other sideways rows (letters past the edge
+   are there, not missing), and its letters sit edge to edge, 28 px wide, so a tap between two
+   letters still lands on one */
+html[data-shell="phone"] .azbar { gap: 0; scrollbar-width: none; }
+html[data-shell="phone"] .azbar::-webkit-scrollbar { display: none; }
+html[data-shell="phone"] .az { flex: none; min-width: 28px; }
 /* Playlist art: a 2×2 mosaic of its album covers */
 .art.mosaic { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 0; }
 .art.mosaic img { position: static; width: 100%; height: 100%; object-fit: cover; }
@@ -2179,6 +2185,11 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
   @media (max-width: 720px) { .scopechips { padding-top: 8px; padding-bottom: 8px; margin-top: -4px; margin-bottom: 8px; } }
   html[data-shell="phone"] .qualchips { padding-top: 8px; padding-bottom: 8px; margin-top: -8px; margin-bottom: 8px; }
   html[data-shell="phone"] .main > .page-head + .qualchips { margin-top: 4px; }
+  /* The A–Z letters reach 44 px tall, all of it downwards into the 28 px before the list: the 8 px
+     above them stay Favourites' own reach. Padding the strip takes back from its margin */
+  html[data-shell="phone"] .azbar { padding-bottom: 18px; margin-bottom: -18px; }
+  html[data-shell="phone"] .az { position: relative; isolation: isolate; }
+  html[data-shell="phone"] .az::before { content: ''; position: absolute; inset: 0 0 -18px; z-index: -1; }
 }
 /* A button that is its icon on a phone (its label says what it does elsewhere) */
 html[data-shell="phone"] .btn.iconic .btn-label { display: none; }

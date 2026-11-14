@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-14
+
+- **On a phone, the A–Z letters on Albums and Artists show that there are more, and are easier to hit.** With a long library the letter strip scrolled sideways but ended cleanly at M (360 px) or P (412 px), so the rest of the alphabet looked missing, and each letter was a 22 × 26 px target with a gap between neighbours. Now the strip fades out at its end while more letters are off to the right, like the other sideways rows, and on a touch screen each letter reaches 44 px tall and sits edge to edge with its neighbours (28 px wide), so a tap between two letters still picks one. The albums and artists below don't move. Tablets and desktop are unchanged.
+
 ### 2026-11-13
 
 - **When one music service doesn’t answer a search, its Retry is a real button.** If, say, Spotify took too long, its line under the search box ended in a small grey “Retry” link, 29 × 17 px on a phone, that looked like plain text and that the keyboard could not reach. It is now the same small Retry button as when the whole search fails: easy to hit with a finger, reachable with Tab, and Enter or a tap searches again with the same words. A service that can’t be helped by trying again (one that needs a paid plan) still says why, with no Retry.
