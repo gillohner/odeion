@@ -5512,10 +5512,11 @@
   // The toast names the playlist picked (as a new one's "Created “…”" does), so with many of them
   // you can tell which row the tap hit
   const addToPlaylist = async (pl, tracks, uris) => {
-    // Songs not identified yet go in too, kept on this node until they are
-    const localN = uris ? 0 : tracks.filter((t) => t && !trackHasId(t)).length;
+    // Songs not identified yet go in too, kept on this node until they are. A song from a page
+    // (itemMenu) comes as { id, local }: its page id says whether it is matched.
+    const localN = uris ? 0 : tracks.filter((t) => t && ('local' in t ? t.local : !trackHasId(t))).length;
     const to = pl.name ? `“${pl.name}”` : 'playlist';
-    try { await api('POST', `/playlists/${encodeURIComponent(pl.id)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast((n === 1 ? `Added to ${to}` : `${countOf(n, 'songs')} added to ${to}`) + (localN ? `. ${localN === n ? (n === 1 ? 'It stays' : 'They stay') : `${localN} stay`} on this node until you pick which song ${localN === 1 ? 'it is' : 'each is'} (the ?).` : '')); }
+    try { await api('POST', `/playlists/${encodeURIComponent(pl.id)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast((n === 1 ? `Added to ${to}` : `${countOf(n, 'songs')} added to ${to}`) + (localN ? `. ${localN === n ? (n === 1 ? 'It stays' : 'They stay') : `${localN} ${localN === 1 ? 'stays' : 'stay'}`} on this node until you pick which song ${localN === 1 ? 'it is' : 'each is'} (the ?).` : '')); }
     catch (e) { toast(e.message, 'error'); }
   };
   // "Add to playlist" for canonical URLs (Internet Archive files): the same menu, by uris.
@@ -5839,12 +5840,14 @@
     await pubkyUser();
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     const uris = (o.songs || []).map((t) => t.page || (t.id && (uriOf('song', t.id) || null))).filter(Boolean);
-    const trackIds = (o.songs || []).filter((t) => t.track_id != null).map((t) => t.track_id);
+    // A library song's page id is lib-<n> until it is matched (trackPageId)
+    const libSongs = (o.songs || []).filter((t) => t.track_id != null).map((t) => ({ id: t.track_id, local: !t.id || /^lib-\d+$/.test(String(t.id)) }));
+    const trackIds = libSongs.map((t) => t.id);
     const single = (o.songs || []).length === 1 ? o.songs[0] : null;
     const singleFav = !!(single && songFav(single));
     // The page you are on: no "Go to" it
     const onThis = (kind, pid) => state.view === 'item' && state.viewArg && state.viewArg.kind === kind && (state.viewArg.id === pid);
-    const addTo = (pl) => (trackIds.length === (o.songs || []).length && trackIds.length ? addToPlaylist(pl, trackIds.map((id) => ({ id })), null) : addToPlaylist(pl, [], uris.length ? uris : o.uri ? [o.uri] : []));
+    const addTo = (pl) => (trackIds.length === (o.songs || []).length && trackIds.length ? addToPlaylist(pl, libSongs, null) : addToPlaylist(pl, [], uris.length ? uris : o.uri ? [o.uri] : []));
     showMenu(anchorEl, [{ title: o.title || 'Item' },
       { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
