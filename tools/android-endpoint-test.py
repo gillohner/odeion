@@ -187,5 +187,42 @@ class AcceptanceTests(unittest.TestCase):
             self.assertNotIn(token, output.getvalue())
 
 
+class ThisPhoneTests(unittest.TestCase):
+    """The page's move to "This phone" before the downloaded song plays (to_this_phone)."""
+    LINE = "INFO pm_desktop_lib::media_live: media controls: the page controls this zone zone={}\n"
+
+    def run_with(self, start, lands):
+        log = [self.LINE.format(start) if start else ""]
+        taps = list(lands)
+
+        def tapped(*_):
+            log.append(self.LINE.format(taps.pop(0)))
+
+        with patch.object(ep, "logcat", side_effect=lambda: "".join(log)), \
+                patch.object(ep, "pick", side_effect=tapped) as pick, \
+                patch.object(ep, "diagnose"), patch.object(ep, "log"):
+            try:
+                ep.to_this_phone("this-phone-test")
+            finally:
+                self.calls = pick.call_count
+
+    def test_already_on_this_phone_taps_nothing(self):
+        self.run_with("browser", [])
+        self.assertEqual(self.calls, 0)
+
+    def test_from_another_zone_it_picks_this_phone(self):
+        self.run_with("google-sdk-gphone64-x86-64", ["browser"])
+        self.assertEqual(self.calls, 1)
+
+    def test_a_tap_on_the_wrong_row_is_tried_again(self):
+        self.run_with("google-sdk-gphone64-x86-64", ["null-output-volume", "browser"])
+        self.assertEqual(self.calls, 2)
+
+    def test_the_page_left_on_the_wrong_zone_fails(self):
+        with self.assertRaisesRegex(RuntimeError, "null-output-volume, not"):
+            self.run_with(None, ["null-output-volume", "null-output-volume"])
+        self.assertEqual(self.calls, 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

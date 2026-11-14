@@ -528,6 +528,14 @@ def pick(name, what):
             if node:
                 x, y = center(node)
                 if (x, y) != (0, 0):
+                    # Only once the row holds still: the picker draws itself again when the
+                    # node's output list comes in (once after a start), and its rows move by a
+                    # row's height; a tap made from the dump before that lands on the row that
+                    # moved under it (release runs for e8bf0df3 and 81e7f293, API 35: Null output)
+                    time.sleep(1)
+                    again = next((n for n in ui_nodes() if name in n and "choose another zone" not in n and "choose where to play" not in n), None)
+                    if not again or center(again) != (x, y):
+                        continue
                     adb("shell", "input", "tap", str(x), str(y))
                     log(f"tapped {what} at {x},{y}")
                     if opened:
@@ -896,22 +904,42 @@ def native_pace(after=0):
     return (pts[-1][1] - pts[0][1]) / 1000 / (pts[-1][0] - pts[0][0]), len(pts)
 
 
+def page_zone(since=0):
+    """The zone the page last said it controls (its media-controls log line), or None."""
+    said = re.findall(r"the page controls this zone zone=(\S+)", logcat()[since:])
+    return said[-1] if said else None
+
+
+def to_this_phone(what):
+    """The page on "This phone": nothing to do when it says it is on it already; else picked in
+    the picker, and the page must then say it is on it. A tap that put the page on another zone
+    (the picker's rows moved under it) is tried again once; the page never stays on the wrong
+    zone unnoticed (it played the downloaded song on Null output, release run 43603272503)."""
+    if page_zone() == "browser":
+        return
+    for attempt in (1, 2):
+        mark = len(logcat())
+        # (the row's text starts with the name; "Playing on This phone: …" and "Move here: This phone" don't)
+        pick('="This phone', "the page's “This phone”")
+        try:
+            zone = until("the page on a zone", lambda: page_zone(mark), timeout=20)
+        except RuntimeError:
+            diagnose(what)
+            raise RuntimeError("timed out waiting for the page on “This phone”") from None
+        if zone == "browser":
+            return
+        log(f"the tap put the page on {zone}, not “This phone” (try {attempt})")
+    diagnose(what)
+    raise RuntimeError(f"the page went to {zone}, not “This phone”")
+
+
 def in_app_player(address, track):
     """The page's "This phone", played by the app itself (see the module's doc)."""
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     time.sleep(3)
     # Shuffle plays on the page's zone: "This phone" chosen in the picker first (the media-controls
     # checks before leave the page on the phone's zone on the node, where Shuffle would play)
-    mark = len(logcat())
-    said = re.findall(r"the page controls this zone zone=(\S+)", logcat())
-    if not said or said[-1] != "browser":
-        # (the row's text starts with the name; "Playing on This phone: …" and "Move here: This phone" don't)
-        pick('="This phone', "the page's “This phone”")
-        try:
-            until("the page on “This phone”", lambda: "the page controls this zone zone=browser" in logcat()[mark:], timeout=20)
-        except RuntimeError:
-            diagnose("this-phone")
-            raise
+    to_this_phone("this-phone")
     start = len(logcat())
     try:
         tap(lambda n: "Shuffle my music" in n, "“Shuffle my music”")
@@ -987,13 +1015,8 @@ def offline_playback(node, track):
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     time.sleep(3)
     # On "This phone": "Play from here" plays on the page's zone, and the UI tour before (Play to)
-    # leaves the page on the phone's zone on the node
-    moved = len(logcat())
-    pick('="This phone', "the page's “This phone”")
-    try:
-        until("the page on “This phone”", lambda: "the page controls this zone zone=browser" in logcat()[moved:], timeout=20)
-    except RuntimeError:
-        log("the page's move to “This phone” was not logged (it may have been on it already)")
+    # may leave the page on the phone's zone on the node
+    to_this_phone("this-phone-offline")
     mark = len(logcat())
     tap(lambda n: 'text="Library"' in n or 'content-desc="Library"' in n, "Library")
     tap(lambda n: 'text="Songs"' in n or 'content-desc="Songs"' in n, "Songs")
