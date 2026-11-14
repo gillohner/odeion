@@ -1964,11 +1964,16 @@ async fn corrections_wait_for_scans_and_picks_for_their_evidence() {
     assert_eq!(recording_of(&s, id), Some(rec(2)));
     // ... a scan that goes on longer than it waits: refused, nothing changed
     let other_song = waiting(&s, dir.path(), "W", "Song W", &[fp(1, "Song W", "Band", 0.6)]);
+    // The gate stays held until the answer is in: the correction's wait starts only once it has
+    // the process-wide ID write lock, which other tests in this binary take too, so a fixed hold
+    // could end before its wait does and let it through
     let gate = gate_held(&s);
     let refused = correct(other_song, 3);
-    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let (st, b) = tokio::time::timeout(std::time::Duration::from_secs(60), refused)
+        .await
+        .expect("the correction gives up while the scan goes on")
+        .unwrap();
     drop(gate);
-    let (st, b) = refused.await.unwrap();
     assert_eq!(st, StatusCode::CONFLICT, "{b}");
     assert!(canonical(&s, other_song).is_none());
     // A scan asked for during a correction (the watcher's) still runs, after it
