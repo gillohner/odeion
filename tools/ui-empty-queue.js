@@ -10,7 +10,9 @@
 // The note names the zone whenever there is more than one place to play.
 // After a reload, Play, Next and Previous in This browser pressed before the node's events are in
 // (or with the node out of reach) go on from the saved song and place, not song 1. The note's Shuffle
-// my music checks again when pressed, and a queue change of this app's on its way counts as songs.
+// my music checks again when pressed, and a queue change of this app's on its way (an Add, a radio
+// station starting) counts as songs. Shuffle my music pressed again while This browser's still reads
+// the library (from the note or Get started) does nothing more.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-empty-queue.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -429,6 +431,60 @@ async function pendingAdd(browser, width) {
   } finally { await context.close(); }
 }
 
+async function radioOnItsWay(browser, width) {
+  // 15. A node zone with an empty queue and a radio station starting on it (its request still on its
+  // way): Play is sent to the node, with no note offering a shuffle that would replace the station
+  const Z = { ...zoneBase, id: 'z1', name: 'Kitchen', output: 'upnp:k' };
+  const station = { id: 'st1', name: 'Fixture FM', url: 'https://radio.example/stream', country: 'CH', tags: ['jazz'] };
+  const { page, context, state } = await twoZones(browser, width, [Z], { '/radio/stations': { body: { stations: [station] } }, '/radio/play': { body: { ...Z, radio: true } } });
+  try {
+    await fx.go(page, '/radio');
+    await page.locator('[data-st-play="st1"]').waitFor();
+    for (let i = 0; i < 40 && !state.hits.some((h) => h.v === '/zones/z1/queue'); i++) await sleep(50);
+    await sleep(200);
+    state.delay = (v, m) => (v === '/radio/play' && m === 'POST' ? 3000 : 0);
+    await page.click('[data-st-play="st1"]');
+    await sleep(200);
+    await hideToast(page);
+    await page.click('#toggle');
+    await sleep(200);
+    assert.ok(!/queue is empty/.test((await toastNow(page)).text), `${width}: no empty-queue note while the station is on its way (${JSON.stringify(await toastNow(page))})`);
+    assert.equal(zonePosts(state, 'z1').filter((v) => v === '/zones/z1/transport').length, 1, `${width}: Play is sent (${JSON.stringify(zonePosts(state, 'z1'))})`);
+    state.delay = 0;
+    await sleep(3100);
+    assert.equal(state.hits.filter((h) => h.v === '/radio/play' && h.m === 'POST').length, 1, `${width}: the station is asked for once`);
+    assert.equal((await toastNow(page)).text, 'Tuning to Fixture FM', `${width}: then says it is tuning`);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
+async function setupShuffleTwice(browser, width) {
+  // 16. The empty-queue note's Shuffle my music in This browser, then Get started's while the first
+  // still reads the library: the library is read once, so the song that starts is not replaced by a
+  // second shuffle. (The same button pressed twice was already dropped: a press in progress is busy.)
+  const firstSteps = { show: true, hidden: false, steps: [{ id: 'play', done: false, optional: false }] };
+  const { page, context, state } = await fx.create(browser, width, { fixtures: { ...fixtures, '/me/first-steps': { body: firstSteps } } });
+  try {
+    await fx.go(page, '/');
+    await page.locator('#setupplay').waitFor();
+    state.delay = (v, m) => (v === '/library/tracks' && m === 'GET' ? 1000 : 0);
+    const asked = state.hits.length;
+    await hideToast(page);
+    await page.click('#toggle');
+    assert.equal((await toastNow(page)).act, 'Shuffle my music', `${width}: the note offers Shuffle my music`);
+    await page.click('#toast .toast-act');
+    await sleep(150);
+    await page.click('#setupplay');
+    await page.waitForFunction(() => document.querySelector('audio')?.getAttribute('src'));
+    await sleep(1500);
+    const reads = state.hits.slice(asked).filter((h) => h.v === '/library/tracks' && /limit=200/.test(h.q)).length;
+    assert.equal(reads, 1, `${width}: the library is read once (${reads})`);
+    assert.equal(state.hits.slice(asked).filter((h) => h.v === '/library/history').length, 1, `${width}: one song started`);
+    assert.match((await bar(page)).src, /\/v1\/library\/tracks\/[123]\//, `${width}: a library song is playing`);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
 async function offline(browser, width) {
   // 7. Offline (the Android app with no node): no Shuffle my music, the downloads have no song list
   const { page } = await fx.create(browser, width, { offline: true, fixtures });
@@ -449,7 +505,7 @@ async function offline(browser, width) {
   let failed = 0;
   try {
     for (const width of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [1280, 1024, 768])) {
-      for (const [name, fn] of [['empty browser queue', browserZone], ['queued then Play', queuedThenPlay], ['no songs', noSongs], ['empty node zone', nodeZone], ['node zone, late event', nodeZoneLateEvent], ['shuffle on the card\'s zone', shuffleOnTheCardsZone], ['shuffle keeps its zone', shuffleKeepsItsZone], ['paused zone, switched zone', pausedAndSwitched], ['late queue answer', lateQueueAnswer], ['Play after a reload', (b, w) => playAfterReload(b, w, '#toggle')], ['Next after a reload', (b, w) => playAfterReload(b, w, '#next')], ['Previous after a reload', (b, w) => playAfterReload(b, w, '#prev')], ['Play after a reload, node out of reach', playAfterReloadNoNode], ['Shuffle checked again', shuffleRechecked], ['Add on its way', pendingAdd], ['offline', offline]]) {
+      for (const [name, fn] of [['empty browser queue', browserZone], ['queued then Play', queuedThenPlay], ['no songs', noSongs], ['empty node zone', nodeZone], ['node zone, late event', nodeZoneLateEvent], ['shuffle on the card\'s zone', shuffleOnTheCardsZone], ['shuffle keeps its zone', shuffleKeepsItsZone], ['paused zone, switched zone', pausedAndSwitched], ['late queue answer', lateQueueAnswer], ['Play after a reload', (b, w) => playAfterReload(b, w, '#toggle')], ['Next after a reload', (b, w) => playAfterReload(b, w, '#next')], ['Previous after a reload', (b, w) => playAfterReload(b, w, '#prev')], ['Play after a reload, node out of reach', playAfterReloadNoNode], ['Shuffle checked again', shuffleRechecked], ['Add on its way', pendingAdd], ['Radio on its way', radioOnItsWay], ['Shuffle from the note, then Get started', setupShuffleTwice], ['offline', offline]]) {
         try { await fn(browser, width); console.log(`PASS ${width} ${name}`); } catch (e) { failed++; console.log(`FAIL ${width} ${name}: ${e.message}`); }
       }
     }
