@@ -2533,6 +2533,9 @@
   const hitItem = (h, album) => ({ uri: h.uri || `${h.source || 'tidal'}:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
   const browserPlay = (i, startAt = 0) => {
     const it = state.browserQueue[i];
+    // A pick-up still due for a song that broke off mid-song is off: this play is the one on. A
+    // new play gets its own pick-up; a retry of the same song where it was keeps the one it used.
+    if (state.midRetry) { clearTimeout(state.midRetry.timer); if (!(state.midRetry.it === it && startAt > 0)) state.midRetry = null; }
     // The end of the queue: the last song stays on the bar, stopped, ready to play again
     if (!it && i >= state.browserQueue.length && state.browserQueue.length) { audio.pause(); try { audio.currentTime = 0; } catch { /* not loaded */ } renderBar(); return; }
     if (!it) { audio.pause(); if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } state.browserIndex = -1; renderBar(); return; }
@@ -2603,12 +2606,15 @@
   // A stream that breaks off mid-song (a dropped connection) picks up where it was, once
   audio.addEventListener('error', () => {
     if (state.ytOn) return;
-    const i = state.browserIndex; const at = audio.currentTime;
-    if (i < 0 || !audio.src || !(at > 0)) return;
-    state.midRetry = state.midRetry && state.midRetry.i === i ? state.midRetry : { i, n: 0 };
-    if (state.midRetry.n >= 1) return;
-    state.midRetry.n++;
-    const src = audio.src; setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
+    const i = state.browserIndex; const it = state.browserQueue[i]; const at = audio.currentTime;
+    if (i < 0 || !it || !audio.src || !(at > 0)) return;
+    // (once per play of this song: a new play, even of another song at the same place, starts afresh)
+    state.midRetry = state.midRetry && state.midRetry.it === it ? state.midRetry : { it, n: 0 };
+    const mine = state.midRetry;
+    if (mine.n >= 1) return;
+    mine.n++;
+    // (only while this play is still the one on: a song started meanwhile keeps playing)
+    const src = audio.src; mine.timer = setTimeout(() => { if (state.browserIndex !== i || state.browserQueue[i] !== it || (state.natOn && nat.held)) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
   });
   // For tests (tools/ui-youtube.js): queue items in the current zone, read the browser engine
   window.pmPlayer = { play: (items) => playSourceItems(items, true), now: () => ({ youtube: !!state.ytOn, index: state.browserIndex, paused: audio.paused, time: audio.currentTime, src: audio.src }) };
