@@ -42,6 +42,10 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
   await searchFixture.install(ctx);
   await ctx.addInitScript((t) => {
     localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser');
+    // Every load starts with nothing queued in this browser: the page saves its queue every 2 s and as
+    // it is left, so a Play clicked by one shard would otherwise put a song in the bar (and its controls)
+    // on the views that shard loads next, and not on the other shards.
+    localStorage.removeItem('pm.browserQueue'); localStorage.removeItem('pm.browserAt');
     HTMLMediaElement.prototype.play = async function () {};
     window.open = () => { window.__opened = (window.__opened || 0) + 1; return null; };
   }, TOKEN);
