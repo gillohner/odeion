@@ -2535,7 +2535,7 @@
     const it = state.browserQueue[i];
     // A pick-up still due for a song that broke off mid-song is off: this play is the one on. A
     // new play gets its own pick-up; a retry of the same song where it was keeps the one it used.
-    if (state.midRetry) { clearTimeout(state.midRetry.timer); if (!(state.midRetry.it === it && startAt > 0)) state.midRetry = null; }
+    if (state.midRetry) { clearTimeout(state.midRetry.timer); state.midRetry.timer = null; if (!(state.midRetry.it === it && startAt > 0)) state.midRetry = null; }
     // The end of the queue: the last song stays on the bar, stopped, ready to play again
     if (!it && i >= state.browserQueue.length && state.browserQueue.length) { audio.pause(); try { audio.currentTime = 0; } catch { /* not loaded */ } renderBar(); return; }
     if (!it) { audio.pause(); if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } state.browserIndex = -1; renderBar(); return; }
@@ -2591,7 +2591,7 @@
   if (hasMediaSession) {
     // (the bar's steps: right after a reload they go on from the saved song, and Previous past
     // 0:03 starts the song again; before, Next and Previous went from song 1)
-    const handlers = { play: () => { if (audio.paused) browserStep({ action: 'toggle' }); }, pause: () => audio.pause(), nexttrack: () => browserStep({ action: 'next' }), previoustrack: () => browserStep({ action: 'previous' }), seekto: (d) => { if (d && typeof d.seekTime === 'number') audio.currentTime = d.seekTime; } };
+    const handlers = { play: () => { if (audio.paused) browserStep({ action: 'toggle' }); }, pause: () => browserPause(), nexttrack: () => browserStep({ action: 'next' }), previoustrack: () => browserStep({ action: 'previous' }), seekto: (d) => { if (d && typeof d.seekTime === 'number') browserSeek(d.seekTime); } };
     for (const [k, f] of Object.entries(handlers)) { try { navigator.mediaSession.setActionHandler(k, f); } catch { /* unsupported action */ } }
     audio.addEventListener('play', () => { try { navigator.mediaSession.playbackState = 'playing'; } catch { /* ignore */ } });
     audio.addEventListener('pause', () => { try { navigator.mediaSession.playbackState = 'paused'; } catch { /* ignore */ } });
@@ -2608,14 +2608,23 @@
     if (state.ytOn) return;
     const i = state.browserIndex; const it = state.browserQueue[i]; const at = audio.currentTime;
     if (i < 0 || !it || !audio.src || !(at > 0)) return;
+    // (a song that didn't open at all, as at a resume place: that is the start's own retry)
+    if (audio.readyState < 1 || (audio.error && audio.error.code === 4)) return;
     // (once per play of this song: a new play, even of another song at the same place, starts afresh)
     state.midRetry = state.midRetry && state.midRetry.it === it ? state.midRetry : { it, n: 0 };
     const mine = state.midRetry;
     if (mine.n >= 1) return;
     mine.n++;
-    // (only while this play is still the one on: a song started meanwhile keeps playing)
-    const src = audio.src; mine.timer = setTimeout(() => { if (state.browserIndex !== i || state.browserQueue[i] !== it || (state.natOn && nat.held)) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
+    // (only while this play is still the one on: a song started meanwhile keeps playing; songs
+    // taken out or moved before it in the queue meanwhile don't matter)
+    mine.src = audio.src; mine.timer = setTimeout(() => { mine.timer = null; if (state.browserQueue[state.browserIndex] !== it || (state.natOn && nat.held)) return; audio.src = mine.src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
   });
+  // A pick-up still due is off when the listener pauses (the bar, a media key, the sleep timer, a
+  // Move): before, 1.5 s later the song went back to where it broke off and played. A seek or
+  // Previous takes it to the place asked for at once (before, it was pulled back there too)
+  const cancelPickUp = () => { const m = state.midRetry; if (!m || !m.timer) return null; clearTimeout(m.timer); m.timer = null; return m; };
+  const browserPause = () => { if (cancelPickUp()) state.midRetry = null; audio.pause(); };
+  const browserSeek = (t) => { const m = cancelPickUp(); const up = m && state.browserQueue[state.browserIndex] === m.it && !(state.natOn && nat.held); if (up) audio.src = m.src; audio.currentTime = t; if (up) audio.play().catch(() => {}); };
   // For tests (tools/ui-youtube.js): queue items in the current zone, read the browser engine
   window.pmPlayer = { play: (items) => playSourceItems(items, true), now: () => ({ youtube: !!state.ytOn, index: state.browserIndex, paused: audio.paused, time: audio.currentTime, src: audio.src }) };
   audio.addEventListener('timeupdate', () => { nativeAhead(); if (isBrowser()) renderBar(); });
@@ -2751,10 +2760,10 @@
     // Songs queued while nothing played (Add to queue, Play next): Play starts the queue at its
     // first song (before, it played nothing and showed Pause)
     if (action.action === 'toggle' && !state.browserQueue[state.browserIndex]) { browserPlay(0); return; }
-    if (action.action === 'toggle') { if (audio.paused) audio.play().catch(() => {}); else audio.pause(); }
+    if (action.action === 'toggle') { if (audio.paused) audio.play().catch(() => {}); else browserPause(); }
     else if (action.action === 'next') browserPlay(state.browserIndex + 1);
-    else if (action.action === 'previous') { if (audio.currentTime > 3) audio.currentTime = 0; else browserPlay(Math.max(0, state.browserIndex - 1)); }
-    else if (action.action === 'seek') audio.currentTime = action.position_ms / 1000;
+    else if (action.action === 'previous') { if (audio.currentTime > 3) browserSeek(0); else browserPlay(Math.max(0, state.browserIndex - 1)); }
+    else if (action.action === 'seek') browserSeek(action.position_ms / 1000);
     else if (action.action === 'play' && action.index != null) browserPlay(action.index);
     renderBar();
   };
@@ -2772,7 +2781,12 @@
       const st = await api('POST', `/zones/${state.zone}/transport`, action, { repeat: action.action === 'next' || action.action === 'previous' });
       state.zones[st.id] = st;
       renderBar();
-    } catch (e) { if (state.starting && state.starting.zone === zt.id) startFail(e.message, true); toast(e.message, 'error'); }
+    } catch (e) {
+      // (Play pressed on an empty queue while a station or a page's Play is still on its way to the
+      // zone: the node has no queue yet and says so; that start's own wait goes on and says how it went)
+      if (action.action === 'play' && zoneBusy.get(zt.id) && !(zt.queue && zt.queue.length)) return;
+      if (state.starting && state.starting.zone === zt.id) startFail(e.message, true); toast(e.message, 'error');
+    }
   };
   const playStation = async (st) => {
     if (isBrowser()) {
@@ -3223,7 +3237,7 @@
         const index = cur ? queue.indexOf(cur) : -1;
         const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
         // Pause here first: the node may take seconds to open the track, and both would play meanwhile
-        if (transport === 'playing') { audio.pause(); resume = true; }
+        if (transport === 'playing') { browserPause(); resume = true; }
         const zs = await zoneOp(target, (t) => api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: index >= 0 ? index : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), shuffle: browserShuffle(), radio: false }, { signal: t.signal }));
         state.zones[zs.id] = zs;
         if (transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
@@ -4436,7 +4450,7 @@
   const setSleep = async (seconds) => {
     if (isBrowser()) {
       clearTimeout(state.browserSleepTimer);
-      if (seconds) { state.sleepAt[BROWSER] = Date.now() + seconds * 1000; state.browserSleepTimer = setTimeout(() => { audio.pause(); delete state.sleepAt[BROWSER]; renderNowPlaying(); }, seconds * 1000); } else delete state.sleepAt[BROWSER];
+      if (seconds) { state.sleepAt[BROWSER] = Date.now() + seconds * 1000; state.browserSleepTimer = setTimeout(() => { browserPause(); delete state.sleepAt[BROWSER]; renderNowPlaying(); }, seconds * 1000); } else delete state.sleepAt[BROWSER];
       toast(seconds ? `Sleeping in ${Math.round(seconds / 60)} minutes` : 'Sleep timer off'); renderNowPlaying(); return;
     }
     try { const v = await api('PUT', `/zones/${encodeURIComponent(state.zone)}/sleep`, { seconds }); if (v.ends_at_ms) state.sleepAt[state.zone] = v.ends_at_ms; else delete state.sleepAt[state.zone]; toast(seconds ? `Sleeping in ${Math.round(seconds / 60)} minutes` : 'Sleep timer off'); renderNowPlaying(); } catch (e) { toast(e.message, 'error'); }
@@ -4536,6 +4550,8 @@
 
   // ---- views ---------------------------------------------------------------
   const main = $('#main');
+  // (their own touch, wheel or key on the page comes before Zones showing the zone in use)
+  ['pointerdown', 'wheel', 'touchstart', 'keydown'].forEach((e) => main.addEventListener(e, () => { state.zoneInView = false; }, { passive: true }));
   // Settings, one topic per tab (STEWARD-UX-SETTINGS.md)
   // Side tabs: a vertical tab list beside one panel per tab (Settings; Sources reuses it). On a
   // phone the list is a page of its own and each tab a page with Back. `tabs`: [[key, label, icon,
@@ -4736,6 +4752,7 @@
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
     main.scrollTop = 0; state.drawnPage = null; if (state.placeHold) state.placeHold(); // a page opened is drawn from the start (redrawing, keepPlace)
+    state.zoneInView = v === 'zones' && how !== 'pop'; // Zones opened (not Back): show the zone in use
     return navigate(fresh);
   };
   window.addEventListener('popstate', async (e) => {
@@ -5051,7 +5068,7 @@
         <div class="fmt-col"><span class="fmt ${LOSSY[t.file && t.file.container] ? 'lossy' : ''}">${esc(fileFormat(t.file))}</span></div>
         <div class="dur">${fmt(t.duration_ms)}</div>
         <div class="row-actions">
-          <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(fav, t.title))}">${icon(fav ? 'heart-fill' : 'heart')}</button>
+          <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" aria-pressed="${fav}" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(fav, t.title))}">${icon(fav ? 'heart-fill' : 'heart')}</button>
           <button class="icon-btn" data-act="next" title="Play next">${icon('playnext')}</button>
           <button class="icon-btn" data-act="add" title="Add to queue">${icon('plus')}</button>
           <button class="icon-btn" data-act="more" title="More">${icon('more')}</button>
@@ -5512,10 +5529,11 @@
   // The toast names the playlist picked (as a new one's "Created “…”" does), so with many of them
   // you can tell which row the tap hit
   const addToPlaylist = async (pl, tracks, uris) => {
-    // Songs not identified yet go in too, kept on this node until they are
-    const localN = uris ? 0 : tracks.filter((t) => t && !trackHasId(t)).length;
+    // Songs not identified yet go in too, kept on this node until they are. A song from a page
+    // (itemMenu) comes as { id, local }: its page id says whether it is matched.
+    const localN = uris ? 0 : tracks.filter((t) => t && ('local' in t ? t.local : !trackHasId(t))).length;
     const to = pl.name ? `“${pl.name}”` : 'playlist';
-    try { await api('POST', `/playlists/${encodeURIComponent(pl.id)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast((n === 1 ? `Added to ${to}` : `${countOf(n, 'songs')} added to ${to}`) + (localN ? `. ${localN === n ? (n === 1 ? 'It stays' : 'They stay') : `${localN} stay`} on this node until you pick which song ${localN === 1 ? 'it is' : 'each is'} (the ?).` : '')); }
+    try { await api('POST', `/playlists/${encodeURIComponent(pl.id)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast((n === 1 ? `Added to ${to}` : `${countOf(n, 'songs')} added to ${to}`) + (localN ? `. ${localN === n ? (n === 1 ? 'It stays' : 'They stay') : `${localN} ${localN === 1 ? 'stays' : 'stay'}`} on this node until you pick which song ${localN === 1 ? 'it is' : 'each is'} (the ?).` : '')); }
     catch (e) { toast(e.message, 'error'); }
   };
   // "Add to playlist" for canonical URLs (Internet Archive files): the same menu, by uris.
@@ -5839,12 +5857,14 @@
     await pubkyUser();
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     const uris = (o.songs || []).map((t) => t.page || (t.id && (uriOf('song', t.id) || null))).filter(Boolean);
-    const trackIds = (o.songs || []).filter((t) => t.track_id != null).map((t) => t.track_id);
+    // A library song's page id is lib-<n> until it is matched (trackPageId)
+    const libSongs = (o.songs || []).filter((t) => t.track_id != null).map((t) => ({ id: t.track_id, local: !t.id || /^lib-\d+$/.test(String(t.id)) }));
+    const trackIds = libSongs.map((t) => t.id);
     const single = (o.songs || []).length === 1 ? o.songs[0] : null;
     const singleFav = !!(single && songFav(single));
     // The page you are on: no "Go to" it
     const onThis = (kind, pid) => state.view === 'item' && state.viewArg && state.viewArg.kind === kind && (state.viewArg.id === pid);
-    const addTo = (pl) => (trackIds.length === (o.songs || []).length && trackIds.length ? addToPlaylist(pl, trackIds.map((id) => ({ id })), null) : addToPlaylist(pl, [], uris.length ? uris : o.uri ? [o.uri] : []));
+    const addTo = (pl) => (trackIds.length === (o.songs || []).length && trackIds.length ? addToPlaylist(pl, libSongs, null) : addToPlaylist(pl, [], uris.length ? uris : o.uri ? [o.uri] : []));
     showMenu(anchorEl, [{ title: o.title || 'Item' },
       { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
@@ -5929,9 +5949,9 @@
   // A song row's heart, the heart a row on Songs has: filled when the song is bookmarked (shown
   // then without hover, on a touch screen too), an outline you reach by hovering the row with a
   // mouse. One click to bookmark where the ⋯ menu used to take two. It says which song it is for.
-  const songHeart = (t, k) => `<button class="icon-btn heart${songFav(t) ? ' on' : ''}" data-sfav="${k}" title="${songFav(t) ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(songFav(t), t.title))}">${icon(songFav(t) ? 'heart-fill' : 'heart')}</button>`;
+  const songHeart = (t, k) => `<button class="icon-btn heart${songFav(t) ? ' on' : ''}" data-sfav="${k}" aria-pressed="${songFav(t)}" title="${songFav(t) ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(songFav(t), t.title))}">${icon(songFav(t) ? 'heart-fill' : 'heart')}</button>`;
   // The heart turned over without redrawing anything around it
-  const setHeart = (b, on, title) => { b.classList.toggle('on', on); b.innerHTML = icon(on ? 'heart-fill' : 'heart'); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.setAttribute('aria-label', heartWords(on, title)); };
+  const setHeart = (b, on, title) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.innerHTML = icon(on ? 'heart-fill' : 'heart'); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.setAttribute('aria-label', heartWords(on, title)); };
   const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}" href="${esc(pathFor('item', { kind: 'album', id: t.album_id }))}"${rowLinkTab()}>${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
@@ -8336,7 +8356,7 @@
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
             + `<div class="hero item-hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" aria-pressed="${!!fav}" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               ${myReview !== undefined ? reviewRow(myReview) : ''}
               <div class="hmatch-slot" id="hmatch"></div>
               </div></div>`
@@ -8452,7 +8472,7 @@
               // (saved for this item; another page opened meanwhile keeps its own heart)
               if (state.view !== 'item' || state.viewArg.kind !== kind || state.viewArg.id !== id) return;
               const b = $('#ifav', main); const on = isFav();
-              if (b) { b.classList.toggle('on', on); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.innerHTML = icon(on ? 'heart-fill' : 'heart'); }
+              if (b) { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.innerHTML = icon(on ? 'heart-fill' : 'heart'); }
               render();
             } catch (er) { toast(er.message, 'error'); }
           };
@@ -8655,6 +8675,21 @@
           $$('[data-zsel]', main).forEach((b) => b.onclick = () => { state.zone = b.dataset.zsel; localStorage.setItem('pm.zone', state.zone); renderZoneName(); renderBar(); refreshQueue(); render(); });
           $$('[data-zone-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(b.dataset.zoneDel)}`); toast('Group removed'); if (state.zone === b.dataset.zoneDel) { ensureZone(); renderZoneName(); } render(); } catch (e) { toast(e.message, 'error'); } });
           $('#zgroup').onclick = () => setView('settings', 'playback');
+          // Zones opened on a phone (a tab, a link, a reload; not Back or Forward): the zone in use
+          // is on screen, not under the mini player (five zones put it a screen down). Once, when
+          // its card is first drawn, and not after they touched or scrolled the page: a redraw,
+          // a Play to, or a place they scrolled to stays where it is.
+          const inUse = $('.zone-card.on', main);
+          if (inUse && !redrawing('zones')) {
+            state.drawnPage = 'zones';
+            if (phone && state.zoneInView) {
+              // (from where the card is in the page: the scroll to the top setView began may still be under way)
+              const m = main.getBoundingClientRect(); const r = inUse.getBoundingClientRect(); const gap = 14;
+              const down = Math.max(0, Math.min(r.bottom - m.top + main.scrollTop + gap - main.clientHeight, r.top - m.top + main.scrollTop - gap));
+              try { main.scrollTo({ top: down, behavior: 'instant' }); } catch { main.scrollTop = down; }
+            }
+            state.zoneInView = false;
+          }
           break;
         }
         case 'add-music': {
