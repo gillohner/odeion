@@ -698,6 +698,14 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .list.queue .q-actions .icon-btn { width: 30px; height: 30px; }
 .list.queue .q-actions .icon-btn .ic { width: 16px; height: 16px; }
 .list.queue .ic.up { transform: rotate(180deg); }
+/* Phones: no hover to show a row's Move up / Move down / Remove, and no room for them beside the
+   title, so they live in the row's ⋯ (as on a playlist's song row); the grip is a 44 px touch (30 px
+   drawn, reaching 8 px either side) */
+.list.queue .qmore { display: none; }
+html[data-shell="phone"] .list.queue .q-actions { display: none; }
+html[data-shell="phone"] .list.queue .qmore { display: inline-flex; flex: none; }
+html[data-shell="phone"] .list.queue .qgrip { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; min-height: 44px; margin: -4px 0; padding: 0 2px 0 0; flex: none; position: relative; }
+html[data-shell="phone"] .list.queue .qgrip::before { content: ''; position: absolute; inset: 0 -8px; }
 .list.queue .icon-btn:disabled { opacity: 0.3; cursor: default; }
 
 /* ---- DSP editor ---- */

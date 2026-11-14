@@ -2,7 +2,8 @@
 // Songs page's Play all) are 44 px taps and a playlist's row stays one row at 360 px, as an album's
 // does, also at 320 px and with a larger font size; a checkbox's whole line (Import's Roon options) is
 // a 44 px tap. A playlist has the album page's compact header (the cover beside its name), so its first
-// song shows on the first screen. Desktop is unchanged.
+// song shows on the first screen. A queue row's Move up / Move down / Remove are in its ⋯ (no hidden
+// buttons a finger could press unseen), and its drag grip is a 44 px tap. Desktop is unchanged.
 // Real candidate assets, isolated responses: node tools/ui-phone-action-rows.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -144,10 +145,61 @@ async function narrow(browser, width, android, k, zoom) {
   await context.close();
 }
 
+// The Queue page: a row shows what a finger can press (the grip, Play from here, ⋯) and nothing else; Move
+// up / Move down / Remove are in the row's ⋯ (they were invisible until hovered, yet tappable, and Remove
+// had no visible way at all). The grip and ⋯ are 44 px taps, and the row keeps its height.
+const QUEUE = ['Journey Through Time', 'Rambling On My Mind', 'The Beginning', 'Last One Standing'].map((title, i) => ({ uri: `file:///music/${i}.flac`, title, artist: 'Sefa', album: 'Journey', duration_ms: 240000 + i * 1000 }));
+// what a tap at each x along the row's middle line presses (grip, play, more or -), as runs
+const qrow = (page, n) => page.evaluate((n) => {
+  const row = document.querySelectorAll('.list.queue .list-row')[n]; const rb = row.getBoundingClientRect(); const y = rb.top + rb.height / 2;
+  const who = (x, yy) => { const e = document.elementFromPoint(x, yy); const c = e && row.contains(e) && e.closest('[data-qgrip], [data-qi], [data-qmore], .q-actions button'); return !c ? '-' : c.dataset.qgrip != null ? 'grip' : c.dataset.qi != null ? 'play' : c.dataset.qmore != null ? 'more' : 'hidden'; };
+  const runs = {}; for (let x = Math.ceil(rb.left); x < rb.right; x++) { const w = who(x, y); runs[w] = (runs[w] || 0) + 1; }
+  const tall = (q) => { const b = row.querySelector(q).getBoundingClientRect(); let h = 0; for (let yy = Math.floor(rb.top); yy < rb.bottom; yy++) if (who(b.left + b.width / 2, yy) === (q === '[data-qgrip]' ? 'grip' : 'more')) h++; return h; };
+  const acts = row.querySelector('.q-actions');
+  return { h: rb.height, runs, gripH: tall('[data-qgrip]'), moreH: row.querySelector('[data-qmore]')?.getClientRects().length ? tall('[data-qmore]') : 0,
+    acts: acts.getClientRects().length > 0, title: row.querySelector('.grow').getBoundingClientRect().width,
+    moreName: row.querySelector('[data-qmore]')?.getAttribute('aria-label'), sw: document.documentElement.scrollWidth, vw: innerWidth };
+}, n);
+const names = (page) => page.locator('.list.queue .name').allInnerTexts();
+const sheet = async (page, n) => { await page.locator('.list.queue .list-row').nth(n).locator('[data-qmore]').tap(); await page.locator('.popover.menu:not([hidden]) .pop-item').first().waitFor(); return (await page.locator('.popover.menu:not([hidden]) .pop-item').allInnerTexts()).map((t) => t.trim()); };
+async function queue(browser, width, android) {
+  const at = `${android ? 'android' : 'browser'} ${width} queue`;
+  const { page, context } = await fx.create(browser, width, { mobile: true });
+  await context.addInitScript((q) => { localStorage.setItem('pm.browserQueue', JSON.stringify(q)); }, QUEUE);
+  if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+  await fx.go(page, '/queue'); await page.waitForSelector('.list.queue .list-row'); await page.waitForTimeout(300);
+  for (const n of [0, 2]) {
+    const r = await qrow(page, n);
+    check(!r.acts && !r.runs.hidden, `${at}: row ${n + 1} has no hidden Move/Remove buttons a finger could press unseen (${JSON.stringify(r.runs)})`);
+    check(r.runs.grip >= 44 && r.gripH >= 44, `${at}: row ${n + 1}'s drag grip is a 44 px tap (${r.runs.grip}×${r.gripH})`);
+    check(r.runs.more >= 44 && r.moreH >= 44, `${at}: row ${n + 1}'s ⋯ is a 44 px tap (${r.runs.more || 0}×${r.moreH}), named "${r.moreName}"`);
+    check(r.runs.play >= 44, `${at}: row ${n + 1}'s Play from here is a 44 px tap (${r.runs.play || 0} wide)`);
+    check(r.h <= 52 && r.title >= (width === 360 ? 130 : 180) && r.sw <= r.vw, `${at}: row ${n + 1} keeps its height (${r.h.toFixed(1)} px) and its title has more room (${r.title.toFixed(0)} px); page ${r.sw} of ${r.vw}`);
+  }
+  await page.screenshot({ path: path.join(SHOTS, `queue-${android ? 'android' : 'browser'}-${width}.png`) });
+  if (!(await page.locator('.list.queue [data-qmore]').first().isVisible())) { check(false, `${at}: a row has a ⋯ to open`); await context.close(); return; }
+  // ⋯ offers only what applies: the first row can't move up, the last can't move down
+  const first = await sheet(page, 0); await page.keyboard.press('Escape'); await page.waitForTimeout(150);
+  const last = await sheet(page, 3); await page.keyboard.press('Escape'); await page.waitForTimeout(150);
+  check(first.join('|') === 'Move down|Remove from queue' && last.join('|') === 'Move up|Remove from queue', `${at}: ⋯ on the first row offers ${first.join(', ')}; on the last ${last.join(', ')}`);
+  // two taps: ⋯ → Remove from queue
+  const mid = await sheet(page, 1);
+  check(mid.join('|') === 'Move up|Move down|Remove from queue', `${at}: ⋯ on a middle row offers ${mid.join(', ')}`);
+  await page.screenshot({ path: path.join(SHOTS, `queue-menu-${android ? 'android' : 'browser'}-${width}.png`) });
+  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from queue' }).tap(); await page.waitForFunction((n) => document.querySelectorAll('.list.queue .list-row').length === n, QUEUE.length - 1, { timeout: 5000 }).catch(() => {});
+  let got = await names(page);
+  check(got.join('|') === [QUEUE[0], QUEUE[2], QUEUE[3]].map((x) => x.title).join('|'), `${at}: ⋯ → Remove from queue takes that song out (${got.join(' / ')})`);
+  await sheet(page, 0); await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Move down' }).tap(); await page.waitForFunction((t) => document.querySelector('.list.queue .name')?.textContent.trim() !== t, QUEUE[0].title, { timeout: 5000 }).catch(() => {});
+  got = await names(page);
+  check(got.join('|') === [QUEUE[2], QUEUE[0], QUEUE[3]].map((x) => x.title).join('|'), `${at}: ⋯ → Move down moves it one place (${got.join(' / ')})`);
+  await context.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
     for (const width of [360, 412]) for (const android of [false, true]) await phone(browser, width, android);
+    for (const width of [360, 412]) for (const android of [false, true]) await queue(browser, width, android);
     for (const width of [320, 340, 360, 412]) for (const k of [1, 1.15, 1.3]) for (const android of [false, true]) await narrow(browser, width, android, k);
     // Android's font size as page zoom (Chrome) on a 360 px phone lays the page out narrower: 130 % 277 px, 115 % 313 px
     for (const width of [277, 313]) for (const android of [false, true]) await narrow(browser, width, android, 1);
@@ -172,6 +224,14 @@ async function narrow(browser, width, android, k, zoom) {
     const dh = await page.evaluate(() => [...document.querySelectorAll('#main label.check:has(#roonfav, #roonpl, #roontags)')].map((l) => l.getBoundingClientRect().height));
     check(dh.length === 3 && dh.every((h) => h < 30), `desktop 1280: Roon's options stay lines of text (${dh.map((h) => h.toFixed(0)).join(' ')})`);
     await context.close();
+    // Desktop: a queue row keeps its Move up / Move down / Remove (shown on hover), and has no ⋯
+    const dq = await fx.create(browser, 1280, {});
+    await dq.context.addInitScript((q) => { localStorage.setItem('pm.browserQueue', JSON.stringify(q)); }, QUEUE);
+    await fx.go(dq.page, '/queue'); await dq.page.waitForSelector('.list.queue .list-row'); await dq.page.waitForTimeout(300);
+    await dq.page.locator('.list.queue .list-row').nth(1).hover(); await dq.page.waitForTimeout(250);
+    const dqr = await dq.page.evaluate(() => { const row = document.querySelectorAll('.list.queue .list-row')[1]; const a = row.querySelector('.q-actions'); return { acts: a.getClientRects().length > 0 && getComputedStyle(a).opacity === '1', buttons: a.querySelectorAll('button').length, more: row.querySelector('[data-qmore]')?.getClientRects().length ?? 0 }; });
+    check(dqr.acts && dqr.buttons === 3 && dqr.more === 0, `desktop 1280: a hovered queue row shows Move up / Move down / Remove and no ⋯ (${JSON.stringify(dqr)})`);
+    await dq.context.close();
   } finally { await browser.close(); }
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
