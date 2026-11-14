@@ -1792,6 +1792,9 @@ html[data-shell="phone"] .qualchips .chip { flex: none; scroll-snap-align: cente
 html[data-shell="phone"] .azbar { gap: 0; scrollbar-width: none; }
 html[data-shell="phone"] .azbar::-webkit-scrollbar { display: none; }
 html[data-shell="phone"] .az { flex: none; min-width: 28px; }
+/* On a phone the Sort select is a 44 px target (it was 27 px beside the 40 px Favourites chip); a
+   select can't take a ::before reach, so it grows itself */
+html[data-shell="phone"] .listbar select.input { min-height: 44px; padding-top: 0; padding-bottom: 0; }
 /* Playlist art: a 2×2 mosaic of its album covers */
 .art.mosaic { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 0; }
 .art.mosaic img { position: static; width: 100%; height: 100%; object-fit: cover; }

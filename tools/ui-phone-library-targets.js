@@ -1,6 +1,7 @@
 // Library's section tabs and Add music entry points have comfortable phone targets.
 // Albums' and Artists' A–Z letters too: each reaches 44 px tall and letters sit edge to edge, the
 // strip fades at its end while more letters are off to the right, and nothing on the page moves.
+// Their Sort select is 44 px tall on a phone and stays compact on desktop.
 // Real candidate assets, isolated responses: node tools/ui-phone-library-targets.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -97,6 +98,14 @@ async function azStrip(browser, width, android) {
       // The reach is room taken from margins: the letters and the list sit where they were
       check(s.gapAbove === 8 && s.gapBelow <= below, `${at}: the letters sit 8 px under Sort and the list ${s.gapBelow} px under them, as before`);
       check(s.overflow <= 0, `${at}: nothing wider than the screen (${s.overflow} px)`);
+      // The Sort select is itself a 44 px target (a select takes no ::before reach): a press 2 px
+      // above its bottom edge lands on it, and it stays on the one line with Favourites
+      const sort = await page.locator('[data-lsort]').evaluate((el) => {
+        const b = el.getBoundingClientRect(), fav = document.querySelector('[data-lfav]')?.getBoundingClientRect();
+        return { width: b.width, height: b.height, edge: document.elementFromPoint(b.left + b.width / 2, b.bottom - 2) === el, oneLine: !fav || (fav.top < b.bottom && fav.bottom > b.top), inside: b.left >= 0 && b.right <= innerWidth };
+      });
+      check(sort.height >= 44 && sort.width >= 44 && sort.edge, `${at}: Sort is at least 44 px tall and its bottom edge lands on it (${sort.width.toFixed(1)}×${sort.height.toFixed(1)})`);
+      check(sort.oneLine && sort.inside, `${at}: Sort stays on Favourites' line and inside the screen`);
       // A press at the bottom of the reach, at the letter's right edge, jumps to that letter. A mouse
       // press, because a touch there would be snapped onto the letter by the browser even without a reach
       const b = await page.locator('[data-az="B"]').boundingBox();
@@ -184,7 +193,7 @@ async function azStrip(browser, width, android) {
       } finally { await context.close(); }
     }
     // These rules belong to the chosen phone layout, including a forced wide phone layout.
-    const { page, context } = await fx.create(browser, 599, { fixtures });
+    const { page, context } = await fx.create(browser, 599, { fixtures: { ...fixtures, ...longLibrary } });
     try {
       await fx.go(page, '/library');
       await chosen(page, 'mine');
@@ -192,6 +201,10 @@ async function azStrip(browser, width, android) {
       await page.setViewportSize({ width: 600, height: 900 });
       await page.waitForFunction(() => document.documentElement.dataset.shell === 'desktop');
       check(await page.locator('#libtab-mine').evaluate((el) => el.getBoundingClientRect().height < 44), '600 px desktop keeps its compact tabs');
+      await fx.go(page, '/artists');
+      check(await page.locator('[data-lsort]').evaluate((el) => el.getBoundingClientRect().height < 44), '600 px desktop keeps its compact Sort');
+      await fx.go(page, '/library');
+      await chosen(page, 'mine');
       await page.evaluate(() => document.documentElement.dataset.shell = 'phone');
       await measure(page, 'phone layout at 600 px');
     } finally { await context.close(); }
