@@ -905,18 +905,28 @@ def native_pace(after=0):
 
 
 def page_zone(since=0):
-    """The zone the page last said it controls (its media-controls log line), or None."""
-    said = re.findall(r"the page controls this zone zone=(\S+)", logcat()[since:])
+    """The zone the page last said it controls (its media-controls log line), or None. Only what
+    the page said since its last start counts (its message port set up again): a line from
+    before a crash or a restart is about a page that is gone."""
+    text = logcat()[since:]
+    start = text.rfind("the page's message port is set up")
+    said = re.findall(r"the page controls this zone zone=(\S+)", text[start:] if start >= 0 else text)
     return said[-1] if said else None
 
 
 def to_this_phone(what):
     """The page on "This phone": nothing to do when it says it is on it already; else picked in
     the picker, and the page must then say it is on it. A tap that put the page on another zone
-    (the picker's rows moved under it) is tried again once; the page never stays on the wrong
-    zone unnoticed (it played the downloaded song on Null output, release run 43603272503)."""
-    if page_zone() == "browser":
-        return
+    (the picker's rows moved under it) or on no zone at all is tried again once; the page never
+    stays on the wrong zone unnoticed (it played the downloaded song on Null output, release run
+    43603272503)."""
+    # (a page just started says its zone a few seconds after its message port is set up)
+    try:
+        if until("the page saying its zone", page_zone, timeout=20) == "browser":
+            return
+    except RuntimeError:
+        pass
+    zone = None
     for attempt in (1, 2):
         mark = len(logcat())
         # (the row's text starts with the name; "Playing on This phone: …" and "Move here: This phone" don't)
@@ -924,13 +934,12 @@ def to_this_phone(what):
         try:
             zone = until("the page on a zone", lambda: page_zone(mark), timeout=20)
         except RuntimeError:
-            diagnose(what)
-            raise RuntimeError("timed out waiting for the page on “This phone”") from None
+            zone = None
         if zone == "browser":
             return
-        log(f"the tap put the page on {zone}, not “This phone” (try {attempt})")
+        log(f"the tap put the page on {zone or 'no new zone'}, not “This phone” (try {attempt})")
     diagnose(what)
-    raise RuntimeError(f"the page went to {zone}, not “This phone”")
+    raise RuntimeError(f"the page went to {zone or 'no new zone'}, not “This phone”")
 
 
 def in_app_player(address, track):

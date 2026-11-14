@@ -196,9 +196,17 @@ class ThisPhoneTests(unittest.TestCase):
         taps = list(lands)
 
         def tapped(*_):
-            log.append(self.LINE.format(taps.pop(0)))
+            zone = taps.pop(0)
+            log.append(self.LINE.format(zone) if zone else "")
 
-        with patch.object(ep, "logcat", side_effect=lambda: "".join(log)), \
+        def until(what, fn, timeout=60, every=1.0):
+            # (no waiting: a page that said nothing has said it by now or never will)
+            v = fn()
+            if not v:
+                raise RuntimeError(f"timed out waiting for {what}")
+            return v
+
+        with patch.object(ep, "logcat", side_effect=lambda: "".join(log)), patch.object(ep, "until", until), \
                 patch.object(ep, "pick", side_effect=tapped) as pick, \
                 patch.object(ep, "diagnose"), patch.object(ep, "log"):
             try:
@@ -220,8 +228,31 @@ class ThisPhoneTests(unittest.TestCase):
 
     def test_the_page_left_on_the_wrong_zone_fails(self):
         with self.assertRaisesRegex(RuntimeError, "null-output-volume, not"):
-            self.run_with(None, ["null-output-volume", "null-output-volume"])
+            self.run_with("google-sdk-gphone64-x86-64", ["null-output-volume", "null-output-volume"])
         self.assertEqual(self.calls, 2)
+
+    def test_a_tap_that_changes_nothing_is_tried_again(self):
+        self.run_with("google-sdk-gphone64-x86-64", [None, "browser"])
+        self.assertEqual(self.calls, 2)
+
+    def test_a_zone_said_before_the_page_started_again_does_not_count(self):
+        log = [self.LINE.format("browser"), "I/pubky-music: media controls: the page's message port is set up\n",
+               self.LINE.format("null-output-volume")]
+        with patch.object(ep, "logcat", side_effect=lambda: "".join(log)):
+            self.assertEqual(ep.page_zone(), "null-output-volume")
+        log[2] = ""
+        with patch.object(ep, "logcat", side_effect=lambda: "".join(log)):
+            self.assertIsNone(ep.page_zone())
+
+    def test_pick_taps_only_a_row_that_holds_still(self):
+        row = 'text="This phone" bounds="[0,{}][320,{}]"'
+        dumps = [[row.format(300, 360)], [row.format(374, 434)], [row.format(374, 434)]]
+        with patch.object(ep, "open_picker", return_value=False), \
+                patch.object(ep, "ui_nodes", side_effect=lambda: dumps.pop(0) if len(dumps) > 1 else dumps[0]), \
+                patch.object(ep, "adb") as adb, patch.object(ep, "log"), patch.object(ep.time, "sleep"):
+            ep.pick('="This phone', "the page's “This phone”")
+        taps = [c.args for c in adb.call_args_list if c.args[:3] == ("shell", "input", "tap")]
+        self.assertEqual(taps, [("shell", "input", "tap", "160", "404")])
 
 
 if __name__ == "__main__":
