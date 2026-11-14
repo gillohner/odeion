@@ -330,6 +330,59 @@ async function slowFavourites(browser, width) {
   } finally { await context.close(); }
 }
 
+// The favourites can't be read (the node or a listener's homeserver doesn't answer): Albums with
+// Favourites chosen says so, with no count and Try again, instead of "0 of 45" and "No favourite
+// albums", which said nothing was hearted. Try again lists them once they can be read.
+async function failedFavourites(browser, width, late = false) {
+  const mbid = (id) => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`;
+  const tagged = albums.map((a) => ({ ...a, release_mbid: mbid(a.id) }));
+  const { page, context, state } = await fx.create(browser, width, {
+    fixtures: { ...fixtures, '/library/albums': { body: tagged }, '/favourites': { status: 503, body: { error: 'The homeserver did not answer' } } },
+    favs: [`https://musicbrainz.org/release/${mbid(3)}`],
+    // late: the failure comes after the 3 s wait, so the page first says they are on their way
+    delay: (v) => (late && v === '/favourites' ? 4500 : 0),
+  });
+  await context.addInitScript(() => localStorage.setItem('pm.list.albums', JSON.stringify({ fav: true })));
+  const at = `${width}${late ? ' late' : ''}`;
+  try {
+    await fx.go(page, '/albums');
+    if (late) {
+      await page.waitForFunction(() => document.querySelector('.empty h3')?.textContent === 'Getting your favourites…', null, { timeout: 4400 })
+        .catch(() => assert.fail(`${at}: says the favourites are on their way while they are`));
+      await page.waitForFunction(() => document.querySelector('.empty h3')?.textContent !== 'Getting your favourites…', null, { timeout: 6000 });
+    }
+    await page.waitForFunction(() => document.querySelector('.empty h3'), null, { timeout: 6000 })
+      .catch(() => assert.fail(`${width}: Albums is drawn when the favourites can't be read`));
+    assert.equal(await page.locator('.empty h3').innerText(), 'Couldn’t get your favourites', `${width}: says the favourites couldn't be read, not "No favourite albums"`);
+    assert.equal(await page.locator('.page-head .count').count(), 0, `${width}: no count when the favourites can't be read, not "0 of 45"`);
+    assert.equal(await page.locator('[data-lfav]').getAttribute('aria-pressed'), 'true', 'Favourites is still chosen');
+    const again = page.getByRole('button', { name: 'Try again' });
+    assert.equal(await again.count(), 1, `${width}: one Try again`);
+    if (width === 1280 && !late) { await fx.cleanCopy(page); await page.screenshot({ path: path.join(shots, `after-albums-fav-failed-${width}.png`) }); }
+    if (late) { assert.deepEqual(state.errors, [], 'no page errors'); console.log(`PASS failed Favourites ${at}: on their way, then says they couldn't be read`); return; }
+    // Still failing: Try again asks again and comes back to the same note (not "No favourite
+    // albums"), with the keyboard still on Try again
+    const asked = () => state.hits.filter((h) => h.v === '/favourites' && h.m === 'GET').length;
+    const before = asked();
+    await again.focus(); await page.keyboard.press('Enter');
+    await page.waitForFunction(() => { const b = document.querySelector('#albumsfavretry'); return b && !b.disabled && document.activeElement === b; }, null, { timeout: 6000 })
+      .catch(() => assert.fail(`${width}: after a failed Try again, Try again is back and keeps the keyboard`));
+    assert.ok(asked() > before, `${width}: Try again asks for the favourites again`);
+    assert.equal(await page.locator('.empty h3').innerText(), 'Couldn’t get your favourites', `${width}: still failing, still says so`);
+    assert.equal(await page.locator('.page-head .count').count(), 0, `${width}: still no count`);
+    // Readable again: Try again lists them, with the count
+    delete state.fixtures['/favourites'];
+    await page.getByRole('button', { name: 'Try again' }).click();
+    await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length === 1, null, { timeout: 6000 })
+      .catch(() => assert.fail(`${width}: Try again lists the favourites once they can be read`));
+    assert.deepEqual(await page.locator('#albumgrid .tile').evaluateAll((els) => els.map((e) => Number(e.getAttribute('data-album')))), [3]);
+    assert.equal(await page.locator('.empty').count(), 0);
+    assert.equal(await page.locator('.page-head .count').innerText(), '1 of 45', `${width}: the count is back once they are in`);
+    assert.deepEqual(state.errors, [], 'no page errors');
+    console.log(`PASS failed Favourites ${width}: says so with Try again, no count; lists them once they can be read`);
+  } finally { await context.close(); }
+}
+
 // A tile's Play sits on its own cover and plays that album (it used to be placed against the page,
 // all tiles' Plays stacked in one spot at the window's corner, and a click there played the last
 // album). On a touch screen, with no hover, the Play shows at a 44 px target; with a mouse it shows on
@@ -411,6 +464,8 @@ async function seeAllTilePlay(browser, width, mobile) {
     await nodeFavAlbum(browser);
     for (const width of [1280, 1024, 768]) await coldFavourites(browser, width);
     for (const width of [1280, 768]) await slowFavourites(browser, width);
+    for (const width of [1280, 1024, 768]) await failedFavourites(browser, width);
+    await failedFavourites(browser, 1280, true);
     for (const width of [1280, 1024, 768]) await tilePlay(browser, width, false);
     for (const width of [360, 412]) await tilePlay(browser, width, true);
     await seeAllTilePlay(browser, 1280, false);

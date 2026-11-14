@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-14
+
+- **Albums says so when your favourites can't be read.** With Favourites on, if your node or your homeserver didn't answer, Albums showed "0 of 45" and "No favourite albums", as if you had hearted none. Now it says "Couldn’t get your favourites" with the reason and a Try again button, and no count. Try again lists them as soon as they can be read.
+
 ### 2026-11-13
 
 - **When one music service doesn’t answer a search, its Retry is a real button.** If, say, Spotify took too long, its line under the search box ended in a small grey “Retry” link, 29 × 17 px on a phone, that looked like plain text and that the keyboard could not reach. It is now the same small Retry button as when the whole search fails: easy to hit with a finger, reachable with Tab, and Enter or a tap searches again with the same words. A service that can’t be helped by trying again (one that needs a paid plan) still says why, with no Retry.
