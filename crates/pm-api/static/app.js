@@ -2563,7 +2563,7 @@
       // instead of the file (owner, 2026-10-22: a library FLAC during a big copy)
       let why = `its source sent no audio ${hereName().toLowerCase()} can play`;
       try { const r = await fetch(audio.src, { headers: { range: 'bytes=0-1' } }); const ct = r.headers.get('content-type') || ''; if (!r.ok) why = `the node answered ${r.status}${r.status >= 500 ? ' (busy or not reachable just now)' : ''}`; else if (!/^audio\/|octet-stream|mpegurl|video\/mp2t/.test(ct)) why = `the node sent ${ct.split(';')[0] || 'something'} instead of audio`; } catch { why = 'the node did not answer'; }
-      if (state.browserRetry.n < 1 && state.browserIndex === i) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex === i) browserPlay(i); }, 2000); return; }
+      if (state.browserRetry.n < 1 && state.browserIndex === i) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex === i) { it.moved = true; browserPlay(i, startAt); } }, 2000); return; }
       toast(`“${it.title || 'This song'}” can't play here: ${why}.${it.track_id != null ? '' : ' Try another version on the song\u2019s page.'}`, 'error');
     });
     // A song moved in from a zone was counted there already
@@ -2583,7 +2583,9 @@
     } catch { /* metadata is a nicety */ }
   };
   if (hasMediaSession) {
-    const handlers = { play: () => audio.play().catch(() => {}), pause: () => audio.pause(), nexttrack: () => browserPlay(state.browserIndex + 1), previoustrack: () => browserPlay(Math.max(0, state.browserIndex - 1)), seekto: (d) => { if (d && typeof d.seekTime === 'number') audio.currentTime = d.seekTime; } };
+    // (the bar's steps: right after a reload they go on from the saved song, and Previous past
+    // 0:03 starts the song again; before, Next and Previous went from song 1)
+    const handlers = { play: () => { if (audio.paused) browserStep({ action: 'toggle' }); }, pause: () => audio.pause(), nexttrack: () => browserStep({ action: 'next' }), previoustrack: () => browserStep({ action: 'previous' }), seekto: (d) => { if (d && typeof d.seekTime === 'number') audio.currentTime = d.seekTime; } };
     for (const [k, f] of Object.entries(handlers)) { try { navigator.mediaSession.setActionHandler(k, f); } catch { /* unsupported action */ } }
     audio.addEventListener('play', () => { try { navigator.mediaSession.playbackState = 'playing'; } catch { /* ignore */ } });
     audio.addEventListener('pause', () => { try { navigator.mediaSession.playbackState = 'paused'; } catch { /* ignore */ } });
@@ -2705,8 +2707,9 @@
     const name = zid === BROWSER ? hereName() : (state.zones[zid] || {}).name;
     const on = name && zoneList().length > 1 ? ` on ${name}` : '';
     if (isOffline()) toast('The queue is empty: play one of your downloads');
-    // (the note stays a while: songs queued meanwhile are not replaced by the shuffle)
-    else if (state.info && state.info.library && state.info.library.tracks > 0) toast(`The queue is empty${on}`, '', { label: 'Shuffle my music', run: () => (queueEmpty(zid) ? shuffleMyMusic(zid) : toast(`The queue has songs now${on}: press Play`)) });
+    // (the note stays a while: songs queued meanwhile are not replaced by the shuffle; pressed again
+    // while This browser's shuffle still reads the library, nothing: its songs are on their way)
+    else if (state.info && state.info.library && state.info.library.tracks > 0) toast(`The queue is empty${on}`, '', { label: 'Shuffle my music', run: () => (zid === BROWSER && zoneBusy.get(BROWSER) ? undefined : queueEmpty(zid) ? shuffleMyMusic(zid) : toast(`The queue has songs now${on}: press Play`)) });
     else toast('The queue is empty: search for something to play');
   };
   // A node zone stopped, with nothing in its queue and nothing playing (the node would only answer
@@ -2718,31 +2721,35 @@
   const zoneEmpty = (z) => !!z && z.transport === 'stopped' && !z.now_playing && !hasQueue(z) && !zoneBusy.get(z.id) && (z.id !== state.zone || (z.id === state.queueZone && !(state.queue || []).length));
   // (a zone gone meanwhile: the shuffle goes, and the node says it is gone)
   const queueEmpty = (zid) => (zid === BROWSER ? !state.browserQueue.length : !state.zones[zid] || zoneEmpty(state.zones[zid]));
+  // This browser's own player: the bar's buttons (in This browser) and the keyboard's or lock
+  // screen's media keys (whichever zone is in use) take the same steps
+  const browserStep = (action) => {
+    const steps = ['toggle', 'play', 'next', 'previous'].includes(action.action);
+    // (with Shuffle my music still reading the library, nothing: its songs are on their way)
+    if (steps && !state.browserQueue.length) { if (!zoneBusy.get(BROWSER)) emptyQueue(BROWSER); return; }
+    // Right after a reload the saved song and place come back when the node's events connect. A
+    // press before that (or with the node out of reach) goes on from them: Play plays the saved
+    // song from where it was, Next and Previous move from it (before, all three started song 1,
+    // and the saver then kept that). (Already counted when it first started: no second play.)
+    const at = ['toggle', 'next', 'previous'].includes(action.action) && state.browserIndex < 0 ? savedBrowserAt() : null;
+    if (at) {
+      const i = action.action === 'next' ? at.index + 1 : action.action === 'previous' && at.pos <= 3 ? Math.max(0, at.index - 1) : at.index;
+      if (i === at.index) state.browserQueue[i].moved = true;
+      browserPlay(i, action.action === 'toggle' ? at.pos : 0); renderBar(); return;
+    }
+    // Songs queued while nothing played (Add to queue, Play next): Play starts the queue at its
+    // first song (before, it played nothing and showed Pause)
+    if (action.action === 'toggle' && !state.browserQueue[state.browserIndex]) { browserPlay(0); return; }
+    if (action.action === 'toggle') { if (audio.paused) audio.play().catch(() => {}); else audio.pause(); }
+    else if (action.action === 'next') browserPlay(state.browserIndex + 1);
+    else if (action.action === 'previous') { if (audio.currentTime > 3) audio.currentTime = 0; else browserPlay(Math.max(0, state.browserIndex - 1)); }
+    else if (action.action === 'seek') audio.currentTime = action.position_ms / 1000;
+    else if (action.action === 'play' && action.index != null) browserPlay(action.index);
+    renderBar();
+  };
   const transport = async (action) => {
     const steps = ['toggle', 'play', 'next', 'previous'].includes(action.action);
-    if (isBrowser()) {
-      if (steps && !state.browserQueue.length) { emptyQueue(); return; }
-      // Right after a reload the saved song and place come back when the node's events connect. A
-      // press before that (or with the node out of reach) goes on from them: Play plays the saved
-      // song from where it was, Next and Previous move from it (before, all three started song 1,
-      // and the saver then kept that). (Already counted when it first started: no second play.)
-      const at = ['toggle', 'next', 'previous'].includes(action.action) && state.browserIndex < 0 ? savedBrowserAt() : null;
-      if (at) {
-        const i = action.action === 'next' ? at.index + 1 : action.action === 'previous' && at.pos <= 3 ? Math.max(0, at.index - 1) : at.index;
-        if (i === at.index) state.browserQueue[i].moved = true;
-        browserPlay(i, action.action === 'toggle' ? at.pos : 0); renderBar(); return;
-      }
-      // Songs queued while nothing played (Add to queue, Play next): Play starts the queue at its
-      // first song (before, it played nothing and showed Pause)
-      if (action.action === 'toggle' && !state.browserQueue[state.browserIndex]) { browserPlay(0); return; }
-      if (action.action === 'toggle') { if (audio.paused) audio.play().catch(() => {}); else audio.pause(); }
-      else if (action.action === 'next') browserPlay(state.browserIndex + 1);
-      else if (action.action === 'previous') { if (audio.currentTime > 3) audio.currentTime = 0; else browserPlay(Math.max(0, state.browserIndex - 1)); }
-      else if (action.action === 'seek') audio.currentTime = action.position_ms / 1000;
-      else if (action.action === 'play' && action.index != null) browserPlay(action.index);
-      renderBar();
-      return;
-    }
+    if (isBrowser()) { browserStep(action); return; }
     if (!state.zones[state.zone]) return;
     const zt = state.zones[state.zone];
     if (steps && zoneEmpty(zt)) { emptyQueue(); return; }
