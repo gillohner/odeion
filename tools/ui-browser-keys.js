@@ -6,6 +6,8 @@
 //   it went to the song before).
 // - The automatic retry after a song did not start opens it where it was to start (a resumed song
 //   no longer starts again at 0:00), and the retry is not counted as a second play.
+// - A retry due after another song was started in its place (a new queue within the 2 s) leaves
+//   that song alone: not started again, not counted twice.
 // - The empty-queue note's Shuffle my music, pressed while an earlier one still reads the library,
 //   starts no second shuffle that would replace the first one's songs; Play meanwhile shows no note.
 // Real candidate assets, isolated API fixtures; no node or external network required.
@@ -194,12 +196,45 @@ async function shuffleOnce(browser, width) {
   } finally { await context.close(); }
 }
 
+async function retryStale(browser, width) {
+  // 7. A song whose first start fails, and within the 2 s before its retry another song started
+  // from its row (the same place in its new queue): the new song keeps playing from where it is,
+  // is counted once, and the failed one's retry does nothing (before, it started the new song again
+  // at 0:00 and counted it twice)
+  const { page, context, state } = await fx.create(browser, width, { fixtures, realAudio: true });
+  await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => (/\/tracks\/2\/file/.test(r.request().url()) ? r.abort() : serveWav(r)));
+  try {
+    await fx.go(page, '/tracks');
+    await page.waitForSelector('#tracklist .track');
+    const playRow = async (n) => { const row = page.locator('#tracklist .track').nth(n); await row.hover(); await row.locator('[data-act="play"]').click(); };
+    await playRow(1);
+    for (let i = 0; i < 60 && !/Trying again/.test((await toastNow(page)).text); i++) await sleep(50);
+    assert.match((await toastNow(page)).text, /Song 2. did not start.*Trying again/, `${width}: says Song 2 did not start and is tried again`);
+    const said = Date.now();
+    await playRow(2);
+    // (inside the 2 s: a slow runner that got here after the retry would pass without the check)
+    assert.ok(Date.now() - said < 1700, `${width}: Song 3 started before Song 2's retry was due (${Date.now() - said} ms)`);
+    const n = await playing(page);
+    assert.equal(songOf(n), 3, `${width}: Song 3 plays (${n.src})`);
+    assert.equal(n.index, 0, `${width}: at the place Song 2 had (${n.index})`);
+    await sleep(2600); // (past the failed song's retry)
+    const later = await now(page);
+    assert.equal(songOf(later), 3, `${width}: Song 3 is still on (${later.src})`);
+    assert.equal(later.paused, false, `${width}: and plays`);
+    assert.ok(later.time > n.time + 1.5, `${width}: on from where it was, not started again (${n.time} -> ${later.time})`);
+    const h3 = history(state).filter((x) => JSON.parse(x.body).track_id === 3);
+    assert.equal(h3.length, 1, `${width}: Song 3 is counted once (${h3.length})`);
+    await page.screenshot({ path: path.join(shots, `retry-stale-${width}.png`) });
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   let failed = 0;
   try {
     for (const width of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [1280, 1024, 768])) {
-      for (const [name, fn] of [['Play key after a reload', playKey], ['Next key after a reload', nextKey], ['Previous key after a reload', previousKey], ['retry keeps the place', retryKeepsPlace], ['retry counted once', retryCountsOnce], ['one shuffle at a time', shuffleOnce]]) {
+      for (const [name, fn] of [['Play key after a reload', playKey], ['Next key after a reload', nextKey], ['Previous key after a reload', previousKey], ['retry keeps the place', retryKeepsPlace], ['retry counted once', retryCountsOnce], ['one shuffle at a time', shuffleOnce], ['a stale retry leaves the new song', retryStale]]) {
         try { await Promise.race([fn(browser, width), sleep(60000).then(() => { throw new Error('timed out after 60 s'); })]); console.log(`PASS ${width} ${name}`); } catch (e) { failed++; console.log(`FAIL ${width} ${name}: ${e.message}`); }
       }
     }

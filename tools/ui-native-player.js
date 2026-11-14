@@ -343,10 +343,16 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       check((await calls(p, 'native_load')).length === loads0 && !(await now(p)).paused, `${at}: and goes on with it without opening it again`);
       // A break at the very start: the song's one retry (a new load)
       await p.evaluate(() => localStorage.setItem('pm.repeat', 'off'));
+      const h0 = r.state.hits.filter((h) => h.v === '/library/history').length;
       await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(700);
       let b0 = (await calls(p, 'native_load')).length;
       await p.evaluate(() => { Object.assign(window.__app, { transport: 'paused', broke: true, position_ms: 0, error: 'decode: the stream broke off' }); window.__send(); }); await sleep(2600);
       check((await calls(p, 'native_load')).length > b0, `${at}: a break at the very start is tried once more`);
+      // (the retry is the same play: counted once)
+      // (a second post would land shortly after the retry's load: given time to, on a slow runner)
+      await waitFor(async () => r.state.hits.filter((h) => h.v === '/library/history').length - h0 > 1, 1500);
+      const h1 = r.state.hits.filter((h) => h.v === '/library/history').length;
+      check(h1 - h0 === 1, `${at}: the song and its retry are counted once (${h1 - h0} history posts)`);
       await p.evaluate(() => { Object.assign(window.__app, { broke: false, error: null }); });
       // The same song reopened, pause and play while it opens, and the open fails: said, and the
       // bar doesn't stay "playing"
