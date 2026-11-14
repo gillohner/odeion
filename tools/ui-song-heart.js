@@ -6,7 +6,8 @@
 // Before, those lists had only Play and ⋯, so you could not see which songs you had, and saving one
 // cost 2 clicks (⋯ → Add to favourites) against 1 on Songs.
 // Checked here: the heart saves in place (the list is not redrawn) and the row's ⋯ menu agrees with
-// it; it never starts the song; from the keyboard Enter saves and the heart keeps focus, so Tab
+// it; a screen reader hears it as a toggle (aria-pressed, like Now Playing's heart) on the album
+// rows and on Library › Songs; it never starts the song; from the keyboard Enter saves and the heart keeps focus, so Tab
 // carries on down the row; bookmarks that arrive after the page fill the hearts in by themselves;
 // while you pick songs on a narrow window the heart stands aside with the row's other controls; a
 // collection's fuller row still fits at 700 px; and the phone shell keeps its two-control row (the
@@ -44,7 +45,7 @@ const shown = (page, sel) => page.evaluate((s) => {
 }, sel);
 const heartState = (page, sel = HEART) => page.evaluate((s) => {
   const b = document.querySelector(s);
-  return b && { on: b.classList.contains('on'), title: b.title, label: b.getAttribute('aria-label'), icon: (b.querySelector('use')?.getAttribute('href') || '').replace('#i-', ''), next: b.nextElementSibling?.dataset.smore != null };
+  return b && { on: b.classList.contains('on'), pressed: b.getAttribute('aria-pressed'), title: b.title, label: b.getAttribute('aria-label'), icon: (b.querySelector('use')?.getAttribute('href') || '').replace('#i-', ''), next: b.nextElementSibling?.dataset.smore != null };
 }, sel);
 const menuLabels = (page) => page.evaluate(() => [...document.querySelectorAll('.popover.menu:not([hidden]) .pop-item')].map((b) => b.textContent.trim()));
 const closeMenu = async (page) => { await page.keyboard.press('Escape'); await page.waitForSelector('.popover.menu:not([hidden])', { state: 'detached', timeout: 2000 }).catch(() => {}); await page.waitForTimeout(120); };
@@ -69,6 +70,7 @@ async function mouse(browser) {
     let h = await heartState(page);
     assert.deepEqual([h.on, h.icon, h.title], [false, 'heart', 'Add to favourites'], `an outline heart before saving (${JSON.stringify(h)})`);
     assert.equal(h.label, `Add ${fx.track.title} to favourites`, 'a screen reader hears which song');
+    assert.equal(h.pressed, 'false', 'and that the heart is a toggle, off (as Now Playing\'s heart says)');
     assert.equal(h.next, true, 'the heart sits right before the row\'s ⋯, as on Songs');
     await page.screenshot({ path: path.join(shots, 'album-1280-hover.png') });
 
@@ -83,6 +85,7 @@ async function mouse(browser) {
     h = await heartState(page);
     assert.deepEqual([h.on, h.icon, h.title], [true, 'heart-fill', 'Remove from favourites'], `filled and relabelled (${JSON.stringify(h)})`);
     assert.equal(h.label, `Remove ${fx.track.title} from favourites`);
+    assert.equal(h.pressed, 'true', 'a screen reader hears it is on now');
     assert.equal(await page.evaluate((s) => document.querySelector(s).dataset.probe, ROW), 'same-node', 'the list was not redrawn under you');
     assert.equal(await shown(page, HEART).then((x) => x.opacity), 1, 'a favourite keeps its heart');
 
@@ -108,7 +111,7 @@ async function mouse(browser) {
     assert.equal(dels.length, 1, 'one click, one removal');
     assert.equal(dels[0].q, '?track_id=1', `removed by the same key (${dels[0].q})`);
     h = await heartState(page);
-    assert.deepEqual([h.on, h.title], [false, 'Add to favourites'], 'an outline again');
+    assert.deepEqual([h.on, h.pressed, h.title], [false, 'false', 'Add to favourites'], 'an outline again, and off');
     await page.click(`${ROW} [data-smore]`);
     await page.waitForSelector('.popover.menu:not([hidden]) .pop-item');
     labels = await menuLabels(page);
@@ -148,6 +151,7 @@ async function already(browser, width, touch, key) {
     if (touch) assert.ok(s.w >= 40 && s.h >= 40, `${width} touch: the heart is a 40 px target (${s.w}x${s.h})`);
     const h = await heartState(page);
     assert.deepEqual([h.on, h.icon, h.title], [true, 'heart-fill', 'Remove from favourites'], `${width}: filled, and it says what pressing it does`);
+    assert.equal(h.pressed, 'true', `${width}: drawn on, it says so to a screen reader too`);
     await page.screenshot({ path: path.join(shots, `album-${width}${touch ? '-touch' : ''}-favourite.png`) });
     await fx.cleanCopy(page);
     assert.deepEqual(state.errors, []);
@@ -335,18 +339,19 @@ async function songsRow(browser) {
     await page.waitForSelector(T, { state: 'attached' });
     await page.waitForTimeout(300);
     let h = await heartState(page, T);
-    assert.deepEqual([h.on, h.label], [false, `Add ${fx.track.title} to favourites`], `the Songs heart says which song (${JSON.stringify(h)})`);
+    assert.deepEqual([h.on, h.pressed, h.label], [false, 'false', `Add ${fx.track.title} to favourites`], `the Songs heart says which song, and that it is off (${JSON.stringify(h)})`);
     await page.evaluate((s) => { document.querySelector(s).closest('.track').dataset.probe = 'same-node'; }, T);
     node.release();
     await page.waitForFunction((s) => document.querySelector(s).classList.contains('on'), T, { timeout: 4000 }).catch(() => {});
     h = await heartState(page, T);
-    assert.deepEqual([h.on, h.icon, h.label], [true, 'heart-fill', `Remove ${fx.track.title} from favourites`], `it fills in once they are in (${JSON.stringify(h)})`);
+    assert.deepEqual([h.on, h.pressed, h.icon, h.label], [true, 'true', 'heart-fill', `Remove ${fx.track.title} from favourites`], `it fills in, pressed, once they are in (${JSON.stringify(h)})`);
     assert.equal(await page.evaluate((s) => document.querySelector(s).closest('.track').dataset.probe, T), 'same-node', 'the row was not drawn again');
     await page.locator('.track').first().hover();
     await page.click(T);
     await page.waitForFunction((s) => !document.querySelector(s).classList.contains('on'), T, { timeout: 4000 });
     assert.deepEqual(node.asks.filter((m) => m !== 'GET'), ['DELETE'], 'one click, one removal');
-    assert.equal((await heartState(page, T)).label, `Add ${fx.track.title} to favourites`);
+    h = await heartState(page, T);
+    assert.deepEqual([h.pressed, h.label], ['false', `Add ${fx.track.title} to favourites`], 'off again after its own press');
     await page.screenshot({ path: path.join(shots, 'songs-1280-late.png') });
     await fx.cleanCopy(page);
     assert.deepEqual(state.errors, []);

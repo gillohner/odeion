@@ -96,11 +96,13 @@ async function artistPage(browser, width) {
     // the new state at once, and a second press before the redraw undoes the first
     await scrollTo(page, 0);
     await page.locator('#ifav').focus();
+    assert.equal(await page.locator('#ifav').getAttribute('aria-pressed'), 'false', `${where}: the heart is a toggle, off, to a screen reader too`);
     await page.evaluate(() => { window.__old = document.querySelector('#main > *'); });
     const asked = asks(state);
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => window.__old.isConnected && document.querySelector('#ifav').title === 'Remove from favourites', null, { timeout: 3000 })
       .catch(() => assert.fail(`${where}: the heart shows it is on at once`));
+    assert.equal(await page.locator('#ifav').getAttribute('aria-pressed'), 'true', `${where}: and says it is pressed at once`);
     await page.keyboard.press('Enter');
     for (let t = 0; !state.hits.some((h) => h.v === '/favourites' && h.m === 'DELETE') && t < 60; t++) await page.waitForTimeout(50);
     assert.deepEqual(state.hits.filter((h) => h.v === '/favourites' && h.m !== 'GET').map((h) => h.m), ['PUT', 'DELETE'], `${where}: the second press takes the favourite off`);
@@ -108,6 +110,7 @@ async function artistPage(browser, width) {
     await page.waitForFunction(() => !window.__old.isConnected, null, { timeout: 6000 });
     await page.waitForTimeout(LATE + 300);
     assert.equal(await page.locator('#ifav').getAttribute('title'), 'Add to favourites', `${where}: the heart is off after both presses`);
+    assert.equal(await page.locator('#ifav').getAttribute('aria-pressed'), 'false', `${where}: and not pressed`);
     assert.equal(await page.locator('#ifav').evaluate((el) => el === document.activeElement), true, `${where}: the heart keeps focus after its redraw (${await active(page)})`);
     assert.equal(await page.evaluate(() => window.__skel), 0, `${where}: no skeleton after the heart`);
     // Opening a page is unchanged: the same page from a link starts at the top
