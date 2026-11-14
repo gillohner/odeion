@@ -1109,6 +1109,19 @@ html[data-shell="phone"] #iblurbmore::before { content: ''; position: absolute; 
 }
 @media (pointer: coarse) { .srow > .heart:not(.on) { display: none; } }
 html[data-shell="phone"] .srow > .heart { display: none; }
+/* …so on a phone a bookmarked song shows a small filled heart after its title instead, in every song
+   list (Songs' rows too, whose heart button is hidden there as well), and the title gives up the room.
+   It is only a mark (⋯ removes it); a screen reader hears "Bookmarked" after the title. Songs' heart
+   button is hidden on the phone layout at any width (Settings › Layout › Phone on a wide window too). */
+html[data-shell="phone"] .track .row-actions .heart { display: none; }
+html[data-shell="phone"] :is(.track:has(.row-actions .heart.on) .title, .srow:has(> .heart.on) .name) { display: flex; align-items: center; min-width: 0; }
+html[data-shell="phone"] :is(.track:has(.row-actions .heart.on) .title, .srow:has(> .heart.on) .name) > :is(.lnk, .ntext) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+html[data-shell="phone"] :is(.track:has(.row-actions .heart.on) .title, .srow:has(> .heart.on) .name)::before { flex: none; }
+html[data-shell="phone"] :is(.track:has(.row-actions .heart.on) .title, .srow:has(> .heart.on) .name)::after {
+  content: '' / 'Bookmarked'; flex: none; width: 12px; height: 12px; margin-left: 6px; background: #ff6b8a;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 8a4.3 4.3 0 0 1 7.5 2.5c0 5.4-7.5 10-7.5 10z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 8a4.3 4.3 0 0 1 7.5 2.5c0 5.4-7.5 10-7.5 10z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
 
 /* Row reorder buttons outside the queue (playlist songs), and the up chevron everywhere */
 .ic.up { transform: rotate(180deg); }
