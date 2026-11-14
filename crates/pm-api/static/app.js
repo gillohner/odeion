@@ -6360,7 +6360,8 @@
     $$('[data-view="sources"]', main).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('sources'); });
     $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this song') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'in ' + it.site : 'link'}`, icon: 'external', run: () => openWeb(it.uri) }]); });
   };
-  const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
+  // (action: { view, label } opens a page; { id, label } is a button the page binds itself)
+  const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" type="button" ${action.id ? `id="${action.id}"` : `data-empty-action="${action.view}"`}>${esc(action.label)}</button>` : ''}</div>`;
   const LAYOUTS = [['auto', 'Automatic', 'Phone under 600 px wide, desktop from there (tablets too)'], ['phone', 'Phone', 'Tabs and a mini player, at any width'], ['desktop', 'Desktop', 'The sidebar and the full player bar, also in windows from 480 px']];
   const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
     + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<input type="checkbox" class="switch" role="switch" id="densepick" ${densePref() ? 'checked' : ''} aria-label="Dense lists">`));
@@ -6487,7 +6488,7 @@
   const pageGen = { albums: 0, artists: 0 }; const pageShown = { albums: 0, artists: 0 };
   const listStale = (v, mine) => state.view !== v || mine < pageShown[v];
   // The latest favourites load, so a page that lists favourites can wait for it on a cold start
-  let favLoad = null; let favRedraw = null;
+  let favLoad = null; let favRedraw = null; let favRetryFocus = false;
   // Only the latest load's answer counts: on a cold start a slow first answer that lands after a
   // heart was pressed would otherwise put back the list without that bookmark. An older load
   // waits for the latest and answers with it.
@@ -6496,7 +6497,8 @@
       if (p !== favLoad) return favLoad;
       state.favUris = new Set(f.uris || []); paintHearts(); return f;
     }, (e) => { if (p !== favLoad) return favLoad; throw e; });
-    p.then(() => { p.done = true; }, () => { p.done = true; });
+    // (`error`: the latest answer was a failure, so a page can say so instead of "none")
+    p.then(() => { p.done = true; }, (e) => { p.done = true; p.error = e; });
     return p;
   };
   // The song hearts on screen (song rows, Library › Songs rows, Now Playing) painted again from the
@@ -7052,13 +7054,13 @@
           // Favourites on a cold start: the list waits for the favourites (not "No favourite albums"),
           // 3 s at most (a listener's first go to their homeserver can take longer), then is drawn
           // again once they are in
-          let favLate = false;
+          let favLate = false; let favFailed = null;
           if (lp.fav && favLoad) {
             const fl = favLoad;
             // (once is enough: drawn again meanwhile, by a sort or a chip, it doesn't wait again)
             if (favRedraw !== fl) await Promise.race([fl.catch(() => {}), new Promise((ok) => setTimeout(ok, 3000))]);
             if (listStale('albums', mine)) return;
-            favLate = !fl.done;
+            favLate = !fl.done; favFailed = fl.error || null;
             // Drawn again when they are in, while it still shows Favourites (those listed already
             // can be joined by new ones; drawn where it stands, keepList)
             if (favLate && favRedraw !== fl) { favRedraw = fl; const again = () => { if (state.view === 'albums' && listPref('albums').fav) render(); }; fl.then(again, again); }
@@ -7070,10 +7072,16 @@
           // While the favourites are still coming the page says so, without a count ("0 of 45" would
           // say none are hearted, "45" that all of them are)
           const waiting = favLate && !shown.length;
-          main.innerHTML = pageHead('Albums', waiting ? null : state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + (isOwner() ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? (waiting ? `<div id="albumswait">${emptyState('disc', 'Getting your favourites…', 'They show here as soon as they are in.')}</div>` : emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav)))) : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
+          // They couldn't be read (the node or a listener's homeserver didn't answer): it says so, with
+          // Try again and no count ("0 of 45" and "No favourite albums" said none were hearted)
+          const failed = !!favFailed && !shown.length;
+          main.innerHTML = pageHead('Albums', waiting || failed ? null : state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + (isOwner() ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? (waiting ? `<div id="albumswait">${emptyState('disc', 'Getting your favourites…', 'They show here as soon as they are in.')}</div>` : failed ? `<div id="albumsfavfail" role="alert">${emptyState('disc', 'Couldn’t get your favourites', favFailed.message || 'The node didn’t answer.', { id: 'albumsfavretry', label: 'Try again' })}</div>` : emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav)))) : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; return renderSortedList(b, `[data-focus="${b.dataset.focus}"]`); });
           const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); return renderSortedList(ls); };
           const lf = $('[data-lfav]', main); if (lf) lf.onclick = () => { setListPref('albums', { ...lp, fav: !lp.fav }); return renderSortedList(lf, '[data-lfav]'); };
+          // (failing again, the keyboard stays on Try again)
+          const refocus = favRetryFocus; favRetryFocus = false;
+          const fr = $('#albumsfavretry', main); if (fr) { if (refocus) fr.focus(); fr.onclick = () => { favRetryFocus = document.activeElement === fr; fr.disabled = true; loadFavourites().catch(() => {}); render(); }; }
           const grid = $('#albumgrid');
           if (grid) {
             let stop = () => {};
