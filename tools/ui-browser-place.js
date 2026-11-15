@@ -261,6 +261,11 @@ async function backOnSong3(page, width, index, label, shot) {
           await until(() => page.evaluate(() => !!document.querySelector('#browser').error), 'its file does not open');
           await sleep(2300); // (a saver tick)
           assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('pm.browserAt') || 'null')), { index: 1, id: 2, pos: 30 }, 'the saved place is still 0:30');
+          // (the bar says where Play will start it: 0:30, half way along, not 0:00)
+          const bar = await page.evaluate(() => ({ pos: document.querySelector('#pos').textContent, seek: Number(document.querySelector('#seek').value) }));
+          assert.equal(bar.pos, '0:30', `the bar shows 0:30 (${JSON.stringify(bar)})`);
+          assert.ok(bar.seek >= 490 && bar.seek <= 510, `the seek slider is half way (${JSON.stringify(bar)})`);
+          if (width === 360) await page.screenshot({ path: path.join(shots, 'failed-restore-bar-360.png') });
           const before = asked;
           await page.click('#toggle');
           await until(async () => asked > before, 'Play asks for the file again');
@@ -331,6 +336,85 @@ async function backOnSong3(page, width, index, label, shot) {
         await sleep(2300); // (a saver tick)
         const kept = await page.evaluate(() => JSON.parse(localStorage.getItem('pm.browserAt') || 'null'));
         assert.ok(kept && kept.pos < 16, `the saved place follows the song (${JSON.stringify(kept)})`);
+        assert.deepEqual(state.errors, [], 'no page errors');
+      } finally { await context.close(); }
+    });
+    // 9. Move here (this browser) from a zone paused at 0:30 whose song's file doesn't open here (the
+    // node busy: 503): the bar shows 0:30, Play asks for the file again and says so, and once the node
+    // answers the song plays from 0:30 (before, the bar showed 0:00 and Play did nothing, said nothing)
+    for (const width of [1280, 360]) {
+      await check(`${width}: a song moved here paused whose file failed plays from its place on Play`, async () => {
+        const q = saved.map(({ uri, title, artist, album, duration_ms }) => ({ uri, title, artist, album, duration_ms }));
+        const Z = { id: 'z1', name: 'Kitchen', output: 'upnp:k', transport: 'paused', now_playing: { item: q[1], index: 1, position_ms: 30000, duration_ms: 60000 }, queue: q, queue_index: 1, queue_version: 1, repeat: 'off', shuffle: false, radio: false, error: null, acked: 0, volume: { percent: 40 } };
+        const zf = { '/zones': { body: [Z] }, '/zones/z1': { body: Z }, '/outputs': { body: [{ id: 'upnp:k', name: 'Kitchen', kind: 'upnp', caps: { hw_volume: 'percent' } }] } };
+        const { page, context, state } = await fx.create(browser, width, { fixtures: { ...fixtures, ...zf }, realAudio: true, ...(width < 600 ? { mobile: true } : {}) });
+        await context.addInitScript(() => localStorage.setItem('pm.zone', 'z1'));
+        await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [Z] })); });
+        let busy = true; let asked = 0;
+        await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => { asked++; return busy ? r.fulfill({ status: 503, contentType: 'text/plain', body: 'busy' }) : serveWav(r); });
+        // (the Queue page reads Kitchen's queue; the move empties it)
+        await page.route(/\/v1\/zones\/z1\/queue(\?|$)/, (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify(r.request().method() === 'DELETE' ? {} : q) }));
+        try {
+          await fx.go(page, '/queue');
+          await until(() => page.evaluate(() => document.querySelector('#zonename').textContent === 'Kitchen'), 'Kitchen is the zone');
+          await page.waitForSelector(width >= 600 ? '#zonebtn' : '#qtransfer');
+          // (a desktop's way: the zone menu's Move here; a phone's: the Queue page's Move to…)
+          if (width >= 600) { await page.click('#zonebtn'); await page.locator('#zonepop [data-move="browser"]').click(); } else { await page.click('#qtransfer'); await page.locator('.pop-item[data-mi]', { hasText: /this|browser/i }).first().click(); }
+          await until(async () => (await now(page)).index === 1, 'Song 2 is in this browser\'s bar');
+          await until(() => page.evaluate(() => !!document.querySelector('#browser').error), 'its file does not open');
+          if (width >= 600) await page.keyboard.press('Escape');
+          await sleep(300);
+          const bar = await page.evaluate(() => ({ pos: document.querySelector('#pos').textContent, label: document.querySelector('#toggle').getAttribute('aria-label') }));
+          assert.deepEqual(bar, { pos: '0:30', label: 'Play' }, `the bar shows Song 2 paused at 0:30 (${JSON.stringify(bar)})`);
+          if (width === 360) await page.screenshot({ path: path.join(shots, 'failed-move-bar-360.png') });
+          const before = asked;
+          await page.click('#toggle');
+          await until(async () => asked > before, 'Play asks for the file again');
+          const t = await until(() => page.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).find((x) => /did not start/.test(x))), 'Play says the song did not start');
+          assert.match(t, /Song 2.*503.*Trying again/, `the message names the song and the node's answer (${t})`);
+          busy = false;
+          const p = await until(async () => { const v = await now(page); return !v.paused && v.time > 30 ? v : null; }, 'the song plays', 9000);
+          assert.equal(p.index, 1, `Song 2 plays (${JSON.stringify(p)})`);
+          assert.ok(p.time < 34, `from 0:30 (${p.time})`);
+          if (width === 360) await page.screenshot({ path: path.join(shots, 'failed-move-then-play-360.png') });
+          assert.deepEqual(state.errors, [], 'no page errors');
+        } finally { await context.close(); }
+      });
+    }
+    // 8d. Previous on a saved song held at 0:30 whose file didn't open goes back to its start, as
+    // on any song past 0:03 (before, it went to the song before: the bar said 0:30, the player 0:00)
+    await check('1280: Previous on a saved song whose file failed goes back to its start', async () => {
+      const { page, context, state } = await fx.create(browser, 1280, { fixtures, realAudio: true });
+      await context.addInitScript(([q, a]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', a); }, [JSON.stringify(saved), JSON.stringify({ index: 1, id: 2, pos: 30 })]);
+      await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => r.fulfill({ status: 503, contentType: 'text/plain', body: 'busy' }));
+      try {
+        await fx.go(page, '/queue');
+        await until(() => page.evaluate(() => pmPlayer.now().index === 1 && !!document.querySelector('#browser').error), 'Song 2 comes back, its file not opening');
+        await page.click('#prev');
+        await sleep(300);
+        const after = await page.evaluate(() => ({ index: pmPlayer.now().index, pos: document.querySelector('#pos').textContent }));
+        assert.deepEqual(after, { index: 1, pos: '0:00' }, `still Song 2, at its start (${JSON.stringify(after)})`);
+        assert.deepEqual(state.errors, [], 'no page errors');
+      } finally { await context.close(); }
+    });
+    // 9b. A saved song whose file didn't open on the reload, moved to a zone: the zone gets it paused at
+    // its place (before, stopped at 0:00: the place was lost on the way)
+    await check('1280: a saved song whose file failed, moved to a zone, goes there paused at its place', async () => {
+      const Z = { id: 'z1', name: 'Kitchen', output: 'upnp:k', transport: 'stopped', now_playing: null, queue: [], queue_index: null, queue_version: 1, repeat: 'off', shuffle: false, radio: false, error: null, acked: 0, volume: { percent: 40 } };
+      const zf = { '/zones': { body: [Z] }, '/zones/z1': { body: Z }, '/outputs': { body: [{ id: 'upnp:k', name: 'Kitchen', kind: 'upnp', caps: { hw_volume: 'percent' } }] } };
+      const { page, context, state } = await fx.create(browser, 1280, { fixtures: { ...fixtures, ...zf }, realAudio: true });
+      await context.addInitScript(([q, a]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', a); }, [JSON.stringify(saved), JSON.stringify({ index: 1, id: 2, pos: 30 })]);
+      await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [Z] })); });
+      await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => r.fulfill({ status: 503, contentType: 'text/plain', body: 'busy' }));
+      let sent = null;
+      await page.route(/\/v1\/zones\/z1\/load(\?|$)/, (r) => { sent = JSON.parse(r.request().postData() || 'null'); return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ ...Z, transport: 'paused', queue: sent.items, queue_index: sent.index, now_playing: { item: sent.items[sent.index], index: sent.index, position_ms: sent.position_ms, duration_ms: 60000 } }) }); });
+      try {
+        await fx.go(page, '/queue');
+        await until(() => page.evaluate(() => pmPlayer.now().index === 1 && !!document.querySelector('#browser').error), 'Song 2 comes back, its file not opening');
+        await page.click('#zonebtn');
+        await page.locator('#zonepop [data-move="z1"]').click();
+        await until(() => sent, 'the move is asked for');
+        assert.deepEqual({ index: sent.index, position_ms: sent.position_ms, transport: sent.transport }, { index: 1, position_ms: 30000, transport: 'paused' }, `Kitchen gets Song 2 paused at 0:30 (${JSON.stringify(sent)})`);
         assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
     });
