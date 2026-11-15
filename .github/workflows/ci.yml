@@ -624,6 +624,7 @@ jobs:
           ui-tag-page.js tag-page-shots
           ui-controls-search-check.js controls-search-shots
           ui-search-recovery.js search-recovery-shots
+          ui-search-contact.js search-contact-shots
           ui-source-policy.js source-policy-shots
           ui-choice-chips.js choice-chips-shots
           ui-queue-covers.js queue-covers-shots
