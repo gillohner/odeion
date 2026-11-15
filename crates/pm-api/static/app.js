@@ -5115,14 +5115,17 @@
   // file nobody has matched yet asks "Which song is this?" first (fresh-eyes review: adding your
   // own songs to a playlist failed with "no canonical identity"). Resolves to the tracks, now
   // identified, or null when the owner stops.
+  // MusicBrainz asks for the node's email or website: Settings › Discover keeps it (Get started on
+  // Home can be hidden or done), and its field takes the keyboard, ready to type
+  const openContact = () => setView('settings', 'discover').then(() => { const c = state.view === 'settings' && $('#contact'); if (c) c.focus(); });
   const whichSong = async (t) => {
     const who = artists(t);
     toast(`Looking up “${t.title}” on MusicBrainz…`);
     let c; try { c = await api('GET', `/library/tracks/${t.id}/candidates`); } catch (e) { toast(e.message, 'error'); return null; }
     const about = `“${t.title}”${who ? ` by ${who}` : ''}`;
     if (c.needs_contact) {
-      const go = await choiceDialog({ title: 'Which song is this?', text: `Playlists and favourites name each song the way other apps understand, by its entry in MusicBrainz (the open music encyclopedia). To look ${about} up there, the node first needs your email or website (Get started on Home).`, choices: [{ label: 'Open Get started', value: 'home', primary: true }] });
-      if (go) setView('home');
+      const go = await choiceDialog({ title: 'Which song is this?', text: `Playlists and favourites name each song the way other apps understand, by its entry in MusicBrainz (the open music encyclopedia). To look ${about} up there, the node first needs your email or website.`, choices: [{ label: 'Add it', value: 'contact', primary: true }] });
+      if (go) openContact();
       return null;
     }
     if (!c.suggestions.length) {
@@ -5173,7 +5176,7 @@
         try {
           const c = await api('GET', `/library/tracks/${id}/candidates${q ? `?q=${encodeURIComponent(q)}` : ''}`);
           if (!live()) return;
-          if (c.needs_contact) { toast('MusicBrainz needs your email or website first (Get started on Home)', 'error'); b.disabled = false; return; }
+          if (c.needs_contact) { b.disabled = false; focusUndo(toast('MusicBrainz needs your email or website first', 'error', { label: 'Add it', run: openContact })); return; }
           extra.set(id, [...(extra.get(id) || []), ...(c.found || [])]);
           if (!(c.found || []).length) toast('MusicBrainz found nothing strong for that');
           draw();
