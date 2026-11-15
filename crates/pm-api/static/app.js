@@ -221,6 +221,14 @@
     }
     return b;
   };
+  // A progress message ("Looking up…") goes as soon as its answer comes, unless another message
+  // replaced it meanwhile (before, it stayed its full 3.8 s: behind the next dialog, and on the page
+  // the answer opened, over the phone's soft keyboard)
+  const toastDone = (msg) => {
+    const t = $('#toast');
+    if (!t.classList.contains('show') || t.textContent !== msg) return;
+    clearTimeout(toast.h); t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400);
+  };
   // A press whose button a redraw removed leaves the focus on the page: it goes to the toast's Undo
   // (keyboard and screen-reader users reach it there; the toast waits while it has the focus)
   const focusUndo = (b) => { const a = document.activeElement; if (b && b.isConnected && (!a || a === document.body)) b.focus(); };
@@ -2932,9 +2940,9 @@
         // stream plays here: a pick with neither (Spotify Connect plays on Spotify's own
         // devices) has just its canonical page, which is never audio, so it is left out and
         // said so. Every other row keeps its place, duplicates included.
-        const slow = setTimeout(() => toast('Finding where these songs play…'), 800);
+        const finding = 'Finding where these songs play…'; const slow = setTimeout(() => toast(finding), 800);
         let d, pf;
-        try { [d, pf] = await Promise.all([api('GET', `/playlists/${id}`), api('GET', `/playlists/${encodeURIComponent(id)}/play-from`)]); } finally { clearTimeout(slow); }
+        try { [d, pf] = await Promise.all([api('GET', `/playlists/${id}`), api('GET', `/playlists/${encodeURIComponent(id)}/play-from`)]); } finally { clearTimeout(slow); toastDone(finding); }
         rememberTracks(d.tracks); rememberTracks(d.local_tracks);
         const elsewhere = new Map();
         const songs = pf.items.flatMap((r, k) => {
@@ -5120,8 +5128,10 @@
   const openContact = () => setView('settings', 'discover').then(() => { const c = state.view === 'settings' && $('#contact'); if (c) c.focus(); });
   const whichSong = async (t) => {
     const who = artists(t);
-    toast(`Looking up “${t.title}” on MusicBrainz…`);
-    let c; try { c = await api('GET', `/library/tracks/${t.id}/candidates`); } catch (e) { toast(e.message, 'error'); return null; }
+    // (said only when it takes a moment: a quick answer opens its dialog with no flash of words first)
+    const looking = `Looking up “${t.title}” on MusicBrainz…`; const slow = setTimeout(() => toast(looking), 400);
+    let c; try { c = await api('GET', `/library/tracks/${t.id}/candidates`); } catch (e) { toast(e.message, 'error'); return null; } finally { clearTimeout(slow); }
+    toastDone(looking);
     const about = `“${t.title}”${who ? ` by ${who}` : ''}`;
     if (c.needs_contact) {
       const go = await choiceDialog({ title: 'Which song is this?', text: `Playlists and favourites name each song the way other apps understand, by its entry in MusicBrainz (the open music encyclopedia). To look ${about} up there, the node first needs your email or website.`, choices: [{ label: 'Add it', value: 'contact', primary: true }] });
