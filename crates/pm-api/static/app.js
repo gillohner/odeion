@@ -1998,7 +1998,7 @@
     browserSrc(it);
     renderBar();
     // (the Queue page opened by the reload was drawn before the place came back: its song is marked now)
-    if (state.view === 'queue' && isBrowser()) render();
+    if (isBrowser()) queueShown();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   // What the bar showed last (zone, song, artist), kept in this browser: until the node answers,
@@ -2593,7 +2593,7 @@
       useNative(false);
       state.ytOn = true; ytPanel(it);
       yt.open(yid).catch((e) => toast(e.message, 'error'));
-      mediaSessionUpdate(it); renderBar(); if (state.view === 'queue') render();
+      mediaSessionUpdate(it); renderBar(); queueShown();
       return;
     }
     if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
@@ -2635,7 +2635,7 @@
     it.moved = false;
     mediaSessionUpdate(it);
     renderBar();
-    if (state.view === 'queue') render();
+    queueShown();
   };
   // Hardware media keys and lock-screen controls for browser playback.
   const hasMediaSession = typeof navigator !== 'undefined' && 'mediaSession' in navigator && typeof MediaMetadata === 'function';
@@ -2973,7 +2973,26 @@
   // is still in use (an older answer, a zone switched from, landing late keeps the newer one). A
   // queue fetched for another zone, or before a time in This browser, no longer counts as this one's.
   let queueAsk = 0, queueDropped = false;
-  const refreshQueue = async (rerender = true) => {
+  // What the Queue page shows besides which row is the song on. When only the song changes (the next
+  // one starts here, the zone moves on), the page is not drawn again: the mark moves to its row, so a
+  // focused row button keeps the focus and a drag in progress still lands. Other changes redraw it.
+  const queueKey = () => {
+    const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
+    return JSON.stringify([state.zone, z ? z.name : '', !!(z && z.radio), isListener(), zoneList().some((o) => o.id !== state.zone), q.map((it) => [it.id, it.uri, itemName(it), it.artist, it.album, it.duration_ms])]);
+  };
+  const markQueue = () => {
+    const z = currentZone(); const at = z ? z.queue_index : null;
+    $$('#main .list.queue [data-qrow]').forEach((r) => {
+      const i = Number(r.dataset.qrow); const on = at === i;
+      if (r.classList.contains('cur') === on) return;
+      r.classList.toggle('cur', on);
+      if (on) r.setAttribute('aria-current', 'true'); else r.removeAttribute('aria-current');
+      const b = $('[data-qi]', r); if (b) b.innerHTML = on ? icon('play') : `<span class="num">${i + 1}</span>`;
+    });
+  };
+  const queueShown = () => { if (state.view !== 'queue') return; if (state.queueKey === queueKey()) markQueue(); else render(); };
+  // (ownDraw: the Queue page asks as it is drawn, and draws what this brings itself)
+  const refreshQueue = async (rerender = true, ownDraw = false) => {
     if (state.queueZone !== state.zone) state.queueZone = null;
     if (!isBrowser()) {
       const zid = state.zone; const ask = ++queueAsk;
@@ -2981,10 +3000,12 @@
       let q = null; try { q = await api('GET', `/zones/${zid}/queue`); } catch { /* shown empty */ }
       if (ask !== queueAsk || zid !== state.zone) { queueDropped = true; return; }
       state.queue = q || []; state.queueZone = q ? zid : null;
-      // (the Queue page drew what it had when its own, older answer was dropped: drawn again now)
-      if (queueDropped) { queueDropped = false; rerender = true; }
+      // (the Queue page drew what it had when its own, older answer was dropped: drawn again now,
+      // unless this answer is the page's own, as it is drawn: that draw has it, a second would take
+      // the focus from a row)
+      if (queueDropped) { queueDropped = false; if (!ownDraw) rerender = true; }
     }
-    if (rerender && state.view === 'queue') render();
+    if (rerender) queueShown();
     if (!$('#nowplaying').hidden) renderNowPlaying();
   };
 
@@ -3803,7 +3824,7 @@
   const markPlaying = () => {
     const z = currentZone(); const np = z && z.now_playing; const m = np && /^track:(\d+)$/.exec(np.item.uri || '');
     const id = m ? m[1] : null;
-    $$('#main .track[data-tid]').forEach((r) => r.classList.toggle('cur', r.dataset.tid === id));
+    $$('#main .track[data-tid]').forEach((r) => { const on = r.dataset.tid === id; r.classList.toggle('cur', on); if (on) r.setAttribute('aria-current', 'true'); else r.removeAttribute('aria-current'); });
     const uri = np ? np.item.uri || '' : '';
     $$('#main .srow[data-np]').forEach((r) => { const on = !!uri && r.dataset.np === uri; r.classList.toggle('cur', on); if (on) r.setAttribute('aria-current', 'true'); else r.removeAttribute('aria-current'); });
   };
@@ -5183,7 +5204,7 @@
       const i = start + k;
       const cur = np && np.item.uri === 'track:' + t.id;
       const fav = isFav(t); const can = trackHasId(t);
-      return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}" data-tid="${t.id}">
+      return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}" data-tid="${t.id}"${cur ? ' aria-current="true"' : ''}>
         <div class="no"><span class="num">${numbers === 'track' ? (t.track_no ?? '') : i + 1}</span><button class="rowplay" data-act="play" title="Play from here">${icon('play')}</button></div>
         <div class="main-col"><div class="title"><a class="lnk" data-act="song" href="${esc(pathFor('item', { kind: 'song', id: trackPageId(t) }))}">${esc(t.title)}</a>${dlHas(t.id) ? dlMark() : ''}${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id })}</div></div>
         ${showAlbum ? `<div class="album-col">${t.album ? `<button class="lnk" data-act="album" data-album="${t.album.id}">${esc(t.album.title)}</button>` : ''}</div>` : ''}
@@ -8677,12 +8698,13 @@
           break;
         }
         case 'queue': {
-          await refreshQueue(false);
+          state.queueKey = null; // (set once the page is drawn)
+          await refreshQueue(false, true);
           if (state.view !== 'queue') return;
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
           const hadQsh = !!document.activeElement && document.activeElement.id === 'qshuffle';
           main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
-            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add songs with the row actions.'));
+            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add songs with the row actions.'));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
           const qedit = async (i, op, to) => {
             if (isBrowser()) {
@@ -8758,6 +8780,7 @@
           // The same mode as the bar's Shuffle, with its state
           // (the toggle keeps the focus across the page's redraw)
           const qsh = $('#qshuffle'); if (qsh) { qsh.onclick = toggleShuffle; renderModes(); if (hadQsh) qsh.focus(); }
+          state.queueKey = queueKey();
           const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Move to' }, ...zoneList().filter((o) => o.id !== state.zone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]);
           const qsv = $('#qsave'); if (qsv) qsv.onclick = async () => {
             const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: state.zone };

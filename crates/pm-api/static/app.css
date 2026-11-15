@@ -702,6 +702,7 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
 /* ---- queue ---- */
 .list.queue .list-row { padding: 6px 10px 6px 6px; }
 .list.queue .num { font-size: var(--fs-sm); color: var(--muted); font-variant-numeric: tabular-nums; }
+.list.queue .list-row.cur .name { color: var(--accent-strong); }
 .list.queue .q-actions { opacity: 0; display: inline-flex; gap: 2px; transition: opacity var(--dur-fast); }
 .list.queue .list-row:hover .q-actions, .list.queue .list-row:focus-within .q-actions { opacity: 1; }
 .list.queue .q-actions .icon-btn { width: 30px; height: 30px; }
