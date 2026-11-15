@@ -2754,14 +2754,17 @@
   // `zid` (default the zone in use): Get started's Shuffle my music, and an empty queue's Play. The
   // zone is the one asked for when it was offered, in its turn: a card on Zones that is not the zone
   // in use, or a switch of zone while the songs are read, can't replace another zone's queue
-  // (pressed again while one for the same zone is on its way, from the note, Get started or anywhere
-  // else: nothing, its songs are coming; before, a node zone's second one replaced the first's.
-  // This browser's also waits for any other change of its own on its way)
-  const shuffling = new Set();
+  // (pressed again while one for the same zone is on its way and still the last change asked for that
+  // zone, from the note, Get started or anywhere else: nothing, its songs are coming; before, a node
+  // zone's second one replaced the first's. With a change asked after it, an album's Play say, the
+  // new press is the last word and goes in its turn, as that Play did. This browser's also waits for
+  // any other change of its own on its way)
+  const shuffling = new Map(); // (zone → the zone's last change asked when its shuffle was)
   const shuffleMyMusic = (zid = state.zone) => {
-    if (shuffling.has(zid) || (zid === BROWSER && zoneBusy.get(BROWSER))) return Promise.resolve();
-    shuffling.add(zid);
-    return zoneOp(zid, async (turn) => { const r = await api('GET', '/library/tracks?limit=200', undefined, { signal: turn.signal }); await playTracks(r.tracks, true, 'end', { shuffle: true, turn }); }).finally(() => shuffling.delete(zid));
+    if ((shuffling.has(zid) && shuffling.get(zid) === zoneOps.get(zid)) || (zid === BROWSER && zoneBusy.get(BROWSER))) return Promise.resolve();
+    const run = zoneOp(zid, async (turn) => { const r = await api('GET', '/library/tracks?limit=200', undefined, { signal: turn.signal }); await playTracks(r.tracks, true, 'end', { shuffle: true, turn }); });
+    const mine = zoneOps.get(zid); shuffling.set(zid, mine);
+    return run.finally(() => { if (shuffling.get(zid) === mine) shuffling.delete(zid); });
   };
   // Play, Previous or Next with nothing in the queue and nothing playing says so (before, nothing
   // happened at all) and offers the library shuffled when there is one (not offline: the

@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-15
 
+- **Shuffle my music pressed after another Play is no longer ignored.** On a speaker zone, if you pressed Shuffle my music, then Play on an album or song while the shuffle was still on its way, then Shuffle my music again, the last press did nothing and the album played last. Now the last press wins: the zone plays a new shuffle after that Play. Pressing Shuffle my music twice in a row still plays one shuffle. Tests: `tools/ui-empty-queue.js`.
 - **"Connect TIDAL" opens TIDAL's own page in Sources.** For music none of your services has, "Connect TIDAL" (on an album or artist page, a Favourites row, its Play menu, or a playlist song's source menu) used to open Sources on Your library, so you had to find and click TIDAL there too. It now opens TIDAL's tab straight away, also in a new tab. When more than one service is named ("Connect TIDAL or Spotify") it opens Sources as before.
 
 ### 2026-11-14
