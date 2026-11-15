@@ -40,8 +40,9 @@ const PLACE = 900;
         await record(page, 'click');
         await page.evaluate(() => { window.__start(); document.querySelector('.nav-item[data-view="home"]').click(); });
         const opened = await frames(page);
-        const glide = [...new Set(opened.slice(1).filter((y) => y !== 0))];
-        check(opened.length > 10 && glide.length === 0, `${at}: a page opened from a scrolled one starts at its top at once (${glide.length ? `passed ${glide.slice(0, 6).join(', ')}…` : 'no frame in between'})`);
+        // (Songs stays where it was until Home replaces it: tools/ui-open-place.js; once at 0, it stays)
+        const glide = [...new Set(opened.slice(1).filter((y, i, a) => y !== 0 && (y !== PLACE || a.slice(0, i).includes(0))))];
+        check(opened.length > 10 && opened.at(-1) === 0 && glide.length === 0, `${at}: a page opened from a scrolled one starts at its top at once (${glide.length ? `passed ${glide.slice(0, 6).join(', ')}…` : 'no frame in between'})`);
         // Back to Songs: where it was left, at once
         await record(page, 'back');
         await page.goBack();

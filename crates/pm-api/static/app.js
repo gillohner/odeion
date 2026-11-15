@@ -4595,8 +4595,18 @@
 
   // ---- views ---------------------------------------------------------------
   const main = $('#main');
+  // Another page opened: the page on screen stays where it is until the new one (or its skeleton)
+  // replaces it, and the new one starts at its top. (Put at the top at once, the old page showed
+  // its own top for a moment first.) The reset comes with that first draw, before the page's own
+  // code can scroll it (Zones to the zone in use, Identify to an album), and never after it.
+  let topLater = null; // the navigation waiting for it, set by setView
+  // (a redrawn page's place-keeping hold ends with it: ended before, the old page would jump up)
+  const topNow = () => { if (topLater) { topLater = null; if (state.placeHold) state.placeHold(); mainTo(0); } };
   // Puts the page at a place at once: .main scrolls smoothly, so a page opened (or Back) would glide there
-  const mainTo = (top) => { try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } };
+  const mainTo = (top) => { topLater = null; try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } };
+  { const html = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+    Object.defineProperty(main, 'innerHTML', { configurable: true, get() { return html.get.call(this); }, set(v) { html.set.call(this, v); topNow(); } }); }
+  new MutationObserver(topNow).observe(main, { childList: true }); // (a page drawn another way)
   // (their own touch, wheel or key on the page comes before Zones showing the zone in use)
   ['pointerdown', 'wheel', 'touchstart', 'keydown'].forEach((e) => main.addEventListener(e, () => { state.zoneInView = false; }, { passive: true }));
   // Settings, one topic per tab (STEWARD-UX-SETTINGS.md)
@@ -4778,7 +4788,8 @@
     if (how !== 'pop') {
       const path = pathFor(v, arg) || location.pathname + location.search;
       const cur = history.state || {};
-      try { history.replaceState({ ...cur, scroll: main.scrollTop }, '', location.pathname + location.search); } catch { /* sandboxed */ }
+      // (a page opened just before and not drawn yet was never scrolled: the old one's place isn't its)
+      try { history.replaceState({ ...cur, scroll: topLater ? 0 : main.scrollTop }, '', location.pathname + location.search); } catch { /* sandboxed */ }
       // Changing a query or tab inside the same page replaces; opening another page pushes.
       // A page opened from a menu takes the menu's transient entry (still a new page for back).
       const viaTransient = !!cur.transient && how !== 'replace';
@@ -4789,6 +4800,7 @@
     }
     // Another page (not a new query on the search page): its skeleton shows if it is slow to draw
     const fresh = v !== 'search' && (v !== state.view || JSON.stringify(arg ?? null) !== JSON.stringify(state.viewArg ?? null));
+    const later = fresh || (v === 'search' && state.view !== 'search'); // (a new query on Search: at once)
     // Usage insights: which page, never its argument; the page a load starts on, a page this sent
     // elsewhere, Back or Forward, else opened (a tab or query inside a page too)
     state.view = v; state.viewArg = arg; state.tab = tab;
@@ -4798,9 +4810,12 @@
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || ((v === 'artist' || v === 'releases') && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
-    mainTo(0); state.drawnPage = null; if (state.placeHold) state.placeHold(); // a page opened is drawn from the start (redrawing, keepPlace)
+    // (a page opened is drawn from the start: redrawing, keepPlace)
+    const top = later ? {} : null; if (top) topLater = top; else { mainTo(0); if (state.placeHold) state.placeHold(); }
+    state.drawnPage = null;
     state.zoneInView = v === 'zones' && how !== 'pop'; // Zones opened (not Back): show the zone in use
-    return navigate(fresh);
+    // (a page that drew nothing, its code done or failed: at its top then, unless a newer page waits)
+    return navigate(fresh).finally(() => { if (top && topLater === top) topNow(); });
   };
   window.addEventListener('popstate', async (e) => {
     if (popHandled) { popHandled = false; return; } // back only closed a menu or dialog
