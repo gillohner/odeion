@@ -8761,7 +8761,22 @@
           await refreshQueue(false, true);
           if (state.view !== 'queue') return;
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
-          const hadQsh = !!document.activeElement && document.activeElement.id === 'qshuffle';
+          // The keyboard keeps its place across the page's redraw (an edit, Radio, another device's
+          // change): a head button keeps the focus, a row's control stays with its song, on the row the
+          // song is on now (after Remove, the row in its place). Before, only Shuffle kept it.
+          const QKEYS = ['qup', 'qdown', 'qrm', 'qgrip', 'qi', 'qmore'];
+          const fa = document.activeElement; const fk = fa && main.contains(fa) && fa.dataset ? QKEYS.find((k) => fa.dataset[k] != null) : null;
+          // (the phone's ⋯ menu has closed by now, the focus with it: it goes back to the song's ⋯;
+          // not once another page has been opened, nor out of a menu open now)
+          const moved = state.qMoved && state.qMoved.gen === navGen ? state.qMoved : null; state.qMoved = null;
+          const place = fk ? { k: fk, i: Number(fa.dataset[fk]) } : fa && main.contains(fa) && /^q(radio|shuffle|transfer|save|clear|mine)$/.test(fa.id) ? { id: fa.id }
+            : fa && main.contains(fa) && fa.matches('.page-head h2') ? { head: true }
+            : moved && (!fa || fa === document.body || (menuEl.hidden && menuEl.contains(fa))) ? { k: moved.k, i: moved.i } : null;
+          // (a song is its queue entry on a node zone, the item itself in this browser's queue; one not
+          // in the queue any more, a removed one, leaves the focus on the row in its place)
+          const qkey = (it) => (it && !isBrowser() && it.id != null ? it.id : it);
+          if (place && place.k) { const was = (state.qDrawn || [])[place.i]; const at = was ? q.findIndex((it) => qkey(it) === qkey(was)) : -1; if (at >= 0) place.i = at; }
+          state.qDrawn = q.slice();
           main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
             + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add songs with the row actions.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
@@ -8770,7 +8785,9 @@
           // when the zone is known to be empty, as for the note: a node zone whose queue could not be
           // fetched, or that is paused on a song, draws no rows but still has music to lose.
           const qm = $('#qmine', main); if (qm) { const zid = state.zone; qm.onclick = async () => { try { await shuffleIfEmpty(zid); } catch (e) { toast(e.message, 'error'); } }; }
-          const qedit = async (i, op, to) => {
+          const qedit = async (i, op, to, k) => {
+            // (from the ⋯ menu, whose closing takes the focus: the next draw puts it on the song's row)
+            state.qMoved = k ? { k, i, gen: navGen } : null;
             if (isBrowser()) {
               const bq = state.browserQueue; const j = op === 'up' ? i - 1 : op === 'down' ? i + 1 : op === 'to' ? to : null;
               if (op === 'rm') { bq.splice(i, 1); if (state.browserIndex === i) browserPlay(Math.min(i, bq.length - 1)); else if (state.browserIndex > i) state.browserIndex--; }
@@ -8782,14 +8799,14 @@
               }
               render(); return;
             }
-            const it = q[i]; if (!it) return;
+            const it = q[i]; if (!it) { state.qMoved = null; return; }
             try {
               // (in the zone's turn: a load on its way goes first, so it can't undo the edit afterwards)
-              const zid = state.zone; const j = op === 'rm' ? null : op === 'to' ? to : op === 'up' ? i - 1 : i + 1; if (j === i) return;
+              const zid = state.zone; const j = op === 'rm' ? null : op === 'to' ? to : op === 'up' ? i - 1 : i + 1; if (j === i) { state.qMoved = null; return; }
               await zoneOp(zid, (t) => op === 'rm' ? api('DELETE', `/zones/${encodeURIComponent(zid)}/queue/${it.id}`, undefined, { signal: t.signal })
                 : api('PUT', `/zones/${encodeURIComponent(zid)}/queue/${it.id}`, { to_index: j }, { signal: t.signal }));
               refreshQueue();
-            } catch (e) { toast(e.message, 'error'); }
+            } catch (e) { state.qMoved = null; toast(e.message, 'error'); }
           };
           $$('[data-qup]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qup), 'up'));
           // Drag to reorder: pointer events, so mouse, touch and pen all work. The row follows the pointer,
@@ -8834,7 +8851,7 @@
           // show them): the row's ⋯ offers them, as a playlist's song row does
           $$('[data-qmore]', main).forEach((b) => b.onclick = (e) => {
             e.stopPropagation(); const i = Number(b.dataset.qmore); const it = q[i]; if (!it) return;
-            showMenu(b, [{ title: itemName(it) }, ...(i > 0 ? [{ label: 'Move up', icon: 'upload', run: () => qedit(i, 'up') }] : []), ...(i < q.length - 1 ? [{ label: 'Move down', icon: 'download', run: () => qedit(i, 'down') }] : []), { label: 'Remove from queue', icon: 'trash', run: () => qedit(i, 'rm') }]);
+            showMenu(b, [{ title: itemName(it) }, ...(i > 0 ? [{ label: 'Move up', icon: 'upload', run: () => qedit(i, 'up', null, 'qmore') }] : []), ...(i < q.length - 1 ? [{ label: 'Move down', icon: 'download', run: () => qedit(i, 'down', null, 'qmore') }] : []), { label: 'Remove from queue', icon: 'trash', run: () => qedit(i, 'rm', null, 'qmore') }]);
           });
           const qr = $('#qradio'); if (qr) qr.onclick = async () => {
             // (in the zone's turn, like a load, which carries the radio as it is when it goes)
@@ -8843,7 +8860,19 @@
           };
           // The same mode as the bar's Shuffle, with its state
           // (the toggle keeps the focus across the page's redraw)
-          const qsh = $('#qshuffle'); if (qsh) { qsh.onclick = toggleShuffle; renderModes(); if (hadQsh) qsh.focus(); }
+          const qsh = $('#qshuffle'); if (qsh) { qsh.onclick = toggleShuffle; renderModes(); }
+          if (place) {
+            // (a control the row no longer offers, e.g. Move down on the last row, gives way to the row's others)
+            const n = $$('[data-qrow]', main).length; const i = Math.min(place.i, n - 1);
+            const alt = { qup: 'qdown', qdown: 'qup' }[place.k];
+            const head = $('.page-head h2', main);
+            const el = place.head ? head : place.id ? $('#' + place.id, main) : n ? [place.k, alt, 'qrm', 'qmore', 'qgrip'].filter(Boolean).map((k) => $(`[data-${k}="${i}"]`, main)).find((b) => b && !b.disabled && b.getClientRects().length) : null;
+            // (Clear, or removing the last song, takes the button or row away: then the empty page's
+            // Shuffle my music, Radio, or the heading, which then keeps the focus on the next draw)
+            const to = el || $('#qmine', main) || $('#qradio', main) || head;
+            if (to && to === head) head.tabIndex = -1;
+            if (to) to.focus();
+          }
           state.queueKey = queueKey();
           const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Move to' }, ...zoneList().filter((o) => o.id !== state.zone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]);
           const qsv = $('#qsave'); if (qsv) qsv.onclick = async () => {
