@@ -1,5 +1,5 @@
 // A progress message goes when its answer comes, for a move and for Songs' Play all.
-//   * Queue › Move to… › another zone says "Moving to Lounge…". With the Play to menu opened while
+//   * Queue › Move to… (a phone: ⋯ › Move to) › another zone says "Moving to Lounge…". With the Play to menu opened while
 //     the node moves it, the answer draws the menu again (no "Moved to" toast), and the message
 //     stayed its full 3.8 s over the menu, saying it still moved. Now it goes with the answer; a
 //     failed move shows its reason in the menu, with no "Moving…" over it either. With the menu
@@ -54,11 +54,12 @@ const shown = (page) => page.evaluate(() => { const t = document.querySelector('
       await o.page.route(/\/v1\/zones\/z1\/queue(\?|$)/, (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify(o.moved ? [] : q) }));
       await fx.go(o.page, '/queue');
       await o.page.waitForFunction(() => document.querySelector('#zonename').textContent === 'Kitchen');
-      await o.page.waitForSelector('#qtransfer');
+      // (a phone has Move to under the head's ⋯; the desktop layout has its button)
+      await o.page.waitForSelector('#qtransfer:visible, #qmenu:visible');
       return o;
     };
     const moveToLounge = async (page) => {
-      await page.click('#qtransfer');
+      await page.click('#qtransfer:visible, #qmenu:visible');
       await page.locator('.popover.menu:not([hidden]) .pop-item[data-mi]', { hasText: 'Lounge' }).first().click();
       await page.waitForFunction(() => /Moving to Lounge/.test(document.querySelector('#toast.show')?.textContent || ''));
     };

@@ -448,7 +448,7 @@ html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44p
 html[data-shell="phone"] .hero-zone .lbl { display: none; }
 @media (max-width: 900px) { .hero-zone .lbl { display: none; } }
 html[data-shell="phone"] .actions > .btn { min-height: 44px; }
-html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore) { min-width: 44px; padding-left: 10px; padding-right: 10px; justify-content: center; }
+html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore, #qmenu) { min-width: 44px; padding-left: 10px; padding-right: 10px; justify-content: center; }
 /* (the narrowest phones: a playlist's Shuffle is its word, as on an album, so ⋯ stays on the row) */
 @media (max-width: 379px) { html[data-shell="phone"] .actions > #plshuffle > .ic { display: none; } }
 /* (and wherever the row is short for its words, on a narrow phone or with a larger font size: Shuffle drops its
@@ -2227,6 +2227,10 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
 /* A playlist's Delete beside Play: a wide desktop window only (narrower, it is in ⋯), following a
    resize */
 .pldel { display: none; }
+/* The Queue page's head on a phone: Radio and Shuffle, and the rest under one ⋯ (app.js, case 'queue') */
+#qmenu { display: none; }
+html[data-shell="phone"] .page-head .actions > #qmenu { display: inline-flex; }
+html[data-shell="phone"] .page-head .actions > :is(#qtransfer, #qsave, #qclear) { display: none; }
 @media (min-width: 1025px) { html[data-shell="desktop"] .pldel { display: inline-flex; } }
 
 /* Touch targets of 48 px (TASK-ui-motion-polish-1106 §4b): on a touch screen every small control's
