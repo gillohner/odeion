@@ -6511,7 +6511,7 @@
     const tp = $('[data-splaytop]', box); if (tp) tp.onclick = async (e) => { if (top.kind === 'song') return playSongs([{ ...top, artist: top.subtitle }], 0, 'replace', null, e.currentTarget); try { const pg = await api('GET', `/item/${top.kind}/${top.id}`); playSongs(pg.songs || [], 0, 'replace', pg.plays_from, e.currentTarget, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } };
     $$('[data-sretry]', box).forEach((b) => b.onclick = () => { searchRuns.delete(searchKey(run.q, run.scope)); startSearch(run.q, run.scope); render(); search.focus(); });
     // (Settings › Discover holds the node's contact: its field takes the keyboard, ready to type)
-    $$('[data-scontact]', box).forEach((b) => b.onclick = () => setView('settings', 'discover').then(() => { const c = state.view === 'settings' && $('#contact'); if (c) c.focus(); }));
+    $$('[data-scontact]', box).forEach((b) => b.onclick = openContact);
     if (retryFocus && !retryFocus.isConnected) { const again = 'scontact' in retryFocus.dataset ? $('[data-scontact]', box) : $$('[data-sretry]', box).find((b) => b.dataset.sretry === retryFocus.dataset.sretry); (again || search).focus(); }
   };
   // ---- Home (STEWARD-UX-HOME.md): everything Pinakes knows about music, one section per call ----
@@ -7029,6 +7029,8 @@
         try { await api('PUT', '/node/settings', { first_steps_hidden: true }); toast('Hidden for everyone on this node. Settings › Home for everyone shows them again.'); } catch (e) { toast(e.message, 'error'); return; }
       } else { try { localStorage.setItem('pm.setupHidden', '1'); } catch { /* still hidden for now */ } }
       state.setupShown = false; box.innerHTML = '';
+      // Its contact step said why Pubky's rows are missing: now Home's line does
+      const nc = $('#h-needcontact'); if (nc) nc.hidden = false;
     };
   };
 
@@ -7161,7 +7163,25 @@
           $$('[data-hdown]', main).forEach((b) => b.onclick = () => move(Number(b.dataset.hdown), 1));
           $$('[data-win]', main).forEach((b) => b.onclick = () => { state.homeWindow = b.dataset.win; render(); });
           $$('[data-seeall]', main).forEach((b) => b.onclick = () => setView('home-section', { section: b.dataset.seeall, window: state.homeWindow || '7d' }));
-          renderSetup();
+          const setupBox = $('#h-setup');
+          const setupDrawn = renderSetup().catch((e) => console.error(e));
+          // Without a contact Pubky has nothing to show: its rows go at once, and one line in their
+          // place (once, where the first was) says why, with Add it (Settings › Discover). With Get
+          // started hidden or done, Home said nothing about the missing rows (Home is the owner's
+          // only). While Get started shows its contact step that step says how: the line waits for
+          // it, hidden, and shows when there is no such step or when Get started is hidden
+          const pubkyRows = ordered.filter(showRow).filter((k) => HOME_TITLES[k]);
+          const noContact = (s) => {
+            // (an earlier Home's answer: this Home's own handler takes care of its rows)
+            if (!setupBox.isConnected) return;
+            if (!$('#h-needcontact')) {
+              const first = pubkyRows.map((k) => document.getElementById('h-' + k)).find(Boolean) || s;
+              first.insertAdjacentHTML('beforebegin', `<section class="section fadein" id="h-needcontact" hidden><div class="card small">Trending music, tags and picks from people on Pubky show up here once the node has your email or website. <button class="btn sm" type="button">Add it</button></div></section>`);
+              const nc = $('#h-needcontact'); $('button', nc).onclick = openContact;
+              setupDrawn.then(() => { if (nc.isConnected && !$('[data-step="contact"]:not(.done)', setupBox)) nc.hidden = false; });
+            }
+            s.remove();
+          };
           // Local rows first: recently played, recently added, forgotten favourites
           api('GET', '/library/home?limit=12').then((h) => {
             if (state.view !== 'home') return;
@@ -7199,8 +7219,7 @@
           for (const name of ['trending-songs', 'trending-albums', 'trending-artists', 'following', 'tags', 'concerts', 'podcasts', 'yours', 'new'].filter(showRow)) {
             loadHomeSection(name, name.startsWith('trending') ? win : null).then((sc) => {
               const el = $(`#h-${name} .hbody`); if (!el || state.view !== 'home') return;
-              // Without a contact Pubky has nothing to show yet: Get started says how, once
-              if (sc.needs === 'contact') { el.parentElement.remove(); return; }
+              if (sc.needs === 'contact') { noContact(el.parentElement); return; }
               el.innerHTML = homeBody(sc, name, false); el.parentElement.classList.add('fadein'); bindHome(el, sc);
               const see = $(`#h-${name} [data-seeall]`); if (see) see.hidden = !(sc.items.length > 6 || sc.tags.length > 20);
               // Its height and its See all for the next visit's placeholder (these rows mix songs,
