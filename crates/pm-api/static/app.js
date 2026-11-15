@@ -3351,7 +3351,10 @@
     if (target === from || moving) return;
     moving = true; $$('[data-move]', zonePop).forEach((b) => { b.disabled = true; });
     // Zone to zone can take a while (the node opens the track first): say so at once when the menu is closed
-    if (zonePop.hidden) { const tz0 = target === BROWSER ? { name: hereName() } : state.zones[target]; toast(`Moving to ${(tz0 && tz0.name) || 'the zone'}…`); }
+    // (the message goes when the node answers: the menu opened meanwhile is drawn again instead of a
+    // toast, and the message stayed over it, saying it still moved)
+    let said = '';
+    if (zonePop.hidden) { const tz0 = target === BROWSER ? { name: hereName() } : state.zones[target]; said = `Moving to ${(tz0 && tz0.name) || 'the zone'}…`; toast(said); }
     let resume = null; // the browser, paused for the move: back on when the move fails
     const cur = currentZone(); const curTitle = cur && cur.now_playing ? cur.now_playing.item.title || '' : '';
     const wasPlaying = cur && cur.transport === 'playing';
@@ -3414,7 +3417,7 @@
       startFail(e.message, true);
       if (resume) browserResume();
       if (!zonePop.hidden) renderZonePop(e.message); else toast(e.message, 'error');
-    } finally { moving = false; }
+    } finally { moving = false; if (said) toastDone(said); }
   };
   // Listening together on this node (presence.rs): who you listen along with, with Leave, and who
   // sees what you play. The node keeps it; the page asks every 20 s and when zones come or go.
@@ -7655,9 +7658,12 @@
             const sh = $('#shuffle');
             if (sh) sh.onclick = async () => {
               if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true, 'end', { shuffle: false });
-              sh.disabled = true; toast(`Loading ${countOf(total, 'songs')}…`);
+              // (the message stays while a big library loads, and goes when the songs play; a quick load
+              // shows none, as Which song is this?'s lookup)
+              const loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true;
+              const slow = setTimeout(() => toast(loading, 'wait'), 400);
               try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
-              sh.disabled = false;
+              clearTimeout(slow); toastDone(loading); sh.disabled = false;
             };
           }
           break;

@@ -692,6 +692,7 @@ jobs:
           ui-queue-empty-shuffle.js queue-empty-shuffle-shots
           ui-home-contact.js home-contact-shots
           ui-progress-toast.js progress-toast-shots
+          ui-move-toast.js move-toast-shots
           LIST
       # feedback.js on a test page, the node mocked: text stays text, a draft is its sign-in's,
       # only ticked details are sent. It takes <token> <mock> <shots>, not the list's <repo> <shots>
