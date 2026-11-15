@@ -1,6 +1,7 @@
 // The top search result's name and an item page's artist, album, "All about this song" and version
 // names are real links, like song names in lists: Tab reaches them, Enter or a click opens the page
-// inside the app, and Ctrl+click opens it in a new tab while this page stays put.
+// inside the app, and Ctrl+click opens it in a new tab while this page stays put. So is "Connect
+// TIDAL" for something none of your services has (an album page, a Favourites row).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-item-links.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -30,6 +31,13 @@ const fixtures = {
   '/item/album/lib-7': { body: plain('album', 'lib-7', 'Journey') },
   '/item/artist/lib-11': { body: plain('artist', 'lib-11', 'Sefa') },
 };
+// An album that none of the connected services has: its songs section offers Connect TIDAL
+const NOWHERE = 'https://musicbrainz.org/release-group/5b11f4ce-a62d-471e-81fc-a69a8278c7da';
+fixtures['/item/album/mb-nowhere'] = { body: { ...plain('album', 'mb-nowhere', 'Nowhere Yet'), source_id: 'musicbrainz', source: 'MusicBrainz', uri: NOWHERE, target: { uri: NOWHERE }, plays_from: null, songs: [], connect: ['tidal'] } };
+// Favourites › From other services: a song no connected service has, with the same Connect link in its row
+const OTHER = 'https://tidal.com/browse/track/77';
+fixtures['/favourites'] = { body: { uris: [OTHER], tracks: [], albums: [], artists: [], other: [OTHER] } };
+fixtures['/discover/describe'] = { body: [{ uri: OTHER, page: OTHER, title: 'Far Away Song', artist: 'Someone Else', kind: 'track', site: null, also_on: [], connect: ['tidal'] }] };
 const searchHits = [{ kind: 'artist', id: 'lib-11', title: 'Sefa', sources: ['library'] }];
 
 const path0 = (page) => new URL(page.url()).pathname + new URL(page.url()).search;
@@ -60,15 +68,16 @@ async function enterOpens(page, sel, want, from, ready, where) {
   await page.waitForFunction(([f, r]) => location.pathname + location.search === f && document.querySelector(r), [from, ready]);
 }
 // Ctrl+click (Cmd on a Mac) opens the address in a new tab; this tab does not navigate
+const readyFor = (w) => (w.startsWith('/search') ? '#sresults, #stop' : w === '/sources' ? '.set-row' : '#iplay');
 async function newTab(run, sel, want, from, where) {
   const opened = run.context.waitForEvent('page', { timeout: 3000 }).catch(() => null);
   await run.page.locator(sel).click({ modifiers: ['ControlOrMeta'] });
   const tab = await opened;
   assert.ok(tab, `${where}: Ctrl+click on ${sel} opens a new tab`);
   // The app has started in the new tab and drawn that page (an address it can't open falls back to Home)
-  await tab.waitForFunction((w) => location.pathname === w && document.querySelector(w.startsWith('/search') ? '#sresults, #stop' : '#iplay'), want, { timeout: 7000 }).catch(() => {});
+  await tab.waitForFunction(([w, r]) => location.pathname === w && document.querySelector(r), [want, readyFor(want)], { timeout: 7000 }).catch(() => {});
   assert.equal(new URL(tab.url()).pathname, want, `${where}: the new tab shows the same page (${tab.url()})`);
-  assert.equal(await tab.locator(want.startsWith('/search') ? '#sresults, #stop' : '#iplay').count() > 0, true, `${where}: the new tab draws ${want}`);
+  assert.equal(await tab.locator(readyFor(want)).count() > 0, true, `${where}: the new tab draws ${want}`);
   await tab.close();
   await run.page.waitForTimeout(150);
   assert.equal(path0(run.page), from, `${where}: Ctrl+click leaves this tab where it was`);
@@ -149,6 +158,40 @@ async function nameSearch(browser, width) {
   } finally { await run.context.close(); }
 }
 
+// "Connect TIDAL" for something none of your services has is a real link to Sources: Tab reaches it,
+// Enter or a click opens Sources inside the app, Ctrl+click opens Sources in a new tab. In a
+// Favourites row a click on it opens Sources only, not also the row's page.
+async function connectLinks(browser, width) {
+  const run = await fx.create(browser, width, { fixtures });
+  const { page, state } = run;
+  try {
+    for (const [from, box, where] of [
+      ['/album/mb-nowhere', '#isongs', `album page Connect ${width}`],
+      ['/favourites', '#favother', `Favourites row Connect ${width}`],
+    ]) {
+      const sel = `${box} a[href="/sources"]`;
+      await fx.go(page, from);
+      await page.locator(box).getByText('Connect TIDAL').waitFor();
+      const link = page.locator(box).getByText('Connect TIDAL');
+      assert.equal(await link.count(), 1, `${where}: the Connect TIDAL link is shown`);
+      assert.equal(await link.getAttribute('href'), '/sources', `${where}: Connect TIDAL has Sources' address`);
+      await tabOnto(page, sel, where);
+      if (width === 1280) await page.screenshot({ path: path.join(shots, `connect-focus-${from.split('/')[1]}-${width}.png`) });
+      await enterOpens(page, sel, '/sources', from, sel, where);
+      await mark(page);
+      await page.locator(sel).click();
+      await page.waitForFunction(() => location.pathname === '/sources' && document.querySelector('.set-row'));
+      await inApp(page, `${where} click`);
+      await page.goBack();
+      await page.waitForFunction((f) => location.pathname === f, from);
+      await page.locator(sel).waitFor();
+      await newTab(run, sel, '/sources', from, where);
+    }
+    await fx.cleanCopy(page);
+    assert.deepEqual(state.errors, [], `Connect ${width}: no page errors`);
+  } finally { await run.context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   let failed = 0; let passed = 0;
@@ -161,6 +204,7 @@ async function nameSearch(browser, width) {
       await run(`${width}: top search result`, () => topResult(browser, width));
       await run(`${width}: song page links`, () => songLinks(browser, width));
       await run(`${width}: artist name search`, () => nameSearch(browser, width));
+      await run(`${width}: Connect a service`, () => connectLinks(browser, width));
     }
   } finally { await browser.close(); }
   console.log(`${passed} passed, ${failed} failed`);
