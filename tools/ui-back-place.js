@@ -1,6 +1,7 @@
 // Opening a page puts it at its top at once, and Back puts it where it was scrolled at once, as a
 // browser's own Back does: the main area's smooth scrolling must not glide there. Every frame
 // after Back shows either the page not yet drawn (0) or the place it was left at, nothing between.
+// The same for an album opened on Downloads (offline) from a scrolled list.
 // Real candidate assets, isolated responses: node tools/ui-back-place.js [repo]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fx = require('./ui-fixture');
@@ -49,6 +50,29 @@ const PLACE = 900;
         const between = [...new Set(back.filter((y) => y !== 0 && y !== PLACE))];
         check(back.length > 10 && back.at(-1) === PLACE, `${at}: Back to Songs is where it was left (${back.at(-1)} px)`);
         check(between.length === 0, `${at}: it gets there at once, without gliding from the top (${between.length ? `passed ${between.slice(0, 6).join(', ')}…` : 'no frame in between'})`);
+        check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
+      } finally { await context.close(); }
+    }
+    // Downloads (offline, the app's own page): an album opened from a scrolled list starts at its
+    // top at once (its tile's click reset #main with scrollTo(0, 0), which glided)
+    for (const width of [1280, 768]) {
+      const at = `${width} Downloads`;
+      const offline = { offline: true, device_id: 'fixture-device', synced_at: null, bytes: 1, queued: 0, tracks, albums: [{ id: 7, title: 'Journey', track_ids: tracks.map((t) => t.id), cover: false }], playlists: [], favourites: { track_ids: [] } };
+      const { context, page, state } = await fx.create(browser, width, { offline: true, tracks, fixtures: { '/offline': { body: offline } } });
+      try {
+        await page.setViewportSize({ width, height: 600 });
+        await fx.go(page, '/downloads');
+        await page.waitForSelector('[data-dlalbum="7"]', { timeout: 8000 });
+        await page.waitForFunction(() => /Song 80/.test(document.querySelector('#main').textContent), null, { timeout: 7000 }).catch(() => {});
+        const room = await page.evaluate(() => { const m = document.querySelector('#main'); return m.scrollHeight - m.clientHeight; });
+        check(room > PLACE, `${at}: the list is long enough to scroll ${PLACE} px (${room})`);
+        await page.evaluate((y) => { const m = document.querySelector('#main'); m.style.scrollBehavior = 'auto'; m.scrollTop = y; m.style.scrollBehavior = ''; }, PLACE);
+        await record(page, 'click');
+        await page.evaluate(() => { window.__start(); document.querySelector('[data-dlalbum="7"]').click(); });
+        const opened = await frames(page);
+        const glide = [...new Set(opened.slice(1).filter((y) => y !== 0))];
+        check(await page.evaluate(() => !!document.querySelector('[data-dlclose]')), `${at}: the album opened`);
+        check(opened.length > 10 && glide.length === 0, `${at}: an album opened from a scrolled list starts at its top at once (${glide.length ? `passed ${glide.slice(0, 6).join(', ')}…` : 'no frame in between'})`);
         check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
       } finally { await context.close(); }
     }

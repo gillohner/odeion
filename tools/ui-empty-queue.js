@@ -12,8 +12,8 @@
 // (or with the node out of reach) go on from the saved song and place, not song 1. The note's Shuffle
 // my music checks again when pressed, and a queue change of this app's on its way (an Add, a radio
 // station starting) counts as songs; the node's "queue is empty" to a Play pressed meanwhile is
-// not said over the station's own wait. Shuffle my music pressed again while This browser's still reads
-// the library (from the note or Get started) does nothing more.
+// not said over the station's own wait. Shuffle my music pressed again while one for the same zone
+// (This browser or a node zone) still reads the library (from the note or Get started) does nothing more.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-empty-queue.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -545,6 +545,43 @@ async function setupShuffleTwice(browser, width) {
   } finally { await context.close(); }
 }
 
+async function setupShuffleTwiceNode(browser, width) {
+  // 17. The same on a node zone: the note's Shuffle my music, then Get started's while the first
+  // still reads the library: the library is read once and the zone loaded once (before, the second
+  // waited its turn and then replaced the songs the first had started)
+  const firstSteps = { show: true, hidden: false, steps: [{ id: 'play', done: false, optional: false }] };
+  const Z = { ...zoneBase, id: 'z1', name: 'Kitchen', output: 'upnp:k' };
+  const { page, context, state } = await twoZones(browser, width, [Z], { '/me/first-steps': { body: firstSteps } });
+  try {
+    await fx.go(page, '/');
+    await page.locator('#setupplay').waitFor();
+    await page.waitForFunction(() => /Kitchen/.test(document.querySelector('#zonebtn')?.textContent || ''));
+    for (let i = 0; i < 40 && !state.hits.some((h) => h.v === '/zones/z1/queue'); i++) await sleep(50);
+    await sleep(200);
+    state.delay = (v, m) => (v === '/library/tracks' && m === 'GET' ? 1000 : 0);
+    const asked = state.hits.length;
+    await hideToast(page);
+    await page.click('#toggle');
+    assert.equal((await toastNow(page)).act, 'Shuffle my music', `${width}: the note offers Shuffle my music`);
+    await page.click('#toast .toast-act');
+    await sleep(150);
+    await page.click('#setupplay');
+    for (let i = 0; i < 60 && !zonePosts(state, 'z1', asked).length; i++) await sleep(50);
+    await sleep(1800);
+    const reads = state.hits.slice(asked).filter((h) => h.v === '/library/tracks' && /limit=200/.test(h.q)).length;
+    assert.equal(reads, 1, `${width}: the library is read once (${reads})`);
+    assert.deepEqual(zonePosts(state, 'z1', asked), ['/zones/z1/load'], `${width}: Kitchen is loaded once`);
+    // Once that one is done, Get started shuffles again (a press of its own, not dropped)
+    state.delay = 0;
+    const later = state.hits.length;
+    assert.equal(await page.locator('#setupplay').count(), 1, `${width}: Get started is still shown`);
+    await page.click('#setupplay');
+    for (let i = 0; i < 40 && !zonePosts(state, 'z1', later).length; i++) await sleep(50);
+    assert.deepEqual(zonePosts(state, 'z1', later), ['/zones/z1/load'], `${width}: a later Shuffle my music still plays`);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
 async function offline(browser, width) {
   // 7. Offline (the Android app with no node): no Shuffle my music, the downloads have no song list
   const { page } = await fx.create(browser, width, { offline: true, fixtures });
@@ -565,7 +602,7 @@ async function offline(browser, width) {
   let failed = 0;
   try {
     for (const width of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [1280, 1024, 768])) {
-      for (const [name, fn] of [['empty browser queue', browserZone], ['queued then Play', queuedThenPlay], ['no songs', noSongs], ['empty node zone', nodeZone], ['node zone, late event', nodeZoneLateEvent], ['shuffle on the card\'s zone', shuffleOnTheCardsZone], ['shuffle keeps its zone', shuffleKeepsItsZone], ['paused zone, switched zone', pausedAndSwitched], ['late queue answer', lateQueueAnswer], ['Play after a reload', (b, w) => playAfterReload(b, w, '#toggle')], ['Next after a reload', (b, w) => playAfterReload(b, w, '#next')], ['Previous after a reload', (b, w) => playAfterReload(b, w, '#prev')], ['Play after a reload, node out of reach', playAfterReloadNoNode], ['Shuffle checked again', shuffleRechecked], ['Add on its way', pendingAdd], ['Radio on its way', radioOnItsWay], ['Radio on its way, Play refused', radioPlayRefused], ['Play error while a change is on its way', playErrorWhileBusy], ['Shuffle from the note, then Get started', setupShuffleTwice], ['offline', offline]]) {
+      for (const [name, fn] of [['empty browser queue', browserZone], ['queued then Play', queuedThenPlay], ['no songs', noSongs], ['empty node zone', nodeZone], ['node zone, late event', nodeZoneLateEvent], ['shuffle on the card\'s zone', shuffleOnTheCardsZone], ['shuffle keeps its zone', shuffleKeepsItsZone], ['paused zone, switched zone', pausedAndSwitched], ['late queue answer', lateQueueAnswer], ['Play after a reload', (b, w) => playAfterReload(b, w, '#toggle')], ['Next after a reload', (b, w) => playAfterReload(b, w, '#next')], ['Previous after a reload', (b, w) => playAfterReload(b, w, '#prev')], ['Play after a reload, node out of reach', playAfterReloadNoNode], ['Shuffle checked again', shuffleRechecked], ['Add on its way', pendingAdd], ['Radio on its way', radioOnItsWay], ['Radio on its way, Play refused', radioPlayRefused], ['Play error while a change is on its way', playErrorWhileBusy], ['Shuffle from the note, then Get started', setupShuffleTwice], ['On a node zone, Shuffle from the note, then Get started', setupShuffleTwiceNode], ['offline', offline]]) {
         try { await fn(browser, width); console.log(`PASS ${width} ${name}`); } catch (e) { failed++; console.log(`FAIL ${width} ${name}: ${e.message}`); }
       }
     }
