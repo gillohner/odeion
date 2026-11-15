@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-15
+
+- **On a phone, a playlist says once where it is kept.** Beside the cover, the small line above the name said “PLAYLIST · PRIVATE · ON THIS NODE” on two lines, and the line under Play said it again (“Private on this node; saved to your homeserver on the next sync.”). On a phone the small line now just says “Playlist”; the line under Play still says who sees it and where it is kept. Larger screens are unchanged.
+
 ### 2026-11-14
 
 - **On a phone, Zones says in full what plays on this device.** Under “Nothing playing”, This browser's card said “Streams the files to th…”, cut off at 360 px beside its “selected” label or Play to button, and the Android and desktop apps' card said “The app plays the files itself”, cut off the same way. They now say “Plays in this browser” and “Plays in the app”, which fit; the Play to list and Move to menu show the same new words. Test: `tools/ui-zone-here-line.js`.
