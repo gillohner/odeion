@@ -1,5 +1,6 @@
 // Phone dialog actions fit inside their sheet and have at least 44 px touch targets; so do the
-// items of a row's ⋯ sheet and the rows of the collection picker, which opens with no keyboard.
+// items of a row's ⋯ sheet and the rows of the collection picker. The picker, Edit tags and Add a
+// WebDAV share open on a phone with no keyboard (their heading has the first focus).
 // node tools/ui-phone-dialog-actions.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -72,17 +73,91 @@ async function measureRows(page, selector, label) {
   check(!m.overflow, `${label}: no horizontal overflow`);
 }
 
-// On a phone the collection picker's heading takes the first focus, so neither a keyboard comes
-// up over the list nor the Android app shows the field focused with no keyboard; a tap on the
-// field still focuses it and filters.
+// Every element the focus goes to from now on (an id, else data-k, else the tag name; a text
+// field is marked `field:`)
+const watchFocus = (page) => page.evaluate(() => {
+  window.focusSeen = [];
+  if (!window.focusWatched) document.addEventListener('focusin', (e) => window.focusSeen.push((e.target.matches('input, textarea') ? 'field:' : '') + (e.target.id || e.target.dataset.k || e.target.tagName)), true);
+  window.focusWatched = true;
+});
+// On a phone a dialog with text fields (the collection picker, Edit tags, Add a WebDAV share)
+// gives its heading the first focus, so neither a keyboard comes up over it nor the Android app
+// shows a field focused with no keyboard.
+async function headingFirst(page, label, field) {
+  const f = await page.evaluate(() => ({ seen: window.focusSeen.join(' '), now: document.activeElement.matches('dialog[open] h2[tabindex="-1"]') }));
+  check(f.now && !/\bfield:/.test(f.seen), `${label}: the heading has the first focus, no field (${field}) ever had it (${f.seen})`);
+}
 async function pickerFirstFocus(page, at) {
-  const f = await page.evaluate(() => ({ seen: window.pickerFocus.join(' '), now: document.activeElement.matches('dialog[open] h2[tabindex="-1"]') }));
-  check(f.now && !/\bppq\b/.test(f.seen), `${at} collection picker: the heading has the first focus, the field never had it (${f.seen})`);
+  await headingFirst(page, `${at} collection picker`, 'ppq');
   await page.locator('dialog[open] #ppq').tap();
   await page.keyboard.type('Road');
   const after = await page.evaluate(() => ({ field: document.activeElement.id === 'ppq', row: document.querySelector('dialog[open] [data-ppnew]').textContent }));
   check(after.field && /Road/.test(after.row), `${at} collection picker: a tap on the field focuses it and filters (${after.row.trim()})`);
   await page.locator('dialog[open] #ppq').fill('');
+}
+
+// Add music › Add a folder or network share › A WebDAV share: the heading first on a phone, a
+// tap on Folder address types there, Cancel adds nothing.
+async function openWebdav(page, at) {
+  const tap = async (sel, text) => { await page.locator(sel).filter({ hasText: text }).tap(); };
+  await page.locator('#libadd').tap();
+  await tap('dialog[open] .choice', 'Add a folder or network share');
+  await watchFocus(page);
+  await tap('dialog[open] .choice', 'A WebDAV share');
+  await page.locator('dialog[open] #wdurl').waitFor();
+  await headingFirst(page, `${at} Add a WebDAV share`, 'wdurl');
+  await page.screenshot({ path: path.join(SHOTS, `webdav-${at}.png`) });
+  await page.locator('dialog[open] #wdurl').tap();
+  await page.keyboard.type('https://nas.test/dav/');
+  check(await page.evaluate(() => document.activeElement.id === 'wdurl' && document.activeElement.value === 'https://nas.test/dav/'), `${at} Add a WebDAV share: a tap on Folder address focuses it and types there`);
+  await page.locator('dialog[open] [data-wdclose]').tap();
+  await closed(page);
+}
+
+// Keys pressed on a phone dialog's focused heading stay in the dialog, and a character goes to its
+// first field (Edit tags and Add a WebDAV share, in a 500 px keyboard window).
+async function auditFieldDialogKeys(browser) {
+  const { page, context, state } = await fx.create(browser, 500, { fixtures });
+  try {
+    await fx.go(page, '/tracks');
+    await page.evaluate(() => { window.reached = []; document.addEventListener('keydown', (e) => { if (e.target.matches('dialog h2')) window.reached.push(e.key); }); });
+    await page.locator('.track [data-act="more"]').first().click();
+    await page.locator('.popover.menu .pop-item').filter({ hasText: 'Edit tags' }).click();
+    await page.locator('dialog[open] [data-save]').waitFor();
+    check(await page.evaluate(() => document.activeElement.matches('dialog[open] h2')), '500 px keyboard window: Edit tags opens on its heading');
+    const before = state.hits.length;
+    // (Space, like any character, moves into Title: it types a space there, as in the picker)
+    for (const key of ['ArrowRight', 'ArrowLeft', 'n', 'Space', '?']) { await page.locator('dialog[open] h2').focus(); await page.keyboard.press(key); }
+    const t = await page.evaluate(() => ({ reached: window.reached.join(' '), title: document.querySelector('dialog[open] [data-k="title"]').value, focus: document.activeElement.dataset.k, np: !document.querySelector('#nowplaying').hidden, dialogs: document.querySelectorAll('dialog[open]').length }));
+    check(!t.reached && !t.np && t.dialogs === 1 && state.hits.length === before, `500 px keyboard window: the arrows, N, Space and ? on the Edit tags heading reach no shortcut (${t.reached || 'none'})`);
+    check(t.title === 'n ?' && t.focus === 'title', `500 px keyboard window: characters typed on the Edit tags heading go to Title (“${t.title}”)`);
+    await page.locator('dialog[open] h2').focus();
+    await page.keyboard.press('Escape');
+    await closed(page);
+    check(!writes(state).length, '500 px keyboard window: Escape closes Edit tags and changes nothing');
+    await fx.go(page, '/library');
+    await page.locator('#libadd').click();
+    await page.locator('dialog[open] .choice').filter({ hasText: 'Add a folder or network share' }).click();
+    await page.locator('dialog[open] .choice').filter({ hasText: 'A WebDAV share' }).click();
+    await page.locator('dialog[open] #wdurl').waitFor();
+    check(await page.evaluate(() => document.activeElement.matches('dialog[open] h2')), '500 px keyboard window: Add a WebDAV share opens on its heading');
+    await page.keyboard.type('h');
+    check(await page.evaluate(() => document.activeElement.id === 'wdurl' && document.activeElement.value === 'h'), '500 px keyboard window: a letter typed on the WebDAV heading goes to Folder address');
+    await page.locator('dialog[open] #wdurl').fill('');
+    await page.locator('dialog[open] h2').focus();
+    // (copied with the keyboard from a scratch field in the dialog: the fixture's http page has no
+    // navigator.clipboard)
+    await page.locator('dialog[open]').evaluate((d) => { const t = document.createElement('textarea'); t.id = 'scratch'; t.value = 'https://nas.test/dav/'; d.append(t); t.select(); });
+    await page.keyboard.press('ControlOrMeta+C');
+    await page.locator('dialog[open] #scratch').evaluate((t) => t.remove());
+    await page.locator('dialog[open] h2').focus();
+    await page.keyboard.press('ControlOrMeta+V');
+    check(await page.evaluate(() => document.activeElement.id === 'wdurl' && document.activeElement.value === 'https://nas.test/dav/'), '500 px keyboard window: an address pasted on the WebDAV heading goes to Folder address');
+    await page.locator('dialog[open] h2').focus();
+    await page.keyboard.press('Escape');
+    await closed(page);
+    check(!state.hits.some((h) => h.v === '/library/webdav'), '500 px keyboard window: Escape closes Add a WebDAV share and adds nothing');
+  } finally { await context.close(); }
 }
 
 // A narrow window used with a keyboard has the phone layout too. Keys pressed on the picker's
@@ -135,7 +210,9 @@ const focusedAction = (page) => page.locator('dialog[open]').evaluate((dialog) =
 });
 const settle = (page) => page.waitForTimeout(200);
 async function focusAction(page, action) {
-  // Start at Edit tags' initial Title focus and use the actual keyboard tab order.
+  // Start at Title (on a phone the dialog opens on its heading, and Tab goes from there to
+  // Title) and use the actual keyboard tab order.
+  if (await page.evaluate(() => document.activeElement.matches('dialog[open] h2'))) await page.keyboard.press('Tab');
   for (let i = 0; i < { undo: 4, close: 5, save: 6 }[action]; i++) await page.keyboard.press('Tab');
   check((await focusedAction(page)).action === action, `Tab reaches ${action}`);
 }
@@ -238,13 +315,14 @@ async function auditFocusedReflow(browser) {
         await tapEdge(page, 'dialog[open] [data-ci="-1"]');
         await closed(page);
         check(new URL(page.url()).pathname === '/library', `${at}: one edge tap cancels Add music on the same page`);
+        await openWebdav(page, at);
 
         await fx.go(page, '/tracks');
         // At the default text size: the row's ⋯ sheet, then the collection picker it opens
         // (a fresh install's picker has one row, New playlist)
         await page.locator('.track [data-act="more"]').first().tap();
         await measureRows(page, '.popover.menu.sheet:not([hidden]) .pop-item', `${at} row menu sheet`);
-        await page.evaluate(() => { window.pickerFocus = []; document.addEventListener('focusin', (e) => window.pickerFocus.push(e.target.id || e.target.tagName), true); });
+        await watchFocus(page);
         await page.locator('.popover.menu .pop-item').filter({ hasText: /^Add to (playlist|collection)/ }).tap();
         await measureRows(page, 'dialog[open] #pplist .list-row', `${at} collection picker rows`);
         await page.screenshot({ path: path.join(SHOTS, `picker-${at}.png`) });
@@ -252,7 +330,13 @@ async function auditFocusedReflow(browser) {
         await page.locator('dialog[open] [data-ppclose]').tap();
         await closed(page);
 
+        await watchFocus(page);
         await openTags(page);
+        await headingFirst(page, `${at} Edit tags`, 'title');
+        await page.locator('dialog[open] [data-k="artist"]').tap();
+        await page.keyboard.type('Sefa X');
+        check(await page.evaluate(() => document.activeElement.dataset.k === 'artist' && document.activeElement.value === 'Sefa X'), `${at} Edit tags: a tap on Artist focuses it and types there`);
+        await page.locator('dialog [data-k="artist"]').fill('');
         await measure(page, `${at} Edit tags`);
         await page.screenshot({ path: path.join(SHOTS, `edit-tags-${at}.png`) });
         await page.locator('dialog [data-k="title"]').fill('An unsaved title');
@@ -312,6 +396,7 @@ async function auditFocusedReflow(browser) {
     }
     await auditFocusedReflow(browser);
     await auditPickerKeys(browser);
+    await auditFieldDialogKeys(browser);
     const { page, context } = await fx.create(browser, 599, { mobile: true });
     try {
       await fx.go(page, '/library');
@@ -349,6 +434,25 @@ async function auditFocusedReflow(browser) {
       check(await desk.page.locator('dialog[open] #pplist .list-row').first().evaluate((r) => r.getBoundingClientRect().height < 44), '1280 px desktop keeps its compact picker rows');
       check(await desk.page.evaluate(() => document.activeElement.id === 'ppq'), '1280 px desktop: the picker opens with the focus in Find a playlist');
     } finally { await desk.context.close(); }
+    // Desktop and tablet keep the first field focused in Edit tags and Add a WebDAV share
+    for (const width of [1280, 768]) {
+      const w = await fx.create(browser, width, { fixtures });
+      try {
+        await fx.go(w.page, '/tracks');
+        await w.page.locator('.track').first().hover();
+        await w.page.locator('.track [data-act="more"]').first().click();
+        await w.page.locator('.popover.menu .pop-item').filter({ hasText: 'Edit tags' }).click();
+        await w.page.locator('dialog[open] [data-save]').waitFor();
+        check(await w.page.evaluate(() => document.activeElement.dataset.k === 'title' && !document.querySelector('dialog[open] h2').hasAttribute('tabindex')), `${width} px: Edit tags opens with the focus in Title`);
+        await w.page.keyboard.press('Escape'); await closed(w.page);
+        await fx.go(w.page, '/library');
+        await w.page.locator('#libadd').click();
+        await w.page.locator('dialog[open] .choice').filter({ hasText: 'Add a folder or network share' }).click();
+        await w.page.locator('dialog[open] .choice').filter({ hasText: 'A WebDAV share' }).click();
+        await w.page.locator('dialog[open] #wdurl').waitFor();
+        check(await w.page.evaluate(() => document.activeElement.id === 'wdurl'), `${width} px: Add a WebDAV share opens with the focus in Folder address`);
+      } finally { await w.context.close(); }
+    }
   } finally { await browser.close(); }
   console.log(`\n${passed} passed; ${failed} failed`);
   if (failed) process.exitCode = 1;

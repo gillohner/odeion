@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-15
+
+- **Edit tags and Add a WebDAV share open calmly on a phone.** In the Android app their first field showed as selected with no keyboard (the app's view opens none for that), and in a phone browser the keyboard could come up over the dialog before you chose a field. Like Add to playlist…, they now open with nothing selected: tap the field you want to change and the keyboard opens there. Desktop and tablet still start in the first field.
+
 ### 2026-11-14
 
 - **On a phone, Zones says in full what plays on this device.** Under “Nothing playing”, This browser's card said “Streams the files to th…”, cut off at 360 px beside its “selected” label or Play to button, and the Android and desktop apps' card said “The app plays the files itself”, cut off the same way. They now say “Plays in this browser” and “Plays in the app”, which fit; the Play to list and Move to menu show the same new words. Test: `tools/ui-zone-here-line.js`.
