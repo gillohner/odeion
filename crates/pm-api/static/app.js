@@ -2575,7 +2575,6 @@
   const tidalEmbed = (kind, id, title) => { const p = $('#embedpanel'); $('#embedtitle').textContent = title || 'TIDAL player'; $('#embedframe').src = `https://embed.tidal.com/${kind}/${encodeURIComponent(id)}?layout=gridify`; p.hidden = false; };
   $('#embedclose').onclick = () => { const p = $('#embedpanel'); p.hidden = true; $('#embedframe').src = 'about:blank'; };
   { const sp = new URLSearchParams(location.search); if (sp.get('drive') === 'ok') { toast('Drive signed in: add a folder'); history.replaceState(null, '', location.pathname); } else if (sp.get('drive') === 'error') { toast('Drive: ' + (sp.get('message') || 'sign-in failed'), 'error'); history.replaceState(null, '', location.pathname); } }
-  { const sp = new URLSearchParams(location.search); if (sp.get('spotify') === 'ok') { toast('Spotify signed in'); history.replaceState(null, '', location.pathname); } else if (sp.get('spotify') === 'error') { toast('Spotify: ' + (sp.get('message') || 'sign-in failed'), 'error'); history.replaceState(null, '', location.pathname); } }
   const hitItem = (h, album) => ({ uri: h.uri || `${h.source || 'tidal'}:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
   const browserPlay = (i, startAt = 0) => {
     const it = state.browserQueue[i];
@@ -4922,9 +4921,17 @@
   // The back arrow: one step back when there is in-app history, else the parent page.
   const goBack = (fallback) => { if (navDepth > 0) history.back(); else if (fallback && fallback.startsWith('item:')) { const [, kind, ...id] = fallback.split(':'); setView('item', { kind, id: id.join(':') }); } else setView(fallback || 'home'); };
   $$('.nav-item').forEach((b) => b.onclick = () => setView(b.dataset.view));
-  // Back from TIDAL's sign-in page.
+  // Back from TIDAL's or Spotify's sign-in page (its callback sends the browser to /?tidal=… or
+  // /?spotify=…): once the first page is drawn (connect), the place the sign-in was started opens,
+  // signed in, or with the toast and its Sign in button to try again (the sign-in says it "comes back
+  // here"; Spotify's, and a failed one, used to stay on Home with only the toast). The owner gets the
+  // service's Sources panel, a listener their Settings (My streaming accounts). Home stays under it, so
+  // Back returns there, not to the service's sign-in page.
+  let signinBack = null;
+  // (Jamendo's callback already lands on its own panel, /source/jamendo?jamendo=…)
   { const p = new URLSearchParams(location.search); const j = p.get('jamendo'); if (j) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (j === 'signed_in') toast('Jamendo signed in'); else toast('Jamendo sign-in failed: ' + (p.get('message') || j), 'error'); }, 300); } }
-  { const p = new URLSearchParams(location.search); const t = p.get('tidal'); if (t) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (t === 'signed_in') { toast('TIDAL signed in'); setView('sources', { source: 'tidal' }); } else toast('TIDAL sign-in failed: ' + (p.get('detail') || t), 'error'); }, 300); } }
+  { const p = new URLSearchParams(location.search); const t = p.get('tidal'); if (t) { history.replaceState(null, '', location.pathname); signinBack = t === 'signed_in' ? { svc: 'tidal', text: 'TIDAL signed in' } : { svc: 'tidal', text: 'TIDAL sign-in failed: ' + (p.get('detail') || t), kind: 'error' }; } }
+  { const p = new URLSearchParams(location.search); const t = p.get('spotify'); if (t === 'ok' || t === 'error') { history.replaceState(null, '', location.pathname); signinBack = t === 'ok' ? { svc: 'spotify', text: 'Spotify signed in' } : { svc: 'spotify', text: 'Spotify: ' + (p.get('message') || 'sign-in failed'), kind: 'error' }; } }
   { const p = new URLSearchParams(location.search); const t = p.get('lastfm'); if (t) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (t === 'signed_in') { toast(`Last.fm connected${p.get('user') ? ' · ' + p.get('user') : ''}`); setView('settings', 'accounts'); } else toast('Last.fm sign-in failed: ' + (p.get('detail') || t), 'error'); }, 300); } }
 
   const search = $('#search');
@@ -9871,6 +9878,7 @@
           runSearch('pop', r.arg.in || 'everywhere');
         } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace');
       }
+      if (signinBack) { const b = signinBack; signinBack = null; toast(b.text, b.kind); if (isListener()) setView('settings'); else setView('sources', { source: b.svc }); }
       link.loaded = true;
       openEvents();
     } catch (e) {
