@@ -4939,10 +4939,13 @@
   // service's Sources panel, a listener their Settings (My streaming accounts). Home stays under it, so
   // Back returns there, not to the service's sign-in page.
   let signinBack = null;
+  // A failed sign-in's reason also stays on the service's panel (the toast is gone in 6 s), until the
+  // next try there, a sign-in that worked, or the service shows signed in: { svc, why }
+  state.signinFailed = null;
   // (Jamendo's callback already lands on its own panel, /source/jamendo?jamendo=…)
-  { const p = new URLSearchParams(location.search); const j = p.get('jamendo'); if (j) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (j === 'signed_in') toast('Jamendo signed in'); else toast('Jamendo sign-in failed: ' + (p.get('message') || j), 'error'); }, 300); } }
-  { const p = new URLSearchParams(location.search); const t = p.get('tidal'); if (t) { history.replaceState(null, '', location.pathname); signinBack = t === 'signed_in' ? { svc: 'tidal', text: 'TIDAL signed in' } : { svc: 'tidal', text: 'TIDAL sign-in failed: ' + (p.get('detail') || t), kind: 'error' }; } }
-  { const p = new URLSearchParams(location.search); const t = p.get('spotify'); if (t === 'ok' || t === 'error') { history.replaceState(null, '', location.pathname); signinBack = t === 'ok' ? { svc: 'spotify', text: 'Spotify signed in' } : { svc: 'spotify', text: 'Spotify: ' + (p.get('message') || 'sign-in failed'), kind: 'error' }; } }
+  { const p = new URLSearchParams(location.search); const j = p.get('jamendo'); if (j) { history.replaceState(null, '', location.pathname); state.signinFailed = j === 'signed_in' ? null : { svc: 'jamendo', why: p.get('message') || (j === 'error' ? 'Jamendo gave no reason' : j) }; setTimeout(() => { if (j === 'signed_in') toast('Jamendo signed in'); else toast('Jamendo sign-in failed: ' + (p.get('message') || j), 'error'); }, 300); } }
+  { const p = new URLSearchParams(location.search); const t = p.get('tidal'); if (t) { history.replaceState(null, '', location.pathname); signinBack = t === 'signed_in' ? { svc: 'tidal', text: 'TIDAL signed in' } : { svc: 'tidal', text: 'TIDAL sign-in failed: ' + (p.get('detail') || t), kind: 'error', why: p.get('detail') || (t === 'error' ? 'TIDAL gave no reason' : t) }; } }
+  { const p = new URLSearchParams(location.search); const t = p.get('spotify'); if (t === 'ok' || t === 'error') { history.replaceState(null, '', location.pathname); signinBack = t === 'ok' ? { svc: 'spotify', text: 'Spotify signed in' } : { svc: 'spotify', text: 'Spotify: ' + (p.get('message') || 'sign-in failed'), kind: 'error', why: p.get('message') || 'Spotify gave no reason' }; } }
   { const p = new URLSearchParams(location.search); const t = p.get('lastfm'); if (t) { history.replaceState(null, '', location.pathname); setTimeout(() => { if (t === 'signed_in') { toast(`Last.fm connected${p.get('user') ? ' · ' + p.get('user') : ''}`); setView('settings', 'accounts'); } else toast('Last.fm sign-in failed: ' + (p.get('detail') || t), 'error'); }, 300); } }
 
   const search = $('#search');
@@ -8046,7 +8049,12 @@
               + (cur.id === 'spotify' ? '<div id="spotplay" hidden><h3 class="set-h sg-play-h">Other ways to play</h3><div id="splibrespot"></div><div id="spotsoloist"></div></div>' : '')
               + (cur.id === 'soundcloud' ? '<div id="scmode"></div>' : '')
               + '<div id="srcmine"></div>';
-          main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
+          // (the last sign-in here failed: why, above the way to try again)
+          if (state.signinFailed && cur && state.signinFailed.svc === cur.id && /^signed in\b/.test(String(cur.status || ''))) state.signinFailed = null;
+          const failed = state.signinFailed && cur && state.signinFailed.svc === cur.id ? `<p class="notice warn src-failed">Last sign-in failed: ${esc(state.signinFailed.why)}</p>` : '';
+          main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${failed}${body}</section>` : ''}</div></div>`;
+          // A new try (a sign-in button, or Finish sign-in with a pasted address) puts the note away
+          if (failed) $(`#src-${CSS.escape(cur.id)}`, main).addEventListener('click', (e) => { if (!e.target.closest('#tidalin, #tbin, #tbfinish, #tfin, #spotin, #jamin, form[id$="paste"] button[type=submit]')) return; state.signinFailed = null; $$('.src-failed', main).forEach((n) => n.remove()); }, true);
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
           // "‹ Sources" opens the list: one step back when the list is the page before, else the list in
           // this panel's place (a service opened from an album's Connect TIDAL, so Back then returns there);
@@ -9925,7 +9933,7 @@
           runSearch('pop', r.arg.in || 'everywhere');
         } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace');
       }
-      if (signinBack) { const b = signinBack; signinBack = null; toast(b.text, b.kind); if (isListener()) setView('settings'); else setView('sources', { source: b.svc }); }
+      if (signinBack) { const b = signinBack; signinBack = null; state.signinFailed = b.why ? { svc: b.svc, why: b.why } : null; toast(b.text, b.kind); if (isListener()) setView('settings'); else setView('sources', { source: b.svc }); }
       link.loaded = true;
       openEvents();
     } catch (e) {

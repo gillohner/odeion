@@ -1356,6 +1356,7 @@ html[data-shell="phone"] label.check { min-height: 44px; }
 .set-list .set-item .sub { color: var(--muted); font-size: var(--fs-xs); }
 .set-rows > #pkurl:not(:empty), .set-rows > #dspbox:not(:empty), .set-rows > .set-note { padding: 0 16px 14px; }
 .set-rows > .notice { margin: 0 16px 14px; }
+.set-panel > .src-failed { margin: 0 0 14px; overflow-wrap: anywhere; }
 .set-rows #pkfiles .list { margin-top: 6px; }
 .nowrap { white-space: nowrap; }
 code.path { font-size: var(--fs-sm); overflow-wrap: anywhere; }
