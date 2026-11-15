@@ -33,6 +33,8 @@ const serveWav = (r) => {
 const until = async (f, label, ms = 7000) => { const t = Date.now(); while (Date.now() - t < ms) { const v = await f(); if (v) return v; await sleep(50); } throw new Error('Timed out: ' + label); };
 const now = (page) => page.evaluate(() => pmPlayer.now());
 const queueIds = (page) => page.evaluate(() => [...document.querySelectorAll('.queue [data-qrow]')].map((r) => (r.textContent.match(/Song (\d)/) || [])[1]).map(Number));
+// The Queue page rows marked as the song on (a .cur row, aria-current), by their row number
+const curRows = (page) => page.evaluate(() => [...document.querySelectorAll('.queue [data-qrow]')].filter((r) => r.classList.contains('cur') || r.getAttribute('aria-current') === 'true').map((r) => `${r.dataset.qrow}${r.classList.contains('cur') ? '' : ' (no .cur)'}${r.getAttribute('aria-current') === 'true' ? '' : ' (no aria-current)'}`));
 
 // A reload with Songs 1-3 saved and the place `at`; the node's events connect only when the test
 // says so (connect()), as after a reload on a slow link. `before` runs first (Shuffle, Remove…).
@@ -61,6 +63,9 @@ async function backOnSong3(page, width, index, label, shot) {
   assert.match(n.src, /\/v1\/library\/tracks\/3\/file/, `${width} ${label}: the bar holds Song 3 (${n.src})`);
   assert.equal(n.paused, true, `${width} ${label}: paused, as it was left`);
   assert.ok(n.time >= 29 && n.time < 31, `${width} ${label}: at 0:30 (${n.time})`);
+  // (the Queue page was drawn before the place came back: it marks Song 3's row now, no reload or visit needed)
+  await until(async () => (await curRows(page)).length, `${width} ${label}: the Queue page marks the song on`, 3000).catch(() => {});
+  assert.deepEqual(await curRows(page), [String(index)], `${width} ${label}: the Queue page marks Song 3's row`);
   await page.click('#toggle');
   const p = await until(async () => { const v = await now(page); return !v.paused && v.time > 30 ? v : null; }, `${width} ${label}: Play plays`);
   assert.match(p.src, /\/v1\/library\/tracks\/3\/file/, `${width} ${label}: Play plays Song 3 (${p.src})`);
@@ -100,6 +105,20 @@ async function backOnSong3(page, width, index, label, shot) {
         });
         try {
           await backOnSong3(page, width, 1, 'removed', width === 1280 ? 'removed-then-restored' : null);
+          assert.deepEqual(state.errors, [], `${width}: no page errors`);
+        } finally { await context.close(); }
+      });
+    }
+    // 2a. On a phone, reloaded on the Queue page: once the place comes back its row is marked (before,
+    // no row was, until the page was left and opened again)
+    for (const width of [360, 412]) {
+      await check(`${width}: reloaded on the Queue page, the song on is marked once its place comes back`, async () => {
+        const { page, context, state } = await reload(browser, width, { index: 2, id: 3, pos: 30 });
+        try {
+          assert.equal(await page.evaluate(() => document.documentElement.dataset.shell), 'phone', `${width}: the phone layout`);
+          await backOnSong3(page, width, 2, 'reloaded on Queue', 'queue-marked-after-reload');
+          assert.deepEqual(await curRows(page), ['2'], `${width}: still marked while it plays`);
+          assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${width}: no sideways scroll`);
           assert.deepEqual(state.errors, [], `${width}: no page errors`);
         } finally { await context.close(); }
       });
