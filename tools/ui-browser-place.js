@@ -7,6 +7,8 @@
 // is hidden or goes (not only every 2 s), except after the session ended. A saved song whose file
 // doesn't open on the reload (the node busy) keeps its place, and Play starts it from there with the
 // start's own retry and message (before, Play did nothing and said nothing, and the place was lost).
+// Play pressed while that file is still opening is the start too, once the open fails; and after a
+// song's start and retry have both failed ("can't play here"), a further Play tries it again.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-browser-place.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -418,6 +420,106 @@ async function backOnSong3(page, width, index, label, shot) {
         assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
     });
+    // Every message the page says, in order (one #toast element shows them one at a time; each toast
+    // is one batch of mutations, its text set at once)
+    const said = (page) => page.evaluate(() => { if (!window.saidLog) { window.saidLog = []; const t = document.querySelector('#toast'); new MutationObserver(() => { const x = t.firstChild && t.firstChild.nodeType === 3 ? t.firstChild.textContent : t.textContent; if (x) window.saidLog.push(x); }).observe(t, { childList: true, characterData: true, subtree: true }); } return window.saidLog.slice(); });
+    // 10. A song that couldn't play here (its start and the start's retry both failed: the node busy)
+    // stays in the bar; a later Play tries it once more from where that start was and says so if it
+    // fails again, and plays it once the node answers (before, a further Play did nothing, said
+    // nothing). Not counted again. On a phone too (the mini player's Play).
+    for (const width of [1280, 360]) {
+      await check(`${width}: after "can't play here", a further Play tries the song again`, async () => {
+        const { page, context, state } = await fx.create(browser, width, { fixtures, realAudio: true, ...(width < 600 ? { mobile: true } : {}) });
+        await context.addInitScript(([q, a]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', a); }, [JSON.stringify(saved), JSON.stringify({ index: 1, id: 2, pos: 30 })]);
+        let busy = true; let asked = 0; let opens = 0;
+        await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => { asked++; if (r.request().headers().range !== 'bytes=0-1') opens++; return busy ? r.fulfill({ status: 503, contentType: 'text/plain', body: 'busy' }) : serveWav(r); });
+        try {
+          await fx.go(page, '/queue');
+          await until(() => page.evaluate(() => pmPlayer.now().index === 1 && !!document.querySelector('#browser').error), 'Song 2 comes back, its file not opening');
+          await said(page);
+          await page.click('#toggle');
+          // (a Play while the start's own retry is due opens nothing more: the reload's open, the
+          // start's and its retry's, 3 in all)
+          await until(async () => (await said(page)).some((x) => /Trying again/.test(x)), 'the start fails and its retry is due');
+          await page.click('#toggle');
+          await until(async () => (await said(page)).some((x) => /can't play here/.test(x)), 'the start and its retry fail: "can\'t play here"', 9000);
+          assert.equal(opens, 3, `the file was opened 3 times, not more (${opens})`);
+          // (a Play while the node is still busy: asked again, and said again)
+          // (the same words again set no new text: the old message is blanked first)
+          await page.evaluate(() => { document.querySelector('#toast').textContent = ''; });
+          let before = asked; const n = (await said(page)).filter((x) => /can't play here/.test(x)).length;
+          await page.click('#toggle');
+          await until(async () => asked > before, 'a further Play asks for the file again');
+          await until(async () => (await said(page)).filter((x) => /can't play here/.test(x)).length > n, 'and says again that it can\'t play');
+          const all = await said(page);
+          assert.match(all[all.length - 1], /Song 2.*can't play here.*503/, `the message names the song and the node's answer (${all[all.length - 1]})`);
+          if (width === 360) await page.screenshot({ path: path.join(shots, 'cant-play-then-play-again-360.png') });
+          // (the node answers again: the next Play plays it, from 0:30 where its start was)
+          busy = false; before = asked;
+          await sleep(300);
+          await page.click('#toggle');
+          const p = await until(async () => { const v = await now(page); return !v.paused && v.time > 30 ? v : null; }, 'Play plays it once the node answers', 9000);
+          assert.ok(asked > before, 'it asked for the file');
+          assert.equal(p.index, 1, `Song 2 plays (${JSON.stringify(p)})`);
+          assert.ok(p.time < 34, `from 0:30 (${p.time})`);
+          if (width === 360) await page.screenshot({ path: path.join(shots, 'cant-play-then-plays-360.png') });
+          assert.equal(state.hits.filter((h) => h.v === '/library/history' && h.m === 'POST').length, 0, 'not counted as another play');
+          assert.deepEqual(state.errors, [], 'no page errors');
+        } finally { await context.close(); }
+      });
+    }
+    // 10b. A seek on a song that couldn't play here moves where the next Play tries it from
+    await check('1280: after "can\'t play here", a seek moves where Play tries the song from', async () => {
+      const { page, context, state } = await fx.create(browser, 1280, { fixtures, realAudio: true });
+      await context.addInitScript(([q, a]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', a); }, [JSON.stringify(saved), JSON.stringify({ index: 1, id: 2, pos: 30 })]);
+      let busy = true;
+      await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => (busy ? r.fulfill({ status: 503, contentType: 'text/plain', body: 'busy' }) : serveWav(r)));
+      try {
+        await fx.go(page, '/queue');
+        await until(() => page.evaluate(() => pmPlayer.now().index === 1 && !!document.querySelector('#browser').error), 'Song 2 comes back, its file not opening');
+        await said(page);
+        await page.click('#toggle');
+        await until(async () => (await said(page)).some((x) => /can't play here/.test(x)), '"can\'t play here"', 9000);
+        // (the bar's seek slider to 0:10 of the song's 1:00)
+        await page.evaluate(() => { const s = document.querySelector('#seek'); s.value = String(Math.round(1000 * 10 / 60)); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); });
+        busy = false;
+        await sleep(300);
+        await page.click('#toggle');
+        const p = await until(async () => { const v = await now(page); return !v.paused && v.time > 8 ? v : null; }, 'Play plays it', 9000);
+        assert.ok(p.time < 14, `from about 0:10, not 0:30 (${p.time.toFixed(1)} s)`);
+        assert.deepEqual(state.errors, [], 'no page errors');
+      } finally { await context.close(); }
+    });
+    // 11. Play pressed on a saved song while its file is still opening (the node slow), then the open
+    // fails (503): that Play is the start, with its retry and message ("did not start … Trying
+    // again"), and the song plays from 0:30 once the node answers (before, that Play went quiet and
+    // only a second Play did anything)
+    for (const width of [1280, 360]) {
+      await check(`${width}: Play on a saved song still opening, whose open then fails, retries it`, async () => {
+        const { page, context, state } = await fx.create(browser, width, { fixtures, realAudio: true, ...(width < 600 ? { mobile: true } : {}) });
+        await context.addInitScript(([q, a]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', a); }, [JSON.stringify(saved), JSON.stringify({ index: 1, id: 2, pos: 30 })]);
+        let busy = true; let asked = 0;
+        await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => { asked++; return busy ? sleep(1500).then(() => r.fulfill({ status: 503, contentType: 'text/plain', body: 'busy' })).catch(() => {}) : serveWav(r); });
+        try {
+          await fx.go(page, '/queue');
+          await until(async () => (await now(page)).index === 1 && asked > 0, 'Song 2 comes back, its file opening');
+          assert.equal(await page.evaluate(() => !!document.querySelector('#browser').error), false, 'its file has not failed yet');
+          await said(page);
+          const before = asked;
+          await page.click('#toggle');
+          await until(async () => asked > before, 'once the open fails, the Play asks for the file again', 6000);
+          const t = await until(async () => (await said(page)).find((x) => /did not start/.test(x)), 'and says the song did not start');
+          assert.match(t, /Song 2.*503.*Trying again/, `the message names the song and the node's answer (${t})`);
+          busy = false;
+          const p = await until(async () => { const v = await now(page); return !v.paused && v.time > 30 ? v : null; }, 'the song plays', 9000);
+          assert.equal(p.index, 1, `Song 2 plays (${JSON.stringify(p)})`);
+          assert.ok(p.time < 34, `from 0:30 (${p.time})`);
+          if (width === 360) await page.screenshot({ path: path.join(shots, 'opening-then-failed-play-360.png') });
+          assert.equal(state.hits.filter((h) => h.v === '/library/history' && h.m === 'POST').length, 0, 'not counted as a second play');
+          assert.deepEqual(state.errors, [], 'no page errors');
+        } finally { await context.close(); }
+      });
+    }
   } finally { await browser.close(); }
   if (failed) { console.log(`${failed} failed`); process.exit(1); }
   console.log('all browser-place checks passed');
