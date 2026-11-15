@@ -6563,6 +6563,10 @@
   };
   // (action: { view, label } opens a page; { id, label } is a button the page binds itself)
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" type="button" ${action.id ? `id="${action.id}"` : `data-empty-action="${action.view}"`}>${esc(action.label)}</button>` : ''}</div>`;
+  // An empty library's Songs and Albums: the owner's way in is Add music (folders, shares and drives
+  // are on Your library › Node library now; the old "in Settings (Library folders)" led nowhere), a
+  // listener can't add to the node's library, so it just says where the music comes from
+  const noMusicYet = (what) => (isOwner() ? ['Add the folder with your music, or upload files from this device.', { view: 'add-music', label: 'Add music' }] : [`${what} show up here once the node’s owner adds music.`]);
   const LAYOUTS = [['auto', 'Automatic', 'Phone under 600 px wide, desktop from there (tablets too)'], ['phone', 'Phone', 'Tabs and a mini player, at any width'], ['desktop', 'Desktop', 'The sidebar and the full player bar, also in windows from 480 px']];
   const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
     + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<input type="checkbox" class="switch" role="switch" id="densepick" ${densePref() ? 'checked' : ''} aria-label="Dense lists">`));
@@ -7280,7 +7284,7 @@
           // Try again and no count ("0 of 45" and "No favourite albums" said none were hearted)
           const failed = !!favFailed && !shown.length;
           main.innerHTML = pageHead('Albums', waiting || failed ? null : state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + (isOwner() ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? (waiting ? `<div id="albumswait">${emptyState('disc', 'Getting your favourites…', 'They show here as soon as they are in.')}</div>` : failed ? `<div id="albumsfavfail" role="alert">${emptyState('disc', 'Couldn’t get your favourites', favFailed.message || 'The node didn’t answer.', { id: 'albumsfavretry', label: 'Try again' })}</div>` : emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav)))) : songs ? emptyState('disc', 'No albums yet', `${songs === 1 ? 'The song in the library has no album name in its tags' : `The ${songs} songs in the library have no album name in their tags`}. Albums come from the tags of scanned files.`, { view: 'tracks', label: 'Show songs' })
-            : emptyState('disc', 'No albums yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
+            : emptyState('disc', 'No albums yet', ...noMusicYet('Albums')));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; return renderSortedList(b, `[data-focus="${b.dataset.focus}"]`); });
           const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); return renderSortedList(ls); };
           const lf = $('[data-lfav]', main); if (lf) lf.onclick = () => { setListPref('albums', { ...lp, fav: !lp.fav }); return renderSortedList(lf, '[data-lfav]'); };
@@ -7403,8 +7407,9 @@
           const draw = () => {
             // (the note is for the draw it came with: a later one, after Show more or Skip all, leaves it out)
             const note = idNote ? `<p class="notice small idnote" role="status">${esc(idNote)}</p>` : ''; idNote = '';
-            main.innerHTML = pageHead('Confirm matches', page.songs, page.songs ? '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is">Skip all unsure</button>' : '') + (albums.some((a) => a.songs.length) || next != null ? `${idHow(files, true)}${note}${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : note + emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
+            main.innerHTML = pageHead('Confirm matches', page.songs, page.songs ? '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is">Skip all unsure</button>' : '') + (albums.some((a) => a.songs.length) || next != null ? `${idHow(files, true)}${note}${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : note + emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify (Your library › Node library) show up here.', { id: 'idopen', label: 'Open Identify' }));
             $$('[data-album]', main).forEach(wire);
+            const ido = $('#idopen'); if (ido) ido.onclick = openIdentify;
             const ska = $('#idskipall'); if (ska) ska.onclick = (ev) => { if (locked.size) return undefined; hold('all', ska); return busy(ska, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { hold('all', null); throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: undoSkip({ all: true }) }); if (!live()) return; listGen++; albums.forEach((a) => { a.songs = []; }); page.songs = 0; next = null; hold('all', null); draw(); focusUndo(ub); }, ev); };
             // (a "Show more" answer that comes after Skip all is for a list that is gone)
             const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; const gen = listGen; try { const p = await api('GET', `/library/suggestions/albums?limit=50&${next}`); if (!live() || gen !== listGen) return; albums.push(...p.albums.filter((a) => !albums.some((x) => x.key === a.key))); next = cursor(p); draw(); } catch (e) { if (!live() || gen !== listGen) return; toast(e.message, 'error'); more.disabled = false; } };
@@ -7534,7 +7539,7 @@
           const [first, stats] = await Promise.all([api('GET', `/library/tracks?limit=${PAGE}`), api('GET', '/library/stats').catch(() => null)]);
           if (state.view !== 'tracks') return;
           const total = Math.max(stats ? stats.tracks : 0, first.tracks.length);
-          main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + (isOwner() ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '')) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', 'Add the folder with your music in Settings (Library folders), or follow Get started on Home.', { view: 'settings', label: 'Open settings' }));
+          main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + (isOwner() ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '')) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', ...noMusicYet('Songs')));
           const box = $('#tracklist');
           if (box) {
             const shown = []; lists.all = shown;
@@ -8929,6 +8934,7 @@
               $('#impstart').onclick = async () => { try { const j = await api('POST', '/library/imports', { path }); watchJob(j.id); box.innerHTML = '<p class="small">Copying. Follow it in the job chip by the player; you can leave this page.</p>'; } catch (er) { toast(er.message, 'error'); } };
             };
           } else if (tab === 'node') {
+            const toCard = state.libToIdentify; state.libToIdentify = false; // (Open Identify's, for this draw only: a page left before it loads forgets it)
             const idGen = idRenderGen; // a card drawn since this ask has a fresher answer than it
             const [info, folders, shares, drv, ns, hidden, idSt] = await Promise.all([
               api('GET', '/info'), api('GET', '/library/folders').catch(() => []), api('GET', '/library/webdav').catch(() => []),
@@ -8944,6 +8950,7 @@
               + nodeLibraryHtml({ info, folders, ns, shares, drv })
               + (hidden.length ? sGroup('Taken out of the library', hidden.map((h, k) => sRow(`<code class="path">${esc(h.path.split('/').slice(-2).join('/'))}</code>`, `Taken out ${ago(h.hidden_at)}; the file is still there.`, `<button class="btn sm ghost" data-unhide="${k}">Bring back</button>`)).join('')) : ''));
             bindNodeLibrary(idSt);
+            if (toCard) showIdentifyCard();
             $$('[data-unhide]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', '/library/hidden/restore', { path: hidden[Number(b.dataset.unhide)].path }); toast(r.scan_started ? 'Back: reading it again' : 'Back with the next scan'); watchScan({ scanning: !!r.scan_started }); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } });
             if (info.scanning) { clearTimeout(state.libPoll); state.libPoll = setTimeout(() => { if (state.view === 'library' && state.viewArg === 'node') render(); }, 3000); }
           } else {
@@ -9615,6 +9622,11 @@
   // The card's title: where the focus goes when a press removed its button (a key held down can't
   // press a title), and only when the focus was left on the page
   const focusCardTitle = () => { const blk = $('#idcard') && $('#idcard').closest('.set-block'); const h = blk && blk.querySelector('.set-name'); if (h && focusLeft()) { h.tabIndex = -1; h.focus(); } };
+  // Confirm matches with nothing to confirm: "Open Identify" opens Node library with the Identify card
+  // in view and its title focused (the card is far down the page; Settings has no Identify)
+  const openIdentify = () => { state.libToIdentify = true; setView('library', 'node'); };
+  // (the group with its IDENTIFY heading at the top, below the phone's sticky Library chips, at once)
+  const showIdentifyCard = () => { const grp = $('#idcard') && $('#idcard').closest('.set-group'); if (!grp || !focusLeft()) return; const nav = $('.main > .libnav'); const over = nav && getComputedStyle(nav).position === 'sticky' ? nav.offsetHeight : 0; grp.style.scrollMarginTop = `${over + 8}px`; grp.scrollIntoView({ block: 'start', behavior: 'instant' }); focusCardTitle(); };
   // Node library's top line says the unsure songs too, as the card does (the card is far down the
   // page): one press to the review, no scroll. Drawn with the page from the same answer, so the line
   // doesn't grow after it shows, and a page redrawn by a scan's poll says nothing new

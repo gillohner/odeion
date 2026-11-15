@@ -2,7 +2,7 @@
 // Songs and has no albums; Albums said "Add the folder with your music in Settings" with Open
 // settings, a folder that is already there. Now, when the library has songs, it says they have no
 // album name in their tags and Show songs opens Songs (1 click). With no songs (or no answer about
-// them) it still sends you to Settings to add your music. At 1280, 1024, 768 and 360 px.
+// them) Add music opens Your library with its chooser. At 1280, 1024, 768 and 360 px.
 //   node tools/ui-albums-empty.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -16,8 +16,8 @@ const stats = (tracks) => ({ tracks, albums: 0, artists: 0, files: tracks, missi
 const cases = [
   { name: 'songs', fixtures: { '/library/stats': { body: stats(4) } }, text: 'The 4 songs in the library have no album name in their tags', button: 'Show songs', goes: 'Songs', url: '/tracks' },
   { name: 'one-song', fixtures: { '/library/stats': { body: stats(1) } }, text: 'The song in the library has no album name in its tags', button: 'Show songs', goes: 'Songs', url: '/tracks' },
-  { name: 'no-songs', fixtures: { '/library/stats': { body: stats(0) } }, text: 'Add the folder with your music in Settings', button: 'Open settings', goes: 'Settings', url: '/settings' },
-  { name: 'stats-fail', fixtures: { '/library/stats': { body: { error: 'busy' }, status: 503 } }, text: 'Add the folder with your music in Settings', button: 'Open settings', goes: 'Settings', url: '/settings' },
+  { name: 'no-songs', fixtures: { '/library/stats': { body: stats(0) } }, text: 'Add the folder with your music, or upload files', button: 'Add music', goes: 'Your library', url: '/library' },
+  { name: 'stats-fail', fixtures: { '/library/stats': { body: { error: 'busy' }, status: 503 } }, text: 'Add the folder with your music, or upload files', button: 'Add music', goes: 'Your library', url: '/library' },
 ];
 
 (async () => {
