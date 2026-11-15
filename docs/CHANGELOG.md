@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-15
+
+- **Shuffle my music pressed after another Play is no longer ignored.** On a speaker zone, if you pressed Shuffle my music, then Play on an album or song while the shuffle was still on its way, then Shuffle my music again, the last press did nothing and the album played last. Now the last press wins: the zone plays a new shuffle after that Play. Pressing Shuffle my music twice in a row still plays one shuffle. Tests: `tools/ui-empty-queue.js`.
+
 ### 2026-11-14
 
 - **On a phone, Zones says in full what plays on this device.** Under “Nothing playing”, This browser's card said “Streams the files to th…”, cut off at 360 px beside its “selected” label or Play to button, and the Android and desktop apps' card said “The app plays the files itself”, cut off the same way. They now say “Plays in this browser” and “Plays in the app”, which fit; the Play to list and Move to menu show the same new words. Test: `tools/ui-zone-here-line.js`.
