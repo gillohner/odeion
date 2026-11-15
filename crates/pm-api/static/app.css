@@ -499,6 +499,8 @@ html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 .filter-none:empty { margin: 0; }
 .notice { padding: 12px 14px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-2); }
 .notice.warn { border-color: rgba(232, 178, 74, 0.4); }
+/* A card's or note's sentence, then its button (My music's Sign in, the homeserver notes): not touching */
+.card > p + .btn, .notice > p + .btn { margin-top: 10px; }
 /* The Android app on an old System WebView (index.html's script): only CSS such a WebView knows, so no
    gap, inset or :is() here */
 .webview-note { margin: 12px 16px 0; font-size: var(--fs-sm); }
