@@ -3224,8 +3224,10 @@
   };
   const refreshOutputs = () => { if (isOwner()) loadOutputs().then(() => { preferPhoneZone(); renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
   window.addEventListener('pmdesktop:output', refreshOutputs);
+  // A zone's line under its name (Zones cards, Play to, Move to, the Sound panel, Settings). The page's
+  // own player's is short, so it fits beside "selected" or Play to on a 360 px phone's card
   const deviceWords = (z) => {
-    if (z.id === BROWSER) return appPlatform() ? 'The app plays the files itself' : 'Streams the files to this browser';
+    if (z.id === BROWSER) return appPlatform() ? 'Plays in the app' : 'Plays in this browser';
     if (deviceOf(z)) return dacWordsFor(z);
     const id = String(z.output || ''); const o = (state.outputs || []).find((x) => x.id === id);
     return [PROTO_WORDS[id.split(':')[0]] || id.split(':')[0], o && o.model].filter(Boolean).join(' · ');
