@@ -2809,6 +2809,9 @@
   // new press is the last word and goes in its turn, as that Play did. This browser's also waits for
   // any other change of its own on its way)
   const shuffling = new Map(); // (zone → the zone's last change asked when its shuffle was)
+  // (offered with a library that has songs, and not offline: the downloads have no list of the
+  // library's songs to shuffle)
+  const canShuffleMine = () => !isOffline() && !!(state.info && state.info.library && state.info.library.tracks > 0);
   const shuffleMyMusic = (zid = state.zone) => {
     if ((shuffling.has(zid) && shuffling.get(zid) === zoneOps.get(zid)) || (zid === BROWSER && zoneBusy.get(BROWSER))) return Promise.resolve();
     const run = zoneOp(zid, async (turn) => { const r = await api('GET', '/library/tracks?limit=200', undefined, { signal: turn.signal }); await playTracks(r.tracks, true, 'end', { shuffle: true, turn }); });
@@ -2820,12 +2823,14 @@
   // downloads have no list of the library's songs to shuffle)
   // (on zone `zid`, the one whose Play was pressed: named whenever there is more than one place to
   // play, so the note still says which zone after a switch, and This browser's card says so too)
+  const onZoneWords = (zid) => { const name = zid === BROWSER ? hereName() : (state.zones[zid] || {}).name; return name && zoneList().length > 1 ? ` on ${name}` : ''; };
+  // The note's Shuffle my music and the empty Queue page's look again when pressed: songs queued
+  // meanwhile (here or from another device) are not replaced by the shuffle
+  const shuffleIfEmpty = (zid) => (queueEmpty(zid) ? shuffleMyMusic(zid) : toast(`The queue has songs now${onZoneWords(zid)}: press Play`));
   const emptyQueue = (zid = state.zone) => {
-    const name = zid === BROWSER ? hereName() : (state.zones[zid] || {}).name;
-    const on = name && zoneList().length > 1 ? ` on ${name}` : '';
     if (isOffline()) toast('The queue is empty: play one of your downloads');
-    // (the note stays a while: songs queued meanwhile are not replaced by the shuffle)
-    else if (state.info && state.info.library && state.info.library.tracks > 0) toast(`The queue is empty${on}`, '', { label: 'Shuffle my music', run: () => (queueEmpty(zid) ? shuffleMyMusic(zid) : toast(`The queue has songs now${on}: press Play`)) });
+    // (the note stays a while)
+    else if (canShuffleMine()) toast(`The queue is empty${onZoneWords(zid)}`, '', { label: 'Shuffle my music', run: () => shuffleIfEmpty(zid) });
     else toast('The queue is empty: search for something to play');
   };
   // A node zone stopped, with nothing in its queue and nothing playing (the node would only answer
@@ -8722,8 +8727,13 @@
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
           const hadQsh = !!document.activeElement && document.activeElement.id === 'qshuffle';
           main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
-            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add songs with the row actions.'));
+            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add songs with the row actions.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
+          // An empty queue offers the library shuffled here too, on the zone the page is for (before,
+          // only words: the bar's Play said the queue was empty, and its note had the button). Only
+          // when the zone is known to be empty, as for the note: a node zone whose queue could not be
+          // fetched, or that is paused on a song, draws no rows but still has music to lose.
+          const qm = $('#qmine', main); if (qm) { const zid = state.zone; qm.onclick = async () => { try { await shuffleIfEmpty(zid); } catch (e) { toast(e.message, 'error'); } }; }
           const qedit = async (i, op, to) => {
             if (isBrowser()) {
               const bq = state.browserQueue; const j = op === 'up' ? i - 1 : op === 'down' ? i + 1 : op === 'to' ? to : null;
