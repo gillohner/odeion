@@ -576,9 +576,9 @@ jobs:
         run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true; tail -n 30 /tmp/pwa/out/node.log || true
 
   # The UI pages checked against fixtures in a real Chromium (tools/ui-fixture.js: the app's own
-  # files, no node, no build), split over two runners; every page is in exactly one half.
+  # files, no node, no build), split over four runners; every page is in exactly one of them.
   ui-fixtures:
-    name: ui-fixtures (${{ matrix.shard }}/2)
+    name: ui-fixtures (${{ matrix.shard }}/4)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -586,7 +586,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -608,7 +608,7 @@ jobs:
           n=0
           while read -r script shots; do
             n=$((n + 1))
-            [ $(( (n - 1) % 2 + 1 )) = "$SHARD" ] || continue
+            [ $(( (n - 1) % 4 + 1 )) = "$SHARD" ] || continue
             echo "::group::$script"
             node "$GITHUB_WORKSPACE/tools/$script" "$GITHUB_WORKSPACE" "/tmp/pm/$shots" < /dev/null
             echo "::endgroup::"
