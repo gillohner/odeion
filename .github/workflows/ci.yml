@@ -676,6 +676,7 @@ jobs:
           ui-empty-ways-in.js empty-ways-in-shots
           ui-item-redraw.js item-redraw-shots
           ui-songs-name.js songs-name-shots
+          ui-song-row-album.js song-row-album-shots
           ui-phone-library-head.js phone-library-head-shots
           ui-song-menus.js song-menus-shots
           ui-playlist-toast.js playlist-toast-shots

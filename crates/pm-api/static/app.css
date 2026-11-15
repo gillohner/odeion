@@ -564,6 +564,14 @@ html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 .track .album-col { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .track .album-col button { background: none; border: 0; color: inherit; cursor: pointer; padding: 0; font: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .track .album-col button:hover { color: var(--fg); text-decoration: underline; }
+/* Under 900 px the desktop layout has no room for an album column: the album joins the artist
+   line and the title takes the width (at 768 px it was cut to about ten characters) */
+.track .by-album { display: none; }
+@media (max-width: 900px) {
+  html[data-shell="desktop"] .track .by-album { display: inline; }
+  html[data-shell="desktop"] .track .album-col { display: none; }
+}
+@media (min-width: 720.02px) and (max-width: 900px) { html[data-shell="desktop"] .track:not(.compact) { grid-template-columns: 40px minmax(0, 1fr) 92px 64px 112px; } }
 .fmt { font-size: var(--fs-xs); color: var(--muted); border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 1px 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .track .dur { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; font-size: var(--fs-sm); }
 .track .row-actions { display: flex; justify-content: flex-end; gap: 2px; opacity: 0; transition: opacity var(--dur-fast); }
