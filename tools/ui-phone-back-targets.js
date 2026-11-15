@@ -18,6 +18,9 @@ const album = { uri: null, source: 'library', source_id: '7', plays_from: { serv
 const fixtures = {
   '/item/album/lib-7': { body: album },
   '/item/album/lib-7/extras': { body: { collections: [], related: [], concerts: [], similar: [] } },
+  // An album none of your services has: its songs section offers Connect TIDAL, to TIDAL's own panel
+  '/item/album/mb-nowhere': { body: { ...album, id: 'mb-nowhere', source_id: 'musicbrainz', source: 'MusicBrainz', target: { uri: 'https://musicbrainz.org/release-group/5b11f4ce-a62d-471e-81fc-a69a8278c7da' }, title: 'Nowhere Yet', plays_from: null, songs: [], connect: ['tidal'] } },
+  '/sources': { body: [{ id: 'tidal', name: 'TIDAL', description: '', status: 'ready', enabled: true }] },
 };
 
 const box = (page, selector) => page.locator(selector).first().evaluate((el) => {
@@ -146,6 +149,35 @@ async function noPush(page, selector, at, most) {
         await tapReachEdge(page, '[data-src-back]');
         await page.waitForFunction(() => location.pathname === '/sources');
         check(true, `${at} sources: one edge tap goes back to the list`);
+
+        // "‹ Sources" goes to the Sources list, also when the service was opened from somewhere else:
+        // an album's Connect TIDAL opens TIDAL's panel, and its "‹ Sources" used to go back to the album.
+        // The list then takes the panel's place, so the phone's Back from it returns to the album.
+        await fx.go(page, '/album/mb-nowhere');
+        await page.locator('#isongs').getByText('Connect TIDAL').click();
+        await page.waitForSelector('#src-tidal [data-src-back]');
+        const depth = await page.evaluate(() => history.length);
+        if (width === 360) await page.screenshot({ path: path.join(SHOTS, `connect-tidal-${at}.png`) });
+        await page.locator('#src-tidal [data-src-back]').click();
+        await page.waitForFunction(() => location.pathname !== '/sources/tidal');
+        await page.waitForSelector('#main .src-nav [data-srctab="tidal"]').catch(() => {});
+        const list = await page.evaluate(() => ({ path: location.pathname, tabs: document.querySelectorAll('#main .src-nav [data-srctab]').length, panel: !!document.querySelector('#main .set-panel'), title: (document.querySelector('#main h1') || {}).textContent || '' }));
+        check(list.path === '/sources' && list.tabs > 0 && !list.panel, `${at} Connect TIDAL › Sources: opens the Sources list (${list.path}, ${list.tabs} services, panel ${list.panel})`);
+        check(await page.evaluate(() => history.length) === depth, `${at} Connect TIDAL › Sources: the list takes the panel's place (no new history entry)`);
+        if (width === 360) await page.screenshot({ path: path.join(SHOTS, `connect-tidal-back-${at}.png`) });
+        await page.goBack();
+        await page.waitForFunction(() => location.pathname !== '/sources', null, { timeout: 3000 }).catch(() => {});
+        check(await page.evaluate(() => location.pathname) === '/album/mb-nowhere', `${at} Connect TIDAL › Sources › Back: returns to the album (${await page.evaluate(() => location.pathname)})`);
+        // From the list itself, "‹ Sources" is still one step back to the same list entry (not a new one).
+        await fx.go(page, '/sources');
+        await page.locator('#main [data-srctab="tidal"]').click();
+        await page.waitForSelector('#src-tidal [data-src-back]');
+        const inList = await page.evaluate(() => history.length);
+        await page.locator('#src-tidal [data-src-back]').click();
+        await page.waitForFunction(() => location.pathname === '/sources');
+        await page.goForward();
+        await page.waitForFunction(() => location.pathname === '/sources/tidal', null, { timeout: 3000 }).catch(() => {});
+        check(await page.evaluate(() => location.pathname) === '/sources/tidal' && await page.evaluate(() => history.length) === inList, `${at} Sources › TIDAL › Sources: a step back (Forward returns to TIDAL)`);
 
         check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
       } finally { await context.close(); }
