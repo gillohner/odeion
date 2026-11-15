@@ -2601,6 +2601,7 @@
     if (startAt > 0) audio.currentTime = startAt;
     // (counted per song: another song at the same place in a new queue gets its own retry)
     state.browserRetry = state.browserRetry && state.browserRetry.it === it ? state.browserRetry : { it, n: 0 };
+    state.browserRetry.gaveUp = null;
     if (!(state.starting && state.starting.zone === BROWSER)) startWait('play', BROWSER, it.title || '');
     nativeAhead();
     audio.play().catch(async (e) => {
@@ -2615,6 +2616,9 @@
       // (only while this song is still the one on: another queue started meanwhile keeps its song)
       const still = () => state.browserIndex === i && state.browserQueue[i] === it;
       if (state.browserRetry.n < 1 && still()) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (still()) { it.moved = true; browserPlay(i, startAt); } }, 2000); return; }
+      // (the place a later Play tries it from again: browserResume; a Play while the reason is
+      // still being asked does nothing, as while the retry is due)
+      if (still()) state.browserRetry.gaveUp = { at: startAt };
       toast(`“${it.title || 'This song'}” can't play here: ${why}.${it.track_id != null ? '' : ' Try another version on the song\u2019s page.'}`, 'error');
     });
     // A song moved in from a zone was counted there already
@@ -2669,20 +2673,32 @@
   // Previous takes it to the place asked for at once (before, it was pulled back there too)
   const cancelPickUp = () => { const m = state.midRetry; if (!m || !m.timer) return null; clearTimeout(m.timer); m.timer = null; return m; };
   const browserPause = () => { if (cancelPickUp()) state.midRetry = null; audio.pause(); };
-  // (a song brought back that hasn't opened: a seek moves the place Play starts it from)
-  const browserSeek = (t) => { const r = state.restoredAt; if (r && r.it === state.browserQueue[state.browserIndex]) r.pos = t; const m = cancelPickUp(); const up = m && state.browserQueue[state.browserIndex] === m.it && !(state.natOn && nat.held); if (up) audio.src = m.src; audio.currentTime = t; if (up) audio.play().catch(() => {}); };
+  // (a song brought back that hasn't opened, or one that couldn't play here: a seek moves the
+  // place Play starts it from)
+  const browserSeek = (t) => { const r = state.restoredAt; if (r && r.it === state.browserQueue[state.browserIndex]) r.pos = t; const g = state.browserRetry; if (g && g.gaveUp && g.it === state.browserQueue[state.browserIndex]) g.gaveUp.at = t; const m = cancelPickUp(); const up = m && state.browserQueue[state.browserIndex] === m.it && !(state.natOn && nat.held); if (up) audio.src = m.src; audio.currentTime = t; if (up) audio.play().catch(() => {}); };
   // Play on a song whose stream broke off opens it again where it was: at once when its pick-up is
   // still due (before, Play went on and the pick-up opened it a second time 1.5 s later), and when
   // the pick-up is off or used (a Pause or a failed Move in the wait: before, Play went on with the
   // broken stream, silent while the bar said playing). (A song that never opened, error 4, is the
-  // start's own retry: Play does not open it a second time.)
+  // start's own retry while that is due: Play does not open it a second time. Once the start and
+  // its retry have both failed, "can't play here", a Play is the listener's own new try.)
   const browserResume = () => {
     const i = state.browserIndex; const it = state.browserQueue[i]; const m = cancelPickUp();
     // A song brought back after a reload whose file didn't open (the node busy just then): Play
     // starts it where it was left, with the start's own retry and message (before, Play did
     // nothing and said nothing: no start had run, so there was no retry to wait for)
     const r = state.restoredAt;
-    if (it && r && r.it === it && audio.error && audio.readyState < 1) { it.moved = true; browserPlay(i, r.pos); return; }
+    if (it && r && r.it === it && audio.readyState < 1) {
+      if (audio.error) { it.moved = true; browserPlay(i, r.pos); return; }
+      // (its file still opening: if the open then fails, this Play becomes that start, from the
+      // place held then; before, it went quiet and only a second Play said anything)
+      audio.play().catch((e) => { const h = state.restoredAt; if (e.name !== 'NotSupportedError' || !h || h.it !== it || state.browserQueue[state.browserIndex] !== it) return; it.moved = true; browserPlay(state.browserIndex, h.pos); });
+      return;
+    }
+    // A song that couldn't play here, its retry used too: Play tries it once more from where that
+    // start was, and says so if it fails again (before, Play did nothing and said nothing)
+    const g = state.browserRetry;
+    if (it && g && g.it === it && g.gaveUp && audio.error && audio.error.code === 4) { const at = g.gaveUp.at; g.gaveUp = null; it.moved = true; browserPlay(i, at); return; }
     const at = m && m.it === it ? m.at : audio.error && audio.error.code !== 4 ? audio.currentTime : null;
     if (it && at != null) { it.moved = true; browserPlay(i, at); return; }
     audio.play().catch(() => {});
