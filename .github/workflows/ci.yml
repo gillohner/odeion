@@ -694,6 +694,7 @@ jobs:
           ui-queue-mark.js queue-mark-shots
           ui-queue-empty-shuffle.js queue-empty-shuffle-shots
           ui-home-contact.js home-contact-shots
+          ui-home-stale.js home-stale-shots
           ui-progress-toast.js progress-toast-shots
           ui-move-toast.js move-toast-shots
           LIST
