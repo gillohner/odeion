@@ -48,7 +48,7 @@ const ANSWERS = {
   ],
 };
 
-const open = async (browser, w, q) => {
+const open = async (browser, w, q, tags = { mine: [], others: [] }) => {
   const { page, context, state } = await fx.create(browser, w, { touch: w < 1025 });
   const asked = [];
   await context.route(/\/v1\/search\?/, (r) => {
@@ -56,7 +56,7 @@ const open = async (browser, w, q) => {
     const answers = ANSWERS[term] || ANSWERS[term.toLowerCase()] || [{ source: 'library', status: 'ok', ms: 1, hits: [] }];
     r.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': answers.map((a) => a.source).join(',') }, body: answers.map((a) => JSON.stringify(a)).join('\n') + '\n' });
   });
-  await context.route(/\/v1\/search\/tags\?/, (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify({ mine: [], others: [] }) }));
+  await context.route(/\/v1\/search\/tags\?/, (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify(tags) }));
   await page.setViewportSize({ width: w, height: 900 });
   await fx.go(page, `/search?q=${encodeURIComponent(q)}`);
   await page.waitForSelector('#sresults');
@@ -156,6 +156,27 @@ const openFilters = async (page) => { if (await page.$('[data-sfilters][aria-exp
       check(r.kinds.includes('concert') && rows.length === 2 && /Hallenstadion/.test(rows[0]) && /2026-12-01/.test(rows[0]), `${w} concerts: the Concerts section lists them with their dates (${rows.join(' | ')})`);
       check(r.wide <= 0, `${w} concerts: nothing wider than the screen (${r.wide})`);
       await page.screenshot({ path: path.join(SHOTS, `concerts-${w}.png`) });
+      await context.close();
+    }
+  }
+  // ---- the result sections keep the page's usual space between them (28 px, as Home's rows and an
+  // artist page's releases), so a section's head doesn't touch the cards or rows above it ----
+  for (const w of [1280, 1024, 768, 412, 360]) {
+    for (const q of ['daft punk', 'every kind']) {
+      const { page, context } = await open(browser, w, q);
+      const gaps = await page.evaluate(() => {
+        const secs = [...document.querySelectorAll('#scontent > .section')].filter((s) => s.getClientRects().length);
+        return secs.slice(1).map((s, i) => [`${secs[i].id || secs[i].dataset.skind}>${s.id || s.dataset.skind}`, Math.round(s.getBoundingClientRect().top - secs[i].getBoundingClientRect().bottom)]);
+      });
+      check(gaps.length >= 3 && gaps.every(([, g]) => g === 28), `${w} ${q}: 28 px between result sections (${gaps.map(([k, g]) => `${k} ${g}`).join(', ')})`);
+      if (q === 'daft punk') await page.screenshot({ path: path.join(SHOTS, `section-gaps-${w}.png`) });
+      await context.close();
+    }
+    // Tags from Pubky above "No exact match …": the same space under the tag chips
+    {
+      const { page, context } = await open(browser, w, 'every kind', { mine: [], others: ['every-kind'] });
+      const g = await until(page, () => { const t = document.querySelector('#scontent > #stags'); const n = document.querySelector('#scontent > #snomatch'); return t && n && t.nextElementSibling === n ? [Math.round(n.getBoundingClientRect().top - t.getBoundingClientRect().bottom)] : null; });
+      check(g && g[0] === 28, `${w} tags: 28 px between the Tags section and "No exact match" (${g && g[0]})`);
       await context.close();
     }
   }
