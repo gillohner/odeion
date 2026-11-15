@@ -1,7 +1,7 @@
 // The top search result's name and an item page's artist, album, "All about this song" and version
 // names are real links, like song names in lists: Tab reaches them, Enter or a click opens the page
 // inside the app, and Ctrl+click opens it in a new tab while this page stays put. So is "Connect
-// TIDAL" for something none of your services has (an album page, a Favourites row).
+// TIDAL" for something none of your services has (an album page, a Favourites row), to TIDAL's tab.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-item-links.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -68,7 +68,7 @@ async function enterOpens(page, sel, want, from, ready, where) {
   await page.waitForFunction(([f, r]) => location.pathname + location.search === f && document.querySelector(r), [from, ready]);
 }
 // Ctrl+click (Cmd on a Mac) opens the address in a new tab; this tab does not navigate
-const readyFor = (w) => (w.startsWith('/search') ? '#sresults, #stop' : w === '/sources' ? '.set-row' : '#iplay');
+const readyFor = (w) => (w.startsWith('/search') ? '#sresults, #stop' : w.startsWith('/sources') ? '.set-tab[aria-current="page"]' : '#iplay');
 async function newTab(run, sel, want, from, where) {
   const opened = run.context.waitForEvent('page', { timeout: 3000 }).catch(() => null);
   await run.page.locator(sel).click({ modifiers: ['ControlOrMeta'] });
@@ -159,34 +159,64 @@ async function nameSearch(browser, width) {
 }
 
 // "Connect TIDAL" for something none of your services has is a real link to Sources: Tab reaches it,
-// Enter or a click opens Sources inside the app, Ctrl+click opens Sources in a new tab. In a
-// Favourites row a click on it opens Sources only, not also the row's page.
+// Enter or a click opens it inside the app, Ctrl+click opens it in a new tab. With one service
+// named it opens that service's tab (/sources/tidal), with more ("TIDAL or Spotify") the Sources
+// page. In a Favourites row a click on it opens Sources only, not also the row's page; the row's
+// Play menu offers the same Connect TIDAL, also to TIDAL's tab.
+const EITHER = 'https://musicbrainz.org/release-group/0c4a7a3c-5d44-4b8c-9c6e-3a3c1a1d2e01';
+const connectFixtures = {
+  ...fixtures,
+  '/item/album/mb-either': { body: { ...plain('album', 'mb-either', 'Either Way'), source_id: 'musicbrainz', source: 'MusicBrainz', uri: EITHER, target: { uri: EITHER }, plays_from: null, songs: [], connect: ['tidal', 'spotify'] } },
+  '/sources': { body: [
+    { id: 'tidal', name: 'TIDAL', description: '', status: 'ready', enabled: true },
+    { id: 'spotify', name: 'Spotify', description: '', status: 'ready', enabled: true },
+  ] },
+  '/discover/play': { body: { uri: OTHER, plays_from: null, items: [], track_ids: [], connect: ['tidal'], reason: 'Not on your connected services' } },
+};
+// On Sources, the tab that is open (TIDAL's, or another one when no single service was named)
+const openTab = (page) => page.locator('.set-tab[aria-current="page"]').getAttribute('id');
 async function connectLinks(browser, width) {
-  const run = await fx.create(browser, width, { fixtures });
+  const run = await fx.create(browser, width, { fixtures: connectFixtures });
   const { page, state } = run;
   try {
-    for (const [from, box, where] of [
-      ['/album/mb-nowhere', '#isongs', `album page Connect ${width}`],
-      ['/favourites', '#favother', `Favourites row Connect ${width}`],
+    for (const [from, box, label, want, where] of [
+      ['/album/mb-nowhere', '#isongs', 'Connect TIDAL', '/sources/tidal', `album page Connect ${width}`],
+      ['/favourites', '#favother', 'Connect TIDAL', '/sources/tidal', `Favourites row Connect ${width}`],
+      ['/album/mb-either', '#isongs', 'Connect TIDAL or Spotify', '/sources', `album page Connect two ${width}`],
     ]) {
-      const sel = `${box} a[href="/sources"]`;
+      const sel = `${box} a[href="${want}"]`;
       await fx.go(page, from);
-      await page.locator(box).getByText('Connect TIDAL').waitFor();
-      const link = page.locator(box).getByText('Connect TIDAL');
-      assert.equal(await link.count(), 1, `${where}: the Connect TIDAL link is shown`);
-      assert.equal(await link.getAttribute('href'), '/sources', `${where}: Connect TIDAL has Sources' address`);
+      await page.locator(box).getByText(label).waitFor();
+      const link = page.locator(box).getByText(label);
+      assert.equal(await link.count(), 1, `${where}: the ${label} link is shown`);
+      assert.equal(await link.getAttribute('href'), want, `${where}: ${label} has the address ${want}`);
       await tabOnto(page, sel, where);
-      if (width === 1280) await page.screenshot({ path: path.join(shots, `connect-focus-${from.split('/')[1]}-${width}.png`) });
-      await enterOpens(page, sel, '/sources', from, sel, where);
+      if (width === 1280) await page.screenshot({ path: path.join(shots, `connect-focus-${from.split('/').pop()}-${width}.png`) });
+      await enterOpens(page, sel, want, from, sel, where);
       await mark(page);
       await page.locator(sel).click();
-      await page.waitForFunction(() => location.pathname === '/sources' && document.querySelector('.set-row'));
+      await page.waitForFunction((w) => location.pathname === w && document.querySelector('.set-tab[aria-current="page"]'), want);
       await inApp(page, `${where} click`);
+      if (want === '/sources/tidal') {
+        assert.equal(await openTab(page), 'srctab-tidal', `${where}: Sources opens on TIDAL's tab`);
+        if (width === 1280 && box === '#isongs') await page.screenshot({ path: path.join(shots, `connect-opens-tidal-${width}.png`) });
+      }
       await page.goBack();
       await page.waitForFunction((f) => location.pathname === f, from);
       await page.locator(sel).waitFor();
-      await newTab(run, sel, '/sources', from, where);
+      await newTab(run, sel, want, from, where);
     }
+    // The Favourites row's Play, for a song no connected service has: its menu's Connect TIDAL opens TIDAL's tab
+    await fx.go(page, '/favourites');
+    await page.locator('#favother [data-dplay]').first().click();
+    const item = page.locator('.pop-item', { hasText: 'Connect TIDAL' });
+    await item.waitFor();
+    await mark(page);
+    await item.click();
+    await page.waitForFunction(() => location.pathname === '/sources/tidal' && document.querySelector('.set-tab[aria-current="page"]'))
+      .catch(() => assert.fail(`Play menu Connect ${width}: opens /sources/tidal (at ${path0(page)})`));
+    await inApp(page, `Play menu Connect ${width}`);
+    assert.equal(await openTab(page), 'srctab-tidal', `Play menu Connect ${width}: Sources opens on TIDAL's tab`);
     await fx.cleanCopy(page);
     assert.deepEqual(state.errors, [], `Connect ${width}: no page errors`);
   } finally { await run.context.close(); }

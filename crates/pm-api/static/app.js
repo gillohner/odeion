@@ -5782,6 +5782,11 @@
   };
   const FEATURE_WORDS = { search: 'Search', play: 'Plays on your zones', connect: 'Plays on its own devices', artists: 'Artist pages', library: 'Your library', playlists: 'Your playlists', downloads: 'Downloads what you bought', lyrics: 'Lyrics', scrobble: 'Reports your plays' };
   const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', soundcloud: 'SoundCloud', bandcamp: 'Bandcamp', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', plex: 'Plex', podcasts: 'Podcasts', radio: 'Internet radio', audiobookshelf: 'Audiobookshelf', youtube: 'YouTube', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
+  // "Connect TIDAL" for music none of your services has: with one service named it opens that
+  // service's tab in Sources, with more ("TIDAL or Spotify") the Sources page
+  const connectArg = (list) => (list && list.length === 1 ? { source: list[0] } : undefined);
+  const connectLink = (list) => { const arg = connectArg(list); return `<a data-view="sources" href="${esc(pathFor('sources', arg))}"${arg ? ` data-source="${esc(arg.source)}"` : ''}>Connect ${esc(list.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>`; };
+  const openConnect = (a) => setView('sources', a.dataset.source ? { source: a.dataset.source } : undefined);
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
   const sourceChip = (t, k) => t.pending ? '<span class="chip srcchip wait" aria-label="Finding where this plays"><span class="spin"></span></span>' : t.unavailable
@@ -5815,7 +5820,7 @@
   const playsChip = (it, long = false) => {
     const pf = it.plays_from;
     if (pf) return `<span class="plays" title="${esc(pf.label)}">${svcIcon(pf.service)}<span>${esc(long ? pf.label : (pf.service === 'library' ? 'Library' : SERVICE_NAMES[pf.service] || pf.service))}</span></span>`;
-    if (it.connect && it.connect.length) return `<span class="plays none" title="Not on your services">${icon('zone')}<span>${long ? 'Not on your services · ' : ''}<a data-view="sources" href="/sources">Connect ${esc(it.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a></span></span>`;
+    if (it.connect && it.connect.length) return `<span class="plays none" title="Not on your services">${icon('zone')}<span>${long ? 'Not on your services · ' : ''}${connectLink(it.connect)}</span></span>`;
     return '';
   };
   // Play through the node's connected services: the library, else the best service link
@@ -6494,7 +6499,7 @@
     }
     if (pf && pf.mode === 'connect') { spotifyPlay(o.shuffle ? shuffleFrom([...plan.spotify_uris]) : plan.spotify_uris, anchor); return; }
     if (pf && plan.items.length) { toast(`Playing from ${pf.label}`); return playSourceItems(plan.items, replace, at, o); }
-    const options = [{ title: 'Not on your services' }, ...(plan.connect || []).map((c) => ({ label: `Connect ${SERVICE_NAMES[c] || c}`, icon: 'zone', run: () => setView('sources') }))];
+    const options = [{ title: 'Not on your services' }, ...(plan.connect || []).map((c) => ({ label: `Connect ${SERVICE_NAMES[c] || c}`, icon: 'zone', run: () => setView('sources', { source: c }) }))];
     if (plan.preview) options.push({ label: `Play a 30 s preview (${SERVICE_NAMES[plan.preview.service] || plan.preview.service})`, icon: 'play', run: () => playSourceItems([{ uri: plan.preview.id.startsWith('track:') ? `${plan.preview.service}:${plan.preview.id}` : plan.preview.id, title: it.title || '', artist: it.artist || '', album: `30 s preview · ${SERVICE_NAMES[plan.preview.service] || plan.preview.service}`, duration_ms: 30000, image: it.image || null }], false, 'now') });
     if (anchor) showMenu(anchor, options); else toast('Not on your services: connect one in Sources', 'error');
   };
@@ -6502,7 +6507,7 @@
     $$('[data-ditem]', main).forEach((row) => row.onclick = (e) => { if (e.target.closest('[data-dplay],[data-dmore]')) return; { const it = items[Number(row.dataset.ditem)]; setView('discover-item', { uri: it.uri, kind: it.kind }); } });
     $$('[data-dplay]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); discoverPlay(items[Number(b.dataset.dplay)], null, b); });
     // (a link: Tab reaches it, Ctrl+click opens Sources in a new tab; either way not the row's page too)
-    $$('[data-view="sources"]', main).forEach((a) => a.onclick = (e) => { e.stopPropagation(); inAppClick(() => setView('sources'))(e); });
+    $$('[data-view="sources"]', main).forEach((a) => a.onclick = (e) => { e.stopPropagation(); inAppClick(() => openConnect(a))(e); });
     $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this song') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'in ' + it.site : 'link'}`, icon: 'external', run: () => openWeb(it.uri) }]); });
   };
   // (action: { view, label } opens a page; { id, label } is a button the page binds itself)
@@ -7817,7 +7822,7 @@
             e.stopPropagation(); const k = Number(b.dataset.psrc); const t = songs[k]; const pinnedNow = t.pinned || t.pinLost;
             const opts = rankSvc([...(t.sources || [])], (x) => x.service).sort((a, b) => (b.available ? 1 : 0) - (a.available ? 1 : 0)).map((x) => ({ label: x.name, note: x.available ? x.label.replace(/^[^·]*·\s*/, '') || null : x.mode === 'preview' ? '30 s previews only' : 'not connected', svc: x.service, on: t.pinned && x.chosen, disabled: !x.available, run: () => pin(k, { service: x.service, uri: x.url || null }, `Pinned to ${x.name}`) }));
             showMenu(b, [{ title: t.unavailable ? t.unavailable : 'Play this song from' }, { label: 'Auto (follow your Settings)', icon: 'shuffle', on: !pinnedNow, note: t.plays && !pinnedNow ? `now: ${srcName(t.plays.service)}` : null, run: () => pin(k, { service: null }, 'Follows your Settings again') }, ...opts,
-              ...(t.connect && t.connect.length ? [{ label: `Connect ${t.connect.map((c) => SERVICE_NAMES[c] || c).join(' or ')}`, icon: 'plus', run: () => setView('sources') }] : []),
+              ...(t.connect && t.connect.length ? [{ label: `Connect ${t.connect.map((c) => SERVICE_NAMES[c] || c).join(' or ')}`, icon: 'plus', run: () => setView('sources', connectArg(t.connect)) }] : []),
               ...(t.id ? [{ label: 'Find another version', icon: 'disc', run: () => setView('item', { kind: 'song', id: t.id }) }] : [])]);
           });
           const setVis = async (pub) => { try { const r = await api('PUT', `/playlists/${d.summary.id}/visibility`, { public: pub }); toast(mine ? (pub ? 'Shared' : 'Private again: the public copy is removed') + (r.summary.synced ? '' : ' once your homeserver answers') : pub ? 'Shared: it goes public on the next sync' : 'Private again: the public copy is removed on the next sync'); render(); } catch (e) { toast(e.message, 'error'); } };
@@ -8451,7 +8456,7 @@
               <div class="hmatch-slot" id="hmatch"></div>
               </div></div>`
             + (aboutTop ? aboutTopHtml(pg) : '')
-            + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}), ...(kind === 'album' ? { listClass: 'nums', oneArtist: songs.length > 1 && songs.every((t) => (t.artist || '') === (songs[0].artist || '')) && !!songs[0].artist } : {}) }) : pg.unavailable ? empty(`${esc(pg.unavailable)}${pg.link ? ` <a href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener">Open on ${esc(pg.source)}</a>` : ''}`) : empty(pg.connect.length ? `Not on your services · <a data-view="sources" href="/sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
+            + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}), ...(kind === 'album' ? { listClass: 'nums', oneArtist: songs.length > 1 && songs.every((t) => (t.artist || '') === (songs[0].artist || '')) && !!songs[0].artist } : {}) }) : pg.unavailable ? empty(`${esc(pg.unavailable)}${pg.link ? ` <a href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener">Open on ${esc(pg.source)}</a>` : ''}`) : empty(pg.connect.length ? `Not on your services · ${connectLink(pg.connect)}` : 'No connected service lists songs for this yet.')}</section>`)
             + (kind === 'song' && pg.albums.length ? `<section class="section" id="ialbums"><div class="section-head"><h3>On the album</h3><span class="muted small">${pg.albums.length}</span></div>${itemTileGrid(pg.albums, 'album')}</section>` : '')
             // An artist's releases: Albums, EPs & singles, Other releases (each with View all), or
             // what the list is when it isn't there: loading, an error with Retry, nothing found
@@ -8543,7 +8548,7 @@
               });
           }
           if (myReview !== undefined) bindReviewRow(target, myReview);
-          $$('[data-view="sources"]', main).forEach((a) => a.onclick = inAppClick(() => setView('sources')));
+          $$('[data-view="sources"]', main).forEach((a) => a.onclick = inAppClick(() => openConnect(a)));
           const ia = $('#iartist'); if (ia) ia.onclick = inAppClick(() => setView('item', { kind: 'artist', id: pg.artist.id }));
           const iq = $('#iartistq'); if (iq) iq.onclick = inAppClick(() => { search.value = pg.artist.name; setView('search', { q: pg.artist.name, in: 'everywhere' }); });
           const ial = $('#ialbum'); if (ial) ial.onclick = inAppClick(() => setView('item', { kind: 'album', id: pg.album.id }));

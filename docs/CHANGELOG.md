@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-15
+
+- **"Connect TIDAL" opens TIDAL's own page in Sources.** For music none of your services has, "Connect TIDAL" (on an album or artist page, a Favourites row, its Play menu, or a playlist song's source menu) used to open Sources on Your library, so you had to find and click TIDAL there too. It now opens TIDAL's tab straight away, also in a new tab. When more than one service is named ("Connect TIDAL or Spotify") it opens Sources as before.
+
 ### 2026-11-14
 
 - **On a phone, Zones says in full what plays on this device.** Under “Nothing playing”, This browser's card said “Streams the files to th…”, cut off at 360 px beside its “selected” label or Play to button, and the Android and desktop apps' card said “The app plays the files itself”, cut off the same way. They now say “Plays in this browser” and “Plays in the app”, which fit; the Play to list and Move to menu show the same new words. Test: `tools/ui-zone-here-line.js`.
