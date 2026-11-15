@@ -7868,11 +7868,14 @@
         case 'sources': {
           // One tab per service with its on/off switch, laid out like Settings (STEWARD-UX-SOURCES.md).
           // Off hides a source everywhere; its tab stays (dimmed) so it can be switched on again.
-          try { state.sources = await api('GET', '/sources'); applySourcesOff(); } catch (e) { state.sources = state.sources || []; }
+          let listed = false; try { state.sources = await api('GET', '/sources'); applySourcesOff(); listed = true; } catch (e) { state.sources = state.sources || []; }
           if (state.view !== 'sources') return;
           const srcs = state.sources;
           const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
           const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
+          // A service this node doesn't have (an old link or bookmark): the address is plain /sources, as
+          // the page shown is, so a reload or a copied link doesn't name it (kept when the list didn't load)
+          if (listed && state.viewArg && state.viewArg.source && !known(state.viewArg.source)) { state.viewArg = undefined; try { history.replaceState({ ...(history.state || {}), arg: null }, '', '/sources'); } catch { /* sandboxed */ } }
           const asked = state.viewArg && known(state.viewArg.source) ? state.viewArg.source : null;
           const active = asked || (phone ? null : (known(state.sourceId) ? state.sourceId : 'library'));
           // Another source: its sign-in opens on the recommended way again, not one opened before
