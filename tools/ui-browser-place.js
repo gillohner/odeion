@@ -8,7 +8,9 @@
 // doesn't open on the reload (the node busy) keeps its place, and Play starts it from there with the
 // start's own retry and message (before, Play did nothing and said nothing, and the place was lost).
 // Play pressed while that file is still opening is the start too, once the open fails; and after a
-// song's start and retry have both failed ("can't play here"), a further Play tries it again.
+// song's start and retry have both failed ("can't play here"), a further Play tries it again. The
+// mini player says each failure in plain words ("Trying again: the node answered 503 …"), not the
+// browser's raw "Failed to load because no supported source was found".
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-browser-place.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -442,6 +444,8 @@ async function backOnSong3(page, width, index, label, shot) {
     // Every message the page says, in order (one #toast element shows them one at a time; each toast
     // is one batch of mutations, its text set at once)
     const said = (page) => page.evaluate(() => { if (!window.saidLog) { window.saidLog = []; const t = document.querySelector('#toast'); new MutationObserver(() => { const x = t.firstChild && t.firstChild.nodeType === 3 ? t.firstChild.textContent : t.textContent; if (x) window.saidLog.push(x); }).observe(t, { childList: true, characterData: true, subtree: true }); } return window.saidLog.slice(); });
+    // The mini player's lines while it says a start failed ("Couldn’t start · <why>")
+    const barLine = (page) => page.evaluate(() => [...document.querySelectorAll('#np .np-title, #np .np-sub')].map((x) => x.textContent.trim()).join(' · '));
     // 10. A song that couldn't play here (its start and the start's retry both failed: the node busy)
     // stays in the bar; a later Play tries it once more from where that start was and says so if it
     // fails again, and plays it once the node answers (before, a further Play did nothing, said
@@ -460,8 +464,15 @@ async function backOnSong3(page, width, index, label, shot) {
           // (a Play while the start's own retry is due opens nothing more: the reload's open, the
           // start's and its retry's, 3 in all)
           await until(async () => (await said(page)).some((x) => /Trying again/.test(x)), 'the start fails and its retry is due');
+          // (the bar's line says it in the message's plain words, not the browser's raw "Failed to
+          // load because no supported source was found")
+          let line = await barLine(page);
+          assert.match(line, /^Couldn’t start · Trying again: the node answered 503/, `the bar says it is trying again, and why (${line})`);
           await page.click('#toggle');
           await until(async () => (await said(page)).some((x) => /can't play here/.test(x)), 'the start and its retry fail: "can\'t play here"', 9000);
+          line = await barLine(page);
+          assert.match(line, /^Couldn’t start · Can’t play here: the node answered 503/, `the bar says it can't play here, and why (${line})`);
+          assert.equal(await page.evaluate(() => document.querySelector('#np .np-sub .warn-text').title), line.replace(/^Couldn’t start · /, ''), 'the whole reason is the line\'s tooltip (a phone cuts it short)');
           assert.equal(opens, 3, `the file was opened 3 times, not more (${opens})`);
           // (a Play while the node is still busy: asked again, and said again)
           // (the same words again set no new text: the old message is blanked first)

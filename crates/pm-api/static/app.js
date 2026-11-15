@@ -2609,18 +2609,25 @@
     audio.play().catch(async (e) => {
       // (the app's own player says its failures through its events: nativefailed, nativerefused)
       if (e.name === 'AbortError') { if (state.starting && state.starting.zone === BROWSER && (audio.paused || state.ytOn)) startDone(); return; }
-      startFail(e.message, true);
+      // (the bar says it in the message's plain words, not the browser's "Failed to load because
+      // no supported source was found"; each step below puts its words there too)
+      let why = `its source sent no audio ${hereName().toLowerCase()} can play`;
+      const was = state.startError;
+      // (only this player's start: another zone's start pressed meanwhile isn't failed with this reason)
+      if (state.starting && state.starting.zone === BROWSER) startFail(e.name === 'NotSupportedError' ? why[0].toUpperCase() + why.slice(1) : e.message, true);
+      const se = state.startError !== was ? state.startError : null;
+      const barSays = (msg) => { if (!se || state.startError !== se) return; se.msg = msg; se.at = Date.now(); renderBar(); setTimeout(renderBar, 10500); };
       if (e.name !== 'NotSupportedError') { toast(`Playback: ${e.message}`, 'error'); return; }
       // Ask what came back: a busy node or a proxy in front of it can answer with an error page
       // instead of the file (owner, 2026-10-22: a library FLAC during a big copy)
-      let why = `its source sent no audio ${hereName().toLowerCase()} can play`;
       try { const r = await fetch(audio.src, { headers: { range: 'bytes=0-1' } }); const ct = r.headers.get('content-type') || ''; if (!r.ok) why = `the node answered ${r.status}${r.status >= 500 ? ' (busy or not reachable just now)' : ''}`; else if (!/^audio\/|octet-stream|mpegurl|video\/mp2t/.test(ct)) why = `the node sent ${ct.split(';')[0] || 'something'} instead of audio`; } catch { why = 'the node did not answer'; }
       // (only while this song is still the one on: another queue started meanwhile keeps its song)
       const still = () => state.browserIndex === i && state.browserQueue[i] === it;
-      if (state.browserRetry.n < 1 && still()) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (still()) { it.moved = true; browserPlay(i, startAt); } }, 2000); return; }
+      if (state.browserRetry.n < 1 && still()) { state.browserRetry.n++; barSays(`Trying again: ${why}`); toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (still()) { it.moved = true; browserPlay(i, startAt); } }, 2000); return; }
       // (the place a later Play tries it from again: browserResume; a Play while the reason is
       // still being asked does nothing, as while the retry is due)
       if (still()) state.browserRetry.gaveUp = { at: startAt };
+      if (still()) barSays(`Can’t play here: ${why}`);
       toast(`“${it.title || 'This song'}” can't play here: ${why}.${it.track_id != null ? '' : ' Try another version on the song\u2019s page.'}`, 'error');
     });
     // A song moved in from a zone was counted there already
@@ -3899,7 +3906,7 @@
     const se = !st && state.startError && state.startError.zone === state.zone && Date.now() - state.startError.at < 10000 ? state.startError : null;
     // (the spinner sits in the cover's square, centred: inline in the title it was cut to an arc)
     const waitHtml = st ? `<div class="np-art placeholder np-art-wait"><span class="spin" aria-hidden="true"></span></div><div class="np-text"><div class="np-title np-wait" role="status">${st.what === 'move' ? 'Moving to' : 'Starting on'} ${esc(z ? z.name : 'the zone')}…</div><div class="np-sub">${esc(st.title || '')}</div></div>` : '';
-    const errHtml = se ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">Couldn’t start</div><div class="np-sub"><span class="warn-text" role="alert">${esc(se.msg)}</span></div></div>` : '';
+    const errHtml = se ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">Couldn’t start</div><div class="np-sub"><span class="warn-text" role="alert" title="${esc(se.msg)}">${esc(se.msg)}</span></div></div>` : '';
     if (!np && !state.zonesSeen && !state.zonePicked && barKept().title && !waitHtml && !errHtml) {
       // The node hasn't said yet: the song the bar showed last stays (index.html drew it)
       const k = barKept();
