@@ -638,6 +638,21 @@
     });
     dialogActionObserver.observe(dialog); dialogActionObserver.observe(footer);
   });
+  // Opens a dialog that has text fields, with its first focus. On a phone the heading takes it,
+  // not `field`: a phone browser would raise its keyboard over the dialog, and the Android app's
+  // WebView shows the field focused with no keyboard (as Search did). A tap on a field opens the
+  // keyboard. Keys pressed on that heading stay in the dialog (Space, the arrows and N don't reach
+  // the app's shortcuts behind it); a character typed or pasted there goes to `field`. Desktop and tablet
+  // focus `field`. (The heading is focusable before showModal, so the field never has the focus.)
+  const showFieldDialog = (d, field) => {
+    const h = shellMode() === 'phone' && $('h2', d);
+    if (h) {
+      h.tabIndex = -1;
+      h.onkeydown = (e) => { e.stopPropagation(); if ((e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v')) field.focus(); };
+    }
+    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    (h || field).focus();
+  };
   // Edit a song's tags on the node (the file is not touched)
   // `e`: GET /library/tracks/{id}/edit: the song's edit (in the fields) and what the file says
   // (shown as each field's placeholder); an empty field is the file's value
@@ -656,8 +671,7 @@
     $('[data-undo]', d).onclick = () => done({ undo: true });
     $('[data-save]', d).onclick = () => done(Object.fromEntries($$('[data-k]', d).map((i) => [i.dataset.k, i.value.trim()])));
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
-    $('[data-k]', d).focus();
+    showFieldDialog(d, $('[data-k]', d));
   });
   const editTrackTags = async (id) => {
     let cur; try { cur = await api('GET', `/library/tracks/${id}/edit`); } catch (e) { return toast(e.message, 'error'); }
@@ -5327,8 +5341,7 @@
         done(false, sh);
       } catch (e) { b.disabled = false; $('#wdmsg', d).textContent = e.message; }
     };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
-    $('#wdurl', d).focus();
+    showFieldDialog(d, $('#wdurl', d));
   });
   // ---- An item page's tags, in its top card (TASK-tags-in-hero-pubky-design) ----
   // Each identity the page has is a group of its own: the item, whatever source plays it, and this
@@ -5917,13 +5930,11 @@
   // The ⋯ menu, the same on a page's hero and on every song row.
   // "Add to playlist…" (UX review #3): one dialog instead of every playlist in the menu: a search
   // field, "New playlist" first, then your playlists, most recently changed first.
-  // On a phone the heading takes the first focus, not the search field: a phone browser would
-  // raise its keyboard over a list that is usually one tap, and the Android app's WebView shows
-  // the field focused with no keyboard (as Search did). A tap on the field opens the keyboard.
+  // On a phone the heading takes the first focus, not the search field (showFieldDialog): a list
+  // that is usually one tap.
   const playlistPicker = (add, newName, makeNew) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
-    const phone = shellMode() === 'phone';
-    d.innerHTML = `<h2${phone ? ' tabindex="-1"' : ''}>Add to playlist</h2><input class="input" id="ppq" placeholder="Find a playlist" aria-label="Find a playlist" autocomplete="off"><div class="list compact picker" id="pplist"></div><div class="dialog-actions"><button class="btn ghost" data-ppclose>Cancel</button></div>`;
+    d.innerHTML = `<h2>Add to playlist</h2><input class="input" id="ppq" placeholder="Find a playlist" aria-label="Find a playlist" autocomplete="off"><div class="list compact picker" id="pplist"></div><div class="dialog-actions"><button class="btn ghost" data-ppclose>Cancel</button></div>`;
     document.body.appendChild(d);
     const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
     const done = (fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(); };
@@ -5936,13 +5947,9 @@
       $$('[data-ppi]', d).forEach((b) => b.onclick = async () => { const pl = list[Number(b.dataset.ppi)]; done(); await add(pl); });
     };
     $('#ppq', d).oninput = draw; draw();
-    // Keys pressed on that heading stay in the dialog (Space, the arrows and N don't reach the
-    // app's shortcuts behind it); a character typed there goes to the field.
-    if (phone) $('h2', d).onkeydown = (e) => { e.stopPropagation(); if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) $('#ppq', d).focus(); };
     $('[data-ppclose]', d).onclick = () => done();
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
-    $(phone ? 'h2' : '#ppq', d).focus();
+    showFieldDialog(d, $('#ppq', d));
   });
   const itemMenu = async (anchorEl, o) => {
     await pubkyUser();
