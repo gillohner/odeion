@@ -2234,6 +2234,12 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
   html[data-shell="phone"] .azbar { padding-bottom: 18px; margin-bottom: -18px; }
   html[data-shell="phone"] .az { position: relative; isolation: isolate; }
   html[data-shell="phone"] .az::before { content: ''; position: absolute; inset: 0 0 -18px; z-index: -1; }
+  /* On a phone a slider (volume, seek) is a 44 px tall touch instead of an 18 px strip: the line
+     and its knob stay in the middle, and the extra 13 px above and below are taken back from its
+     margins, so nothing around it moves (in a line of text, as Now playing's seek, the slider's
+     baseline is its bottom edge: it goes down the same 13 px). Buttons next to it keep their own
+     taps (they are positioned, so they sit above it) */
+  html[data-shell="phone"] input[type=range] { height: 44px; margin-top: -13px; margin-bottom: -13px; vertical-align: -13px; }
 }
 /* A button that is its icon on a phone (its label says what it does elsewhere) */
 html[data-shell="phone"] .btn.iconic .btn-label { display: none; }
