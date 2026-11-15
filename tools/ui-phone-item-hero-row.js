@@ -70,8 +70,10 @@ async function hero(browser, kind, width, android, k, zoom) {
     check(by(r, 'iplay').icon === playIcon && by(r, 'ishuffle').icon === (width >= 380), `${at}: Play's icon ${by(r, 'iplay').icon ? 'shown' : 'hidden'} (want ${playIcon ? 'shown' : 'hidden'}), Shuffle's ${by(r, 'ishuffle').icon ? 'shown' : 'hidden'} (want ${width >= 380 ? 'shown' : 'hidden'})`);
   }
   if (k !== 1.15 && ![313, 340].includes(width)) await page.locator('#main > .hero').screenshot({ path: path.join(SHOTS, `${kind}-row-${android ? 'android' : 'browser'}-${width}-${Math.round(k * 100)}${zoom ? '-textzoom' : ''}.png`) });
-  // still one tap: ⋯ opens the page's menu
-  await page.locator('#imore').tap(); await page.waitForTimeout(200);
+  // still one tap: ⋯ opens the page's menu (it opens after the sign-in state and the playlists load,
+  // so wait for it, up to 5 s, rather than a fixed time a busy machine can overrun)
+  await page.locator('#imore').tap();
+  await page.locator('.popover.menu:not([hidden])').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
   check(await page.locator('.popover.menu:not([hidden])').count() === 1, `${at}: one tap on ⋯ opens the menu`);
   await context.close();
 }
