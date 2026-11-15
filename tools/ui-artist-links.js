@@ -22,7 +22,7 @@ async function assertTarget(page,c){const u=new URL(page.url());if(c.id!=null)as
     await go(page,screen==='collection'?'/playlist/c1':'/tracks');await page.locator(screen==='collection'?'#plsongs .srow':'.track').first().waitFor();
     let root=screen==='collection'?page.locator('#plsongs .srow .grow .sub').first():page.locator('.track .by').first();
     if(screen==='player'){await page.locator('.track [data-act="play"]').first().click();await page.locator('#np').click();root=page.locator('#nowplaying .np-titles .artist');await root.waitFor();}
-    const expected=test.credits.map(c=>c.name);const names=await root.locator('a:not([data-salbum]):not([data-np-album]),button:not([data-salbum]):not([data-np-album])').allTextContents();
+    const expected=test.credits.map(c=>c.name);const names=await root.locator('a:not([data-salbum]):not([data-np-album]):not([data-act="album"]),button:not([data-salbum]):not([data-np-album]):not([data-act="album"])').allTextContents();
     assert.deepEqual(names,expected,`${width} ${test.name} ${screen}: independent exact credit names`);
     const before=state.hits.length,now=await page.evaluate(()=>pmPlayer.now());const link=root.locator('[data-artist-credit]').nth(n);
     assert.equal(await link.getAttribute('href'),target(test.credits[n]));
@@ -38,7 +38,7 @@ async function assertTarget(page,c){const u=new URL(page.url());if(c.id!=null)as
   const links=page.locator('.track .by [data-artist-credit]');await links.first().waitFor();
   fs.mkdirSync(shots,{recursive:true});await page.screenshot({path:path.join(shots,`${width}-${test.name}-rows.png`)});
   // The album remains a distinct target, not part of the artist credit.
-  const album=page.locator('.track [data-act="album"]').first();if(await album.isVisible()){await album.click();await page.waitForTimeout(150);assert.equal(new URL(page.url()).pathname,'/album/lib-7');}
+  const album=page.locator('.track [data-act="album"]:visible').first();if(await album.isVisible()){await album.click();await page.waitForTimeout(150);assert.equal(new URL(page.url()).pathname,'/album/lib-7');}
   assert.deepEqual(state.errors,[]);console.log(`PASS ${width} ${test.name}: row/collection/player identity, click+keyboard, no playback`);await context.close();
  }
  {const {page,context,state}=await create(browser,390,{fixtures:{'/playlists/c1':{body:{...detail,tracks:[null,null]}}}});await go(page,'/playlist/c1');await page.waitForFunction(()=>document.querySelectorAll('#plsongs [data-artist-credit]').length===2);assert.deepEqual(await page.locator('#plsongs [data-artist-credit]').allTextContents(),['Sefa','Dr. Peacock']);assert.equal(await page.locator('#plsongs [data-artist-credit]').nth(1).getAttribute('href'),'/artist/lib-22');assert.equal(state.hits.filter(h=>h.v==='/library/tracks/1').length,1,'flattened legacy row coalesces one local metadata read');assert.deepEqual(state.errors,[]);console.log('PASS legacy flattened row: local structured hydration, distinct targets');await context.close();}

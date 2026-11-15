@@ -5224,6 +5224,8 @@
     };
     draw();
   };
+  // The album has its own column; where the window is too narrow for it (the desktop layout under
+  // 900 px) it joins the artist line instead (.by-album), so the title keeps the width
   const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr', start = 0, bare = false } = {}) => {
     rememberTracks(tracks);
     const z = currentZone(); const np = z && z.now_playing;
@@ -5233,7 +5235,7 @@
       const fav = isFav(t); const can = trackHasId(t);
       return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}" data-tid="${t.id}"${cur ? ' aria-current="true"' : ''}>
         <div class="no"><span class="num">${numbers === 'track' ? (t.track_no ?? '') : i + 1}</span><button class="rowplay" data-act="play" title="Play from here">${icon('play')}</button></div>
-        <div class="main-col"><div class="title"><a class="lnk" data-act="song" href="${esc(pathFor('item', { kind: 'song', id: trackPageId(t) }))}">${esc(t.title)}</a>${dlHas(t.id) ? dlMark() : ''}${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id })}</div></div>
+        <div class="main-col"><div class="title"><a class="lnk" data-act="song" href="${esc(pathFor('item', { kind: 'song', id: trackPageId(t) }))}">${esc(t.title)}</a>${dlHas(t.id) ? dlMark() : ''}${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id })}${showAlbum && t.album ? `<span class="by-album"> · <a class="lnk" data-act="album" data-album="${t.album.id}" href="${esc(pathFor('item', { kind: 'album', id: 'lib-' + t.album.id }))}">${esc(t.album.title)}</a></span>` : ''}</div></div>
         ${showAlbum ? `<div class="album-col">${t.album ? `<button class="lnk" data-act="album" data-album="${t.album.id}">${esc(t.album.title)}</button>` : ''}</div>` : ''}
         <div class="fmt-col"><span class="fmt ${LOSSY[t.file && t.file.container] ? 'lossy' : ''}">${esc(fileFormat(t.file))}</span></div>
         <div class="dur">${fmt(t.duration_ms)}</div>
@@ -5265,7 +5267,8 @@
       const tracks = lists[list ? list.dataset.list : 'tr'] || [];
       const i = Number(row ? row.dataset.i : -1);
       const act = btn.dataset.act;
-      if (act === 'album') { setView('album', Number(btn.dataset.album)); return; }
+      // (the artist line's album is a real link, inline so a long name ends in "…": Ctrl or middle click opens a new tab)
+      if (act === 'album') { if (btn.tagName === 'A') { if (opensElsewhere(e)) return; e.preventDefault(); } setView('album', Number(btn.dataset.album)); return; }
       if (act === 'identify') { const t = tracks[i]; if (!t) return; const done = await whichSong(t); if (done) { tracks[i] = done; btn.remove(); toast(`Identified: ${done.title}`); } return; }
       if (act === 'song') {
         // A real link (Tab reaches it, Enter opens it); Ctrl or middle click opens the page in a new tab
