@@ -7186,6 +7186,10 @@
           $$('[data-win]', main).forEach((b) => b.onclick = () => { state.homeWindow = b.dataset.win; render(); });
           $$('[data-seeall]', main).forEach((b) => b.onclick = () => setView('home-section', { section: b.dataset.seeall, window: state.homeWindow || '7d' }));
           const setupBox = $('#h-setup');
+          // This drawing's answers fill this drawing's rows only: Home draws itself again (a Trending
+          // window, Edit Home), and an earlier drawing's late answer (last window's songs) would find
+          // the new drawing's row by its id
+          const here = () => setupBox.isConnected && state.view === 'home';
           const setupDrawn = renderSetup().catch((e) => console.error(e));
           // Without a contact Pubky has nothing to show: its rows go at once, and one line in their
           // place (once, where the first was) says why, with Add it (Settings › Discover). With Get
@@ -7195,7 +7199,7 @@
           const pubkyRows = ordered.filter(showRow).filter((k) => HOME_TITLES[k]);
           const noContact = (s) => {
             // (an earlier Home's answer: this Home's own handler takes care of its rows)
-            if (!setupBox.isConnected) return;
+            if (!here()) return;
             if (!$('#h-needcontact')) {
               const first = pubkyRows.map((k) => document.getElementById('h-' + k)).find(Boolean) || s;
               first.insertAdjacentHTML('beforebegin', `<section class="section fadein" id="h-needcontact" hidden><div class="card small">Trending music, tags and picks from people on Pubky show up here once the node has your email or website. <button class="btn sm" type="button">Add it</button></div></section>`);
@@ -7206,7 +7210,7 @@
           };
           // Local rows first: recently played, recently added, forgotten favourites
           api('GET', '/library/home?limit=12').then((h) => {
-            if (state.view !== 'home') return;
+            if (!here()) return;
             const albumRow = (k, list, emptyText) => {
               const el = $(`#h-${k} .hbody`); if (!el) return;
               const albums = (list || []).filter((a) => a.id != null).slice(0, 12);
@@ -7227,12 +7231,12 @@
                 fe.innerHTML = songRows(songs, { numbers: 'index' }); fe.parentElement.hidden = false; fe.parentElement.classList.add('fadein'); bindSongRows(fe, songs, {});
               }
             }
-          }).catch(() => { for (const k of ['played', 'added', 'forgotten']) { const el = $(`#h-${k} .hbody`); if (el && el.querySelector('[aria-hidden="true"], .skeleton')) { el.innerHTML = '<p class="muted small">The library did not answer.</p>'; el.parentElement.hidden = false; } } });
+          }).catch(() => { if (here()) for (const k of ['played', 'added', 'forgotten']) { const el = $(`#h-${k} .hbody`); if (el && el.querySelector('[aria-hidden="true"], .skeleton')) { el.innerHTML = '<p class="muted small">The library did not answer.</p>'; el.parentElement.hidden = false; } } });
           // ListenBrainz's picks for the user, when connected (Settings › ListenBrainz).
           api('GET', '/listenbrainz').then(async (lb) => {
-            if (!lb.connected || state.view !== 'home') return;
+            if (!lb.connected || !here()) return;
             const recs = await api('GET', '/listenbrainz/recommendations?limit=10');
-            const wrap = $('#h-lbwrap'); if (!wrap || state.view !== 'home' || !recs.length) return;
+            const wrap = $('#h-lbwrap'); if (!wrap || !here() || !recs.length) return;
             const songs = recs.map((x, k) => ({ no: k + 1, title: itemName(x), artist: x.artist, image: x.image, page: x.page || x.uri, uri: x.playable || null, id: idOf(x.uri) }));
             wrap.innerHTML = `<section class="section fadein" id="h-lb"><div class="section-head"><h3>Recommended for you</h3><span class="muted small">from your ListenBrainz listens</span></div>${songRows(songs, { numbers: 'index' })}</section>`;
             bindSongRows($('#h-lb'), songs, {});
@@ -7240,7 +7244,7 @@
           // Every Pubky section in parallel, each rendered as it arrives.
           for (const name of ['trending-songs', 'trending-albums', 'trending-artists', 'following', 'tags', 'concerts', 'podcasts', 'yours', 'new'].filter(showRow)) {
             loadHomeSection(name, name.startsWith('trending') ? win : null).then((sc) => {
-              const el = $(`#h-${name} .hbody`); if (!el || state.view !== 'home') return;
+              const el = $(`#h-${name} .hbody`); if (!el || !here()) return;
               if (sc.needs === 'contact') { noContact(el.parentElement); return; }
               el.innerHTML = homeBody(sc, name, false); el.parentElement.classList.add('fadein'); bindHome(el, sc);
               const see = $(`#h-${name} [data-seeall]`); if (see) see.hidden = !(sc.items.length > 6 || sc.tags.length > 20);

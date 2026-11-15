@@ -691,6 +691,7 @@ jobs:
           ui-queue-mark.js queue-mark-shots
           ui-queue-empty-shuffle.js queue-empty-shuffle-shots
           ui-home-contact.js home-contact-shots
+          ui-home-stale.js home-stale-shots
           ui-progress-toast.js progress-toast-shots
           LIST
       # feedback.js on a test page, the node mocked: text stays text, a draft is its sign-in's,
