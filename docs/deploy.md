@@ -389,7 +389,7 @@ reviews and playlists can refer to the music by its canonical identity.
 
 ## Adding music after the node is running
 
-Folders can be added from the web UI or the app (Settings → Library folders) as well as in
+Folders can be added from the web UI or the app (Your library → Node library) as well as in
 `[library] folders` of the config. Folders added from the UI are stored in the library database,
 watched for changes and scanned straight away; removing one there forgets the tracks that lived
 only in it.

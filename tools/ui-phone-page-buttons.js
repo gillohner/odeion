@@ -1,5 +1,5 @@
 // On a phone a page's plain buttons (Settings › Library's Add folder and Scan now, Import's Check
-// and Import, an empty page's Open settings) are 44 px taps, like a dialog's; an icon button stays
+// and Import, an empty page's Add music) are 44 px taps, like a dialog's; an icon button stays
 // square, Back keeps its height so the page doesn't move, and desktop keeps its compact buttons. On the
 // Playlists page each box shares its row with its button, so the playlists start higher.
 // Real candidate assets, isolated responses: node tools/ui-phone-page-buttons.js [repo] [shots]
@@ -16,7 +16,7 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
 // The pages and the buttons each one must show (all of them measure 38 px on a phone without the rule).
 const pages = [
   ['/library', ['Sign in']],
-  ['/albums', ['Open settings']],
+  ['/albums', ['Add music']],
   ['/settings/library', ['Add folder', 'Scan now', 'Add share']],
   ['/library/import', ['Choose a playlist file', 'Check', 'Import', 'Open Sources']],
   ['/zones', ['Group outputs']],
