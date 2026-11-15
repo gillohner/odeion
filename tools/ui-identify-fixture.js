@@ -15,7 +15,8 @@
 //     shows the toast and its Undo; one change at a time per album (the others wait); an Undo says
 //     at once that it works and the review page gives the focus back; an album's Undo says it brings
 //     back that album's skipped songs; "Bring back N skipped" asks a second press; no Skip all on the
-//     card while a run goes.
+//     card while a run goes;
+//   - Node library's top line says the unsure songs with a Review button, on the first screen.
 // Any request outside the loopback server fails the run.
 //   node tools/ui-identify-fixture.js [static dir] [screenshot dir]
 const http = require('http');
@@ -460,6 +461,60 @@ const server = http.createServer(async (req, res) => {
         if (first === 'Leave as is') check(/left as they are/.test(await page.locator('#toast').textContent()) && (await page.locator('#toast .toast-act').count()) === 1, `${W} …and the toast keeps its Undo`);
         check(await until(async () => await page.evaluate(() => [...document.querySelectorAll('[data-album] [data-skip], [data-album] [data-reject], #idskipall')].every((b) => !b.disabled))), `${W} …and the buttons take presses again after the answer`);
       }
+
+      // Node library's top line says the unsure songs too, with the review one press away and no
+      // scroll (the card is pages down on a phone); nothing there when none wait or while a run goes,
+      // and a redraw of the card keeps the same button and its focus
+      const topLine = () => page.evaluate(() => { const b = document.querySelector('#libreview'); const r = b && b.getBoundingClientRect(); return { text: b ? b.textContent : null, inStatus: !!(b && b.closest('.libstatus')), visible: !!r && r.width > 0 && r.top >= 0 && r.bottom <= innerHeight, scrolled: document.querySelector('#main').scrollTop, line: (document.querySelector('.libstatus') || {}).textContent || '' }; });
+      // (the identify answer comes late: the line is drawn with it, not grown after it showed)
+      fx = base({ routes: { 'PUT /library/identify/settings': async () => [200, {}], 'GET /library/identify': async () => [200, status({}), 600] } });
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('.libstatus').count()) === 1);
+      const drawnWith = (await page.locator('.libstatus #libreview').count()) === 1;
+      check(await until(async () => (await page.locator('#libreview').count()) === 1), `${W} Node library's top line offers the review`);
+      check(drawnWith, `${W} …drawn with the line, not added after it showed`);
+      let tl = await topLine(); await shot('top-line-unsure');
+      check(tl.text === 'Review 6 unsure' && tl.inStatus && /120 songs in the library\s*· Review 6 unsure/.test(tl.line), `${W} …"${tl.line}"`);
+      check(tl.visible && tl.scrolled === 0, `${W} …on the first screen, no scroll (scrollTop ${tl.scrolled})`);
+      // The card drawn again (a setting changed) with the same count, then with 5 and with none: the
+      // same button keeps the focus while there are unsure songs (waits for the card's own redraw: the
+      // old card's mark gone), and the line drops the review at 0
+      const redraw = async (suggested) => {
+        fx.routes['GET /library/identify'] = async () => [200, status({ counts: { total: 120, identified: 90, suggested, unknown: 4, unchecked: 0, by: { tags: 10, album: 80 } } })];
+        await page.evaluate(() => { document.querySelector('#idphase').dataset.old = '1'; const a = document.querySelector('#idauto'); a.checked = !a.checked; a.dispatchEvent(new Event('change')); });
+        return until(async () => page.evaluate(() => !!document.querySelector('#idphase') && !document.querySelector('#idphase').dataset.old));
+      };
+      await page.locator('#libreview').focus();
+      await page.evaluate(() => { document.querySelector('#libreview').dataset.mark = 'first'; });
+      const same = () => page.evaluate(() => { const b = document.activeElement; return { focused: !!b && b.id === 'libreview' && b.dataset.mark === 'first', text: b && b.textContent }; });
+      check(await redraw(6) && (await same()).focused, `${W} …a redraw of the card with the same count keeps the button and its focus`);
+      const five = (await redraw(5)) && await same();
+      check(five && five.focused && five.text === 'Review 5 unsure', `${W} …a new count goes into the same button, focus kept ("${five && five.text}")`);
+      check(await redraw(0) && (await page.locator('#libreview').count()) === 0 && !/unsure/.test(await page.locator('.libstatus').textContent()), `${W} …and with none left the line drops the review`);
+      check(await page.evaluate(() => !!document.activeElement && document.activeElement.matches('.set-block .set-name') && !!document.activeElement.closest('.set-block').querySelector('#idcard')), `${W} …its focus going to the Identify card's title`);
+      fx = base({});
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#libreview').count()) === 1);
+      await page.locator('#libreview').focus();
+      await page.keyboard.press('Enter');
+      check(await until(async () => page.evaluate(() => location.pathname === '/identify')), `${W} …Enter on it opens the review (${await page.evaluate(() => location.pathname)})`);
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#libreview').count()) === 1);
+      await page.locator('#libreview').click();
+      check(await until(async () => page.evaluate(() => location.pathname === '/identify')), `${W} …and a click opens it`);
+      fx = base({ status: { phase: 'ready', counts: { total: 120, identified: 116, suggested: 0, unknown: 4, unchecked: 0, by: { tags: 10, album: 106 } } } });
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#idbox .idbar').count()) === 1);
+      tl = await topLine();
+      check(tl.text === null && !/unsure/.test(tl.line), `${W} with nothing unsure the top line says no review ("${tl.line}")`);
+      fx = base({ status: { phase: 'running', progress: { running: true, total: 30, done: 10, identified: 5, suggested: 6, unknown: 0, errors: 0 }, counts: { total: 120, identified: 90, suggested: 6, unknown: 4, unchecked: 20, by: { tags: 10, album: 70 } } } });
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#idbox .idbar').count()) === 1);
+      check((await page.locator('#libreview').count()) === 0, `${W} while a run goes the top line offers no review (the card does)`);
+      // The identify answer failing: asked once (the card uses the page's answer), the card says so
+      fx = base({ routes: { 'GET /library/identify': async () => [500, { error: 'identify broke' }] } });
+      await page.goto(`${BASE}/library/node`);
+      check(await until(async () => /identify broke/.test(await page.locator('#idbox').textContent())) && (await sleep(500), asked('GET', '/library/identify').length === 1) && (await page.locator('#libreview').count()) === 0, `${W} a failed identify answer is asked once and the card says it (${asked('GET', '/library/identify').length} asks)`);
 
       // Keys: the legend's unsure count takes the focus (in the Tab order) and Enter opens the review
       fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: skipRoutes() });

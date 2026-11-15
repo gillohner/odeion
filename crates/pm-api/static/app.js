@@ -518,7 +518,7 @@
         + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that playlists, tags and other apps understand: IDs in the tags first, then the folder as an album (one MusicBrainz lookup for a whole album), then how it sounds (AcoustID) for the rest. Unsure matches, and songs where two ways disagree, wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
     return library;
   };
-  const bindNodeLibrary = () => {
+  const bindNodeLibrary = (idSt) => {
       // Fix my files' tags: the list first, then the write
       const loadFixes = async () => {
         const out = $('#fixout'); if (!out) return;
@@ -544,7 +544,7 @@
       $$('[data-wd-del]').forEach((b) => b.onclick = async () => { if (!confirm('Remove this share and its songs from the library? The files on the share stay.')) return; try { const r = await api('DELETE', `/library/webdav/${b.dataset.wdDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
       $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') addFolder(); };
       $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${countOf(r.removed_tracks, 'songs')} gone`); render(); } catch (e) { toast(e.message, 'error'); } });
-    renderIdentify();
+    renderIdentify(idSt);
   };
   // Playlists from files and moving from Roon (was Settings › Import)
   const importHtml = () => {
@@ -8894,19 +8894,21 @@
               $('#impstart').onclick = async () => { try { const j = await api('POST', '/library/imports', { path }); watchJob(j.id); box.innerHTML = '<p class="small">Copying. Follow it in the job chip by the player; you can leave this page.</p>'; } catch (er) { toast(er.message, 'error'); } };
             };
           } else if (tab === 'node') {
-            const [info, folders, shares, drv, ns, hidden] = await Promise.all([
+            const idGen = idRenderGen; // a card drawn since this ask has a fresher answer than it
+            const [info, folders, shares, drv, ns, hidden, idSt] = await Promise.all([
               api('GET', '/info'), api('GET', '/library/folders').catch(() => []), api('GET', '/library/webdav').catch(() => []),
               api('GET', '/library/drives').catch(() => ({ providers: [], roots: [] })), api('GET', '/node/settings').catch(() => ({})), api('GET', '/library/hidden').catch(() => []),
+              api('GET', '/library/identify').then((st) => ({ st, gen: idGen }), (err) => ({ err, gen: idGen })),
             ]);
             if (state.view !== 'library' || state.viewArg !== 'node') return;
             state.info = info;
             const lsc = info.last_scan;
             const scanLine = info.scanning ? `<span class="spin"></span> Scanning… ${countOf(info.library.tracks, 'songs')} so far`
               : `${countOf(info.library.tracks, 'songs')} in the library${lsc ? ` · last scan ${ago(lsc.finished_at)}${lsc.error_count ? ` · ${countOf(lsc.error_count, 'files')} could not be read` : ''}` : ''}`;
-            main.innerHTML = head + libPanel(tab, `<div class="libstatus" role="status">${scanLine}</div><p class="muted small">Edit a song’s tags or take it out of the library from its ⋯ menu, an album from the album’s ⋯ menu. Edits stay on this node; files are never changed.</p>`
+            main.innerHTML = head + libPanel(tab, `<div class="libstatus" role="status">${scanLine}${unsureSlot(idUnsure(idSt.st))}</div><p class="muted small">Edit a song’s tags or take it out of the library from its ⋯ menu, an album from the album’s ⋯ menu. Edits stay on this node; files are never changed.</p>`
               + nodeLibraryHtml({ info, folders, ns, shares, drv })
               + (hidden.length ? sGroup('Taken out of the library', hidden.map((h, k) => sRow(`<code class="path">${esc(h.path.split('/').slice(-2).join('/'))}</code>`, `Taken out ${ago(h.hidden_at)}; the file is still there.`, `<button class="btn sm ghost" data-unhide="${k}">Bring back</button>`)).join('')) : ''));
-            bindNodeLibrary();
+            bindNodeLibrary(idSt);
             $$('[data-unhide]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', '/library/hidden/restore', { path: hidden[Number(b.dataset.unhide)].path }); toast(r.scan_started ? 'Back: reading it again' : 'Back with the next scan'); watchScan({ scanning: !!r.scan_started }); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } });
             if (info.scanning) { clearTimeout(state.libPoll); state.libPoll = setTimeout(() => { if (state.view === 'library' && state.viewArg === 'node') render(); }, 3000); }
           } else {
@@ -9578,10 +9580,28 @@
   // The card's title: where the focus goes when a press removed its button (a key held down can't
   // press a title), and only when the focus was left on the page
   const focusCardTitle = () => { const blk = $('#idcard') && $('#idcard').closest('.set-block'); const h = blk && blk.querySelector('.set-name'); if (h && focusLeft()) { h.tabIndex = -1; h.focus(); } };
-  const renderIdentify = async () => {
+  // Node library's top line says the unsure songs too, as the card does (the card is far down the
+  // page): one press to the review, no scroll. Drawn with the page from the same answer, so the line
+  // doesn't grow after it shows, and a page redrawn by a scan's poll says nothing new
+  const idUnsure = (st) => { if (!st || !st.counts) return 0; const running = st.phase ? st.phase === 'running' : !!(st.progress && st.progress.running); return running ? 0 : Number(st.counts.suggested || 0); };
+  const unsureSlot = (k) => `<span id="libunsure" data-n="${k}">${k ? `· <button class="lnk" type="button" id="libreview">Review ${k.toLocaleString()} unsure</button>` : ''}</span>`;
+  // `pre`: the answer the page asked for with its other parts ({ st } or { err }), used unless a
+  // card was drawn since it was asked
+  const renderIdentify = async (pre) => {
     const box = $('#idbox'); if (!box) return;
+    if (pre && pre.gen !== idRenderGen) pre = null;
     const g = ++idRenderGen;
-    let st; try { st = await api('GET', '/library/identify'); } catch (e) { if (g === idRenderGen) box.textContent = e.message; return; }
+    const setUnsure = (k) => {
+      // Changed only when the count does, and a new count goes into the same button, so a redraw of
+      // the card keeps the focus
+      const lu = $('#libunsure'); const was = lu && lu.querySelector('#libreview');
+      if (lu && lu.dataset.n !== String(k)) {
+        if (was && k) { lu.dataset.n = String(k); was.textContent = `Review ${k.toLocaleString()} unsure`; } else { const had = was && document.activeElement === was; lu.outerHTML = unsureSlot(k); if (had) focusCardTitle(); }
+      }
+      const lb = $('#libreview'); if (lb) lb.onclick = () => setView('identify');
+    };
+    let st;
+    try { if (pre && pre.err) throw pre.err; st = pre ? pre.st : await api('GET', '/library/identify'); } catch (e) { if (g === idRenderGen) { box.textContent = e.message; setUnsure(0); } return; }
     if (g !== idRenderGen || !box.isConnected) return;
     const c = st.counts; const p = st.progress;
     // One line says where identification stands (st.phase), before the numbers
@@ -9599,6 +9619,7 @@
     // Review is optional (TASK-identify-less-review-1106): songs play and show as usual either way,
     // so the unsure ones are a secondary line, not a warning, and Identify stays the main button
     const reviewFirst = false;
+    setUnsure(idUnsure(st));
     const unsure = ph === 'needs_review' && c.suggested ? `<p class="small muted idsub" id="idunsure">${n(c.suggested)} ${c.suggested === 1 ? 'song' : 'songs'} unsure (optional): songs play and show as usual, identified or not.</p>` : '';
     // Unsure songs whose files the node can't find now (a share offline, a folder moved): not counted above, as on Confirm matches
     const offline = c.suggested_missing ? `<p class="small muted" id="idmissing">${n(c.suggested_missing)} more unsure ${c.suggested_missing === 1 ? 'song’s file is' : 'songs’ files are'} out of reach now (a share offline or a folder moved); they wait until the files are back.</p>` : '';
