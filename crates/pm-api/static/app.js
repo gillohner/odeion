@@ -1878,16 +1878,20 @@
   const isBrowser = () => state.zone === BROWSER;
   // What the app's own player says of what plays: the path, as a zone reports it
   const nativePath = () => { const n = state.natOn && !state.ytOn ? nat.status() : null; const np = n && n.now_playing; return np ? { signal_path: np.signal_path, source_format: np.source_format, output_format: np.output_format, format: np.format || null } : {}; };
+  // Where the bar's song is, in seconds: a song held at its place whose file hasn't opened is
+  // there, not at 0:00 (holdPlace)
+  const browserTime = () => { const r = state.restoredAt; return r && r.it === state.browserQueue[state.browserIndex] && audio.readyState < 1 ? r.pos : audio.currentTime; };
+  const browserTransport = () => (audio.paused ? (browserTime() > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing');
   const browserState = () => {
     const it = state.browserQueue[state.browserIndex];
     return {
       id: BROWSER, name: hereName(), output: 'browser',
-      transport: audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing',
+      transport: browserTransport(),
       queue_index: state.browserIndex,
       // Why the app's player paused (the node took this phone's output, the DAC went, the stream
       // broke): said in the bar
       error: (() => { const n = state.natOn ? nat.status() : null; return n && n.transport === 'paused' ? n.error : null; })(),
-      now_playing: it ? { item: it, position_ms: audio.currentTime * 1000, duration_ms: (it.duration_ms && (!Number.isFinite(audio.duration) || it.stream)) ? it.duration_ms : (audio.duration || 0) * 1000, signal_path: null, ...nativePath() } : null,
+      now_playing: it ? { item: it, position_ms: browserTime() * 1000, duration_ms: (it.duration_ms && (!Number.isFinite(audio.duration) || it.stream)) ? it.duration_ms : (audio.duration || 0) * 1000, signal_path: null, ...nativePath() } : null,
     };
   };
   const currentZone = () => (isBrowser() ? browserState() : state.zones[state.zone]);
@@ -1935,7 +1939,7 @@
       const cur = state.browserQueue[state.browserIndex];
       // (the song itself with its place: the queue can change before the place comes back)
       // (a song brought back that hasn't opened, its file not answering: still where it was left)
-      const r = state.restoredAt; const pos = r && r.it === cur && audio.readyState < 1 ? r.pos : audio.currentTime;
+      const pos = browserTime();
       if (cur && !isLiveRadio(cur)) localStorage.setItem('pm.browserAt', JSON.stringify({ index: state.browserQueue.slice(0, state.browserIndex).filter((it) => !isLiveRadio(it)).length, id: cur.id, pos: Math.floor(pos || 0) }));
     } catch { /* storage unavailable */ }
   };
@@ -1954,15 +1958,11 @@
     const index = at.id == null ? hint : q[hint] && q[hint].id === at.id ? hint : q.findIndex((it) => it.id === at.id);
     return q[index] ? { index, pos: Number(at.pos) || 0 } : null;
   };
-  // Back where it was, paused: the song in the bar and its position
-  const restoreBrowserQueue = () => {
-    const at = savedBrowserAt();
-    const it = at && state.browserQueue[at.index];
-    if (!it) return;
-    state.browserIndex = at.index;
-    state.restoredAt = { it, pos: at.pos };
-    audio.preload = 'metadata';
-    browserSrc(it);
+  // A song in the bar, paused at a place, whose file is opening (after a reload, or moved here
+  // paused from a zone): the bar, the saver and a Move show that place until it opens, and Play on
+  // a file that didn't open starts it there (browserResume)
+  const holdPlace = (it, pos) => {
+    state.restoredAt = { it, pos };
     // Once it opens, at its place (moved by a seek meanwhile), and from then on an ordinary song: a
     // later break picks up where it broke. A play that took over first (Play on a file that didn't
     // open, from its place or a seek's) is left where it is
@@ -1972,6 +1972,16 @@
       if (r.pos > 0) { try { audio.currentTime = r.pos; } catch { /* not seekable */ } }
       renderBar();
     }, { once: true });
+  };
+  // Back where it was, paused: the song in the bar and its position
+  const restoreBrowserQueue = () => {
+    const at = savedBrowserAt();
+    const it = at && state.browserQueue[at.index];
+    if (!it) return;
+    state.browserIndex = at.index;
+    holdPlace(it, at.pos);
+    audio.preload = 'metadata';
+    browserSrc(it);
     renderBar();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
@@ -2806,7 +2816,7 @@
     if (action.action === 'toggle' && !state.browserQueue[state.browserIndex]) { browserPlay(0); return; }
     if (action.action === 'toggle') { if (audio.paused) browserResume(); else browserPause(); }
     else if (action.action === 'next') browserPlay(state.browserIndex + 1);
-    else if (action.action === 'previous') { if (audio.currentTime > 3) browserSeek(0); else browserPlay(Math.max(0, state.browserIndex - 1)); }
+    else if (action.action === 'previous') { if (browserTime() > 3) browserSeek(0); else browserPlay(Math.max(0, state.browserIndex - 1)); }
     else if (action.action === 'seek') browserSeek(action.position_ms / 1000);
     else if (action.action === 'play' && action.index != null) browserPlay(action.index);
     renderBar();
@@ -3239,10 +3249,15 @@
     const it = state.browserQueue[index]; if (!it) { state.browserIndex = -1; renderBar(); return; }
     if (ytOf(it.uri)) { browserPlay(index); return; } // YouTube's player starts from the top
     if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
-    // The seek is for this song only: a later song (this one never loaded) is not moved
-    audio.addEventListener('loadedmetadata', () => { if (state.browserIndex !== index) return; try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
-    if (!paused) { it.moved = true; browserPlay(index); return; } // browserPlay says why when it can't play
+    if (!paused) {
+      // The seek is for this song only: a later song (this one never loaded) is not moved
+      audio.addEventListener('loadedmetadata', () => { if (state.browserIndex !== index) return; try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
+      it.moved = true; browserPlay(index); return; // browserPlay says why when it can't play
+    }
+    // Paused: held at its place, as after a reload (before, a file that didn't open left the bar at
+    // 0:00 and Play did nothing and said nothing)
     state.browserIndex = index;
+    holdPlace(it, posMs > 1000 ? posMs / 1000 : 0);
     browserSrc(it);
     audio.preload = 'metadata'; audio.load();
     mediaSessionUpdate(it); renderBar();
@@ -3281,10 +3296,10 @@
         const items = queue.map((it) => ({ uri: nodeRel(it.uri), title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: nodeRel(it.image || null), limit: it.limit || null }));
         if (!items.length) throw new Error('Nothing to move: the queue is empty');
         const index = cur ? queue.indexOf(cur) : -1;
-        const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
+        const transport = !cur ? 'stopped' : browserTransport();
         // Pause here first: the node may take seconds to open the track, and both would play meanwhile
         if (transport === 'playing') { browserPause(); resume = true; }
-        const zs = await zoneOp(target, (t) => api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: index >= 0 ? index : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), shuffle: browserShuffle(), radio: false }, { signal: t.signal }));
+        const zs = await zoneOp(target, (t) => api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: index >= 0 ? index : null, position_ms: Math.round((browserTime() || 0) * 1000), transport, repeat: browserRepeat(), shuffle: browserShuffle(), radio: false }, { signal: t.signal }));
         state.zones[zs.id] = zs;
         if (transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
         resume = null;

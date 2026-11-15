@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-15
+
+- **A song moved to this browser while paused keeps its place, and Play always starts it.** Moving what plays from a paused zone into this browser (or the app on a phone) when the node was busy and the song's file didn't open left the bar at 0:00, and Play then did nothing and said nothing. Now the bar shows where the song was (say 0:30), and Play asks for the file again, says “did not start … Trying again”, and plays from that place. A song brought back after a reload whose file didn't open also shows its place in the bar now instead of 0:00, Previous on it goes back to its start, as on any song past 0:03 (before, to the song before), and moving it on to a zone sends it there paused at that place (before, stopped at the start). Tests: `tools/ui-browser-place.js`.
+
 ### 2026-11-14
 
 - **On a phone, Zones says in full what plays on this device.** Under “Nothing playing”, This browser's card said “Streams the files to th…”, cut off at 360 px beside its “selected” label or Play to button, and the Android and desktop apps' card said “The app plays the files itself”, cut off the same way. They now say “Plays in this browser” and “Plays in the app”, which fit; the Play to list and Move to menu show the same new words. Test: `tools/ui-zone-here-line.js`.
