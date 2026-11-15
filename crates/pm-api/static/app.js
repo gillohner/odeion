@@ -6407,7 +6407,7 @@
   const renderSearchBody = (run) => {
     if (!currentSearch(run)) return;
     const chips = $('#scopechips'); const box = $('#sresults'); if (!chips || !box) return;
-    const retryFocus = $('[data-sretry]:focus', box);
+    const retryFocus = $('[data-sretry]:focus, [data-scontact]:focus', box);
     const scope = run.scope;
     if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(displayedSearch()); }).catch(() => { state.sourcesLoading = false; }); }
     const allKinds = mergeSearch(run);
@@ -6466,7 +6466,11 @@
     // One line per source: its reason when it gave one ("Spotify needs a Premium plan for this ·
     // Sources"), else that it didn't answer; Retry only where trying again can help. Retry is the
     // same small button as the whole search's, so a keyboard reaches it and a finger can hit it
-    const notes = problems.length ? `<div class="snotes">${problems.map((src) => { const err = run.answers[src] && run.answers[src].error; const said = err ? short(err, src).replace(/[.\s·]+$/, '') : ''; const why = said && !said.toLowerCase().includes(srcName(src).toLowerCase()) ? `${srcName(src)}: ${said}` : said; const again = !err || /answered 5\d\d|timed? ?out|time-?out|took too long|reach|network|busy|later|didn.t answer|isn.t answering|sending request|refused|dns|connect(ion)? (error|reset|closed)/i.test(err); return `<span class="snote" title="${esc(err || 'still waiting')}">${svcBadge(src)} ${why ? esc(why) : `${esc(srcName(src))} didn’t answer`}${again ? ` <button class="btn sm" type="button" data-sretry="${src}">Retry</button>` : ''}</span>`; }).join('')}</div>` : '';
+    // A source waiting for the node's contact (Pubky: the node says "the upstream contact (Settings)")
+    // says so in plain words, and the node's owner gets one press to the field
+    const needsContact = (err) => /upstream contact/i.test(err || '');
+    const contactWords = (err) => err.replace(/the (node's )?upstream contact( \(Settings\))?/i, isOwner() ? 'your email or website' : 'an email or website from the node’s owner');
+    const notes = problems.length ? `<div class="snotes">${problems.map((src) => { const err = run.answers[src] && run.answers[src].error; const said = (!err ? '' : needsContact(err) ? contactWords(err) : short(err, src)).replace(/[.\s·]+$/, ''); const why = said && !said.toLowerCase().includes(srcName(src).toLowerCase()) ? `${srcName(src)}: ${said}` : said; const again = !err || /answered 5\d\d|timed? ?out|time-?out|took too long|reach|network|busy|later|didn.t answer|isn.t answering|sending request|refused|dns|connect(ion)? (error|reset|closed)/i.test(err); return `<span class="snote" title="${esc(err ? (needsContact(err) ? contactWords(err) : err) : 'still waiting')}">${svcBadge(src)} ${why ? esc(why) : `${esc(srcName(src))} didn’t answer`}${needsContact(err) ? (isOwner() ? ' <button class="btn sm" type="button" data-scontact>Add it</button>' : '') : again ? ` <button class="btn sm" type="button" data-sretry="${src}">Retry</button>` : ''}</span>`; }).join('')}</div>` : '';
     const nothing = !pendingAny && !SEARCH_KINDS.some(([k]) => byKind[k].length);
     const nothingAtAll = nothing && !(tg && ((tg.mine || []).length || (tg.others || []).length));
     // Keep Retry attached while late tags/sources redraw the results. Replacing it and restoring
@@ -6501,7 +6505,9 @@
     const to = $('[data-sopen="top"]', box); if (to) to.onclick = inAppClick(() => setView('item', { kind: top.kind === 'song' ? 'song' : top.kind, id: top.id }));
     const tp = $('[data-splaytop]', box); if (tp) tp.onclick = async (e) => { if (top.kind === 'song') return playSongs([{ ...top, artist: top.subtitle }], 0, 'replace', null, e.currentTarget); try { const pg = await api('GET', `/item/${top.kind}/${top.id}`); playSongs(pg.songs || [], 0, 'replace', pg.plays_from, e.currentTarget, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } };
     $$('[data-sretry]', box).forEach((b) => b.onclick = () => { searchRuns.delete(searchKey(run.q, run.scope)); startSearch(run.q, run.scope); render(); search.focus(); });
-    if (retryFocus && !retryFocus.isConnected) { const again = $$('[data-sretry]', box).find((b) => b.dataset.sretry === retryFocus.dataset.sretry); (again || search).focus(); }
+    // (Settings › Discover holds the node's contact: its field takes the keyboard, ready to type)
+    $$('[data-scontact]', box).forEach((b) => b.onclick = () => setView('settings', 'discover').then(() => { const c = state.view === 'settings' && $('#contact'); if (c) c.focus(); }));
+    if (retryFocus && !retryFocus.isConnected) { const again = 'scontact' in retryFocus.dataset ? $('[data-scontact]', box) : $$('[data-sretry]', box).find((b) => b.dataset.sretry === retryFocus.dataset.sretry); (again || search).focus(); }
   };
   // ---- Home (STEWARD-UX-HOME.md): everything Pinakes knows about music, one section per call ----
   const HOME_TITLES = { 'trending-songs': 'Trending songs', 'trending-albums': 'Trending albums', 'trending-artists': 'Trending artists', following: 'From people you follow', tags: 'Tags people use for music', concerts: 'Concerts near you', podcasts: 'Podcasts', yours: 'Yours on Pubky', new: 'New on Pubky' };
