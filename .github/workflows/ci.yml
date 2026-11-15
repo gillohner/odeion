@@ -656,6 +656,7 @@ jobs:
           ui-signin-return.js signin-return-shots
           ui-phone-page-buttons.js phone-page-buttons-shots
           ui-phone-zone-cards.js phone-zone-cards-shots
+          ui-zones-quiet.js zones-quiet-shots
           ui-wrong-match.js wrong-match-shots
           ui-musicbrainz-contact.js musicbrainz-contact-shots
           ui-add-music-ask.js add-music-ask-shots

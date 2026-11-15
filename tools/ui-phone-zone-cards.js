@@ -134,7 +134,8 @@ const open = async (page) => { await fx.go(page, '/zones'); await page.waitForSe
         // Scrolled back to the top, the next redraw leaves it there
         await page.evaluate(() => { const m = document.querySelector('#main'); m.style.scrollBehavior = 'auto'; m.scrollTop = 0; m.style.scrollBehavior = ''; });
         sock.ws.send(JSON.stringify({ type: 'zone', seq: 2, state: { ...tv, transport: 'stopped' } }));
-        await page.waitForFunction(() => /stopped/.test((document.querySelector('[data-zcard="tv"] .zc-head') || {}).textContent || ''), null, { timeout: 3000 }).catch(() => {});
+        // (a stopped zone has no state pill: the redraw takes "paused" away)
+        await page.waitForFunction(() => { const h = document.querySelector('[data-zcard="tv"] .zc-head'); return !!h && !/paused/.test(h.textContent); }, null, { timeout: 3000 }).catch(() => {});
         await page.waitForTimeout(150);
         check(await page.evaluate(() => document.querySelector('#main').scrollTop) === 0, `${at}: back at the top, a redraw doesn't scroll the page down again`);
         // Another page and Back: the place they left Zones at, not the zone in use

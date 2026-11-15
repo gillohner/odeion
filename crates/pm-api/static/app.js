@@ -8969,16 +8969,17 @@
             return [{ z: lead, ways: fam }];
           });
           const phone = shellMode() === 'phone';
-          main.innerHTML = pageHead('Zones', `${cards.length} · multi-room overview`, `<button class="btn iconic" id="zgroup" aria-label="Group outputs">${icon('plus')}<span class="btn-label">Group outputs…</span></button>`) + `<div class="cards">${cards.map(({ z, ways }) => {
+          main.innerHTML = pageHead('Zones', cards.length, `<button class="btn iconic" id="zgroup" aria-label="Group outputs">${icon('plus')}<span class="btn-label">Group outputs…</span></button>`) + `<div class="cards">${cards.map(({ z, ways }) => {
             const np = z.now_playing; const it = np && np.item; const caps = capsOf(z); const hv = caps && caps.hw_volume && caps.hw_volume.kind === 'db' ? caps.hw_volume : null;
             const members = np && np.members && np.members.length ? `<span class="pill">${np.members.length} outputs</span>` : '';
             const title = ways ? esc(familyName(z)) : named(z);
+            // (a stopped zone gets no state pill: its "Nothing playing" or its Play button says so)
             // On a phone the card's Play to (or "selected") sits on the now-playing line and the
             // volume note is for screen readers only, so the controls are one line under it
             const pick = z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}" aria-label="Play to ${esc(z.name)}">Play to</button>`;
             const wayChips = ways ? `<div class="chips zc-ways" role="group" aria-label="Ways to play to ${esc(familyName(z))}">${ways.map((m) => `<button class="chip ${m.id === state.zone ? 'on' : ''}" data-zsel="${esc(m.id)}" aria-pressed="${m.id === state.zone}" title="Play to ${esc(m.name)}">${esc(PROTO_WORDS[protoOf(m)] || protoOf(m))}</button>`).join('')}</div>` : '';
             return `<div class="card zone-card ${z.id === state.zone ? 'on' : ''}" data-zcard="${esc(z.id)}">
-              <div class="zc-head">${icon('zone')}<h3>${title}</h3>${members}${z.transport === 'stopped' && z.error ? '<span class="pill bad">error</span>' : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
+              <div class="zc-head">${icon('zone')}<h3>${title}</h3>${members}${z.transport === 'stopped' ? (z.error ? '<span class="pill bad">error</span>' : '') : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
               ${wayChips}
               <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : `<div class="np-art placeholder zc-ph" aria-hidden="true">${icon('zone')}</div>`}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div>${phone ? pick : ''}</div>
               <div class="zc-controls">
