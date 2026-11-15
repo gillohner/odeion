@@ -222,6 +222,49 @@ async function connectLinks(browser, width) {
   } finally { await run.context.close(); }
 }
 
+// An address that names a service this node doesn't list (an old link or bookmark, /sources/deezer)
+// opens Sources and the address becomes plain /sources, as the page shown is: a reload stays there
+// and a copied link doesn't name it. A listed service keeps its address even when it is turned off,
+// and so does any address while the list of services can't be loaded (it may just be slow).
+const offFixtures = { ...connectFixtures, '/sources': { body: [...connectFixtures['/sources'].body, { id: 'qobuz', name: 'Qobuz', description: '', status: 'ready', enabled: false }] } };
+const sourcesDrawn = (page, want) => page.waitForFunction((w) => document.querySelector('.src-nav') && location.pathname === w, want, { timeout: 5000 })
+  .then(() => true, () => false);
+async function unknownSource(browser, width, mobile) {
+  const where = `unknown service ${width}`;
+  let run = await fx.create(browser, width, { fixtures: offFixtures, mobile });
+  try {
+    const { page, state } = run;
+    await fx.go(page, '/album/mb-nowhere');
+    await page.locator('#isongs').getByText('Connect TIDAL').waitFor();
+    await fx.go(page, '/sources/deezer');
+    assert.ok(await sourcesDrawn(page, '/sources'), `${where}: /sources/deezer becomes /sources (at ${path0(page)})`);
+    assert.deepEqual(await page.evaluate(() => [history.state && history.state.v, history.state && history.state.arg, history.length]), ['sources', null, 3], `${where}: the same history entry (no new one), the Sources page's, names no service`);
+    if (mobile) assert.equal(await page.locator('.set-panel').count(), 0, `${where}: a phone shows the list of services`);
+    else assert.equal(await openTab(page), 'srctab-library', `${where}: Sources opens on Your library`);
+    if (width === 1280 || mobile) await page.screenshot({ path: path.join(shots, `unknown-source-${width}.png`) });
+    await page.reload();
+    assert.ok(await sourcesDrawn(page, '/sources'), `${where}: a reload stays on /sources (at ${path0(page)})`);
+    // Back goes to the page before (no extra entry was pushed), not to the address with the unknown service
+    await page.goBack();
+    await page.waitForFunction(() => location.pathname === '/album/mb-nowhere' && document.querySelector('#isongs'))
+      .catch(() => assert.fail(`${where}: Back returns to the album (at ${path0(page)})`));
+    // A listed service that is turned off keeps its address and its tab
+    await fx.go(page, '/sources/qobuz');
+    assert.ok(await sourcesDrawn(page, '/sources/qobuz'), `${where}: /sources/qobuz (turned off) keeps its address (at ${path0(page)})`);
+    if (!mobile) assert.equal(await openTab(page), 'srctab-qobuz', `${where}: Qobuz's tab is open`);
+    await fx.cleanCopy(page);
+    assert.deepEqual(state.errors, [], `${where}: no page errors`);
+  } finally { await run.context.close(); }
+  // The list of services doesn't load: the address is kept
+  run = await fx.create(browser, width, { fixtures: { ...offFixtures, '/sources': { status: 500, body: { error: 'busy' } } }, mobile });
+  try {
+    await fx.go(run.page, '/sources/tidal');
+    await run.page.locator('.src-nav').waitFor();
+    assert.equal(path0(run.page), '/sources/tidal', `${where}: with no list of services the address is kept`);
+    assert.deepEqual(run.state.errors, [], `${where}: no page errors without the list`);
+  } finally { await run.context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   let failed = 0; let passed = 0;
@@ -235,7 +278,9 @@ async function connectLinks(browser, width) {
       await run(`${width}: song page links`, () => songLinks(browser, width));
       await run(`${width}: artist name search`, () => nameSearch(browser, width));
       await run(`${width}: Connect a service`, () => connectLinks(browser, width));
+      await run(`${width}: unknown service address`, () => unknownSource(browser, width, false));
     }
+    for (const width of [360, 412]) await run(`${width} phone: unknown service address`, () => unknownSource(browser, width, true));
   } finally { await browser.close(); }
   console.log(`${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
