@@ -512,6 +512,7 @@
   const sGroup = (title, body) => `<div class="set-group">${title ? `<h3 class="set-h">${title}</h3>` : ''}<div class="set-rows">${body}</div></div>`;
   // The folders, shares and drives the node plays in place (was Settings › Library folders)
   const nodeLibraryHtml = ({ info, folders, ns, shares, drv }) => {
+    if (driveFailed && drv.providers.some((p) => p.id === driveFailed.provider && p.connected)) driveFailed = null; // (signed in since: the old failure is over)
     const row = sRow; const block = sBlock; const group = sGroup;
       const scanErrs = info.last_scan && info.last_scan.error_count ? `<details class="scanerrs small"><summary>${countOf(info.last_scan.error_count, 'files')} could not be read in the last scan</summary><ul>${info.last_scan.errors.map(([fp, why]) => `<li><code>${esc(fp.split('/').slice(-2).join('/'))}</code>: ${esc(why.replace(fp, '').replace(/^[: ]+/, '') || 'unreadable')}</li>`).join('')}</ul></details>` : '';
       const library = group('Music folders',
@@ -521,7 +522,7 @@
         + group('WebDAV shares', shares.map((sh) => row(esc(sh.name), `${esc(sh.url)} · ${countOf(sh.tracks, 'songs')}`, `<button class="btn sm" data-wd-scan="${esc(sh.id)}">Rescan</button><button class="btn sm ghost" data-wd-del="${esc(sh.id)}">Remove</button>`)).join('')
           + row('Add a WebDAV share', 'A music folder on Nextcloud, ownCloud or a NAS, played where it is (it is read again every 6 hours).', `<button class="btn" id="wdopen">${icon('plus')} Add share</button>`))
         + group('Cloud drives', drv.roots.map((r) => row(esc(r.name), `${r.provider === 'google' ? 'Google Drive' : 'OneDrive'} · ${countOf(r.tracks, 'songs')}`, `<button class="btn sm" data-dr-scan="${esc(r.id)}">Rescan</button><button class="btn sm ghost" data-dr-del="${esc(r.id)}">Remove</button>`)).join('')
-          + drv.providers.map((p) => row(esc(p.name), !p.configured ? 'Not set up on this node: add its app in Settings › This node › Service apps' : p.connected ? `Signed in${p.user ? ` as ${esc(p.user)}` : ''}` : 'Sign in, then pick a music folder; it is read again every 6 hours.', !p.configured ? '' : p.connected ? `<button class="btn" data-dr-add="${esc(p.id)}" data-dr-name="${esc(p.name)}">${icon('plus')} Add a folder</button><button class="btn sm ghost" data-dr-out="${esc(p.id)}">Sign out</button>` : `<button class="btn" data-dr-login="${esc(p.id)}">Sign in</button>`)).join(''))
+          + drv.providers.map((p) => row(esc(p.name), !p.configured ? 'Not set up on this node: add its app in Settings › This node › Service apps' : p.connected ? `Signed in${p.user ? ` as ${esc(p.user)}` : ''}` : 'Sign in, then pick a music folder; it is read again every 6 hours.' + (driveFailed && driveFailed.provider === p.id ? '<br>' + driveFailedHtml(driveFailed.why) : ''), !p.configured ? '' : p.connected ? `<button class="btn" data-dr-add="${esc(p.id)}" data-dr-name="${esc(p.name)}">${icon('plus')} Add a folder</button><button class="btn sm ghost" data-dr-out="${esc(p.id)}">Sign out</button>` : `<button class="btn" data-dr-login="${esc(p.id)}">Sign in</button>`)).join(''))
         + group('Fix my files\u2019 tags', block('', 'Write what the node knows into your files, so other players see it too: each artist on their own (not one artist called \u201cSefa, Dr. Peacock\u201d), and the MusicBrainz match of each song. You see every change first; each file\u2019s tags are saved before it changes, and the music itself is never touched.', '<div class="actions"><button class="btn" id="fixcheck">Check my files</button></div><div id="fixout" aria-live="polite"></div>'))
         + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that playlists, tags and other apps understand: IDs in the tags first, then the folder as an album (one MusicBrainz lookup for a whole album), then how it sounds (AcoustID) for the rest. Unsure matches, and songs where two ways disagree, wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
     return library;
@@ -542,7 +543,7 @@
       const fc = $('#fixcheck'); if (fc) fc.onclick = loadFixes;
       $('#scan').onclick = async () => { try { await api('POST', '/library/scan', {}); toast('Scan started'); watchScan({ scanning: true }); } catch (e) { toast(e.message, 'error'); } };
       const addFolder = async () => { const p = $('#folderadd').value.trim(); if (!p) return; try { const r = await api('POST', '/library/folders', { path: p }); toast(r.scan_started ? 'Folder added; scanning' : 'Folder added; scanned after the current scan'); watchScan({ scanning: true }); render(); } catch (e) { toast(e.message, 'error'); } };
-      $$('[data-dr-login]').forEach((b) => b.onclick = async () => { try { const r = await api('POST', `/library/drives/${b.dataset.drLogin}/login`); location.href = r.url; } catch (e) { toast(e.message, 'error'); } });
+      $$('[data-dr-login]').forEach((b) => b.onclick = async () => { try { const r = await api('POST', `/library/drives/${b.dataset.drLogin}/login`); try { sessionStorage.setItem('pm.driveLogin', b.dataset.drLogin); } catch { /* storage off */ } location.href = r.url; } catch (e) { toast(e.message, 'error'); } });
       $$('[data-dr-add]').forEach((b) => b.onclick = async () => { const r = await driveFolderDialog(b.dataset.drAdd, b.dataset.drName); if (r) { toast(`${r.name} added; scanning`); render(); } });
       $$('[data-dr-out]').forEach((b) => b.onclick = async () => { try { await api('DELETE', `/library/drives/${b.dataset.drOut}/account`); render(); } catch (e) { toast(e.message, 'error'); } });
       $$('[data-dr-scan]').forEach((b) => b.onclick = async () => { try { await api('POST', `/library/drives/roots/${b.dataset.drScan}/scan`); toast('Reading the folder again'); } catch (e) { toast(e.message, 'error'); } });
@@ -2582,7 +2583,41 @@
   // TIDAL's official embed player in a panel: full-length playback for subscribers, inside this UI, no tier needed.
   const tidalEmbed = (kind, id, title) => { const p = $('#embedpanel'); $('#embedtitle').textContent = title || 'TIDAL player'; $('#embedframe').src = `https://embed.tidal.com/${kind}/${encodeURIComponent(id)}?layout=gridify`; p.hidden = false; };
   $('#embedclose').onclick = () => { const p = $('#embedpanel'); p.hidden = true; $('#embedframe').src = 'about:blank'; };
-  { const sp = new URLSearchParams(location.search); if (sp.get('drive') === 'ok') { toast('Drive signed in: add a folder'); history.replaceState(null, '', location.pathname); } else if (sp.get('drive') === 'error') { toast('Drive: ' + (sp.get('message') || 'sign-in failed'), 'error'); history.replaceState(null, '', location.pathname); } }
+  // Back from a cloud drive's sign-in (drives.rs callback: /settings/library?drive=ok|error). The
+  // answer waits for Node library's first drawing (driveReturn), then goes to that drive's row: a
+  // drive with no folder yet opens its folder picker; a failure says why on the row while the app
+  // stays open, until the drive shows signed in. (The provider is the one whose Sign in was pressed.)
+  let driveBack = null; let driveFailed = null;
+  { const sp = new URLSearchParams(location.search); const d = sp.get('drive'); if (d === 'ok' || d === 'error') { let provider = null; try { provider = sessionStorage.getItem('pm.driveLogin'); sessionStorage.removeItem('pm.driveLogin'); } catch { /* storage off */ } const msg = sp.get('message'); driveBack = d === 'ok' ? { provider, text: 'Drive signed in: add a folder' } : { provider, kind: 'error', why: msg || 'The drive gave no reason', text: 'Drive: ' + (msg || 'sign-in failed') }; history.replaceState(null, '', location.pathname); } }
+  const driveFailedHtml = (why) => `<span class="warn-text" data-drv-failed>Last sign-in failed: ${esc(why)}</span>`;
+  const driveReturn = (drv) => {
+    if (!driveBack) return; const b = driveBack; driveBack = null;
+    const ps = drv.providers.filter((p) => p.configured); const want = !b.why;
+    // (the drive whose Sign in was pressed, if its state agrees with the answer; else, e.g. storage
+    // off or a Sign in left half-way earlier, the only drive in the state the answer says)
+    const fits = ps.filter((x) => !!x.connected === want);
+    const p = fits.find((x) => x.id === b.provider) || (fits.length === 1 ? fits[0] : null);
+    const group = [...$$('.set-group', main)].find((g) => /Cloud drives/.test(($('.set-h', g) || {}).textContent || ''));
+    const into = (el) => { if (el) el.scrollIntoView({ block: 'center', behavior: 'instant' }); }; // (at once, as a page opened: .main glides)
+    if (b.why) {
+      const btn = p && !p.connected ? $(`[data-dr-login="${p.id}"]`, main) : null;
+      if (btn) {
+        driveFailed = { provider: p.id, why: b.why };
+        const row = btn.closest('.set-row'); const help = $('.set-help', row);
+        if (help && !$('[data-drv-failed]', help)) help.insertAdjacentHTML('beforeend', '<br>' + driveFailedHtml(b.why));
+        into(row);
+      } else into(group);
+      if (btn) btn.focus({ preventScroll: true });
+      // (the node's reasons mostly start with the drive's name already: "Google Drive refused the sign-in: …")
+      toast(p && !b.why.toLowerCase().startsWith(p.name.toLowerCase()) ? `${p.name}: ${b.why}` : b.why, 'error');
+      return;
+    }
+    const add = p && p.connected ? $(`[data-dr-add="${p.id}"]`, main) : null;
+    if (!add) { into(group); toast(b.text); return; }
+    into(add.closest('.set-row')); add.focus({ preventScroll: true }); // (a closed picker gives the focus back here)
+    if (drv.roots.some((r) => r.provider === p.id)) { toast(`${p.name} signed in`); return; }
+    add.click(); // its folder picker: the next step after a first sign-in
+  };
   const hitItem = (h, album) => ({ uri: h.uri || `${h.source || 'tidal'}:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
   const browserPlay = (i, startAt = 0) => {
     const it = state.browserQueue[i];
@@ -4875,6 +4910,8 @@
     const asked = v; // (usage insights: a page sent elsewhere below is a redirect)
     if (isListener() && LISTENER_VIEWS_OFF.has(v)) { v = 'albums'; arg = undefined; }
     if (isOffline() && !OFFLINE_VIEWS.has(v)) { v = 'downloads'; arg = undefined; }
+    // (a drive's sign-in answer for a page that isn't Node library, or a listener's: the message, as before)
+    if (driveBack && (isListener() || !(v === 'library' && arg === 'node'))) { const b = driveBack; driveBack = null; toast(b.text, b.kind); }
     { const sb = document.getElementById('search'); if (sb && NAV_VIEWS.includes(v) && document.activeElement !== sb) sb.value = ''; }
     // (on Back or Forward, history.state is already the entry being shown; on a reload it is the page's own)
     const firstPage = !tabsBooted; const fromEntry = how === 'pop' || !tabsBooted; tabsBooted = true;
@@ -9034,6 +9071,7 @@
               + nodeLibraryHtml({ info, folders, ns, shares, drv })
               + (hidden.length ? sGroup('Taken out of the library', hidden.map((h, k) => sRow(`<code class="path">${esc(h.path.split('/').slice(-2).join('/'))}</code>`, `Taken out ${ago(h.hidden_at)}; the file is still there.`, `<button class="btn sm ghost" data-unhide="${k}">Bring back</button>`)).join('')) : ''));
             bindNodeLibrary(idSt);
+            driveReturn(drv);
             if (toCard) showIdentifyCard();
             $$('[data-unhide]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', '/library/hidden/restore', { path: hidden[Number(b.dataset.unhide)].path }); toast(r.scan_started ? 'Back: reading it again' : 'Back with the next scan'); watchScan({ scanning: !!r.scan_started }); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } });
             if (info.scanning) { clearTimeout(state.libPoll); state.libPoll = setTimeout(() => { if (state.view === 'library' && state.viewArg === 'node') render(); }, 3000); }
