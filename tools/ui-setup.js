@@ -640,7 +640,9 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await acRow.locator('form').count() === 0 && await acRow.locator('[data-applib]').count() === 1, 'Settings › Service apps keeps no AcoustID form, only the way to Node library');
     await acRow.locator('[data-applib]').click();
     check(await (async () => { const end = Date.now() + 5000; for (;;) { if (new URL(p.url()).pathname === '/library/node') return true; if (Date.now() > end) return false; await p.waitForTimeout(100); } })(), 'which opens Node library');
-    await c.close();
+    // Node library asks for the identify state with its other parts: a reply still in the route
+    // when the page closes must not end the run
+    await p.unrouteAll({ behavior: 'ignoreErrors' }); await c.close();
     // Item pages: the back button and the breadcrumb line up (owner addendum to TASK-tablet-nav).
     // Both show when a page is opened from another one in the app; a deep link hides the button on
     // wide screens where it would repeat a crumb, so it is shown here for the measurement: the
