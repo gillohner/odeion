@@ -8941,6 +8941,8 @@
         }
         case 'library': {
           const owner = isOwner();
+          // (Add music's ask is for this drawing only: a page left before it draws forgets it)
+          const askAdd = state.libAsk; state.libAsk = false;
           const tab = !owner ? 'mine' : state.viewArg === 'node' || state.viewArg === 'import' ? state.viewArg : 'mine';
           const tabsHtml = `<div class="chips libtabs" role="tablist" aria-label="Your library">${[['mine', 'My music'], ...(owner ? [['node', 'Node library'], ['import', 'Import']] : [])].map(([k, l]) => `<button class="chip ${tab === k ? 'on' : ''}" role="tab" aria-selected="${tab === k}" aria-controls="libpanel" id="libtab-${k}" data-libtab="${k}">${l}</button>`).join('')}</div>`;
           const head = pageHead('Your library', null, (appDl() ? `<button class="btn" data-dlgo>${icon('download')} Downloads</button>` : '') + (owner ? `<button class="btn primary" id="libadd">${icon('plus')} Add music</button>` : '')) + tabsHtml;
@@ -9042,7 +9044,7 @@
           $$('[data-libtab]', main).forEach((b) => b.onclick = () => { if (document.activeElement === b) state.libTabFocus = true; setView('library', b.dataset.libtab === 'mine' ? null : b.dataset.libtab, 'replace'); });
           $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
           const la = $('#libadd'); if (la) la.onclick = addMusicDialog;
-          if (state.libAsk) { state.libAsk = false; if (owner) addMusicDialog(); }
+          if (askAdd && owner) addMusicDialog();
           // Tabs: arrow keys move between them; the chosen tab keeps the keyboard after the page draws
           const tabBtns = $$('[data-libtab]', main);
           tabBtns.forEach((b, k) => { b.tabIndex = b.classList.contains('on') ? 0 : -1; b.onkeydown = (ev) => { if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return; ev.preventDefault(); const n = tabBtns[(k + (ev.key === 'ArrowRight' ? 1 : tabBtns.length - 1)) % tabBtns.length]; state.libTabFocus = true; n.click(); }; });
