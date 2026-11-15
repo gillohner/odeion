@@ -7986,8 +7986,10 @@
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
           // "‹ Sources" opens the list: one step back when the list is the page before, else the list in
-          // this panel's place (a service opened from an album's Connect TIDAL, so Back then returns there)
-          $$('[data-src-back]', main).forEach((b) => b.onclick = () => { if (navDepth > 0 && String((history.state || {}).fromPath || '').split('?')[0] === '/sources') history.back(); else setView('sources', undefined, 'replace'); });
+          // this panel's place (a service opened from an album's Connect TIDAL, so Back then returns there);
+          // on the first page of the app's history (opened by a link or the address bar) the list is pushed,
+          // like every Back's fallback, so the phone's Back from it returns to this panel, not out of the app
+          $$('[data-src-back]', main).forEach((b) => b.onclick = () => { if (navDepth === 0 || String((history.state || {}).fromPath || '').split('?')[0] === '/sources') goBack('sources'); else setView('sources', undefined, 'replace'); });
           // The Sign in chooser of each source that has one (STEWARD-CREDENTIALS-REUSE.md)
           signinChooser(tidalSigninCfg($('#tidalsignin')), tidalSi);
           qobuzSetup($('#signin-qobuz'));

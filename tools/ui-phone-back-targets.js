@@ -178,6 +178,21 @@ async function noPush(page, selector, at, most) {
         await page.goForward();
         await page.waitForFunction(() => location.pathname === '/sources/tidal', null, { timeout: 3000 }).catch(() => {});
         check(await page.evaluate(() => location.pathname) === '/sources/tidal' && await page.evaluate(() => history.length) === inList, `${at} Sources › TIDAL › Sources: a step back (Forward returns to TIDAL)`);
+        // TIDAL's panel as the first page of the app (a link, the address bar): "‹ Sources" pushes the list,
+        // so the phone's Back from it returns to the panel instead of leaving the app (it replaced the panel).
+        // (another page first: loading the address already shown counts as a reload and keeps its entry)
+        await fx.go(page, '/library');
+        await page.waitForSelector('#main');
+        await fx.go(page, '/sources/tidal');
+        await page.waitForSelector('#src-tidal [data-src-back]');
+        const fresh = await page.evaluate(() => ({ depth: (history.state || {}).depth || 0, len: history.length }));
+        await page.locator('#src-tidal [data-src-back]').click();
+        await page.waitForFunction(() => location.pathname === '/sources' && !document.querySelector('#main .set-panel'), null, { timeout: 3000 }).catch(() => {});
+        const freshList = await page.evaluate(() => ({ path: location.pathname, tabs: document.querySelectorAll('#main .src-nav [data-srctab]').length, len: history.length }));
+        check(fresh.depth === 0 && freshList.path === '/sources' && freshList.tabs > 0 && freshList.len === fresh.len + 1, `${at} first page TIDAL › Sources: opens the list as a new step (${freshList.path}, history ${fresh.len} → ${freshList.len})`);
+        await page.goBack();
+        await page.waitForSelector('#src-tidal', { timeout: 3000 }).catch(() => {});
+        check(await page.evaluate(() => location.pathname === '/sources/tidal' && !!document.querySelector('#src-tidal')), `${at} first page TIDAL › Sources › Back: returns to TIDAL's panel (${await page.evaluate(() => location.pathname)})`);
 
         check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
       } finally { await context.close(); }
