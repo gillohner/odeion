@@ -1115,6 +1115,11 @@ html[data-shell="phone"] .srow > .heart { display: none; }
    It is only a mark (⋯ removes it); a screen reader hears "Bookmarked" after the title. Songs' heart
    button is hidden on the phone layout at any width (Settings › Layout › Phone on a wide window too). */
 html[data-shell="phone"] .track .row-actions .heart { display: none; }
+/* Songs' rows on the phone layout carry only ⋯ (Play next and Add to queue are in it), always shown,
+   as on a phone, at any width: Settings › Layout › Phone on a window wider than 720 px showed no
+   control on a row until it was hovered */
+html[data-shell="phone"] .track .row-actions, html[data-shell="phone"] .track .row-actions:has(.heart.on) .icon-btn:not(.heart) { opacity: 1; }
+html[data-shell="phone"] .track .row-actions:has([data-act="more"]) .icon-btn:not([data-act="more"]) { display: none; }
 html[data-shell="phone"] :is(.track:has(.row-actions .heart.on) .title, .srow:has(> .heart.on) .name) { display: flex; align-items: center; min-width: 0; }
 html[data-shell="phone"] :is(.track:has(.row-actions .heart.on) .title, .srow:has(> .heart.on) .name) > :is(.lnk, .ntext) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 html[data-shell="phone"] :is(.track:has(.row-actions .heart.on) .title, .srow:has(> .heart.on) .name)::before { flex: none; }
@@ -1871,6 +1876,8 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 .track .title:has(.idmark) { display: flex; align-items: center; min-width: 0; }
 .track .title:has(.idmark) > .lnk { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .track .title:has(.idmark) > .idmark { flex: none; }
+/* (a playing row's bars keep their 12 px beside a long title) */
+.track .title:has(.idmark)::before { flex: none; }
 /* A listener (#46) plays the shared library; the owner's tags and settings aren't theirs (their bookmarks and collections are their own) */
 body.listener .nav-item[data-view="home"],
 body.listener .nav-item[data-view="radio"], body.listener .nav-item[data-view="sources"], body.listener .nav-item[data-view="identify"],

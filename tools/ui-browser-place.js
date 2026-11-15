@@ -4,7 +4,9 @@
 // saved song (before, whatever now sat at the old index came back from the old position, and the
 // saver kept it). Play or Next pressed before that goes on from the saved song too. A saved song no longer in the queue brings nothing back; a place saved before
 // the song was named still comes back by its index. A queue change is saved at once when the page
-// is hidden or goes (not only every 2 s), except after the session ended.
+// is hidden or goes (not only every 2 s), except after the session ended. A saved song whose file
+// doesn't open on the reload (the node busy) keeps its place, and Play starts it from there with the
+// start's own retry and message (before, Play did nothing and said nothing, and the place was lost).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-browser-place.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -241,6 +243,95 @@ async function backOnSong3(page, width, index, label, shot) {
         await until(() => page.evaluate(() => !window.oldPage && document.readyState !== 'loading').catch(() => false), 'the page reloads');
         const ids = await savedIds(page);
         assert.deepEqual(ids, [], `the old queue is gone after the reload (${JSON.stringify(ids)})`);
+      } finally { await context.close(); }
+    });
+    // 8. The saved song's file doesn't open on the reload (the node busy: 503). The saved place stays
+    // 0:30 through saver ticks; Play asks for the file again at once and says so ("did not start …
+    // Trying again"), and once the node answers the song plays from 0:30. Not counted again. On a
+    // phone too (the bar's Play is the mini player's).
+    for (const width of [1280, 360]) {
+      await check(`${width}: a saved song whose file failed on the reload plays from its place on Play`, async () => {
+        const { page, context, state } = await fx.create(browser, width, { fixtures, realAudio: true, ...(width < 600 ? { mobile: true } : {}) });
+        await context.addInitScript(([q, a]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', a); }, [JSON.stringify(saved), JSON.stringify({ index: 1, id: 2, pos: 30 })]);
+        let busy = true; let asked = 0;
+        await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => { asked++; return busy ? r.fulfill({ status: 503, contentType: 'text/plain', body: 'busy' }) : serveWav(r); });
+        try {
+          await fx.go(page, '/queue');
+          await until(async () => (await now(page)).index === 1, 'Song 2 comes back to the bar');
+          await until(() => page.evaluate(() => !!document.querySelector('#browser').error), 'its file does not open');
+          await sleep(2300); // (a saver tick)
+          assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('pm.browserAt') || 'null')), { index: 1, id: 2, pos: 30 }, 'the saved place is still 0:30');
+          const before = asked;
+          await page.click('#toggle');
+          await until(async () => asked > before, 'Play asks for the file again');
+          const t = await until(() => page.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).find((x) => /did not start/.test(x))), 'Play says the song did not start');
+          assert.match(t, /Song 2.*503.*Trying again/, `the message names the song and the node's answer (${t})`);
+          busy = false; // (the node answers again; the retry 2 s later opens it)
+          const p = await until(async () => { const v = await now(page); return !v.paused && v.time > 30 ? v : null; }, 'the song plays', 9000);
+          assert.equal(p.index, 1, `Song 2 plays (${JSON.stringify(p)})`);
+          assert.ok(p.time < 34, `from 0:30 (${p.time})`);
+          if (width === 360) await page.screenshot({ path: path.join(shots, 'failed-restore-then-play-360.png') });
+          assert.equal(state.hits.filter((h) => h.v === '/library/history' && h.m === 'POST').length, 0, 'not counted as a second play');
+          assert.deepEqual(state.errors, [], 'no page errors');
+        } finally { await context.close(); }
+      });
+    }
+    // 8b. A saved song whose file opens (as usual) and plays is an ordinary song from then on: when its
+    // stream breaks off later (here at about 0:33), Pause then Play go on from where it broke, not
+    // from the place it came back at (0:30). The file is served in pieces up to 0:33, the next piece
+    // answers late with a 503; then the node answers again.
+    await check('1280: a saved song that opened and played, then broke off, goes on from where it broke', async () => {
+      const { page, context, state } = await fx.create(browser, 1280, { fixtures, realAudio: true });
+      await context.addInitScript(([q, a]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', a); }, [JSON.stringify(saved), JSON.stringify({ index: 1, id: 2, pos: 30 })]);
+      const CUT = 44 + 32000 * 33; let healed = false;
+      await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => {
+        const m = /bytes=(\d+)-(\d*)/.exec(r.request().headers().range || ''); const a = m ? Number(m[1]) : 0;
+        if (!healed && a >= CUT) return sleep(4000).then(() => r.fulfill({ status: 503, contentType: 'text/plain', body: 'busy' })).catch(() => {});
+        const end = m && m[2] ? Math.min(Number(m[2]), WAV.length - 1) : WAV.length - 1; const z = healed ? end : Math.min(end, a + 200000, CUT - 1);
+        return r.fulfill({ status: m ? 206 : 200, contentType: 'audio/wav', headers: { 'accept-ranges': 'bytes', 'content-length': String(z - a + 1), ...(m ? { 'content-range': `bytes ${a}-${z}/${WAV.length}` } : {}) }, body: WAV.subarray(a, z + 1) });
+      });
+      try {
+        await fx.go(page, '/queue');
+        await until(async () => (await now(page)).time >= 29, 'Song 2 comes back at 0:30');
+        await page.click('#toggle');
+        await until(() => page.evaluate(() => { const a = document.querySelector('#browser'); return !!a.error && a.currentTime > 31; }), 'the stream breaks off after 0:31', 20000);
+        healed = true;
+        if (!(await now(page)).paused) { await page.click('#toggle'); await sleep(200); }
+        const broke = (await now(page)).time;
+        await page.click('#toggle');
+        // (its first moment playing again: about where it broke, or about 0:30)
+        const p = await until(async () => { const v = await now(page); return !v.paused && v.time > 0 ? v : null; }, 'Play plays it again', 9000);
+        assert.ok(broke > 31.5 && p.time >= broke - 1, `from where it broke (${broke.toFixed(1)} s), not 0:30 (${p.time.toFixed(1)} s)`);
+        assert.deepEqual(state.errors, [], 'no page errors');
+      } finally { await context.close(); }
+    });
+    // 8c. A seek on a saved song whose file didn't open moves where Play starts it (and the saved place)
+    await check('1280: a seek on a saved song whose file failed moves where Play starts it', async () => {
+      const { page, context, state } = await fx.create(browser, 1280, { fixtures, realAudio: true });
+      await context.addInitScript(([q, a]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', a); }, [JSON.stringify(saved), JSON.stringify({ index: 1, id: 2, pos: 30 })]);
+      let busy = true;
+      await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => (busy ? r.fulfill({ status: 503, contentType: 'text/plain', body: 'busy' }) : serveWav(r)));
+      try {
+        await fx.go(page, '/queue');
+        await until(() => page.evaluate(() => pmPlayer.now().index === 1 && !!document.querySelector('#browser').error), 'Song 2 comes back, its file not opening');
+        // (the bar's seek slider to 0:10 of the song's 1:00; the lock screen's seekto takes the same step)
+        const seeked = await page.evaluate(() => { const s = document.querySelector('#seek'); if (!s) return false; s.value = String(Math.round(1000 * 10 / 60)); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; });
+        assert.ok(seeked, 'the bar has a seek slider');
+        await sleep(2300); // (a saver tick)
+        const at = await page.evaluate(() => JSON.parse(localStorage.getItem('pm.browserAt') || 'null'));
+        assert.ok(at && at.pos >= 8 && at.pos <= 12, `the saved place follows the seek to about 0:10 (${JSON.stringify(at)})`);
+        busy = false;
+        await page.click('#toggle');
+        const p = await until(async () => { const v = await now(page); return !v.paused && v.time > 8 ? v : null; }, 'Play plays it');
+        assert.ok(p.time < 14, `from about 0:10, not 0:30 (${p.time.toFixed(1)} s)`);
+        // (and it stays there once the file is open: not pulled back to 0:30 by the restore)
+        await sleep(1200);
+        const q = await now(page);
+        assert.ok(!q.paused && q.time > p.time && q.time < 15, `still going on from 0:10 a second later (${q.time.toFixed(1)} s)`);
+        await sleep(2300); // (a saver tick)
+        const kept = await page.evaluate(() => JSON.parse(localStorage.getItem('pm.browserAt') || 'null'));
+        assert.ok(kept && kept.pos < 16, `the saved place follows the song (${JSON.stringify(kept)})`);
+        assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
     });
   } finally { await browser.close(); }
