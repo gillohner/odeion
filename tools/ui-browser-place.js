@@ -380,9 +380,9 @@ async function backOnSong3(page, width, index, label, shot) {
         try {
           await fx.go(page, '/queue');
           await until(() => page.evaluate(() => document.querySelector('#zonename').textContent === 'Kitchen'), 'Kitchen is the zone');
-          await page.waitForSelector(width >= 600 ? '#zonebtn' : '#qtransfer');
-          // (a desktop's way: the zone menu's Move here; a phone's: the Queue page's Move to…)
-          if (width >= 600) { await page.click('#zonebtn'); await page.locator('#zonepop [data-move="browser"]').click(); } else { await page.click('#qtransfer'); await page.locator('.pop-item[data-mi]', { hasText: /this|browser/i }).first().click(); }
+          await page.waitForSelector(width >= 600 ? '#zonebtn' : '#qmenu');
+          // (a desktop's way: the zone menu's Move here; a phone's: the Queue page's ⋯ › Move to)
+          if (width >= 600) { await page.click('#zonebtn'); await page.locator('#zonepop [data-move="browser"]').click(); } else { await page.click('#qmenu'); await page.locator('.pop-item[data-mi]', { hasText: /this|browser/i }).first().click(); }
           await until(async () => (await now(page)).index === 1, 'Song 2 is in this browser\'s bar');
           await until(() => page.evaluate(() => !!document.querySelector('#browser').error), 'its file does not open');
           if (width >= 600) await page.keyboard.press('Escape');

@@ -3380,6 +3380,7 @@
   // and the browser stops; into it the browser takes the zone's queue and the zone empties (radio
   // is the node's: it does not come along). The node's errors (403: a zone not open to listeners;
   // 400: an empty queue) show in the menu when it is open, else as a toast.
+  let queueSaving = false; // one Save as playlist at a time (the Queue page's)
   let moving = false; // one move at a time (review: a second Move here sent the same queue twice)
   const moveTo = async (target) => {
     const from = state.zone;
@@ -8842,7 +8843,7 @@
           // (the phone's ⋯ menu has closed by now, the focus with it: it goes back to the song's ⋯;
           // not once another page has been opened, nor out of a menu open now)
           const moved = state.qMoved && state.qMoved.gen === navGen ? state.qMoved : null; state.qMoved = null;
-          const place = fk ? { k: fk, i: Number(fa.dataset[fk]) } : fa && main.contains(fa) && /^q(radio|shuffle|transfer|save|clear|mine)$/.test(fa.id) ? { id: fa.id }
+          const place = fk ? { k: fk, i: Number(fa.dataset[fk]) } : fa && main.contains(fa) && /^q(radio|shuffle|transfer|save|clear|mine|menu)$/.test(fa.id) ? { id: fa.id }
             : fa && main.contains(fa) && fa.matches('.page-head h2') ? { head: true }
             : moved && (!fa || fa === document.body || (menuEl.hidden && menuEl.contains(fa))) ? { k: moved.k, i: moved.i } : null;
           // (a song is its queue entry on a node zone, the item itself in this browser's queue; one not
@@ -8850,7 +8851,7 @@
           const qkey = (it) => (it && !isBrowser() && it.id != null ? it.id : it);
           if (place && place.k) { const was = (state.qDrawn || [])[place.i]; const at = was ? q.findIndex((it) => qkey(it) === qkey(was)) : -1; if (at >= 0) place.i = at; }
           state.qDrawn = q.slice();
-          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
+          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || !isListener() || !isBrowser()) ? `<button class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
             + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add songs with the row actions.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
           // An empty queue offers the library shuffled here too, on the zone the page is for (before,
@@ -8947,12 +8948,40 @@
             if (to) to.focus();
           }
           state.queueKey = queueKey();
-          const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Move to' }, ...zoneList().filter((o) => o.id !== state.zone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]);
-          const qsv = $('#qsave'); if (qsv) qsv.onclick = async () => {
-            const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: state.zone };
-            try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); }
+          const moveItems = () => zoneList().filter((o) => o.id !== state.zone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }));
+          // (for the zone given: the ⋯'s items for the zone it was opened on; one save at a time, a
+          // second tap while the first is on its way made a second playlist)
+          const saveQueue = async (zid = state.zone) => {
+            if (queueSaving) return; queueSaving = true;
+            const body = zid === BROWSER ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: zid };
+            try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); } finally { queueSaving = false; }
           };
-          const qc = $('#qclear'); if (qc) qc.onclick = async () => { const zid = state.zone; try { await zoneOp(zid, (t) => api('DELETE', `/zones/${encodeURIComponent(zid)}/queue`, undefined, { signal: t.signal })); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
+          const clearQueue = async (zid = state.zone) => { try { await zoneOp(zid, (t) => api('DELETE', `/zones/${encodeURIComponent(zid)}/queue`, undefined, { signal: t.signal })); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
+          const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Move to' }, ...moveItems()]);
+          const qsv = $('#qsave'); if (qsv) qsv.onclick = () => saveQueue();
+          const qc = $('#qclear'); if (qc) qc.onclick = () => clearQueue();
+          // Phones: Radio and Shuffle stay on the head's one row; Save as playlist, Clear and Move to
+          // (also in the Play to menu) are under its ⋯, which the desktop layout hides (app.css)
+          // (an item gives the focus back to the ⋯ first, so the keyboard keeps its place: after Clear,
+          // which takes the ⋯ away, the next draw puts it on Radio, as the Clear button did)
+          // The menu stays open across a redraw, and the zone can change meanwhile (following the host
+          // to another device, the zone gone, the Android app's USB DAC plugged in): an item is for the
+          // zone the ⋯ was opened on, and does nothing once the page is for another (it would have
+          // cleared, saved or moved that one's queue). While an item runs, the ⋯ doesn't open again.
+          const qmn = $('#qmenu'); if (qmn) qmn.onclick = () => {
+            if (BUSY.has(qmn)) return;
+            const zid = state.zone;
+            const back = (f) => () => {
+              if (qmn.isConnected) qmn.focus();
+              if (state.zone !== zid) { toast(`Nothing changed: the Queue now shows ${state.zone === BROWSER ? hereName().toLowerCase() : (state.zones[state.zone] || {}).name || 'another device'}`); render(); return; }
+              return f(zid);
+            };
+            const own = [...(qsv ? [{ label: 'Save as playlist', icon: 'playlist', run: back(saveQueue) }] : []), ...(qc ? [{ label: 'Clear queue', icon: 'trash', run: back(clearQueue) }] : [])];
+            const moves = moveItems().map((it) => ({ ...it, run: back(it.run) }));
+            // (the other devices gone since the page was drawn, with nothing else here: no ⋯ any more)
+            if (!own.length && !moves.length) { render(); return; }
+            showMenu(qmn, [...(own.length ? [{ title: 'Queue' }, ...own] : []), ...(moves.length ? [{ title: 'Move to' }, ...moves] : [])], { all: true });
+          };
           break;
         }
         case 'zones': {
