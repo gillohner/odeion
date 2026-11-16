@@ -37,13 +37,14 @@ const run = async (browser, width, android) => {
     await page.waitForSelector('#main .zone-card[data-zcard="porch"]', { timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(300);
     const cards = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#main .zone-card')].map((c) => {
-      const alert = c.querySelector('.zc-text [role="alert"]');
+      const alert = c.querySelector('.zc-text .warn-text');
       const r = alert && alert.getBoundingClientRect();
-      return [c.dataset.zcard, { pills: [...c.querySelectorAll('.zc-head .pill')].map((p) => p.textContent.trim().toLowerCase()), text: c.querySelector('.zc-text').innerText, alert: alert ? alert.textContent.trim() : null, seen: !!r && r.width > 0 && r.height > 0 && r.right <= innerWidth + 0.5 }];
+      return [c.dataset.zcard, { pills: [...c.querySelectorAll('.zc-head .pill')].map((p) => p.textContent.trim().toLowerCase()), text: c.querySelector('.zc-text').innerText, alert: alert ? alert.textContent.trim() : null, loud: !!(alert && alert.closest('[role="alert"]')), seen: !!r && r.width > 0 && r.height > 0 && r.right <= innerWidth + 0.5 }];
     })));
     const porch = cards.porch || {}; const study = cards.study || {};
     check(!!porch.alert && porch.alert.includes(WHY), `${at}: a zone paused by an error says why on its card ("${porch.alert}")`);
     check(!!porch.seen, `${at}: the error is on screen, within the width`);
+    check(!porch.loud, `${at}: the paused zone's error is not an alert (the page is drawn again on each play/pause; the mini player announces it)`);
     check((porch.pills || []).join() === 'paused', `${at}: it keeps its "paused" pill (${porch.pills})`);
     check(/Come On/.test(porch.text || '') && !/Dr\. Peacock/.test(porch.text || ''), `${at}: the error is where the artist is, under the song (as the mini player has it)`);
     check(!study.alert && /Dr\. Peacock/.test(study.text || ''), `${at}: a zone paused without an error still shows its artist, no error line`);
