@@ -7281,7 +7281,7 @@
         case 'home': {
           if (!state.sources) { try { state.sources = await api('GET', '/sources'); } catch { state.sources = []; } }
           const win = state.homeWindow || '7d';
-          const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}" ${homeCount('s:' + name, undefined, 1) ? '' : 'hidden'}>See all</button></div><div class="hbody"><div class="skeleton" style="height:${homeCount('h:' + name, undefined, opts.h || 160)}px"></div></div></section>`;
+          const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win" ${win !== '7d' || homeCount('w:' + name, undefined, 1) ? '' : 'hidden'}>${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}" ${homeCount('s:' + name, undefined, 1) ? '' : 'hidden'}>See all</button></div><div class="hbody"><div class="skeleton" style="height:${homeCount('h:' + name, undefined, opts.h || 160)}px"></div></div></section>`;
           await pubkyUser();
           // Rows you can hide and reorder (UX review #10): your own layout (Settings › You › Home), over the node's
           const HOME_ROWS = [['listening', 'Listening now'], ['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
@@ -7409,6 +7409,16 @@
               const el = $(`#h-${name} .hbody`); if (!el || !here()) return;
               if (sc.needs === 'contact') { noContact(el.parentElement); return; }
               el.innerHTML = homeBody(sc, name, false); el.parentElement.classList.add('fadein'); bindHome(el, sc);
+              // A Trending row that didn't answer on This week shows its error and Try again only: its
+              // window chips (they ask the whole Home again) come back once it answers. On another
+              // window they stay, the way back to This week. The next visit's placeholder draws them
+              // as they were last (a row failing again doesn't move the rows below)
+              const wins = $(`#h-${name} .section-head .chips.win`);
+              if (wins) {
+                const had = wins.contains(document.activeElement);
+                wins.hidden = !!sc.error && win === '7d'; homeCount('w:' + name, sc.error ? 0 : 1);
+                if (had && wins.hidden) { const b = $('[data-hretry]', el); if (b) b.focus(); }
+              }
               retryOn(el, (kept) => { holdRow(el); loadPubky(name, kept); });
               focusRetry(el, kept);
               const see = $(`#h-${name} [data-seeall]`); if (see) see.hidden = !(sc.items.length > 6 || sc.tags.length > 20);
