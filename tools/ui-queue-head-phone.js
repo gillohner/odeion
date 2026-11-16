@@ -16,6 +16,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const until = async (f, label, ms = 5000) => { const t = Date.now(); while (Date.now() - t < ms) { const v = await f(); if (v) return v; await sleep(50); } throw new Error('Timed out: ' + label); };
 const tracks = [1, 2, 3, 4].map((id) => ({ ...fx.track, id, title: `Song ${id}`, mbid: null, canonical_uri: null }));
 const items = tracks.map((t, k) => ({ id: 101 + k, uri: `track:${t.id}`, track_id: t.id, title: t.title, artist: 'Sefa', album: 'Journey', duration_ms: 60000 }));
+// (the Living room has a queue of its own: a tap that reached it would clear, save or move it)
+const items2 = tracks.slice(0, 2).map((t, k) => ({ ...items[k], id: 201 + k }));
 const rows = (page) => page.evaluate(() => document.querySelectorAll('.queue [data-qrow]').length);
 // The head's visible buttons, how many rows they take, and their sizes
 const head = (page) => page.evaluate(() => {
@@ -26,9 +28,9 @@ const head = (page) => page.evaluate(() => {
 const menu = (page) => page.evaluate(() => { const m = document.querySelector('.popover.menu'); return m && !m.hidden ? [...m.children].map((c) => c.classList.contains('pop-title') ? '# ' + c.textContent.trim() : ((c.querySelector(':scope > span') || c).firstChild.textContent || '').trim()).join(' | ') : ''; });
 
 async function zoneQueue(browser, width, opts = {}) {
-  const Z = (id, name) => ({ id, name, output: 'upnp:' + id, transport: 'paused', now_playing: { item: items[0], position_ms: 1000, duration_ms: 60000 }, queue: id === 'z1' ? items : [], queue_index: 0, queue_version: 1, repeat: 'off', shuffle: false, radio: false, error: null, acked: 0, volume: { percent: 40 } });
+  const Z = (id, name) => ({ id, name, output: 'upnp:' + id, transport: 'paused', now_playing: { item: items[0], position_ms: 1000, duration_ms: 60000 }, queue: id === 'z1' ? items : items2, queue_index: 0, queue_version: 1, repeat: 'off', shuffle: false, radio: false, error: null, acked: 0, volume: { percent: 40 } });
   const z1 = Z('z1', 'Kitchen'); const z2 = Z('z2', 'Living room');
-  const fixtures = { '/zones': { body: [z1, z2] }, '/zones/z1': { body: z1 }, '/zones/z2': { body: z2 }, '/zones/z1/queue': { body: items }, '/zones/z2/queue': { body: [] },
+  const fixtures = { '/zones': { body: [z1, z2] }, '/zones/z1': { body: z1 }, '/zones/z2': { body: z2 }, '/zones/z1/queue': { body: items }, '/zones/z2/queue': { body: items2 },
     '/outputs': { body: [{ id: 'upnp:z1', name: 'Kitchen', kind: 'upnp', caps: { hw_volume: 'percent' } }, { id: 'upnp:z2', name: 'Living room', kind: 'upnp', caps: {} }] },
     '/playlists/from-queue': { body: { playlist: { summary: { id: 'q1', name: 'Queue · kitchen' } }, skipped: [] } } };
   const run = await fx.create(browser, width, { fixtures, zone: opts.browser ? 'browser' : 'z1', tracks, role: opts.role || 'owner', ...(width < 600 ? { mobile: true } : {}) });
@@ -196,6 +198,85 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
         await page.click('#qmenu'); await sleep(200);
         if ((await menu(page)).includes('Save as playlist')) await page.locator('[data-mi]', { hasText: 'Save as playlist' }).click();
         await sleep(300); release(); await sleep(500);
+        assert.equal(state.hits.filter((h) => h.m === 'POST' && h.v === '/playlists/from-queue').length, 1, 'saves sent');
+        assert.deepEqual(state.errors, [], 'no page errors');
+      } finally { await context.close(); }
+    });
+    // The page's buttons and rows are for the zone it shows, until it is drawn again: here the page
+    // follows the host to the Living room, whose queue is slow to come, so the page still shows the
+    // Kitchen meanwhile. A tap then sends nothing (before: Clear emptied the Living room's queue, Save
+    // saved it, Move to moved it, a row's number played the Living room's song at that place).
+    const followHeld = async (run) => {
+      let release; const held = new Promise((r) => { release = r; }); let asked = false;
+      await run.context.route(/\/v1\/zones\/z2\/queue$/, async (r) => { if (r.request().method() !== 'GET') return r.fallback(); asked = true; await held; return r.fallback(); });
+      run.fixtures['/presence'] = { body: [{ mine: true, key: 'host', name: 'Host', zone: { id: 'z2', name: 'Living room' }, your_zone: 'z1' }] };
+      run.fixtures['/me/presence'] = { body: { visible: 'hidden' } };
+      run.ws.send(JSON.stringify({ type: 'zone_removed', seq: 1, zone: 'z9' }));
+      await until(async () => asked, 'the page asks for the Living room\'s queue');
+      assert.match(await run.page.evaluate(() => document.querySelector('.page-head').textContent), /Kitchen/, 'the page still shows the Kitchen');
+      return release;
+    };
+    const stale = [
+      [1280, 'Clear', async (page) => page.click('#qclear')],
+      [1280, 'Save as playlist', async (page) => page.click('#qsave')],
+      [1280, 'Move to…', async (page) => page.click('#qtransfer')],
+      [1280, 'Move to › This browser (the menu opened before)', async (page) => page.locator('[data-mi]', { hasText: 'This browser' }).click(), async (page) => { await page.click('#qtransfer'); await until(async () => (await menu(page)).includes('This browser'), 'the Move to menu opens'); }],
+      [1280, 'Radio', async (page) => page.click('#qradio')],
+      [1280, 'a row\'s Play from here', async (page) => page.click('[data-qi="1"]')],
+      [1280, 'a row\'s Remove', async (page) => page.click('[data-qrm="1"]', { force: true })],
+      [360, '⋯', async (page) => page.click('#qmenu')],
+      [360, 'a row\'s ⋯', async (page) => page.click('[data-qmore="1"]')],
+      // (twice: one redraw, not two racing ones)
+      [1280, 'Clear, twice', async (page) => { await page.click('#qclear'); await sleep(100); await page.click('#qclear'); }],
+    ];
+    for (const [w, what, tap, before] of stale) {
+      await check(`${w}: ${what} while the page still shows the device it left does nothing to the new one`, async () => {
+        const run = await zoneQueue(browser, w); const { page, context, state } = run;
+        try {
+          if (before) await before(page);
+          const release = await followHeld(run);
+          const n = state.hits.length;
+          await tap(page);
+          await sleep(400);
+          const sent = state.hits.slice(n).filter((h) => h.m !== 'GET');
+          assert.deepEqual(sent.map((h) => h.m + ' ' + h.v), [], 'nothing asked of the node');
+          assert.equal(await menu(page), '', 'no menu opened');
+          await until(async () => page.evaluate(() => /Nothing changed: the Queue now shows Living room/.test(document.body.innerText)), 'the toast says why');
+          release();
+          await until(async () => page.evaluate(() => /Living room/.test(document.querySelector('.page-head').textContent)) && (await rows(page)) === 2, 'the page then shows the Living room\'s queue');
+          if (what === 'Clear') await page.screenshot({ path: path.join(shots, 'after-queue-stale-clear-1280.png') });
+          assert.deepEqual(state.errors, [], 'no page errors');
+        } finally { await context.close(); }
+      });
+    }
+    // The zone shown goes (removed on another device): the page is drawn again for this browser at
+    // once. Before, it kept the Kitchen's songs and buttons, and its Clear sent DELETE /zones/browser/queue.
+    for (const w of [1280, 360]) {
+      await check(`${w}: the zone shown removed elsewhere: the page shows this browser's queue at once`, async () => {
+        const run = await zoneQueue(browser, w); const { page, context, state } = run;
+        try {
+          run.ws.send(JSON.stringify({ type: 'zone_removed', seq: 1, zone: 'z1' }));
+          await until(async () => page.evaluate(() => !/Kitchen/.test(document.querySelector('.page-head').textContent)), 'the page is drawn again');
+          assert.equal(await page.locator('#qclear').count(), 0, 'no Clear for this browser\'s queue');
+          assert.ok(!state.hits.some((h) => h.m !== 'GET'), 'nothing asked of the node');
+          assert.deepEqual(state.errors, [], 'no page errors');
+        } finally { await context.close(); }
+      });
+    }
+    await check('1280: Save as playlist while the first is still on its way says so (after the page was drawn again)', async () => {
+      const run = await zoneQueue(browser, 1280); const { page, context, state } = run;
+      try {
+        let release; const held = new Promise((r) => { release = r; }); let asked = false;
+        await context.route(/\/v1\/playlists\/from-queue$/, async (r) => { asked = true; await held; return r.fallback(); });
+        await page.click('#qsave');
+        await until(async () => asked, 'the first save asks the node');
+        // (the page drawn again meanwhile, here by Radio: its new Save button is not busy)
+        run.fixtures['/zones/z1/radio'] = { body: {} };
+        await page.click('#qradio');
+        await until(async () => page.evaluate(() => { const b = document.querySelector('#qsave'); return b && !b.getAttribute('aria-busy') && /Radio on: similar/.test(document.body.innerText); }), 'the page is drawn again');
+        await page.click('#qsave');
+        await until(async () => page.evaluate(() => /Still saving the queue as a playlist/.test(document.body.innerText)), 'the second tap says the first is still saving');
+        release(); await sleep(400);
         assert.equal(state.hits.filter((h) => h.m === 'POST' && h.v === '/playlists/from-queue').length, 1, 'saves sent');
         assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
