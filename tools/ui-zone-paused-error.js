@@ -49,6 +49,7 @@ const run = async (browser, width, android) => {
     check(/Come On/.test(porch.text || '') && !/Dr\. Peacock/.test(porch.text || ''), `${at}: the error is where the artist is, under the song (as the mini player has it)`);
     check(!study.alert && /Dr\. Peacock/.test(study.text || ''), `${at}: a zone paused without an error still shows its artist, no error line`);
     check(cards.garage && /Couldn’t play: The device went away/.test(cards.garage.alert || ''), `${at}: a zone stopped by an error still says so (${cards.garage && cards.garage.alert})`);
+    check(cards.garage && !cards.garage.loud, `${at}: the stopped zone's "Couldn’t play" is not an alert either (read out again on every redraw)`);
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${at}: Zones: no sideways overflow`);
     await page.screenshot({ path: path.join(SHOTS, `zones-${at}.png`), fullPage: width >= 600 });
 

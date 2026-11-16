@@ -3063,14 +3063,15 @@
     });
   };
   const queueShown = () => { if (state.view !== 'queue') return; if (state.queueKey === queueKey()) markQueue(); else render(); };
-  // (ownDraw: the Queue page asks as it is drawn, and draws what this brings itself)
+  // (ownDraw: the Queue page asks as it is drawn, and draws what this brings itself. A dropped answer
+  // gives false when a newer fetch was asked, null when none was: the zone changed meanwhile)
   const refreshQueue = async (rerender = true, ownDraw = false) => {
     if (state.queueZone !== state.zone) state.queueZone = null;
     if (!isBrowser()) {
       const zid = state.zone; const ask = ++queueAsk;
       // (a failed fetch shows no songs, but says nothing of the zone's queue: Play still goes to the node)
       let q = null; try { q = await api('GET', `/zones/${zid}/queue`); } catch { /* shown empty */ }
-      if (ask !== queueAsk || zid !== state.zone) { queueDropped = true; return; }
+      if (ask !== queueAsk || zid !== state.zone) { queueDropped = true; return ask === queueAsk ? null : false; }
       state.queue = q || []; state.queueZone = q ? zid : null;
       // (the Queue page drew what it had when its own, older answer was dropped: drawn again now,
       // unless this answer is the page's own, as it is drawn: that draw has it, a second would take
@@ -3079,6 +3080,7 @@
     }
     if (rerender) queueShown();
     if (!$('#nowplaying').hidden) renderNowPlaying();
+    return true;
   };
 
   // Shuffle and repeat are modes of the zone in use, as in any player: the node's come with its state
@@ -8897,8 +8899,20 @@
         }
         case 'queue': {
           state.queueKey = null; // (set once the page is drawn)
-          await refreshQueue(false, true);
+          const own = await refreshQueue(false, true);
           if (state.view !== 'queue') return;
+          // The page's own fetch overtaken by a newer one (a zone event just after the page was drawn
+          // again for another device): the songs in hand are then another zone's, and were drawn under
+          // this one's name, a row's Play playing this zone's song at that place and Remove sending the
+          // other queue's ids here. The page waits for the newer answer, which draws it: the Queue page
+          // on screen stays as it was (its taps are for the zone it shows), another page gives way to the
+          // head and a loader, still loading for the navigation. (asked again if no newer fetch was:
+          // the zone changed meanwhile)
+          if (!own && !isBrowser() && state.queueZone !== state.zone) {
+            if (!state.qPage || state.qPage.parentElement !== main) { const zw = currentZone(); main.innerHTML = pageHead('Queue', zw ? zw.name : '') + skelRows(4); state.qPage = null; }
+            if (own === null) refreshQueue();
+            return;
+          }
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
           // The keyboard keeps its place across the page's redraw (an edit, Radio, another device's
           // change): a head button keeps the focus, a row's control stays with its song, on the row the
@@ -9028,7 +9042,7 @@
             if (to && to === head) head.tabIndex = -1;
             if (to) to.focus();
           }
-          state.queueKey = queueKey();
+          state.queueKey = queueKey(); state.qPage = main.firstElementChild;
           const moveItems = () => zoneList().filter((o) => o.id !== drawnZone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: forDrawn(() => moveTo(o.id)) }));
           // (for the zone the page was drawn for; one save at a time, a second tap while the first is
           // on its way made a second playlist, and one the node hasn't answered yet says so)
@@ -9097,8 +9111,9 @@
             const title = ways ? esc(familyName(z)) : named(z);
             // (a stopped zone gets no state pill: its "Nothing playing" or its Play button says so)
             // A zone paused by an error (its USB DAC went away) says why where the artist is, as the mini player does
-            // (not as an alert: the page is drawn again on every play/pause here, and a screen reader would
-            // read it out each time; the mini player announces it)
+            // (not as an alert, nor a stopped zone's "Couldn’t play": the page is drawn again on every
+            // play/pause here, and a screen reader would read it out each time; the mini player announces
+            // the zone in use's)
             // On a phone the card's Play to (or "selected") sits on the now-playing line and the
             // volume note is for screen readers only, so the controls are one line under it
             const pick = z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}" aria-label="Play to ${esc(z.name)}">Play to</button>`;
@@ -9106,7 +9121,7 @@
             return `<div class="card zone-card ${z.id === state.zone ? 'on' : ''}" data-zcard="${esc(z.id)}">
               <div class="zc-head">${icon('zone')}<h3>${title}</h3>${members}${zoneStatePill(z)}</div>
               ${wayChips}
-              <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : `<div class="np-art placeholder zc-ph" aria-hidden="true">${icon('zone')}</div>`}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it && z.transport === 'paused' && z.error ? `<span class="warn-text">${esc(z.error)}</span>` : it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div>${phone ? pick : ''}</div>
+              <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : `<div class="np-art placeholder zc-ph" aria-hidden="true">${icon('zone')}</div>`}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it && z.transport === 'paused' && z.error ? `<span class="warn-text">${esc(z.error)}</span>` : it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text">Couldn’t play: ${esc(z.error)}</div>` : ''}</div>${phone ? pick : ''}</div>
               <div class="zc-controls">
                 <button class="icon-btn" data-zt="previous" data-repeat title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>

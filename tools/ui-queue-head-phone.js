@@ -249,6 +249,45 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
         } finally { await context.close(); }
       });
     }
+    // The page drawn again for the Living room asks for its queue; a zone event right after asks
+    // again, and the page's own answer, now the older one, is dropped. Before, the page then drew the
+    // Kitchen's songs (still in hand) under the Living room's name: a row's Play played the Living
+    // room's song at that place, Remove sent the Kitchen's queue ids to the Living room. Now the
+    // Kitchen's page stays (its taps say why and send nothing) until the newer answer draws the page.
+    for (const w of [1280, 360]) {
+      await check(`${w}: the page's queue fetch overtaken by a newer one: the old device's songs are never drawn under the new name`, async () => {
+        const run = await zoneQueue(browser, w); const { page, context, state } = run;
+        try {
+          const held = []; let holding = true; // (each GET of the Living room's queue, held until released)
+          await context.route(/\/v1\/zones\/z2\/queue$/, async (r) => { if (r.request().method() !== 'GET' || !holding) return r.fallback(); await new Promise((res) => held.push(res)); return r.fallback(); });
+          run.fixtures['/presence'] = { body: [{ mine: true, key: 'host', name: 'Host', zone: { id: 'z2', name: 'Living room' }, your_zone: 'z1' }] };
+          run.fixtures['/me/presence'] = { body: { visible: 'hidden' } };
+          run.ws.send(JSON.stringify({ type: 'zone_removed', seq: 1, zone: 'z9' }));
+          await until(async () => held.length >= 1, 'the app asks for the Living room\'s queue');
+          await sleep(200); const a = held.length;
+          // (a tap on the Kitchen's page: nothing sent, the page drawn again, which asks too)
+          await page.click(w < 600 ? '[data-qmore="1"]' : '[data-qi="1"]');
+          await until(async () => held.length > a, 'the page drawn again asks for the Living room\'s queue');
+          const ownAnswer = held[held.length - 1]; const b = held.length;
+          run.ws.send(JSON.stringify({ type: 'zone', seq: 2, state: { ...run.fixtures['/zones/z2'].body, queue_version: 2 } }));
+          await until(async () => held.length > b, 'the zone event asks again');
+          ownAnswer(); // (the page's own answer, now not the newest)
+          await sleep(400);
+          const shown = await page.evaluate(() => ({ head: document.querySelector('.page-head').textContent, rows: document.querySelectorAll('.queue [data-qrow]').length }));
+          if (w >= 600) await page.screenshot({ path: path.join(shots, 'queue-overtaken-1280.png') });
+          assert.ok(!(/Living room/.test(shown.head) && shown.rows === 4), `the Kitchen's 4 songs under the Living room's name (${shown.head}, ${shown.rows} rows)`);
+          const n = state.hits.length;
+          if (shown.rows) await page.click(w < 600 ? '[data-qmore="2"]' : '[data-qi="2"]', { force: true });
+          if (shown.rows && w >= 600) await page.click('[data-qrm="2"]', { force: true });
+          await sleep(300);
+          assert.deepEqual(state.hits.slice(n).filter((h) => h.m !== 'GET').map((h) => h.m + ' ' + h.v), [], 'nothing asked of the node');
+          assert.equal(await menu(page), '', 'no menu opened');
+          holding = false; held.forEach((f) => f());
+          await until(async () => page.evaluate(() => /Living room/.test(document.querySelector('.page-head').textContent)) && (await rows(page)) === 2, 'the page then shows the Living room\'s queue', 8000);
+          assert.deepEqual(state.errors, [], 'no page errors');
+        } finally { await context.close(); }
+      });
+    }
     // The zone shown goes (removed on another device): the page is drawn again for this browser at
     // once. Before, it kept the Kitchen's songs and buttons, and its Clear sent DELETE /zones/browser/queue.
     for (const w of [1280, 360]) {
