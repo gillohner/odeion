@@ -661,6 +661,7 @@ jobs:
           ui-zone-state-words.js zone-state-words-shots
           ui-playto-follows.js playto-follows-shots
           ui-wrong-match.js wrong-match-shots
+          ui-libstatus-wrap.js libstatus-wrap-shots
           ui-favourites-count.js favourites-count-shots
           ui-favourites-empty.js favourites-empty-shots
           ui-empty-head-count.js empty-head-count-shots

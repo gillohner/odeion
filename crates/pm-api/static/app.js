@@ -9346,9 +9346,10 @@
             if (state.view !== 'library' || state.viewArg !== 'node') return;
             state.info = info;
             const lsc = info.last_scan;
-            const scanLine = info.scanning ? `<span class="spin"></span> Scanning… ${countOf(info.library.tracks, 'songs')} so far`
-              : `${countOf(info.library.tracks, 'songs')} in the library${lsc ? ` · last scan ${ago(lsc.finished_at)}${lsc.error_count ? ` · ${countOf(lsc.error_count, 'files')} could not be read` : ''}` : ''}`;
-            main.innerHTML = head + libPanel(tab, `<div class="libstatus" role="status">${scanLine}${unsureSlot(idUnsure(idSt.st))}</div><p class="muted small">Edit a song’s tags or take it out of the library from its ⋯ menu, an album from the album’s ⋯ menu. Edits stay on this node; files are never changed.</p>`
+            const songs = countOf(Number(info.library.tracks || 0).toLocaleString(), 'songs');
+            const scanLine = info.scanning ? [`<span class="spin"></span> Scanning… ${songs} so far`]
+              : [`${songs} in the library`, ...(lsc ? [`last scan ${ago(lsc.finished_at)}`, ...(lsc.error_count ? [`${countOf(Number(lsc.error_count).toLocaleString(), 'files')} could not be read`] : [])] : [])];
+            main.innerHTML = head + libPanel(tab, `<div class="libstatus lsline" role="status"><span class="lsrow">${scanLine.map((t) => lsPart(t)).join('')}${unsureSlot(idUnsure(idSt.st))}</span></div><p class="muted small">Edit a song’s tags or take it out of the library from its ⋯ menu, an album from the album’s ⋯ menu. Edits stay on this node; files are never changed.</p>`
               + nodeLibraryHtml({ info, folders, ns, shares, drv })
               + (hidden.length ? sGroup('Taken out of the library', hidden.map((h, k) => sRow(`<code class="path">${esc(h.path.split('/').slice(-2).join('/'))}</code>`, `Taken out ${ago(h.hidden_at)}; the file is still there.`, `<button class="btn sm ghost" data-unhide="${k}">Bring back</button>`)).join('')) : ''));
             bindNodeLibrary(idSt);
@@ -10034,7 +10035,10 @@
   // page): one press to the review, no scroll. Drawn with the page from the same answer, so the line
   // doesn't grow after it shows, and a page redrawn by a scan's poll says nothing new
   const idUnsure = (st) => { if (!st || !st.counts) return 0; const running = st.phase ? st.phase === 'running' : !!(st.progress && st.progress.running); return running ? 0 : Number(st.counts.suggested || 0); };
-  const unsureSlot = (k) => `<span id="libunsure" data-n="${k}">${k ? `· <button class="lnk" type="button" id="libreview">Review ${k.toLocaleString()} unsure</button>` : ''}</span>`;
+  // Node library's top line comes in parts, each after a "·"; the line clips the dot of a part that
+  // starts a row (.lsline), so a wrapped line never starts with "·" and a part moves down whole
+  const lsPart = (html, attrs = '') => `<span class="lspart"${attrs}><span class="lsep" aria-hidden="true">· </span><span>${html}</span></span>`;
+  const unsureSlot = (k) => k ? lsPart(`<button class="lnk" type="button" id="libreview">Review ${k.toLocaleString()} unsure</button>`, ` id="libunsure" data-n="${k}"`) : `<span id="libunsure" data-n="0"></span>`;
   // `pre`: the answer the page asked for with its other parts ({ st } or { err }), used unless a
   // card was drawn since it was asked
   const renderIdentify = async (pre) => {

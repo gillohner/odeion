@@ -2194,6 +2194,13 @@ html[data-shell="phone"] :is(.libtabs .chip, #libadd, [data-addmusic]) { min-hei
 .libstatus + .muted.small { margin: -6px 0 14px; }
 .libstatus { font-size: var(--fs-sm); color: var(--fg-2); margin: 0 0 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
 .libstatus .spin { margin-right: 4px; }
+/* Node library's top line: each part starts with its "·" (1.3em); the row is pulled left by that much
+   and the line clips it, so the part that starts a row shows no dot. The clip edges sit 6px out from
+   the text, room for Review's focus ring (2px + 2px offset) and its tap reach, and still clear of the dot */
+.libstatus.lsline { display: block; overflow-x: clip; margin-left: -6px; margin-right: -6px; padding: 0 6px; }
+.lsrow { display: flex; flex-wrap: wrap; align-items: center; row-gap: 4px; margin-left: -1.3em; }
+.lspart { display: flex; align-items: baseline; min-width: 0; }
+.lsep { flex: none; width: 1.3em; text-align: center; }
 .mrow .thumb { margin-right: 0; }
 .mrow .msize { min-width: 64px; text-align: right; }
 @media (max-width: 600px) { .mrow .msize { display: none; } }
