@@ -1946,9 +1946,14 @@
   // The phone's own zone (the node's, on this app's output) while the app plays its music itself:
   // one "This phone" in the phone's picker; listed again while it is the zone in use or plays
   const ownZoneHidden = (z) => nativeOk() && z.id !== state.zone && z.transport !== 'playing' && ((window.pmDesktop && window.pmDesktop.outputs) || []).includes(z.output);
-  // A zone's state pill, the same on the Zones page and in Settings: playing or paused, "error" for
-  // one stopped by an error, and none for a quiet stopped zone (its "Nothing playing" says so)
-  const zoneStatePill = (z) => (z.transport === 'stopped' ? (z.error ? '<span class="pill bad">error</span>' : '') : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`);
+  // A zone's state in one word, the same in every zone list (the Zones page, Settings, Play to,
+  // Playing on): playing or paused, "error" for one stopped by an error, and none for a quiet
+  // stopped zone (its "Nothing playing" says so)
+  const zoneStateWord = (z) => (z.transport === 'stopped' ? (z.error ? 'error' : '') : z.transport || '');
+  const zoneStatePill = (z) => { const w = zoneStateWord(z); return w ? `<span class="pill ${w === 'playing' ? 'ok' : w === 'error' ? 'bad' : ''}">${esc(w)}</span>` : ''; };
+  // The same word in a list row's small state slot (Play to, Playing on); an error is in the warning
+  // colour, its reason in the tooltip and for a screen reader (the Zones card shows it)
+  const zoneStateText = (z) => { const w = zoneStateWord(z); return w === 'playing' ? `${icon('play')} playing` : w === 'error' ? `<span class="warn-text" title="${esc(z.error)}">error<span class="sr-only">: ${esc(z.error)}</span></span>` : esc(w); };
   const zoneList = () => { const zs = Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z) && !ownZoneHidden(z)); return appPlatform() && zs.length ? [...zs, browserState()] : [browserState(), ...zs]; };
   // The browser's queue survives a reload, every song with where it was (UX review #6): stream
   // links are rebuilt on load (they carry the token), live radio is not kept.
@@ -3585,7 +3590,7 @@
     zonePop.innerHTML = `<div class="pop-title">Play to</div>` + zoneList().map((z) => `
       <div class="pop-row"><button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
         ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}${z.id === BROWSER ? '' : `<span class="sr-only"> (${esc(z.output)})</span>`}</span></span>
-        <span class="state">${z.transport === 'playing' ? `${icon('play')} playing` : ''}</span>
+        <span class="state">${zoneStateText(z)}</span>
       </button>${movingTo === z.id ? '<span class="pop-act muted"><span class="spin"></span> Moving…</span>' : movable && z.id !== state.zone ? `<button class="pop-item pop-act" ${moving ? 'disabled' : ''} data-move="${esc(z.id)}" title="Move what plays, with the queue, to ${esc(z.name)}" aria-label="Move here: ${esc(z.name)}">Move here</button>` : ''}</div>`).join('')
       + (err ? `<div class="pop-err" role="alert">${esc(err.charAt(0).toUpperCase() + err.slice(1))}</div>` : '')
       // The sleep timer for the zone in use, here too (UX review: it was only in Now playing). Moving
@@ -4104,7 +4109,7 @@
   let qPanelKey = null;
   let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
   const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); const op = $(qOpener); if (op) op.setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) { if (op && op.getClientRects().length) op.focus(); } qOpener = '#quality'; if (fromBack !== true) popTransient(); };
-  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) : ''}`; };
+  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${z && z.error ? z.error : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) : ''}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
   const loadDsp = async () => { if (isBrowser()) return; const zone = state.zone; try { const cfg = await api('GET', `/zones/${encodeURIComponent(zone)}/dsp`); (state.dspCfg = state.dspCfg || {})[zone] = cfg; } catch (e) { (state.dspCfg = state.dspCfg || {})[zone] = { error: e.message }; } syncQPanel(); };
@@ -4155,7 +4160,7 @@
     }
     const srcLabel = np ? (svc === 'library' ? 'Your library' : svc ? srcName(svc) : (np.stream_title ? 'Live stream' : 'Unknown source')) : 'Nothing playing';
     qPanel.innerHTML = `<div class="pop-title">Playing on</div>
-      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span></span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
+      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span></span><span class="state">${zoneStateText(z)}</span></div>
       <div class="pop-title">Source</div>
       <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? decodedBy() : ''))}</span>` : ''}</span></div>
       <div class="pop-title">Signal path</div>
