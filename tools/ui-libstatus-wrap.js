@@ -3,7 +3,8 @@
 // row starts with "·" (it did: "· Review 64 unsure" began the second or third row), a part moves
 // down whole, the first part of each row lines up with the page's text, the Review button's focus
 // ring has room, and big counts read with separators (12,840, not 12840). A count drawn again by
-// the Identify card (none left) leaves no stray dot.
+// the Identify card (none left) leaves no stray dot. "N files could not be read" is a link that
+// opens the list of those files (Music folders) and goes to it.
 // Real candidate assets, isolated responses: node tools/ui-libstatus-wrap.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -19,7 +20,7 @@ const now = Math.floor(Date.now() / 1000);
 const info = (scan) => ({ body: { name: 'Fixture node', library: { tracks: 12840, albums: 900, artists: 300, files: 12900, missing_files: 0 }, scanning: false, ...scan } });
 const identify = (suggested) => ({ body: { phase: suggested ? 'needs_review' : 'ready', progress: { running: false, total: 30, done: 30, identified: 20, suggested, unknown: 4, errors: 0, finished_at: 1 }, counts: { total: 12840, identified: 12000, suggested, unknown: 776, unchecked: 0, by: { tags: 10, album: 60, fingerprint: 8, you: 2, title_artist: 10 } }, acoustid: true, acoustid_own: true, acoustid_state: 'ok', write_ids: false } });
 const CASES = {
-  errors: { '/info': info({ last_scan: { finished_at: now - 3 * 3600, error_count: 37, errors: [['/music/A/b.flac', 'bad header']] } }), '/library/identify': identify(64) },
+  errors: { '/info': info({ last_scan: { finished_at: now - 3 * 3600, error_count: 1037, errors: [['/music/A/b.flac', 'bad header'], ...Array.from({ length: 19 }, (_, k) => [`/music/C/${k + 2}.mp3`, 'no audio frames'])] } }), '/library/identify': identify(64), '/library/folders': { body: ['Music', 'Live', 'Vinyl rips', 'Podcasts', 'Old CDs', 'Downloads'].map((f) => [`/srv/media/${f}`, true]) } },
   scan: { '/info': info({ last_scan: { finished_at: now - 3 * 3600, error_count: 0, errors: [] } }), '/library/identify': identify(64) },
   scanning: { '/info': info({ scanning: true }), '/library/identify': identify(64) },
 };
@@ -73,7 +74,7 @@ const rows = (page) => page.evaluate(() => {
           check(g.rows.every((r) => r.first !== '·'), `${at} ${name}: no row starts with "·" (${all})`);
           check(g.rows.every((r) => Math.abs(r.left - g.textLeft) < 4), `${at} ${name}: each row starts where the page's text does (${g.rows.map((r) => Math.round(r.left)).join(', ')} vs ${Math.round(g.textLeft)})`);
           check(/12,840 songs/.test(all) && !/12840/.test(all), `${at} ${name}: the song count reads 12,840`);
-          if (name === 'errors') check(/37 files could not be read/.test(all) && /last scan 3 h ago/.test(all), `${at} ${name}: every part is there`);
+          if (name === 'errors') check(/1,037 files could not be read/.test(all) && /last scan 3 h ago/.test(all), `${at} ${name}: every part is there`);
           if (width < 600) check(g.parts.length > 0 && g.parts.every((p) => p.h < p.lh * 1.6), `${at} ${name}: a part moves down whole, not split over two rows (${g.parts.map((p) => Math.round(p.h)).join(', ')} px)`);
           if (width >= 1280) check(g.rows.length === 1, `${at} ${name}: one row on a desktop (${g.rows.length})`);
           // The Review button's focus ring (2px, 2px off) has room, wherever the button lands
@@ -87,6 +88,33 @@ const rows = (page) => page.evaluate(() => {
           await page.screenshot({ path: path.join(SHOTS, `${at}-${name}.png`) });
           await fx.cleanCopy(page).then(() => check(true, `${at} ${name}: clean copy, no horizontal overflow`), (e) => check(false, `${at} ${name}: ${e.message}`));
           if (name === 'errors') {
+            // "1,037 files could not be read" on the line is a link to the list of them (in Music folders,
+            // below six folders here): one press opens the list and goes to it
+            const le = await page.evaluate(() => {
+              const b = document.querySelector('.libstatus #liberrs'); if (!b) return null; const r = b.getBoundingClientRect(); const d = document.querySelector('#scanerrs');
+              // A phone's tap 12px under the words still lands on it (44px reach, as Review's)
+              const below = document.elementFromPoint(r.left + r.width / 2, r.bottom + 12);
+              return { tag: b.tagName, text: b.textContent, left: r.left, right: r.right, reach: !!(below && b.contains(below)), controls: b.getAttribute('aria-controls'), listOpen: d ? d.open : null, listBelow: d ? d.getBoundingClientRect().top > innerHeight : null, title: d && d.querySelector('summary').textContent };
+            });
+            check(le && le.tag === 'BUTTON' && le.text === '1,037 files could not be read' && le.controls === 'scanerrs', `${at} ${name}: "1,037 files could not be read" is a button for the list of them (${le && le.tag} "${le && le.text}")`);
+            if (le) {
+              check(le.left - 6 >= g.clipLeft - 0.5 && le.right + 6 <= g.clipRight + 0.5, `${at} ${name}: its focus ring and tap reach aren't cut (${Math.round(le.left - g.clipLeft)} px left, ${Math.round(g.clipRight - le.right)} px right)`);
+              if (width < 600) check(le.reach, `${at} ${name}: a tap 12px under it still opens the list (44px reach)`);
+              check(le.title === '1,037 files could not be read in the last scan', `${at} ${name}: the list's title writes the count as the line does (${le.title})`);
+              if (width < 600) check(le.listBelow === true && le.listOpen === false, `${at} ${name}: the list starts closed, out of sight below the folders`);
+              await page.locator('#liberrs').click();
+              const after = await page.evaluate(() => {
+                const d = document.querySelector('#scanerrs'); const sm = d && d.querySelector('summary'); const r = sm && sm.getBoundingClientRect();
+                const hit = r && document.elementFromPoint(r.left + Math.min(r.width / 2, 40), r.top + r.height / 2);
+                const li = d && d.querySelector('li'); const lr = li && li.getBoundingClientRect();
+                const liHit = lr && document.elementFromPoint(lr.left + 10, lr.top + lr.height / 2);
+                return { open: d && d.open, focused: document.activeElement === sm, seen: !!(hit && sm.contains(hit)), item: !!(liHit && li.contains(liHit)), itemText: li && li.textContent };
+              });
+              check(after.open && after.focused, `${at} ${name}: one press opens the list and puts the keyboard on it (open ${after.open}, focus ${after.focused})`);
+              check(after.seen && after.item && /A\/b\.flac: bad header/.test(after.itemText || ''), `${at} ${name}: …and the list is in sight, not under the player or the top bar (${after.itemText})`);
+              await page.screenshot({ path: path.join(SHOTS, `${at}-${name}-list.png`) });
+              await page.evaluate(() => { document.querySelector('#scanerrs').open = false; document.querySelector('.main').scrollTo(0, 0); window.scrollTo(0, 0); });
+            }
             // The Identify card drawn again with none unsure: the review goes and leaves no dot behind
             fixtures['/library/identify'] = identify(0);
             await page.evaluate(() => { document.querySelector('#idphase').dataset.old = '1'; const a = document.querySelector('#idauto'); a.checked = !a.checked; a.dispatchEvent(new Event('change')); });

@@ -908,9 +908,9 @@ a[data-view="sources"]:hover { text-decoration: underline; }
 .idkey { display: inline-flex; align-items: center; gap: 6px; }
 /* The legend's "N unsure" opens the review: a button (keys and screen readers reach it) that reads as
    a link; on a phone an invisible layer makes it a 44 px tap, so nothing on the card moves */
-.idkey .lnk, #libreview { text-decoration: underline; }
-html[data-shell="phone"] :is(.idkey .lnk, #libreview) { position: relative; }
-html[data-shell="phone"] :is(.idkey .lnk, #libreview)::before { content: ''; position: absolute; inset: -14px -6px; }
+.idkey .lnk, #libreview, #liberrs { text-decoration: underline; }
+html[data-shell="phone"] :is(.idkey .lnk, #libreview, #liberrs) { position: relative; }
+html[data-shell="phone"] :is(.idkey .lnk, #libreview, #liberrs)::before { content: ''; position: absolute; inset: -14px -6px; }
 .idswatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
 .idswatch.unchecked { box-shadow: inset 0 0 0 1px var(--line-strong); }
 /* The AcoustID key is short: the field keeps to 320 px, with Check, Save key and Remove beside it */
