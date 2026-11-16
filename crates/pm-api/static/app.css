@@ -529,6 +529,9 @@ html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 .tile:hover .art { transform: translateY(-2px); box-shadow: var(--shadow); }
 .tile .t { margin-top: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile .a { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+/* An album with no artist or year keeps its line's height: a tile is a button, which centres its content, so a
+   shorter tile's cover sat lower than its neighbours' */
+.tile .a:empty::before { content: '\a0'; }
 .tile-play {
   position: absolute; right: 10px; bottom: 10px; width: 40px; height: 40px; border-radius: 50%; border: 0;
   background: var(--accent); color: var(--on-accent); display: flex; align-items: center; justify-content: center;

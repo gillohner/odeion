@@ -679,6 +679,7 @@ jobs:
           ui-filter-none.js filter-none-shots
           ui-albums-empty.js albums-empty-shots
           ui-album-tile-line.js album-tile-line-shots
+          ui-home-album-line.js home-album-line-shots
           ui-empty-ways-in.js empty-ways-in-shots
           ui-item-redraw.js item-redraw-shots
           ui-songs-name.js songs-name-shots
