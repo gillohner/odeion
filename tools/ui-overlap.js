@@ -4,7 +4,9 @@
 //   * an element's box spills out of its card, row or container (unless a box between them clips
 //     it on purpose: overflow hidden/auto, ellipsis);
 //   * two neighbours overlap (siblings in the same row or column; badges and overlays placed on
-//     purpose with position absolute/fixed are left out).
+//     purpose with position absolute/fixed are left out; so is padding that paints nothing on a
+//     box that is not a control and hands it back with a negative margin, as song rows do to fit
+//     the focus ring inside their "…" clip).
 // Screens: Home, the library pages, an album, a song, an artist, search, playlists, queue, zones,
 // sources, radio, favourites, every Settings tab, every Sources tab, the now-playing overlay and a dialog.
 //   npm install playwright@1.49.1 && npx playwright install chromium   (anywhere; run from there)
@@ -24,6 +26,20 @@ const inspect = () => {
   const shown = (el) => { const r = el.getBoundingClientRect(); if (r.width < 1 || r.height < 1) return false; const st = getComputedStyle(el); return st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity) > 0.05 && !el.closest('[hidden],[aria-hidden="true"]'); };
   const placed = (el) => ['absolute', 'fixed', 'sticky'].includes(getComputedStyle(el).position);
   const clips = (el) => { const st = getComputedStyle(el); return /(hidden|auto|scroll|clip)/.test(st.overflowX + st.overflow) || st.textOverflow === 'ellipsis'; };
+  // The box a neighbour can be seen (or clicked) in. A box that is not a control and paints nothing
+  // in its padding (no background, border or shadow) may pad itself and hand the room back with an
+  // equal negative margin: song rows do that so a link's focus ring fits inside their "…" clip,
+  // and that padding reaches into the next line while the text does not. Only such a side is
+  // measured at the content edge; every other box is measured whole.
+  const seenBox = (el) => {
+    const r = el.getBoundingClientRect(); const st = getComputedStyle(el);
+    const control = st.cursor === 'pointer' || el.matches('a, button, input, select, textarea, label, summary, [role], [tabindex], [contenteditable]');
+    const paints = st.backgroundImage !== 'none' || !/^(transparent|rgba\(0, 0, 0, 0\))$/.test(st.backgroundColor) || st.boxShadow !== 'none'
+      || ['Top', 'Right', 'Bottom', 'Left'].some((k) => parseFloat(st[`border${k}Width`]) > 0);
+    if (control || paints) return r;
+    const given = (k) => { const p = parseFloat(st[`padding${k}`]) || 0; return p > 0 && (parseFloat(st[`margin${k}`]) || 0) <= -p + 0.5 ? p : 0; };
+    return { left: r.left + given('Left'), right: r.right - given('Right'), top: r.top + given('Top'), bottom: r.bottom - given('Bottom') };
+  };
   const CONTAINERS = '.card, .set-rows, .set-row, .list-row, .track, .tile, .notice, .player, .chip, .btn, .dialog, .popover, .np-page, .set-nav, .toolbar, .section-head';
   const roots = [document.querySelector('#main'), document.querySelector('.player'), document.querySelector('#overlay:not([hidden])'), ...document.querySelectorAll('dialog[open], .popover')].filter(Boolean);
   const seen = new Set();
@@ -41,10 +57,11 @@ const inspect = () => {
       }
       // 2. neighbours that overlap
       const kids = [...el.children].filter((k) => shown(k) && !placed(k) && !k.closest('svg') && k.tagName !== 'BR');
+      const boxes = kids.map(seenBox);
       for (let i = 0; i < kids.length; i++) {
-        const a = kids[i].getBoundingClientRect();
+        const a = boxes[i];
         for (let j = i + 1; j < kids.length; j++) {
-          const b = kids[j].getBoundingClientRect();
+          const b = boxes[j];
           const w = Math.min(a.right, b.right) - Math.max(a.left, b.left); const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
           if (w > 2 && h > 2) out.overlap.push(`${name(kids[i])} “${text(kids[i])}” and ${name(kids[j])} “${text(kids[j])}” overlap (${Math.round(w)}×${Math.round(h)})`);
         }
