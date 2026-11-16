@@ -12299,13 +12299,55 @@ exec sleep 300
                 && url.contains("%2Flastfm%2Fcallback"),
             "{url}"
         );
-        let req = Request::builder()
-            .uri("/lastfm/callback?token=tok123")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-        assert_eq!(resp.headers()["location"], "/?lastfm=signed_in&user=listener");
+        let state_of = |url: &str| {
+            let u = url::Url::parse(url).unwrap();
+            let cb = u
+                .query_pairs()
+                .find(|(k, _)| k == "cb")
+                .expect("cb")
+                .1
+                .into_owned();
+            let cb = url::Url::parse(&cb).unwrap();
+            assert_eq!(cb.path(), "/lastfm/callback", "{cb}");
+            cb.query_pairs()
+                .find(|(k, _)| k == "state")
+                .expect("state in cb")
+                .1
+                .into_owned()
+        };
+        let first = state_of(url);
+        // Last.fm sends the browser back to `cb` with `&token=` added
+        let back = |state: &str| {
+            let app = app.clone();
+            let uri = format!("/lastfm/callback?state={state}&token=tok123");
+            async move {
+                let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+                resp.headers()["location"].to_str().unwrap().to_string()
+            }
+        };
+        // No state, or one this node never gave out: refused, Last.fm not asked
+        for uri in [
+            "/lastfm/callback?token=tok123",
+            "/lastfm/callback?state=made-up&token=tok123",
+        ] {
+            let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+            assert!(
+                resp.headers()["location"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("/?lastfm=error"),
+                "{uri}"
+            );
+        }
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no getSession for a sign-in not started here"
+        );
+        assert_eq!(back(&first).await, "/?lastfm=signed_in&user=listener");
         let (_, lf) = call(&app, "GET", "/v1/lastfm", None).await;
         assert_eq!(
             (lf["connected"].clone(), lf["user"].clone(), lf["submit"].clone()),
@@ -12405,17 +12447,20 @@ exec sleep 300
         }
         assert_eq!(lf["pending"], 1, "{lf}");
         assert!(lf["problem"].as_str().unwrap().contains("sign in again"), "{lf}");
-        // Signing in again clears it; the waiting scrobble goes out with the next play
+        // Signing in again clears it; the waiting scrobble goes out with the next play. The
+        // first sign-in's state is used up; a new one is needed
         refuse.store(false, std::sync::atomic::Ordering::SeqCst);
         calls.lock().unwrap().clear();
-        let req = Request::builder()
-            .uri("/lastfm/callback?token=tok123")
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(
-            app.clone().oneshot(req).await.unwrap().status(),
-            StatusCode::SEE_OTHER
+        assert!(back(&first).await.starts_with("/?lastfm=error"));
+        let (_, lf) = call(&app, "GET", "/v1/lastfm", None).await;
+        assert!(
+            lf["problem"].as_str().is_some(),
+            "a refused callback changes nothing: {lf}"
         );
+        let (_, l) = call(&app, "GET", "/v1/lastfm/login", None).await;
+        let again = state_of(l["url"].as_str().unwrap());
+        assert_ne!(again, first);
+        assert_eq!(back(&again).await, "/?lastfm=signed_in&user=listener");
         let (_, lf) = call(&app, "GET", "/v1/lastfm", None).await;
         assert!(lf["problem"].is_null(), "{lf}");
         let (_, _) = call(

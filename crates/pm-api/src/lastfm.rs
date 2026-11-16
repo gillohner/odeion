@@ -4,7 +4,8 @@
 //! node ships no key; the secret never leaves the node, which signs every request itself.
 //!
 //! Sign-in is Last.fm's web flow: the browser authorises the app on last.fm and comes back to
-//! `/lastfm/callback` (no API token there, like `/tidal/callback`); the node turns that token into
+//! `/lastfm/callback` (no API token there, like `/tidal/callback`) with the state the node put in
+//! the return address (one sign-in, once, for 10 minutes); the node turns that token into
 //! a session key (Last.fm gives them no expiry) and keeps it as a secret. A play counts the way the
 //! ListenBrainz one does: half the track or four minutes, or its end; "now playing" goes out when
 //! it starts. Scrobbles Last.fm can't take wait on the node and go with the next ones.
@@ -796,8 +797,46 @@ pub struct LoginUrl {
     pub url: String,
 }
 
+/// Sign-ins started here (`login`) and not yet back: state → (node id, when it started). Last.fm
+/// sends no state of its own, so the node puts one in `cb`; `callback` takes only one of these,
+/// once, within [`STARTED_FOR`].
+type Started = Mutex<HashMap<String, (String, std::time::Instant)>>;
+const STARTED_FOR: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const STARTED_MAX: usize = 16;
+
+fn started() -> &'static Started {
+    static S: std::sync::OnceLock<Started> = std::sync::OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A new sign-in's state for `node`: ones over [`STARTED_FOR`] old go, and the oldest past
+/// [`STARTED_MAX`].
+fn start_sign_in(node: &str, now: std::time::Instant) -> String {
+    let state = crate::tidal::random_urlsafe(18);
+    let mut m = started().lock().expect("lastfm sign-ins");
+    m.retain(|_, (_, t)| now.saturating_duration_since(*t) < STARTED_FOR);
+    while m.len() >= STARTED_MAX {
+        let Some(oldest) = m.iter().min_by_key(|(_, (_, t))| *t).map(|(k, _)| k.clone()) else {
+            break;
+        };
+        m.remove(&oldest);
+    }
+    m.insert(state.clone(), (node.to_string(), now));
+    state
+}
+
+/// Whether `state` is a sign-in `node` started within [`STARTED_FOR`]; it is used up.
+fn take_sign_in(node: &str, state: &str, now: std::time::Instant) -> bool {
+    let mut m = started().lock().expect("lastfm sign-ins");
+    if !m.get(state).is_some_and(|(n, _)| n == node) {
+        return false;
+    }
+    m.remove(state)
+        .is_some_and(|(_, t)| now.saturating_duration_since(t) < STARTED_FOR)
+}
+
 /// `GET /v1/lastfm/login`: Last.fm's authorisation page, coming back to this node's
-/// `/lastfm/callback`.
+/// `/lastfm/callback?state=…` (a state for this sign-in only).
 pub(crate) async fn login(
     State(s): State<Arc<NodeState>>,
     headers: axum::http::HeaderMap,
@@ -808,7 +847,11 @@ pub(crate) async fn login(
             "Enter your Last.fm API key and shared secret first (Settings › Accounts)",
         )
     })?;
-    let cb = format!("{}/lastfm/callback", crate::tidal::external_base(&s, &headers));
+    let state = start_sign_in(&s.node_id, std::time::Instant::now());
+    let cb = format!(
+        "{}/lastfm/callback?state={state}",
+        crate::tidal::external_base(&s, &headers)
+    );
     let url = reqwest::Url::parse_with_params(
         AUTH_URL,
         &[("api_key", app.api_key.as_str()), ("cb", cb.as_str())],
@@ -819,13 +862,32 @@ pub(crate) async fn login(
 
 #[derive(Debug, Deserialize)]
 pub struct CallbackQuery {
+    pub state: Option<String>,
     pub token: Option<String>,
 }
 
-/// `GET /lastfm/callback?token=…` (no API token): the browser comes back from last.fm; the node
-/// turns the token into a session and keeps it.
+impl CallbackQuery {
+    /// The state and the token; also when Last.fm added `?token=` to a `cb` that had a query.
+    fn parts(&self) -> (&str, &str) {
+        let state = self.state.as_deref().unwrap_or("");
+        match (&self.token, state.split_once("?token=")) {
+            (Some(t), _) => (state, t.as_str()),
+            (None, Some((st, t))) => (st, t),
+            (None, None) => (state, ""),
+        }
+    }
+}
+
+/// `GET /lastfm/callback?state=…&token=…` (no API token): the browser comes back from last.fm;
+/// for a sign-in started here ([`login`]'s state, once), the node turns the token into a session
+/// and keeps it. Any other is refused, and the current sign-in stays.
 pub(crate) async fn callback(State(s): State<Arc<NodeState>>, Query(q): Query<CallbackQuery>) -> Response {
-    match finish_login(&s, q.token.as_deref().unwrap_or("")).await {
+    let (state, token) = q.parts();
+    if !take_sign_in(&s.node_id, state, std::time::Instant::now()) {
+        let e = "This sign-in wasn't started here, or took too long: sign in again from Settings › Accounts";
+        return Redirect::to(&format!("/?lastfm=error&detail={}", urlencode(e))).into_response();
+    }
+    match finish_login(&s, token).await {
         Ok(user) => Redirect::to(&format!("/?lastfm=signed_in&user={}", urlencode(&user))).into_response(),
         Err(e) => Redirect::to(&format!("/?lastfm=error&detail={}", urlencode(&e))).into_response(),
     }
@@ -1127,5 +1189,44 @@ mod tests {
         };
         assert!(format!("{a:?}").contains("<set>") && !format!("{a:?}").contains("s3cret"));
         assert_eq!(urlencode("a b/ü"), "a%20b%2F%C3%BC");
+    }
+
+    #[test]
+    fn a_sign_in_state_is_this_nodes_once_and_for_ten_minutes() {
+        // The sign-ins are the process's: none of another test's go meanwhile
+        let _api_guard = API_TEST_LOCK.blocking_lock();
+        let t0 = std::time::Instant::now();
+        let a = start_sign_in("node-a", t0);
+        // Another node's, a made-up one, none
+        assert!(!take_sign_in("node-b", &a, t0));
+        assert!(!take_sign_in("node-a", "made-up", t0));
+        assert!(!take_sign_in("node-a", "", t0));
+        // Its own: once
+        assert!(take_sign_in("node-a", &a, t0));
+        assert!(!take_sign_in("node-a", &a, t0));
+        // Too late
+        let late = start_sign_in("node-a", t0);
+        assert!(!take_sign_in("node-a", &late, t0 + STARTED_FOR));
+        // Many started: the oldest go, the newest stay
+        let first = start_sign_in("node-c", t0);
+        let mut last = String::new();
+        for i in 0..STARTED_MAX {
+            last = start_sign_in("node-c", t0 + std::time::Duration::from_millis(i as u64 + 1));
+        }
+        assert!(started().lock().unwrap().len() <= STARTED_MAX);
+        assert!(!take_sign_in("node-c", &first, t0));
+        assert!(take_sign_in("node-c", &last, t0));
+    }
+
+    #[test]
+    fn the_callback_reads_lastfms_token_either_way() {
+        let q = |state: Option<&str>, token: Option<&str>| CallbackQuery {
+            state: state.map(str::to_string),
+            token: token.map(str::to_string),
+        };
+        assert_eq!(q(Some("st"), Some("tok")).parts(), ("st", "tok"));
+        assert_eq!(q(Some("st?token=tok"), None).parts(), ("st", "tok"));
+        assert_eq!(q(None, Some("tok")).parts(), ("", "tok"));
+        assert_eq!(q(Some("st"), None).parts(), ("st", ""));
     }
 }
