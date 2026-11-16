@@ -1946,6 +1946,9 @@
   // The phone's own zone (the node's, on this app's output) while the app plays its music itself:
   // one "This phone" in the phone's picker; listed again while it is the zone in use or plays
   const ownZoneHidden = (z) => nativeOk() && z.id !== state.zone && z.transport !== 'playing' && ((window.pmDesktop && window.pmDesktop.outputs) || []).includes(z.output);
+  // A zone's state pill, the same on the Zones page and in Settings: playing or paused, "error" for
+  // one stopped by an error, and none for a quiet stopped zone (its "Nothing playing" says so)
+  const zoneStatePill = (z) => (z.transport === 'stopped' ? (z.error ? '<span class="pill bad">error</span>' : '') : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`);
   const zoneList = () => { const zs = Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z) && !ownZoneHidden(z)); return appPlatform() && zs.length ? [...zs, browserState()] : [browserState(), ...zs]; };
   // The browser's queue survives a reload, every song with where it was (UX review #6): stream
   // links are rebuilt on load (they carry the token), live radio is not kept.
@@ -2771,8 +2774,24 @@
   nat.addEventListener('nativefailed', (e) => { const d = (e && e.detail) || {}; const why = (typeof d === 'string' ? d : d.why) || 'it did not start'; if (!state.natOn || state.browserIndex < 0) return; if (state.starting && state.starting.zone === BROWSER) startFail(why, true); nativeRetry(state.browserIndex, why, d.at || 0); renderBar(); });
   // Opened, then found unplayable by the app (the song handed ahead): the page plays it itself
   nat.addEventListener('nativerefused', () => { const i = state.browserIndex; const it = state.browserQueue[i]; if (!it || !state.natOn) return; it.nativeNo = true; browserPlay(i); });
-  audio.addEventListener('play', () => renderBar());
-  audio.addEventListener('pause', () => renderBar());
+  // The Zones page's card for this device is drawn again too: it says playing or paused, and why
+  // the app's player paused (its USB DAC went away), as the bar does (it was drawn again only when
+  // a node's zone changed). (One redraw for a burst: a song's end and the next one's start.)
+  let hereCardT = null;
+  // (a card's Play, Next or Previous that had the focus has it again in the new drawing)
+  const hereCardAgain = () => {
+    clearTimeout(hereCardT);
+    hereCardT = setTimeout(async () => {
+      if (state.view !== 'zones') return;
+      const a = document.activeElement; const card = a && a.dataset && a.dataset.zt && a.closest('#main [data-zcard]');
+      const was = card ? [card.dataset.zcard, a.dataset.zt] : null;
+      await render();
+      const now = document.activeElement;
+      if (was && state.view === 'zones' && (!now || now === document.body)) { const b = $$('#main [data-zcard]').find((c) => c.dataset.zcard === was[0]); const t = b && $(`[data-zt="${was[1]}"]`, b); if (t) t.focus(); }
+    }, 150);
+  };
+  audio.addEventListener('play', () => { renderBar(); hereCardAgain(); });
+  audio.addEventListener('pause', () => { renderBar(); hereCardAgain(); });
   // Back on screen after Android stopped the app's audio in the background (its player service
   // gone, as the background probe's part C does on API 37): the element still says it plays, but
   // its time stands still and nothing sounds. A pause and play starts it again; a stream that is
@@ -8989,14 +9008,15 @@
             const members = np && np.members && np.members.length ? `<span class="pill">${np.members.length} outputs</span>` : '';
             const title = ways ? esc(familyName(z)) : named(z);
             // (a stopped zone gets no state pill: its "Nothing playing" or its Play button says so)
+            // A zone paused by an error (its USB DAC went away) says why where the artist is, as the mini player does
             // On a phone the card's Play to (or "selected") sits on the now-playing line and the
             // volume note is for screen readers only, so the controls are one line under it
             const pick = z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}" aria-label="Play to ${esc(z.name)}">Play to</button>`;
             const wayChips = ways ? `<div class="chips zc-ways" role="group" aria-label="Ways to play to ${esc(familyName(z))}">${ways.map((m) => `<button class="chip ${m.id === state.zone ? 'on' : ''}" data-zsel="${esc(m.id)}" aria-pressed="${m.id === state.zone}" title="Play to ${esc(m.name)}">${esc(PROTO_WORDS[protoOf(m)] || protoOf(m))}</button>`).join('')}</div>` : '';
             return `<div class="card zone-card ${z.id === state.zone ? 'on' : ''}" data-zcard="${esc(z.id)}">
-              <div class="zc-head">${icon('zone')}<h3>${title}</h3>${members}${z.transport === 'stopped' ? (z.error ? '<span class="pill bad">error</span>' : '') : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
+              <div class="zc-head">${icon('zone')}<h3>${title}</h3>${members}${zoneStatePill(z)}</div>
               ${wayChips}
-              <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : `<div class="np-art placeholder zc-ph" aria-hidden="true">${icon('zone')}</div>`}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div>${phone ? pick : ''}</div>
+              <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : `<div class="np-art placeholder zc-ph" aria-hidden="true">${icon('zone')}</div>`}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it && z.transport === 'paused' && z.error ? `<span class="warn-text" role="alert">${esc(z.error)}</span>` : it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div>${phone ? pick : ''}</div>
               <div class="zc-controls">
                 <button class="icon-btn" data-zt="previous" data-repeat title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
@@ -9278,7 +9298,7 @@
           state.devOutputs = !!ns.dev_outputs;
           const shownOuts = outs.filter((o) => state.devOutputs || !devOutput(o.id));
           const outList = shownOuts.length ? `<div class="set-list">${shownOuts.map((o) => `<div class="set-item"><div class="grow"><div class="name">${esc(o.name)}</div><div class="sub">${esc(o.id)}</div></div><span class="muted small caps">${o.caps.max_pcm_bits}-bit · ${o.caps.pcm_rates.map((r) => (r / 1000).toFixed(1).replace('.0', '') + 'k').join(' ')}${o.caps.dsd ? ' · DSD' : ''}</span></div>`).join('')}</div>` : '<p class="muted small">No outputs found.</p>';
-          const zoneRows = zoneList().map((z) => row(esc(z.name), esc(z.id === BROWSER ? deviceWords(z) : z.output || ''), `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>${z.id !== BROWSER ? `<button class="btn sm ${state.dspOpen === z.id ? 'primary' : 'ghost'}" data-dsp="${esc(z.id)}">DSP</button>` : ''}${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Remove</button>` : ''}`)).join('');
+          const zoneRows = zoneList().map((z) => row(esc(z.name), esc(z.id === BROWSER ? deviceWords(z) : z.output || ''), `${zoneStatePill(z)}${z.id !== BROWSER ? `<button class="btn sm ${state.dspOpen === z.id ? 'primary' : 'ghost'}" data-dsp="${esc(z.id)}">DSP</button>` : ''}${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Remove</button>` : ''}`)).join('');
           const personalPlayFrom = group('Play from', block('Where songs play from', 'Your personal source order applies to every playlist. A pinned song keeps its source.', '<div id="gordercard"><div id="gorder"><div class="skeleton" style="height:120px"></div></div></div>'));
           const playback = group('Playback', ''
             + row('Prefer full tracks', 'On a service\u2019s song page, Play plays that service, even a 30 s preview. With this on, a preview gives way to the full track from your Play from order.', `<label><input type="checkbox" id="preferfull" ${ns.prefer_full ? 'checked' : ''}> On</label>`))
