@@ -574,6 +574,8 @@ html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 /* Under 900 px the desktop layout has no room for an album column: the album joins the artist
    line and the title takes the width (at 768 px it was cut to about ten characters) */
 .track .by-album { display: none; }
+/* A song with no artists: the line is the album alone, not "· Album" (its artist span is empty) */
+.track .by > span:empty + .by-album .by-dot { display: none; }
 @media (max-width: 900px) {
   html[data-shell="desktop"] .track .by-album { display: inline; }
   html[data-shell="desktop"] .track .album-col { display: none; }
