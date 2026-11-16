@@ -4,7 +4,8 @@
 // down whole, the first part of each row lines up with the page's text, the Review button's focus
 // ring has room, and big counts read with separators (12,840, not 12840). A count drawn again by
 // the Identify card (none left) leaves no stray dot. "N files could not be read" is a link that
-// opens the list of those files (Music folders) and goes to it.
+// opens the list of those files (Music folders) and goes to it. When the node kept only 20 of them, a
+// note under the list says so.
 // Real candidate assets, isolated responses: node tools/ui-libstatus-wrap.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -21,6 +22,8 @@ const info = (scan) => ({ body: { name: 'Fixture node', library: { tracks: 12840
 const identify = (suggested) => ({ body: { phase: suggested ? 'needs_review' : 'ready', progress: { running: false, total: 30, done: 30, identified: 20, suggested, unknown: 4, errors: 0, finished_at: 1 }, counts: { total: 12840, identified: 12000, suggested, unknown: 776, unchecked: 0, by: { tags: 10, album: 60, fingerprint: 8, you: 2, title_artist: 10 } }, acoustid: true, acoustid_own: true, acoustid_state: 'ok', write_ids: false } });
 const CASES = {
   errors: { '/info': info({ last_scan: { finished_at: now - 3 * 3600, error_count: 1037, errors: [['/music/A/b.flac', 'bad header'], ...Array.from({ length: 19 }, (_, k) => [`/music/C/${k + 2}.mp3`, 'no audio frames'])] } }), '/library/identify': identify(64), '/library/folders': { body: ['Music', 'Live', 'Vinyl rips', 'Podcasts', 'Old CDs', 'Downloads'].map((f) => [`/srv/media/${f}`, true]) } },
+  // Two unreadable files and a folder that could not be read, all listed: no "N of M" note
+  few: { '/info': info({ last_scan: { finished_at: now - 3 * 3600, error_count: 3, errors: [['/music/A/b.flac', 'bad header'], ['/music/C/2.mp3', 'no audio frames'], ['/mnt/gone', 'No such file or directory']] } }), '/library/identify': identify(64) },
   scan: { '/info': info({ last_scan: { finished_at: now - 3 * 3600, error_count: 0, errors: [] } }), '/library/identify': identify(64) },
   scanning: { '/info': info({ scanning: true }), '/library/identify': identify(64) },
 };
@@ -112,6 +115,10 @@ const rows = (page) => page.evaluate(() => {
               });
               check(after.open && after.focused, `${at} ${name}: one press opens the list and puts the keyboard on it (open ${after.open}, focus ${after.focused})`);
               check(after.seen && after.item && /A\/b\.flac: bad header/.test(after.itemText || ''), `${at} ${name}: …and the list is in sight, not under the player or the top bar (${after.itemText})`);
+              // The node keeps only the first 20: the list says so, and where the rest are
+              const more = await page.evaluate(() => { const n = document.querySelector('#scanerrs > ul + .scanmore'); if (!n) return null; n.scrollIntoView({ block: 'center', behavior: 'instant' }); const r = n.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + 10, r.top + r.height / 2); return { text: n.textContent, seen: !!(hit && n.contains(hit)), items: document.querySelectorAll('#scanerrs li').length }; });
+              check(more && more.items === 20 && more.text === '20 of 1,037 are listed here; the node’s log has the rest.', `${at} ${name}: under the 20 listed, a note says 20 of 1,037 are listed (${more && more.text})`);
+              check(more && more.seen, `${at} ${name}: …and it can be scrolled into sight, not under the player`);
               await page.screenshot({ path: path.join(SHOTS, `${at}-${name}-list.png`) });
               await page.evaluate(() => { document.querySelector('#scanerrs').open = false; document.querySelector('.main').scrollTo(0, 0); window.scrollTo(0, 0); });
             }
@@ -128,6 +135,11 @@ const rows = (page) => page.evaluate(() => {
             const g5 = await rows(page);
             const t5 = g5.rows.map((r) => r.text).join(' / ');
             check(/(^|· |\/ )Review 5 unsure$/.test(t5) && g5.rows.every((r) => r.first !== '·'), `${at} ${name}: …and back with 5 it reads as before (${t5})`);
+          }
+          if (name === 'few') {
+            await page.locator('#liberrs').click();
+            const few = await page.evaluate(() => ({ open: document.querySelector('#scanerrs').open, items: document.querySelectorAll('#scanerrs li').length, note: !!document.querySelector('#scanerrs .scanmore'), title: document.querySelector('#scanerrs summary').textContent }));
+            check(few.open && few.items === 3 && !few.note && few.title === '3 files could not be read in the last scan', `${at} ${name}: with all listed (3 of 3, one a folder) there is no "N of M" note (${few.items} listed, note ${few.note})`);
           }
           check(state.errors.length === 0, `${at} ${name}: no page errors (${state.errors.join('; ')})`);
         } finally { await context.close(); }
