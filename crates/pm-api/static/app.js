@@ -589,12 +589,12 @@
         if (!files.length) { out.innerHTML = ''; return; }
         const opts = `favourites=${$('#roonfav').checked}&playlist=${$('#roonpl').checked}&tags=${$('#roontags').checked}&dry_run=${dry}`;
         // What it is doing goes on the first line; the last results stay, dimmed, so the page keeps its height
-        const say = (html) => { $$('.roonfile', out).forEach((e) => e.classList.add('stale')); const s = $('.roonstate', out); if (s) s.outerHTML = html; else out.insertAdjacentHTML('afterbegin', html); };
+        const say = (html) => { $$('.roonfile', out).forEach((e) => e.classList.add('stale')); const s = $('[data-roonstate]', out); if (s) s.outerHTML = html; else out.insertAdjacentHTML('afterbegin', html); };
         const parts = []; let matched = 0; let failed = false;
         if (!dry) roonCtl().forEach((e) => { e.disabled = true; });
         try {
           for (const [i, f] of files.entries()) {
-            say(`<p class="muted small roonstate"><span class="spin"></span> ${dry ? 'Checking' : 'Importing'}${files.length > 1 ? ` ${i + 1} of ${files.length}` : ''}…</p>`);
+            say(`<p class="muted small" data-roonstate><span class="spin"></span> ${dry ? 'Checking' : 'Importing'}${files.length > 1 ? ` ${i + 1} of ${files.length}` : ''}…</p>`);
             try {
               const res = await fetch(`/v1/import/roon?file=${encodeURIComponent(f.name)}&${opts}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
               const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
@@ -609,7 +609,7 @@
           }
         } finally { if (!dry) roonCtl().forEach((e) => { e.disabled = false; }); }
         if (!dry) roonDone = true;
-        out.innerHTML = (dry ? `<p class="muted small roonstate">${failed ? 'Not every file could be checked; nothing changed yet. <button class="lnk" data-roon-again>Check again</button>' : 'Checked: nothing changed yet.'}</p>` : '<p class="small roonstate">Imported.</p>') + parts.join('');
+        out.innerHTML = (dry ? `<p class="muted small" data-roonstate>${failed ? 'Not every file could be checked; nothing changed yet. <button class="lnk" data-roon-again>Check again</button>' : 'Checked: nothing changed yet.'}</p>` : '<p class="small" data-roonstate>Imported.</p>') + parts.join('');
         const again = $('[data-roon-again]', out); if (again) again.onclick = () => roonRun(true);
         go.disabled = !dry || !matched || roonDone;
         if (dry && !matched && !failed) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Your library › Node library), then choose the files again.</p>');
