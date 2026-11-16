@@ -24,19 +24,23 @@ const PINAKES = 'bad request: tags allows at most 5 labels, or 3 with match=all;
 const item = (t) => ({ kind: 'other', title: t, name: t, description: 'A fixture page', site: 'example.com', uri: `https://example.com/${encodeURIComponent(t)}` });
 const CO = [['live', 4], ['a-rather-long-tag-label-that-has-to-wrap', 3], ['track', 2], ['dracula', 2]];
 
-// One page; `answer(labels)` gives { status, body, wait } for a /home/tag request, each of which is counted
+// One page; `answer(labels)` gives { status, body, wait, hold } for a /home/tag request, each of which is counted.
+// `hold`: the answer waits until the test calls release() (at most 10 s), so "still loading" is read before it
+// arrives however slow the page load is (a fixed wait raced a slow CI runner's first page).
 const open = async (browser, w, url, answer) => {
   const { page, context, state } = await fx.create(browser, w, { touch: w < 1025 });
   const asked = [];
+  let release; const gate = new Promise((r) => { release = r; });
   await context.route('**/v1/home/tag?*', async (r) => {
     const labels = new URL(r.request().url()).searchParams.get('labels'); asked.push(labels);
     const a = answer(labels.split(','));
+    if (a.hold) await Promise.race([gate, sleep(10000)]);
     if (a.wait) await sleep(a.wait);
     r.fulfill({ status: a.status || 200, contentType: 'application/json', body: JSON.stringify(a.body) }).catch(() => {});
   });
   await page.setViewportSize({ width: w, height: 900 });
   await fx.go(page, url); await page.waitForSelector('#tagbody');
-  return { page, context, state, asked };
+  return { page, context, state, asked, release };
 };
 const read = (page) => page.evaluate(() => {
   const q = (s) => document.querySelector(s); const all = (s) => [...document.querySelectorAll(s)];
@@ -56,8 +60,8 @@ const fits = (r) => r.wide <= 0 && r.right <= r.vw;
   for (const w of [360, 390, 1440]) {
     // ---- two tags, Pubky answers with an error ----
     {
-      const { page, context, state, asked } = await open(browser, w, '/tag/apple-music,dracula', (l) => (l.length > 1 ? { status: 502, body: { error: PINAKES }, wait: 500 } : { body: { items: [item('On dracula')], tags: [] } }));
-      const early = await read(page);
+      const { page, context, state, asked, release } = await open(browser, w, '/tag/apple-music,dracula', (l) => (l.length > 1 ? { status: 502, body: { error: PINAKES }, hold: true } : { body: { items: [item('On dracula')], tags: [] } }));
+      const early = await read(page); release();
       check(early.loading && early.solo.join() === 'apple-music,dracula' && early.del.join() === 'apple-music,dracula', `${w}: two tags, still loading: both chips with × are there (${early.del.join()})`);
       await until(page, () => /Pubky did not answer/.test(document.querySelector('#tagbody').textContent));
       const r = await read(page);

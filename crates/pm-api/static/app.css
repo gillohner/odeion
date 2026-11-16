@@ -387,9 +387,10 @@ html:not([data-shell="phone"]) .lyric-lines { overscroll-behavior: contain; }
 .dialog h2 { margin-bottom: 6px; }
 .dialog p { margin-bottom: 16px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-/* Phone dialog actions stay easy to tap, including when larger text needs another row. */
+/* Phone dialog actions stay easy to tap, including when larger text needs another row. Tab onto
+   one scrolls it a pixel clear of the dialog's edge (whole-pixel scroll on fractional rows). */
 html[data-shell="phone"] .dialog-actions { flex-wrap: wrap; }
-html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44px; max-width: 100%; white-space: normal; }
+html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44px; max-width: 100%; white-space: normal; scroll-margin-block: 1px; }
 .field { display: block; }
 .field span { display: block; font-size: var(--fs-xs); color: var(--muted); margin-bottom: 6px; }
 .field input, .input { width: 100%; background: var(--surface); border: 1px solid var(--line-strong); color: var(--fg); padding: 9px 12px; border-radius: var(--r-sm); font: inherit; }
@@ -1603,6 +1604,12 @@ html[data-shell="phone"] .btn.sm { min-height: 40px; }
    An icon button stays square. */
 html[data-shell="phone"] :where(#main) .btn:not(.sm, .back, .set-back, .hero .actions > *) { min-height: 44px; }
 html[data-shell="phone"] :where(#main) .btn.iconic { min-width: 44px; justify-content: center; }
+/* Phones: a text field or a select is a 44 px tap too, as tall as the buttons beside it (Songs'
+   Filter next to Play all, Add folder's field, a dialog's fields). A textarea keeps its rows, and
+   a tag field stays chip-sized (above). A small button beside a field (city's Save, AcoustID's
+   Check, Use this file) is as tall as it. */
+html[data-shell="phone"] :is(.input, .field input):not(textarea, .taginput, [type="checkbox"], [type="radio"], [type="range"]) { min-height: 44px; }
+html[data-shell="phone"] :has(> .input:not(textarea, .taginput, [type="checkbox"], [type="radio"], [type="range"])) > .btn.sm { min-height: 44px; }
 html[data-shell="phone"] .porder-grip { padding: 12px; margin: -8px 0; }
 html[data-shell="phone"] .taginput { min-height: 40px; }
 @media (pointer: coarse) {
