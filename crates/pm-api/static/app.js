@@ -7304,7 +7304,7 @@
               const albums = (list || []).filter((a) => a.id != null).slice(0, 12);
               homeCount(k, albums.length);
               if (!albums.length && state.setupShown) { el.parentElement.remove(); return; }
-              el.innerHTML = albums.length ? itemTileGrid(albums.map((a) => ({ id: 'lib-' + a.id, title: a.title, image: `/v1/library/albums/${a.id}/cover`, year: a.album_artist || a.year || '' })), 'album') : `<p class="muted small">${emptyText}</p>`;
+              el.innerHTML = albums.length ? itemTileGrid(albums.map((a) => ({ id: 'lib-' + a.id, title: a.title, image: `/v1/library/albums/${a.id}/cover`, year: [a.album_artist, a.year].filter(Boolean).join(' · ') })), 'album') : `<p class="muted small">${emptyText}</p>`;
               el.parentElement.hidden = false; el.parentElement.classList.add('fadein');
               if (albums.length) bindItemTiles(el, albums.map((a) => ({ id: 'lib-' + a.id, title: a.title })), 'album');
             };
