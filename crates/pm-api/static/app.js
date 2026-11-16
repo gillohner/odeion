@@ -235,8 +235,18 @@
   // A node without a route answers 404, or 405 when the path matches another method's route
   const noRoute = (e) => (e && (e.status === 404 || e.status === 405) ? new Error('This node doesn’t offer that yet: update it first') : e);
   // An Undo pressed says so at once (bringing back thousands of songs takes the node a moment)
-  // (it stays until the answer's own toast replaces it)
-  const bringingBack = () => toast('Bringing the songs back…', 'wait');
+  // (it stays until the answer's own toast replaces it). A node that stops answering doesn't leave it
+  // up for good: the request is given up and the toast says so. (While a scan writes, the node itself
+  // waits up to 10 minutes, identify.rs BUSY_PATIENCE, then answers why: the cut comes after that.)
+  // The node may still bring them back: the Identify card counts what is still skipped
+  const UNSKIP_MS = 11 * 60000;
+  const UNSKIP_LATE = 'The node stopped answering, so the songs may not be back. Your library › Node library shows how many are still skipped.';
+  const unskipSongs = (body) => {
+    toast('Bringing the songs back…', 'wait');
+    const ac = new AbortController(); ac.signal.why = new Error(UNSKIP_LATE);
+    const cut = setTimeout(() => ac.abort(ac.signal.why), UNSKIP_MS);
+    return api('POST', '/library/suggestions/unskip', body, { signal: ac.signal }).finally(() => clearTimeout(cut));
+  };
   // After an Undo the review page is drawn again: the focus goes to its heading (not Skip all, which
   // an Enter meant for the Undo would press), and only when it was left on the page's body or the
   // toast: a user who moved it meanwhile keeps it where they put it
@@ -7631,7 +7641,7 @@
             const ska = $('#idskipall', main); if (ska) ska.disabled = [...locked.values()].some((b) => b !== ska);
           };
           // Undo of a skip: the page is loaded again when it is still the one on screen (any generation)
-          const undoSkip = (body) => async () => { bringingBack(); const u = await api('POST', '/library/suggestions/unskip', body); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); focusReview(); } else if ($('#idbox')) renderIdentify(); };
+          const undoSkip = (body) => async () => { const u = await unskipSongs(body); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); focusReview(); } else if ($('#idbox')) renderIdentify(); };
           const MAX_CONFIRM = 500;
           const how = (o) => (o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search by tags');
           const holdWhy = { search: 'found by its title and artist only', weak: 'a weak match', other_release: 'on another release than the rest of the album' };
@@ -10083,7 +10093,7 @@
     // Skip all unsure: marked reviewed without an identity (kept out of re-checks); undoable
     // (the node's unskip of all brings back earlier skips too: the Undo says so when there are any)
     // (the Undo button goes with the click: the focus comes back to the card)
-    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { bringingBack(); const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); focusReview(); return; } await renderIdentify(); focusCardTitle(); } }); renderIdentify().then(() => focusUndo(ub)); }, ev);
+    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { const u = await unskipSongs({ all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); focusReview(); return; } await renderIdentify(); focusCardTitle(); } }); renderIdentify().then(() => focusUndo(ub)); }, ev);
     // (a second press to confirm: it undoes every "Leave as is" at once, and the node answers how many
     // came back, not which, so there is no Undo for it)
     const us = $('#idunskip'); if (us) {
@@ -10106,8 +10116,7 @@
         if (!byKey && Date.now() - idUnskip.armedAt < 500) return undefined;
         idUnskip.armedUntil = 0; idUnskip.sending = true; us.disabled = true;
         return busy(us, async () => {
-          bringingBack();
-          let u; try { u = await api('POST', '/library/suggestions/unskip', { all: true }); } finally { idUnskip.sending = false; }
+          let u; try { u = await unskipSongs({ all: true }); } finally { idUnskip.sending = false; }
           toast(`${countOf(u.restored, 'songs')} back for review`); await renderIdentify(); focusCardTitle();
         }, ev).finally(() => { if (!idUnskip.sending) { const b = $('#idunskip'); if (b) { b.disabled = false; if (idUnskip.armedUntil <= Date.now()) b.textContent = `Bring back ${n(c.skipped)} skipped`; } } });
       };
