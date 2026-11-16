@@ -709,6 +709,7 @@ jobs:
           ui-home-contact.js home-contact-shots
           ui-home-stale.js home-stale-shots
           ui-home-retry.js home-retry-shots
+          ui-home-trend-fail-chips.js home-trend-fail-chips-shots
           ui-progress-toast.js progress-toast-shots
           ui-move-toast.js move-toast-shots
           ui-queue-head-phone.js queue-head-phone-shots
