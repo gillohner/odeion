@@ -4,7 +4,8 @@
 // moved to Your library › Node library: Settings has neither, so both were dead ends. Now the owner's
 // Songs and Albums offer Add music (its chooser opens, 1 click), a listener reads where the music
 // comes from with no button, and Open Identify opens Node library with the Identify card on screen
-// and its title focused (1 click; before: a dead end, then 2 clicks and a scroll).
+// and its title focused (1 click; before: a dead end, then 2 clicks and a scroll). An empty page
+// has one Add music (the empty state's; the head's is shown once there is music to list).
 // At 1280, 1024, 768 and 360 px.
 //   node tools/ui-empty-ways-in.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -27,6 +28,9 @@ const nodeLib = {
   '/library/hidden': { body: Array.from({ length: 14 }, (_, k) => ({ path: `/music/Band/Album/${k + 1} Song.flac`, hidden_at: 1793631888 })) },
   '/library/stats': { body: { ...stats, tracks: 4, files: 4 } },
 };
+// Where the page shows an Add music button: the page head, the empty state or elsewhere in the page
+const visibleAdds = (page) => page.evaluate(() => [...document.querySelectorAll('#main button')].filter((b) => b.offsetParent && (b.matches('[data-addmusic]') || b.textContent.trim() === 'Add music'))
+  .map((b) => (b.closest('.page-head') ? 'head' : b.closest('.empty') ? 'empty' : 'other')));
 const emptyBox = (page) => page.evaluate(() => { const box = document.querySelector('.main .empty'); return box && { title: box.querySelector('h3')?.textContent, text: box.querySelector('p')?.textContent || '', buttons: [...box.querySelectorAll('button')].map((b) => b.textContent.trim()) }; });
 
 (async () => {
@@ -47,6 +51,12 @@ const emptyBox = (page) => page.evaluate(() => { const box = document.querySelec
           check(!/Settings/.test(e.text), `${T}: it no longer sends you to Settings (${e.text})`);
           check(/Add the folder with your music, or upload files/.test(e.text), `${T}: it says how music gets in (${e.text})`);
           check(e.buttons.length === 1 && e.buttons[0] === 'Add music', `${T}: one button, Add music (${e.buttons.join(', ')})`);
+          const adds = await visibleAdds(page);
+          check(adds.length === 1 && adds[0] === 'empty', `${T}: Add music is on the page once, in the empty state (${adds.join(', ')})`);
+          if (width < 600) {
+            const b = await page.locator('.main .empty button').boundingBox();
+            check(b && b.height >= 44 && b.width >= 44, `${T}: its Add music is at least 44 px (${b && `${b.width.toFixed(1)}×${b.height.toFixed(1)}`})`);
+          }
           const o = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
           check(o <= 0, `${T}: nothing wider than the screen (${o})`);
           await page.screenshot({ path: path.join(SHOTS, `owner${view.replace('/', '-')}-${width}.png`) });
@@ -54,6 +64,37 @@ const emptyBox = (page) => page.evaluate(() => { const box = document.querySelec
           const dlg = await page.waitForFunction(() => { const d = document.querySelector('dialog[open]'); return d && /Add music/.test(d.textContent) && /Add a folder or network share/.test(d.textContent); }, null, { timeout: 8000 }).then(() => true, () => false);
           check(dlg, `${T}: Add music opens the chooser with "Add a folder or network share" (${await page.evaluate(() => location.pathname)})`);
           await page.screenshot({ path: path.join(SHOTS, `owner${view.replace('/', '-')}-chooser-${width}.png`) });
+          check(!state.errors.length, `${T}: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
+      // With music in it, the owner's Songs and Albums keep Add music in the page head
+      for (const view of ['/tracks', '/albums']) {
+        const T = `${width} owner ${view} with music`;
+        const { page, context, state } = await fx.create(browser, width, { fixtures: { '/library/albums': { body: [{ id: 7, title: 'An Album', album_artist: 'Somebody', year: 2001, tracks: 1 }] } } });
+        try {
+          await fx.go(page, view);
+          const drawn = await page.waitForSelector(view === '/tracks' ? '#tracklist .track' : '#albumgrid .tile', { timeout: 8000 }).then(() => true, () => false);
+          check(drawn, `${T}: the list is drawn`);
+          if (!drawn) continue;
+          const adds = await visibleAdds(page);
+          check(adds.length === 1 && adds[0] === 'head', `${T}: one Add music, in the page head (${adds.join(', ')})`);
+          check(!state.errors.length, `${T}: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
+      // Songs without album tags: Albums' empty state offers Open Songs, so its head keeps Add music
+      {
+        const T = `${width} owner /albums, songs without albums`;
+        const { page, context, state } = await fx.create(browser, width, { fixtures: { '/library/stats': { body: { ...stats, tracks: 3, files: 3 } } } });
+        try {
+          await fx.go(page, '/albums');
+          const shown = await page.waitForSelector('.main .empty', { timeout: 8000 }).then(() => true, () => false);
+          check(shown, `${T}: the empty state shows`);
+          if (shown) {
+            const e = await emptyBox(page);
+            check(e.buttons.length === 1 && e.buttons[0] === 'Open Songs', `${T}: its button is Open Songs (${e.buttons.join(', ')})`);
+            const adds = await visibleAdds(page);
+            check(adds.length === 1 && adds[0] === 'head', `${T}: one Add music, in the page head (${adds.join(', ')})`);
+          }
           check(!state.errors.length, `${T}: no page errors (${state.errors.join(' | ')})`);
         } finally { await context.close(); }
       }

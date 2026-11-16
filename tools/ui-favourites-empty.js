@@ -2,7 +2,8 @@
 // to keep it here" with nothing to press, a dead end; the hearts are on Songs, Albums and Artists.
 // Now, with songs in the library, Open Songs opens Songs (1 click, owner or listener, also with
 // the listener's own homeserver connected). With an empty library the owner gets Add music (Your
-// library), as on the other empty pages, and a listener gets no button. A listener whose
+// library), as on the other empty pages, and a listener gets no button and is told the hearts
+// come once the node's owner adds music (not to press a heart with nothing to press). A listener whose
 // homeserver isn't connected still sees only Connect your homeserver (no empty state). At 1280,
 // 1024 and 768 px. Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-favourites-empty.js [repo] [shots]
@@ -20,7 +21,8 @@ const cases = [
   { name: 'listener-songs', opts: { role: 'listener', fixtures: fav({}) }, button: 'Open Songs', goes: 'Songs', url: '/tracks' },
   { name: 'listener-homeserver', opts: { role: 'listener', fixtures: fav({ homeserver: { connected: true } }) }, text: 'on your own homeserver', button: 'Open Songs', goes: 'Songs', url: '/tracks' },
   { name: 'owner-no-songs', opts: { tracks: [], fixtures: fav({}) }, button: 'Add music', goes: 'Your library', url: '/library' },
-  { name: 'listener-no-songs', opts: { role: 'listener', tracks: [], fixtures: fav({}) }, button: null },
+  { name: 'listener-no-songs', opts: { role: 'listener', tracks: [], fixtures: fav({}) }, text: 'Once the node’s owner adds music, press the heart on a song, album or artist to keep it here.', exact: true, button: null },
+  { name: 'listener-homeserver-no-songs', opts: { role: 'listener', tracks: [], fixtures: fav({ homeserver: { connected: true } }) }, text: 'Once the node’s owner adds music, press the heart on a song, album or artist to keep it here, on your own homeserver.', exact: true, button: null },
   { name: 'listener-homeserver-off', opts: { role: 'listener', fixtures: fav({ homeserver: { connected: false } }) }, noEmpty: true },
 ];
 
@@ -43,7 +45,8 @@ const cases = [
           if (!shown) continue;
           const e = await page.evaluate(() => { const box = document.querySelector('.main .empty'); return { title: box.querySelector('h3')?.textContent, text: box.querySelector('p')?.textContent || '', buttons: [...box.querySelectorAll('button')].map((b) => b.textContent.trim()) }; });
           check(e.title === 'Nothing hearted yet', `${width} ${c.name}: the title is "Nothing hearted yet" (${e.title})`);
-          check(e.text.includes(c.text || 'Press the heart on a song, album or artist'), `${width} ${c.name}: it says how to heart something (${e.text})`);
+          if (c.exact) check(e.text === c.text, `${width} ${c.name}: it says "${c.text}" (${e.text})`);
+          else check(e.text.includes(c.text || 'Press the heart on a song, album or artist'), `${width} ${c.name}: it says how to heart something (${e.text})`);
           if (c.button) check(e.buttons.length === 1 && e.buttons[0] === c.button, `${width} ${c.name}: one button, ${c.button} (${e.buttons.join(', ')})`);
           else check(!e.buttons.length, `${width} ${c.name}: no button (${e.buttons.join(', ')})`);
           const o = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
