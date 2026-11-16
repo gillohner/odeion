@@ -306,6 +306,17 @@ def find(pred):
     return next((n for n in ui_nodes() if pred(n)), None)
 
 
+def named(label):
+    """A node whose name (content-desc) or text is exactly `label`, read back from the dump's XML
+    escaping. A song row's buttons are named after the song ("More for Tone", "Play Tone"), not
+    after their tooltip ("More", "Play from here"). A WebView that adds the tooltip after the name
+    ("More for Tone, More") still counts."""
+    def pred(n):
+        return any(v == label or v.startswith(label + ", ")
+                   for v in map(html.unescape, re.findall(r'\s(?:content-desc|text)="([^"]*)"', n)))
+    return pred
+
+
 def tap(pred, what):
     """Tap a node once the screen holds still: the same node at the same place in two dumps a second
     apart. The connect page lays itself out again while the app looks for nodes on the network
@@ -1023,13 +1034,15 @@ def offline_playback(node, track):
     """A song downloaded in the app plays with no network and no node (see the module's doc)."""
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     time.sleep(3)
-    # On "This phone": "Play from here" plays on the page's zone, and the UI tour before (Play to)
+    # On "This phone": a row's play button (Play from here) plays on the page's zone, and the UI tour before (Play to)
     # may leave the page on the phone's zone on the node
     to_this_phone("this-phone-offline")
     mark = len(logcat())
     tap(lambda n: 'text="Library"' in n or 'content-desc="Library"' in n, "Library")
     tap(lambda n: 'text="Songs"' in n or 'content-desc="Songs"' in n, "Songs")
-    tap(lambda n: 'content-desc="More"' in n or 'text="More"' in n, "the song's ⋯ menu")
+    # The song row's buttons are named after their song (app.js rowWords)
+    title = track.get("title") or "this song"
+    tap(named(f"More for {title}"), "the song's ⋯ menu")
     tap(lambda n: 'text="Download"' in n or 'content-desc="Download"' in n, "Download")
     synced = re.compile(r"offline: synced downloaded=([1-9])")
     until("the song downloaded to the phone", lambda: synced.search(logcat()[mark:]), timeout=120, every=3)
@@ -1037,7 +1050,7 @@ def offline_playback(node, track):
     shot("9-downloaded")
     # Connected, it plays from the phone's copy (no stream: mobile data saved)
     here = len(logcat())
-    tap(lambda n: 'content-desc="Play from here"' in n or 'text="Play from here"' in n, "the song's play button")
+    tap(named(f"Play {title}"), "the song's play button")
     def from_copy():
         return next((m for m in NATIVE.finditer(logcat()[here:]) if m.group(1) == "playing"), None)
     m = until("the downloaded song playing while connected", from_copy, timeout=60)
@@ -1546,6 +1559,18 @@ def self_test():
           "session block: the app's own lines only, up to the next session")
     check(not media_session_playing(ours, "Tone")[0], "REJECT: the app paused while another app plays the same title")
     check(session_block(other) == "", "session block: none for an app without a session")
+    # A song row's buttons, found by the name the row gives them (the WebView's dump of a row)
+    row = ['<node index="0" text="" resource-id="" class="android.widget.Button" content-desc="More for Tone" bounds="[900,600][1000,700]" />',
+           '<node index="1" text="" resource-id="" class="android.widget.Button" content-desc="Play Tone" bounds="[0,600][100,700]" />',
+           '<node index="2" text="" resource-id="" class="android.widget.Button" content-desc="More for Tone &amp; Echo" bounds="[900,700][1000,800]" />',
+           '<node index="3" text="More" resource-id="" class="android.view.View" content-desc="" bounds="[0,0][1,1]" />']
+    check(next((n for n in row if named("More for Tone")(n)), None) is row[0], "a song's ⋯ found by its name, More for Tone")
+    check(next((n for n in row if named("Play Tone")(n)), None) is row[1], "a song's play button found by its name, Play Tone")
+    check(next((n for n in row if named("More for Tone & Echo")(n)), None) is row[2], "a name with & read back from the dump's escaping")
+    check(not any(named("More for Ton")(n) for n in row), "REJECT: part of a name is not the name")
+    check(named("Play Tone")('<node text="" content-desc="Play Tone, Play from here" />'), "a name with the tooltip after it")
+    check(not named("More")('<node subtext="More" content-desc="" />'), "REJECT: another attribute ending in text")
+    check(next((n for n in row if named("More")(n)), None) is row[3], "a bare More is only the node named More")
     if failed:
         print(f"self-test FAILED: {len(failed)} check(s)")
         return 1
