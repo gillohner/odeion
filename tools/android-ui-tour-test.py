@@ -6,6 +6,8 @@ zones-api30.png and zones-api35.png are ui-0-zones.png of main's phone-as-zone r
 WebView wraps the card's Play to under the transport row, API 35's keeps it on the volume line.
 zones-api35-selected.png is API 35's with shorter phone cards and five zones: the phone's card (the
 first) says selected and the next card's Play to is in view; that one is not the phone's.
+zones-api30-no-pill.png is API 30's once a stopped zone lost its "stopped" pill: the second card
+(Null output) has no state pill, so its name is where the first card ends.
 """
 import importlib.util
 import subprocess
@@ -84,6 +86,22 @@ class PlayToSpotTests(unittest.TestCase):
 
         with self.ocr_edited(title_case):
             self.assertIsNone(tour.zone_pick(FIX / "zones-api35-selected.png"))
+
+    def test_api30_next_card_without_a_pill(self):
+        # The phone's card plays (PLAYING); Null output, stopped, has no pill: its name ends the first card
+        names = ["Google sdk_gphone_x86_64", "Null output"]
+        pick = tour.zone_pick(FIX / "zones-api30-no-pill.png", names)
+        self.assertIsNotNone(pick, "Play to not read on zones-api30-no-pill.png")
+        kind, (x, y) = pick
+        self.assertEqual(kind, "play to")
+        self.assertTrue(236 <= x <= 298 and 326 <= y <= 354, f"{(x, y)} is outside the first card's Play to")
+        # (no names: one pill read, where the first card ends is not known)
+        self.assertIsNone(tour.zone_pick(FIX / "zones-api30-no-pill.png"))
+
+    def test_name_above_the_first_pill_is_no_top(self):
+        # "Google" is also in the WebView notice over the cards and the first card's own title:
+        # neither ends the first card (a name named only there finds nothing)
+        self.assertIsNone(tour.zone_pick(FIX / "zones-api30-no-pill.png", ["Google sdk_gphone_x86_64"]))
 
     def test_no_play_to(self):
         self.assertIsNone(tour.play_to_spot(FIX / "missing.png"))

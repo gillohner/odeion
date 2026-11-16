@@ -40,21 +40,25 @@ from pathlib import Path
 PLAY_TO_PSMS = ("11", "3", "6", "12")
 
 
-# A zone card's state pill, on its title line: the second one read is the second card's top.
+# A zone card's state pill, on its title line. A stopped zone's card has none (only playing,
+# paused and error say so), so a zone's name read below the first card's pill is a card's top too.
 CARD_STATES = ("PLAYING", "PAUSED", "STOPPED", "ERROR")
 
 
-def zone_pick(png):
+def zone_pick(png, names=()):
     """What the first zone card offers on a screenshot of the Zones page, read from the picture
     (OCR: the WebView's accessibility tree is stale by now): ("play to", (x, y)), the centre of its
     Play to in screen pixels; ("selected", (x, y)) when the card says "selected" (the page plays to
     that zone already, so the card has no Play to); or None. Only the first card counts: what lies
-    below the second card's state pill is another zone's (on a phone, shorter cards bring the next
-    card's Play to into view). So a find counts only between the first two state pills read; with
-    fewer than two read, where the first card ends is not known and nothing counts (None: the tour
+    below the next card's top is another zone's (on a phone, shorter cards bring the next card's
+    Play to into view). The first card's top is the first state pill read (the tour's zone plays);
+    the next card's is the next state pill or, as a stopped zone's card has no pill, the first word
+    of one of `names` (the zones' names) read below that pill. A find counts only between the two;
+    with no next top read, where the first card ends is not known and nothing counts (None: the tour
     taps the usual place). The words of every page mode are read together: one mode can read
     "Play to" where another reads only "selected" (API 35 with the phone's zone selected)."""
-    plays, picked, states = [], [], []
+    plays, picked, states, heads = [], [], [], []
+    firsts = {w for w in (re.sub(r"[^A-Za-z0-9]", "", (n or "").split(" ")[0]) for n in names) if len(w) > 2}
 
     def mid(r):
         return int(r["left"]) + int(r["width"]) // 2, int(r["top"]) + int(r["height"]) // 2
@@ -76,6 +80,8 @@ def zone_pick(png):
             word = re.sub(r"[^A-Za-z]", "", r["text"])
             if word in CARD_STATES:
                 states.append(mid(r)[1])
+            elif re.sub(r"[^A-Za-z0-9]", "", r["text"]) in firsts:
+                heads.append(mid(r)[1])
             elif word == "SELECTED":  # (the pill's word, not a song called Selected Works)
                 picked.append(mid(r))
         for a, b in zip(words, words[1:]):
@@ -84,13 +90,16 @@ def zone_pick(png):
                 right = int(b["left"]) + int(b["width"])
                 bottom = max(int(a["top"]) + int(a["height"]), int(b["top"]) + int(b["height"]))
                 plays.append(((left + right) // 2, (top + bottom) // 2))
-    # (the same pill read by several modes is one card: a few pixels apart at most)
-    tops = sorted(states)
-    cards = [y for i, y in enumerate(tops) if i == 0 or y - tops[i - 1] > 12]
-    if len(cards) < 2:
-        # (one pill read: the second card's may be the one OCR missed, and its Play to in view)
+    # (the same pill read by several modes is one card: a few pixels apart at most; a name above
+    # the first pill, such as the first card's own or one in a notice over the cards, is no top)
+    if not states:
         return None
-    top, below = cards[0] - 12, cards[1]
+    first = min(states)
+    later = [y for y in states + heads if y - first > 12]
+    if not later:
+        # (one pill and no name read: the second card's top may be what OCR missed, and its Play to in view)
+        return None
+    top, below = first - 12, min(later)
     found = [(p[1], p[0], "play to") for p in plays] + [(p[1], p[0], "selected") for p in picked]
     found = [f for f in found if top <= f[0] < below]
     if not found:
@@ -198,7 +207,7 @@ def run(h):
                 break
             last = pulled
         shot("ui-0-zones")
-        pick = zone_pick(out / "ui-0-zones.png")
+        pick = zone_pick(out / "ui-0-zones.png", [z.get("name") for z in api("GET", "/v1/zones")])
         if pick and pick[0] == "selected":
             # (an earlier step left the page on the phone's zone: its card has no Play to, and the
             # topmost Play to on the screen is another zone's)
