@@ -34,7 +34,8 @@ async function zoneQueue(browser, width, opts = {}) {
   const run = await fx.create(browser, width, { fixtures, zone: opts.browser ? 'browser' : 'z1', tracks, role: opts.role || 'owner', ...(width < 600 ? { mobile: true } : {}) });
   if (opts.android) await run.context.addInitScript(() => { window.pmDesktop = { platform: 'android' }; });
   if (opts.browser) await run.context.addInitScript((q) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 0, id: 101, pos: 0 })); }, JSON.stringify(items));
-  await run.context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [z1, z2] })); });
+  run.fixtures = fixtures;
+  await run.context.routeWebSocket(/\/v1\/events/, (ws) => { run.ws = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [z1, z2] })); });
   await run.context.route(/\/v1\/zones\/z1\/queue$/, (r) => {
     if (r.request().method() !== 'DELETE') return r.fallback();
     run.state.hits.push({ v: '/zones/z1/queue', m: 'DELETE', at: Date.now() }); // (this route answers before the fixture's, which logs the others)
@@ -149,6 +150,53 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
         await page.click('#qmenu');
         await until(async () => (await menu(page)).includes('Kitchen'), `the ⋯ menu opens (${await menu(page)})`);
         assert.match(await menu(page), /^# Move to \| [^#]*Kitchen[^#]*$/, 'the ⋯ menu');
+        assert.deepEqual(state.errors, [], 'no page errors');
+      } finally { await context.close(); }
+    });
+    // The ⋯ menu stays open across a redraw; the zone can change meanwhile (here the host moves the
+    // music to the Living room and the page follows): its items are for the zone it was opened on
+    // and do nothing for the new one (before, Clear queue emptied the Living room's queue)
+    const follow = async (run) => {
+      run.fixtures['/presence'] = { body: [{ mine: true, key: 'host', name: 'Host', zone: { id: 'z2', name: 'Living room' }, your_zone: 'z1' }] };
+      run.fixtures['/me/presence'] = { body: { visible: 'hidden' } };
+      run.ws.send(JSON.stringify({ type: 'zone_removed', seq: 1, zone: 'z9' })); // (another zone: asks /presence again)
+      await until(async () => run.page.evaluate(() => /Living room/.test(document.querySelector('.page-head') ? document.querySelector('.page-head').textContent : '')), 'the page follows to the Living room');
+    };
+    for (const what of ['Clear queue', 'Save as playlist', 'This browser']) {
+      await check(`360: ⋯ › ${what} after the page followed to another device does nothing to that device's queue`, async () => {
+        const run = await zoneQueue(browser, 360); const { page, context, state } = run;
+        try {
+          await page.click('#qmenu');
+          await until(async () => (await menu(page)).includes(what), `the ⋯ menu opens (${await menu(page)})`);
+          await follow(run);
+          assert.ok((await menu(page)).includes(what), 'the menu is still open');
+          const n = state.hits.length;
+          await page.locator('[data-mi]', { hasText: what }).click();
+          await sleep(500);
+          const sent = state.hits.slice(n).filter((h) => h.m !== 'GET');
+          assert.deepEqual(sent.map((h) => h.m + ' ' + h.v), [], 'nothing asked of the node');
+          await until(async () => page.evaluate(() => /Nothing changed: the Queue now shows Living room/.test(document.body.innerText)), 'the toast says why');
+          if (what === 'Clear queue') await page.screenshot({ path: path.join(shots, 'after-queue-followed-clear-360.png') });
+          assert.deepEqual(state.errors, [], 'no page errors');
+        } finally { await context.close(); }
+      });
+    }
+    // (the node's POST is shared while on its way; the list of playlists read after it was not: a tap
+    // then made a second playlist)
+    await check('360: a second Save as playlist while the first is finishing makes no second playlist', async () => {
+      const run = await zoneQueue(browser, 360); const { page, context, state } = run;
+      try {
+        let release; const held = new Promise((r) => { release = r; }); let asked = false;
+        await context.route(/\/v1\/playlists$/, async (r) => { if (r.request().method() !== 'GET' || !hit(state, 'POST', /^\/playlists\/from-queue$/)) return r.fallback(); asked = true; await held; return r.fulfill({ status: 200, contentType: 'application/json', body: '[]' }); });
+        await page.click('#qmenu');
+        await until(async () => (await menu(page)).includes('Save as playlist'), `the ⋯ menu opens (${await menu(page)})`);
+        await page.locator('[data-mi]', { hasText: 'Save as playlist' }).click();
+        await until(async () => asked, 'the first save reads the playlists again');
+        // (the ⋯ is busy: it doesn't open; were it to, its Save as playlist is pressed again)
+        await page.click('#qmenu'); await sleep(200);
+        if ((await menu(page)).includes('Save as playlist')) await page.locator('[data-mi]', { hasText: 'Save as playlist' }).click();
+        await sleep(300); release(); await sleep(500);
+        assert.equal(state.hits.filter((h) => h.m === 'POST' && h.v === '/playlists/from-queue').length, 1, 'saves sent');
         assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
     });

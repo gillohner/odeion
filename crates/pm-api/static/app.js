@@ -3380,6 +3380,7 @@
   // and the browser stops; into it the browser takes the zone's queue and the zone empties (radio
   // is the node's: it does not come along). The node's errors (403: a zone not open to listeners;
   // 400: an empty queue) show in the menu when it is open, else as a toast.
+  let queueSaving = false; // one Save as playlist at a time (the Queue page's)
   let moving = false; // one move at a time (review: a second Move here sent the same queue twice)
   const moveTo = async (target) => {
     const from = state.zone;
@@ -8948,20 +8949,33 @@
           }
           state.queueKey = queueKey();
           const moveItems = () => zoneList().filter((o) => o.id !== state.zone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }));
-          const saveQueue = async () => {
-            const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: state.zone };
-            try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); }
+          // (for the zone given: the ⋯'s items for the zone it was opened on; one save at a time, a
+          // second tap while the first is on its way made a second playlist)
+          const saveQueue = async (zid = state.zone) => {
+            if (queueSaving) return; queueSaving = true;
+            const body = zid === BROWSER ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: zid };
+            try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); } finally { queueSaving = false; }
           };
-          const clearQueue = async () => { const zid = state.zone; try { await zoneOp(zid, (t) => api('DELETE', `/zones/${encodeURIComponent(zid)}/queue`, undefined, { signal: t.signal })); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
+          const clearQueue = async (zid = state.zone) => { try { await zoneOp(zid, (t) => api('DELETE', `/zones/${encodeURIComponent(zid)}/queue`, undefined, { signal: t.signal })); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
           const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Move to' }, ...moveItems()]);
-          const qsv = $('#qsave'); if (qsv) qsv.onclick = saveQueue;
-          const qc = $('#qclear'); if (qc) qc.onclick = clearQueue;
+          const qsv = $('#qsave'); if (qsv) qsv.onclick = () => saveQueue();
+          const qc = $('#qclear'); if (qc) qc.onclick = () => clearQueue();
           // Phones: Radio and Shuffle stay on the head's one row; Save as playlist, Clear and Move to
           // (also in the Play to menu) are under its ⋯, which the desktop layout hides (app.css)
           // (an item gives the focus back to the ⋯ first, so the keyboard keeps its place: after Clear,
           // which takes the ⋯ away, the next draw puts it on Radio, as the Clear button did)
+          // The menu stays open across a redraw, and the zone can change meanwhile (following the host
+          // to another device, the zone gone, the Android app's USB DAC plugged in): an item is for the
+          // zone the ⋯ was opened on, and does nothing once the page is for another (it would have
+          // cleared, saved or moved that one's queue). While an item runs, the ⋯ doesn't open again.
           const qmn = $('#qmenu'); if (qmn) qmn.onclick = () => {
-            const back = (f) => () => { if (qmn.isConnected) qmn.focus(); return f(); };
+            if (BUSY.has(qmn)) return;
+            const zid = state.zone;
+            const back = (f) => () => {
+              if (qmn.isConnected) qmn.focus();
+              if (state.zone !== zid) { toast(`Nothing changed: the Queue now shows ${state.zone === BROWSER ? hereName().toLowerCase() : (state.zones[state.zone] || {}).name || 'another device'}`); render(); return; }
+              return f(zid);
+            };
             const own = [...(qsv ? [{ label: 'Save as playlist', icon: 'playlist', run: back(saveQueue) }] : []), ...(qc ? [{ label: 'Clear queue', icon: 'trash', run: back(clearQueue) }] : [])];
             const moves = moveItems().map((it) => ({ ...it, run: back(it.run) }));
             // (the other devices gone since the page was drawn, with nothing else here: no ⋯ any more)
