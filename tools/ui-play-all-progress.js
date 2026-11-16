@@ -1,7 +1,7 @@
 // Songs › Play all on a library bigger than one part of the node's answer (1000 songs).
-//   * The message counted nothing while thousands of songs loaded ("Loading 2500 songs…" for as
-//     long as it took). Now it counts up as each thousand comes: "Loading 2500 songs… 1000 so far",
-//     "… 2000 so far", and goes when the songs play.
+//   * The message counted nothing while thousands of songs loaded ("Loading 2,500 songs…" for as
+//     long as it took). Now it counts up as each thousand comes: "Loading 2,500 songs… 1,000 so far",
+//     "… 2,000 so far", and goes when the songs play.
 //   * A node that stopped answering mid-library left that message up and Play all disabled for good.
 //     Now a part with no answer for 30 s is given up: "The node stopped answering. Try again.", and
 //     Play all can be pressed again (and then plays).
@@ -54,9 +54,9 @@ const toastIs = (page, re, timeout = 8000) => page.waitForFunction((src) => new 
       const { page, context, state, parts } = await open((from) => (from === 0 ? 0 : 1500));
       try {
         await page.click('#shuffle');
-        await toastIs(page, /^Loading 2500 songs… 1000 so far$/);
+        await toastIs(page, /^Loading 2,500 songs… 1,000 so far$/);
         if (width === 360) await page.screenshot({ path: path.join(shots, `counting-${file}.png`) });
-        await toastIs(page, /^Loading 2500 songs… 2000 so far$/);
+        await toastIs(page, /^Loading 2,500 songs… 2,000 so far$/);
         await page.waitForFunction(() => !document.querySelector('#shuffle').disabled, null, { timeout: 8000 });
         await sleep(400);
         assert.doesNotMatch(await shown(page), /Loading/, 'gone once they play');
@@ -69,10 +69,10 @@ const toastIs = (page, re, timeout = 8000) => page.waitForFunction((src) => new 
       const { page, context, state, parts } = await open((from) => (from === 1000 && stuck ? null : 0), true);
       try {
         await page.click('#shuffle');
-        await toastIs(page, /^Loading 2500 songs… 1000 so far$/);
+        await toastIs(page, /^Loading 2,500 songs… 1,000 so far$/);
         await page.clock.fastForward(25000);
         await sleep(300);
-        assert.match(await shown(page), /^Loading 2500 songs/, 'still loading after 25 s');
+        assert.match(await shown(page), /^Loading 2,500 songs/, 'still loading after 25 s');
         assert.equal(await page.$eval('#shuffle', (b) => b.disabled), true, 'Play all waits meanwhile');
         await page.clock.fastForward(6000);
         await toastIs(page, /^The node stopped answering\. Try again\.$/, 5000);
@@ -94,7 +94,7 @@ const toastIs = (page, re, timeout = 8000) => page.waitForFunction((src) => new 
       const { page, context, state } = await open(() => 1500);
       try {
         await page.click('#shuffle');
-        await toastIs(page, /^Loading 2500 songs…$/);
+        await toastIs(page, /^Loading 2,500 songs…$/);
         await page.evaluate(() => { const t = document.querySelector('#toast'); t.textContent = 'Another message'; });
         await sleep(2200);
         assert.equal(await shown(page), 'Another message', 'the count stays out of it');
