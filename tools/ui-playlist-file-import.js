@@ -3,8 +3,10 @@
 // under way, Your library › Import said only "Importing…" in a small line, and once it was in, the new
 // playlist was one or two more clicks away (Open Playlists, then its row). Now the button itself says
 // Importing… (busy, no second file meanwhile), and the new playlist opens with what matched in a
-// toast. Someone who went to another page or is typing meanwhile stays there (toast with Open playlist);
-// a page drawn again meanwhile still shows the import under way, and the busy button opens no picker. A
+// toast. Someone who went to another page or is typing meanwhile stays there (toast with Open playlist),
+// and so does someone who left a name in Playlists' box or started a Move from Roon check meanwhile;
+// a page drawn again meanwhile still shows the import under way, and the busy button opens no picker
+// and takes no second file (on the button drawn again either). A
 // failed import says why (in the line under the button on Your library › Import, in a toast on
 // Playlists) and the button can be used again at once, for the same file too. At 1280, 1024, 768 px.
 //   node tools/ui-playlist-file-import.js [repo] [shots]
@@ -29,6 +31,8 @@ const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Dat
         const tag = `${width} ${pl.at}`;
         const { page, context, state } = await fx.create(browser, width, {});
         const net = { status: 200, wait: 900, body: ANSWER }; let sent = 0;
+        let roon = 0;
+        await page.route('**/v1/import/roon*', async (r) => { roon++; await r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ kind: 'tracks', name: null, rows: 3, matched: 2, unmatched: 1, not_identified: 0, favourites: 0, tags_added: 0, playlist: null, tags_found: [], misses: [], dry: true }) }); });
         await page.route('**/v1/playlists/import/file*', async (r) => {
           sent++; await sleep(net.wait);
           if (net.status === 200) state.collections = [fx.summary];
@@ -49,12 +53,19 @@ const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Dat
           check(!!mid && mid.focus && mid.said === 'Importing trip.m3u…', `${tag}: the keyboard stays on the button (${mid && mid.focus}) and a screen reader hears "${mid && mid.said}"`);
           const picker = await Promise.all([page.waitForEvent('filechooser', { timeout: 700 }).then(() => true, () => false), lab.click({ force: true }), page.keyboard.press('Enter')]).then(([x]) => x);
           check(!picker, `${tag}: a click on the busy button opens no file picker`);
+          // A second file given to the busy button is dropped, and the button is emptied again.
+          await page.locator(pl.input).setInputFiles(FILE); await sleep(150);
+          const second = await page.evaluate((q) => document.querySelector(q).value, pl.input);
+          check(sent === 1 && second === '', `${tag}: a second file on the busy button is not sent (${sent} requests, input "${second}")`);
           await page.screenshot({ path: path.join(SHOTS, `importing-${pl.at.replace(/\//g, '_')}-${width}.png`) });
           // The page drawn again meanwhile (to Songs and Back) still shows the import under way.
           await page.click('[data-view="tracks"]'); await until(() => page.evaluate(() => location.pathname === '/tracks'), 2000);
           await page.goBack(); await page.waitForSelector(pl.input, { state: 'attached' }); await sleep(200);
           const again = await busyLook(pl.input);
           check(!!again && /^Importing…$/.test(again.text) && again.busy === 'true' && again.off === 'true', `${tag}: the page drawn again meanwhile still says "${again && again.text}" (busy ${again && again.busy})`);
+          await page.locator(pl.input).setInputFiles(FILE); await sleep(150);
+          const third = await page.evaluate((q) => document.querySelector(q).value, pl.input);
+          check(sent === 1 && third === '', `${tag}: a file on the button drawn again is not sent either (${sent} requests, input "${third}")`);
           // 2. The new playlist opens, with what matched said once in a toast. One click: the choice itself.
           const opened = await until(() => page.evaluate(() => location.pathname === '/playlist/c1' && /Music and notes/.test(document.querySelector('#main h1')?.textContent || '')));
           const t = await page.evaluate(() => document.querySelector('#toast')?.textContent || '');
@@ -100,6 +111,27 @@ const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Dat
             await sleep(1300);
             const typing = await page.evaluate(() => ({ path: location.pathname, name: document.querySelector('#plname')?.value, open: [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent) }));
             check(typing.path === '/playlists' && typing.name === 'Road' && typing.open.includes('Open playlist'), `${tag}: someone typing a name meanwhile stays (${typing.path}, "${typing.name}"), with ${JSON.stringify(typing.open)}`);
+            // 6. A name typed and left (the box lost the keyboard): stay, the name is kept.
+            await fx.go(page, pl.at); await page.waitForSelector(pl.input, { state: 'attached' });
+            net.wait = 900; await page.locator(pl.input).setInputFiles(FILE); await sleep(200);
+            await page.locator('#plname').fill('Road'); await page.evaluate(() => document.activeElement && document.activeElement.blur());
+            await sleep(1300);
+            const leftName = await page.evaluate(() => ({ path: location.pathname, name: document.querySelector('#plname')?.value, focus: document.activeElement === document.body, open: [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent) }));
+            check(leftName.path === '/playlists' && leftName.name === 'Road' && leftName.focus && leftName.open.includes('Open playlist'), `${tag}: a name typed and left meanwhile keeps them there (${leftName.path}, "${leftName.name}"), with ${JSON.stringify(leftName.open)}`);
+          } else {
+            // 6. A Move from Roon check started meanwhile: stay, with its results; the toast offers Open playlist.
+            await fx.go(page, pl.at); await page.waitForSelector(pl.input, { state: 'attached' });
+            net.wait = 900; await page.locator(pl.input).setInputFiles(FILE); await sleep(200);
+            const r0 = roon; await page.locator('#roonfiles').setInputFiles({ name: 'roon-tracks.xlsx', mimeType: 'application/octet-stream', buffer: Buffer.from('PK fixture') });
+            await page.evaluate(() => document.activeElement && document.activeElement.blur());
+            await sleep(1300);
+            const moved = await page.evaluate(() => ({ path: location.pathname, roon: document.querySelector('#roonout')?.textContent || '', open: [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent) }));
+            check(roon === r0 + 1 && moved.path === pl.at && /2 of 3 matched this library/.test(moved.roon) && moved.open.includes('Open playlist'), `${tag}: a Move from Roon check started meanwhile keeps them there with its results (${moved.path}, ${roon - r0} checks), with ${JSON.stringify(moved.open)}`);
+            // 7. Nothing else done, the keyboard on the page's body: the new playlist still opens.
+            await fx.go(page, pl.at); await page.waitForSelector(pl.input, { state: 'attached' });
+            net.wait = 600; await page.locator(pl.input).setInputFiles(FILE); await sleep(100);
+            await page.evaluate(() => document.activeElement && document.activeElement.blur());
+            check(await until(() => page.evaluate(() => location.pathname === '/playlist/c1')), `${tag}: with nothing else started, the new playlist opens`);
           }
           check(!state.errors.length, `${tag}: no page errors (${state.errors.join('; ')})`);
         } finally { await context.close(); }

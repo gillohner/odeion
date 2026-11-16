@@ -571,9 +571,14 @@
   // goes up, the button says Importing… (aria-busy and aria-disabled, so the keyboard stays on it; a
   // page drawn again meanwhile shows it too) and opens no picker; then the new playlist opens, with
   // what matched in a toast. Someone who went to another page, or opened a menu, Now playing or a
-  // dialog, or is typing, stays where they are (the toast has Open playlist). A failure is said under
-  // the button (Your library › Import) or in a toast, and the button takes a file again, the same one too.
+  // dialog, is typing (or left a name or link in Playlists' boxes), has the keyboard on another control
+  // of the page, or started something else there meanwhile (a Move from Roon check or import, Create,
+  // Open) stays where they are (the toast has Open playlist). A failure is said under the button (Your
+  // library › Import) or in a toast, and the button takes a file again, the same one too.
   let plImport = null; // the file going up: { name }
+  // What else is started on these pages: how many times, and how many are still under way
+  const pageWork = { started: 0, busy: 0 };
+  const pageAct = (fn) => async (...a) => { pageWork.started++; pageWork.busy++; try { return await fn(...a); } finally { pageWork.busy--; } };
   const PL_IMPORT_LIMIT = 180000; // ms
   const PL_FILES = ['libplimport', 'plimport'];
   const plImportLook = () => PL_FILES.forEach((id) => {
@@ -587,7 +592,7 @@
   });
   const importPlaylistFile = async (input, outId) => {
     const f = input.files[0]; if (!f || plImport) { input.value = ''; return; }
-    const from = location.pathname; const focused = document.activeElement === input;
+    const from = location.pathname; const focused = document.activeElement === input; const started = pageWork.started;
     const out = () => document.getElementById(outId);
     const mine = plImport = { name: f.name, spin: false };
     plImportLook(); setTimeout(() => { if (plImport === mine) { mine.spin = true; plImportLook(); } }, 150);
@@ -603,10 +608,18 @@
       const said = `Imported “${j.name}”: ${j.imported} of ${j.parsed} matched${j.kept ? ` · ${countOf(j.kept, 'kept as links')}` : ''}${(j.unresolved || []).length ? ` · not matched: ${j.unresolved.slice(0, 4).map((d) => d.title).join(', ')}` : ''}`;
       api('GET', '/playlists').then((l) => { state.playlists = l; }, () => {});
       { const o = out(); if (o) o.textContent = ''; }
-      const a = document.activeElement;
-      const typing = a && a.matches('input:not([type="file"], [type="checkbox"], [type="radio"], [type="range"], [type="button"], [type="submit"], [type="reset"], [type="color"]), textarea, [contenteditable="true"]');
-      const here = location.pathname === from && !transients.some((t) => t.open()) && !document.querySelector('dialog[open]') && !typing;
-      if (here) { setView('playlist', j.id); toast(said); } else toast(said, '', { label: 'Open playlist', run: () => setView('playlist', j.id) });
+      // Still here, doing nothing else? Asked again after a menu's history entry is popped, just before it opens.
+      const here = () => {
+        const a = document.activeElement;
+        const typing = a && a.matches('input:not([type="file"], [type="checkbox"], [type="radio"], [type="range"], [type="button"], [type="submit"], [type="reset"], [type="color"]), textarea, [contenteditable="true"]');
+        // (the import button itself, or its copy on a page drawn again, and the body don't count)
+        const other = a && a !== document.body && a.id !== input.id && main.contains(a) && a.matches('input, select, textarea, button, a[href], summary, [tabindex]:not([tabindex="-1"])');
+        const left = ['plname', 'plshared'].some((id) => { const e = document.getElementById(id); return !!e && !!e.value.trim(); });
+        return location.pathname === from && !transients.some((t) => t.open()) && !document.querySelector('dialog[open]') && !typing && !other && !left
+          && pageWork.started === started && !pageWork.busy;
+      };
+      let go = here(); if (go && popPending) { await popPending; go = here(); }
+      if (go) { setView('playlist', j.id); toast(said); } else toast(said, '', { label: 'Open playlist', run: () => setView('playlist', j.id) });
     } catch (er) {
       const o = out(); if (o && !o.classList.contains('sr-only')) o.innerHTML = `<span class="warn-text">${esc(er.message)}</span>`; else { if (o) o.textContent = ''; toast(er.message, 'error'); }
     } finally {
@@ -637,31 +650,36 @@
       // import of what matched (roon_import.rs). Only the latest check draws; during the import the
       // files and options stay as they were. The chosen files are kept here and the input emptied, so
       // choosing the same files again checks them again; after an import, only new files offer Import.
+      // Import sends only the files whose latest check went through (a file whose check failed is
+      // never imported unseen: Check again, or choose it again).
       // A screen reader hears #roonsay only: what started, then one line with the outcome, not
       // every "Checking 2 of 3…" or the whole list of files.
-      let roonSeq = 0; let roonFiles = []; let roonDone = false;
+      let roonSeq = 0; let roonFiles = []; let roonOk = []; let roonDone = false;
       // (Emptied first and filled a frame later, so the same words twice are read twice.)
       let roonSaid = 0;
-      const roonSay = (t) => { const s = $('#roonsay'); if (!s) return; const n = ++roonSaid; s.textContent = ''; if (t) requestAnimationFrame(() => { if (n === roonSaid) s.textContent = t; }); };
+      const roonSay = (s, t) => { if (!s || !s.isConnected) return; const n = ++roonSaid; s.textContent = ''; if (t) requestAnimationFrame(() => { if (n === roonSaid) s.textContent = t; }); };
       const roonCtl = () => ['#roonfiles', '#roonfav', '#roonpl', '#roontags'].map((q) => $(q)).filter(Boolean);
-      const roonRun = async (dry) => {
-        const files = roonFiles; const out = $('#roonout'); const go = $('#roongo');
+      const roonRun = pageAct(async (dry) => {
+        const files = dry ? roonFiles : roonOk; const out = $('#roonout'); const go = $('#roongo');
+        // (this run's own status line and controls: a run left behind by leaving Import says nothing
+        // over a newer one and frees none of its controls)
+        const sayEl = $('#roonsay'); const tell = (t) => { if (out.isConnected) roonSay(sayEl, t); }; const ctl = roonCtl();
         const seq = ++roonSeq; go.disabled = true;
-        if (!files.length) { out.innerHTML = ''; roonSay(''); return; }
+        if (!files.length) { out.innerHTML = ''; tell(''); return; }
         const opts = `favourites=${$('#roonfav').checked}&playlist=${$('#roonpl').checked}&tags=${$('#roontags').checked}&dry_run=${dry}`;
         // What it is doing goes on the first line; the last results stay, dimmed, so the page keeps its height
         const say = (html) => { $$('.roonfile', out).forEach((e) => e.classList.add('stale')); const s = $('[data-roonstate]', out); if (s) s.outerHTML = html; else out.insertAdjacentHTML('afterbegin', html); };
-        const parts = []; let matched = 0; let rows = 0; let failed = false;
+        const parts = []; const ok = []; let matched = 0; let rows = 0; let failed = false;
         const many = files.length > 1 ? ` ${files.length} files` : '';
-        roonSay(dry ? `Checking${many}…` : `Importing${many}…`);
-        if (!dry) roonCtl().forEach((e) => { e.disabled = true; });
+        tell(dry ? `Checking${many}…` : `Importing${many}…`);
+        if (!dry) ctl.forEach((e) => { e.disabled = true; });
         try {
           for (const [i, f] of files.entries()) {
             say(`<p class="muted small" data-roonstate><span class="spin"></span> ${dry ? 'Checking' : 'Importing'}${files.length > 1 ? ` ${i + 1} of ${files.length}` : ''}…</p>`);
             try {
               const res = await fetch(`/v1/import/roon?file=${encodeURIComponent(f.name)}&${opts}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
               const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
-              matched += r.matched; rows += r.rows;
+              matched += r.matched; rows += r.rows; ok.push(f);
               const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
               const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}${r.playlist.kept ? ` and ${countOf(r.playlist.kept, 'links')} to match by hand` : ''}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
               parts.push(`<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
@@ -670,20 +688,24 @@
             } catch (e) { failed = true; parts.push(`<div class="roonfile"><div class="name">${esc(f.name)}</div><p class="small joberr">${esc(e.message)}</p></div>`); }
             if (dry && seq !== roonSeq) return; // (a newer check is on its way)
           }
-        } finally { if (!dry) roonCtl().forEach((e) => { e.disabled = false; }); }
-        if (!dry) roonDone = true;
-        out.innerHTML = (dry ? `<p class="muted small" data-roonstate>${failed ? 'Not every file could be checked; nothing changed yet. <button class="lnk" data-roon-again>Check again</button>' : 'Checked: nothing changed yet.'}</p>` : '<p class="small" data-roonstate>Imported.</p>') + parts.join('');
+        } finally { if (!dry) ctl.forEach((e) => { e.disabled = false; }); }
+        if (dry) roonOk = ok; else roonDone = true;
+        // (files whose check failed, not sent by Import)
+        const left = dry ? 0 : roonFiles.length - files.length;
+        const leftWords = left === 1 ? ' The file whose check failed was left out.' : left ? ` The ${left} files whose check failed were left out.` : '';
+        out.innerHTML = (dry ? `<p class="muted small" data-roonstate>${failed ? 'Not every file could be checked; nothing changed yet. <button class="lnk" data-roon-again>Check again</button>' : 'Checked: nothing changed yet.'}</p>` : `<p class="small" data-roonstate>${matched ? 'Imported.' : 'Nothing was imported.'}${leftWords}</p>`) + parts.join('');
         const again = $('[data-roon-again]', out); if (again) again.onclick = () => roonRun(true);
         go.disabled = !dry || !matched || roonDone;
         const nothing = dry && !matched && !failed;
         if (nothing) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Your library › Node library), then choose the files again.</p>');
         const tally = `${matched} of ${rows} matched this library`;
-        roonSay(nothing ? 'Checked: nothing in these files matched this library yet. Scan your music folders first, then choose the files again.'
+        tell(nothing ? 'Checked: nothing in these files matched this library yet. Scan your music folders first, then choose the files again.'
           : dry ? (failed ? `Not every file could be checked${matched ? `; in the others, ${tally}` : ''}. Nothing changed yet.${matched ? ' Import is ready for those.' : ''} Check again is above the results.`
             : `Checked: ${tally}. Nothing changed yet${roonDone ? '' : '; Import is ready'}.`)
-            : !failed ? `Imported: ${tally}.` : rows ? `Imported what matched (${tally}), but not every file could be imported. The results say which.` : 'Nothing could be imported. The results say why.');
+            : (!matched ? (failed ? 'Nothing was imported. The results say why.' : 'Nothing was imported: nothing in these files matched this library.')
+              : !failed ? `Imported: ${tally}.` : `Imported what matched (${tally}), but not every file could be imported. The results say which.`) + leftWords);
         if (!dry) { state.playlists = await api('GET', '/playlists').catch(() => state.playlists); }
-      };
+      });
       $('#roonfiles').onchange = (e) => { roonFiles = [...(e.target.files || [])]; e.target.value = ''; roonDone = false; roonRun(true); };
       ['#roonfav', '#roonpl', '#roontags'].forEach((q) => { $(q).onchange = () => { if (!roonDone) roonRun(true); }; });
       $('#roongo').onclick = () => roonRun(false);
@@ -1964,7 +1986,7 @@
         + `<div class="actions"><button class="btn ghost" id="dlrmall">${icon('trash')} Remove all downloads</button></div>`
       : `<div class="empty">${icon('download')}<h3>Nothing on this phone yet</h3><p>Download an album, a playlist or a song from its ⋯ menu: it plays here without your node, and saves mobile data.</p></div>`;
     const lists = $('#dllists', main);
-    if (listsOnly && lists) { lists.innerHTML = body; const h = $('.page-head', main); if (h) h.outerHTML = `<div class="page-head"><h2>Downloads${d.songs ? `<span class="count">${d.songs}</span>` : ''}</h2><div class="actions"></div></div>`; }
+    if (listsOnly && lists) { lists.innerHTML = body; const h = $('.page-head', main); if (h) h.outerHTML = `<div class="page-head"><h2>Downloads${d.songs ? `<span class="count">${esc(fmtCount(d.songs))}</span>` : ''}</h2><div class="actions"></div></div>`; }
     else main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p><div id="dllists">${body}</div><div class="set-group">${limit}</div>`;
     $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; return x ? dlKeep(x.kind, x.id, false, x.title) : undefined; });
     const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your playlists stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
@@ -8068,10 +8090,10 @@
           const hc = $('[data-hsconnect]', main); if (hc) hc.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) render(); };
           const sn = $('#smartnew'); if (sn) sn.onclick = () => setView('smart-edit', 'new');
           $$('[data-smart]', main).forEach((r) => r.onclick = () => setView('smart', r.dataset.smart));
-          $('#plcreate').onclick = async () => { const n = $('#plname').value.trim(); if (!n) { $('#plname').focus(); return; } try { await api('POST', '/playlists', { name: n }); toast(`Created “${n}”`); render(); } catch (e) { toast(e.message, 'error'); } };
+          $('#plcreate').onclick = pageAct(async () => { const n = $('#plname').value.trim(); if (!n) { $('#plname').focus(); return; } try { await api('POST', '/playlists', { name: n }); toast(`Created “${n}”`); render(); } catch (e) { toast(e.message, 'error'); } });
           $('#plname').onkeydown = (e) => { if (e.key === 'Enter') $('#plcreate').click(); };
           needsText($('#plname'), $('#plcreate')); needsText($('#plshared'), $('#plopenshared'));
-          const openShared = async () => { try { const t = await api('GET', `/shared/resolve?link=${encodeURIComponent($('#plshared').value)}`); setView('shared', t.id ? { user: t.user, id: t.id } : { user: t.user }); } catch (e) { toast(e.message, 'error'); } };
+          const openShared = pageAct(async () => { try { const t = await api('GET', `/shared/resolve?link=${encodeURIComponent($('#plshared').value)}`); setView('shared', t.id ? { user: t.user, id: t.id } : { user: t.user }); } catch (e) { toast(e.message, 'error'); } });
           $('#plopenshared').onclick = openShared; $('#plshared').onkeydown = (e) => { if (e.key === 'Enter' && $('#plshared').value.trim()) openShared(); };
           bindPlaylistFile($('#plimport'), 'plimportout');
           $$('[data-pl]', main).forEach((el) => el.onclick = (e) => { if (e.target.closest('[data-plplay]')) return; setView('playlist', el.dataset.pl); });
