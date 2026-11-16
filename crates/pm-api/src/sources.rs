@@ -547,7 +547,8 @@ pub fn open_http_stream(uri: &str) -> Result<Box<dyn FrameSource>, SourceError> 
 }
 
 /// [`open_http_stream`] with extra request headers (a bearer token for a cloud drive) and a
-/// format hint for answers that name none (`application/octet-stream`, no extension).
+/// format hint for answers that name none (`application/octet-stream`, no extension). With
+/// headers, a playlist answer is refused, not followed.
 pub fn open_http_stream_with(
     uri: &str,
     headers: &[(String, String)],
@@ -720,6 +721,11 @@ fn open_http_stream_via(
                 .unwrap_or("")
                 .to_string();
             if is_playlist(&url, &mime) && hop == 0 {
+                // A request with headers of its own (a drive's bearer token) is for one file,
+                // never a playlist: following one would send them to the host it names
+                if !headers.is_empty() {
+                    return Err(err("the file is a playlist, not audio".into()));
+                }
                 let text = read_playlist(resp).map_err(err)?;
                 url = first_stream_url(&text).ok_or_else(|| err("playlist has no stream URL".into()))?;
                 if let Some(limit) = limit {
@@ -1605,5 +1611,52 @@ mod tests {
         let [unsized_sent, sized_sent] = server_thread.join().unwrap();
         assert!(unsized_sent < BODY / 4, "read {unsized_sent} bytes of it");
         assert!(sized_sent < BODY / 4, "read {sized_sent} bytes of it");
+    }
+
+    #[test]
+    fn a_drives_token_never_goes_to_a_url_in_a_playlist() {
+        use std::io::{Read, Write};
+        // The other server: says what Authorization (if any) it was sent
+        let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let other_url = format!("http://{}/stream.mp3", other.local_addr().unwrap());
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for mut c in other.incoming().flatten() {
+                let mut req = [0u8; 4096];
+                let n = c.read(&mut req).unwrap_or(0);
+                let text = String::from_utf8_lossy(&req[..n]).to_ascii_lowercase();
+                let auth = text
+                    .lines()
+                    .find(|l| l.starts_with("authorization:"))
+                    .map(str::to_string);
+                let _ = seen_tx.send(auth);
+                let _ =
+                    c.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        });
+        // The drive: a file stored as a playlist that names the other server
+        let drive = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let drive_url = format!("http://{}/files/abc?alt=media", drive.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut c in drive.incoming().flatten() {
+                let mut req = [0u8; 4096];
+                let _ = c.read(&mut req);
+                let body = format!("{other_url}\n");
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = c.write_all(head.as_bytes());
+                let _ = c.write_all(body.as_bytes());
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+        let headers = [("Authorization".to_string(), "Bearer drive-secret".to_string())];
+        let r = open_http_stream_via(&client, &drive_url, &headers, Some("mp3"), None);
+        assert!(r.is_err(), "a drive file is never a playlist");
+        // Not asked at all is fine too
+        if let Ok(auth) = seen_rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            assert_eq!(auth, None, "the drive's token went to the playlist's server");
+        }
     }
 }
