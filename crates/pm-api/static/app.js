@@ -568,7 +568,7 @@
   // Playlists from files and moving from Roon (was Settings › Import)
   const importHtml = () => {
     const block = sBlock; const group = sGroup;
-      const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here and check them: nothing changes yet.</li><li>Import what matched.</li></ol><input type="file" id="roonfiles" accept=".xlsx,.csv" multiple aria-label="Roon export files"><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn" id="rooncheck">${icon('search')} Check</button><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout" aria-live="polite"></div>`));
+      const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here: they are checked right away, nothing changes yet.</li><li>Import what matched.</li></ol><label class="btn file-btn roonpick">${icon('upload')} Choose Roon export files<input type="file" id="roonfiles" accept=".xlsx,.csv" multiple></label><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout" aria-live="polite"></div>`));
     return group('Playlists from files', sBlock('', 'An M3U or M3U8 list, a CSV, or a Roon playlist export: each line is matched to a song (MusicBrainz, ISRC, then title and artist); what doesn’t match stays as its line.', `<label class="btn file-btn">${icon('upload')} Choose a playlist file<input type="file" id="libplimport" accept=".m3u,.m3u8,.csv,.xlsx"></label><div id="libplout" class="small" aria-live="polite"></div>`)
       + sRow('Playlists on a service', 'TIDAL, Spotify, Deezer and the others: open the playlist on Sources and choose Import.', '<button class="btn ghost" data-view-go="sources">Open Sources</button>'))
       + importTab;
@@ -587,32 +587,46 @@
       } catch (er) { out.innerHTML = `<span class="warn-text">${esc(er.message)}</span>`; }
       e.target.value = '';
     };
-      // Move from Roon: a dry run per file, then the import of what matched (roon_import.rs).
+      // Move from Roon: a dry run per file as soon as files are chosen or an option changes, then the
+      // import of what matched (roon_import.rs). Only the latest check draws; during the import the
+      // files and options stay as they were. The chosen files are kept here and the input emptied, so
+      // choosing the same files again checks them again; after an import, only new files offer Import.
+      let roonSeq = 0; let roonFiles = []; let roonDone = false;
+      const roonCtl = () => ['#roonfiles', '#roonfav', '#roonpl', '#roontags'].map((q) => $(q)).filter(Boolean);
       const roonRun = async (dry) => {
-        const files = [...($('#roonfiles').files || [])]; const out = $('#roonout');
-        if (!files.length) { toast('Choose the Roon export files first', 'error'); return; }
+        const files = roonFiles; const out = $('#roonout'); const go = $('#roongo');
+        const seq = ++roonSeq; go.disabled = true;
+        if (!files.length) { out.innerHTML = ''; return; }
         const opts = `favourites=${$('#roonfav').checked}&playlist=${$('#roonpl').checked}&tags=${$('#roontags').checked}&dry_run=${dry}`;
-        out.innerHTML = '<div class="skeleton" style="height:60px"></div>';
-        const parts = []; let matched = 0;
-        for (const f of files) {
-          try {
-            const res = await fetch(`/v1/import/roon?file=${encodeURIComponent(f.name)}&${opts}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
-            const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
-            matched += r.matched;
-            const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
-            const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}${r.playlist.kept ? ` and ${countOf(r.playlist.kept, 'links')} to match by hand` : ''}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
-            parts.push(`<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
-              + (r.tags_found.length ? `<p class="muted small">Roon tags: ${r.tags_found.slice(0, 12).map(([l, c]) => `${esc(l)} (${c})`).join(', ')}${r.tags_found.length > 12 ? '…' : ''}</p>` : '')
-              + (r.misses.length ? `<details class="small"><summary>${r.unmatched + r.not_identified} not moved, and why</summary><ul class="misses">${r.misses.map((m) => `<li><strong>${esc(m.what)}</strong>: ${esc(m.reason)}</li>`).join('')}</ul></details>` : '') + '</div>');
-          } catch (e) { parts.push(`<div class="roonfile"><div class="name">${esc(f.name)}</div><p class="small joberr">${esc(e.message)}</p></div>`); }
-        }
-        out.innerHTML = (dry ? '<p class="muted small">Checked: nothing changed yet.</p>' : '<p class="small">Imported.</p>') + parts.join('');
-        $('#roongo').disabled = !dry || !matched;
-        if (dry && !matched) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Your library › Node library), then check again.</p>');
+        // What it is doing goes on the first line; the last results stay, dimmed, so the page keeps its height
+        const say = (html) => { $$('.roonfile', out).forEach((e) => e.classList.add('stale')); const s = $('[data-roonstate]', out); if (s) s.outerHTML = html; else out.insertAdjacentHTML('afterbegin', html); };
+        const parts = []; let matched = 0; let failed = false;
+        if (!dry) roonCtl().forEach((e) => { e.disabled = true; });
+        try {
+          for (const [i, f] of files.entries()) {
+            say(`<p class="muted small" data-roonstate><span class="spin"></span> ${dry ? 'Checking' : 'Importing'}${files.length > 1 ? ` ${i + 1} of ${files.length}` : ''}…</p>`);
+            try {
+              const res = await fetch(`/v1/import/roon?file=${encodeURIComponent(f.name)}&${opts}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
+              const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
+              matched += r.matched;
+              const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
+              const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}${r.playlist.kept ? ` and ${countOf(r.playlist.kept, 'links')} to match by hand` : ''}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
+              parts.push(`<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
+                + (r.tags_found.length ? `<p class="muted small">Roon tags: ${r.tags_found.slice(0, 12).map(([l, c]) => `${esc(l)} (${c})`).join(', ')}${r.tags_found.length > 12 ? '…' : ''}</p>` : '')
+                + (r.misses.length ? `<details class="small"><summary>${r.unmatched + r.not_identified} not moved, and why</summary><ul class="misses">${r.misses.map((m) => `<li><strong>${esc(m.what)}</strong>: ${esc(m.reason)}</li>`).join('')}</ul></details>` : '') + '</div>');
+            } catch (e) { failed = true; parts.push(`<div class="roonfile"><div class="name">${esc(f.name)}</div><p class="small joberr">${esc(e.message)}</p></div>`); }
+            if (dry && seq !== roonSeq) return; // (a newer check is on its way)
+          }
+        } finally { if (!dry) roonCtl().forEach((e) => { e.disabled = false; }); }
+        if (!dry) roonDone = true;
+        out.innerHTML = (dry ? `<p class="muted small" data-roonstate>${failed ? 'Not every file could be checked; nothing changed yet. <button class="lnk" data-roon-again>Check again</button>' : 'Checked: nothing changed yet.'}</p>` : '<p class="small" data-roonstate>Imported.</p>') + parts.join('');
+        const again = $('[data-roon-again]', out); if (again) again.onclick = () => roonRun(true);
+        go.disabled = !dry || !matched || roonDone;
+        if (dry && !matched && !failed) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Your library › Node library), then choose the files again.</p>');
         if (!dry) { state.playlists = await api('GET', '/playlists').catch(() => state.playlists); }
       };
-      $('#roonfiles').onchange = () => { $('#roongo').disabled = true; $('#roonout').innerHTML = ''; };
-      $('#rooncheck').onclick = () => roonRun(true);
+      $('#roonfiles').onchange = (e) => { roonFiles = [...(e.target.files || [])]; e.target.value = ''; roonDone = false; roonRun(true); };
+      ['#roonfav', '#roonpl', '#roontags'].forEach((q) => { $(q).onchange = () => { if (!roonDone) roonRun(true); }; });
       $('#roongo').onclick = () => roonRun(false);
   };
   // The chosen tab's content, as the tab panel the tabs control
