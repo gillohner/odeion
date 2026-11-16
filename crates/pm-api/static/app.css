@@ -1899,11 +1899,13 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 .main > .stickyhead + * { margin-top: 0; }
 .stickyhead strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .stickyhead { height: 46px; margin: -18px -14px -28px; padding: 0 14px; top: -18px; } }
-.track .title:has(.idmark) { display: flex; align-items: center; min-width: 0; }
-.track .title:has(.idmark) > .lnk { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.track .title:has(.idmark) > .idmark { flex: none; }
+/* A song title that is a link (matched or not) is a flex row whose link cuts itself with "…": a link
+   running on past the title's "…" lost the right side of its keyboard focus ring */
+.track .title:has(> .lnk) { display: flex; align-items: center; min-width: 0; }
+.track .title:has(> .lnk) > .lnk { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.track .title:has(> .lnk) > .idmark, .track .title:has(> .lnk) > .dl-mark { flex: none; }
 /* (a playing row's bars keep their 12 px beside a long title) */
-.track .title:has(.idmark)::before { flex: none; }
+.track .title:has(> .lnk)::before { flex: none; }
 /* A listener (#46) plays the shared library; the owner's tags and settings aren't theirs (their bookmarks and collections are their own) */
 body.listener .nav-item[data-view="home"],
 body.listener .nav-item[data-view="radio"], body.listener .nav-item[data-view="sources"], body.listener .nav-item[data-view="identify"],
