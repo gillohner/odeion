@@ -619,7 +619,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
 .zone-card { display: flex; flex-direction: column; gap: 12px; }
 .zone-card.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
-.zone-card .zc-head { display: flex; align-items: center; gap: 10px; }
+.zone-card .zc-head { display: flex; align-items: center; gap: 10px; min-height: 24px; } /* the height a state pill gives it, with or without one */
 .zone-card .zc-head h3 { margin: 0; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .zone-card .zc-now { display: flex; gap: 12px; align-items: center; min-height: 56px; }
 .zone-card .zc-now .art, .zone-card .zc-now .np-art { width: 56px; height: 56px; flex: none; }
