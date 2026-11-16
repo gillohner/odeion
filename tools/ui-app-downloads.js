@@ -182,6 +182,11 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
     await page.evaluate(() => { window.__dl.items[0].here = 3; window.__dl.items[0].bytes = 91e6; window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: JSON.parse(JSON.stringify(window.__dl)) })); }); await sleep(300);
     const kept2 = await page.evaluate(() => [!!document.querySelector('#dllimit').__kept, document.querySelector('#dllists').innerText]);
     check(kept2[0] && /3 of 3 songs here/.test(kept2[1]), `${at}: a song done redraws the lists, not the limit picker (${JSON.stringify(kept2[0])})`);
+    // A big count after such an event keeps its separators, as when the page is drawn (1,200, not 1200)
+    await page.evaluate(() => { window.__dl.songs = 1200; window.__dl.items[0].here = 2; window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: JSON.parse(JSON.stringify(window.__dl)) })); }); await sleep(300);
+    const bigHead = await page.evaluate(() => [!!document.querySelector('#dllimit').__kept, (document.querySelector('#main .page-head .count') || {}).textContent || '']);
+    check(bigHead[0] && bigHead[1] === '1,200', `${at}: after a download event the head count reads ${JSON.stringify(bigHead[1])}`);
+    await page.evaluate(() => { window.__dl.songs = 3; window.__dl.items[0].here = 3; window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: JSON.parse(JSON.stringify(window.__dl)) })); }); await sleep(300);
     const fetched = (await calls(page, 'downloads_state')).length;
     check(/Journey/.test(text) && /2 of 3 songs here/.test(text) && /61\.0 MB/.test(text) && /1 stay online/.test(text) && /waiting/.test(text), `${at}: each kept thing with its songs here and size`);
     await page.screenshot({ path: path.join(SHOTS, `storage-${w}.png`), fullPage: true });
