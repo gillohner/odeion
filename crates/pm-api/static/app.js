@@ -6668,8 +6668,18 @@
   // A Discover item as a shared song row or tile.
   const asRow = (it) => ({ title: itemName(it), artist: it.artist, album: it.versions ? `${it.versions + 1} versions` : null, id: idOf(it.page || it.uri), page: it.page || it.uri, uri: it.in_library ? null : it.playable, track_id: it.in_library ? it.in_library.id : null, image: it.image });
   const asTile = (it) => ({ id: idOf(it.page || it.uri), title: itemName(it), image: it.image, year: it.artist || '' });
+  // A Home row that didn't answer has Try again: it asks for that row again in place, under a
+  // placeholder of the row's own height (nothing below moves). A keyboard that pressed it stays
+  // with the row: on its new Try again if it fails again, else on the row itself.
+  const retryOn = (el, again) => { const b = $('[data-hretry]', el); if (b) b.onclick = () => again(document.activeElement === b); };
+  const holdRow = (el) => { el.innerHTML = `<div class="skeleton" style="height:${Math.round(el.offsetHeight)}px"></div>`; };
+  const focusRetry = (el, kept) => {
+    if (!kept || !el || !el.isConnected) return;
+    const b = $('[data-hretry]', el); if (b) { b.focus(); return; }
+    const row = el.closest('.section') || el; row.tabIndex = -1; row.focus({ preventScroll: true });
+  };
   const homeBody = (sec, name, full) => {
-    if (sec.error) return `<p class="muted small">Pubky did not answer: ${esc(sec.error)}</p>`;
+    if (sec.error) return `<p class="muted small hfail">Pubky did not answer: ${esc(sec.error)} <button class="btn sm" type="button" data-hretry>Try again</button></p>`;
     if (sec.needs === 'pubky') return `<div class="card small">${esc(sec.note)} <button class="btn sm primary" data-home-signin>Sign in with Pubky Ring</button></div>`;
     if (sec.needs === 'location') return `<div class="card small">${esc(sec.note)} <span class="row" style="gap:6px;display:inline-flex"><input class="input" data-city placeholder="Your city" style="width:180px"><button class="btn sm primary" data-city-save>Save</button></span></div>`;
     if (sec.needs === 'contact') return `<p class="muted small">${esc(sec.note)}</p>`;
@@ -7347,7 +7357,9 @@
             s.remove();
           };
           // Local rows first: recently played, recently added, forgotten favourites
-          api('GET', '/library/home?limit=12').then((h) => {
+          // A row that didn't answer says so with Try again (retryOn); the library's three rows come in one answer
+          const LOCAL = ['played', 'added', 'forgotten'];
+          const loadLocal = (kept) => api('GET', '/library/home?limit=12').then((h) => {
             if (!here()) return;
             const albumRow = (k, list, emptyText) => {
               const el = $(`#h-${k} .hbody`); if (!el) return;
@@ -7369,7 +7381,20 @@
                 fe.innerHTML = songRows(songs, { numbers: 'index' }); fe.parentElement.hidden = false; fe.parentElement.classList.add('fadein'); bindSongRows(fe, songs, {});
               }
             }
-          }).catch(() => { if (here()) for (const k of ['played', 'added', 'forgotten']) { const el = $(`#h-${k} .hbody`); if (el && el.querySelector('[aria-hidden="true"], .skeleton')) { el.innerHTML = '<p class="muted small">The library did not answer.</p>'; el.parentElement.hidden = false; } } });
+          }).catch(() => {
+            if (!here()) return;
+            for (const k of LOCAL) {
+              const el = $(`#h-${k} .hbody`);
+              if (el && el.querySelector('[aria-hidden="true"], .skeleton')) {
+                el.innerHTML = '<p class="muted small hfail">The library did not answer. <button class="btn sm" type="button" data-hretry>Try again</button></p>'; el.parentElement.hidden = false;
+                retryOn(el, (kept) => {
+                  for (const j of LOCAL) { const b = $(`#h-${j} .hbody`); if (b && b.querySelector('[data-hretry]')) holdRow(b); }
+                  loadLocal(kept ? k : null);
+                });
+              }
+            }
+          }).then(() => { if (kept && here()) focusRetry($(`#h-${kept} .hbody`) || $('#h-played .hbody'), true); });
+          loadLocal(null);
           // ListenBrainz's picks for the user, when connected (Settings › ListenBrainz).
           api('GET', '/listenbrainz').then(async (lb) => {
             if (!lb.connected || !here()) return;
@@ -7380,17 +7405,18 @@
             bindSongRows($('#h-lb'), songs, {});
           }).catch(() => { /* not connected or not answering: no section */ });
           // Every Pubky section in parallel, each rendered as it arrives.
-          for (const name of ['trending-songs', 'trending-albums', 'trending-artists', 'following', 'tags', 'concerts', 'podcasts', 'yours', 'new'].filter(showRow)) {
-            loadHomeSection(name, name.startsWith('trending') ? win : null).then((sc) => {
+          const loadPubky = (name, kept) => loadHomeSection(name, name.startsWith('trending') ? win : null).then((sc) => {
               const el = $(`#h-${name} .hbody`); if (!el || !here()) return;
               if (sc.needs === 'contact') { noContact(el.parentElement); return; }
               el.innerHTML = homeBody(sc, name, false); el.parentElement.classList.add('fadein'); bindHome(el, sc);
+              retryOn(el, (kept) => { holdRow(el); loadPubky(name, kept); });
+              focusRetry(el, kept);
               const see = $(`#h-${name} [data-seeall]`); if (see) see.hidden = !(sc.items.length > 6 || sc.tags.length > 20);
               // Its height and its See all for the next visit's placeholder (these rows mix songs,
               // covers and events; See all can take the header a second line)
               homeCount('h:' + name, Math.round(el.offsetHeight)); if (see) homeCount('s:' + name, see.hidden ? 0 : 1);
             });
-          }
+          for (const name of ['trending-songs', 'trending-albums', 'trending-artists', 'following', 'tags', 'concerts', 'podcasts', 'yours', 'new'].filter(showRow)) loadPubky(name, false);
           break;
         }
         case 'home-section': {
@@ -7398,9 +7424,16 @@
           main.innerHTML = backBtn('home', 'Home') + pageHead(HOME_TITLES[section] || 'Home') + (section && section.startsWith('trending') ? `<div class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === (window || '7d') ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</div>` : '') + '<div id="hsfull"><div class="skeleton" style="height:400px"></div></div>';
           $('[data-back]', main).onclick = () => goBack('home');
           $$('[data-win]', main).forEach((b) => b.onclick = () => setView('home-section', { section, window: b.dataset.win }, 'replace'));
-          const sc = await loadHomeSection(section, section.startsWith('trending') ? window || '7d' : null, 60);
-          if (state.view !== 'home-section') return;
-          const el = $('#hsfull'); el.innerHTML = homeBody(sc, section, true); el.classList.add('fadein'); bindHome(el, sc);
+          // (an answer for a window since left, or a page since left, draws nothing)
+          const shown = state.viewArg;
+          const fill = async (kept) => {
+            const sc = await loadHomeSection(section, section.startsWith('trending') ? window || '7d' : null, 60);
+            const el = $('#hsfull'); if (state.view !== 'home-section' || state.viewArg !== shown || !el) return;
+            el.innerHTML = homeBody(sc, section, true); el.classList.add('fadein'); bindHome(el, sc);
+            retryOn(el, (k) => { holdRow(el); fill(k); });
+            focusRetry(el, kept);
+          };
+          await fill(false);
           break;
         }
         case 'tag': {
