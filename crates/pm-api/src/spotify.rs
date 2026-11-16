@@ -235,6 +235,8 @@ pub(crate) struct Pending {
     pub(crate) who: Who,
     /// A listener's: the browser cookie it must come back with (`accounts::login_binding`).
     binding: Option<String>,
+    /// When it started: it waits [`crate::tidal::SIGN_IN_FOR`] at most.
+    started: std::time::Instant,
 }
 
 pub(crate) fn pending() -> &'static Mutex<HashMap<String, Pending>> {
@@ -878,15 +880,21 @@ pub(crate) async fn login(
         crate::project_apps::return_state(&nonce, &callback_uri(&s, &headers))
     };
     let binding = crate::accounts::login_binding("spotify", &who);
-    pending().lock().expect("pending").insert(
-        nonce,
-        Pending {
-            verifier,
-            redirect: redirect.clone(),
-            who,
-            binding: binding.as_ref().map(|(v, _)| v.clone()),
-        },
-    );
+    {
+        let now = std::time::Instant::now();
+        let mut pending = pending().lock().expect("pending");
+        crate::tidal::make_room(&mut pending, |p| p.started, now);
+        pending.insert(
+            nonce,
+            Pending {
+                verifier,
+                redirect: redirect.clone(),
+                who,
+                binding: binding.as_ref().map(|(v, _)| v.clone()),
+                started: now,
+            },
+        );
+    }
     let mut url = url::Url::parse(&format!("{}/authorize", accounts_base(&s))).map_err(upstream)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -985,10 +993,12 @@ async fn finish_login(
         redirect,
         who,
         binding,
+        ..
     } = pending()
         .lock()
         .expect("pending")
         .remove(crate::project_apps::state_nonce(&state))
+        .filter(|p| p.started.elapsed() < crate::tidal::SIGN_IN_FOR)
         .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in state; start again"))?;
     crate::accounts::check_login("spotify", &who, binding.as_deref(), &finish)?;
     let c = creds(s);
