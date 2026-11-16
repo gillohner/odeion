@@ -299,7 +299,7 @@ html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; 
 .pop-item:hover { background: var(--surface-3); }
 .pop-item.on { background: var(--accent-soft); color: var(--accent-strong); }
 .pop-item .sub { display: block; font-size: var(--fs-xs); color: var(--muted); }
-.pop-item .state { margin-left: auto; font-size: var(--fs-xs); color: var(--muted); }
+.pop-item .state { margin-left: auto; font-size: var(--fs-xs); color: var(--muted); flex: none; white-space: nowrap; }
 /* A zone row with Move here beside it (the row and the action are two buttons: one is not nested in the other) */
 .pop-row { display: flex; align-items: center; gap: 2px; }
 .pop-row > .pop-item { flex: 1; min-width: 0; }
@@ -1952,7 +1952,7 @@ body.listener .np-tags, body.listener [data-sel="tag"], body.listener [data-sel=
 .qp-zone .grow, .qp-src .grow { flex: 1; min-width: 0; }
 .qp-zone .name, .qp-src .name { display: block; font-weight: 600; }
 .qp-zone .sub, .qp-src .sub { display: block; font-size: var(--fs-xs); color: var(--muted); }
-.qp-zone .state { margin-left: auto; font-size: var(--fs-xs); color: var(--muted); }
+.qp-zone .state { margin-left: auto; font-size: var(--fs-xs); color: var(--muted); flex: none; white-space: nowrap; }
 .qp-src .src-badge.ico { flex: none; }
 .qpanel .path { margin: 0 4px 4px; }
 .path.compact .path-head { padding: 8px 10px; font-size: var(--fs-sm); }

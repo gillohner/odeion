@@ -658,6 +658,7 @@ jobs:
           ui-phone-zone-cards.js phone-zone-cards-shots
           ui-zones-quiet.js zones-quiet-shots
           ui-zone-paused-error.js zone-paused-error-shots
+          ui-zone-state-words.js zone-state-words-shots
           ui-wrong-match.js wrong-match-shots
           ui-favourites-count.js favourites-count-shots
           ui-empty-head-count.js empty-head-count-shots

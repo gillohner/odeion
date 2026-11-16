@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-16
 
+- **Play to and the Sound panel say what each zone is doing, as the Zones page does.** The Play to list only marked a zone that was playing, so a paused zone, or a speaker that had stopped with an error, looked free; you found out after picking it. It now says "playing", "paused" or "error" (in the warning colour, and a screen reader also reads the reason) beside each zone, the same words as the Zones page and Settings. The Sound panel's "Playing on" line says "error" too, and changes while it is open when the zone fails or recovers.
 - **A song with no artist no longer reads "· Album".** In song lists on a tablet or a narrow window, where the album joins the artist line, a song without an artist (untagged files) showed a stray dot before its album. The line is now just the album.
 - **A long song title keeps its whole focus ring.** With the keyboard on a song whose title is cut with “…”, the ring around the title had no right side: the link ran on, hidden, past the “…”. Songs with a Match mark already ended the link at the “…”; every song title now does, so the ring is whole and the title sits where it did.
 - **An album without an album artist no longer reads “· 2020”.** On the Albums page, an album whose files carry no album artist (or whose album artist was cleared in Edit tags) showed a dot before its year under the title. It now shows just the year, an album with an artist and no year shows just the artist, and the dot appears only between the two.
