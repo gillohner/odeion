@@ -102,9 +102,9 @@ const ringOn = (page, id) => page.evaluate((x) => { const l = document.getElemen
         check(!after.go, `${width}: Import is ready once something matched`);
         await page.screenshot({ path: path.join(SHOTS, `checked-${width}.png`), fullPage: true });
 
-        // Import: the real run, with the options as checked; the controls wait during it.
+        // Import: the real run, with the options as checked; the controls wait during it. A double press sends it once.
         const last = calls.length;
-        await page.locator('#roongo').click({ timeout: 2000 }).catch(() => {});
+        await page.locator('#roongo').dblclick({ timeout: 2000 }).catch(() => {});
         const during = await page.evaluate(() => ['#roonfiles', '#roonfav', '#roonpl', '#roontags'].every((q) => document.querySelector(q).disabled));
         await page.waitForFunction(() => /Imported\./.test(document.querySelector('#roonout').textContent), null, { timeout: 5000 }).catch(() => {});
         const done = await page.evaluate(() => ({ text: document.querySelector('#roonout').textContent, go: document.querySelector('#roongo').disabled, free: ['#roonfiles', '#roonfav', '#roonpl', '#roontags'].every((q) => !document.querySelector(q).disabled) }));
