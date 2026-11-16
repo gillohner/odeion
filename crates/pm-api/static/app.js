@@ -5249,6 +5249,13 @@
       return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms), (t.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div>${cur ? '' : '<p class="small muted">No match now.</p>'}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${body}</div></div>`;
     };
     const draw = () => {
+      // None of the songs is in the library now (Back or a reload brings the page back for songs
+      // removed since; the node leaves missing songs out): say so, and the way on, not a bare intro
+      if (!page.albums.length) {
+        main.innerHTML = pageHead('Wrong match?', null) + emptyState('search', 'These songs are no longer in your library', 'They were removed, or moved to another folder. If one was moved, find it in Songs and choose Wrong match? in its menu again.', { id: 'fxsongs', label: 'Open Songs' });
+        $('#fxsongs', main).onclick = () => setView('tracks');
+        return;
+      }
       const say = `Pick the right recording, search MusicBrainz for it, or choose Not matched. The match you replace is never picked again for this song. ${esc(files)} Tags you already published on Pubky for the old match stay on it.`;
       // (on a phone it folds under the title, as Confirm matches' does, so the first choice is on the first screen)
       const opened = !!$('#main details.idhow[open]'); // (a search redraws the page: an opened fold stays open)
