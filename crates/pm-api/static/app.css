@@ -633,6 +633,8 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .zone-card .zc-text { min-width: 0; flex: 1; }
 .zone-card .zc-text .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .zone-card .zc-text .sub { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Why a zone couldn't play is read whole: it wraps, not cut with "…" */
+.zone-card .zc-text .sub.warn-text, .zone-card .zc-text .sub:has(> .warn-text) { white-space: normal; overflow-wrap: anywhere; }
 .zone-card .zc-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 /* The placeholder shows the zone's mark, not a blank grey square; the ways to one device are chips */
 .zone-card .zc-ph { display: flex; align-items: center; justify-content: center; color: var(--muted); }
