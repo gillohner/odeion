@@ -1,4 +1,4 @@
-// On a phone a page's plain buttons (Settings › Library's Add folder and Scan now, Import's Check
+// On a phone a page's plain buttons (Settings › Library's Add folder and Scan now, Import's Choose Roon export files
 // and Import, an empty page's Add music) are 44 px taps, like a dialog's; an icon button stays
 // square, Back keeps its height so the page doesn't move, and desktop keeps its compact buttons. On the
 // Playlists page each box shares its row with its button, so the playlists start higher.
@@ -18,7 +18,7 @@ const pages = [
   ['/library', ['Sign in']],
   ['/albums', ['Add music']],
   ['/settings/library', ['Add folder', 'Scan now', 'Add share']],
-  ['/library/import', ['Choose a playlist file', 'Check', 'Import', 'Open Sources']],
+  ['/library/import', ['Choose a playlist file', 'Choose Roon export files', 'Import', 'Open Sources']],
   ['/zones', ['Group outputs']],
 ];
 

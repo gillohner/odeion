@@ -658,7 +658,12 @@ html[data-shell="phone"] .zone-card { position: relative; }
 html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phone"] .zone-card .zc-now > .pill { flex: none; }
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .toolbar .input { width: 260px; }
-.file-btn input { display: none; }
+/* A file button: the label is the button; its input stays out of sight but in the Tab order
+   (Enter or Space opens the file picker), and the button shows the keyboard's focus */
+.file-btn { position: relative; }
+.file-btn input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; clip-path: inset(50%); pointer-events: none; }
+.file-btn:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.file-btn:has(input:disabled) { opacity: 0.45; cursor: not-allowed; }
 /* Account pills carry names (users, servers): their case is kept */
 .pill.account { text-transform: none; letter-spacing: 0; font-size: var(--fs-xs); }
 .pill { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 8px; border-radius: var(--r-pill); background: var(--surface-3); color: var(--fg-2); }
@@ -1265,8 +1270,10 @@ a.btn { text-decoration: none; }
 .jobcur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .joberr { color: var(--bad); }
 /* Move from Roon */
-#roonmove input[type=file] { margin: 8px 0; max-width: 100%; }
 #roonmove .check { display: block; margin: 4px 0; }
+.roonpick { margin-bottom: 6px; }
+.roonpick ~ .toolbar { margin-top: 8px; }
+.roonfile.stale { opacity: 0.5; }
 /* Phones: a checkbox's whole line is a 44 px tap (the box itself is 13 px; Roon, DSP, ListenBrainz, people) */
 html[data-shell="phone"] label.check { min-height: 44px; }
 .steps { padding-left: 18px; margin: 4px 0 8px; }
