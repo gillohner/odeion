@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-16
 
+- **A song with no artist no longer reads "· Album".** In song lists on a tablet or a narrow window, where the album joins the artist line, a song without an artist (untagged files) showed a stray dot before its album. The line is now just the album.
 - **A long song title keeps its whole focus ring.** With the keyboard on a song whose title is cut with “…”, the ring around the title had no right side: the link ran on, hidden, past the “…”. Songs with a Match mark already ended the link at the “…”; every song title now does, so the ring is whole and the title sits where it did.
 - **An album without an album artist no longer reads “· 2020”.** On the Albums page, an album whose files carry no album artist (or whose album artist was cleared in Edit tags) showed a dot before its year under the title. It now shows just the year, an album with an artist and no year shows just the artist, and the dot appears only between the two.
 - **An empty list doesn't say "0" beside its title.** Genres, Albums, Artists, Songs and Playlists read "Genres 0" above "No genres yet" (and Albums with Favourites on, "0 of 0"), saying the same thing twice; Favourites already didn't. With nothing in the list the title stands alone and the note below says it; with something in it the count is there as before.

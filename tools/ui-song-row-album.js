@@ -109,6 +109,32 @@ const rowReport = () => [...document.querySelectorAll('#main .tracks[data-list="
         check(!state.errors.length, `${T}: no page errors (${state.errors.join(' | ')})`);
       } finally { await context.close(); }
     }
+    // A song with no artists (untagged files): under 900 px its artist line is the album alone,
+    // never "· Journey"; wider, the line is empty and the album keeps its column
+    for (const width of [1024, 900, 768, 600]) {
+      const T = `${width} no artists`;
+      const bare = [
+        { ...fx.track, id: 1, title: 'No artists in the answer', artists: undefined, artist: undefined },
+        { ...fx.track, id: 2, title: 'Untagged rip', artists: [] },
+        { ...fx.track, id: 3, title: 'Tagged song' },
+      ];
+      const { page, context, state } = await fx.create(browser, width, { tracks: bare });
+      try {
+        await fx.go(page, '/tracks');
+        await page.waitForFunction(() => document.querySelectorAll('#main .track').length >= 3, null, { timeout: 8000 });
+        const by = await page.evaluate(() => [...document.querySelectorAll('#main .track .by')].map((e) => e.innerText.trim()));
+        if (width > 900) {
+          check(by[0] === '' && by[1] === '' && by[2] === 'Sefa, Dr. Peacock', `${T}: the album keeps its column; no artists, no artist line (${JSON.stringify(by)})`);
+        } else {
+          check(by[0] === 'Journey' && by[1] === 'Journey', `${T}: a song with no artists reads the album alone (${JSON.stringify(by.slice(0, 2))})`);
+          check(by[2] === 'Sefa, Dr. Peacock · Journey', `${T}: a song with artists keeps "artists · album" (${JSON.stringify(by[2])})`);
+          const link = await page.evaluate(() => { const a = document.querySelectorAll('#main .track .by')[1].querySelector('[data-act="album"]'); return a ? { shown: a.getClientRects().length > 0, href: a.getAttribute('href') } : null; });
+          check(!!link && link.shown && link.href === '/album/lib-7', `${T}: the album is still a link there (${JSON.stringify(link)})`);
+          await page.locator('#main .track').nth(1).screenshot({ path: path.join(SHOTS, `no-artists-${width}.png`) });
+        }
+        check(!state.errors.length, `${T}: no page errors (${state.errors.join(' | ')})`);
+      } finally { await context.close(); }
+    }
   } finally { await browser.close(); }
   console.log(failed ? `song row album: ${failed} FAIL` : 'song row album: all ok');
   process.exit(failed ? 1 : 0);
