@@ -1317,6 +1317,7 @@ html[data-shell="phone"] label.check { min-height: 44px; }
 .scanerrs { margin-top: 10px; color: var(--fg-2); }
 .scanerrs summary { cursor: pointer; color: var(--warn); }
 .scanerrs ul { margin: 6px 0 0 18px; padding: 0; }
+.scanerrs .scanmore { margin: 6px 0 0; }
 
 /* Fresh-eyes review: phones */
 .track .dur { padding-right: 6px; }
