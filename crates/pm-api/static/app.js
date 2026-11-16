@@ -7366,7 +7366,11 @@
             : hs.lost ? `<div class="notice warn" role="alert" id="hsnote"><p>Your homeserver no longer lets this node in. These are the node’s copy; approve it again to change them.</p><button class="btn" data-hsconnect>Approve again</button></div>`
               : hs.pending ? `<p class="muted small" id="hsnote" role="status">${countOf(hs.pending, 'changes')} wait on this node until your homeserver answers.</p>`
                 : hs.stale ? '<p class="muted small" id="hsnote" role="status">Your homeserver didn’t answer just now: this is the node’s copy.</p>' : '';
-          main.innerHTML = pageHead('Favourites', `${countOf(f.albums.length, 'albums')} · ${countOf(f.tracks.length, 'songs')} · ${countOf(f.artists.length, 'artists')}`, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play songs</button>` : '')
+          // The count names only the kinds there are, in the order of the sections below (none on an
+          // empty page: its empty state says so), with the other services' ones too
+          const favCount = [[f.albums, 'albums'], [f.artists, 'artists'], [f.tracks, 'songs']].filter(([l]) => l.length).map(([l, w]) => countOf(l.length, w))
+            .concat(f.other.length ? [`${f.other.length} from other services`] : []).join(' · ') || null;
+          main.innerHTML = pageHead('Favourites', favCount, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play songs</button>` : '')
             + hsNote
             + (none && !(hs && !hs.connected) ? emptyState('heart', 'Nothing hearted yet', hs ? 'Press the heart on a song, album or artist to keep it here, on your own homeserver.' : 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your favourites are also kept in your own Pubky storage.') : '')
             + (f.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(f.albums)}</section>` : '')

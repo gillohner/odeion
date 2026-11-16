@@ -74,7 +74,7 @@ async function run(browser, width) {
       // Favourites: counted, played and headed as songs
       await fx.go(page, '/favourites');
       await page.locator('#favplay').waitFor();
-      assert.match(await page.locator('main .page-head').first().innerText(), /\b1 song\b/, `${T}: Favourites counts songs`);
+      assert.equal(await page.locator('main .page-head h2 .count').first().textContent(), '1 song', `${T}: Favourites counts songs (and only what there is: no "0 albums")`);
       assert.equal((await page.locator('#favplay').textContent()).trim(), 'Play songs', `${T}: Favourites' Play button`);
       assert.deepEqual(await page.locator('main .section-head h3').allTextContents(), ['Songs'], `${T}: Favourites' song section`);
       await noTrack(page, `${T} Favourites`);

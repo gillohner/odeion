@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-15
 
+- **Favourites counts only what you have.** The line beside the title read "0 albums · 1 song · 0 artists" for one hearted song, and skipped what you hearted on other services, so a page of only those said "0 albums · 0 songs · 0 artists" above them. It now names just the kinds there are, in the order of the sections below it ("1 album · 2 artists · 3 songs", "2 from other services"), and an empty page shows no count.
 - **With the keyboard you can see which link in a song row you are on.** In song lists, the focus ring around a song title, an artist, the album and the Match mark was cut to a thin sliver at its sides, because the row cuts long names with “…”. The ring is now whole, and the titles, artists and albums sit exactly where they did.
 - **On a phone, the Queue's songs start right under its title.** Radio, Shuffle, Move to…, Save as playlist and Clear took three rows of buttons above the first song. Now Radio and Shuffle share one row with a ⋯ that holds Save as playlist, Clear queue and Move to (the other devices, as in the Play to menu). The songs start about 100 px higher. The desktop layout keeps its buttons.
 - **Home's Trending rows show the window you picked.** Picking This month and then This week again before the month's songs arrived left This month's songs under This week once they came. Each time Home draws itself again (a Trending window, Edit Home, Done), only the answers for what is on screen now fill its rows.
