@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-16
 
+- **An empty Genres page shows the way on.** Genres with nothing in it said only "tag your music and rescan", with nothing to press. Now it works like Albums: when the library has songs, it says none of them has a genre in its tags and Open Songs opens them; with no music at all the owner gets Add music, and a listener is told the music shows up once the node's owner adds it.
 - **An empty Artists page shows the way on.** With no music yet, the Artists page only said "Artists come from the tags of scanned files.", with nothing to press. Now, as on Songs and Albums, the owner gets Add music, and a listener is told the music shows up once the node's owner adds it. Albums' button to the songs now reads Open Songs (it said Show songs), like the other empty pages.
 - **Home's albums read like the Albums page, and their covers line up.** Recently played and Recently added showed only an album's artist ("Sefa"), while the Albums page says "Sefa · 2020". Home now says both, the same way. An album with neither an artist nor a year sat a little lower than the albums beside it on both pages; its cover now lines up with theirs.
 - **Wrong match? no longer opens blank when its songs are gone.** Going Back to (or reloading) Wrong match? for songs that have since left your library showed only the page title and its explanation, with nothing to pick and no way on. It now says the songs are no longer in your library, with Open Songs to find a moved one again.
