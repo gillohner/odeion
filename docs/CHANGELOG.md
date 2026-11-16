@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-16
+
+- **An empty list doesn't say "0" beside its title.** Genres, Albums, Artists, Songs and Playlists read "Genres 0" above "No genres yet" (and Albums with Favourites on, "0 of 0"), saying the same thing twice; Favourites already didn't. With nothing in the list the title stands alone and the note below says it; with something in it the count is there as before.
+
 ### 2026-11-15
 
 - **A playlist page says each thing once.** At the end of a playlist, an About section repeated what its top card already says: how many songs, how long, and where it is kept. It also got two of them wrong: a web link in the playlist counted as a song (“Songs 2” under “1 song · 1 link”), and a shared playlist said it was stored “(private)”. That section is gone, so the page is shorter to scroll. The one thing only it said, how many songs are in this library, is now on the top line (“1 song · 1 link · 4 min · 1 in this library”) where nothing else says it: for a listener, and when the songs’ sources couldn’t be found. Otherwise the source chips above the songs (“1 Library”) still say it. Tests: `tools/ui-playlist-said-once.js`.

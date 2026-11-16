@@ -659,6 +659,7 @@ jobs:
           ui-zones-quiet.js zones-quiet-shots
           ui-wrong-match.js wrong-match-shots
           ui-favourites-count.js favourites-count-shots
+          ui-empty-head-count.js empty-head-count-shots
           ui-musicbrainz-contact.js musicbrainz-contact-shots
           ui-add-music-ask.js add-music-ask-shots
           ui-phone-library-nav.js phone-library-nav-shots
