@@ -564,6 +564,13 @@ html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 .track .album-col { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .track .album-col button { background: none; border: 0; color: inherit; cursor: pointer; padding: 0; font: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .track .album-col button:hover { color: var(--fg); text-decoration: underline; }
+/* These cut long text with "…" (overflow: hidden), which cut the keyboard focus ring of their links
+   and the Match mark to a sliver. 4 px of padding inside the clip holds the ring; the matching
+   negative margins keep the text where it was (the artist line's -8 px top margin collapses with
+   the title's -4 px bottom margin, so the gap between the two lines stays 0) */
+.track .title, .track .album-col { padding: 4px; margin: -4px; }
+.track .by { padding: 4px; margin: -8px -4px -4px; }
+.track .title, .track .by { scroll-padding-inline: 4px; }
 /* Under 900 px the desktop layout has no room for an album column: the album joins the artist
    line and the title takes the width (at 768 px it was cut to about ten characters) */
 .track .by-album { display: none; }
