@@ -210,6 +210,35 @@ const menuLabels = async (page) => page.$$eval('.popover.menu:not([hidden]) .pop
       await context.close();
     }
   }
+  // The songs are gone (web-176): Wrong match? opened for songs that left the library since (Back,
+  // or a reload, brings the page back for them; the node leaves out missing songs) says so and leads
+  // to Songs, instead of a title and an explanation with nothing to pick under them
+  for (const w of [1280, 1024, 768, 390]) {
+    const gone = fixtures({ auto: true });
+    const { page, context, state } = await fx.create(browser, w, { role: 'owner', fixtures: gone, touch: w < 1025 });
+    const at = `songs gone at ${w}`;
+    await fx.go(page, '/album/lib-7'); await page.waitForSelector('#imore');
+    // (fx reads the fixtures at each request: the album page drew, now its songs are gone)
+    gone['/library/identify/fix'] = { body: { albums: [], next_after: null, songs: 0, total_albums: 0, offset: 0, next: null } };
+    await page.click('#imore'); await until(async () => (await menuLabels(page)).length > 0);
+    await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Wrong match?' }).first().click();
+    const shown = await until(async () => (await page.locator('#main .empty').count()) === 1);
+    check(shown, `${at}: an empty state says the songs are gone`);
+    const m = await page.evaluate(() => ({ h: (document.querySelector('#main .empty h3') || {}).textContent || '', p: (document.querySelector('#main .empty p') || {}).textContent || '', intro: !!document.querySelector('#main .idintro, #main details.idhow'), count: !!document.querySelector('#main .page-head .count'), title: (document.querySelector('#main .page-head h2') || {}).textContent || '', btn: (document.querySelector('#main .empty button') || {}).textContent || '', over: document.documentElement.scrollWidth - innerWidth }));
+    check(/no longer in your library/.test(m.h) && /Wrong match\?/.test(m.p), `${at}: in plain words (${m.h} | ${m.p})`);
+    check(m.title === 'Wrong match?' && !m.count, `${at}: under the page's title, with no count (${m.title}${m.count ? ' +count' : ''})`);
+    check(!m.intro, `${at}: no explanation of choices that aren't there`);
+    check(m.over <= 0, `${at}: no sideways scroll (${m.over})`);
+    await fx.cleanCopy(page);
+    await page.screenshot({ path: path.join(SHOTS, `wrong-match-gone-${w}.png`) });
+    check(m.btn.trim() === 'Open Songs', `${at}: one way on: Open Songs (${m.btn})`);
+    if (m.btn) {
+      await page.locator('#main .empty button').click();
+      check(await until(async () => page.evaluate(() => location.pathname === '/tracks')), `${at}: it opens Songs (${await page.evaluate(() => location.pathname)})`);
+    }
+    check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
+    await context.close();
+  }
   await browser.close();
   console.log(failed ? `${failed} failed` : 'all ok');
   process.exit(failed ? 1 : 0);
