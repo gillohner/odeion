@@ -6759,7 +6759,18 @@
   // artist" row, GET /library/artists)
   // Nothing hearted yet: Songs, where the hearts are (an empty library: the owner's Add music; a
   // listener has nowhere to go yet)
+  // What the empty Favourites page says: how to heart something; a listener on a node with no
+  // songs yet is told first that there is nothing to heart until the owner adds music
+  const favHowTo = (hs) => {
+    const noSongs = !!(state.info && state.info.library) && !(state.info.library.tracks > 0);
+    if (noSongs && !isOwner()) return `Once the node’s owner adds music, press the heart on a song, album or artist to keep it here${hs ? ', on your own homeserver' : ''}.`;
+    return hs ? 'Press the heart on a song, album or artist to keep it here, on your own homeserver.' : 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your favourites are also kept in your own Pubky storage.';
+  };
   const favWayOn = () => (state.info && state.info.library && state.info.library.tracks > 0 ? { view: 'tracks', label: 'Open Songs' } : isOwner() ? { view: 'add-music', label: 'Add music' } : undefined);
+  // Songs' and Albums' heads carry the owner's Add music; on a page whose empty state has the same
+  // button (no music at all) the head leaves it out (one Add music on the page). Albums with songs but
+  // no album tags keeps it: its empty state offers Open Songs
+  const headAddMusic = (n) => (isOwner() && n ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '');
   const noMusicYet = (what) => (isOwner() ? ['Add the folder with your music, or upload files from this device.', { view: 'add-music', label: 'Add music' }] : [`${what} show up here once the node’s owner adds music.`]);
   const LAYOUTS = [['auto', 'Automatic', 'Phone under 600 px wide, desktop from there (tablets too)'], ['phone', 'Phone', 'Tabs and a mini player, at any width'], ['desktop', 'Desktop', 'The sidebar and the full player bar, also in windows from 480 px']];
   const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
@@ -7491,7 +7502,7 @@
             .concat(f.other.length ? [`${f.other.length} from other services`] : []).join(' · ') || null;
           main.innerHTML = pageHead('Favourites', favCount, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play songs</button>` : '')
             + hsNote
-            + (none && !(hs && !hs.connected) ? emptyState('heart', 'Nothing hearted yet', hs ? 'Press the heart on a song, album or artist to keep it here, on your own homeserver.' : 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your favourites are also kept in your own Pubky storage.', favWayOn()) : '')
+            + (none && !(hs && !hs.connected) ? emptyState('heart', 'Nothing hearted yet', favHowTo(hs), favWayOn()) : '')
             + (f.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(f.albums)}</section>` : '')
             + (f.artists.length ? `<section class="section"><div class="section-head"><h3>Artists</h3></div><div class="chips">${f.artists.map((a) => `<button class="chip" data-artist="${a.id}">${esc(a.name)}</button>`).join('')}</div></section>` : '')
             + (f.tracks.length ? `<section class="section"><div class="section-head"><h3>Songs</h3></div>${trackRows(f.tracks, { key: 'fav' })}</section>` : '')
@@ -7535,7 +7546,7 @@
           // They couldn't be read (the node or a listener's homeserver didn't answer): it says so, with
           // Try again and no count ("0 of 45" and "No favourite albums" said none were hearted)
           const failed = !!favFailed && !shown.length;
-          main.innerHTML = pageHead('Albums', waiting || failed || !albums.length ? null : state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + (isOwner() ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '')) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? (waiting ? `<div id="albumswait">${emptyState('disc', 'Getting your favourites…', 'They show here as soon as they are in.')}</div>` : failed ? `<div id="albumsfavfail" role="alert">${emptyState('disc', 'Couldn’t get your favourites', favFailed.message || 'The node didn’t answer.', { id: 'albumsfavretry', label: 'Try again' })}</div>` : emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav)))) : songs ? emptyState('disc', 'No albums yet', `${songs === 1 ? 'The song in the library has no album name in its tags' : `The ${songs} songs in the library have no album name in their tags`}. Albums come from the tags of scanned files.`, { view: 'tracks', label: 'Open Songs' })
+          main.innerHTML = pageHead('Albums', waiting || failed || !albums.length ? null : state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + headAddMusic(albums.length || songs)) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? (waiting ? `<div id="albumswait">${emptyState('disc', 'Getting your favourites…', 'They show here as soon as they are in.')}</div>` : failed ? `<div id="albumsfavfail" role="alert">${emptyState('disc', 'Couldn’t get your favourites', favFailed.message || 'The node didn’t answer.', { id: 'albumsfavretry', label: 'Try again' })}</div>` : emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav)))) : songs ? emptyState('disc', 'No albums yet', `${songs === 1 ? 'The song in the library has no album name in its tags' : `The ${songs} songs in the library have no album name in their tags`}. Albums come from the tags of scanned files.`, { view: 'tracks', label: 'Open Songs' })
             : emptyState('disc', 'No albums yet', ...noMusicYet('Albums')));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; return renderSortedList(b, `[data-focus="${b.dataset.focus}"]`); });
           const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); return renderSortedList(ls); };
@@ -7795,7 +7806,7 @@
           const [first, stats] = await Promise.all([api('GET', `/library/tracks?limit=${PAGE}`), api('GET', '/library/stats').catch(() => null)]);
           if (state.view !== 'tracks') return;
           const total = Math.max(stats ? stats.tracks : 0, first.tracks.length);
-          main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + (isOwner() ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '')) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', ...noMusicYet('Songs')));
+          main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + headAddMusic(total)) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', ...noMusicYet('Songs')));
           const box = $('#tracklist');
           if (box) {
             const shown = []; lists.all = shown;

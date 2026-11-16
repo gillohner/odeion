@@ -18,6 +18,9 @@ const fixtures = {
   '/library/webdav': { body: [] },
   '/library/drives': { body: { providers: [], roots: [] } },
   '/library/hidden': { body: [] },
+  // (one album, so Albums lists something and its head has Add music; an empty page has only its
+  // empty state's, checked in tools/ui-empty-ways-in.js)
+  '/library/albums': { body: [{ id: 7, title: 'An Album', album_artist: 'Somebody', year: 2001, tracks: 1 }] },
 };
 
 async function measure(page, at) {
