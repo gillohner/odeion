@@ -524,7 +524,7 @@
   const nodeLibraryHtml = ({ info, folders, ns, shares, drv }) => {
     if (driveFailed && drv.providers.some((p) => p.id === driveFailed.provider && p.connected)) driveFailed = null; // (signed in since: the old failure is over)
     const row = sRow; const block = sBlock; const group = sGroup;
-      const scanErrs = info.last_scan && info.last_scan.error_count ? `<details class="scanerrs small"><summary>${countOf(info.last_scan.error_count, 'files')} could not be read in the last scan</summary><ul>${info.last_scan.errors.map(([fp, why]) => `<li><code>${esc(fp.split('/').slice(-2).join('/'))}</code>: ${esc(why.replace(fp, '').replace(/^[: ]+/, '') || 'unreadable')}</li>`).join('')}</ul></details>` : '';
+      const scanErrs = info.last_scan && info.last_scan.error_count ? `<details class="scanerrs small" id="scanerrs"><summary>${countOf(Number(info.last_scan.error_count).toLocaleString(), 'files')} could not be read in the last scan</summary><ul>${info.last_scan.errors.map(([fp, why]) => `<li><code>${esc(fp.split('/').slice(-2).join('/'))}</code>: ${esc(why.replace(fp, '').replace(/^[: ]+/, '') || 'unreadable')}</li>`).join('')}</ul></details>` : '';
       const library = group('Music folders',
         (folders.length ? folders.map(([fp, present]) => { const fromConfig = (ns.config_folders || []).includes(fp); return row(`<code class="path">${esc(fp)}</code>`, [present ? '' : 'Not found on this computer.', fromConfig ? 'From the node’s config (<code>node.toml</code>, or <code>PM_FOLDERS</code> in Docker), read at every start. To remove it, take it out there and restart the node; then Remove here forgets its songs.' : ''].filter(Boolean).join(' '), fromConfig ? '<span class="pill">From config</span>' : `<button class="btn sm ghost" data-folder-del="${esc(fp)}">Remove</button>`); }).join('') : row('No folders yet', 'Add the folder with your music below.', ''))
         + block('Add a folder', 'A folder on the node. It is read now and watched for new files; your files stay as they are.', `<div class="toolbar"><input class="input" id="folderadd" placeholder="/path/to/your/Music" aria-label="Folder to add"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div>${scanErrs}`)
@@ -9398,11 +9398,14 @@
             const lsc = info.last_scan;
             const songs = countOf(Number(info.library.tracks || 0).toLocaleString(), 'songs');
             const scanLine = info.scanning ? [`<span class="spin"></span> Scanning… ${songs} so far`]
-              : [`${songs} in the library`, ...(lsc ? [`last scan ${ago(lsc.finished_at)}`, ...(lsc.error_count ? [`${countOf(Number(lsc.error_count).toLocaleString(), 'files')} could not be read`] : [])] : [])];
+              : [`${songs} in the library`, ...(lsc ? [`last scan ${ago(lsc.finished_at)}`, ...(lsc.error_count ? [`<button class="lnk" type="button" id="liberrs" aria-controls="scanerrs">${countOf(Number(lsc.error_count).toLocaleString(), 'files')} could not be read</button>`] : [])] : [])];
             main.innerHTML = head + libPanel(tab, `<div class="libstatus lsline" role="status"><span class="lsrow">${scanLine.map((t) => lsPart(t)).join('')}${unsureSlot(idUnsure(idSt.st))}</span></div><p class="muted small">Edit a song’s tags or take it out of the library from its ⋯ menu, an album from the album’s ⋯ menu. Edits stay on this node; files are never changed.</p>`
               + nodeLibraryHtml({ info, folders, ns, shares, drv })
               + (hidden.length ? sGroup('Taken out of the library', hidden.map((h, k) => sRow(`<code class="path">${esc(h.path.split('/').slice(-2).join('/'))}</code>`, `Taken out ${ago(h.hidden_at)}; the file is still there.`, `<button class="btn sm ghost" data-unhide="${k}">Bring back</button>`)).join('')) : ''));
             bindNodeLibrary(idSt);
+            // The line's unreadable files: one press opens their list (in Music folders, often a screen
+            // down) and goes to it, instead of saying the same count twice with no way between them
+            const le = $('#liberrs'); if (le) le.onclick = () => { const d = $('#scanerrs'); const sm = d && $('summary', d); if (!sm) return; d.open = true; sm.scrollIntoView({ block: 'center', behavior: 'instant' }); sm.focus({ preventScroll: true }); }; // (its title centred: a long list stays below it)
             driveReturn(drv);
             if (toCard) showIdentifyCard();
             $$('[data-unhide]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', '/library/hidden/restore', { path: hidden[Number(b.dataset.unhide)].path }); toast(r.scan_started ? 'Back: reading it again' : 'Back with the next scan'); watchScan({ scanning: !!r.scan_started }); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } });
