@@ -247,6 +247,8 @@ pub(crate) struct Pending {
     pub(crate) who: Who,
     /// A listener's: the browser cookie it must come back with (`accounts::login_binding`).
     binding: Option<String>,
+    /// When it started: it waits [`crate::tidal::SIGN_IN_FOR`] at most.
+    started: std::time::Instant,
 }
 
 pub(crate) fn pending() -> &'static Mutex<HashMap<String, Pending>> {
@@ -1046,6 +1048,31 @@ impl StreamingService for Tidal {
 
 // ---- sign-in ----
 
+/// How long a started sign-in (TIDAL's, Spotify's) waits for its callback.
+pub(crate) const SIGN_IN_FOR: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// The most sign-ins that wait at once, everyone's together.
+pub(crate) const SIGN_IN_MAX: usize = 64;
+
+/// Room for one more started sign-in in `pending`: those over [`SIGN_IN_FOR`] old go, then the
+/// oldest while [`SIGN_IN_MAX`] wait.
+pub(crate) fn make_room<T>(
+    pending: &mut HashMap<String, T>,
+    started: impl Fn(&T) -> std::time::Instant,
+    now: std::time::Instant,
+) {
+    pending.retain(|_, p| now.saturating_duration_since(started(p)) < SIGN_IN_FOR);
+    while pending.len() >= SIGN_IN_MAX {
+        let Some(oldest) = pending
+            .iter()
+            .min_by_key(|(_, p)| started(p))
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        pending.remove(&oldest);
+    }
+}
+
 pub(crate) fn random_urlsafe(bytes: usize) -> String {
     use rand::RngCore;
     let mut buf = vec![0u8; bytes];
@@ -1092,15 +1119,21 @@ pub(crate) async fn login(
         crate::project_apps::return_state(&nonce, &callback_uri(&s, &headers))
     };
     let binding = crate::accounts::login_binding("tidal", &who);
-    pending().lock().expect("pending").insert(
-        nonce,
-        Pending {
-            verifier,
-            redirect: redirect.clone(),
-            who,
-            binding: binding.as_ref().map(|(v, _)| v.clone()),
-        },
-    );
+    {
+        let now = std::time::Instant::now();
+        let mut pending = pending().lock().expect("pending");
+        make_room(&mut pending, |p| p.started, now);
+        pending.insert(
+            nonce,
+            Pending {
+                verifier,
+                redirect: redirect.clone(),
+                who,
+                binding: binding.as_ref().map(|(v, _)| v.clone()),
+                started: now,
+            },
+        );
+    }
     let mut url = url::Url::parse(&format!("{}/authorize", login_base(&s))).map_err(upstream)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -1226,10 +1259,12 @@ async fn finish_login(
         redirect,
         who,
         binding,
+        ..
     } = pending()
         .lock()
         .expect("pending")
         .remove(crate::project_apps::state_nonce(&state))
+        .filter(|p| p.started.elapsed() < SIGN_IN_FOR)
         .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in state; start again"))?;
     crate::accounts::check_login("tidal", &who, binding.as_deref(), &finish)?;
     let c = creds(s);
@@ -2849,6 +2884,24 @@ pub(crate) fn open_track_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn started_sign_ins_wait_ten_minutes_and_only_so_many() {
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        let mut m: HashMap<String, std::time::Instant> = HashMap::new();
+        m.insert("old".into(), t0);
+        make_room(&mut m, |t| *t, t0 + SIGN_IN_FOR);
+        assert!(m.is_empty(), "over 10 minutes old: gone");
+        for i in 0..SIGN_IN_MAX as u64 {
+            make_room(&mut m, |t| *t, at(i));
+            m.insert(format!("s{i}"), at(i));
+        }
+        assert_eq!(m.len(), SIGN_IN_MAX);
+        make_room(&mut m, |t| *t, at(SIGN_IN_MAX as u64));
+        assert_eq!(m.len(), SIGN_IN_MAX - 1);
+        assert!(!m.contains_key("s0") && m.contains_key("s1"), "the oldest goes");
+    }
 
     #[test]
     fn manifests_parse() {

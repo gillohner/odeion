@@ -236,6 +236,24 @@ pub(crate) fn parse_multistatus(xml: &str) -> Result<Vec<DavEntry>, String> {
     Ok(out)
 }
 
+/// The most of one folder's PROPFIND answer that is read.
+const LISTING_MAX: u64 = 32 * 1024 * 1024;
+
+/// A body read whole, but `max` bytes at most: refused when it says or turns out to be bigger.
+fn read_capped(resp: reqwest::blocking::Response, max: u64) -> Result<Vec<u8>, String> {
+    if resp.content_length().is_some_and(|n| n > max) {
+        return Err(format!("the share sent more than the {max} bytes asked for"));
+    }
+    let mut buf = Vec::new();
+    resp.take(max + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.len() as u64 > max {
+        return Err(format!("the share sent more than the {max} bytes asked for"));
+    }
+    Ok(buf)
+}
+
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/><d:getlastmodified/></d:prop></d:propfind>"#;
 
 fn propfind(share: &Share, url: &url::Url) -> Result<Vec<DavEntry>, String> {
@@ -254,7 +272,8 @@ fn propfind(share: &Share, url: &url::Url) -> Result<Vec<DavEntry>, String> {
         404 => return Err("the share has no such folder".into()),
         st => return Err(format!("the share answered {st}")),
     }
-    parse_multistatus(&resp.text().map_err(|e| e.to_string())?)
+    let body = read_capped(resp, LISTING_MAX)?;
+    parse_multistatus(&String::from_utf8_lossy(&body))
 }
 
 /// Every file under the share, as library entries (key, size, time).
@@ -337,15 +356,17 @@ impl RangeReader {
             .send()
             .map_err(|e| std::io::Error::other(e.without_url().to_string()))?;
         let st = resp.status().as_u16();
-        let bytes = resp.bytes().map_err(|e| std::io::Error::other(e.to_string()))?;
+        // A range answer is the range asked for; a whole one is the file as listed
+        let max = if st == 206 { end + 1 - self.pos } else { self.len };
+        let bytes = read_capped(resp, max).map_err(std::io::Error::other)?;
         match st {
             206 => {
-                self.buf = bytes.to_vec();
+                self.buf = bytes;
                 self.buf_at = self.pos;
             }
             // No ranges: the whole file came; keep it
             200 => {
-                self.buf = bytes.to_vec();
+                self.buf = bytes;
                 self.buf_at = 0;
             }
             st => return Err(std::io::Error::other(format!("the share answered {st}"))),
@@ -632,6 +653,36 @@ pub fn spawn_rescans(s: &Arc<NodeState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_share_answer_is_read_only_up_to_what_was_asked() {
+        use std::io::Write;
+        // Each connection: 1000 bytes, with its length or without
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/f", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (i, c) in l.incoming().flatten().enumerate() {
+                let mut c = c;
+                let mut req = [0u8; 2048];
+                let _ = c.read(&mut req);
+                let len = if i % 2 == 0 {
+                    "Content-Length: 1000\r\n"
+                } else {
+                    ""
+                };
+                let head = format!("HTTP/1.1 200 OK\r\n{len}Connection: close\r\n\r\n");
+                let _ = c.write_all(head.as_bytes());
+                let _ = c.write_all(&[b'x'; 1000]);
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+        let get = || client.get(&url).send().unwrap();
+        // Says it is bigger: refused; is bigger: refused; fits: read
+        assert!(read_capped(get(), 999).is_err());
+        assert!(read_capped(get(), 999).is_err());
+        assert_eq!(read_capped(get(), 1000).unwrap().len(), 1000);
+        assert_eq!(read_capped(get(), 1000).unwrap().len(), 1000);
+    }
 
     #[test]
     fn multistatus_and_keys() {
