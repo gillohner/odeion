@@ -619,7 +619,11 @@
           && (pageWork.started[from] || 0) === started && !pageWork.busy[from];
       };
       let go = here(); if (go && popPending) { await popPending; go = here(); }
-      if (go) { setView('playlist', j.id); toast(said); } else toast(said, '', { label: 'Open playlist', run: () => setView('playlist', j.id) });
+      if (go) { setView('playlist', j.id); toast(said); } else {
+        toast(said, '', { label: 'Open playlist', run: () => setView('playlist', j.id) });
+        // (on Playlists, the new row is in the list at once; drawn where it stands, what is typed stays)
+        if (state.view === 'playlists') render();
+      }
     } catch (er) {
       const o = out(); if (o && !o.classList.contains('sr-only')) o.innerHTML = `<span class="warn-text">${esc(er.message)}</span>`; else { if (o) o.textContent = ''; toast(er.message, 'error'); }
     } finally {
@@ -8091,9 +8095,18 @@
         case 'playlists': {
           // A listener's are their own, on their own homeserver (no imports or smart playlists: those are the owner's)
           const mine = isListener();
-          const [lists, smarts, hs] = await Promise.all([api('GET', '/playlists'), mine ? [] : api('GET', '/smart').catch(() => []), mine ? api('GET', '/me/homeserver').catch(() => null) : null]);
-          state.playlists = lists;
-          if (state.view !== 'playlists') return;
+          // (each draw numbered: one that answers after a newer one was drawn draws nothing, its error
+          // neither, so the newer list stays; one that answers first is drawn meanwhile)
+          const plDraw = state.plDraw = (state.plDraw || 0) + 1; const stale = () => plDraw < (state.plShown || 0);
+          let got; try { got = await Promise.all([api('GET', '/playlists'), mine ? [] : api('GET', '/smart').catch(() => []), mine ? api('GET', '/me/homeserver').catch(() => null) : null]); } catch (e) { if (stale()) return; throw e; }
+          const [lists, smarts, hs] = got;
+          if (state.view !== 'playlists' || stale()) return;
+          state.playlists = lists; state.plShown = plDraw;
+          // Drawn again where it stands (the library changed, an import or a new playlist came in):
+          // what is typed in the name and link boxes and its caret, the scroll and the focus stay.
+          // Opening the page draws it from the start.
+          const again = redrawing('playlists'); const place = again ? keepPlace() : null;
+          const typed = again ? ['plname', 'plshared'].map((id) => document.getElementById(id)).filter((el) => el && main.contains(el)).map((el) => ({ id: el.id, value: el.value, sel: [el.selectionStart, el.selectionEnd, el.selectionDirection || 'none'] })) : [];
           const hsNote = !hs ? '' : !hs.connected ? `<div class="notice" id="hsnote"><p>Your collections are kept on your own homeserver. Connect it once (one approval in Pubky Ring), then the ones you make here are yours.</p><button class="btn primary" data-hsconnect>Connect your homeserver</button></div>`
             : hs.lost ? `<div class="notice warn" role="alert" id="hsnote"><p>Your homeserver no longer lets this node in. These are the node’s copy; approve it again to change them.</p><button class="btn" data-hsconnect>Approve again</button></div>`
               : hs.pending ? `<p class="muted small" id="hsnote" role="status">${countOf(hs.pending, 'changes')} ${hs.pending === 1 ? 'waits' : 'wait'} on this node until your homeserver answers.</p>`
@@ -8103,10 +8116,12 @@
             <div class="toolbar"><input class="input" id="plshared" aria-label="Shared playlist link" placeholder="Shared playlist: paste its pubky:// link or a Pubky key"><button class="btn" id="plopenshared">${icon('external')} Open</button></div>`
             + (state.playlists.length ? `<div class="list">${state.playlists.map((p) => `<div class="list-row clickable" data-pl="${esc(p.id)}">${mosaic(p.covers, p.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} item${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div><span class="pill ${p.synced ? 'ok' : ''}">${p.synced ? 'synced' : mine ? 'waiting' : 'local'}</span><button class="icon-btn" data-plplay="${esc(p.id)}" title="Play">${icon('play')}</button></div>`).join('')}</div>` : hs && !hs.connected ? '' : emptyState('playlist', 'No playlists yet', mine ? 'Create one, or add songs from any ⋯ menu. They’re kept on your own homeserver.' : 'Create one, import a file from another player, or add songs from any list.'))
             + (mine ? '' : `<section class="section"><div class="section-head"><h3>Smart playlists</h3><button class="btn sm" id="smartnew">${icon('plus')} New smart playlist</button></div><p class="muted small">Songs picked by rules over your library and your tags; they change as your library does.</p>${smarts.length ? `<div class="list">${smarts.map((x) => `<div class="list-row clickable" data-smart="${esc(x.id)}">${mosaic([], x.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(x.name)}</div><div class="sub">${esc(smartSummary(x))}</div></div><span class="pill">smart</span></div>`).join('')}</div>` : ''}</section>`);
+          typed.forEach((t) => { const el = document.getElementById(t.id); if (el) el.value = t.value; });
           const hc = $('[data-hsconnect]', main); if (hc) hc.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) render(); };
           const sn = $('#smartnew'); if (sn) sn.onclick = () => setView('smart-edit', 'new');
           $$('[data-smart]', main).forEach((r) => r.onclick = () => setView('smart', r.dataset.smart));
-          $('#plcreate').onclick = pageAct(async () => { const n = $('#plname').value.trim(); if (!n) { $('#plname').focus(); return; } try { await api('POST', '/playlists', { name: n }); toast(`Created “${n}”`); render(); } catch (e) { toast(e.message, 'error'); } });
+          // (once made, the box is emptied; pressed from the keyboard, the keyboard goes to it for the next one)
+          $('#plcreate').onclick = pageAct(async (ev) => { const n = $('#plname').value.trim(); if (!n) { $('#plname').focus(); return; } try { await api('POST', '/playlists', { name: n }); toast(`Created “${n}”`); const box = $('#plname'); if (box) { if (box.value.trim() === n) box.value = ''; if (ev.detail === 0 && document.activeElement === $('#plcreate')) box.focus(); } render(); } catch (e) { toast(e.message, 'error'); } });
           $('#plname').onkeydown = (e) => { if (e.key === 'Enter') $('#plcreate').click(); };
           needsText($('#plname'), $('#plcreate')); needsText($('#plshared'), $('#plopenshared'));
           const openShared = pageAct(async () => { try { const t = await api('GET', `/shared/resolve?link=${encodeURIComponent($('#plshared').value)}`); setView('shared', t.id ? { user: t.user, id: t.id } : { user: t.user }); } catch (e) { toast(e.message, 'error'); } });
@@ -8114,6 +8129,8 @@
           bindPlaylistFile($('#plimport'), 'plimportout');
           $$('[data-pl]', main).forEach((el) => el.onclick = (e) => { if (e.target.closest('[data-plplay]')) return; setView('playlist', el.dataset.pl); });
           $$('[data-plplay]', main).forEach((b) => b.onclick = () => playPlaylist(b.dataset.plplay));
+          state.drawnPage = 'playlists'; if (place) place();
+          typed.forEach((t) => { const el = document.getElementById(t.id); if (el && document.activeElement === el) { try { el.setSelectionRange(...t.sel); } catch { /* no caret */ } } });
           break;
         }
         case 'person': {
