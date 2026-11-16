@@ -2902,7 +2902,9 @@
   const shuffling = new Map(); // (zone → the zone's last change asked when its shuffle was)
   // (offered with a library that has songs, and not offline: the downloads have no list of the
   // library's songs to shuffle)
-  const canShuffleMine = () => !isOffline() && !!(state.info && state.info.library && state.info.library.tracks > 0);
+  // The node's library has songs (GET /info's count; undefined counts as none)
+  const hasSongs = () => !!(state.info && state.info.library && state.info.library.tracks > 0);
+  const canShuffleMine = () => !isOffline() && hasSongs();
   const shuffleMyMusic = (zid = state.zone) => {
     if ((shuffling.has(zid) && shuffling.get(zid) === zoneOps.get(zid)) || (zid === BROWSER && zoneBusy.get(BROWSER))) return Promise.resolve();
     const run = zoneOp(zid, async (turn) => { const r = await api('GET', '/library/tracks?limit=200', undefined, { signal: turn.signal }); await playTracks(r.tracks, true, 'end', { shuffle: true, turn }); });
@@ -6775,7 +6777,9 @@
     $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this song') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'in ' + it.site : 'link'}`, icon: 'external', run: () => openWeb(it.uri) }]); });
   };
   // (action: { view, label } opens a page; { id, label } is a button the page binds itself)
-  const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" type="button" ${action.id ? `id="${action.id}"` : `data-empty-action="${action.view}"`}>${esc(action.label)}</button>` : ''}</div>`;
+  // (songs: the button depends on whether the library has songs; the box notes the count it was drawn
+  // with, songsChanged)
+  const emptyState = (iconName, title, text, action, songs) => `<div class="empty"${songs ? ` data-songs="${hasSongs()}"` : ''}>${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" type="button" ${action.id ? `id="${action.id}"` : `data-empty-action="${action.view}"`}>${esc(action.label)}</button>` : ''}</div>`;
   // An empty library's Songs, Albums and Artists: the owner's way in is Add music (folders, shares
   // and drives are on Your library › Node library now; the old "in Settings (Library folders)" led
   // nowhere), a listener can't add to the node's library, so it just says where the music comes from
@@ -6790,7 +6794,7 @@
     if (noSongs && !isOwner()) return `Once the node’s owner adds music, press the heart on a song, album or artist to keep it here${hs ? ', on your own homeserver' : ''}.`;
     return hs ? 'Press the heart on a song, album or artist to keep it here, on your own homeserver.' : 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your favourites are also kept in your own Pubky storage.';
   };
-  const favWayOn = () => (state.info && state.info.library && state.info.library.tracks > 0 ? { view: 'tracks', label: 'Open Songs' } : isOwner() ? { view: 'add-music', label: 'Add music' } : undefined);
+  const favWayOn = () => (hasSongs() ? { view: 'tracks', label: 'Open Songs' } : isOwner() ? { view: 'add-music', label: 'Add music' } : undefined);
   // Songs' and Albums' heads carry the owner's Add music; on a page whose empty state has the same
   // button (no music at all) the head leaves it out (one Add music on the page). Albums with songs but
   // no album tags keeps it: its empty state offers Open Songs
@@ -7536,7 +7540,7 @@
             .concat(f.other.length ? [`${f.other.length} from other services`] : []).join(' · ') || null;
           main.innerHTML = pageHead('Favourites', favCount, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play songs</button>` : '')
             + hsNote
-            + (none && !(hs && !hs.connected) ? emptyState('heart', 'Nothing hearted yet', favHowTo(hs), favWayOn()) : '')
+            + (none && !(hs && !hs.connected) ? emptyState('heart', 'Nothing hearted yet', favHowTo(hs), favWayOn(), true) : '')
             + (f.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(f.albums)}</section>` : '')
             + (f.artists.length ? `<section class="section"><div class="section-head"><h3>Artists</h3></div><div class="chips">${f.artists.map((a) => `<button class="chip" data-artist="${a.id}">${esc(a.name)}</button>`).join('')}</div></section>` : '')
             + (f.tracks.length ? `<section class="section"><div class="section-head"><h3>Songs</h3></div>${trackRows(f.tracks, { key: 'fav' })}</section>` : '')
@@ -9049,7 +9053,7 @@
           };
           const forDrawn = (f) => (...a) => (zoneMoved() ? undefined : f(...a));
           main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || !isListener() || !isBrowser()) ? `<button class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
-            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add songs with the row actions.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null));
+            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add songs with the row actions.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null, true));
           $$('[data-qi]', main).forEach((b) => b.onclick = forDrawn(() => transport({ action: 'play', index: Number(b.dataset.qi) })));
           // An empty queue offers the library shuffled here too, on the zone the page is for (before,
           // only words: the bar's Play said the queue was empty, and its note had the button). Only
@@ -10002,9 +10006,14 @@
     link.pingId++; link.pingSent = performance.now(); link.awaiting = true;
     ws.send(JSON.stringify({ type: 'ping', id: link.pingId }));
   };
+  // Favourites' and the queue's empty states pick their button by whether the library has songs
+  // (favWayOn: Open Songs or Add music, canShuffleMine: Shuffle my music); a new song count from
+  // GET /info that turns "no songs" into "songs" or back draws the one on screen again
+  const songsChanged = () => { const e = $('#main .empty[data-songs]'); if (e && ['favourites', 'queue'].includes(state.view) && e.dataset.songs !== String(hasSongs())) render(); };
   const onLibraryChanged = () => {
     forgetAlbums();
-    api('GET', '/info').then((i) => { state.info = i; watchScan(i); if (link.up) setConn('ok', nodeLabel()); }).catch(() => {});
+    // (the redraw below comes before the new song count, songsChanged)
+    api('GET', '/info').then((i) => { state.info = i; watchScan(i); if (link.up) setConn('ok', nodeLabel()); songsChanged(); }).catch(() => {});
     if (['albums', 'tracks', 'artists', 'home', 'favourites', 'album', 'artist', 'playlists', 'playlist'].includes(state.view)) render();
   };
   const applySnapshot = (ev) => {
@@ -10180,7 +10189,7 @@
       forgetAlbums();
       if (state.view === 'settings' || state.view === 'albums' || state.view === 'tracks') render();
     }
-    if (info && info.scanning) scanTimer = setTimeout(async () => { try { const i = await api('GET', '/info'); state.info = i; setConn(true, `${i.name} · ${countOf(i.library.tracks, 'songs')}`); watchScan(i); } catch { showScanning(false); } }, 2000);
+    if (info && info.scanning) scanTimer = setTimeout(async () => { try { const i = await api('GET', '/info'); state.info = i; setConn(true, `${i.name} · ${countOf(i.library.tracks, 'songs')}`); watchScan(i); songsChanged(); } catch { showScanning(false); } }, 2000);
   };
   const connect = async () => {
     try {

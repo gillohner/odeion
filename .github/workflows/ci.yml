@@ -664,6 +664,7 @@ jobs:
           ui-libstatus-wrap.js libstatus-wrap-shots
           ui-favourites-count.js favourites-count-shots
           ui-favourites-empty.js favourites-empty-shots
+          ui-library-count-redraw.js library-count-redraw-shots
           ui-empty-head-count.js empty-head-count-shots
           ui-musicbrainz-contact.js musicbrainz-contact-shots
           ui-add-music-ask.js add-music-ask-shots
