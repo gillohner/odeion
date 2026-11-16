@@ -6861,11 +6861,17 @@
   // A sync's answer as one plain line: the re-sign notice instead of a raw 403.
   const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Saved: ${r.pushed} sent to your homeserver, ${r.pulled} received${r.errors.length ? `, ${r.errors.length} errors` : ''}${r.pending ? `; ${r.pending} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
   // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).
-  const pageAll = async (path, idOf, unwrap = (r) => r) => {
+  // opts.onPage(n): the rows so far, after each part; opts.wait: ms a part may take before it is given
+  // up with STOPPED_ANSWERING (a node that stops answering mid-library doesn't leave it waiting for good)
+  const STOPPED_ANSWERING = 'The node stopped answering. Try again.';
+  const pageAll = async (path, idOf, unwrap = (r) => r, opts = {}) => {
     const out = []; let after = null;
     for (let i = 0; i < 50; i++) {
-      const rows = unwrap(await api('GET', `${path}?limit=1000${after != null ? `&after=${after}` : ''}`));
+      const ac = opts.wait ? new AbortController() : null; let cut = null;
+      if (ac) { ac.signal.why = new Error(STOPPED_ANSWERING); cut = setTimeout(() => ac.abort(ac.signal.why), opts.wait); }
+      let rows; try { rows = unwrap(await api('GET', `${path}?limit=1000${after != null ? `&after=${after}` : ''}`, undefined, ac ? { signal: ac.signal } : {})); } finally { clearTimeout(cut); }
       out.push(...rows);
+      if (opts.onPage && rows.length === 1000) opts.onPage(out.length);
       if (rows.length < 1000) break;
       after = idOf(rows[rows.length - 1]); if (after == null) break;
     }
@@ -7707,9 +7713,12 @@
               if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true, 'end', { shuffle: false });
               // (the message stays while a big library loads, and goes when the songs play; a quick load
               // shows none, as Which song is this?'s lookup)
-              const loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true;
+              // It counts up as each thousand comes (unless another message replaced it), and gives up
+              // after 30 s without an answer: Play all can be pressed again
+              let loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true;
               const slow = setTimeout(() => toast(loading, 'wait'), 400);
-              try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
+              const onPage = (n) => { const t = $('#toast'); const was = loading; loading = `Loading ${countOf(total, 'songs')}… ${n} so far`; if (t.classList.contains('show') && t.textContent === was) toast(loading, 'wait'); };
+              try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks, { onPage, wait: 30000 }), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
               clearTimeout(slow); toastDone(loading); sh.disabled = false;
             };
           }
