@@ -565,6 +565,61 @@
       $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${countOf(r.removed_tracks, 'songs')} gone`); render(); } catch (e) { toast(e.message, 'error'); } });
     renderIdentify(idSt);
   };
+  // Choose a playlist file (Your library › Import) and Playlists' Import: one file at a time. While it
+  // goes up, the button says Importing… (aria-busy and aria-disabled, so the keyboard stays on it; a
+  // page drawn again meanwhile shows it too) and opens no picker; then the new playlist opens, with
+  // what matched in a toast. Someone who went to another page, or opened a menu, Now playing or a
+  // dialog, or is typing, stays where they are (the toast has Open playlist). A failure is said under
+  // the button (Your library › Import) or in a toast, and the button takes a file again, the same one too.
+  let plImport = null; // the file going up: { name }
+  const PL_IMPORT_LIMIT = 180000; // ms
+  const PL_FILES = ['libplimport', 'plimport'];
+  const plImportLook = () => PL_FILES.forEach((id) => {
+    const input = document.getElementById(id); const lab = input && input.closest('label'); if (!lab) return;
+    const word = [...lab.childNodes].find((n) => n.nodeType === 3 && n.textContent.trim());
+    const on = !!plImport;
+    if (on && lab.dataset.word == null && word) { lab.dataset.word = word.textContent; word.textContent = ' Importing…'; }
+    if (!on && lab.dataset.word != null) { if (word) word.textContent = lab.dataset.word; delete lab.dataset.word; }
+    lab.classList.toggle('is-busy', on); lab.classList.toggle('is-spinning', on && !!plImport.spin);
+    if (on) { lab.setAttribute('aria-busy', 'true'); input.setAttribute('aria-disabled', 'true'); } else { lab.removeAttribute('aria-busy'); input.removeAttribute('aria-disabled'); }
+  });
+  const importPlaylistFile = async (input, outId) => {
+    const f = input.files[0]; if (!f || plImport) { input.value = ''; return; }
+    const from = location.pathname; const focused = document.activeElement === input;
+    const out = () => document.getElementById(outId);
+    const mine = plImport = { name: f.name, spin: false };
+    plImportLook(); setTimeout(() => { if (plImport === mine) { mine.spin = true; plImportLook(); } }, 150);
+    { const o = out(); if (o) o.innerHTML = `<span class="sr-only">Importing ${esc(f.name)}…</span>`; }
+    // (a node that never answers doesn't leave the buttons busy for good: cut after PL_IMPORT_LIMIT)
+    const ac = new AbortController(); const cut = setTimeout(() => ac.abort(), PL_IMPORT_LIMIT);
+    try {
+      const j = await (async () => {
+        const r = await fetch('/v1/playlists/import/file?file=' + encodeURIComponent(f.name), { method: 'POST', signal: ac.signal, headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
+        const b = await r.json().catch(() => ({})); if (!r.ok || !b.id) throw new Error(b.error || `The node answered ${r.status}`);
+        return b;
+      })().catch((e) => { throw ac.signal.aborted ? new Error('The node stopped answering, so the playlist may not be in. Playlists shows whether it is.') : e; });
+      const said = `Imported “${j.name}”: ${j.imported} of ${j.parsed} matched${j.kept ? ` · ${countOf(j.kept, 'kept as links')}` : ''}${(j.unresolved || []).length ? ` · not matched: ${j.unresolved.slice(0, 4).map((d) => d.title).join(', ')}` : ''}`;
+      api('GET', '/playlists').then((l) => { state.playlists = l; }, () => {});
+      { const o = out(); if (o) o.textContent = ''; }
+      const a = document.activeElement;
+      const typing = a && a.matches('input:not([type="file"], [type="checkbox"], [type="radio"], [type="range"], [type="button"], [type="submit"], [type="reset"], [type="color"]), textarea, [contenteditable="true"]');
+      const here = location.pathname === from && !transients.some((t) => t.open()) && !document.querySelector('dialog[open]') && !typing;
+      if (here) { setView('playlist', j.id); toast(said); } else toast(said, '', { label: 'Open playlist', run: () => setView('playlist', j.id) });
+    } catch (er) {
+      const o = out(); if (o && !o.classList.contains('sr-only')) o.innerHTML = `<span class="warn-text">${esc(er.message)}</span>`; else { if (o) o.textContent = ''; toast(er.message, 'error'); }
+    } finally {
+      clearTimeout(cut); plImport = null; plImportLook(); input.value = '';
+      // (the keyboard goes back to the button, the one drawn now if the page was drawn again)
+      if (focused && location.pathname === from && (document.activeElement === input || document.activeElement === document.body)) { const now = document.getElementById(input.id); if (now) now.focus(); }
+    }
+  };
+  // The two file inputs: no picker while a file goes up (a click or Enter on the button is dropped)
+  const bindPlaylistFile = (input, outId) => {
+    if (!input) return;
+    input.addEventListener('click', (e) => { if (plImport) e.preventDefault(); });
+    input.onchange = () => importPlaylistFile(input, outId);
+    plImportLook();
+  };
   // Playlists from files and moving from Roon (was Settings › Import)
   const importHtml = () => {
     const block = sBlock; const group = sGroup;
@@ -575,18 +630,7 @@
   };
   const bindImport = () => {
     const pi = $('#libplimport');
-    if (pi) pi.onchange = async (e) => {
-      const f = e.target.files[0]; if (!f) return; const out = $('#libplout');
-      out.innerHTML = '<span class="spin"></span> Importing…';
-      try {
-        const r = await fetch('/v1/playlists/import/file?file=' + encodeURIComponent(f.name), { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
-        const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status);
-        out.innerHTML = `Imported “${esc(j.name)}”: ${j.imported} of ${j.parsed} matched${j.unresolved.length ? ` · not matched: ${esc(j.unresolved.slice(0, 4).map((d) => d.title).join(', '))}` : ''} · <button class="lnk" data-view-go="playlists">Open Playlists</button>`;
-        $$('[data-view-go]', out).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
-        state.playlists = await api('GET', '/playlists').catch(() => state.playlists);
-      } catch (er) { out.innerHTML = `<span class="warn-text">${esc(er.message)}</span>`; }
-      e.target.value = '';
-    };
+    bindPlaylistFile(pi, 'libplout');
       // Move from Roon: a dry run per file as soon as files are chosen or an option changes, then the
       // import of what matched (roon_import.rs). Only the latest check draws; during the import the
       // files and options stay as they were. The chosen files are kept here and the input emptied, so
@@ -7998,7 +8042,7 @@
               : hs.pending ? `<p class="muted small" id="hsnote" role="status">${countOf(hs.pending, 'changes')} ${hs.pending === 1 ? 'waits' : 'wait'} on this node until your homeserver answers.</p>`
                 : hs.stale ? '<p class="muted small" id="hsnote" role="status">The node couldn’t read all of your homeserver just now (it didn’t answer, was slow, or has more posts than the node reads at once): this list is the node’s copy.</p>' : '';
           main.innerHTML = pageHead('Playlists', state.playlists.length) + hsNote + `
-            <div class="toolbar"><input class="input" id="plname" aria-label="New playlist name" placeholder="New playlist name"><button class="btn" id="plcreate">${icon('plus')} Create</button>${mine ? '' : `<label class="btn file-btn">${icon('upload')} Import M3U, CSV or Roon export<input type="file" id="plimport" accept=".m3u,.m3u8,.csv,.xlsx"></label>`}</div>
+            <div class="toolbar"><input class="input" id="plname" aria-label="New playlist name" placeholder="New playlist name"><button class="btn" id="plcreate">${icon('plus')} Create</button>${mine ? '' : `<label class="btn file-btn">${icon('upload')} Import M3U, CSV or Roon export<input type="file" id="plimport" accept=".m3u,.m3u8,.csv,.xlsx"></label><span id="plimportout" class="sr-only" aria-live="polite"></span>`}</div>
             <div class="toolbar"><input class="input" id="plshared" aria-label="Shared playlist link" placeholder="Shared playlist: paste its pubky:// link or a Pubky key"><button class="btn" id="plopenshared">${icon('external')} Open</button></div>`
             + (state.playlists.length ? `<div class="list">${state.playlists.map((p) => `<div class="list-row clickable" data-pl="${esc(p.id)}">${mosaic(p.covers, p.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} item${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div><span class="pill ${p.synced ? 'ok' : ''}">${p.synced ? 'synced' : mine ? 'waiting' : 'local'}</span><button class="icon-btn" data-plplay="${esc(p.id)}" title="Play">${icon('play')}</button></div>`).join('')}</div>` : hs && !hs.connected ? '' : emptyState('playlist', 'No playlists yet', mine ? 'Create one, or add songs from any ⋯ menu. They’re kept on your own homeserver.' : 'Create one, import a file from another player, or add songs from any list.'))
             + (mine ? '' : `<section class="section"><div class="section-head"><h3>Smart playlists</h3><button class="btn sm" id="smartnew">${icon('plus')} New smart playlist</button></div><p class="muted small">Songs picked by rules over your library and your tags; they change as your library does.</p>${smarts.length ? `<div class="list">${smarts.map((x) => `<div class="list-row clickable" data-smart="${esc(x.id)}">${mosaic([], x.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(x.name)}</div><div class="sub">${esc(smartSummary(x))}</div></div><span class="pill">smart</span></div>`).join('')}</div>` : ''}</section>`);
@@ -8010,15 +8054,7 @@
           needsText($('#plname'), $('#plcreate')); needsText($('#plshared'), $('#plopenshared'));
           const openShared = async () => { try { const t = await api('GET', `/shared/resolve?link=${encodeURIComponent($('#plshared').value)}`); setView('shared', t.id ? { user: t.user, id: t.id } : { user: t.user }); } catch (e) { toast(e.message, 'error'); } };
           $('#plopenshared').onclick = openShared; $('#plshared').onkeydown = (e) => { if (e.key === 'Enter' && $('#plshared').value.trim()) openShared(); };
-          if ($('#plimport')) $('#plimport').onchange = async (e) => {
-            const f = e.target.files[0]; if (!f) return;
-            try {
-              const r = await fetch('/v1/playlists/import/file?file=' + encodeURIComponent(f.name), { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
-              const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status);
-              toast(`Imported “${j.name}”: ${j.imported} of ${j.parsed} matched${j.kept ? ` · ${countOf(j.kept, 'kept as links')}` : ''}${j.unresolved.length ? ` · not matched: ${j.unresolved.slice(0, 4).map((d) => d.title).join(', ')}` : ''}`);
-              render();
-            } catch (er) { toast(er.message, 'error'); }
-          };
+          bindPlaylistFile($('#plimport'), 'plimportout');
           $$('[data-pl]', main).forEach((el) => el.onclick = (e) => { if (e.target.closest('[data-plplay]')) return; setView('playlist', el.dataset.pl); });
           $$('[data-plplay]', main).forEach((b) => b.onclick = () => playPlaylist(b.dataset.plplay));
           break;
