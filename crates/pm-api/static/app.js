@@ -88,8 +88,10 @@
   // A lossy file shows its codec, not the PCM it decodes to ("MP3", not "24/44.1k")
   const LOSSY = { mp3: 'MP3', aac: 'AAC', vorbis: 'Vorbis', opus: 'Opus' };
   const fileFormat = (file) => (!file ? '' : LOSSY[file.container] || fmtFormat(file.format));
-  // "1 track", "2 tracks" (n may be a formatted number)
-  const countOf = (n, many) => `${n} ${String(n).replace(/[^0-9]/g, '') === '1' ? many.replace(/s$/, '') : many}`;
+  // A count as people read it: 12,840, not 12840 (the reader's own separator; a string is kept as is)
+  const fmtCount = (n) => (typeof n === 'number' ? n.toLocaleString() : n);
+  // "1 track", "2 tracks", "12,840 tracks" (n may be a formatted number)
+  const countOf = (n, many) => `${fmtCount(n)} ${String(n).replace(/[^0-9]/g, '') === '1' ? many.replace(/s$/, '') : many}`;
   // Which service a page link belongs to ("Open in Audius", not "Open in")
   const SERVICE_HOSTS = { 'audius.co': 'audius', 'archive.org': 'archive', 'deezer.com': 'deezer', 'tidal.com': 'tidal', 'listen.tidal.com': 'tidal', 'open.spotify.com': 'spotify', 'jamendo.com': 'jamendo', 'musicbrainz.org': 'musicbrainz' };
   const serviceOfUrl = (u) => { try { return SERVICE_HOSTS[new URL(u).hostname.replace(/^www\./, '')] || ''; } catch { return ''; } };
@@ -1349,7 +1351,7 @@
       + (pace ? `<p class="muted small jobpace">${pace}</p>` : '')
       + (p.kind === 'bring' && p.dest ? `<p class="muted small">Into ${esc(p.dest)}, then added to your library.</p>` : '')
       + (!done && (p.current_folder || p.current) ? `<p class="muted small jobcur">${esc(p.current_folder || p.current)}</p>` : '')
-      + (why ? `<p class="small warn-text jobwhy" role="status">${done && p.total > files + (p.skipped || 0) + (p.not_audio || 0) ? `Stopped after ${files} of ${countOf(p.total, 'files')}: ` : ''}${esc(why)}</p>` : '')
+      + (why ? `<p class="small warn-text jobwhy" role="status">${done && p.total > files + (p.skipped || 0) + (p.not_audio || 0) ? `Stopped after ${fmtCount(files)} of ${countOf(p.total, 'files')}: ` : ''}${esc(why)}</p>` : '')
       + (nErr ? `<button class="lnk small" type="button" data-jerrs aria-expanded="${jobs.showErrors}">${countOf(nErr, 'errors')}</button>${jobs.showErrors ? `<ul class="small joberr">${errs.map((e) => `<li>${jobErr(e)}</li>`).join('')}</ul>` : ''}` : '')
       + (jobs.queued.length ? `<p class="muted small">Then: ${jobs.queued.map((q) => esc(q.label || countOf(q.total || 0, 'files'))).join(', ')}</p>` : '')
       + `<div class="row-btns">${btns}</div></div>`;
@@ -1377,7 +1379,7 @@
     const stopped = jobStopped(p);
     c.classList.toggle('done', done && !stopped); c.classList.toggle('stopped', stopped);
     c.innerHTML = `${icon(p.kind === 'bring' ? 'download' : 'upload')}<span class="jc-text">${stopped ? jobStopShort(p) : done ? (p.failed ? `${p.failed} failed` : 'Done') : p.state === 'paused' ? 'Paused' : p.state === 'queued' ? 'Waiting' : `${p.done + (p.failed || 0)}/${p.total}`}</span><span class="jc-bar"><span style="width:${jobPct(p)}%"></span></span>`;
-    const tl = `${jobTitle(p)}: ${p.done + (p.failed || 0)} of ${p.total} files, ${fmtBytes(p.bytes_done)} of ${fmtBytes(p.bytes_total)}${stopped ? `. ${jobStopWhy(p)}` : ''}`;
+    const tl = `${jobTitle(p)}: ${fmtCount(p.done + (p.failed || 0))} of ${countOf(p.total, 'files')}, ${fmtBytes(p.bytes_done)} of ${fmtBytes(p.bytes_total)}${stopped ? `. ${jobStopWhy(p)}` : ''}`;
     c.title = tl; c.setAttribute('aria-label', tl);
   };
   const drawJobs = () => {
@@ -6872,7 +6874,7 @@
   };
   // A count of 0 is not shown: the page's empty state says there is nothing ("Genres 0" above
   // "No genres yet" said it twice). A text count ("0 of 12", a zone's name) is shown as it is.
-  const pageHead = (title, count, actions = '') => libNav() + `<div class="page-head"><h2>${esc(title)}${count != null && count !== 0 ? `<span class="count">${esc(count)}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
+  const pageHead = (title, count, actions = '') => libNav() + `<div class="page-head"><h2>${esc(title)}${count != null && count !== 0 ? `<span class="count">${esc(fmtCount(count))}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
   // One way back (08-item-page.md): history, labelled with the previous page; on a deep link the page's section.
   const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} ${esc((navDepth > 0 && history.state && history.state.backLabel) || label)}</button>`;
   const loading = () => { if (state.placeHold) state.placeHold(); main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
@@ -7172,7 +7174,7 @@
   const filterBox = (placeholder, off = false) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}"${off ? ' disabled' : ''}>`;
   const bindFilter = (selector) => {
     const f = $('#filter'); if (!f) return;
-    f.oninput = () => { const q = f.value.trim().toLowerCase(); let n = 0; $$(selector, main).forEach((el) => { const show = !q || el.textContent.toLowerCase().includes(q); el.hidden = !show; if (show) n++; }); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${n} shown` : ''; };
+    f.oninput = () => { const q = f.value.trim().toLowerCase(); let n = 0; $$(selector, main).forEach((el) => { const show = !q || el.textContent.toLowerCase().includes(q); el.hidden = !show; if (show) n++; }); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${fmtCount(n)} shown` : ''; };
     f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
   };
   // (a load started before a newer one, or before the albums were let go (the library changed),
@@ -7628,7 +7630,7 @@
           // They couldn't be read (the node or a listener's homeserver didn't answer): it says so, with
           // Try again and no count ("0 of 45" and "No favourite albums" said none were hearted)
           const failed = !!favFailed && !shown.length;
-          main.innerHTML = pageHead('Albums', waiting || failed || !albums.length ? null : state.focus || lp.fav ? `${shown.length} of ${albums.length}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + headAddMusic(albums.length || songs)) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? (waiting ? `<div id="albumswait">${emptyState('disc', 'Getting your favourites…', 'They show here as soon as they are in.')}</div>` : failed ? `<div id="albumsfavfail" role="alert">${emptyState('disc', 'Couldn’t get your favourites', favFailed.message || 'The node didn’t answer.', { id: 'albumsfavretry', label: 'Try again' })}</div>` : emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav)))) : songs ? emptyState('disc', 'No albums yet', `${songs === 1 ? 'The song in the library has no album name in its tags' : `The ${songs} songs in the library have no album name in their tags`}. Albums come from the tags of scanned files.`, { view: 'tracks', label: 'Open Songs' })
+          main.innerHTML = pageHead('Albums', waiting || failed || !albums.length ? null : state.focus || lp.fav ? `${fmtCount(shown.length)} of ${fmtCount(albums.length)}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + headAddMusic(albums.length || songs)) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? (waiting ? `<div id="albumswait">${emptyState('disc', 'Getting your favourites…', 'They show here as soon as they are in.')}</div>` : failed ? `<div id="albumsfavfail" role="alert">${emptyState('disc', 'Couldn’t get your favourites', favFailed.message || 'The node didn’t answer.', { id: 'albumsfavretry', label: 'Try again' })}</div>` : emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav)))) : songs ? emptyState('disc', 'No albums yet', `${songs === 1 ? 'The song in the library has no album name in its tags' : `The ${fmtCount(songs)} songs in the library have no album name in their tags`}. Albums come from the tags of scanned files.`, { view: 'tracks', label: 'Open Songs' })
             : emptyState('disc', 'No albums yet', ...noMusicYet('Albums')));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; return renderSortedList(b, `[data-focus="${b.dataset.focus}"]`); });
           const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); return renderSortedList(ls); };
@@ -7647,7 +7649,7 @@
             // A–Z: the matches from that letter on (the grid draws as you scroll)
             const az = azJump(lp.sort === 'artist' ? (a) => firstLetter(a.album_artist) : (a) => firstLetter(a.title), matches, draw, none);
             if (f) {
-              f.oninput = () => { const q = f.value.trim(); const list = matches(); draw(list); az(list); none(q, list.length); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
+              f.oninput = () => { const q = f.value.trim(); const list = matches(); draw(list); az(list); none(q, list.length); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${fmtCount(list.length)} shown` : ''; };
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
           }
@@ -7678,7 +7680,7 @@
             const az = azJump((a) => firstLetter(a.name), matches, draw, none);
             const als = $('[data-lsort]', main); if (als) als.onchange = () => { setListPref('artists', { ...alp, sort: als.value }); return renderSortedList(als); };
             if (f) {
-              f.oninput = () => { const q = f.value.trim(); const list = matches(); draw(list); az(list); none(q, list.length); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${list.length} shown` : ''; };
+              f.oninput = () => { const q = f.value.trim(); const list = matches(); draw(list); az(list); none(q, list.length); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${fmtCount(list.length)} shown` : ''; };
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
           }
@@ -7767,7 +7769,7 @@
             const sec = $(`[data-album="${ai}"]`, main); if (!sec) return;
             const html = albumHtml(albums[ai], ai);
             if (!html) { sec.remove(); } else { sec.insertAdjacentHTML('afterend', html); sec.remove(); wire($(`[data-album="${ai}"]`, main)); }
-            const count = $('.page-head .count', main); if (count) count.textContent = String(page.songs);
+            const count = $('.page-head .count', main); if (count) count.textContent = fmtCount(page.songs);
             if (!albums.some((a) => a.songs.length) && next == null) draw();
             else if (!albums.some((a) => a.songs.length)) { const m = $('#idmore'); if (m) m.click(); }
           };
@@ -7868,7 +7870,7 @@
           const pubBox = isOwner() && (genres.length || songs !== 0 || ns.genre_tags) ? `<label class="small genre-pub"><input type="checkbox" id="genretags" ${ns.genre_tags ? 'checked' : ''}> Publish my files' genres as tags too (public on Pubky, on songs that are matched)</label>` : '';
           const byLabel = new Map(); for (const t of mine) byLabel.set(t.label, (byLabel.get(t.label) || 0) + 1);
           const tagsSec = `<section class="section"><div class="section-head"><h3>Your Pubky tags</h3><span class="muted small">public, on your homeserver</span></div>${byLabel.size ? `<div class="chips">${[...byLabel.entries()].sort((a, b) => b[1] - a[1]).map(([l, n]) => tagChip(l, { own: true, count: n, attrs: `data-mytag="${esc(l)}"`, title: `Your tag · ${countOf(n, 'items')}` })).join('')}</div>` : '<p class="muted small">No tags yet. Add them on any song, album or artist page.</p>'}${pubBox}</section>`;
-          main.innerHTML = pageHead('Genres', genres.length) + tagsSec + `<section class="section"><div class="section-head"><h3>From your files</h3><span class="muted small">the genres in your files' metadata</span></div>` + (genres.length ? `<div class="cards">${genres.map((g) => `<button class="card genre" data-genre="${g.id}" style="text-align:left;cursor:pointer;background:linear-gradient(135deg, hsl(${hue(g.name)} 32% 22%), var(--surface))"><h3 style="margin-bottom:4px">${esc(g.name)}</h3><div class="muted small">${g.albums} album${g.albums === 1 ? '' : 's'} · ${countOf(g.tracks, 'songs')}</div></button>`).join('')}</div>` : songs ? emptyState('genre', 'No genres yet', `${songs === 1 ? 'The song in the library has no genre in its tags' : `The ${songs} songs in the library have no genre in their tags`}. Genres come from the tags of scanned files.`, { view: 'tracks', label: 'Open Songs' }) : emptyState('genre', 'No genres yet', ...noMusicYet('Genres')));
+          main.innerHTML = pageHead('Genres', genres.length) + tagsSec + `<section class="section"><div class="section-head"><h3>From your files</h3><span class="muted small">the genres in your files' metadata</span></div>` + (genres.length ? `<div class="cards">${genres.map((g) => `<button class="card genre" data-genre="${g.id}" style="text-align:left;cursor:pointer;background:linear-gradient(135deg, hsl(${hue(g.name)} 32% 22%), var(--surface))"><h3 style="margin-bottom:4px">${esc(g.name)}</h3><div class="muted small">${g.albums} album${g.albums === 1 ? '' : 's'} · ${countOf(g.tracks, 'songs')}</div></button>`).join('')}</div>` : songs ? emptyState('genre', 'No genres yet', `${songs === 1 ? 'The song in the library has no genre in its tags' : `The ${fmtCount(songs)} songs in the library have no genre in their tags`}. Genres come from the tags of scanned files.`, { view: 'tracks', label: 'Open Songs' }) : emptyState('genre', 'No genres yet', ...noMusicYet('Genres')));
           main.insertAdjacentHTML('beforeend', '</section>');
           $$('[data-genre]', main).forEach((b) => b.onclick = () => setView('genre', Number(b.dataset.genre)));
           $$('[data-mytag]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.mytag }));
@@ -7941,7 +7943,7 @@
               // after 30 s without an answer: Play all can be pressed again
               let loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true;
               const slow = setTimeout(() => toast(loading, 'wait'), 400);
-              const onPage = (n) => { const t = $('#toast'); const was = loading; loading = `Loading ${countOf(total, 'songs')}… ${n} so far`; if (t.classList.contains('show') && t.textContent === was) toast(loading, 'wait'); };
+              const onPage = (n) => { const t = $('#toast'); const was = loading; loading = `Loading ${countOf(total, 'songs')}… ${fmtCount(n)} so far`; if (t.classList.contains('show') && t.textContent === was) toast(loading, 'wait'); };
               try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks, { onPage, wait: 30000 }), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
               clearTimeout(slow); toastDone(loading); sh.disabled = false;
             };
@@ -9358,7 +9360,7 @@
             const cr = $('#copyrate'); if (cr) cr.onchange = async () => { const kb = Math.max(0, Math.round(Number(cr.value) || 0)); try { await api('PUT', '/node/settings', { copy_rate: kb * 1000 }); toast(kb ? `Copies at most ${kb} kB/s` : 'Copies without a speed limit'); } catch (e) { toast(e.message, 'error'); } };
         const bt = $('#bulktag'); if (bt) bt.onclick = async () => {
           const label = $('#bulklabel').value.trim(); if (!label) return; bt.disabled = true;
-          try { const r = await api('POST', '/tags/bulk', { label }); $('#bulkout').textContent = `#${r.label}: ${countOf(r.tagged, 'songs')} tagged, ${r.already} already had it, ${r.skipped_no_identity} skipped (no MusicBrainz id or ISRC). Sync with Pubky to publish.`; }
+          try { const r = await api('POST', '/tags/bulk', { label }); $('#bulkout').textContent = `#${r.label}: ${countOf(r.tagged, 'songs')} tagged, ${fmtCount(r.already)} already had it, ${fmtCount(r.skipped_no_identity)} skipped (no MusicBrainz id or ISRC). Sync with Pubky to publish.`; }
           catch (e) { toast(e.message, 'error'); }
           bt.disabled = false;
         };
@@ -9449,7 +9451,7 @@
           }
           if (d.albums.length) html += `<section class="section"><div class="section-head"><h3>Albums <span class="muted small">${d.albums.length}</span></h3></div><div class="grid">${d.albums.map(albumTile).join('')}</div></section>`;
           const pls = d.playlists.filter((p) => p.track_ids.length);
-          if (pls.length) html += `<section class="section"><div class="section-head"><h3>Playlists</h3></div><div class="list">${pls.map((p, k) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name || 'Playlist')}</div><div class="sub">${p.track_ids.length === p.total ? countOf(p.total, 'songs') : `${p.track_ids.length} of ${p.total} songs on this device`}</div></div><button class="btn sm" data-dlpl="${k}">${icon('play')} Play</button></div>`).join('')}</div></section>`;
+          if (pls.length) html += `<section class="section"><div class="section-head"><h3>Playlists</h3></div><div class="list">${pls.map((p, k) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name || 'Playlist')}</div><div class="sub">${p.track_ids.length === p.total ? countOf(p.total, 'songs') : `${fmtCount(p.track_ids.length)} of ${countOf(p.total, 'songs')} on this device`}</div></div><button class="btn sm" data-dlpl="${k}">${icon('play')} Play</button></div>`).join('')}</div></section>`;
           const favs = songsOf(d.favourites.track_ids || []);
           if (favs.length) { lists.fav = favs; html += `<section class="section"><div class="section-head"><h3>Favourites</h3><button class="btn sm ghost" data-dlplay="fav">${icon('play')} Play</button></div>${trackRows(favs, { key: 'fav' })}</section>`; }
           lists.all = [...d.tracks].sort((a, b) => String(a.title).localeCompare(String(b.title)));
@@ -10224,7 +10226,7 @@
     // A scan that ends says so, with what it could not read (fresh-eyes review)
     if (was && info && !info.scanning && info.library) {
       const ls = info.last_scan; const n = info.library.tracks;
-      toast(`Library up to date: ${countOf(n.toLocaleString(), 'songs')}${ls && ls.error_count ? `. ${ls.error_count} ${ls.error_count === 1 ? 'file' : 'files'} could not be read (Your library › Node library)` : ''}`, ls && ls.error_count ? 'error' : '');
+      toast(`Library up to date: ${countOf(n.toLocaleString(), 'songs')}${ls && ls.error_count ? `. ${countOf(ls.error_count, 'files')} could not be read (Your library › Node library)` : ''}`, ls && ls.error_count ? 'error' : '');
       forgetAlbums();
       if (state.view === 'settings' || state.view === 'albums' || state.view === 'tracks') render();
     }
