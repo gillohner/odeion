@@ -648,6 +648,9 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .zone-card .icon-btn.big { width: 40px; height: 40px; background: var(--accent); color: var(--on-accent); border-radius: 50%; }
 @media (hover: hover) { .zone-card .icon-btn.big:hover { background: var(--accent-strong); } }
 .zone-card .zc-controls input[type=range] { flex: 1; min-width: 100px; }
+/* A Home row that didn't answer: its words and Try again on one line of whole pixels, so the
+   height kept for its next placeholder is the height it draws (no jump when Home opens again) */
+.hfail { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin: 0; line-height: 20px; }
 html[data-shell="phone"] .zone-card { position: relative; }
 html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phone"] .zone-card .zc-now > .pill { flex: none; }
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
