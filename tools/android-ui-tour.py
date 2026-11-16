@@ -59,6 +59,13 @@ def zone_pick(png, names=()):
     "Play to" where another reads only "selected" (API 35 with the phone's zone selected)."""
     plays, picked, states, heads = [], [], [], []
     firsts = {w for w in (re.sub(r"[^A-Za-z0-9]", "", (n or "").split(" ")[0]) for n in names) if len(w) > 2}
+    # (a card's title starts in its left fifth, after the zone icon: the same word in a song's
+    # line or a button further right is not a card's top)
+    try:
+        with open(png, "rb") as f:
+            width = int.from_bytes(f.read(24)[16:20], "big")
+    except OSError:
+        width = 0
 
     def mid(r):
         return int(r["left"]) + int(r["width"]) // 2, int(r["top"]) + int(r["height"]) // 2
@@ -80,7 +87,7 @@ def zone_pick(png, names=()):
             word = re.sub(r"[^A-Za-z]", "", r["text"])
             if word in CARD_STATES:
                 states.append(mid(r)[1])
-            elif re.sub(r"[^A-Za-z0-9]", "", r["text"]) in firsts:
+            elif re.sub(r"[^A-Za-z0-9]", "", r["text"]) in firsts and int(r["left"]) < width // 5:
                 heads.append(mid(r)[1])
             elif word == "SELECTED":  # (the pill's word, not a song called Selected Works)
                 picked.append(mid(r))

@@ -98,10 +98,26 @@ class PlayToSpotTests(unittest.TestCase):
         # (no names: one pill read, where the first card ends is not known)
         self.assertIsNone(tour.zone_pick(FIX / "zones-api30-no-pill.png"))
 
-    def test_name_above_the_first_pill_is_no_top(self):
-        # "Google" is also in the WebView notice over the cards and the first card's own title:
-        # neither ends the first card (a name named only there finds nothing)
-        self.assertIsNone(tour.zone_pick(FIX / "zones-api30-no-pill.png", ["Google sdk_gphone_x86_64"]))
+    def test_a_name_is_no_first_card_top(self):
+        # With the phone's PLAYING pill missed, the names alone don't say where the first card
+        # starts ("Google" is also in the WebView notice over the cards): nothing counts
+        names = ["Google sdk_gphone_x86_64", "Null output"]
+        with self.ocr_edited(lambda ln: None if ln.rstrip().endswith("PLAYING") else ln):
+            self.assertIsNone(tour.zone_pick(FIX / "zones-api30-no-pill.png", names))
+
+    def test_a_name_right_of_the_title_column_is_no_top(self):
+        # A zone named like the first card's song ("Tone ...", read here 20 px higher, above the
+        # card's Play to) is not that card's end: a card's title starts at the card's left
+        def song_higher(ln):
+            c = ln.split("\t")
+            if len(c) == 12 and c[11].strip() == "Tone":
+                c[7] = str(int(c[7]) - 20)
+            return "\t".join(c)
+
+        with self.ocr_edited(song_higher):
+            pick = tour.zone_pick(FIX / "zones-api30-no-pill.png", ["Tone arm", "Null output"])
+        self.assertIsNotNone(pick, "the song's title ended the first card above its Play to")
+        self.assertEqual(pick[0], "play to")
 
     def test_no_play_to(self):
         self.assertIsNone(tour.play_to_spot(FIX / "missing.png"))
