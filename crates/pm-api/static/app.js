@@ -5142,6 +5142,27 @@
   let pointerDown = { at: 0, target: null }, focusByPointer = false;
   document.addEventListener('pointerdown', (e) => { pointerDown = { at: performance.now(), target: e.target }; }, true);
   document.addEventListener('focusin', (e) => { const t = pointerDown.target; focusByPointer = !!t && performance.now() - pointerDown.at < 1000 && (e.target === t || (e.target.contains && e.target.contains(t))); }, true);
+  // A song row's artist line cut with "…" (its artists, and under 900 px its album): the browser leaves a
+  // focused link where it is once ~32 px of it shows, so a second artist took focus with most of its
+  // name under the "…"; where it did scroll the line, the "…" stayed put and the line drew blank.
+  // Reached from the keyboard, the line now moves just enough to show the link (its start, if it is
+  // wider than the line), is cut without "…" while moved (.slid), and goes back when focus leaves it.
+  const cutLineOf = (el) => (el && el.closest ? el.closest('#main .track .by') : null);
+  document.addEventListener('focusin', (e) => {
+    const a = e.target; if (focusByPointer || !a.matches || !a.matches('a[href], button')) return;
+    const line = cutLineOf(a); if (!line || line.scrollWidth <= line.clientWidth) return;
+    // The link goes inside the line's padding (at least 4 px: room for its focus ring)
+    const cs = getComputedStyle(line), b = line.getBoundingClientRect(), r = a.getBoundingClientRect();
+    const inset = (side) => Math.max(4, parseFloat(cs['padding' + side]) || 0);
+    const lo = b.left + line.clientLeft + inset('Left'), hi = b.left + line.clientLeft + line.clientWidth - inset('Right');
+    if (r.left < lo || r.width > hi - lo) line.scrollLeft += r.left - lo;
+    else if (r.right > hi) line.scrollLeft += r.right - hi;
+    line.classList.toggle('slid', line.scrollLeft > 0);
+  });
+  document.addEventListener('focusout', (e) => {
+    const line = cutLineOf(e.target);
+    if (line && !(e.relatedTarget && line.contains(e.relatedTarget))) { line.scrollLeft = 0; line.classList.remove('slid'); }
+  });
   document.addEventListener('keydown', (e) => {
     if (e.defaultPrevented) return;
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
