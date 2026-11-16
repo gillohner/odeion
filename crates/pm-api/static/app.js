@@ -625,7 +625,7 @@
   // Playlists from files and moving from Roon (was Settings › Import)
   const importHtml = () => {
     const block = sBlock; const group = sGroup;
-      const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here: they are checked right away, nothing changes yet.</li><li>Import what matched.</li></ol><label class="btn file-btn roonpick">${icon('upload')} Choose Roon export files<input type="file" id="roonfiles" accept=".xlsx,.csv" multiple></label><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout" aria-live="polite"></div>`));
+      const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here: they are checked right away, nothing changes yet.</li><li>Import what matched.</li></ol><label class="btn file-btn roonpick">${icon('upload')} Choose Roon export files<input type="file" id="roonfiles" accept=".xlsx,.csv" multiple></label><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout"></div><p id="roonsay" class="sr-only" role="status"></p>`));
     return group('Playlists from files', sBlock('', 'An M3U or M3U8 list, a CSV, or a Roon playlist export: each line is matched to a song (MusicBrainz, ISRC, then title and artist); what doesn’t match stays as its line.', `<label class="btn file-btn">${icon('upload')} Choose a playlist file<input type="file" id="libplimport" accept=".m3u,.m3u8,.csv,.xlsx"></label><div id="libplout" class="small" aria-live="polite"></div>`)
       + sRow('Playlists on a service', 'TIDAL, Spotify, Deezer and the others: open the playlist on Sources and choose Import.', '<button class="btn ghost" data-view-go="sources">Open Sources</button>'))
       + importTab;
@@ -637,16 +637,23 @@
       // import of what matched (roon_import.rs). Only the latest check draws; during the import the
       // files and options stay as they were. The chosen files are kept here and the input emptied, so
       // choosing the same files again checks them again; after an import, only new files offer Import.
+      // A screen reader hears #roonsay only: what started, then one line with the outcome, not
+      // every "Checking 2 of 3…" or the whole list of files.
       let roonSeq = 0; let roonFiles = []; let roonDone = false;
+      // (Emptied first and filled a frame later, so the same words twice are read twice.)
+      let roonSaid = 0;
+      const roonSay = (t) => { const s = $('#roonsay'); if (!s) return; const n = ++roonSaid; s.textContent = ''; if (t) requestAnimationFrame(() => { if (n === roonSaid) s.textContent = t; }); };
       const roonCtl = () => ['#roonfiles', '#roonfav', '#roonpl', '#roontags'].map((q) => $(q)).filter(Boolean);
       const roonRun = async (dry) => {
         const files = roonFiles; const out = $('#roonout'); const go = $('#roongo');
         const seq = ++roonSeq; go.disabled = true;
-        if (!files.length) { out.innerHTML = ''; return; }
+        if (!files.length) { out.innerHTML = ''; roonSay(''); return; }
         const opts = `favourites=${$('#roonfav').checked}&playlist=${$('#roonpl').checked}&tags=${$('#roontags').checked}&dry_run=${dry}`;
         // What it is doing goes on the first line; the last results stay, dimmed, so the page keeps its height
         const say = (html) => { $$('.roonfile', out).forEach((e) => e.classList.add('stale')); const s = $('[data-roonstate]', out); if (s) s.outerHTML = html; else out.insertAdjacentHTML('afterbegin', html); };
-        const parts = []; let matched = 0; let failed = false;
+        const parts = []; let matched = 0; let rows = 0; let failed = false;
+        const many = files.length > 1 ? ` ${files.length} files` : '';
+        roonSay(dry ? `Checking${many}…` : `Importing${many}…`);
         if (!dry) roonCtl().forEach((e) => { e.disabled = true; });
         try {
           for (const [i, f] of files.entries()) {
@@ -654,7 +661,7 @@
             try {
               const res = await fetch(`/v1/import/roon?file=${encodeURIComponent(f.name)}&${opts}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
               const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
-              matched += r.matched;
+              matched += r.matched; rows += r.rows;
               const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
               const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}${r.playlist.kept ? ` and ${countOf(r.playlist.kept, 'links')} to match by hand` : ''}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
               parts.push(`<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
@@ -668,7 +675,13 @@
         out.innerHTML = (dry ? `<p class="muted small" data-roonstate>${failed ? 'Not every file could be checked; nothing changed yet. <button class="lnk" data-roon-again>Check again</button>' : 'Checked: nothing changed yet.'}</p>` : '<p class="small" data-roonstate>Imported.</p>') + parts.join('');
         const again = $('[data-roon-again]', out); if (again) again.onclick = () => roonRun(true);
         go.disabled = !dry || !matched || roonDone;
-        if (dry && !matched && !failed) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Your library › Node library), then choose the files again.</p>');
+        const nothing = dry && !matched && !failed;
+        if (nothing) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Your library › Node library), then choose the files again.</p>');
+        const tally = `${matched} of ${rows} matched this library`;
+        roonSay(nothing ? 'Checked: nothing in these files matched this library yet. Scan your music folders first, then choose the files again.'
+          : dry ? (failed ? `Not every file could be checked${matched ? `; in the others, ${tally}` : ''}. Nothing changed yet.${matched ? ' Import is ready for those.' : ''} Check again is above the results.`
+            : `Checked: ${tally}. Nothing changed yet${roonDone ? '' : '; Import is ready'}.`)
+            : !failed ? `Imported: ${tally}.` : rows ? `Imported what matched (${tally}), but not every file could be imported. The results say which.` : 'Nothing could be imported. The results say why.');
         if (!dry) { state.playlists = await api('GET', '/playlists').catch(() => state.playlists); }
       };
       $('#roonfiles').onchange = (e) => { roonFiles = [...(e.target.files || [])]; e.target.value = ''; roonDone = false; roonRun(true); };
@@ -9542,7 +9555,7 @@
           // (their controls stay wired); only the chosen one shows. On a phone: the list, then a tab.
           // The newest outputs, not the answer fetched before the awaits above (a change since wins)
           const outs = state.outputs || outs0; const myOut = appOutput(); const dv = myOut && myOut.device; state.dacDrawn = appDevice();
-          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: settingsTabs({ saved, bundled: !!(bundled && bundled.configured), tunnel: !!(tunnel && tunnel.available), dac: dv ? hereDevice() : null }), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
+          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: settingsTabs({ saved, bundled: !!(bundled && bundled.configured), tunnel: !!(tunnel && tunnel.available), dac: dv ? hereDevice() : null }), prefix: 'set', ids: { backup: 'backupcard' }, remembered: state.settingsTab });
           const { phone, active } = tabs;
           if (active) state.settingsTab = active;
           const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');

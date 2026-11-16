@@ -1270,7 +1270,6 @@ a.btn { text-decoration: none; }
 .jobcur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .joberr { color: var(--bad); }
 /* Move from Roon */
-#roonmove .check { display: block; margin: 4px 0; }
 .roonpick { margin-bottom: 6px; }
 .roonpick ~ .toolbar { margin-top: 8px; }
 .roonfile.stale { opacity: 0.5; }
