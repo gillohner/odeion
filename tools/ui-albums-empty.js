@@ -6,7 +6,10 @@
 // all (songs without an artist tag are its "Unknown artist" row), said only "Artists come from the
 // tags of scanned files." with nothing to press; now the owner gets Add music, as on Songs and
 // Albums, and a listener is told the owner adds the music. Albums' button to Songs reads "Open
-// Songs" (was "Show songs"; other empty states say "Open …"). At 1280, 1024, 768 and 360 px.
+// Songs" (was "Show songs"; other empty states say "Open …"). Genres said only "Genres come from
+// the files' tags; tag your music and rescan." with nothing to press; now it follows the Albums
+// rule (songs without a genre tag: Open Songs; no songs: Add music, or for a listener, who adds it).
+// Also a listener case for Albums. At 1280, 1024, 768 and 360 px.
 //   node tools/ui-albums-empty.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -25,6 +28,8 @@ const albumCases = [
   { name: 'songs', fixtures: { '/library/stats': { body: stats(4) } }, text: 'The 4 songs in the library have no album name in their tags', button: 'Open Songs', goes: 'Songs', url: '/tracks' },
   { name: 'one-song', fixtures: { '/library/stats': { body: stats(1) } }, text: 'The song in the library has no album name in its tags', button: 'Open Songs', goes: 'Songs', url: '/tracks' },
   ...noSongs,
+  // a listener with no songs is told the owner adds the music, with nothing to press
+  { name: 'listener-no-songs', role: 'listener', fixtures: { '/library/stats': { body: stats(0) } }, text: 'Albums show up here once the node’s owner adds music.', button: null },
 ];
 const PAGES = [
   { view: 'albums', title: 'No albums yet', cases: albumCases },
@@ -32,6 +37,12 @@ const PAGES = [
   { view: 'artists', title: 'No artists yet', cases: [{ ...noSongs[0], fixtures: {} },
     // a listener can't add music: it says who does, and offers nothing to press
     { name: 'listener-no-songs', role: 'listener', fixtures: {}, text: 'Artists show up here once the node’s owner adds music.', button: null }] },
+  // Genres: the same rule as Albums
+  { view: 'genres', title: 'No genres yet', cases: [
+    { name: 'songs', fixtures: { '/library/stats': { body: stats(4) } }, text: 'The 4 songs in the library have no genre in their tags', button: 'Open Songs', goes: 'Songs', url: '/tracks' },
+    { name: 'one-song', fixtures: { '/library/stats': { body: stats(1) } }, text: 'The song in the library has no genre in its tags', button: 'Open Songs', goes: 'Songs', url: '/tracks' },
+    ...noSongs,
+    { name: 'listener-no-songs', role: 'listener', fixtures: { '/library/stats': { body: stats(0) } }, text: 'Genres show up here once the node’s owner adds music.', button: null }] },
 ];
 
 (async () => {
