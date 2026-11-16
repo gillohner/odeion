@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-16
 
+- **An empty list doesn't say "0" beside its title.** Genres, Albums, Artists, Songs and Playlists read "Genres 0" above "No genres yet" (and Albums with Favourites on, "0 of 0"), saying the same thing twice; Favourites already didn't. With nothing in the list the title stands alone and the note below says it; with something in it the count is there as before.
 - **A zone paused by an error says why on the Zones page.** When the app's player paused because its USB DAC went away (or a device wouldn't play on), the mini player said why, but the zone's card on the Zones page only said "paused". The card now says why, where the artist is, and a long reason wraps instead of being cut off. The phone's own card also changes as soon as its player plays or pauses: before, it waited until another zone changed. In Settings › Playback, the zone list marks zones the way the Zones page does: playing, paused, or "error" for a zone stopped by an error. A quiet stopped zone no longer shows a "stopped" badge.
 
 ### 2026-11-15
