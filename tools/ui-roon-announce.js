@@ -53,6 +53,7 @@ const reset = (page) => page.evaluate(() => { window.__said = []; });
         const q = new URL(r.request().url()).searchParams; sent.push({ file: q.get('file'), dry: q.get('dry_run') });
         await new Promise((res) => setTimeout(res, 150 + net.slow + (q.get('dry_run') === 'false' ? net.importSlow : 0)));
         if (net.fail && q.get('file') === net.fail) return r.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ error: 'The node is busy' }) });
+        if (net.odd && q.get('file') === net.odd) return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...answer(q), tags_found: null }) });
         await r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(answer(q)) });
       });
       try {
@@ -101,9 +102,28 @@ const reset = (page) => page.evaluate(() => { window.__said = []; });
         s = await said(page); end = (s[s.length - 1] || {}).text || '';
         const partial = sent.slice(n0);
         check(partial.length === 2 && partial.every((x) => x.dry === 'false') && !partial.some((x) => x.file === 'albums.xlsx'), `${width}: Import after a partly failed check sends only the files that checked out (${JSON.stringify(partial)})`);
-        check(/^Importing 2 files…$/.test((s[0] || {}).text || '') && /^Imported: 1 of 5 matched this library\. The file whose check failed was left out\.$/.test(end), `${width}: it says the file whose check failed was left out (${JSON.stringify(s.map((x) => x.text))})`);
+        check(/^Importing 2 files…$/.test((s[0] || {}).text || '') && /^Imported: 1 of 5 matched this library\. The file whose check failed was left out\. Check again is above the results\.$/.test(end), `${width}: it says the file whose check failed was left out (${JSON.stringify(s.map((x) => x.text))})`);
         const leftVis = await page.evaluate(() => (document.querySelector('#roonout [data-roonstate]') || {}).textContent || '');
-        check(/^Imported\. The file whose check failed was left out\.$/.test(leftVis), `${width}: and shows it (${leftVis})`);
+        check(/^Imported\. The file whose check failed was left out\. Check it again$/.test(leftVis), `${width}: and shows it, with Check it again (${leftVis})`);
+        // Check it again checks just the file left out; its Import sends just that file.
+        n0 = sent.length;
+        await page.locator('#roonout [data-roon-again]').click({ timeout: 2000 }).catch(() => {});
+        await page.waitForFunction(() => !document.querySelector('#roongo').disabled, null, { timeout: 8000 }).catch(() => {});
+        await page.locator('#roongo').click({ timeout: 2000 }).catch(() => {});
+        await page.waitForFunction(() => /Imported\./.test(document.querySelector('#roonout').textContent), null, { timeout: 8000 }).catch(() => {});
+        const retry = sent.slice(n0);
+        check(retry.length === 2 && retry.every((x) => x.file === 'albums.xlsx') && retry[0].dry === 'true' && retry[1].dry === 'false', `${width}: Check it again checks and imports only the file left out (${JSON.stringify(retry)})`);
+
+        // A file whose answer can't be read (a 200 without its tag list) counts as failed: Import leaves it out.
+        await reset(page); net.odd = 'albums.xlsx';
+        await page.locator('#roonfiles').setInputFiles(THREE);
+        await page.waitForSelector('#roonout [data-roon-again]', { timeout: 8000 }).catch(() => {});
+        await page.waitForFunction(() => !document.querySelector('#roongo').disabled, null, { timeout: 8000 }).catch(() => {});
+        net.odd = null; n0 = sent.length;
+        await page.locator('#roongo').click({ timeout: 2000 }).catch(() => {});
+        await page.waitForFunction(() => /Imported\./.test(document.querySelector('#roonout').textContent), null, { timeout: 8000 }).catch(() => {});
+        const odd = sent.slice(n0);
+        check(odd.length === 2 && !odd.some((x) => x.file === 'albums.xlsx'), `${width}: a file whose check answer could not be read is not imported (${JSON.stringify(odd)})`);
 
         // Nothing matched.
         await reset(page);

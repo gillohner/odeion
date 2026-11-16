@@ -576,9 +576,9 @@
   // Open) stays where they are (the toast has Open playlist). A failure is said under the button (Your
   // library › Import) or in a toast, and the button takes a file again, the same one too.
   let plImport = null; // the file going up: { name }
-  // What else is started on these pages: how many times, and how many are still under way
-  const pageWork = { started: 0, busy: 0 };
-  const pageAct = (fn) => async (...a) => { pageWork.started++; pageWork.busy++; try { return await fn(...a); } finally { pageWork.busy--; } };
+  // What else is started on these pages, per page: how many times, and how many are still under way
+  const pageWork = { started: {}, busy: {} };
+  const pageAct = (fn) => async (...a) => { const at = location.pathname; pageWork.started[at] = (pageWork.started[at] || 0) + 1; pageWork.busy[at] = (pageWork.busy[at] || 0) + 1; try { return await fn(...a); } finally { pageWork.busy[at]--; } };
   const PL_IMPORT_LIMIT = 180000; // ms
   const PL_FILES = ['libplimport', 'plimport'];
   const plImportLook = () => PL_FILES.forEach((id) => {
@@ -592,7 +592,7 @@
   });
   const importPlaylistFile = async (input, outId) => {
     const f = input.files[0]; if (!f || plImport) { input.value = ''; return; }
-    const from = location.pathname; const focused = document.activeElement === input; const started = pageWork.started;
+    const from = location.pathname; const focused = document.activeElement === input; const started = pageWork.started[from] || 0;
     const out = () => document.getElementById(outId);
     const mine = plImport = { name: f.name, spin: false };
     plImportLook(); setTimeout(() => { if (plImport === mine) { mine.spin = true; plImportLook(); } }, 150);
@@ -616,7 +616,7 @@
         const other = a && a !== document.body && a.id !== input.id && main.contains(a) && a.matches('input, select, textarea, button, a[href], summary, [tabindex]:not([tabindex="-1"])');
         const left = ['plname', 'plshared'].some((id) => { const e = document.getElementById(id); return !!e && !!e.value.trim(); });
         return location.pathname === from && !transients.some((t) => t.open()) && !document.querySelector('dialog[open]') && !typing && !other && !left
-          && pageWork.started === started && !pageWork.busy;
+          && (pageWork.started[from] || 0) === started && !pageWork.busy[from];
       };
       let go = here(); if (go && popPending) { await popPending; go = here(); }
       if (go) { setView('playlist', j.id); toast(said); } else toast(said, '', { label: 'Open playlist', run: () => setView('playlist', j.id) });
@@ -651,7 +651,7 @@
       // files and options stay as they were. The chosen files are kept here and the input emptied, so
       // choosing the same files again checks them again; after an import, only new files offer Import.
       // Import sends only the files whose latest check went through (a file whose check failed is
-      // never imported unseen: Check again, or choose it again).
+      // never imported unseen); after it, Check again checks just the files left out.
       // A screen reader hears #roonsay only: what started, then one line with the outcome, not
       // every "Checking 2 of 3…" or the whole list of files.
       let roonSeq = 0; let roonFiles = []; let roonOk = []; let roonDone = false;
@@ -679,21 +679,23 @@
             try {
               const res = await fetch(`/v1/import/roon?file=${encodeURIComponent(f.name)}&${opts}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
               const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
-              matched += r.matched; rows += r.rows; ok.push(f);
               const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
               const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}${r.playlist.kept ? ` and ${countOf(r.playlist.kept, 'links')} to match by hand` : ''}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
-              parts.push(`<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
+              const row = `<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
                 + (r.tags_found.length ? `<p class="muted small">Roon tags: ${r.tags_found.slice(0, 12).map(([l, c]) => `${esc(l)} (${c})`).join(', ')}${r.tags_found.length > 12 ? '…' : ''}</p>` : '')
-                + (r.misses.length ? `<details class="small"><summary>${r.unmatched + r.not_identified} not moved, and why</summary><ul class="misses">${r.misses.map((m) => `<li><strong>${esc(m.what)}</strong>: ${esc(m.reason)}</li>`).join('')}</ul></details>` : '') + '</div>');
+                + (r.misses.length ? `<details class="small"><summary>${r.unmatched + r.not_identified} not moved, and why</summary><ul class="misses">${r.misses.map((m) => `<li><strong>${esc(m.what)}</strong>: ${esc(m.reason)}</li>`).join('')}</ul></details>` : '') + '</div>';
+              // (counted, and offered to Import, only once its answer could be read in full)
+              matched += r.matched; rows += r.rows; ok.push(f); parts.push(row);
             } catch (e) { failed = true; parts.push(`<div class="roonfile"><div class="name">${esc(f.name)}</div><p class="small joberr">${esc(e.message)}</p></div>`); }
             if (dry && seq !== roonSeq) return; // (a newer check is on its way)
           }
         } finally { if (!dry) ctl.forEach((e) => { e.disabled = false; }); }
-        if (dry) roonOk = ok; else roonDone = true;
-        // (files whose check failed, not sent by Import)
+        // (files whose check failed, not sent by Import: they stay chosen, for Check again)
         const left = dry ? 0 : roonFiles.length - files.length;
+        if (dry) roonOk = ok; else if (left) roonFiles = roonFiles.filter((f) => !files.includes(f)); else roonDone = true;
         const leftWords = left === 1 ? ' The file whose check failed was left out.' : left ? ` The ${left} files whose check failed were left out.` : '';
-        out.innerHTML = (dry ? `<p class="muted small" data-roonstate>${failed ? 'Not every file could be checked; nothing changed yet. <button class="lnk" data-roon-again>Check again</button>' : 'Checked: nothing changed yet.'}</p>` : `<p class="small" data-roonstate>${matched ? 'Imported.' : 'Nothing was imported.'}${leftWords}</p>`) + parts.join('');
+        out.innerHTML = (dry ? `<p class="muted small" data-roonstate>${failed ? 'Not every file could be checked; nothing changed yet. <button class="lnk" data-roon-again>Check again</button>' : 'Checked: nothing changed yet.'}</p>`
+          : `<p class="small" data-roonstate>${matched ? 'Imported.' : 'Nothing was imported.'}${leftWords}${left ? ` <button class="lnk" data-roon-again>Check ${left === 1 ? 'it' : 'them'} again</button>` : ''}</p>`) + parts.join('');
         const again = $('[data-roon-again]', out); if (again) again.onclick = () => roonRun(true);
         go.disabled = !dry || !matched || roonDone;
         const nothing = dry && !matched && !failed;
@@ -703,7 +705,7 @@
           : dry ? (failed ? `Not every file could be checked${matched ? `; in the others, ${tally}` : ''}. Nothing changed yet.${matched ? ' Import is ready for those.' : ''} Check again is above the results.`
             : `Checked: ${tally}. Nothing changed yet${roonDone ? '' : '; Import is ready'}.`)
             : (!matched ? (failed ? 'Nothing was imported. The results say why.' : 'Nothing was imported: nothing in these files matched this library.')
-              : !failed ? `Imported: ${tally}.` : `Imported what matched (${tally}), but not every file could be imported. The results say which.`) + leftWords);
+              : !failed ? `Imported: ${tally}.` : `Imported what matched (${tally}), but not every file could be imported. The results say which.`) + leftWords + (left ? ' Check again is above the results.' : ''));
         if (!dry) { state.playlists = await api('GET', '/playlists').catch(() => state.playlists); }
       });
       $('#roonfiles').onchange = (e) => { roonFiles = [...(e.target.files || [])]; e.target.value = ''; roonDone = false; roonRun(true); };

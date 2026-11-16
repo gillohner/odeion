@@ -118,6 +118,13 @@ const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Dat
             await sleep(1300);
             const leftName = await page.evaluate(() => ({ path: location.pathname, name: document.querySelector('#plname')?.value, focus: document.activeElement === document.body, open: [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent) }));
             check(leftName.path === '/playlists' && leftName.name === 'Road' && leftName.focus && leftName.open.includes('Open playlist'), `${tag}: a name typed and left meanwhile keeps them there (${leftName.path}, "${leftName.name}"), with ${JSON.stringify(leftName.open)}`);
+            // 7. Create pressed meanwhile (the page is drawn again, the box empty): stay; the toast offers Open playlist.
+            await fx.go(page, pl.at); await page.waitForSelector(pl.input, { state: 'attached' });
+            net.wait = 900; await page.locator(pl.input).setInputFiles(FILE); await sleep(200);
+            await page.locator('#plname').fill('Road'); await page.click('#plcreate');
+            await sleep(1300);
+            const created = await page.evaluate(() => ({ path: location.pathname, name: document.querySelector('#plname')?.value, open: [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent) }));
+            check(created.path === '/playlists' && created.name === '' && created.open.includes('Open playlist'), `${tag}: Create pressed meanwhile keeps them there (${created.path}, box "${created.name}"), with ${JSON.stringify(created.open)}`);
           } else {
             // 6. A Move from Roon check started meanwhile: stay, with its results; the toast offers Open playlist.
             await fx.go(page, pl.at); await page.waitForSelector(pl.input, { state: 'attached' });
