@@ -3367,7 +3367,7 @@
     renderZoneName(); renderBar(); queueShown();
     toast(`${o.device.name}: this phone plays through ${z.name}, straight to the DAC`);
   };
-  const refreshOutputs = () => { if (isOwner()) loadOutputs().then(() => { preferPhoneZone(); renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
+  const refreshOutputs = () => { if (isOwner()) loadOutputs().then(() => { preferPhoneZone(); renderBar(); followZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
   window.addEventListener('pmdesktop:output', refreshOutputs);
   // A zone's line under its name (Zones cards, Play to, Move to, the Sound panel, Settings). The page's
   // own player's is short, so it fits beside "selected" or Play to on a 360 px phone's card
@@ -3407,10 +3407,11 @@
   // 400: an empty queue) show in the menu when it is open, else as a toast.
   let queueSaving = false; // one Save as playlist at a time (the Queue page's)
   let moving = false; // one move at a time (review: a second Move here sent the same queue twice)
+  let moveTarget = null; // where that move goes: its Move here still says "Moving…" when the menu is drawn again
   const moveTo = async (target) => {
     const from = state.zone;
     if (target === from || moving) return;
-    moving = true; $$('[data-move]', zonePop).forEach((b) => { b.disabled = true; });
+    moving = true; moveTarget = target; $$('[data-move]', zonePop).forEach((b) => { b.disabled = true; });
     // Zone to zone can take a while (the node opens the track first): say so at once when the menu is closed
     // (the message goes when the node answers: the menu opened meanwhile is drawn again instead of a
     // toast, and the message stayed over it, saying it still moved)
@@ -3584,10 +3585,12 @@
   // gets its own Back step (opened at once, it found that entry still there and pushed none, and
   // Back then left the URL a page behind)
   const menuAfterPop = (anchor, items) => { const go = () => showMenu(anchor, items); if (popPending) popPending.then(go); else go(); };
-  const renderZonePop = (err) => {
+  // What the menu shows, and the error it shows (kept when a zone event draws it again)
+  let zonePopDrawn = ''; let zonePopErr = null;
+  const zonePopHtml = (err) => {
     const movable = hasQueue(currentZone());
-    const movingTo = state.starting && state.starting.what === 'move' ? state.starting.zone : null;
-    zonePop.innerHTML = `<div class="pop-title">Play to</div>` + zoneList().map((z) => `
+    const movingTo = state.starting && state.starting.what === 'move' ? state.starting.zone : moving ? moveTarget : null;
+    return `<div class="pop-title">Play to</div>` + zoneList().map((z) => `
       <div class="pop-row"><button class="pop-item ${z.id === state.zone ? 'on' : ''}" data-zone="${esc(z.id)}">
         ${icon('zone')}<span><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}${z.id === BROWSER ? '' : `<span class="sr-only"> (${esc(z.output)})</span>`}</span></span>
         <span class="state">${zoneStateText(z)}</span>
@@ -3598,6 +3601,10 @@
       + `<div class="pop-title">This zone</div>`
       + `<button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`
       + (isOffline() ? '' : `<div class="pop-title">Listening together</div><button class="pop-item" id="zpvisible">${icon('artist')}<span><span class="name">Who sees what you play</span><span class="sub">${esc((VISIBLE.find((x) => x[0] === (state.presenceVisible || 'hidden')) || VISIBLE[0])[1])}</span></span></button>`);
+  };
+  const renderZonePop = (err) => {
+    zonePopErr = err || null;
+    zonePop.innerHTML = zonePopDrawn = zonePopHtml(zonePopErr);
     const zs = $('#zpsleep', zonePop); if (zs) zs.onclick = () => { closePop(); menuAfterPop($('#zonebtn'), [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]); };
     const zv = $('#zpvisible', zonePop); if (zv) zv.onclick = () => { closePop(); menuAfterPop($('#zonebtn'), [{ title: 'Who sees what you play' }, ...VISIBLE.map(([v, label, note]) => ({ label, note, icon: 'artist', on: (state.presenceVisible || 'hidden') === v, run: () => setVisible(v) }))]); };
     $$('[data-move]', zonePop).forEach((b) => b.onclick = () => { b.disabled = true; b.innerHTML = '<span class="spin"></span> Moving…'; moveTo(b.dataset.move); });
@@ -3606,13 +3613,28 @@
       closePop(); renderZoneName(); renderBar(); refreshQueue();
     });
   };
+  // The open menu follows the zones (a zone that went stayed in it, and a tap on it picked a zone no
+  // longer there; one that came was missing; a state word stayed old). Drawn again only when what it
+  // shows changed, keeping its error, its scroll and the keyboard's place (the first row when that
+  // row went).
+  const followZonePop = () => {
+    if (zonePop.hidden) return;
+    const html = zonePopHtml(zonePopErr);
+    if (html === zonePopDrawn) return;
+    const f = document.activeElement; const had = zonePop.contains(f) ? f : null;
+    const key = had && (had.dataset.zone != null ? `[data-zone="${CSS.escape(had.dataset.zone)}"]` : had.dataset.move != null ? `[data-move="${CSS.escape(had.dataset.move)}"]` : had.id ? `#${CSS.escape(had.id)}` : null);
+    const top = zonePop.scrollTop;
+    renderZonePop(zonePopErr);
+    zonePop.scrollTop = top;
+    if (had) { const b = (key && $(key, zonePop)) || $('.pop-item.on', zonePop) || $('.pop-item', zonePop); if (b) b.focus({ preventScroll: true }); }
+  };
   $('#zonebtn').onclick = () => {
     if (!zonePop.hidden) { closePop(); return; }
     closeJobPop();
     renderZonePop();
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
     // The devices' models: the owner's output list, fetched once
-    if (isOwner() && !state.outputs) loadOutputs().then(() => { if (!zonePop.hidden) renderZonePop(); renderBar(); }).catch(() => {});
+    if (isOwner() && !state.outputs) loadOutputs().then(() => { followZonePop(); renderBar(); }).catch(() => {});
   };
   // The tabs' Library: the library page last open. The tabs' Search focuses the field, except in
   // the Android app: its WebView doesn't open the keyboard for a focus set by script, so the field
@@ -10100,7 +10122,7 @@
         return;
       }
       // A snapshot (connected, reconnected, resynced): an outputs_changed may have been missed
-      if (ev.type === 'snapshot') { applySnapshot(ev); renderBar(); refreshOutputs(); return; }
+      if (ev.type === 'snapshot') { applySnapshot(ev); renderBar(); followZonePop(); refreshOutputs(); return; }
       // Numbered events: a gap means something was missed, so ask for a fresh snapshot.
       if (typeof ev.seq === 'number' && link.seq != null) {
         if (ev.seq > link.seq + 1) ws.send(JSON.stringify({ type: 'resync' }));
@@ -10133,13 +10155,14 @@
         // then fall back as for any zone that goes
         const yours = ev.zone === state.zone && (state.along || state.hosting || state.alongHome);
         delete state.zones[ev.zone]; countEvent(ev.zone);
-        if (yours) refreshAlong().finally(() => { ensureZone(); renderZoneName(); renderBar(); refreshQueue(); });
+        if (yours) refreshAlong().finally(() => { ensureZone(); renderZoneName(); renderBar(); followZonePop(); refreshQueue(); });
         else { ensureZone(); renderZoneName(); refreshAlong(); }
       }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
       else if (ev.type === 'outputs_changed') refreshOutputs(); // a phone's USB DAC came or went
       else if (ev.type === 'jobs') { if (isOwner()) { jobs.eventAt = Date.now(); onJobs(ev.jobs || ev); } } // the owner's jobs, as the polling
       renderBar();
+      if (ev.type === 'zone' || ev.type === 'zone_removed') followZonePop();
     };
   };
   $('#conn').addEventListener('click', () => { if (!link.up) retryNow(); });
