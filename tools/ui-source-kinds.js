@@ -6,7 +6,12 @@
 // stays "Play X on Spotify"; an untitled album's is "Play the album on Spotify"); the tooltip stays
 // "Play on Spotify", and Enter on each plays that row. Bandcamp's purchases said "Sefa · track" under
 // the title; they now end in "album" or "song" the same way, with only the artist under the title.
-// At 1280, 1024 and 768 px.
+// Favourites' songs from other services said "Sefa · album" under an album's title, nothing for a
+// song and the describer's raw "other" for a link it couldn't place; they now end in "album", "song",
+// "artist" the same way (nothing for "other"), and an album's Play is named "Play the album X" so it
+// differs from the same-titled song's "Play X"; on a phone the kind stays under the title (e.g.
+// "Sefa · album"), where a row-end word would take the title's room. At 1280, 1024 and 768 px
+// (Favourites also at 360 and 412).
 // Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-source-kinds.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -28,6 +33,14 @@ const sc = { '/sources': { body: [{ id: 'soundcloud', name: 'SoundCloud', descri
 // page nor artist and a long title
 const bcItems = [{ id: 'a1', title: T, artist: 'Sefa', kind: 'album', url: 'https://sefa.bandcamp.com/album/x', item: 'album:sefa.x', downloadable: true, downloaded: false }, { id: 't2', title: 'Second', artist: 'Sefa', kind: 'track', url: 'https://sefa.bandcamp.com/track/y', item: 'track:sefa.y', downloadable: true, downloaded: true }, { id: 't3', title: 'Third, a much longer title that has to share the row with its kind and its state', kind: 'track', url: 'https://example.com/z', downloadable: false, downloaded: false }];
 const bandcamp = { '/sources': { body: [{ id: 'bandcamp', name: 'Bandcamp', description: '', status: 'signed in', enabled: true }] }, '/sources/bandcamp/collection': { body: bcItems }, '/sources/bandcamp/downloads': { body: [{ id: 'a1', state: 'downloading', bytes: 42, total: 100 }] } };
+// Hearted elsewhere: the same title as a Bandcamp album and song, an artist, a link nobody described
+const favOther = [
+  { uri: 'https://sefa.bandcamp.com/album/x', page: 'https://sefa.bandcamp.com/album/x', title: T, artist: 'Sefa', kind: 'album', site: 'bandcamp', also_on: [] },
+  { uri: 'https://sefa.bandcamp.com/track/x', page: 'https://sefa.bandcamp.com/track/x', title: T, artist: 'Sefa', kind: 'track', site: 'bandcamp', also_on: [] },
+  { uri: 'https://open.spotify.com/artist/p', page: 'https://open.spotify.com/artist/p', title: 'Dr. Peacock', kind: 'artist', site: 'spotify', also_on: [] },
+  { uri: 'https://example.com/live', page: 'https://example.com/live', title: null, kind: 'other', site: null, also_on: [] },
+];
+const favourites = { '/favourites': { body: { uris: favOther.map((o) => o.uri), tracks: [], albums: [], artists: [], other: favOther.map((o) => o.uri) } }, '/discover/describe': { body: favOther }, '/discover/play': { body: { plays_from: null, items: [], connect: [] } } };
 const kinds = (page) => page.$$eval('.main [data-sitem]', (rs) => rs.map((r) => { const k = [...r.children].find((c) => c.matches('span.muted.small')); return k ? k.textContent.trim() : null; }));
 
 (async () => {
@@ -81,6 +94,62 @@ const kinds = (page) => page.$$eval('.main [data-sitem]', (rs) => rs.map((r) => 
             check(o <= 0, `${width} ${svc}: nothing wider than the screen (${o})`);
           } else await page.screenshot({ path: path.join(SHOTS, `${svc}-${width}-undrawn.png`) });
           check(!state.errors.length, `${width} ${svc}: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
+      // Favourites › From other services
+      {
+        const { page, context, state } = await fx.create(browser, width, { fixtures: favourites });
+        try {
+          await fx.go(page, '/favourites');
+          const drawn = await page.waitForFunction(() => document.querySelectorAll('#favother .list-row').length === 4, null, { timeout: 8000 }).then(() => true, () => false);
+          check(drawn, `${width} favourites: other services' rows drawn`);
+          if (drawn) {
+            const rows = await page.$$eval('#favother .list-row', (rs) => rs.map((r) => { const k = [...r.children].find((c) => c.matches('span.muted.small') && c.checkVisibility()); return { kind: k ? k.innerText.trim() : '', sub: r.querySelector('.sub').innerText.trim() }; }));
+            const k = rows.map((r) => r.kind).join();
+            check(k === 'album,song,artist,', `${width} favourites: rows end in album, song, artist, nothing (${k})`);
+            const subs = rows.map((r) => r.sub).join('|');
+            check(subs === 'Sefa|Sefa||', `${width} favourites: the line under the title holds no kind (${subs})`);
+            const text = await page.innerText('#favother');
+            check(!/\b(other|track)\b/i.test(text), `${width} favourites: no raw "other" or "track" on the list`);
+            const labels = await page.$$eval('#favother [data-dplay]', (bs) => bs.map((b) => b.getAttribute('aria-label')));
+            check(labels[0] === `Play the album ${T}`, `${width} favourites: the album's Play is "Play the album ${T}" (${labels[0]})`);
+            check(labels[1] === `Play ${T}`, `${width} favourites: the song's Play stays "Play ${T}" (${labels[1]})`);
+            const b = page.getByRole('button', { name: `Play the album ${T}`, exact: true });
+            const one = await b.count() === 1;
+            check(one, `${width} favourites: exactly one button named "Play the album ${T}"`);
+            const before = state.hits.length;
+            const pressed = one && await b.focus({ timeout: 2000 }).then(() => page.keyboard.press('Enter')).then(() => true, () => false);
+            let asked = false;
+            for (let i = 0; pressed && i < 40 && !asked; i++) { asked = state.hits.slice(before).some((h) => h.v === '/discover/play' && decodeURIComponent(h.q).includes(favOther[0].uri)); if (!asked) await new Promise((r) => setTimeout(r, 50)); }
+            check(asked, `${width} favourites: Enter on the album's Play plays that album`);
+            await page.keyboard.press('Escape');
+            await page.screenshot({ path: path.join(SHOTS, `favourites-${width}.png`) });
+            const o = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+            check(o <= 0, `${width} favourites: nothing wider than the screen (${o})`);
+          } else await page.screenshot({ path: path.join(SHOTS, `favourites-${width}-undrawn.png`) });
+          check(!state.errors.length, `${width} favourites: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
+      // Favourites on a phone: the kind stays in the line under the title (a row-end word next to
+      // a Connect chip left the title no room), never "other"
+      if (width === 1280) for (const pw of [360, 412]) {
+        const fav = { ...favourites, '/discover/describe': { body: favOther.map((o) => ({ ...o, connect: ['tidal'] })) } };
+        const { page, context, state } = await fx.create(browser, pw, { mobile: true, fixtures: fav });
+        try {
+          await fx.go(page, '/favourites');
+          const drawn = await page.waitForFunction(() => document.querySelectorAll('#favother .list-row').length === 4, null, { timeout: 8000 }).then(() => true, () => false);
+          check(drawn, `${pw} phone favourites: rows drawn`);
+          if (drawn) {
+            const rows = await page.$$eval('#favother .list-row', (rs) => rs.map((r) => ({ end: [...r.children].filter((c) => c.matches('span.muted.small') && c.checkVisibility()).map((c) => c.innerText.trim()).join(''), sub: r.querySelector('.sub').innerText.trim(), name: Math.round(r.querySelector('.grow').getBoundingClientRect().width) })));
+            check(rows.map((r) => r.sub).join('|') === 'Sefa · album|Sefa · song|artist|', `${pw} phone favourites: the line under the title ends in the kind (${rows.map((r) => r.sub).join('|')})`);
+            check(rows.every((r) => !r.end), `${pw} phone favourites: no kind at the row's end (${rows.map((r) => r.end).join()})`);
+            // (the same room for the title as without a kind word: 28 px at 360 next to Connect TIDAL)
+            check(rows.every((r) => r.name >= 25), `${pw} phone favourites: the title keeps its room (${rows.map((r) => r.name).join()} px)`);
+            await page.screenshot({ path: path.join(SHOTS, `favourites-phone-${pw}.png`) });
+            const o = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+            check(o <= 0, `${pw} phone favourites: nothing wider than the screen (${o})`);
+          }
+          check(!state.errors.length, `${pw} phone favourites: no page errors (${state.errors.join(' | ')})`);
         } finally { await context.close(); }
       }
       // Bandcamp's purchases (rows with no page here have no data-sitem)
