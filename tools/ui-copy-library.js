@@ -31,7 +31,7 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
   const browser = await chromium.launch();
   try {
     for (const [w, h] of [[1280, 900], [390, 844]]) {
-      const ctx = await browser.newContext({ viewport: { width: w, height: h }, reducedMotion: 'reduce' });
+      const ctx = await browser.newContext({ viewport: { width: w, height: h }, locale: 'en-US', reducedMotion: 'reduce' });
       await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
       const log = []; const slow = { tree: 0, music: 0, dry: 0 }; let paged = true; const musicAsks = []; let jobs500 = 0;
       const job = { current: null, queued: [], last: null };
@@ -84,7 +84,7 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(await until(async () => p.isVisible('#mmfiles .slow-note'), 3500), `${W} "Still loading…" after 2 s`);
       check(await p.waitForSelector('#mmlist .mrow', { timeout: 10000 }).then(() => true).catch(() => false), `${W} the files arrive (${Date.now() - t0} ms)`);
       slow.music = 0;
-      check(await p.$$eval('#mmlist .mrow', (r) => r.length) === 200 && /19800 more/.test(await p.textContent('#mmlist [data-mmmore]')), `${W} 200 of 20 000, with Show more`);
+      check(await p.$$eval('#mmlist .mrow', (r) => r.length) === 200 && /19,800 more/.test(await p.textContent('#mmlist [data-mmmore]')), `${W} 200 of 20 000, with Show more`);
       await p.click('#mmlist [data-mmmore]');
       check(await until(async () => (await p.$$eval('#mmlist .mrow', (r) => r.length)) === 400), `${W} Show more adds the next 200`);
       await p.fill('#mmq', 'Song 1999'); check(await until(async () => (await p.$$eval('#mmlist .mrow', (r) => r.length)) >= 1 && (await p.$$eval('#mmlist .mrow', (r) => r.length)) <= 11) && musicAsks.some((q) => /[?&]q=Song\+1999/.test(q)), `${W} the search goes to the node (q=…)`);
