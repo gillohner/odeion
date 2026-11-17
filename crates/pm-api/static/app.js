@@ -6368,14 +6368,16 @@
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
-  const endSelect = () => { if (selBar) { selBar.remove(); selBar = null; } $$('.selecting').forEach((b) => b.classList.remove('selecting')); $$('.selbox').forEach((c) => c.remove()); $$('[data-selstart]').forEach((b) => { b.setAttribute('aria-pressed', 'false'); }); };
+  // While selecting, the page ends the bar's height lower (--selbar), so the last songs scroll out
+  // from under it and can be ticked too.
+  const endSelect = () => { if (selBar) { selBar.ro.disconnect(); selBar.remove(); selBar = null; document.documentElement.style.removeProperty('--selbar'); } $$('.selecting').forEach((b) => b.classList.remove('selecting')); $$('.selbox').forEach((c) => c.remove()); $$('[data-selstart]').forEach((b) => { b.setAttribute('aria-pressed', 'false'); }); };
   const enableSelect = (section, songs, opts = {}) => {
     if (!section || !songs.length) return;
     const head = $('.section-head', section); if (!head || $('[data-selstart]', head)) return;
     head.insertAdjacentHTML('beforeend', `<button class="btn ghost sm selstart" data-selstart aria-pressed="false">${icon('check')}<span>Select</span></button>`);
     const sel = new Set();
     const draw = () => {
-      if (!selBar) { selBar = document.createElement('div'); selBar.className = 'selbar'; selBar.setAttribute('role', 'toolbar'); selBar.setAttribute('aria-label', 'Selected songs'); document.body.appendChild(selBar); }
+      if (!selBar) { selBar = document.createElement('div'); selBar.className = 'selbar'; selBar.setAttribute('role', 'toolbar'); selBar.setAttribute('aria-label', 'Selected songs'); document.body.appendChild(selBar); const bar = selBar; bar.ro = new ResizeObserver(() => { if (bar.isConnected) document.documentElement.style.setProperty('--selbar', `${bar.offsetHeight}px`); }); bar.ro.observe(bar); }
       const picked = [...sel].sort((a, b) => a - b).map((k) => songs[k]);
       selBar.innerHTML = `<span class="selcount">${countOf(sel.size, 'songs')} selected</span><button class="btn sm primary" data-sel="play" ${sel.size ? '' : 'disabled'}>${icon('play')} Play</button><button class="btn sm" data-sel="queue" ${sel.size ? '' : 'disabled'}>${icon('plus')} Add to queue</button><button class="btn sm" data-sel="playlist" ${sel.size ? '' : 'disabled'}>${icon('playlist')} Add to playlist…</button><button class="btn sm" data-sel="tag" ${sel.size ? '' : 'disabled'}>Tag…</button>${opts.remove ? `<button class="btn sm danger" data-sel="remove" ${sel.size ? '' : 'disabled'}>${icon('trash')} Remove</button>` : ''}<button class="btn sm ghost" data-sel="all">${sel.size === songs.length ? 'None' : 'All'}</button><button class="icon-btn" data-sel="cancel" aria-label="Stop selecting">${icon('close')}</button>`;
       $$('[data-sel]', selBar).forEach((b) => b.onclick = async () => {

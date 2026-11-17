@@ -1920,8 +1920,13 @@ body.kiosk .main { padding: 0; }
 .selbar { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(var(--player) + 14px); z-index: 40; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: calc(100vw - 24px); padding: 10px 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-lg); box-shadow: var(--shadow); }
 .selcount { font-weight: 600; margin-right: 4px; }
 html[data-shell="phone"] .selbar { bottom: calc(57px + 70px + env(safe-area-inset-bottom)); left: 12px; right: 12px; transform: none; justify-content: center; }
+/* Phone: every button on the bar is a 44 px tap (the bar sits outside #main, so the page rule misses it). */
+html[data-shell="phone"] .selbar :is(.btn, .icon-btn) { min-height: 44px; min-width: 44px; justify-content: center; }
+/* While selecting, the page scrolls on past the bar: the last songs come out from under it. */
+.main:has(.selecting) { padding-bottom: calc(32px + 14px + var(--selbar, 0px)); }
 .selecting .srow:has(.selbox input:checked) { background: var(--accent-soft); }
-@media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow [data-sfav], .selecting .srow [data-smore] { display: none; } }
+/* (the source chip's "finding" placeholder too, so nothing spins and vanishes beside the ticks) */
+@media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow .srcchip.wait, .selecting .srow [data-sfav], .selecting .srow [data-smore] { display: none; } }
 /* One way back (UX review, sweep A17): phones have the back link only; the desktop layout (tablets
    too) has the trail, and Back only where it goes somewhere the trail doesn't */
 html[data-shell="desktop"] .pagebar > .dupback { display: none; }

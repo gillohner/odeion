@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-17
+
+- **Select reaches the last songs of a list.** With Select on (a playlist, an album, search results), the bar of actions at the bottom covered the last two or three songs and the end of the page, even scrolled all the way down; on a phone a tap on the last song's box did nothing. Now the page scrolls on past the bar, so every song can be ticked, and the page's end comes back when you stop selecting. On a phone every button on the bar (All and ✕ were 36 px) is now a full 44 px tap, and while the songs' sources are still loading the rows no longer show a spinning chip beside the boxes.
+
 ### 2026-11-16
 
 - **A song’s row buttons say which song they are for.** With a screen reader or the keyboard, going down Songs, Favourites or an album, artist or playlist page read “Play from here”, “Play next”, “Add to queue” and “More” on every row, so you could not tell which song a button would play or queue without stepping back to its title. Now each one names its song, as the heart already did: “Play Night Drive”, “Play Night Drive next”, “Add Night Drive to the queue”, “More for Night Drive”. A link in a playlist names its page’s title the same way once the title has loaded, not the address. The short tooltips are unchanged.
