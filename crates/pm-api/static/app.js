@@ -5042,6 +5042,17 @@
   };
   // What the back arrow says on the next page.
   const hereLabel = () => state.view === 'item' ? (state.itemTitle || 'Back') : state.view === 'releases' ? (state.relTitle || 'Back') : state.view === 'tag' ? `#${String(state.viewArg).split(',').join(' #')}` : state.view === 'home-section' ? (HOME_TITLES[state.viewArg && state.viewArg.section] || 'Home') : state.view === 'playlist' || state.view === 'shared' ? (state.itemTitle || 'Playlist') : state.view === 'search' ? `Results for “${(state.viewArg && state.viewArg.q) || ''}”` : (VIEW_LABELS[state.view] || 'Back');
+  // The browser tab (and its Back list, and a screen reader on each page) names the page, not only
+  // the app: "Journey · Odeion"; Home is the app's own name. The name is the one Back gives this
+  // page, else its heading (a person, a smart playlist); a Back that names no page leaves the app's.
+  const BRAND = document.title || 'Odeion';
+  // (opening: the page isn't drawn, so its heading is still the last page's)
+  const pageTitle = (opening) => {
+    const v = state.view; let name = v === 'home' || v === 'dashboard' ? '' : v === 'search' && !(state.viewArg && state.viewArg.q) ? 'Search' : hereLabel();
+    // (a page head's h2 by its own words, not its count: the smart playlist editor)
+    if (name === 'Back' || v === 'genre') { const h = !opening && ($('#main h1') || $('#main .page-head h2')); const w = h && h.firstChild; name = w ? (w.nodeType === 3 ? w : h).textContent.trim() : ''; }
+    const t = name ? `${name} · ${BRAND}` : BRAND; if (document.title !== t) document.title = t;
+  };
   // History stores only what restores a view (search keeps its query, not its results).
   const histArg = (v, arg) => (v === 'search' ? (arg && arg.q ? (arg.in && arg.in !== 'everywhere' ? { q: arg.q, in: arg.in } : { q: arg.q }) : null) : (arg && typeof arg === 'object' && !Array.isArray(arg) ? JSON.parse(JSON.stringify(arg)) : arg ?? null));
   let navDepth = 0;
@@ -5098,10 +5109,14 @@
     }
     // Another page (not a new query on the search page): its skeleton shows if it is slow to draw
     const fresh = v !== 'search' && (v !== state.view || JSON.stringify(arg ?? null) !== JSON.stringify(state.viewArg ?? null));
+    const sameReleases = v === 'releases' && state.view === 'releases' && !!arg && !!state.viewArg && arg.id === state.viewArg.id && arg.section === state.viewArg.section;
     const later = fresh || (v === 'search' && state.view !== 'search'); // (a new query on Search: at once)
     // Usage insights: which page, never its argument; the page a load starts on, a page this sent
     // elsewhere, Back or Forward, else opened (a tab or query inside a page too)
     state.view = v; state.viewArg = arg; state.tab = tab;
+    // (a page not drawn yet has no name, not the last one's; the next page of the same releases keeps it)
+    if (fresh) { state.itemTitle = null; if (!sameReleases) state.relTitle = null; }
+    pageTitle(true);
     if (window.PM_USAGE) PM_USAGE.nav(v, firstPage ? 'initial' : v !== asked ? 'redirect' : how === 'pop' ? 'pop' : 'push');
     if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
     markTabs();
@@ -7443,7 +7458,7 @@
     // A page opened by a press is the page's own reading, not the press's
     const outer = inHandler; inHandler = 0; let p;
     try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }
-    const drawn = () => { drawing.on = false; markDownloads(); dropStaleSelect(); }; drawing.done = p.then(drawn, drawn);
+    const drawn = () => { drawing.on = false; markDownloads(); dropStaleSelect(); if (drawing === lastDrawing) pageTitle(); }; drawing.done = p.then(drawn, drawn);
     return p;
   };
   const renderPage = async (api) => {
