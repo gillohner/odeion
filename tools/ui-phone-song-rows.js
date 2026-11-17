@@ -2,7 +2,8 @@
 // rows of playlists, search and item pages: a tap on its name or its artist plays from there instead of
 // opening a page. The song, artist and album pages stay in the row's ⋯ (Go to song page). Desktop and a
 // tablet's touch screen keep the names as links. Nor are the names Tab stops on a phone, in any song
-// list (tabCase).
+// list (tabCase). With two artists credited the ⋯ has one Go to per artist ("Go to Sefa", "Go to
+// Dr. Peacock"), as the row's names no longer open them (menuArtists); desktop keeps one Go to artist.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-phone-song-rows.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -16,6 +17,9 @@ const tracks = Array.from({ length: 4 }, (_, i) => ({ ...fx.track, id: i + 1, ti
 let ok = 0; let fail = 0;
 const check = (cond, msg) => { if (cond) { ok++; console.log(`ok   ${msg}`); } else { fail++; console.log(`FAIL ${msg}`); } };
 const path0 = (page) => new URL(page.url()).pathname;
+// The open ⋯ menu's artist rows, and a press on one of them
+const MENU = '.popover.menu:not([hidden])';
+const menuArtists = (page) => page.locator(`${MENU} button, ${MENU} [role="menuitem"]`).evaluateAll((els) => els.map((e) => e.textContent.trim()).filter((t) => /^Go to (?!song page|album)|^Search “/.test(t)));
 // the song the app's player loaded (a fixture's play() is a no-op, so the bar stays at "Starting on…")
 const playing = (page, id) => page.waitForFunction((n) => [...document.querySelectorAll('audio, video')].some((a) => a.src.includes(`/library/tracks/${n}/file`)), id, { timeout: 4000 }).then(() => true, () => false);
 const tapAt = async (page, loc, touch) => {
@@ -60,6 +64,15 @@ async function phoneCase(browser, width, { android = false, touch = true } = {})
       await go.click();
       await page.waitForFunction(() => location.pathname.startsWith('/song/')).catch(() => {});
       check(path0(page).startsWith('/song/'), `${label} ${pg.name}: Go to song page opens it (${path0(page)})`);
+      // one Go to per credited artist (the row's names don't open them on a phone)
+      await fx.go(page, pg.at); await row.waitFor();
+      await row.locator('[data-act="more"]').click();
+      await page.locator(MENU).getByText('Go to song page', { exact: true }).waitFor({ timeout: 3000 }).catch(() => {});
+      const arts = await menuArtists(page);
+      check(arts.join('|') === 'Go to Sefa|Go to Dr. Peacock', `${label} ${pg.name}: ⋯ has one Go to per artist (${arts.join(' | ')})`);
+      await page.locator(MENU).getByText('Go to Dr. Peacock', { exact: true }).click().catch(() => {});
+      await page.waitForFunction(() => location.pathname.startsWith('/artist/')).catch(() => {});
+      check(path0(page) === '/artist/lib-22', `${label} ${pg.name}: Go to Dr. Peacock opens the second artist (${path0(page)})`);
       await fx.go(page, pg.at); await row.waitFor();
       await fx.cleanCopy(page);
       if (pg.at === '/tracks') await page.screenshot({ path: path.join(shots, `songs-${label.replace(/ /g, '-')}.png`) });
@@ -79,6 +92,12 @@ async function linkCase(browser, width, touch) {
     await tapAt(page, row.locator('.title [data-act="song"]'), touch);
     await page.waitForFunction(() => location.pathname.startsWith('/song/')).catch(() => {});
     check(path0(page).startsWith('/song/'), `${label} Songs: the song's name still opens its page (${path0(page)})`);
+    // (the names are links here: ⋯ keeps its one Go to artist)
+    await fx.go(page, '/tracks'); await row.waitFor();
+    await row.locator('[data-act="more"]').click();
+    await page.locator(MENU).getByText('Go to song page', { exact: true }).waitFor({ timeout: 3000 }).catch(() => {});
+    const arts = await menuArtists(page);
+    check(arts.join('|') === 'Go to artist', `${label} Songs: ⋯ has one Go to artist (${arts.join(' | ')})`);
     check(state.errors.length === 0, `${label} Songs: no page errors`);
   } finally { await context.close(); }
 }
@@ -118,6 +137,18 @@ async function tabCase(browser, width, { touch = true } = {}) {
     const pl = await tabs(page, `#plsongs ${SROW_NAMES}`);
     check(split && pl.length >= 3 && pl.every((n) => n === want), `${label} playlist: its row's ${pl.length} names, read-in artists too, have tabIndex ${want} (${pl})`);
     check(await credits.count() === 2, `${label} playlist: two artist links`);
+    // its ⋯: one Go to per artist on a phone; desktop keeps its one row (the names are links there)
+    await page.locator('#plsongs .srow').first().locator('[data-smore]').click();
+    await page.locator(MENU).getByText('Add to queue', { exact: true }).waitFor({ timeout: 3000 }).catch(() => {});
+    const arts = await menuArtists(page);
+    check(phone ? arts.join('|') === 'Go to Sefa|Go to Dr. Peacock' : arts.length === 1, `${label} playlist: ⋯ has ${phone ? 'one Go to per artist' : 'one artist row'} (${arts.join(' | ')})`);
+    if (phone) {
+      await page.locator(MENU).getByText('Go to Dr. Peacock', { exact: true }).click().catch(() => {});
+      await page.waitForFunction(() => location.pathname.startsWith('/artist/')).catch(() => {});
+      check(path0(page) === '/artist/lib-22', `${label} playlist: Go to Dr. Peacock opens the second artist (${path0(page)})`);
+      await fx.go(page, '/playlist/c1');
+      await page.waitForFunction(() => document.querySelectorAll('#plsongs .srow [data-artist-credit]').length === 2, null, { timeout: 4000 }).catch(() => {});
+    } else await page.keyboard.press('Escape');
     if (phone) { // (the artists too follow a change of layout)
       await page.setViewportSize({ width: 1280, height: 900 }); await page.waitForFunction(() => document.documentElement.dataset.shell !== 'phone');
       const wide = await tabs(page, `#plsongs ${SROW_NAMES}`);
