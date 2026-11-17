@@ -5492,10 +5492,11 @@
     onBusy(container, 'click', async (e) => {
       const lists = rowLists;
       const btn = e.target.closest('[data-act]');
-      // On a touch screen a tap on the row plays from there (no hover to reveal the play button)
+      // On a touch screen a tap on the row plays from there (no hover to reveal the play button); on a
+      // phone its names take no taps (app.css), so a click there plays too, with a mouse as well
       if (!btn) {
         const row = e.target.closest('.track'); const list = row && row.closest('[data-list]');
-        if (row && list && !e.target.closest('a, button, input') && window.matchMedia && matchMedia('(hover: none)').matches) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
+        if (row && list && !e.target.closest('a, button, input') && (shellMode() === 'phone' || (window.matchMedia && matchMedia('(hover: none)').matches))) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
         return;
       }
       const row = btn.closest('.track'); const list = btn.closest('[data-list]');
