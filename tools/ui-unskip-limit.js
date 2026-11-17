@@ -66,7 +66,11 @@ const server = http.createServer(async (req, res) => {
       if (android) await ctx.addInitScript(() => { window.pmDesktop = { platform: 'android' }; });
       const outside = [];
       await ctx.route((url) => url.origin !== BASE && !/^(data|blob):/.test(url.protocol), (r) => { outside.push(r.request().url()); return r.abort(); });
-      await ctx.routeWebSocket(/\/v1\/events/, (ws) => ws.close());
+      // connectToServer first: otherwise Playwright 1.49 opens the routed socket after this handler
+      // (WebSocketRoute._afterHandle → ensureOpened) outside any await, and a reconnect landing while
+      // the context closes rejects with a TargetClosedError nobody catches (exit 1 after every check
+      // passed). The loopback server has no upgrade listener and drops it; the page still sees a close.
+      await ctx.routeWebSocket(/\/v1\/events/, (ws) => { ws.connectToServer(); return ws.close(); });
       const page = await ctx.newPage();
       await page.clock.install();
       const errors = []; page.on('pageerror', (e) => errors.push(e.message));
