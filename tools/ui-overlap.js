@@ -99,7 +99,7 @@ const inspect = () => {
       }
       // The now-playing overlay and a dialog
       await p.goto(BASE + '/tracks'); await sleep(1200);
-      const play = await p.$('.track [data-act="play"]'); if (play) { await p.hover('.track'); await play.click().catch(() => {}); await sleep(700); await p.keyboard.press('n'); await sleep(900); await check('Now playing'); await p.keyboard.press('Escape'); await sleep(300); }
+      const play = await p.$('.track [data-act="play"]'); if (play) { await p.hover('.track'); await play.dispatchEvent('click').catch(() => {}); /* (a phone's row play button takes only the keyboard: pressed directly) */ await sleep(700); await p.keyboard.press('n'); await sleep(900); await check('Now playing'); await p.keyboard.press('Escape'); await sleep(300); }
       const more = await p.$('.track [data-act="more"]'); if (more) { await p.hover('.track'); await more.click().catch(() => {}); await sleep(500); await check('Track menu'); await p.keyboard.press('Escape'); }
       await ctx.close();
     }

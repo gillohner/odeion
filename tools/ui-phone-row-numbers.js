@@ -1,0 +1,140 @@
+// On a phone the library's song lists (Songs, Favourites, a genre's songs, Downloads' All songs and
+// Favourites) had a running number (1, 2, 3…) before each title. It counts rows and nothing else,
+// and the title had 194 px at 360 (246 at 412). The other phone song rows (search, playlists, item
+// pages) have none, and docs/ux/responsive.md draws a phone row as the title, artist, length and ⋯.
+// Now the number goes on a phone and the title takes its room: 28 px more (222 / 274 px; it starts
+// 12 px in, as the other phone rows do); an album's real track numbers (Downloads › an album) stay. The row's play button stays for the
+// keyboard: it shows over the row's start only while the keyboard is on it, and Enter plays from
+// there. A tap (or, in the phone layout, a mouse click) at the title's start still plays the row
+// through the row itself, and a mouse over the row doesn't show the hidden button. Desktop and
+// tablet widths keep their numbers, and so does the Phone layout chosen on a window wider than 720 px.
+// Real candidate assets, isolated API fixtures; no node or external network required.
+//   node tools/ui-phone-row-numbers.js [repo] [shots]
+const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
+const fs = require('node:fs'); const path = require('node:path');
+const fx = require('./ui-fixture');
+const SHOTS = path.resolve(process.argv[3] || path.join(process.env.TMPDIR || '/tmp', 'phone-row-numbers-shots'));
+fs.mkdirSync(SHOTS, { recursive: true });
+let ok = 0; let fail = 0;
+const check = (cond, what) => { if (cond) { ok++; console.log(`ok   ${what}`); } else { fail++; console.log(`FAIL ${what}`); } };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const LONG = 'A Remarkably Long Song Title That Keeps Going (Extended Club Remix Version)';
+const tracks = [[1, LONG, 3], [2, 'Bright Morning', 1], [3, 'Cold River', 2]].map(([id, title, no]) => ({ ...fx.track, id, title, track_no: no, canonical_uri: `${fx.SONG}?n=${id}` }));
+const genre = { genre: { id: 5, name: 'Ambient', albums: 0, tracks: 3 }, albums: [], tracks };
+const offline = { offline: true, device_id: 'fixture-device', synced_at: null, bytes: 1, queued: 0, tracks, albums: [{ id: 7, title: 'Journey', track_ids: [2, 3, 1], cover: false }], playlists: [], favourites: { track_ids: [2] } };
+// Each row of a list: its number (shown or not, and its text), where its title starts and how wide
+const rows = (page, list) => page.$$eval(`[data-list="${list}"] .track`, (rs) => rs.map((r) => {
+  const n = r.querySelector('.num'); const box = r.getBoundingClientRect(); const t = r.querySelector('.main-col').getBoundingClientRect();
+  return { num: n && n.getClientRects().length ? n.textContent.trim() : null, lead: Math.round(t.left - box.left), title: Math.round(t.width), row: Math.round(box.width) };
+}));
+const nowSrc = (page) => page.evaluate(() => (window.pmPlayer && window.pmPlayer.now().src) || '');
+const playing = (page, id) => page.waitForFunction((n) => [...document.querySelectorAll('audio, video')].some((a) => a.src.includes(`/library/tracks/${n}/file`)), id, { timeout: 4000 }).then(() => true, () => false);
+
+async function phone(browser, width) {
+  const at = `${width}px`;
+  const run = await fx.create(browser, width, { mobile: true, tracks, favs: [fx.SONG], fixtures: { '/library/genres/5': { body: genre } } });
+  const { page, context, state } = run;
+  try {
+    for (const [where, url, list] of [['Songs', '/tracks', 'all'], ['Favourites', '/favourites', 'fav'], ['A genre', '/genre/5', 'genre']]) {
+      await fx.go(page, url); await page.waitForSelector(`[data-list="${list}"] .track`); await sleep(200);
+      const rs = await rows(page, list);
+      check(rs.length && rs.every((r) => r.num === null), `${at} ${where}: no running number before the titles (${JSON.stringify(rs.map((r) => r.num))})`);
+      // the title starts at the row's own padding, and gets all but the length and ⋯ (38 + 32 + gaps)
+      check(rs.every((r) => r.lead >= 10 && r.lead <= 14 && r.title >= r.row - 12 - 10 - 38 - 32 - 16), `${at} ${where}: the title starts ${rs[0].lead} px in and is ${rs[0].title} px of the row's ${rs[0].row}`);
+      const ov = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+      check(ov <= 0, `${at} ${where}: no horizontal overflow (${ov})`);
+      await page.screenshot({ path: path.join(SHOTS, `${where.replace(' ', '-').toLowerCase()}-${width}.png`) });
+    }
+    // Songs at 360 had 194 px for the title (246 at 412); now 28 more
+    await fx.go(page, '/tracks'); await page.waitForSelector('[data-list="all"] .track');
+    const [first] = await rows(page, 'all');
+    check(Math.abs(first.title - (width === 360 ? 222 : 274)) <= 2, `${at} Songs: the title is ${first.title} px wide (was ${width === 360 ? 194 : 246})`);
+    // A tap where the number was, on the title's start: the row plays, not the hidden button
+    const r2 = page.locator('[data-list="all"] .track').nth(1); const b2 = await r2.boundingBox();
+    const hit = await page.evaluate(([x, y]) => { const e = document.elementFromPoint(x, y); return e ? (e.closest('[data-act]') ? e.closest('[data-act]').dataset.act : e.closest('.main-col') ? 'main-col' : e.className) : null; }, [b2.x + 16, b2.y + b2.height / 2]);
+    check(hit === 'main-col', `${at} Songs: the title's start is the row, not its hidden play button (${hit})`);
+    await page.touchscreen.tap(b2.x + 16, b2.y + b2.height / 2);
+    check(await playing(page, 2), `${at} Songs: a tap at row 2's start plays Bright Morning (${await nowSrc(page)})`);
+    // The keyboard's play button: hidden until the keyboard is on it, then over the row's start
+    const kb = r2.locator('[data-act="play"]');
+    check(await kb.evaluate((e) => getComputedStyle(e).opacity === '0'), `${at} Songs: the row's play button is not shown`);
+    await page.locator('[data-list="all"] .track').nth(0).locator('[data-act="more"]').focus(); await page.keyboard.press('Tab');
+    const shown = await kb.evaluate((e) => { const r = e.getBoundingClientRect(); const row = e.closest('.track').getBoundingClientRect(); return { focused: e === document.activeElement, op: getComputedStyle(e).opacity, inRow: r.left >= row.left && r.right <= row.left + 48 && r.top >= row.top && r.bottom <= row.bottom, top: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === e || e.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) }; });
+    check(shown.focused && shown.op === '1' && shown.inRow && shown.top, `${at} Songs: Tab from row 1's ⋯ reaches row 2's play button, shown at the row's start (${JSON.stringify(shown)})`);
+    await page.screenshot({ path: path.join(SHOTS, `songs-keyboard-play-${width}.png`) });
+    await page.keyboard.press('Tab');
+    check(await r2.locator('[data-act="more"]').evaluate((e) => e === document.activeElement), `${at} Songs: Tab goes on to its ⋯`);
+    check(await kb.evaluate((e) => getComputedStyle(e).opacity === '0'), `${at} Songs: and the play button hides again`);
+    // Enter on the next row's play button (row 2 already plays from the tap): row 3 plays
+    await page.keyboard.press('Tab');
+    const kb3 = page.locator('[data-list="all"] .track').nth(2).locator('[data-act="play"]');
+    check(await kb3.evaluate((e) => e === document.activeElement && getComputedStyle(e).opacity === '1'), `${at} Songs: Tab goes on to row 3's play button, shown`);
+    await page.keyboard.press('Enter');
+    check(await playing(page, 3), `${at} Songs: Enter on it plays Cold River from there (${await nowSrc(page)})`);
+    check(!state.errors.length, `${at}: no page errors (${state.errors.join(' | ')})`);
+  } finally { await context.close(); }
+  // Downloads (offline): All songs and Favourites drop the number; an opened album keeps its track numbers
+  const off = await fx.create(browser, width, { offline: true, mobile: true, tracks, fixtures: { '/offline': { body: offline } } });
+  try {
+    await fx.go(off.page, '/downloads'); await off.page.waitForSelector('[data-list="all"] .track', { timeout: 8000 }); await sleep(200);
+    for (const list of ['all', 'fav']) { const rs = await rows(off.page, list); check(rs.length && rs.every((r) => r.num === null && r.lead <= 14), `${at} Downloads › ${list}: no running number (${JSON.stringify(rs.map((r) => r.num))})`); }
+    await off.page.click('[data-dlalbum="7"]'); await off.page.waitForSelector('[data-list="album"] .track');
+    const al = await rows(off.page, 'album');
+    check(JSON.stringify(al.map((r) => r.num)) === '["1","2","3"]' && al.every((r) => r.lead >= 30), `${at} Downloads › an album keeps its track numbers (${JSON.stringify(al.map((r) => r.num))}, title ${al[0].lead} px in)`);
+    await off.page.screenshot({ path: path.join(SHOTS, `downloads-album-${width}.png`) });
+    check(!off.state.errors.length, `${at} Downloads: no page errors (${off.state.errors.join(' | ')})`);
+  } finally { await off.context.close(); }
+}
+
+// The phone layout with a mouse (a narrow window): a hover over the row doesn't show the button,
+// and a click at the title's start plays the row
+async function mouse(browser) {
+  const { page, context } = await fx.create(browser, 390, { tracks });
+  try {
+    await fx.go(page, '/tracks'); await page.waitForSelector('[data-list="all"] .track');
+    const r = page.locator('[data-list="all"] .track').nth(2); const b = await r.boundingBox();
+    await page.mouse.move(b.x + 16, b.y + b.height / 2);
+    check(await r.locator('[data-act="play"]').evaluate((e) => getComputedStyle(e).opacity === '0'), '390 mouse: a hover over the row leaves its play button hidden');
+    await page.mouse.click(b.x + 16, b.y + b.height / 2);
+    check(await playing(page, 3), '390 mouse: a click at row 3\'s start plays Cold River');
+  } finally { await context.close(); }
+}
+
+// Desktop and tablet widths keep the numbers (and the play button over them)
+async function wide(browser, width) {
+  const { page, context } = await fx.create(browser, width, { tracks });
+  try {
+    await fx.go(page, '/tracks'); await page.waitForSelector('[data-list="all"] .track');
+    const rs = await rows(page, 'all');
+    check(JSON.stringify(rs.map((r) => r.num)) === '["1","2","3"]', `${width}px Songs: the rows keep their numbers (${JSON.stringify(rs.map((r) => r.num))})`);
+    const r = page.locator('[data-list="all"] .track').nth(1); await r.hover();
+    check(await r.locator('[data-act="play"]').evaluate((e) => getComputedStyle(e).opacity === '1'), `${width}px Songs: a hover shows the row's play button`);
+  } finally { await context.close(); }
+}
+
+// Settings › Layout › Phone on a wider window: up to 720 px the row is the phone's four columns and
+// the number goes; wider, the row keeps its album and format columns and its number, in one line
+async function chosen(browser, width) {
+  const { page, context } = await fx.create(browser, width, { tracks });
+  try {
+    await context.addInitScript(() => { localStorage.setItem('pm.layout', 'phone'); });
+    await fx.go(page, '/tracks'); await page.waitForSelector('[data-list="all"] .track'); await sleep(200);
+    const shell = await page.evaluate(() => document.documentElement.dataset.shell);
+    const rs = await rows(page, 'all');
+    const line = await page.$eval('[data-list="all"] .track', (r) => { const kids = [...r.children].filter((c) => c.getClientRects().length && !c.matches('.no') || (c.matches('.no') && getComputedStyle(c).position !== 'absolute')).map((c) => c.getBoundingClientRect()); return kids.every((a, i) => i === 0 || (a.left >= kids[i - 1].right - 1 && Math.abs(a.top + a.height / 2 - (kids[0].top + kids[0].height / 2)) < 12)); });
+    const want = width <= 720 ? '[null,null,null]' : '["1","2","3"]';
+    check(shell === 'phone' && JSON.stringify(rs.map((r) => r.num)) === want && line, `${width}px Phone layout: numbers ${JSON.stringify(rs.map((r) => r.num))}, the row's parts side by side in one line (${line})`);
+  } finally { await context.close(); }
+}
+
+(async () => {
+  const browser = await chromium.launch();
+  try {
+    for (const w of [360, 412]) await phone(browser, w);
+    await mouse(browser);
+    for (const w of [700, 800]) await chosen(browser, w);
+    for (const w of [1280, 768, 600]) await wide(browser, w);
+  } finally { await browser.close(); }
+  console.log(`${ok} ok, ${fail} FAIL`);
+  process.exit(fail ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(1); });

@@ -2593,6 +2593,19 @@ html[data-shell="phone"] .sk-srow > .icon-btn { display: none; }
 html[data-shell="phone"] .srow:not(.card-row) :is(.name, .sub) .lnk:not(.vmark) { pointer-events: none; }
 /* (so is a library song row: Songs, Favourites, a genre; its ⋯ has Go to song page, artist and album) */
 html[data-shell="phone"] .track .main-col .lnk { pointer-events: none; }
+/* Phone: a library list's running number (Songs, Favourites, a genre, Downloads: 1, 2, 3…) goes, as
+   in the other song rows (title, artist, length and ⋯; docs/ux/responsive.md), and the title takes its
+   width. An album's track numbers stay. The row's play button stays for the keyboard: it shows over
+   the row's start only while the keyboard is on it (a tap anywhere on the row plays already). (Up to
+   720 px, where the row is those four columns; the Phone layout chosen on a wider window keeps the
+   album and format columns, and its numbers) */
+@media (max-width: 720px) {
+  html[data-shell="phone"] .track.seq { grid-template-columns: minmax(0, 1fr) 38px 32px; position: relative; padding-left: 12px; }
+  html[data-shell="phone"] .track.seq > .no { position: absolute; left: 0; top: 0; bottom: 0; width: 40px; pointer-events: none; }
+  html[data-shell="phone"] .track.seq .num { display: none; }
+  html[data-shell="phone"] .track.seq .rowplay:not(:focus-visible) { opacity: 0; }
+  html[data-shell="phone"] .track.seq .rowplay:focus-visible { pointer-events: auto; }
+}
 @media (pointer: coarse) { .section-head > .btn.selstart { line-height: 40px; margin-top: -4px; margin-bottom: -4px; } }
 
 /* (review round 1) A desktop window up to 720 px wide: the old one-screen minimum height goes, and the
