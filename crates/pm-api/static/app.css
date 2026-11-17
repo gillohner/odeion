@@ -2561,6 +2561,8 @@ html[data-shell="phone"] #main > .hero.item-hero { container: ihero / inline-siz
 html[data-shell="phone"] .sk-srow > .icon-btn { display: none; }
 /* (a song row is one tap target on a phone: it plays; its song, artist and album pages are in its ⋯) */
 html[data-shell="phone"] .srow:not(.card-row) :is(.name, .sub) .lnk:not(.vmark) { pointer-events: none; }
+/* (so is a library song row: Songs, Favourites, a genre; its ⋯ has Go to song page, artist and album) */
+html[data-shell="phone"] .track .main-col .lnk { pointer-events: none; }
 @media (pointer: coarse) { .section-head > .btn.selstart { line-height: 40px; margin-top: -4px; margin-bottom: -4px; } }
 
 /* (review round 1) A desktop window up to 720 px wide: the old one-screen minimum height goes, and the
