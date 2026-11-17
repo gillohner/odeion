@@ -7081,6 +7081,11 @@
   // faster than a list loads still draw each answer, the page is never left on its placeholder.)
   const pageGen = { albums: 0, artists: 0 }; const pageShown = { albums: 0, artists: 0 };
   const listStale = (v, mine) => state.view !== v || mine < pageShown[v];
+  // Each draw of a playlist is numbered as well: only the latest draw of the playlist at the address
+  // draws anything, its error too. An older draw that answers late (a library change redrew it, or
+  // another playlist was opened while it waited) would show a list the server no longer has, and
+  // every Remove on that page goes by a song's place in the list.
+  let plGen = 0;
   // The latest favourites load, so a page that lists favourites can wait for it on a cold start
   let favLoad = null; let favRedraw = null; let favRetryFocus = false;
   // Only the latest load's answer counts: on a cold start a slow first answer that lands after a
@@ -7470,6 +7475,7 @@
     // (another page ends Select; this page drawn again keeps it where its list does, enableSelect)
     if (!selOn() || selNow.page !== selPage()) endSelect();
     const lists = {}; let listMine = 0; // (Albums, Artists: this draw's number, pageGen)
+    let drawStale = null; // (a playlist: this draw is no longer the latest, plGen)
     try {
       switch (v) {
         case 'home': {
@@ -8258,17 +8264,23 @@
           // scroll and the focus kept, keepPlace)
           const again = redrawing('playlist'); if (!again) loading();
           const plId = state.viewArg;
-          await pubkyUser();
+          const plMine = ++plGen; drawStale = () => plMine !== plGen || state.view !== 'playlist' || state.viewArg !== plId; await pubkyUser();
           // Where songs play from can take a while the first time (each service asked by ISRC):
           // the songs show at once, the chips follow.
           const cachedPf = state.plPf && state.plPf.id === plId && Date.now() - state.plPf.at < 30000 ? state.plPf.data : null;
           const pfFailed = !cachedPf && state.plPf && state.plPf.id === plId && state.plPf.failed && Date.now() - state.plPf.at < 30000;
           // A listener's collection plays what the library has: no play-from orders or pins (those are the owner's)
           const mine = isListener();
-          const pfP = mine ? Promise.resolve(null) : cachedPf ? Promise.resolve(cachedPf) : pfFailed ? Promise.resolve(null) : api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true }; return null; });
+          const askPf = () => api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true }; return null; });
+          let pfP = mine ? Promise.resolve(null) : cachedPf ? Promise.resolve(cachedPf) : pfFailed ? Promise.resolve(null) : askPf();
           const d = await api('GET', `/playlists/${encodeURIComponent(plId)}`);
-          let pf = cachedPf || await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]);
-          if (state.view !== 'playlist') return;
+          // The answer kept from before goes by place too: if the list changed meanwhile (another
+          // device moved or removed a song), a row would show one song and remove another, so it is
+          // asked for again
+          const pfFits = cachedPf && cachedPf.items.length === d.playlist.items.length && cachedPf.items.every((r, k) => r.uri === d.playlist.items[k].uri);
+          if (cachedPf && !pfFits && !mine) pfP = askPf();
+          let pf = (pfFits && cachedPf) || await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]);
+          if (drawStale()) return;
           const pfPending = pf === undefined;
           if (pfPending) { pf = null; let pfDone = false; pfP.then(() => { pfDone = true; if (state.view === 'playlist' && state.viewArg === plId) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
           state.itemTitle = d.summary.name;
@@ -10099,7 +10111,7 @@
       $$('[data-crumb-kind]', main).forEach((b) => b.onclick = () => (b.dataset.asBack ? $('.pagebar > [data-back]', main).click() : setView('item', { kind: b.dataset.crumbKind, id: b.dataset.crumbId })));
       bindTrackRows(main, lists);
     } catch (e) {
-      if (listMine && listStale(v, listMine)) return; // (an older list's error over a newer list)
+      if ((listMine && listStale(v, listMine)) || (drawStale && drawStale())) return; // (an older list's or playlist draw's error over a newer one)
       if (state.drawnPage === v) state.drawnPage = null; // (Albums, Artists: Try again draws it from the start)
       main.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)} <button class="btn sm" id="navretry">Try again</button></div>`;
       $('#navretry', main).onclick = () => render();
