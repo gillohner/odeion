@@ -3,7 +3,9 @@
 // load (or a song pinned to a source further down) must not end Select, drop the ticks, flash the
 // skeleton or jump to the top: the page stays where it was, the ticks stay and the bar acts on the
 // list on screen. Opening another page ends Select; starting Select again starts with nothing
-// ticked. In Search, "See all songs" keeps Select and the tick, with a box on every new row.
+// ticked. In Search, "See all songs" keeps Select and the tick, with a box on every new row. The
+// playlist changing under Select (a song above a tick taken out, a song in it twice, a filter, a
+// Remove that takes a while): the bar's Remove deletes exactly the songs ticked on screen.
 // Phones (360, 412, Android stub) and desktop (1280).
 // Real candidate assets, isolated responses: node tools/ui-phone-select-redraw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -109,15 +111,6 @@ async function playlist(browser, width, android) {
     const pinned = pins.includes('PUT /v1/playlists/c1/items/19/source');
     const pinSk = await page.evaluate(() => window.__sk);
     check(pinned && !pinSk && Math.abs(pinTop - top0) <= 2, `${at}: pinning song 20 to a source keeps the page where it was (put ${pinned}, skeleton ${pinSk}, ${top0} → ${pinTop}px)`);
-    // From the keyboard, Move down twice moves the song two places: the focus follows it
-    if (!phone) {
-      await page.evaluate(() => document.querySelector('#plsongs [data-pdown="5"]').focus());
-      await page.keyboard.press('Enter');
-      await page.waitForFunction(() => document.activeElement && document.activeElement.matches('#plsongs [data-pdown]'), null, { timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(300);
-      const f = await page.evaluate(() => { const a = document.activeElement; return a && a.dataset ? a.dataset.pdown || a.dataset.pup || a.tagName : null; });
-      check(f === '6', `${at}: Move down from the keyboard leaves the focus on the moved song's Move down, now 7th (${f})`);
-    }
     // A ticked song taken out elsewhere: Select stays on with the other ticks (song 3, song 6 gone)
     await startSelect(page, '#plsongs'); await tick(page, 2); await tick(page, 5);
     gone = 5;
@@ -163,12 +156,156 @@ async function search(browser, width, android) {
   } finally { await context.close(); }
 }
 
+// The playlist changing under Select: a song taken out above a tick (by its row's own Remove),
+// a song in it twice, a source filter, the bar's Remove while a redraw comes, and the keyboard's
+// Move down pressed twice. Remove after a redraw must delete exactly the songs ticked on screen.
+async function edits(browser, width) {
+  const at = `${width} edits`; const phone = width < 600;
+  const { context, page, state } = await fx.create(browser, width, { mobile: phone, fixtures, tracks, collections: [summary] });
+  try {
+    let list = []; let deletes = []; let puts = []; let holdDelete = null; let holdPut = null; let failAt = -1;
+    // (odd songs play from the library, even ones from Spotify, so the filter has two sources)
+    const svc = (t) => (t.id % 2 ? 'library' : 'spotify');
+    const body = () => ({ summary: { ...summary, items: list.length }, playlist: { ...summary, items: list.map((t) => ({ uri: t.canonical_uri })) }, tracks: list, entries: list.map((t) => ({ kind: 'track', uri: t.canonical_uri })), local_tracks: [] });
+    const pfNow = () => ({ order: { order: ['library', 'spotify'], services: [{ id: 'library', name: 'Your library', connected: true }, { id: 'spotify', name: 'Spotify', connected: true }] }, own_order: false, items: list.map((t, k) => ({ index: k, uri: t.canonical_uri, title: t.title, artist: 'Sefa', track_id: t.id, plays_from: { service: svc(t), label: svc(t) }, sources: [{ ...libSource, service: svc(t) }] })) });
+    await context.route('**/v1/playlists/c1/play-from', (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify(pfNow()) }));
+    await context.route('**/v1/playlists/c1', async (r) => {
+      const m = r.request().method();
+      if (m === 'PUT') { const { uris } = JSON.parse(r.request().postData()); puts.push(uris); if (holdPut) await holdPut; const pool = [...list]; list = uris.map((u) => pool.splice(pool.findIndex((t) => t.canonical_uri === u), 1)[0]); }
+      return r.fulfill({ contentType: 'application/json', body: JSON.stringify(body()) }).catch(() => {});
+    });
+    await context.route('**/v1/playlists/c1/items/*', async (r) => {
+      if (r.request().method() !== 'DELETE') return r.fallback();
+      const k = Number(new URL(r.request().url()).pathname.split('/').pop()); deletes.push(k);
+      if (holdDelete) await holdDelete;
+      if (deletes.length - 1 === failAt) return r.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"homeserver did not answer"}' }).catch(() => {});
+      list.splice(k, 1); return r.fulfill({ contentType: 'application/json', body: '{}' }).catch(() => {});
+    });
+    const S = (n) => tracks[n - 1];
+    const titles = () => list.map((t) => t.title.replace('Song ', '')).join(',');
+    const open = async (songs) => {
+      list = songs; deletes = []; puts = []; holdDelete = null; holdPut = null; failAt = -1;
+      await fx.go(page, '/playlist/c1');
+      await page.waitForSelector('#plsongs [data-psrc]', { state: 'attached' });
+      await page.waitForTimeout(200);
+    };
+    const rows = (n) => page.waitForFunction((nn) => document.querySelectorAll('#plsongs .srow').length === nn, n, { timeout: 5000 }).catch(() => {});
+    const press = (s) => page.evaluate((ss) => document.querySelector(ss).click(), s);
+    const removeTicked = async () => { await press('.selbar [data-sel="remove"]'); await page.waitForFunction(() => !document.querySelector('.selbar'), null, { timeout: 5000 }).catch(() => {}); await page.waitForTimeout(200); };
+
+    // A song taken out above the tick: the tick moves up with its song, Remove takes that song
+    await open([S(1), S(2), S(3), S(4), S(5), S(6)]);
+    await startSelect(page, '#plsongs'); await tick(page, 3);
+    await press('#plsongs [data-rm="1"]'); await rows(5); await page.waitForTimeout(200);
+    let l = await look(page, '#plsongs');
+    check(l.selecting && l.ticked.join() === '2' && l.count === '1 song selected', `${at}: song 2 taken out above the tick on song 4, the tick moves up with it (ticked ${l.ticked}, "${l.count}")`);
+    await removeTicked();
+    check(deletes.join() === '1,2' && titles() === '1,3,5,6', `${at}: Remove then deletes song 4 (DELETE items ${deletes}; left ${titles()})`);
+
+    // A song in the list twice, its 2nd copy ticked: a song above taken out, still the 2nd copy
+    await open([S(1), S(2), S(3), S(1), S(4)]);
+    await startSelect(page, '#plsongs'); await tick(page, 3);
+    await press('#plsongs [data-rm="1"]'); await rows(4); await page.waitForTimeout(200);
+    l = await look(page, '#plsongs');
+    check(l.selecting && l.ticked.join() === '2' && l.count === '1 song selected', `${at}: [1,2,3,1,4] with the 2nd 1 ticked, 2 taken out: the 2nd 1 stays ticked (ticked ${l.ticked}, "${l.count}")`);
+    await removeTicked();
+    check(deletes.join() === '1,2' && titles() === '1,3,4', `${at}: Remove then deletes the 2nd copy, the 1st stays first (DELETE items ${deletes}; left ${titles()})`);
+
+    // A copy of the ticked song goes: which one was ticked isn't sure, so its tick is dropped
+    await open([S(1), S(2), S(1), S(3)]);
+    await startSelect(page, '#plsongs'); await tick(page, 2); await tick(page, 3);
+    await press('#plsongs [data-rm="0"]'); await rows(3); await page.waitForTimeout(200);
+    l = await look(page, '#plsongs');
+    check(l.selecting && l.ticked.join() === '2' && l.count === '1 song selected', `${at}: [1,2,1,3] with the 2nd 1 and 3 ticked, the 1st 1 taken out: only 3 stays ticked (ticked ${l.ticked}, "${l.count}")`);
+    await page.evaluate(() => { const c = document.querySelector('.selbar [data-sel="cancel"]'); if (c) c.click(); });
+
+    // A filter hiding a ticked song: its tick goes, so Remove can't take a song not on screen
+    await open([S(1), S(2), S(3), S(4), S(5), S(6)]);
+    await startSelect(page, '#plsongs'); await tick(page, 1); await tick(page, 2);
+    await press('#plsongs [data-pfilter="library"]');
+    await page.waitForSelector('#plsongs .list-row.filtered', { state: 'attached', timeout: 5000 }).catch(() => {}); await page.waitForTimeout(200);
+    l = await look(page, '#plsongs');
+    const hidden = await page.evaluate(() => [...document.querySelectorAll('#plsongs .list-row.filtered .selbox input')].filter((c) => c.checked).length);
+    check(l.selecting && l.ticked.join() === '2' && hidden === 0 && l.count === '1 song selected', `${at}: filtered to the library, the tick on hidden song 2 goes, song 3's stays (ticked ${l.ticked}, ${hidden} hidden ticked, "${l.count}")`);
+    await press('.selbar [data-sel="all"]');
+    l = await look(page, '#plsongs');
+    const allLabel = await page.evaluate(() => document.querySelector('.selbar [data-sel="all"]').textContent);
+    check(l.ticked.join() === '0,2,4' && l.count === '3 songs selected' && allLabel === 'None', `${at}: filtered, All ticks just the 3 songs on screen (ticked ${l.ticked}, "${l.count}", then "${allLabel}")`);
+    await press('.selbar [data-sel="all"]'); await tick(page, 2);
+    await removeTicked();
+    check(deletes.join() === '2' && titles() === '1,2,4,5,6', `${at}: Remove deletes only song 3 (DELETE items ${deletes}; left ${titles()})`);
+
+    // The bar's Remove takes a while: its buttons wait, and a redraw meanwhile ends Select
+    await open([S(1), S(2), S(3), S(4), S(5), S(6)]);
+    await startSelect(page, '#plsongs'); await tick(page, 1); await tick(page, 4);
+    let release; holdDelete = new Promise((r) => { release = r; });
+    await press('.selbar [data-sel="remove"]');
+    await page.waitForTimeout(150);
+    const busy = await page.evaluate(() => [...document.querySelectorAll('.selbar button')].map((b) => b.disabled));
+    check(busy.length > 0 && busy.every(Boolean), `${at}: while Remove runs, the bar's buttons wait (${busy.filter(Boolean).length}/${busy.length} disabled)`);
+    await press('#plsongs [data-pfilter=""]'); // (the page drawn again meanwhile)
+    await page.waitForTimeout(400);
+    const mid = await page.evaluate(() => ({ bar: !!document.querySelector('.selbar'), selecting: document.querySelectorAll('.selecting').length, remove: !!document.querySelector('.selbar [data-sel="remove"]:not(:disabled)') }));
+    check(!mid.remove && !mid.bar && mid.selecting === 0, `${at}: a redraw while Remove runs ends Select, no second Remove to press (bar ${mid.bar}, working Remove ${mid.remove})`);
+    const held = await page.evaluate(() => !!document.querySelector('#plsongs').closest('[inert]'));
+    check(held, `${at}: the list drawn again takes no presses until Remove is done (inert ${held})`);
+    if (!phone) {
+      const b = await page.locator('#plsongs [data-rm="0"]').boundingBox();
+      await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2); await page.waitForTimeout(200);
+      check(deletes.join() === '4', `${at}: a row's own Remove pressed meanwhile does nothing (DELETE items so far ${deletes})`);
+    }
+    release(); holdDelete = null;
+    await rows(4); await page.waitForTimeout(300);
+    check(deletes.join() === '4,1' && titles() === '1,3,4,6', `${at}: just songs 2 and 5 go (DELETE items ${deletes}; left ${titles()})`);
+    const freed = await page.evaluate(() => !document.querySelector('#plsongs').closest('[inert]'));
+    check(freed, `${at}: the list takes presses again when Remove is done`);
+
+    // Remove failing part way: Select ends (its ticks point at other songs now), the list is read again
+    await open([S(1), S(2), S(3), S(4), S(5), S(6)]);
+    await startSelect(page, '#plsongs'); await tick(page, 1); await tick(page, 4);
+    failAt = 1;
+    await press('.selbar [data-sel="remove"]');
+    await rows(5); await page.waitForTimeout(400);
+    const failed = await page.evaluate(() => ({ bar: !!document.querySelector('.selbar'), selecting: document.querySelectorAll('.selecting').length, rows: document.querySelectorAll('#plsongs .srow').length, inert: !!document.querySelector('#plsongs').closest('[inert]') }));
+    check(deletes.join() === '4,1' && titles() === '1,2,3,4,6' && !failed.bar && failed.selecting === 0 && failed.rows === 5 && !failed.inert, `${at}: Remove failing on the 2nd song ends Select and shows the list as it is (DELETE items ${deletes}; left ${titles()}; bar ${failed.bar}, ${failed.rows} rows)`);
+
+    if (!phone) {
+      // From the keyboard, Move down twice moves the song two places: the focus follows it
+      await open([S(1), S(2), S(3), S(4), S(5), S(6)]);
+      await page.evaluate(() => document.querySelector('#plsongs [data-pdown="2"]').focus());
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => document.activeElement && document.activeElement.matches('#plsongs [data-pdown="3"]'), null, { timeout: 5000 }).catch(() => {});
+      const f1 = await page.evaluate(() => document.activeElement.dataset.pdown);
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => document.activeElement && document.activeElement.matches('#plsongs [data-pdown="4"]'), null, { timeout: 5000 }).catch(() => {});
+      const f2 = await page.evaluate(() => document.activeElement.dataset.pdown);
+      check(puts.length === 2 && titles() === '1,2,4,5,3,6' && f1 === '3' && f2 === '4', `${at}: Move down twice from the keyboard moves song 3 two places, the focus with it (${puts.length} saves, ${titles()}, focus ${f1} then ${f2})`);
+      // The focus moved elsewhere while the move is saved: it stays there
+      let go; holdPut = new Promise((r) => { go = r; });
+      await page.evaluate(() => document.querySelector('#plsongs [data-pdown="0"]').focus());
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(100);
+      await page.evaluate(() => document.querySelector('#plplay').focus());
+      go(); holdPut = null;
+      await page.waitForFunction(() => document.querySelector('#plsongs .srow[data-srow="1"] .name').textContent === 'Song 1', null, { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(400);
+      const f3 = await page.evaluate(() => document.activeElement && (document.activeElement.id || document.activeElement.dataset.pdown || document.activeElement.tagName));
+      check(titles() === '2,1,4,5,3,6' && f3 === 'plplay', `${at}: the focus moved to Play while the move was saved stays on Play (${titles()}, focus ${f3})`);
+    }
+    const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    check(over <= 0, `${at}: nothing runs past the screen (${over})`);
+    check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
     for (const w of [360, 412]) await playlist(browser, w, false);
     await playlist(browser, 360, true);
     await playlist(browser, 1280, false);
+    await edits(browser, 360);
+    await edits(browser, 1280);
     await search(browser, 360, false);
     await search(browser, 1280, false);
   } finally { await browser.close(); }
