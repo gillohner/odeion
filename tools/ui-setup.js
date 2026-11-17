@@ -685,7 +685,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       }
       // A song from the library in This browser
       await pp.goto(BASE + '/tracks'); await pp.waitForSelector('.track', { timeout: 20000 });
-      const first = pp.locator('.track').first(); await first.hover().catch(() => {}); await first.locator('[data-act="play"], .play-btn, button[aria-label^="Play"]').first().click().catch(async () => { await first.dblclick(); });
+      const first = pp.locator('.track').first(); await first.hover().catch(() => {}); const rowPlay = first.locator('[data-act="play"], .play-btn, button[aria-label^="Play"]').first(); await (w < 600 ? rowPlay.dispatchEvent('click') : rowPlay.click()).catch(async () => { await first.dblclick(); }); // (a phone's row play button takes only the keyboard: pressed directly, as ui-overlap.js does)
       const room = await (async () => { const end = Date.now() + 8000; for (;;) { const r = await pp.evaluate(() => { const t = document.querySelector('#np .np-title'); return t && !/Nothing playing|Starting/.test(t.textContent) ? Math.round(document.querySelector('#np').getBoundingClientRect().width) : 0; }); if (r || Date.now() > end) return r; await pp.waitForTimeout(200); } })();
       const floor = w < 600 ? 150 : 170;
       check(room >= floor, `${w}: playing, the bar keeps ${room} px for the cover and title (at least ${floor})`);

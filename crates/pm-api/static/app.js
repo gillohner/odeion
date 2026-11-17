@@ -8344,7 +8344,12 @@
           const again = redrawing('playlist'); if (!again) loading();
           const plRead = ++plDraws; // (plWrite: a change's hold ends with a draw that read after it)
           const plId = state.viewArg;
-          const plMine = ++plGen; drawStale = () => plMine !== plGen || state.view !== 'playlist' || state.viewArg !== plId; await pubkyUser();
+          const plMine = ++plGen; drawStale = () => plMine !== plGen || state.view !== 'playlist' || state.viewArg !== plId;
+          // (under a hold: a read that doesn't answer, the Pubky user's included, ends in Try again
+          // after 15 s, plHolds)
+          const plCut = plHolds.has(plId) ? new AbortController() : null; let plCutAt = null;
+          if (plCut) { plCut.signal.why = new Error('Couldn’t load this playlist: the node didn’t answer in time.'); plCutAt = setTimeout(() => plCut.abort(plCut.signal.why), PL_READ_MS); }
+          await (plCut ? Promise.race([pubkyUser(), new Promise((_, no) => plCut.signal.addEventListener('abort', () => no(plCut.signal.why), { once: true }))]) : pubkyUser());
           // Where songs play from can take a while the first time (each service asked by ISRC):
           // the songs show at once, the chips follow.
           const cachedPf = state.plPf && state.plPf.id === plId && Date.now() - state.plPf.at < 30000 ? state.plPf.data : null;
@@ -8353,9 +8358,6 @@
           const mine = isListener();
           const askPf = () => api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true }; return null; });
           let pfP = mine ? Promise.resolve(null) : cachedPf ? Promise.resolve(cachedPf) : pfFailed ? Promise.resolve(null) : askPf();
-          // (under a hold: a read that doesn't answer ends in Try again, plHolds)
-          const plCut = plHolds.has(plId) ? new AbortController() : null; let plCutAt = null;
-          if (plCut) { plCut.signal.why = new Error('Couldn’t load this playlist: the node didn’t answer in time.'); plCutAt = setTimeout(() => plCut.abort(plCut.signal.why), PL_READ_MS); }
           const d = await api('GET', `/playlists/${encodeURIComponent(plId)}`, undefined, plCut ? { signal: plCut.signal } : {}).finally(() => clearTimeout(plCutAt));
           // The answer kept from before goes by place too: if the list changed meanwhile (another
           // device moved or removed a song), a row would show one song and remove another, so it is
@@ -8425,7 +8427,7 @@
           const plHoldNow = plHolds.get(plId);
           if (plHoldNow) {
             if (plRead < plHoldNow.after) plHoldShow();
-            else { if (again || plHoldNow.failed) heldFocus = plHoldNow.focus; plHolds.delete(plId); } // (a fresh open keeps its own place; Try again is in place)
+            else { if (again || plHoldNow.retry === navGen) heldFocus = plHoldNow.focus; plHolds.delete(plId); } // (a fresh open keeps its own place; Try again, on this visit, is in place)
           }
           // Playlist rows can also be removed together (highest index first, so positions hold)
           enableSelect($('#plsongs'), songs, { keys: d.playlist.items.map((it) => it.uri), held: () => plHeld(plId), remove: (idx) => plWrite(plId, async (signal) => { try { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`, undefined, { signal }); toast(`Removed ${countOf(idx.length, 'songs')}`); } finally { state.plPf = null; } }) });
@@ -10209,10 +10211,10 @@
       bindTrackRows(main, lists);
     } catch (e) {
       if ((listMine && listStale(v, listMine)) || (drawStale && drawStale())) return; // (an older list's or playlist draw's error over a newer one)
-      if (v === 'playlist' && plHolds.has(state.viewArg)) plHolds.get(state.viewArg).failed = true; // (its Try again draws it in place, plHolds)
+      const heldPl = v === 'playlist' ? plHolds.get(state.viewArg) : null; // (its Try again draws it in place, on this visit only: a fresh open is a new navGen)
       if (state.drawnPage === v) state.drawnPage = null; // (Albums, Artists: Try again draws it from the start)
       main.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)} <button class="btn sm" id="navretry">Try again</button></div>`;
-      $('#navretry', main).onclick = () => render();
+      $('#navretry', main).onclick = () => { if (heldPl && plHolds.get(heldPl.id) === heldPl) heldPl.retry = navGen; render(); };
     }
   };
 
