@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-17
+
+- **Play buttons in more lists say what they play.** With a screen reader or the keyboard, Favourites’ songs from other services, the Playlists list, Radio stations and your Spotify library on Sources read just “Play” (or “Play on Spotify”, “More”) on every row, and Settings’ Play from order read “Earlier” and “Later”, so you could not tell which row a button was for. Each is now named after its row: “Play Night Drive”, “More for Night Drive”, “Play Road trip”, “Play Radio Swiss Jazz”, “Move TIDAL earlier”. The short tooltips are unchanged.
+
 ### 2026-11-16
 
 - **A song’s row buttons say which song they are for.** With a screen reader or the keyboard, going down Songs, Favourites or an album, artist or playlist page read “Play from here”, “Play next”, “Add to queue” and “More” on every row, so you could not tell which song a button would play or queue without stepping back to its title. Now each one names its song, as the heart already did: “Play Night Drive”, “Play Night Drive next”, “Add Night Drive to the queue”, “More for Night Drive”. A link in a playlist names its page’s title the same way once the title has loaded, not the address. The short tooltips are unchanged.
