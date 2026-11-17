@@ -886,6 +886,9 @@ a[data-view="sources"]:hover { text-decoration: underline; }
 .playsfrom { margin-top: 10px; display: flex; align-items: center; gap: 8px; }
 .playsfrom .plays { font-size: var(--fs-sm); padding: 4px 10px 4px 5px; }
 .list-row > .plays { margin-right: 6px; }
+/* Favourites' other-service rows: the kind ends the row; on a phone it is in the line under the title */
+.list-row .subkind, html[data-shell="phone"] .list-row > .rowkind { display: none; }
+html[data-shell="phone"] .list-row .subkind { display: inline; }
 
 /* Identification: the row mark, the Settings bar, the review view. */
 .idmark { margin-left: 8px; padding: 1px 7px; border-radius: var(--r-pill); border: 1px solid var(--line-strong); background: transparent; color: var(--muted); font-size: var(--fs-xs); line-height: 1.5; cursor: pointer; vertical-align: 1px; opacity: 0; transition: opacity var(--dur-fast); }
