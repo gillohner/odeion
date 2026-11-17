@@ -138,13 +138,16 @@ const OFF = '.track .title, .track .by, .track .album-col { padding: 0 !importan
         await off.evaluate((e) => e.remove());
         check(JSON.stringify(now) === JSON.stringify(without), `${T}: title, artist, album and Match mark sit where they would without the room (${JSON.stringify(now[0])})`);
 
-        // A click on the very edge of a link still lands on that link (the boxes now overlap a little)
+        // A click on the very edge of a link still lands on that link (the boxes now overlap a little);
+        // on a phone the names take no taps (the row plays: tools/ui-phone-song-rows.js), so both land on the row
         const hits = await page.evaluate(() => {
           const r = document.querySelector('#main .track'); const t = r.querySelector('.title > a.lnk'); const a = r.querySelector('.by .lnk');
           const tr = t.getBoundingClientRect(); const ar = a.getBoundingClientRect();
-          return { titleBottom: document.elementFromPoint(tr.left + 8, tr.bottom - 1) === t, artistTop: document.elementFromPoint(ar.left + 4, ar.top + 1) === a };
+          const tb = document.elementFromPoint(tr.left + 8, tr.bottom - 1); const at = document.elementFromPoint(ar.left + 4, ar.top + 1);
+          return { titleBottom: tb === t, artistTop: at === a, inRow: r.contains(tb) && r.contains(at) };
         });
-        check(hits.titleBottom && hits.artistTop, `${T}: the title's bottom edge and the artist's top edge each hit their own link (${JSON.stringify(hits)})`);
+        if (shell === 'phone') check(!hits.titleBottom && !hits.artistTop && hits.inRow, `${T}: the title's and the artist's edges land on the row, not the links (${JSON.stringify(hits)})`);
+        else check(hits.titleBottom && hits.artistTop, `${T}: the title's bottom edge and the artist's top edge each hit their own link (${JSON.stringify(hits)})`);
 
         const over = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
         check(over <= 0, `${T}: nothing wider than the window (${over})`);
