@@ -4,7 +4,9 @@
 // the service's own word ("track"), as did SoundCloud's likes. Now all three show "album" or "song"
 // at the row's end, and Spotify's Play on an album is named "Play the album X on Spotify" (a song's
 // stays "Play X on Spotify"; an untitled album's is "Play the album on Spotify"); the tooltip stays
-// "Play on Spotify", and Enter on each plays that row. At 1280, 1024 and 768 px.
+// "Play on Spotify", and Enter on each plays that row. Bandcamp's purchases said "Sefa · track" under
+// the title; they now end in "album" or "song" the same way, with only the artist under the title.
+// At 1280, 1024 and 768 px.
 // Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-source-kinds.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -22,6 +24,10 @@ const spItems = [items[0], { kind: 'album', id: 'spa2', title: '', creator: 'Sef
 const spotify = { '/sources': { body: [{ id: 'spotify', name: 'Spotify', description: '', status: 'ready', enabled: true }] }, '/sources/spotify/status': { body: { signed_in: true } }, '/sources/spotify/signin': { body: { ways: [], in_use: { way: 'app' }, details: { status: { signed_in: true } } } }, '/sources/spotify/collection': { body: { items: spItems } }, '/sources/spotify/playlists': { body: [] }, '/sources/spotify/devices': { body: [{ id: 'd1', name: 'Desk', type: 'Computer', is_active: true }] }, '/sources/spotify/play': { body: {} } };
 const tidal = { '/sources': { body: [{ id: 'tidal', name: 'TIDAL', description: '', status: 'ready', enabled: true }] }, '/sources/tidal/signin': { body: { ways: [], in_use: { way: 'device' }, details: { status: { signed_in: true } } } }, '/sources/tidal/collection': { body: { albums: [{ ...items[0], id: 'ta1' }], tracks: [{ ...items[1], id: 'tt1' }] } }, '/sources/tidal/playlists': { body: [] } };
 const sc = { '/sources': { body: [{ id: 'soundcloud', name: 'SoundCloud', description: '', status: 'signed in', enabled: true }] }, '/sources/soundcloud/likes': { body: { tracks: [{ ...items[1], id: 'sct1' }, { ...items[1], id: 'sct2', title: 'Second' }], playlists: [] } }, '/sources/soundcloud/playlists': { body: [] } };
+// Bought on Bandcamp: an album (downloading) and a song with a page here, and a song with neither
+// page nor artist and a long title
+const bcItems = [{ id: 'a1', title: T, artist: 'Sefa', kind: 'album', url: 'https://sefa.bandcamp.com/album/x', item: 'album:sefa.x', downloadable: true, downloaded: false }, { id: 't2', title: 'Second', artist: 'Sefa', kind: 'track', url: 'https://sefa.bandcamp.com/track/y', item: 'track:sefa.y', downloadable: true, downloaded: true }, { id: 't3', title: 'Third, a much longer title that has to share the row with its kind and its state', kind: 'track', url: 'https://example.com/z', downloadable: false, downloaded: false }];
+const bandcamp = { '/sources': { body: [{ id: 'bandcamp', name: 'Bandcamp', description: '', status: 'signed in', enabled: true }] }, '/sources/bandcamp/collection': { body: bcItems }, '/sources/bandcamp/downloads': { body: [{ id: 'a1', state: 'downloading', bytes: 42, total: 100 }] } };
 const kinds = (page) => page.$$eval('.main [data-sitem]', (rs) => rs.map((r) => { const k = [...r.children].find((c) => c.matches('span.muted.small')); return k ? k.textContent.trim() : null; }));
 
 (async () => {
@@ -75,6 +81,33 @@ const kinds = (page) => page.$$eval('.main [data-sitem]', (rs) => rs.map((r) => 
             check(o <= 0, `${width} ${svc}: nothing wider than the screen (${o})`);
           } else await page.screenshot({ path: path.join(SHOTS, `${svc}-${width}-undrawn.png`) });
           check(!state.errors.length, `${width} ${svc}: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
+      // Bandcamp's purchases (rows with no page here have no data-sitem)
+      {
+        const { page, context, state } = await fx.create(browser, width, { fixtures: bandcamp });
+        try {
+          await fx.go(page, '/sources/bandcamp');
+          const drawn = await page.waitForFunction(() => document.querySelectorAll('#bcmine .list-row').length === 3, null, { timeout: 8000 }).then(() => true, () => false);
+          check(drawn, `${width} bandcamp: purchases drawn`);
+          if (drawn) {
+            const rows = await page.$$eval('#bcmine .list-row', (rs) => rs.map((r) => { const k = [...r.children].find((c) => c.matches('span.muted.small')); return { kind: k ? k.textContent.trim() : null, sub: r.querySelector('.sub').textContent.trim() }; }));
+            const k = rows.map((r) => r.kind).join();
+            check(k === 'album,song,song', `${width} bandcamp: rows end in album, song, song (${k})`);
+            const subs = rows.map((r) => r.sub);
+            check(subs.join('|') === 'Sefa|Sefa|', `${width} bandcamp: the line under the title is the artist alone (${subs.join('|')})`);
+            // (the album downloading: its state follows the kind; the long title keeps room to be read)
+            const ends = await page.$$eval('#bcmine .list-row', (rs) => rs.map((r) => [...r.children].filter((c) => c.matches('span.muted.small')).map((c) => c.textContent.trim()).join(' ')));
+            check(ends[0] === 'album 42%', `${width} bandcamp: a downloading album ends in "album 42%" (${ends[0]})`);
+            const nameW = await page.$eval('#bcmine .list-row:nth-child(3) .name', (n) => n.getBoundingClientRect().width);
+            check(nameW >= 150, `${width} bandcamp: a long title keeps room next to its kind and state (${Math.round(nameW)} px)`);
+            const text = await page.innerText('#bcmine');
+            check(!/\btrack\b/i.test(text), `${width} bandcamp: no "track" on the list`);
+            await page.screenshot({ path: path.join(SHOTS, `bandcamp-${width}.png`) });
+            const o = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+            check(o <= 0, `${width} bandcamp: nothing wider than the screen (${o})`);
+          } else await page.screenshot({ path: path.join(SHOTS, `bandcamp-${width}-undrawn.png`) });
+          check(!state.errors.length, `${width} bandcamp: no page errors (${state.errors.join(' | ')})`);
         } finally { await context.close(); }
       }
     }

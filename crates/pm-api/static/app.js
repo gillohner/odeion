@@ -8538,7 +8538,8 @@
           };
           fillBandcamp();
           if (cur && cur.id === 'bandcamp' && cur.enabled && cur.status === 'signed in') {
-            // Your purchases, each downloadable into the library.
+            // Your purchases, each downloadable into the library. Each row ends in "album" or "song", as
+            // the other services' lists on Sources do (Bandcamp's own word is "track")
             const box = document.createElement('div'); box.id = 'bcmine'; stillLoading(box, 'Still loading from Bandcamp… the first time can take a while.', () => !!box.querySelector('[data-loading]')); box.innerHTML = '<p class="muted small" data-loading>Loading your Bandcamp collection…</p>'; ($('#srcmine') || main).appendChild(box);
             const draw = async () => {
               try {
@@ -8546,7 +8547,7 @@
                 if (state.view !== 'sources' || state.sourceId !== 'bandcamp' || !box.isConnected) return;
                 const job = Object.fromEntries(jobs.map((j) => [j.id, j]));
                 const act = (p) => { const j = job[p.id]; if (j && !['done', 'failed'].includes(j.state)) return `<span class="muted small">${esc(j.state === 'downloading' && j.total ? `${Math.round(100 * j.bytes / j.total)}%` : j.state)}</span>`; if (j && j.state === 'failed') return `<span class="pill bad" title="${esc(j.error || '')}">Failed</span><button class="btn ghost sm" data-bcdl="${esc(p.id)}">Retry</button>`; if (p.downloaded || (j && j.state === 'done')) return '<span class="pill ok">In your library</span>'; return p.downloadable ? `<button class="btn sm" data-bcdl="${esc(p.id)}">${icon('download')} Download</button>` : '<span class="muted small">no download</span>'; };
-                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your purchases</h3><span class="muted small">${countOf(items.length, 'items')}</span></div>${items.length ? `<div class="list">${items.map((p) => `<div class="list-row ${p.item ? 'clickable' : ''}" ${p.item ? `data-sitem="${esc(p.item)}"` : ''}>${p.image ? `<img class="thumb" src="${esc(p.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(p.title)}</div><div class="sub">${esc([p.artist, p.kind].filter(Boolean).join(' · '))}</div></div>${act(p)}</div>`).join('')}</div>` : '<p class="muted">Nothing bought on Bandcamp yet.</p>'}</section>`;
+                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your purchases</h3><span class="muted small">${countOf(items.length, 'items')}</span></div>${items.length ? `<div class="list">${items.map((p) => `<div class="list-row ${p.item ? 'clickable' : ''}" ${p.item ? `data-sitem="${esc(p.item)}"` : ''}>${p.image ? `<img class="thumb" src="${esc(p.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(p.title)}</div><div class="sub">${esc(p.artist || '')}</div></div><span class="muted small">${esc(homeKind(p))}</span>${act(p)}</div>`).join('')}</div>` : '<p class="muted">Nothing bought on Bandcamp yet.</p>'}</section>`;
                 $$('[data-sitem]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('button')) return; setView('source-item', { source: 'bandcamp', id: b.dataset.sitem }); });
                 $$('[data-bcdl]', box).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); b.disabled = true; try { await api('POST', `/sources/bandcamp/collection/${encodeURIComponent(b.dataset.bcdl)}/download`); toast('Downloading into your library'); } catch (er) { toast(er.message, 'error'); } draw(); });
                 if (jobs.some((j) => !['done', 'failed'].includes(j.state))) setTimeout(draw, 2000);
