@@ -229,6 +229,10 @@ html { -webkit-tap-highlight-color: transparent; }
 /* position: the page scrolls inside .main, so screen-reader-only text (absolute) is placed in it too
    instead of past the end of the document, which made the whole document scrollable on Search */
 .main { position: relative; flex: 1; overflow: auto; padding: 24px 24px 32px; scroll-behavior: smooth; }
+/* A control reached by Tab (or a part scrolled to) stops a little inside the page's edge, so its whole
+   focus ring shows; on a page with the compact header (stickyhead) it stops below that header */
+.main { scroll-padding-block: 8px; }
+.main:has(> .stickyhead) { scroll-padding-top: 60px; }
 .main > * + * { margin-top: 28px; }
 /* A page drawn again keeps its height below until its later parts are back (app.js keepPlace) */
 .main[data-hold]::after { content: ''; display: block; height: var(--hold, 0); }
@@ -1962,6 +1966,7 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 .main > .stickyhead + * { margin-top: 0; }
 .stickyhead strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .stickyhead { height: 46px; margin: -18px -14px -28px; padding: 0 14px; top: -18px; } }
+@media (max-width: 720px) { .main:has(> .stickyhead) { scroll-padding-top: 54px; } }
 /* A song title that is a link (matched or not) is a flex row whose link cuts itself with "…": a link
    running on past the title's "…" lost the right side of its keyboard focus ring */
 .track .title:has(> .lnk) { display: flex; align-items: center; min-width: 0; }
