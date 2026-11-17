@@ -6097,7 +6097,7 @@
   // ("album", "song", never the describer's "other"), and an album's Play says it is the album. On a
   // phone it stays in the line under the title: next to a plays chip a row-end word left the
   // title no room.
-  const discoverRows = (items) => `<div class="list">${items.map((it, i) => { const kind = it.kind && it.kind !== 'other' ? homeKind(it) : ''; return `<div class="list-row clickable" data-ditem="${i}">${it.image ? `<img class="thumb" src="${esc(it.image)}" alt="" loading="lazy">` : `<div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div>`}<div class="grow"><div class="name">${esc(itemName(it))} ${it.site ? `<span class="src-badge">${esc(it.site.toUpperCase())}</span>` : ''}${it.in_library ? '<span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([it.artist, it.group_size ? `on ${it.group_size} services` : null, it.taggers ? `${it.taggers} tagger${it.taggers === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))}${kind ? `<span class="subkind">${it.artist || it.group_size || it.taggers ? ' · ' : ''}${esc(kind)}</span>` : ''}</div></div>${kind ? `<span class="muted small rowkind">${esc(kind)}</span>` : ''}${playsChip(it)}<span class="row-actions"><button class="icon-btn" data-dplay="${i}" title="Play" aria-label="Play ${it.kind === 'album' ? 'the album ' : ''}${esc(itemName(it))}">${icon('play')}</button><button class="icon-btn" data-dmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></span></div>`; }).join('')}</div>`;
+  const discoverRows = (items) => `<div class="list">${items.map((it, i) => { const kind = it.kind && it.kind !== 'other' ? homeKind(it) : ''; return `<div class="list-row clickable" data-ditem="${i}"${it.uri ? ` data-uri="${esc(it.uri)}"` : ''}>${it.image ? `<img class="thumb" src="${esc(it.image)}" alt="" loading="lazy">` : `<div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div>`}<div class="grow"><div class="name">${esc(itemName(it))} ${it.site ? `<span class="src-badge">${esc(it.site.toUpperCase())}</span>` : ''}${it.in_library ? '<span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([it.artist, it.group_size ? `on ${it.group_size} services` : null, it.taggers ? `${it.taggers} tagger${it.taggers === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))}${kind ? `<span class="subkind">${it.artist || it.group_size || it.taggers ? ' · ' : ''}${esc(kind)}</span>` : ''}</div></div>${kind ? `<span class="muted small rowkind">${esc(kind)}</span>` : ''}${playsChip(it)}<span class="row-actions"><button class="icon-btn" data-dplay="${i}" title="Play" aria-label="Play ${it.kind === 'album' ? 'the album ' : ''}${esc(itemName(it))}">${icon('play')}</button><button class="icon-btn" data-dmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></span></div>`; }).join('')}</div>`;
   // Charts and search as artwork tiles (Roon-style), with the same play/menu actions as the rows.
   // Service marks for badges: simple monochrome glyphs in the spirit of each
   // service's logo (no trademarked artwork copied), a note for the rest.
@@ -7075,7 +7075,7 @@
     const began = state.placeHold && state.placeHold.began;
     if (state.placeHold) state.placeHold();
     const at = (s) => { try { return $$(s, main); } catch { return []; } };
-    let inside = !!a && a !== main && main.contains(a); let sel = ''; let i = -1;
+    let inside = !!a && a !== main && main.contains(a); let sel = ''; let i = -1; let alt = null;
     if (inside) {
       // Looked for within its part (the nearest box with an id), so a tile in Similar isn't taken
       // for the same tile in a release section
@@ -7083,9 +7083,20 @@
       const within = box && box !== main && main.contains(box) ? `#${CSS.escape(box.id)} ` : '';
       // (an empty state's button is the same place when the new one names another way in: Add
       // music became Open Songs once the first songs came)
-      sel = a.matches('.empty > .btn') ? '.empty > .btn' : a.id ? `#${CSS.escape(a.id)}` : within + a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-') || x.name === 'href').map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
+      sel = a.matches('.empty > .btn') ? '.empty > .btn' : a.id ? `#${CSS.escape(a.id)}` : within + a.tagName.toLowerCase() + [...a.attributes].filter((x) => (x.name.startsWith('data-') && x.name !== 'data-uri') || x.name === 'href').map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
       i = at(sel).indexOf(a);
-    } else if (was && (!a || a === document.body || a === main)) { ({ sel, i } = was); inside = true; }
+      // A row that names its song (data-uri; Favourites' other services) is found by that song, so
+      // a favourite gone or added above it doesn't move the focus onto another one. When that song
+      // itself went, the one now in its place takes it, or the last one when it was the last
+      const row = a.id ? null : a.closest('[data-uri]');
+      if (row && main.contains(row)) {
+        const rbox = row.parentElement && row.parentElement.closest('[id]');
+        const rin = rbox && rbox !== main && main.contains(rbox) ? `#${CSS.escape(rbox.id)} ` : '';
+        // (within the row: its kind of control, not its place in the list: data-dplay, not data-dplay="2")
+        const part = row === a ? '' : ' ' + a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-') || x.name === 'href').map((x) => (x.name === 'href' ? `[href="${CSS.escape(x.value)}"]` : `[${x.name}]`)).join('');
+        alt = { sel, i, last: `${rin}[data-uri]${part}` }; sel = `${rin}[data-uri="${CSS.escape(row.dataset.uri)}"]${part}`; i = at(sel).indexOf(a);
+      }
+    } else if (was && (!a || a === document.body || a === main)) { ({ sel, i, alt } = was); inside = true; }
     return () => {
       // The parts drawn after the page (Similar, concerts, comments) come back a moment later: until
       // they do (6 s at most, 20 s across redraws; opening a page ends it) the page keeps its
@@ -7098,7 +7109,7 @@
       // take and the focus would fall to the page: Artists, Favourites' other services.)
       const refocus = () => {
         const now = document.activeElement; if (now && now !== document.body && now !== main) return true;
-        const b = at(sel)[i]; if (!b || b.disabled) return false;
+        const b = at(sel)[i] || (alt && (at(alt.sel)[alt.i] || at(alt.last).pop())); if (!b || b.disabled) return false;
         if (b.matches(UNTAGGED)) keyable(b);
         b.focus({ preventScroll: true }); return document.activeElement === b;
       };
@@ -7123,7 +7134,7 @@
         const since = began || Date.now();
         const t = setTimeout(() => state.placeHold(), Math.max(0, Math.min(Date.now() + 6000, since + 20000) - Date.now()));
         state.placeHold = () => { mo.disconnect(); clearTimeout(t); acts.forEach((e) => document.removeEventListener(e, mine, true)); main.style.removeProperty('--hold'); delete main.dataset.hold; state.placeHold = null; };
-        state.placeHold.wants = () => (want ? { sel, i } : null); state.placeHold.began = since;
+        state.placeHold.wants = () => (want ? { sel, i, alt } : null); state.placeHold.began = since;
       }
     };
   };
