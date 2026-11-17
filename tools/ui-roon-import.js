@@ -40,6 +40,10 @@ const ringOn = (page, id) => page.evaluate((x) => { const l = document.getElemen
     for (const width of [1280, 1024, 768]) {
       const { page, context, state } = await fx.create(browser, width, {});
       const calls = []; const net = { fail: false, slow: 0 };
+      // Listen for the file picker from the start: Playwright turns its interception on without
+      // waiting, so a listener added together with the Enter press can lose that race on a slow
+      // runner and the picker that did open is never seen.
+      const choosers = []; page.on('filechooser', (c) => choosers.push(c));
       await page.route('**/v1/import/roon*', async (r) => {
         const q = new URL(r.request().url()).searchParams; calls.push({ tags: q.get('tags'), dry: q.get('dry_run'), fav: q.get('favourites') });
         if (calls.length === 1) await new Promise((res) => setTimeout(res, 1200)); // the first check is slow
@@ -74,8 +78,12 @@ const ringOn = (page, id) => page.evaluate((x) => { const l = document.getElemen
           check(await ringOn(page, 'roonfiles'), `${width}: Choose Roon export files shows the keyboard's focus`);
           await page.screenshot({ path: path.join(SHOTS, `roon-focus-${width}.png`) });
           // Enter opens the picker; choosing a file checks it without another press.
-          const chooser = await Promise.all([page.waitForEvent('filechooser', { timeout: 3000 }), page.keyboard.press('Enter')]).then(([c]) => c, () => null);
-          check(!!chooser, `${width}: Enter on it opens the file picker`);
+          choosers.length = 0;
+          await page.keyboard.press('Enter');
+          for (let i = 0; i < 30 && !choosers.length; i++) await page.waitForTimeout(100);
+          const chooser = choosers[0] || null;
+          const why = chooser ? '' : await page.evaluate(() => ` (focus on #${document.activeElement && document.activeElement.id})`);
+          check(!!chooser, `${width}: Enter on it opens the file picker${why}`);
           if (chooser) { await chooser.setFiles(FILE); chosen = true; }
         }
         if (!chosen) await page.locator('#roonfiles').setInputFiles(FILE).catch(() => {});

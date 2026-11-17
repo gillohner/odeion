@@ -6916,7 +6916,9 @@
       // for the same tile in a release section
       const box = a.id ? null : a.parentElement && a.parentElement.closest('[id]');
       const within = box && box !== main && main.contains(box) ? `#${CSS.escape(box.id)} ` : '';
-      sel = a.id ? `#${CSS.escape(a.id)}` : within + a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-') || x.name === 'href').map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
+      // (an empty state's button is the same place when the new one names another way in: Add
+      // music became Open Songs once the first songs came)
+      sel = a.matches('.empty > .btn') ? '.empty > .btn' : a.id ? `#${CSS.escape(a.id)}` : within + a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-') || x.name === 'href').map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
       i = at(sel).indexOf(a);
     } else if (was && (!a || a === document.body || a === main)) { ({ sel, i } = was); inside = true; }
     return () => {
@@ -7583,7 +7585,9 @@
           break;
         }
         case 'favourites': {
-          loading();
+          // (drawn again where it stands, a library change or a heart: no skeleton, the scroll and
+          // the focus kept, keepPlace)
+          const again = redrawing('favourites'); if (!again) loading();
           const f = await loadFavourites();
           if (state.view !== 'favourites') return;
           const none = !f.albums.length && !f.tracks.length && !f.artists.length && !f.other.length;
@@ -7597,6 +7601,9 @@
           // empty page: its empty state says so), with the other services' ones too
           const favCount = [[f.albums, 'albums'], [f.artists, 'artists'], [f.tracks, 'songs']].filter(([l]) => l.length).map(([l, w]) => countOf(l.length, w))
             .concat(f.other.length ? [`${f.other.length} from other services`] : []).join(' · ') || null;
+          const place = again ? keepPlace() : null;
+          // (drawn again: the other services' rows stay as they are until their new ones come)
+          const oldOther = again ? $('#favother', main) : null; const favMine = state.favDraw = (state.favDraw || 0) + 1;
           main.innerHTML = pageHead('Favourites', favCount, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play songs</button>` : '')
             + hsNote
             + (none && !(hs && !hs.connected) ? emptyState('heart', 'Nothing hearted yet', favHowTo(hs), favWayOn(), true) : '')
@@ -7605,9 +7612,12 @@
             + (f.tracks.length ? `<section class="section"><div class="section-head"><h3>Songs</h3></div>${trackRows(f.tracks, { key: 'fav' })}</section>` : '')
             + (f.other.length ? `<section class="section"><div class="section-head"><h3>From other services</h3></div><div id="favother"><div class="skeleton" style="height:56px"></div></div></section>` : '');
           lists.fav = f.tracks; bindTrackRows(main, lists); // (its rows work while the rest is still coming)
+          if (oldOther) { const nb = $('#favother', main); if (nb) nb.replaceWith(oldOther); }
           const hc = $('[data-hsconnect]', main); if (hc) hc.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) render(); };
           const fp = $('#favplay'); if (fp) fp.onclick = () => playTracks(f.tracks, true, 'end', { shuffle: false });
-          if (f.other.length) { const items = await describe(f.other); const box = $('#favother'); if (box && state.view === 'favourites') { box.innerHTML = discoverRows(items); bindDiscoverRows(items); } }
+          state.drawnPage = 'favourites'; if (place) place();
+          // (an older draw's answer that comes after a newer draw's is not put in)
+          if (f.other.length) { const items = await describe(f.other); const box = $('#favother'); if (box && state.view === 'favourites' && state.favDraw === favMine) { box.innerHTML = discoverRows(items); bindDiscoverRows(items); } }
           break;
         }
         case 'albums': {
