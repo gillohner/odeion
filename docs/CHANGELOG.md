@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-17
+
+- **Select reaches the last songs of a list.** With Select on (a playlist, an album, search results), the bar of actions at the bottom covered the last two or three songs and the end of the page, even scrolled all the way down; on a phone a tap on the last song's box did nothing. Now the page scrolls on past the bar, so every song can be ticked, and the page's end comes back when you stop selecting. On a phone every button on the bar (All and ✕ were 36 px) is now a full 44 px tap, and while the songs' sources are still loading the rows no longer show a spinning chip beside the boxes.
+
 ### 2026-11-16
 
 - **Playlists keeps what you typed when the library changes.** A scan, an import or an edit drew Playlists again from scratch: a half-typed new playlist name or a pasted shared-playlist link was wiped and the keyboard fell back to the page. Now the page is drawn again where it stands: both boxes keep their text and cursor, and the focus and scroll stay. A playlist file imported while you stay on Playlists (typing a name, say) now shows up in the list right away, not on the next visit. After Create, the name box is emptied, and when you pressed Create from the keyboard the keyboard goes back to the box for the next one.
