@@ -892,6 +892,16 @@ a[data-view="sources"]:hover { text-decoration: underline; }
 /* Favourites' other-service rows: the kind ends the row; on a phone it is in the line under the title */
 .list-row .subkind, html[data-shell="phone"] .list-row > .rowkind { display: none; }
 html[data-shell="phone"] .list-row .subkind { display: inline; }
+/* A row's Plays-from chip (Favourites › From other services): at the row's end, on a phone on its
+   own line under the title (next to Play and More a "Connect TIDAL" chip left the title ~28 px), a
+   long one wrapping in its column; its Connect link there takes the whole chip and a touch area of
+   at least 44 px between the line above and the row's end */
+html[data-shell="phone"] .list-row:has(> .plays) { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "art text act" "art chip act"; row-gap: 10px; }
+html[data-shell="phone"] .list-row:has(> .plays) > :first-child { grid-area: art; }
+html[data-shell="phone"] .list-row:has(> .plays) > .grow { grid-area: text; }
+html[data-shell="phone"] .list-row:has(> .plays) > .row-actions { grid-area: act; }
+html[data-shell="phone"] .list-row > .plays { grid-area: chip; justify-self: start; max-width: 100%; white-space: normal; margin-right: 0; position: relative; }
+html[data-shell="phone"] .list-row > .plays a::after { content: ""; position: absolute; left: -4px; right: -4px; top: -10px; bottom: -12px; }
 
 /* Identification: the row mark, the Settings bar, the review view. */
 .idmark { margin-left: 8px; padding: 1px 7px; border-radius: var(--r-pill); border: 1px solid var(--line-strong); background: transparent; color: var(--muted); font-size: var(--fs-xs); line-height: 1.5; cursor: pointer; vertical-align: 1px; opacity: 0; transition: opacity var(--dur-fast); }

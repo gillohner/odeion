@@ -5,6 +5,7 @@ Newest first. Dates are when the change landed on `main`.
 ## Unreleased
 
 ### 2026-11-17
+- **On a phone, a favourite from another service shows its whole title again.** Under Favourites › “From other services”, a “Connect TIDAL” (or “Spotify”) chip sat at the end of the row next to Play and More, so at 360 px the title got about 28 px (“A …”) and the artist wrapped one word per line. The chip now sits on its own line under the title, so the title and “Sefa · album” use the row’s width. A chip naming several services wraps instead of covering Play. A tap anywhere on the chip, its icon included, opens Sources (a tap on the icon used to open the album instead). Computers and tablets are unchanged.
 
 - **A long name on Back stays on one line.** Back names the page you came from, so after a playlist with a long name or a long search, it wrapped onto two lines on a phone and pushed the page down. Now it stays on one line and ends in …, and the page starts where it always does. Screen readers still read the whole name.
 - **Artists end in an arrow pointing to the artist’s page.** Each row in Artists ended in an arrow pointing down, the way a row that opens below itself looks, though a click opens the artist’s page. It now points right in the same grey as Search’s rows that open a page, so the same arrow means the same thing in both places. The “In collections” rows on a song, album or artist page, which each open that collection, now end in the same arrow. Clicking a row, or Enter on it, still opens it.

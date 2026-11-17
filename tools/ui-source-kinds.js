@@ -10,8 +10,9 @@
 // song and the describer's raw "other" for a link it couldn't place; they now end in "album", "song",
 // "artist" the same way (nothing for "other"), and an album's Play is named "Play the album X" so it
 // differs from the same-titled song's "Play X"; on a phone the kind stays under the title (e.g.
-// "Sefa · album"), where a row-end word would take the title's room. At 1280, 1024 and 768 px
-// (Favourites also at 360 and 412).
+// "Sefa · album"), where a row-end word would take the title's room, and a "Connect TIDAL" chip
+// goes on its own line under it (at the row's end it left the title ~28 px at 360), the whole chip
+// a 44 px tall touch area for its link. At 1280, 1024 and 768 px (Favourites also at 360 and 412).
 // Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-source-kinds.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -133,7 +134,8 @@ const kinds = (page) => page.$$eval('.main [data-sitem]', (rs) => rs.map((r) => 
       // Favourites on a phone: the kind stays in the line under the title (a row-end word next to
       // a Connect chip left the title no room), never "other"
       if (width === 1280) for (const pw of [360, 412]) {
-        const fav = { ...favourites, '/discover/describe': { body: favOther.map((o) => ({ ...o, connect: ['tidal'] })) } };
+        // (the last row can't play anywhere you're signed in: three services to connect)
+        const fav = { ...favourites, '/discover/describe': { body: favOther.map((o, k) => ({ ...o, connect: k === 3 ? ['tidal', 'spotify', 'deezer'] : ['tidal'] })) } };
         const { page, context, state } = await fx.create(browser, pw, { mobile: true, fixtures: fav });
         try {
           await fx.go(page, '/favourites');
@@ -144,12 +146,51 @@ const kinds = (page) => page.$$eval('.main [data-sitem]', (rs) => rs.map((r) => 
             check(rows.map((r) => r.sub).join('|') === 'Sefa · album|Sefa · song|artist|', `${pw} phone favourites: the line under the title ends in the kind (${rows.map((r) => r.sub).join('|')})`);
             check(rows.every((r) => !r.end), `${pw} phone favourites: no kind at the row's end (${rows.map((r) => r.end).join()})`);
             // (the same room for the title as without a kind word: 28 px at 360 next to Connect TIDAL)
-            check(rows.every((r) => r.name >= 25), `${pw} phone favourites: the title keeps its room (${rows.map((r) => r.name).join()} px)`);
+            // The Connect chip is on its own line under the title, so the title has the row's width
+            // (it had ~28 px at 360 next to a row-end chip, Play and More)
+            check(rows.every((r) => r.name >= 150), `${pw} phone favourites: the title has the row's width (${rows.map((r) => r.name).join()} px)`);
+            const chips = await page.$$eval('#favother .list-row', (rs) => rs.map((r) => { const v = [...r.querySelectorAll('.plays')].filter((c) => c.checkVisibility()); const g = r.querySelector('.grow').getBoundingClientRect(); const c = v[0] && v[0].getBoundingClientRect(); return { n: v.length, under: v.length === 1 && c.top >= r.querySelector('.sub').getBoundingClientRect().bottom - 1 && Math.abs(c.left - g.left) <= 1, text: v.map((c) => c.innerText.trim()).join() }; }));
+            check(chips.every((c, k) => c.n === 1 && c.under && c.text === (k === 3 ? 'Connect TIDAL or Spotify or Deezer' : 'Connect TIDAL')), `${pw} phone favourites: one Connect chip per row, under the title's lines (${JSON.stringify(chips)})`);
+            // A long chip wraps in its column: it never reaches Play or More, which still answer a tap
+            const long = await page.$eval('#favother .list-row:nth-child(4)', (r) => { const c = r.querySelector('.plays').getBoundingClientRect(); const a = r.querySelector('.row-actions').getBoundingClientRect(); const p = r.querySelector('[data-dplay]').getBoundingClientRect(); const e = document.elementFromPoint(p.left + p.width / 2, p.top + p.height / 2); return { gap: Math.round(a.left - c.right), play: !!(e && e.closest('[data-dplay]')) }; });
+            check(long.gap >= 0 && long.play, `${pw} phone favourites: a three-service chip stays clear of Play and More (${JSON.stringify(long)})`);
+            const sub0 = await page.$eval('#favother .list-row .sub', (s) => s.getBoundingClientRect().height / parseFloat(getComputedStyle(s).lineHeight));
+            check(sub0 < 1.5, `${pw} phone favourites: "Sefa · album" fits on one line (${sub0.toFixed(2)} lines)`);
+            // Its link takes the whole chip and a 44 px tall touch area; the title and artist still open the row
+            const hit = await page.$eval('#favother .list-row .plays', (c) => { const b = c.getBoundingClientRect(); const cy = b.top + b.height / 2; const at = (x, y) => { const e = document.elementFromPoint(x, y); return e && e.closest('a[data-view="sources"]') ? 'link' : e && e.closest('.list-row') ? 'row' : 'none'; }; const r = c.closest('.list-row'); const sub = r.querySelector('.sub').getBoundingClientRect(); const name = r.querySelector('.name').getBoundingClientRect(); return { icon: at(b.left + 10, cy), top: at(b.left + b.width / 2, cy - 20), bottom: at(b.left + b.width / 2, cy + 20), sub: at(sub.left + 8, sub.top + sub.height / 2), name: at(name.left + 8, name.top + name.height / 2) }; }).catch(() => ({}));
+            check(hit.icon === 'link' && hit.top === 'link' && hit.bottom === 'link', `${pw} phone favourites: the chip's icon and a 44 px tall band are the Connect link (${JSON.stringify(hit)})`);
+            const band = await page.$eval('#favother .list-row .plays', (c) => { const b = c.getBoundingClientRect(); const s = getComputedStyle(c.querySelector('a'), '::after'); const top = b.top + parseFloat(s.top); const bottom = b.bottom - parseFloat(s.bottom); const r = c.closest('.list-row'); return { h: Math.round(bottom - top), aboveSub: Math.round(top - r.querySelector('.sub').getBoundingClientRect().bottom), belowRow: Math.round(r.getBoundingClientRect().bottom - bottom) }; }).catch(() => ({}));
+            check(band.h >= 44 && band.aboveSub >= 0 && band.belowRow >= 0, `${pw} phone favourites: the link's touch band is 44 px tall, below the artist line and inside the row (${JSON.stringify(band)})`);
+            check(hit.sub === 'row' && hit.name === 'row', `${pw} phone favourites: the title and the line under it still open the row (${hit.name}, ${hit.sub})`);
+            const icon = await page.$eval('#favother .list-row .plays svg', (s) => { const b = s.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; }).catch(() => null);
             await page.screenshot({ path: path.join(SHOTS, `favourites-phone-${pw}.png`) });
             const o = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
             check(o <= 0, `${pw} phone favourites: nothing wider than the screen (${o})`);
+            if (icon) await page.touchscreen.tap(icon.x, icon.y);
+            const went = !!icon && await page.waitForFunction(() => location.pathname.startsWith('/sources'), null, { timeout: 4000 }).then(() => true, () => false);
+            check(went, `${pw} phone favourites: a tap on the chip's icon opens Sources (${await page.evaluate(() => location.pathname)})`);
           }
           check(!state.errors.length, `${pw} phone favourites: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
+      // Away from a phone the Connect chip stays at the row's end, once
+      if (width === 1280 || width === 768) {
+        const fav = { ...favourites, '/discover/describe': { body: favOther.map((o) => ({ ...o, connect: ['tidal'] })) } };
+        const { page, context, state } = await fx.create(browser, width, { fixtures: fav });
+        try {
+          await fx.go(page, '/favourites');
+          const drawn = await page.waitForFunction(() => document.querySelectorAll('#favother .list-row').length === 4, null, { timeout: 8000 }).then(() => true, () => false);
+          check(drawn, `${width} favourites with Connect: rows drawn`);
+          if (drawn) {
+            const chips = await page.$$eval('#favother .list-row', (rs) => rs.map((r) => { const g = r.querySelector('.grow').getBoundingClientRect(); return [...r.querySelectorAll('.plays')].filter((c) => c.checkVisibility()).map((c) => { const b = c.getBoundingClientRect(); return b.left >= g.right - 1 && b.top < g.bottom && b.bottom > g.top ? 'end' : 'under'; }).join(); }));
+            check(chips.every((c) => c === 'end'), `${width} favourites with Connect: one chip per row, at the row's end (${chips.join('|')})`);
+            const links = await page.$$eval('#favother a[data-view="sources"]', (as) => as.filter((a) => a.checkVisibility()).length);
+            check(links === 4, `${width} favourites with Connect: one visible Connect link per row (${links})`);
+            const ht = await page.$eval('#favother .list-row', (r) => r.getBoundingClientRect().height);
+            check(ht < 80, `${width} favourites with Connect: a row stays one line tall (${Math.round(ht)} px)`);
+            await page.screenshot({ path: path.join(SHOTS, `favourites-connect-${width}.png`) });
+          }
+          check(!state.errors.length, `${width} favourites with Connect: no page errors (${state.errors.join(' | ')})`);
         } finally { await context.close(); }
       }
       // Bandcamp's purchases (rows with no page here have no data-sitem)
