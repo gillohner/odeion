@@ -6478,7 +6478,7 @@
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
   // While selecting, the page ends the bar's height lower (--selbar), so the last songs scroll out
-  // from under it and can be ticked too.
+  // from under it and can be ticked too, and a song reached by Tab stops above the bar (app.css).
   const endSelect = () => { if (selBar) { selBar.ro.disconnect(); selBar.remove(); selBar = null; document.documentElement.style.removeProperty('--selbar'); } $$('.selecting').forEach((b) => b.classList.remove('selecting')); $$('.selbox').forEach((c) => c.remove()); $$('[data-selstart]').forEach((b) => { b.setAttribute('aria-pressed', 'false'); }); };
   const enableSelect = (section, songs, opts = {}) => {
     if (!section || !songs.length) return;
