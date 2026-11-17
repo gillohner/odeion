@@ -4,7 +4,9 @@
 // stop each row at the very top, under that header (a song's More button wholly hidden). A control
 // scrolled to at the very top (Songs, going back up) or bottom of the page lost 1-4 px of its ring at
 // the page's edge.
-// At 1280, 1024 and 768 px.
+// While the compact header shows, the page keeps it and 8 px clear at its top: the header is 52 px high on wider screens and 46 px up to 720 px wide (phone), so a control
+// scrolled to sits just below it, not hidden and not further down.
+// At 1280, 1024, 768 and 412 px (phone).
 // Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-sticky-focus.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -41,6 +43,8 @@ const where = () => {
   const b = shown ? bar.getBoundingClientRect() : null;
   const label = (e.getAttribute('aria-label') || e.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 40);
   return { label, top: main.scrollTop, h: r.height, fits: r.height + 2 * g < m.height, barShown: shown,
+    // (from the header's bottom to where the page lines a control up: its top edge plus the space it keeps clear)
+    clear: b ? m.top + main.clientTop + parseFloat(getComputedStyle(main).scrollPaddingTop) - b.bottom : null,
     under: b ? Math.max(0, Math.min(r.bottom + g, b.bottom) - Math.max(r.top - g, b.top)) : 0,
     cutTop: r.top >= m.top - 0.5 ? Math.max(0, m.top - (r.top - g)) : 0,
     cutBottom: r.bottom <= m.bottom + 0.5 ? Math.max(0, r.bottom + g - m.bottom) : 0 };
@@ -49,7 +53,7 @@ const where = () => {
 (async () => {
   const browser = await chromium.launch(process.env.PLAYWRIGHT_CHROMIUM ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM } : {});
   try {
-    for (const width of [1280, 1024, 768]) {
+    for (const width of [1280, 1024, 768, 412]) {
       for (const p of [{ name: 'album', url: '/album/lib-7', rows: '#main .srow' }, { name: 'playlist', url: '/playlist/c1', rows: '#plsongs .srow' }]) {
         const at = `${width} ${p.name}`;
         const { context, page, state } = await fx.create(browser, width, { fixtures, tracks });
@@ -76,12 +80,12 @@ const where = () => {
         // no control stops under it
         await page.locator(p.rows).last().locator('[data-smore], .icon-btn').last().focus();
         await settle(page);
-        const under = []; let barSeen = false; let rowsSeen = 0; let shot = false;
+        const under = []; let barSeen = false; let rowsSeen = 0; let shot = false; const clear = new Set();
         for (let i = 0; i < tracks.length * 4 + 4; i++) {
           await page.keyboard.press('Shift+Tab'); await settle(page);
           const w = await page.evaluate(where);
           if (!w) continue;
-          if (w.barShown) barSeen = true;
+          if (w.barShown) { barSeen = true; clear.add(w.clear.toFixed(1)); }
           if (w.barShown && /^Journey part|part \d+$/.test(w.label)) rowsSeen++;
           if (w.under > 0.5 || (w.fits && w.cutTop > 0.5)) {
             under.push(`${w.label} ${w.under > 0.5 ? `${w.under.toFixed(0)}/${w.h.toFixed(0)}px under the header` : `${w.cutTop.toFixed(1)}px cut at the top`}`);
@@ -90,6 +94,7 @@ const where = () => {
         }
         check(barSeen && rowsSeen > 10, `${at}: Shift+Tab goes back up the songs below the compact header (${rowsSeen} stops with it shown)`);
         check(under.length === 0, `${at}: Shift+Tab up the songs, nothing stops under the compact header or past the top edge${under.length ? ` (${under.length}: ${under.slice(0, 3).join('; ')})` : ''}`);
+        check(clear.size === 1 && Math.abs(Number([...clear][0]) - 8) <= 1, `${at}: while the compact header shows, the page keeps it and 8 px clear at its top (${[...clear].join(', ')} px past the header)`);
         await page.screenshot({ path: path.join(SHOTS, `${p.name}-up-${width}.png`) });
         check(state.errors.length === 0, `${at}: no page errors${state.errors.length ? ` (${state.errors[0]})` : ''}`);
         await context.close();

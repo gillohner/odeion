@@ -8,6 +8,8 @@
 // that rows going somewhere use; opening a folder puts the focus on its first folder (or on Add
 // this folder when it has none); Back puts it on the folder you came out of; a folder that fails
 // keeps Back, which has the focus. Focus moved elsewhere (Cancel) while the drive reads stays there.
+// A slow read of a folder left before it answered, landing after another folder was opened, draws
+// nothing; Add this folder adds the folder shown.
 // Real UI in Chromium against fixtures (no node).
 //   node tools/ui-drive-folders.js [repo] [screenshot directory]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -40,11 +42,11 @@ const tree = {
   const check = async (name, fn) => { try { await fn(); oks++; console.log('ok  ', name); } catch (e) { fails++; console.log('FAIL', name, '-', e.message.split('\n')[0]); } };
   for (const width of [1280, 1024, 768, 412]) {
     const file = (n) => path.join(shots, `${n}-${width}.png`);
-    const open = async (slow) => {
+    const open = async (slow, inside) => {
       const o = await fx.create(browser, width, { mobile: width < 600, fixtures });
       await o.page.route('**/v1/library/drives/google/folders*', async (r) => {
         const parent = new URL(r.request().url()).searchParams.get('parent');
-        if (slow && slow.parent === parent) await slow.wait;
+        if (slow && slow.parent === parent) { await slow.wait; if (inside?.[parent]) return r.fulfill({ contentType: 'application/json', body: JSON.stringify(inside[parent]) }); }
         if (parent === 'f3') return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The drive refused to list Broken' }) });
         return r.fulfill({ contentType: 'application/json', body: JSON.stringify(tree[parent] || []) });
       });
@@ -171,6 +173,45 @@ const tree = {
         await page.locator('[data-dfopen="1"]').click();
         await at(page, 'Google Drive › Albums › Singles');
         assert.equal(await page.locator('#dfadd:not([disabled])').count(), 1);
+        assert.deepEqual(state.errors, [], 'no page errors');
+      } finally { await context.close(); }
+    });
+
+    await check(`a slow read of a folder left before it answered draws nothing over the folder opened since; Add adds the folder shown (${width})`, async () => {
+      // Discs answers late, and then with a folder of its own, so a late draw would show
+      let go; const slow = { parent: 'f11', wait: new Promise((res) => { go = res; }) };
+      const { page, context, state } = await open(slow, { f11: [{ id: 'f111', name: 'Late disc' }] });
+      // (the node's answer to an added folder: the new drive root)
+      const adds = [];
+      await page.route('**/v1/library/drives', (r) => { if (r.request().method() !== 'POST') return r.fallback(); adds.push(r.request().postDataJSON()); return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ provider: 'google', folder_id: 'f12', name: 'Singles' }) }); });
+      try {
+        await page.locator('[data-dfopen="0"]').click();
+        await at(page, 'Google Drive › Albums');
+        // Open Discs (its read hangs), then go Back from it before it answers. The list is only
+        // the spinner while the drive reads, so a person can't start a second read meanwhile:
+        // this Back is the one drawn with Albums, kept from before the list was swapped (the
+        // check that drops a late answer is defensive)
+        await page.evaluate(() => { window.__dfBack = document.querySelector('[data-dfup]'); });
+        await page.locator('[data-dfopen="0"]').click();
+        await page.locator('#dfbox .spin').waitFor();
+        assert.equal(await page.locator('#dfpath').textContent(), 'Google Drive › Albums › Discs');
+        await page.evaluate(() => window.__dfBack.click());
+        await at(page, 'Google Drive › Albums');
+        await page.locator('[data-dfopen="1"]').click();
+        await at(page, 'Google Drive › Albums › Singles');
+        const shown = await page.locator('#dfbox').innerHTML();
+        const late = page.waitForResponse((r) => r.url().includes('parent=f11'));
+        go(); // (Discs answers now)
+        await (await late).finished();
+        await page.evaluate(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));
+        assert.equal(await page.locator('#dfpath').textContent(), 'Google Drive › Albums › Singles', 'the path is the folder opened');
+        assert.equal(await page.locator('#dfbox').innerHTML(), shown, "the list is still Singles' (no Late disc)");
+        await page.screenshot({ path: file('after-late-read') });
+        // Add this folder sends the folder shown, and closes the picker
+        await page.locator('#dfadd').click();
+        await page.locator('dialog.dialog[open] #dfadd').waitFor({ state: 'detached' });
+        assert.deepEqual(adds, [{ provider: 'google', folder_id: 'f12', name: 'Singles' }], 'one add, of Singles');
+        await page.waitForFunction(() => document.querySelector('#toast')?.textContent === 'Singles added; scanning', null, { timeout: 3000 });
         assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
     });
