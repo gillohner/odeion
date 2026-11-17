@@ -21,7 +21,8 @@ async function assertTarget(page,c){const u=new URL(page.url());if(c.id!=null)as
    for(let step=0;step<test.credits.length*2;step++){const n=Math.floor(step/2);
     await go(page,screen==='collection'?'/playlist/c1':'/tracks');await page.locator(screen==='collection'?'#plsongs .srow':'.track').first().waitFor();
     let root=screen==='collection'?page.locator('#plsongs .srow .grow .sub').first():page.locator('.track .by').first();
-    if(screen==='player'){await page.locator('.track [data-act="play"]').first().click();await page.locator('#np').click();root=page.locator('#nowplaying .np-titles .artist');await root.waitFor();}
+    // (a phone's row play button takes only the keyboard, so it is pressed directly)
+    if(screen==='player'){await page.locator('.track [data-act="play"]').first().dispatchEvent('click');await page.locator('#np').click();root=page.locator('#nowplaying .np-titles .artist');await root.waitFor();}
     const expected=test.credits.map(c=>c.name);const names=await root.locator('a:not([data-salbum]):not([data-np-album]):not([data-act="album"]),button:not([data-salbum]):not([data-np-album]):not([data-act="album"])').allTextContents();
     assert.deepEqual(names,expected,`${width} ${test.name} ${screen}: independent exact credit names`);
     const before=state.hits.length,now=await page.evaluate(()=>pmPlayer.now());const link=root.locator('[data-artist-credit]').nth(n);

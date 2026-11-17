@@ -5479,6 +5479,8 @@
   // The album has its own column; where the window is too narrow for it (the desktop layout under
   // 900 px) it joins the artist line instead (.by-album), so the title keeps the width. Its dot
   // (.by-dot) goes when the song has no artists (app.css)
+  // A list's running number (not an album's track numbers) marks its rows .seq: a phone leaves it
+  // out (app.css)
   const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr', start = 0, bare = false } = {}) => {
     rememberTracks(tracks);
     const z = currentZone(); const np = z && z.now_playing;
@@ -5486,7 +5488,7 @@
       const i = start + k;
       const cur = np && np.item.uri === 'track:' + t.id;
       const fav = isFav(t); const can = trackHasId(t);
-      return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}" data-tid="${t.id}"${cur ? ' aria-current="true"' : ''}>
+      return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}${numbers === 'track' ? '' : ' seq'}" data-i="${i}" data-tid="${t.id}"${cur ? ' aria-current="true"' : ''}>
         <div class="no"><span class="num">${numbers === 'track' ? (t.track_no ?? '') : i + 1}</span><button class="rowplay" data-act="play" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div>
         <div class="main-col"><div class="title"><a class="lnk" data-act="song" href="${esc(pathFor('item', { kind: 'song', id: trackPageId(t) }))}"${rowLinkTab()}>${esc(t.title)}</a>${dlHas(t.id) ? dlMark() : ''}${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id }, rowLinkTab())}${showAlbum && t.album ? `<span class="by-album"><span class="by-dot"> · </span><a class="lnk" data-act="album" data-album="${t.album.id}" href="${esc(pathFor('item', { kind: 'album', id: 'lib-' + t.album.id }))}"${rowLinkTab()}>${esc(t.album.title)}</a></span>` : ''}</div></div>
         ${showAlbum ? `<div class="album-col">${t.album ? `<button class="lnk" data-act="album" data-album="${t.album.id}">${esc(t.album.title)}</button>` : ''}</div>` : ''}
