@@ -1,8 +1,9 @@
 // Select on a song list (a playlist here). On a phone: the rows hide the source chip's "finding"
-// placeholder as well as the chip, so nothing spins beside the ticks while the sources load; every
-// button on the selection bar is a 44 px tap; the page scrolls on past the bar, so the last songs and
-// the end of the page come out from under it and the last song can be ticked; Stop selecting puts
-// the page's end back. The desktop page scrolls past its bar too. Nothing runs past the screen.
+// placeholder as well as the chip, so nothing spins beside the ticks while the sources load, and
+// Select stays on when they come; every button on the selection bar is a 44 px tap; the page scrolls
+// on past the bar, so the last songs and the end of the page come out from under it and the last
+// song can be ticked; Stop selecting puts the page's end back. The desktop page scrolls past its
+// bar too. Nothing runs past the screen.
 // Real candidate assets, isolated responses: node tools/ui-phone-select-bar.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -48,13 +49,12 @@ async function phone(browser, width, android) {
     const spinning = await page.evaluate(() => [...document.querySelectorAll('#plsongs .srow .srcchip.wait')].filter((c) => c.getClientRects().length).length);
     check(spinning === 0, `${at}: in Select, no row shows the "finding" placeholder while the sources load (${spinning} shown)`);
     await page.screenshot({ path: path.join(SHOTS, `select-loading-${width}${android ? '-android' : ''}.png`) });
-    // (the sources' answer redraws the page, which ends Select: start it again on the answered rows)
+    // (the sources' answer redraws the page in place: Select stays on, its chips stay hidden)
     release();
-    await page.waitForSelector('#plsongs [data-psrc]');
-    await page.waitForSelector('.selbar', { state: 'detached' });
-    await page.click('#plsongs [data-selstart]');
-    await page.waitForSelector('.selbar');
+    await page.waitForSelector('#plsongs [data-psrc]', { state: 'attached' });
     await page.waitForTimeout(150);
+    const kept = await page.evaluate(() => !!document.querySelector('.selbar') && !!document.querySelector('#plsongs .selbox input'));
+    check(kept, `${at}: Select stays on when the sources come`);
     const btns = await page.evaluate(() => [...document.querySelectorAll('.selbar button')].map((b) => { const r = b.getBoundingClientRect(); return { name: b.textContent.trim() || b.getAttribute('aria-label'), w: r.width, h: r.height }; }));
     check(btns.length >= 6, `${at}: the bar has its buttons (${btns.length})`);
     for (const b of btns) check(b.w >= 44 && b.h >= 44, `${at}: bar button "${b.name}" is a 44 px tap (${b.w.toFixed(0)}×${b.h.toFixed(0)})`);
