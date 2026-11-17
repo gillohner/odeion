@@ -1,7 +1,8 @@
 // On a phone a library song row (Songs, Favourites, a genre's songs) is one tap target, like the song
 // rows of playlists, search and item pages: a tap on its name or its artist plays from there instead of
 // opening a page. The song, artist and album pages stay in the row's ⋯ (Go to song page). Desktop and a
-// tablet's touch screen keep the names as links.
+// tablet's touch screen keep the names as links. Nor are the names Tab stops on a phone, in any song
+// list (tabCase).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-phone-song-rows.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -82,6 +83,53 @@ async function linkCase(browser, width, touch) {
   } finally { await context.close(); }
 }
 
+// The names in a song row are not Tab stops on a phone either (a tap plays the row; ⋯ has the pages),
+// in the library's lists (.track) as in the others (.srow), artists read in later too; Tab goes from
+// the row's play button to its ⋯. The desktop layout keeps them as Tab stops, and a change of layout
+// (a window resized across 600 px) redoes them.
+const TRACK_NAMES = '.track .main-col .lnk'; const SROW_NAMES = '.srow:not(.card-row) :is(.name, .sub) .lnk:not(.vmark)'; // (as app.css names them)
+const tabs = (page, sel) => page.locator(sel).evaluateAll((els) => els.map((e) => e.tabIndex));
+async function tabCase(browser, width, { touch = true } = {}) {
+  const phone = width < 600; const want = phone ? -1 : 0; const label = `${width}${touch ? '' : ' mouse'} keys`;
+  const run = await fx.create(browser, width, { mobile: touch, tracks });
+  const { context, page, state } = run;
+  try {
+    await fx.go(page, '/tracks');
+    const row = page.locator('.tracks[data-list="all"] .track').nth(1); await row.waitFor();
+    const songs = await tabs(page, `.tracks[data-list="all"] ${TRACK_NAMES}`);
+    check(songs.length >= 12 && songs.every((n) => n === want), `${label} Songs: ${songs.length} names (song, artists, album) have tabIndex ${want} (${[...new Set(songs)]})`);
+    if (phone) {
+      await row.locator('[data-act="play"]').focus(); await page.keyboard.press('Tab');
+      check(await row.locator('[data-act="more"]').evaluate((e) => e === document.activeElement), `${label} Songs: Tab goes from the row's play button to its ⋯`);
+      // a change of layout redoes them, and back
+      await page.setViewportSize({ width: 1280, height: 900 }); await page.waitForFunction(() => document.documentElement.dataset.shell !== 'phone');
+      const wide = await tabs(page, `.tracks[data-list="all"] ${TRACK_NAMES}`);
+      check(wide.length === songs.length && wide.every((n) => n === 0), `${label} Songs: widened to the desktop layout, the names are Tab stops again (${[...new Set(wide)]})`);
+      await page.setViewportSize({ width, height: 900 }); await page.waitForFunction(() => document.documentElement.dataset.shell === 'phone');
+      const back = await tabs(page, `.tracks[data-list="all"] ${TRACK_NAMES}`);
+      check(back.length === songs.length && back.every((n) => n === -1), `${label} Songs: narrowed again, they are not (${[...new Set(back)]})`);
+    }
+    // a playlist whose page has only the flattened artist line: the artists are read in afterwards
+    state.fixtures = { '/playlists/c1': { body: { ...fx.detail, tracks: [null, null] } } };
+    await fx.go(page, '/playlist/c1');
+    const credits = page.locator('#plsongs .srow').first().locator('[data-artist-credit]');
+    const split = await page.waitForFunction(() => document.querySelectorAll('#plsongs .srow [data-artist-credit]').length === 2, null, { timeout: 4000 }).then(() => true, () => false);
+    check(split, `${label} playlist: the flattened artist line is read in as two artists`);
+    const pl = await tabs(page, `#plsongs ${SROW_NAMES}`);
+    check(split && pl.length >= 3 && pl.every((n) => n === want), `${label} playlist: its row's ${pl.length} names, read-in artists too, have tabIndex ${want} (${pl})`);
+    check(await credits.count() === 2, `${label} playlist: two artist links`);
+    if (phone) { // (the artists too follow a change of layout)
+      await page.setViewportSize({ width: 1280, height: 900 }); await page.waitForFunction(() => document.documentElement.dataset.shell !== 'phone');
+      const wide = await tabs(page, `#plsongs ${SROW_NAMES}`);
+      check(wide.length === pl.length && wide.every((n) => n === 0), `${label} playlist: widened, its names are Tab stops again (${wide})`);
+      await page.setViewportSize({ width, height: 900 }); await page.waitForFunction(() => document.documentElement.dataset.shell === 'phone');
+      const back = await tabs(page, `#plsongs ${SROW_NAMES}`);
+      check(back.length === pl.length && back.every((n) => n === -1), `${label} playlist: narrowed again, they are not (${back})`);
+    }
+    check(state.errors.length === 0, `${label}: no page errors ${state.errors.join(' | ')}`);
+  } catch (e) { check(false, `${label}: ${e.message.split('\n')[0]}`); } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -92,6 +140,9 @@ async function linkCase(browser, width, touch) {
     await phoneCase(browser, 390, { touch: false });
     await linkCase(browser, 1024, true);
     await linkCase(browser, 1280, false);
+    for (const width of [360, 412]) await tabCase(browser, width);
+    await tabCase(browser, 390, { touch: false });
+    await tabCase(browser, 1280, { touch: false });
   } finally { await browser.close(); }
   console.log(`${ok} ok, ${fail} FAIL`);
   process.exit(fail ? 1 : 0);

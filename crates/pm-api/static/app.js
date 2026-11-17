@@ -3801,7 +3801,7 @@
     const changed = document.documentElement.dataset.shell !== now;
     document.documentElement.dataset.shell = now;
     if (changed && state.view) markTabs();
-    if (changed) $$('.srow [data-ssong], .srow [data-salbum]').forEach((a) => { if (now === 'phone') a.tabIndex = -1; else a.removeAttribute('tabindex'); });
+    if (changed) $$('.srow [data-ssong], .srow [data-salbum], .srow:not(.card-row) .sub [data-artist-credit], .track .main-col .lnk').forEach((a) => { if (now === 'phone') a.tabIndex = -1; else a.removeAttribute('tabindex'); });
     if (changed) { const pb = $('#peoplebox'); if (pb && pb.reshell) pb.reshell(); }
     if (changed && state.view === 'zones') render(); // (its cards are laid out for the shell)
     if (changed && state.view === 'search') { const run = displayedSearch(); if (run) renderSearchBody(run); } // (Filters folds only on a phone)
@@ -3943,11 +3943,12 @@
     if (Array.isArray(credits) && credits.length) return credits.filter((a) => a && a.name).map((a) => ({ name: a.name, id: a.id != null && /^\d+$/.test(String(a.id)) ? 'lib-' + a.id : null, join: a.join_phrase ?? a.joinphrase ?? ', ' }));
     return it.artist ? [{ name: it.artist, id: it.artist_id && !/[,;&/]/.test(it.artist) ? it.artist_id : null, join: '' }] : [];
   };
-  const artistLinksHtml = (it) => {
+  // (`tab`: a song row's names on a phone are not Tab stops, rowLinkTab)
+  const artistLinksHtml = (it, tab = '') => {
     const credits = artistCredits(it); const tid = it.track_id ?? trackIdOf(it);
     // Only a library song whose row carries no structured artists is read again (hydrateArtistCredits)
     const flat = tid != null && !Array.isArray(it.artists) && !Array.isArray((state.trackCache.get('track:' + tid) || {}).artists);
-    return `<span${flat ? ` data-credit-track="${esc(tid)}"` : ''}>${credits.map((a, i) => `<a class="lnk" data-artist-credit="${esc(a.name)}"${a.id ? ` data-credit-id="${esc(a.id)}"` : ''} href="${esc(a.id ? '/artist/' + encodeURIComponent(a.id) : '/search?q=' + encodeURIComponent(a.name))}" title="Open ${esc(a.name)}">${esc(a.name)}</a>${i < credits.length - 1 ? esc(a.join) : ''}`).join('')}</span>`;
+    return `<span${flat ? ` data-credit-track="${esc(tid)}"` : ''}>${credits.map((a, i) => `<a class="lnk" data-artist-credit="${esc(a.name)}"${a.id ? ` data-credit-id="${esc(a.id)}"` : ''} href="${esc(a.id ? '/artist/' + encodeURIComponent(a.id) : '/search?q=' + encodeURIComponent(a.name))}" title="Open ${esc(a.name)}"${tab}>${esc(a.name)}</a>${i < credits.length - 1 ? esc(a.join) : ''}`).join('')}</span>`;
   };
   // A click the browser takes elsewhere (a new tab or window): Ctrl, Cmd, Shift or not the main button.
   // Not Alt: Alt+click on a link downloads the page in Chrome and Edge, so it stays in the app.
@@ -3984,7 +3985,7 @@
   const namedCredits = (t) => Array.isArray(t && t.artists) && t.artists.some((a) => a && a.name);
   const showCredits = (id, t) => creditEls(id).forEach((el) => {
     const focused = el.contains(document.activeElement);
-    el.insertAdjacentHTML('afterend', artistLinksHtml({ track_id: Number(id), artists: t.artists }));
+    el.insertAdjacentHTML('afterend', artistLinksHtml({ track_id: Number(id), artists: t.artists }, el.closest('.srow:not(.card-row), .track') ? rowLinkTab() : ''));
     const fresh = el.nextElementSibling; el.remove();
     if (focused && fresh) { const a = $('[data-artist-credit]', fresh); if (a) a.focus(); }
   });
@@ -5485,7 +5486,7 @@
       const fav = isFav(t); const can = trackHasId(t);
       return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}" data-tid="${t.id}"${cur ? ' aria-current="true"' : ''}>
         <div class="no"><span class="num">${numbers === 'track' ? (t.track_no ?? '') : i + 1}</span><button class="rowplay" data-act="play" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div>
-        <div class="main-col"><div class="title"><a class="lnk" data-act="song" href="${esc(pathFor('item', { kind: 'song', id: trackPageId(t) }))}">${esc(t.title)}</a>${dlHas(t.id) ? dlMark() : ''}${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id })}${showAlbum && t.album ? `<span class="by-album"><span class="by-dot"> · </span><a class="lnk" data-act="album" data-album="${t.album.id}" href="${esc(pathFor('item', { kind: 'album', id: 'lib-' + t.album.id }))}">${esc(t.album.title)}</a></span>` : ''}</div></div>
+        <div class="main-col"><div class="title"><a class="lnk" data-act="song" href="${esc(pathFor('item', { kind: 'song', id: trackPageId(t) }))}"${rowLinkTab()}>${esc(t.title)}</a>${dlHas(t.id) ? dlMark() : ''}${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id }, rowLinkTab())}${showAlbum && t.album ? `<span class="by-album"><span class="by-dot"> · </span><a class="lnk" data-act="album" data-album="${t.album.id}" href="${esc(pathFor('item', { kind: 'album', id: 'lib-' + t.album.id }))}"${rowLinkTab()}>${esc(t.album.title)}</a></span>` : ''}</div></div>
         ${showAlbum ? `<div class="album-col">${t.album ? `<button class="lnk" data-act="album" data-album="${t.album.id}">${esc(t.album.title)}</button>` : ''}</div>` : ''}
         <div class="fmt-col"><span class="fmt ${LOSSY[t.file && t.file.container] ? 'lossy' : ''}">${esc(fileFormat(t.file))}</span></div>
         <div class="dur">${fmt(t.duration_ms)}</div>
@@ -6367,8 +6368,9 @@
   // (`data-np`: what the row plays, so the playing one is marked; `opts.oneArtist`: the album's songs
   // are all by its artist, said once in the header and not on every row)
   const songNpKey = (t) => (t.track_id != null ? `track:${t.track_id}` : t.uri || '');
-  // On phones a song row is one button (a tap plays it; its names don't take taps, app.css): its song
-  // and album links are not separate Tab stops there
+  // On phones a song row is one button (a tap plays it; its names don't take taps, app.css): its song,
+  // artist and album links are not separate Tab stops there either (its ⋯ has their pages), in the
+  // library's lists (.track) as in the others (.srow)
   const rowLinkTab = () => (shellMode() === 'phone' ? ' tabindex="-1"' : '');
   // Whether a song row's song is one of your favourites: by its library track, by its page (a
   // canonical URI) or by the URI its page id stands for — the three keys /favourites answers with
@@ -6386,7 +6388,7 @@
   const songHeart = (t, k) => `<button class="icon-btn heart${songFav(t) ? ' on' : ''}" data-sfav="${k}" aria-pressed="${songFav(t)}" title="${songFav(t) ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(songFav(t), t.title))}">${icon(songFav(t) ? 'heart-fill' : 'heart')}</button>`;
   // The heart turned over without redrawing anything around it
   const setHeart = (b, on, title) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.innerHTML = icon(on ? 'heart-fill' : 'heart'); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.setAttribute('aria-label', heartWords(on, title)); };
-  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}" href="${esc(pathFor('item', { kind: 'album', id: t.album_id }))}"${rowLinkTab()}>${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
+  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t, rowLinkTab()) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}" href="${esc(pathFor('item', { kind: 'album', id: t.album_id }))}"${rowLinkTab()}>${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
   // The list being selected from (while the bar is up): its page, its part of the page, each song's
   // key and the ticks. The same list drawn again where it stands (a playlist's sources answering, a
   // pin, the next search source, See all songs) takes Select over with the same songs ticked;
