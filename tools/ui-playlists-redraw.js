@@ -5,7 +5,9 @@
 // next visit. Now the page is drawn in place (redrawing/keepPlace): the boxes keep what is typed
 // and the caret, focus and scroll stay, and a finished import puts its row in the list at once.
 // Create empties the name box and leaves the keyboard in it for the next one (Enter or a mouse
-// click; a tap on a touch screen doesn't pull the on-screen keyboard up). At 1280, 1024, 768 px.
+// click; a tap on a touch screen doesn't pull the on-screen keyboard up: the focus goes to the new
+// playlist's row instead, not lost on the page). The keyboard on a playlist's row stays there when the
+// list is drawn again. At 1280, 1024, 768 px.
 //   node tools/ui-playlists-redraw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -96,6 +98,14 @@ const IMPORTED = { ...fx.summary, id: 'imp1', name: 'Road trip', items: 1 };
         check(open.includes('Open playlist'), `${width}: the toast still offers ${JSON.stringify(open)}`);
         await page.screenshot({ path: path.join(SHOTS, `import-shown-${width}.png`) });
 
+        // 3b. The keyboard on a playlist's row: a library change keeps it on that row (before, the new
+        // row had no tabindex until the next frame, so the focus fell to the page)
+        await page.focus('#main [data-pl="p5"]'); await mark(); changed();
+        const kept = await redrawn(); await sleep(150);
+        const on = await page.evaluate(() => { const a = document.activeElement; return a && (a.dataset.pl || a.id || a.tagName); });
+        check(kept && on === 'p5', `${width}: the keyboard on a playlist's row stays on it when the list is drawn again (redrawn ${kept}, ${on})`);
+        await page.screenshot({ path: path.join(SHOTS, `keyboard-kept-${width}.png`) });
+
         // 4. Create: the new row is there, the box is emptied and keeps the keyboard.
         await page.fill('#plname', 'Sunday');
         await page.locator('#plname').press('Enter');
@@ -146,26 +156,54 @@ const IMPORTED = { ...fx.summary, id: 'imp1', name: 'Road trip', items: 1 };
         check(!state.errors.length, `${width}: no page errors (${state.errors.join('; ')})`);
       } finally { await context.close(); }
     }
-    // A tap on Create (a touch screen, 1024 px tablet): the box empties but isn't focused, so no
-    // on-screen keyboard pops up over the list.
-    {
-      const { page, context, state } = await fx.create(browser, 1024, { touch: true });
-      state.collections = [pl(1)];
+    // A tap on Create (a touch screen, 1024 and 768 px tablets): the box empties but isn't focused, so
+    // no on-screen keyboard pops up over the list. The focus goes to the new playlist's row (before, it
+    // fell to the page when Create went grey: a screen reader lost its place). Someone who put the
+    // focus somewhere else while the playlist was being made keeps it there.
+    for (const width of [1024, 768]) {
+      const { page, context, state } = await fx.create(browser, width, { touch: true });
+      state.collections = Array.from({ length: 30 }, (_, i) => pl(i + 1));
+      let socket = null;
+      await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
+      let made = 0; let wait = 0;
       await page.route('**/v1/playlists', async (r) => {
         if (r.request().method() !== 'POST') return r.fallback();
-        const name = JSON.parse(r.request().postData() || '{}').name;
-        state.collections = [...state.collections, { ...fx.summary, id: 'tap1', name, items: 0 }];
-        return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...fx.detail, summary: { ...fx.summary, id: 'tap1', name } }) });
+        const name = JSON.parse(r.request().postData() || '{}').name; const id = `tap${++made}`;
+        if (wait) await sleep(wait);
+        state.collections = [...state.collections, { ...fx.summary, id, name, items: 0 }];
+        return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...fx.detail, summary: { ...fx.summary, id, name } }) });
       });
+      const look = () => page.evaluate(() => { const a = document.activeElement; const r = a && a.closest('[data-pl]'); return { name: document.querySelector('#plname').value, focus: a && (a.id || (r && r.dataset.pl) || a.tagName), row: !!r && r === a, top: document.querySelector('#main').scrollTop }; });
       try {
         await fx.go(page, '/playlists');
         await page.waitForSelector('#main [data-pl]');
         await page.fill('#plname', 'Thursday'); await page.tap('#plcreate');
-        const made = await until(() => page.evaluate(() => !!document.querySelector('#main [data-pl="tap1"]')), 3000);
+        const drawn = await until(() => page.evaluate(() => !!document.querySelector('#main [data-pl="tap1"]')), 3000);
+        await until(async () => (await look()).focus !== 'BODY', 1500);
+        let l = await look();
+        check(drawn && l.name === '' && l.focus !== 'plname', `${width} touch: a tap on Create draws the row and empties the box without pulling the keyboard up (made ${drawn}, "${l.name}", ${l.focus})`);
+        check(l.focus === 'tap1' && l.row, `${width} touch: the focus goes to the new playlist's row, not to the page (${l.focus})`);
+        // (#main scrolls smoothly: the row is in view once that ends)
+        const seen = await until(() => page.evaluate(() => { const r = document.querySelector('#main [data-pl="tap1"]').getBoundingClientRect(); const m = document.querySelector('#main').getBoundingClientRect(); return r.top >= m.top && r.bottom <= m.bottom; }), 3000);
+        check(seen, `${width} touch: the new row, here at the foot of a long list, is scrolled into view (top ${(await look()).top})`);
+        await page.screenshot({ path: path.join(SHOTS, `touch-create-${width}.png`) });
+        // The node says "library changed" after a create: that redraw (in place) keeps the focus on the row
+        for (let i = 0; i < 50 && !socket; i++) await sleep(100);
+        await page.evaluate(() => { document.querySelector('#main .list').dataset.old = '1'; });
+        socket.send(JSON.stringify({ type: 'library_changed' }));
+        const again = await until(() => page.evaluate(() => { const x = document.querySelector('#main .list'); return !!x && !x.dataset.old; }));
         await sleep(150);
-        const l = await page.evaluate(() => ({ name: document.querySelector('#plname').value, focus: document.activeElement && (document.activeElement.id || document.activeElement.tagName) }));
-        check(made && l.name === '' && l.focus !== 'plname', `1024 touch: a tap on Create draws the row and empties the box without pulling the keyboard up (made ${made}, "${l.name}", ${l.focus})`);
-        check(!state.errors.length, `1024 touch: no page errors (${state.errors.join('; ')})`);
+        l = await look();
+        check(again && l.focus === 'tap1' && l.row, `${width} touch: the redraw "library changed" brings keeps the focus on the new row (redrawn ${again}, ${l.focus})`);
+        // While the next one is being made, the person taps into the shared-link box: the focus stays there
+        wait = 600;
+        await page.fill('#plname', 'Friday'); await page.tap('#plcreate');
+        await sleep(100); await page.focus('#plshared');
+        await until(() => page.evaluate(() => !!document.querySelector('#main [data-pl="tap2"]')), 3000);
+        await sleep(300);
+        l = await look();
+        check(l.focus === 'plshared', `${width} touch: focus moved elsewhere during the request stays there (${l.focus})`);
+        check(!state.errors.length, `${width} touch: no page errors (${state.errors.join('; ')})`);
       } finally { await context.close(); }
     }
   } finally { await browser.close(); }
