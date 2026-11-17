@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-17
+
+- **Queue and playlist rows say which song their buttons move or remove.** With a screen reader or the keyboard, every row on the Queue read “Move up”, “Move down” and “Remove”, and its play button read only the row’s number (“2”), so you had to step back to the title to know which song you were about to move or take out. A playlist’s rows were the same. Now each button names its song: “Play Night Drive”, “Move Night Drive up”, “Move Night Drive down”, “Remove Night Drive from the queue” (or “from this playlist”), and the grip says “Drag Night Drive to reorder”. A link in a playlist is named by its page’s title once that is read. The tooltips you see with a mouse are unchanged.
+
 ### 2026-11-16
 
 - **A song’s row buttons say which song they are for.** With a screen reader or the keyboard, going down Songs, Favourites or an album, artist or playlist page read “Play from here”, “Play next”, “Add to queue” and “More” on every row, so you could not tell which song a button would play or queue without stepping back to its title. Now each one names its song, as the heart already did: “Play Night Drive”, “Play Night Drive next”, “Add Night Drive to the queue”, “More for Night Drive”. A link in a playlist names its page’s title the same way once the title has loaded, not the address. The short tooltips are unchanged.

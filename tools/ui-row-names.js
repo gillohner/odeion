@@ -86,6 +86,71 @@ const pages = [
         }
         check(!state.errors.length, `${width} playlist: no page errors (${state.errors.join(' | ')})`);
       } finally { await context.close(); }
+      // The Queue: a row's Play from here (it showed the row's number, so it was read as "2"), its
+      // grip, Move up, Move down and Remove named after the song too; the short tooltips stay
+      {
+        const saved = tracks.map((t) => ({ id: t.id, uri: `track:${t.id}`, track_id: t.id, title: t.title, artist: 'Sefa', album: 'Journey', duration_ms: 60000 }));
+        const qfix = {}; for (const t of tracks) qfix[`/library/tracks/${t.id}`] = { body: t };
+        const { page, context, state } = await fx.create(browser, width, { tracks, fixtures: qfix });
+        try {
+          await context.addInitScript((q) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 0, id: 1, pos: 0 })); }, JSON.stringify(saved));
+          await fx.go(page, '/queue');
+          const drawn = await page.waitForFunction((n) => document.querySelectorAll('.queue [data-qrow]').length === n, titles.length, { timeout: 8000 }).then(() => true, () => false);
+          check(drawn, `${width} queue: ${titles.length} rows drawn`);
+          if (drawn) {
+            const qButtons = [['[data-qi]', 'Play from here', (t) => `Play ${t}`], ['[data-qgrip]', 'Drag to reorder', (t) => `Drag ${t} to reorder (or Alt+↑/↓)`], ['[data-qup]', 'Move up', (t) => `Move ${t} up`], ['[data-qdown]', 'Move down', (t) => `Move ${t} down`], ['[data-qrm]', 'Remove', (t) => `Remove ${t} from the queue`], ['[data-qmore]', 'More', (t) => `More for ${t}`]];
+            const rowsNow = () => page.$$eval('.queue [data-qrow]', (rows) => rows.map((r) => r.querySelector('.name').textContent.trim()));
+            for (const [sel, tip, name] of qButtons) {
+              const got = await page.$$eval(`.queue [data-qrow] ${sel}`, (bs) => bs.map((b) => ({ label: b.getAttribute('aria-label'), title: b.getAttribute('title') })));
+              titles.forEach((t, i) => {
+                check(got[i] && got[i].label === name(t), `${width} queue: row ${i + 1}'s ${tip} is named "${name(t)}" (${got[i] && got[i].label})`);
+                check(got[i] && got[i].title === tip, `${width} queue: row ${i + 1}'s tooltip still says "${tip}" (${got[i] && got[i].title})`);
+              });
+            }
+            // What the browser computes for the row's play button (not its number) and its Remove
+            for (const t of titles) {
+              for (const n of [`Play ${t}`, `Remove ${t} from the queue`]) {
+                const c = await page.getByRole('button', { name: n, exact: true }).count();
+                check(c === 1, `${width} queue: exactly one button is named "${n}" (${c})`);
+              }
+            }
+            // Keyboard: "Move <second song> down" moves that song, and the names follow the songs
+            const down = page.getByRole('button', { name: `Move ${titles[0]} down`, exact: true });
+            const pressed = await down.focus({ timeout: 2000 }).then(() => page.keyboard.press('Enter')).then(() => true, () => false);
+            check(pressed, `${width} queue: a button named "Move ${titles[0]} down" takes the focus`);
+            const moved = pressed && await page.waitForFunction((want) => [...document.querySelectorAll('.queue [data-qrow] .name')].map((n) => n.textContent.trim()).join('|') === want, [titles[1], titles[0], titles[2]].join('|'), { timeout: 5000 }).then(() => true, () => false);
+            check(moved, `${width} queue: Enter on "Move ${titles[0]} down" moves that song (${(await rowsNow()).join(' / ')})`);
+            const after = await page.$$eval('.queue [data-qrow]', (rows) => rows.map((r) => ({ name: r.querySelector('.name').textContent.trim(), up: r.querySelector('[data-qup]').getAttribute('aria-label'), rm: r.querySelector('[data-qrm]').getAttribute('aria-label') })));
+            check(after.every((r) => r.up === `Move ${r.name} up` && r.rm === `Remove ${r.name} from the queue`), `${width} queue: after the move each row's buttons name its own song (${after.map((r) => r.up).join(' / ')})`);
+            await page.hover('.queue [data-qrow="1"]');
+            await page.screenshot({ path: path.join(SHOTS, `queue-${width}.png`) });
+          }
+          check(!state.errors.length, `${width} queue: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
+      // A playlist's rows: Move up, Move down and Remove name the song, and a link row's are renamed
+      // with its title when its page answers (as its ⋯ and Open are)
+      {
+        const { page, context, state } = await fx.create(browser, width);
+        try {
+          await fx.go(page, '/playlist/c1');
+          const ok = await page.waitForFunction(() => [...document.querySelectorAll('.main .srow[data-card] .name')].some((n) => n.textContent.trim() === 'Liner notes'), null, { timeout: 8000 }).then(() => true, () => false);
+          check(ok, `${width} playlist rows: drawn, with the link's title`);
+          if (ok) {
+            const r = await page.$$eval('#plsongs .srow', (rows) => rows.map((row) => ({ name: row.querySelector('.name').textContent.trim(), up: row.querySelector('[data-pup]')?.getAttribute('aria-label'), down: row.querySelector('[data-pdown]')?.getAttribute('aria-label'), rm: row.querySelector('[data-rm]')?.getAttribute('aria-label'), tips: ['[data-pup]', '[data-pdown]', '[data-rm]'].map((s) => row.querySelector(s)?.getAttribute('title')).join('|') })));
+            check(r.length === 2, `${width} playlist rows: a song and a link (${r.length})`);
+            for (const x of r) {
+              check(x.up === `Move ${x.name} up` && x.down === `Move ${x.name} down`, `${width} playlist rows: "${x.name}" has Move ${x.name} up / down (${x.up} / ${x.down})`);
+              check(x.rm === `Remove ${x.name} from this playlist`, `${width} playlist rows: "${x.name}" has Remove ${x.name} from this playlist (${x.rm})`);
+              check(x.tips === 'Move up|Move down|Remove', `${width} playlist rows: "${x.name}"'s tooltips unchanged (${x.tips})`);
+              // (and what the browser computes: one button so named, on this row)
+              const c = await page.getByRole('button', { name: `Remove ${x.name} from this playlist`, exact: true }).count();
+              check(c === 1, `${width} playlist rows: exactly one button is named "Remove ${x.name} from this playlist" (${c})`);
+            }
+          }
+          check(!state.errors.length, `${width} playlist rows: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
     }
   } finally { await browser.close(); }
   console.log(failed ? `${passed} ok, ${failed} FAIL` : `${passed} ok, all passed`);
