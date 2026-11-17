@@ -5110,7 +5110,7 @@
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
     // (a page opened is drawn from the start: redrawing, keepPlace)
     const top = later ? {} : null; if (top) topLater = top; else { mainTo(0); if (state.placeHold) state.placeHold(); }
-    state.drawnPage = null;
+    state.drawnPage = null; endSelect(); // (opening a page, the same one too, ends Select)
     state.zoneInView = v === 'zones' && how !== 'pop'; // Zones opened (not Back): show the zone in use
     // (a page that drew nothing, its code done or failed: at its top then, unless a newer page waits)
     return navigate(fresh).finally(() => { if (top && topLater === top) topNow(); });
@@ -6371,6 +6371,17 @@
   // The heart turned over without redrawing anything around it
   const setHeart = (b, on, title) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.innerHTML = icon(on ? 'heart-fill' : 'heart'); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.setAttribute('aria-label', heartWords(on, title)); };
   const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}" href="${esc(pathFor('item', { kind: 'album', id: t.album_id }))}"${rowLinkTab()}>${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
+  // The list being selected from (while the bar is up): its page, its part of the page, each song's
+  // key and the ticks. The same list drawn again where it stands (a playlist's sources answering, a
+  // pin, the next search source, See all songs) takes Select over with the same songs ticked;
+  // another page ends it
+  let selNow = null;
+  const selOn = () => (selBar && selNow) || null;
+  const selPage = () => pathFor(state.view, state.viewArg) || state.view;
+  const selWhere = (section) => section.id || (section.dataset.skind ? `skind:${section.dataset.skind}` : '');
+  // (after a redraw: a selection whose list went and that no new list took over ends)
+  const dropStaleSelect = () => { if (selOn() && !selNow.section.isConnected) endSelect(); };
+
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
@@ -6410,12 +6421,26 @@
         if (what === 'remove') { try { await opts.remove([...sel].sort((a, b) => b - a)); endSelect(); } catch (e) { toast(e.message, 'error'); } }
       });
     };
-    $('[data-selstart]', head).onclick = (e) => {
-      if (section.classList.contains('selecting')) return endSelect();
-      endSelect(); section.classList.add('selecting'); e.currentTarget.setAttribute('aria-pressed', 'true');
-      $$('.srow[data-srow]', section).forEach((row) => { const k = Number(row.dataset.srow); row.insertAdjacentHTML('afterbegin', `<label class="selbox" title="Select"><input type="checkbox" data-k="${k}" aria-label="Select ${esc(songs[k] ? songs[k].title : '')}"></label>`); const c = $('.selbox input', row); c.onclick = (ev) => ev.stopPropagation(); c.onchange = () => { if (c.checked) sel.add(k); else sel.delete(k); draw(); }; });
+    // (a song's key: opts.keys, else its library id, page or address, so the same list drawn again
+    // with its sources found still has the same keys)
+    const keys = songs.map((t, k) => (opts.keys && opts.keys[k]) ?? t.track_id ?? t.page ?? t.uri ?? t.id ?? t.title);
+    // Select starts with nothing ticked (or with the ticks a redraw carries over)
+    const start = (btn, ticks) => {
+      endSelect(); sel.clear(); section.classList.add('selecting'); btn.setAttribute('aria-pressed', 'true');
+      selNow = { section, page: selPage(), where: selWhere(section), keys, sel };
+      $$('.srow[data-srow]', section).forEach((row) => { const k = Number(row.dataset.srow); row.insertAdjacentHTML('afterbegin', `<label class="selbox" title="Select"><input type="checkbox" data-k="${k}" aria-label="Select ${esc(songs[k] ? songs[k].title : '')}"></label>`); const c = $('.selbox input', row); if (ticks && ticks.has(k)) { c.checked = true; sel.add(k); } c.onclick = (ev) => ev.stopPropagation(); c.onchange = () => { if (c.checked) sel.add(k); else sel.delete(k); draw(); }; });
       draw();
     };
+    $('[data-selstart]', head).onclick = (e) => { if (section.classList.contains('selecting')) return endSelect(); start(e.currentTarget, null); };
+    // This list in place of the one being selected from: Select goes on here with the ticked songs
+    // that are still in it (found by their key, in their own place first; the bar counts them)
+    const was = selOn();
+    if (was && !was.section.isConnected && was.page === selPage() && was.where === selWhere(section)) {
+      const at = new Map(); keys.forEach((x, j) => { if (!at.has(x)) at.set(x, []); at.get(x).push(j); });
+      const ticks = new Set();
+      [...was.sel].sort((a, b) => a - b).forEach((k) => { const x = was.keys[k]; const i = keys[k] === x && !ticks.has(k) ? k : (at.get(x) || []).find((j) => !ticks.has(j)); if (i != null) ticks.add(i); });
+      start($('[data-selstart]', head), ticks);
+    }
   };
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && selBar) endSelect(); });
   // A compact header once the page's big one scrolls away: the title and Play stay at hand
@@ -6773,6 +6798,7 @@
     // Bind: rows and tiles use the shared components.
     const songsSec = $('[data-skind="song"]', box);
     if (songsSec && byKind.song.length) { const ss = byKind.song.slice(0, run.allSongs ? 50 : 6).map((h) => ({ ...h, artist: h.subtitle })); bindSongRows(songsSec, ss, {}); enableSelect(songsSec, ss); }
+    dropStaleSelect(); // (no songs left to select from)
     for (const kind of ['album', 'artist']) { const sec = $(`[data-skind="${kind}"]`, box); if (sec && byKind[kind].length) bindItemTiles(sec, byKind[kind].slice(0, 12), kind); }
     $$('[data-sother]', box).forEach((r) => r.onclick = () => { const [k, n] = r.dataset.sother.split(':'); const h = byKind[k][Number(n)]; if (k === 'person') setView('person', h.id); else if (k === 'playlist' && h.sources.includes('library')) setView('playlist', h.id); else if (h.page) openWeb(h.page); });
     const to = $('[data-sopen="top"]', box); if (to) to.onclick = inAppClick(() => setView('item', { kind: top.kind === 'song' ? 'song' : top.kind, id: top.id }));
@@ -7401,7 +7427,7 @@
     // A page opened by a press is the page's own reading, not the press's
     const outer = inHandler; inHandler = 0; let p;
     try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }
-    const drawn = () => { drawing.on = false; markDownloads(); }; drawing.done = p.then(drawn, drawn);
+    const drawn = () => { drawing.on = false; markDownloads(); dropStaleSelect(); }; drawing.done = p.then(drawn, drawn);
     return p;
   };
   const renderPage = async (api) => {
@@ -7410,7 +7436,8 @@
     const v = state.view;
     // The dashboard is a full screen of its own (a TV or tablet): no sidebar, bars or player
     document.body.classList.toggle('kiosk', v === 'dashboard');
-    endSelect();
+    // (another page ends Select; this page drawn again keeps it where its list does, enableSelect)
+    if (!selOn() || selNow.page !== selPage()) endSelect();
     const lists = {}; let listMine = 0; // (Albums, Artists: this draw's number, pageGen)
     try {
       switch (v) {
@@ -8196,7 +8223,9 @@
         }
         case 'playlist': {
           loadSvcRank(); // for the "Play this song from" menu's order
-          loading();
+          // (drawn again where it stands, its sources found, a pin or a move: no skeleton, the
+          // scroll and the focus kept, keepPlace)
+          const again = redrawing('playlist'); if (!again) loading();
           const plId = state.viewArg;
           await pubkyUser();
           // Where songs play from can take a while the first time (each service asked by ISRC):
@@ -8251,6 +8280,7 @@
           const sharingNote = d.summary.visibility === 'public'
             ? (d.summary.synced ? 'Public on Pubky. Anyone with the link can open it.' : mine ? 'Public copy pending: shared once your homeserver answers.' : 'Public copy pending: shared on the next sync with your homeserver.')
             : (d.summary.synced ? 'Private on your homeserver.' : mine ? 'Private; it waits on this node until your homeserver answers.' : 'Private on this node; saved to your homeserver on the next sync.');
+          const place = again ? keepPlace() : null;
           main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist<span class="eb-where"> · ${esc(d.summary.visibility)} · ${d.summary.synced ? (mine ? 'on your homeserver' : 'synced to your homeserver') : mine ? 'waiting for your homeserver' : 'on this node'}</span></div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}${libNote}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" data-wd="up" title="Move up" aria-label="${esc(rowWords.up(t.title))}" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" data-wd="down" title="Move down" aria-label="${esc(rowWords.down(t.title))}" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" data-wd="unlist" title="Remove" aria-label="${esc(rowWords.unlist(t.title))}">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', mine ? 'Add songs from any ⋯ menu.' : 'Add songs from any ⋯ menu, or import a file.')}</section>`
@@ -8263,7 +8293,7 @@
           bindSongRows($('#plsongs'), songs, { rowExtra: rowActs });
           const pfr = $('#pfretry'); if (pfr) pfr.onclick = () => { state.plPf = null; render(); };
           // Playlist rows can also be removed together (highest index first, so positions hold)
-          enableSelect($('#plsongs'), songs, { remove: async (idx) => { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`); state.plPf = null; toast(`Removed ${countOf(idx.length, 'songs')}`); render(); } });
+          enableSelect($('#plsongs'), songs, { keys: d.playlist.items.map((it) => it.uri), remove: async (idx) => { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`); state.plPf = null; toast(`Removed ${countOf(idx.length, 'songs')}`); render(); } });
           if (localSongs.length) bindSongRows($('#pllocal'), localSongs, {});
           $$('[data-lrm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/local/${b.dataset.lrm}`); render(); } catch (er) { toast(er.message, 'error'); } });
           // Cards (web pages, posts) play nowhere: Play and Shuffle play the songs around them
@@ -8300,7 +8330,9 @@
             ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-rm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`); state.plPf = null; render(); } catch (er) { toast(er.message, 'error'); } });
-          const pmove = async (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); try { await api('PUT', `/playlists/${d.summary.id}`, { uris }); state.plPf = null; render(); } catch (e) { toast(e.message, 'error'); } };
+          // (pressed from the keyboard, the focus follows the song to its new place, so a second
+          // press moves it on rather than moving the song that took its place back)
+          const pmove = async (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); const had = document.activeElement && document.activeElement.matches('[data-pup], [data-pdown]') ? (j2 < i2 ? 'pup' : 'pdown') : null; try { await api('PUT', `/playlists/${d.summary.id}`, { uris }); state.plPf = null; await render(); if (had && state.view === 'playlist' && state.viewArg === plId) { const b = $(`#plsongs [data-${had}="${j2}"]:not(:disabled)`, main) || $(`#plsongs [data-${had === 'pup' ? 'pdown' : 'pup'}="${j2}"]`, main); if (b) b.focus(); } } catch (e) { toast(e.message, 'error'); } };
           $$('[data-pup]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); pmove(Number(b.dataset.pup), Number(b.dataset.pup) - 1); });
           $$('[data-pdown]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); pmove(Number(b.dataset.pdown), Number(b.dataset.pdown) + 1); });
           // Source chip → every source this song has here, plus Auto; picking one pins it.
@@ -8325,6 +8357,7 @@
           const us = $('#plunshare'); if (us) us.onclick = () => setVis(false);
           const cl = $('#plcopylink'); if (cl) cl.onclick = async () => { const t = `pubky://${sharer.replace(/^pubky/, '')}/pub/social/v1/posts/${d.summary.id}`; try { await navigator.clipboard.writeText(t); toast('Link copied'); } catch { toast(t); } };
           $$('[data-pfilter]', main).forEach((b) => b.onclick = () => { state.plFilter = b.dataset.pfilter ? { id: plId, key: b.dataset.pfilter } : null; render(); });
+          state.drawnPage = 'playlist'; if (place) place();
           break;
         }
         case 'sources': {
