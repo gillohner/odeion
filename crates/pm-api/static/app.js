@@ -7019,7 +7019,7 @@
   // "No genres yet" said it twice). A text count ("0 of 12", a zone's name) is shown as it is.
   const pageHead = (title, count, actions = '') => libNav() + `<div class="page-head"><h2>${esc(title)}${count != null && count !== 0 ? `<span class="count">${esc(fmtCount(count))}</span>` : ''}</h2><div class="actions">${actions}</div></div>`;
   // One way back (08-item-page.md): history, labelled with the previous page; on a deep link the page's section.
-  const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} ${esc((navDepth > 0 && history.state && history.state.backLabel) || label)}</button>`;
+  const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} <span class="back-l">${esc((navDepth > 0 && history.state && history.state.backLabel) || label)}</span></button>`;
   const loading = () => { if (state.placeHold) state.placeHold(); main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
   // A page drawn again where it stands (its songs still coming, a heart, other sources found) stays
   // on screen until it is drawn anew: no skeleton, so it doesn't jump to the top, and the control
