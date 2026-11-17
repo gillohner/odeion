@@ -3,9 +3,11 @@
 // heard the same name on every page. Now the tab says the page, with the name its Back button
 // gives it: "Albums · Odeion", "Journey · Odeion" (an album), "Music and notes · Odeion" (a
 // playlist), "Results for “song” · Odeion" (an empty Search: "Search · Odeion"); a smart playlist
-// by its heading; Home is "Odeion" (the app's own name, tools/ui-brand.js). An album or an artist
-// still loading says "Odeion", not the page it was opened from; a song that fails to load says
-// "Odeion", not the playlist before it; Back gives the last page's title again. At 1280, 1024 and 768 px.
+// by its heading; an artist's View all albums "Albums by Sefa · Odeion" (and the album opened
+// from there says "Albums by Sefa" on its Back); Home is "Odeion" (the app's own name,
+// tools/ui-brand.js). An album or an artist still loading says "Odeion", not the page it was
+// opened from; a song that fails to load says "Odeion", not the playlist before it; Back gives
+// the last page's title again. At 1280, 1024 and 768 px.
 // Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-page-title.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -33,7 +35,7 @@ const extras = { body: { collections: [], related: [], concerts: [], similar: []
         '/library/albums': { body: [{ id: 7, title: 'Journey', album_artist: 'Sefa', year: 2019 }] },
         '/item/album/lib-7': { body: album },
         '/item/album/lib-7/extras': extras,
-        '/item/artist/lib-11': { body: item('artist', 'lib-11', 'Sefa') },
+        '/item/artist/lib-11': { body: item('artist', 'lib-11', 'Sefa', { albums: [{ id: 'lib-7', title: 'Journey', year: 2019, release_type: 'album', released: '2019-05-01' }] }) },
         '/item/artist/lib-11/extras': extras,
         '/item/song/lib-1': { body: { error: 'Not found' }, status: 404 },
         '/smart/s1/tracks': { body: { playlist: { id: 's1', name: 'Late night' }, tracks: [] } },
@@ -80,6 +82,19 @@ const extras = { body: { collections: [], related: [], concerts: [], similar: []
     check(failedShown && seen.size === 1 && seen.has('Odeion'), `${at}: a page that failed to load isn't named after the playlist before it (got ${[...seen].map((t) => `"${t}"`).join(', ')})`);
     await page.goBack();
     check(await titled(page, 'Music and notes · Odeion'), `${at}: Back gives the playlist's title again (got "${await page.title()}")`);
+
+    // An artist's View all albums: whose albums, not the library's Albums; the album opened from it
+    // says the same on its Back (shown on a phone; at these widths the breadcrumb stands in for it)
+    await fx.go(page, '/artist/lib-11/releases/albums');
+    check(await titled(page, 'Albums by Sefa · Odeion'), `${at}: an artist's albums name the artist in the tab (got "${await page.title()}")`);
+    await page.locator('#main .tile').first().click();
+    await page.waitForURL(/\/album\/lib-7$/);
+    check(await titled(page, 'Journey · Odeion'), `${at}: the album opened from them is named (got "${await page.title()}")`);
+    const relBack = ((await page.locator('#main .back').first().textContent().catch(() => '')) || '').trim();
+    check(relBack === 'Albums by Sefa', `${at}: its Back says whose albums (got "${relBack}")`);
+    if (width === 1280) await page.screenshot({ path: path.join(SHOTS, `release-back-${width}.png`) });
+    await page.goBack();
+    check(await titled(page, 'Albums by Sefa · Odeion'), `${at}: Back gives the artist's albums' title again (got "${await page.title()}")`);
 
     check(!state.errors.length, `${at}: no page errors ${state.errors.join(' | ')}`);
     await context.close();

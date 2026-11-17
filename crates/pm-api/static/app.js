@@ -1492,9 +1492,11 @@
   };
   // Clickable rows that are not buttons or links are made reachable for the keyboard, also when
   // they arrive after a page first draws (Home's sections, search results).
+  const UNTAGGED = '.clickable:not(button):not(a):not([tabindex])';
+  const keyable = (el) => { el.tabIndex = 0; if (!el.getAttribute('role')) el.setAttribute('role', 'button'); };
   {
     let queued = false;
-    const tag = () => { queued = false; document.querySelectorAll('.clickable:not(button):not(a):not([tabindex])').forEach((el) => { el.tabIndex = 0; if (!el.getAttribute('role')) el.setAttribute('role', 'button'); }); };
+    const tag = () => { queued = false; document.querySelectorAll(UNTAGGED).forEach(keyable); };
     new MutationObserver(() => { if (!queued) { queued = true; requestAnimationFrame(tag); } }).observe(document.body, { childList: true, subtree: true });
   }
   // ---- Log in / Log out (TASK-login-ux) -------------------------------------
@@ -7023,11 +7025,14 @@
       // back when it is drawn
       let extra = 0;
       const fit = () => { extra = Math.max(0, tall - (main.scrollHeight - extra)); if (extra) { main.style.setProperty('--hold', `${extra}px`); main.dataset.hold = ''; } else { main.style.removeProperty('--hold'); delete main.dataset.hold; } return extra; };
-      // Done once focus is back, or something else took it meanwhile
+      // Done once focus is back, or something else took it meanwhile. (A clickable row drawn just
+      // now isn't keyboard-reachable until the next frame: it is made so here, or focus() wouldn't
+      // take and the focus would fall to the page: Artists, Favourites' other services.)
       const refocus = () => {
         const now = document.activeElement; if (now && now !== document.body && now !== main) return true;
-        const b = at(sel)[i]; if (b && !b.disabled) { b.focus({ preventScroll: true }); return true; }
-        return false;
+        const b = at(sel)[i]; if (!b || b.disabled) return false;
+        if (b.matches(UNTAGGED)) keyable(b);
+        b.focus({ preventScroll: true }); return document.activeElement === b;
       };
       let held = fit();
       if (main.scrollTop !== top) { try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } }
@@ -7719,7 +7724,8 @@
           const fp = $('#favplay'); if (fp) fp.onclick = () => playTracks(f.tracks, true, 'end', { shuffle: false });
           state.drawnPage = 'favourites'; if (place) place();
           // (an older draw's answer that comes after a newer draw's is not put in)
-          if (f.other.length) { const items = await describe(f.other); const box = $('#favother'); if (box && state.view === 'favourites' && state.favDraw === favMine) { box.innerHTML = discoverRows(items); bindDiscoverRows(items); } }
+          // (the keyboard on one of those rows stays on it when the new ones come)
+          if (f.other.length) { const items = await describe(f.other); const box = $('#favother'); if (box && state.view === 'favourites' && state.favDraw === favMine) { const back = box.contains(document.activeElement) ? keepPlace() : null; box.innerHTML = discoverRows(items); bindDiscoverRows(items); if (back) back(); } }
           break;
         }
         case 'albums': {
@@ -8853,8 +8859,9 @@
           const live = () => gen === state.pageGen && state.view === 'releases' && state.viewArg.id === id && state.viewArg.section === section;
           const key = (REL_SECTIONS.find(([, , slug]) => slug === section) || [])[0] || 'other';
           const refresh = state.viewArg.refresh ? '?refresh=1' : ''; delete state.viewArg.refresh;
-          // The next page's Back label, even when this one fails to load
-          state.relTitle = (REL_SECTIONS.find(([k]) => k === key) || [, 'Releases'])[1];
+          // The next page's Back label, even when this one fails to load (drawn again in place, it
+          // keeps the artist's name its last draw gave it while the new answer comes)
+          state.relTitle = state.relTitle || (REL_SECTIONS.find(([k]) => k === key) || [, 'Releases'])[1];
           const pageKey = `releases:${id}:${section}`; const again = !refresh && redrawing(pageKey);
           if (!again) loading();
           let pg;
@@ -8864,7 +8871,8 @@
           pg.albums = pg.albums || [];
           const g = relGroups(pg.albums); const list = g[key];
           const name = pg.title || 'Artist'; const title = relTitle(key, g);
-          state.relTitle = title; state.itemSection = 'artists';
+          // (the tab and the next page's Back say whose: "Albums by Sefa", not the library's Albums)
+          state.relTitle = pg.title ? `${title} by ${pg.title}` : title; state.itemSection = 'artists';
           const pages = Math.max(1, Math.ceil(list.length / REL_PAGE));
           const page = Math.min(Math.max(1, Math.floor(Number(state.viewArg.page) || 1)), pages);
           const shown = list.slice((page - 1) * REL_PAGE, page * REL_PAGE);
