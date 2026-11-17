@@ -6401,6 +6401,35 @@
   // take no presses (a row's own Remove or Move, a second Remove) until it is done, so no index
   // goes stale under it
   let selRemoving = null;
+  // A playlist change that goes by a song's place (a row's Remove, Move up or down, a pin, the
+  // bar's Remove) holds that playlist's songs from the press until a draw that read the list after
+  // the change has drawn them: a second press on the list still on screen would go by an old place
+  // and change another song. One that doesn't answer in 30 s is cut, and a hold still on 30 s after
+  // its change answered ends with the list read again. (one hold per playlist; plDraws: each
+  // playlist draw's number)
+  const plHolds = new Map(); let plDraws = 0; const PL_HOLD_MS = 30000;
+  const plHeld = (id) => plHolds.has(id);
+  const plHoldShow = () => { $$('#plsongs, #pllocal').forEach((x) => { x.inert = true; }); if (selBar) $$('button', selBar).forEach((b) => { b.disabled = true; }); };
+  // (the control that had focus in the list, by its data attributes and its place among its likes:
+  // the list going inert takes the focus away, the new list gives it back)
+  const plFocusOf = (a) => {
+    const box = a && a.closest ? a.closest('#plsongs, #pllocal') : null; if (!box) return null;
+    const sel = a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
+    return { box: box.id, sel, i: $$(sel, box).indexOf(a) };
+  };
+  // Runs `run(signal)` (the change) under the hold, then draws the playlist again (`wait`: until it
+  // is drawn; a draw left for another page never ends, so only Move, for its focus, waits); false
+  // when it failed or another change of this playlist still holds it
+  const plWrite = async (id, run, wait) => {
+    if (plHeld(id)) return false;
+    const hold = { id, after: Infinity, focus: plFocusOf(document.activeElement) }; plHolds.set(id, hold); plHoldShow();
+    const cut = new AbortController(); const limit = setTimeout(() => { cut.signal.why = new Error('The node didn’t answer in time; the playlist is shown as it is now'); cut.abort(); }, PL_HOLD_MS);
+    let ok = false;
+    try { await run(cut.signal); ok = true; } catch (e) { toast(e.message, 'error'); } finally { clearTimeout(limit); }
+    if (plHolds.get(id) === hold) { hold.after = plDraws + 1; setTimeout(() => { if (plHolds.get(id) === hold) { plHolds.delete(id); if (state.view === 'playlist' && state.viewArg === id) render(); } }, PL_HOLD_MS); }
+    const drawn = render(); if (wait) await drawn;
+    return ok;
+  };
 
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
@@ -6444,9 +6473,9 @@
         // than handing its ticks to the half-changed list)
         // (a failure part way ends Select: the ticks no longer point at the same songs; the list is
         // drawn again by opts.remove)
-        if (what === 'remove') { const job = { page: selNow.page, where: selNow.where, sel, held: [section] }; selRemoving = job; section.inert = true; draw(); try { await opts.remove([...sel].sort((a, b) => b - a)); } catch (e) { toast(e.message, 'error'); } finally { if (selRemoving === job) selRemoving = null; job.held.forEach((x) => { x.inert = false; }); if (selOn() && selNow.sel === sel) endSelect(); } }
+        if (what === 'remove') { const job = { page: selNow.page, where: selNow.where, sel, held: [section] }; selRemoving = job; section.inert = true; draw(); try { await opts.remove([...sel].sort((a, b) => b - a)); } catch (e) { toast(e.message, 'error'); } finally { if (selRemoving === job) selRemoving = null; if (!(opts.held && opts.held())) job.held.forEach((x) => { x.inert = false; }); if (selOn() && selNow.sel === sel) endSelect(); } }
       });
-      if (selRemoving && selRemoving.sel === sel) $$('button', selBar).forEach((b) => { b.disabled = true; });
+      if ((selRemoving && selRemoving.sel === sel) || (opts.held && opts.held())) $$('button', selBar).forEach((b) => { b.disabled = true; });
     };
     // (a song's key: opts.keys, else its library id, page or address, so the same list drawn again
     // with its sources found still has the same keys)
@@ -8266,6 +8295,7 @@
           // (drawn again where it stands, its sources found, a pin or a move: no skeleton, the
           // scroll and the focus kept, keepPlace)
           const again = redrawing('playlist'); if (!again) loading();
+          const plRead = ++plDraws; // (plWrite: a change's hold ends with a draw that read after it)
           const plId = state.viewArg;
           const plMine = ++plGen; drawStale = () => plMine !== plGen || state.view !== 'playlist' || state.viewArg !== plId; await pubkyUser();
           // Where songs play from can take a while the first time (each service asked by ISRC):
@@ -8338,10 +8368,19 @@
           const rowActs = (k, row) => (row && $('.q-actions', row) && getComputedStyle($('.q-actions', row)).display === 'none' ? [['pup', 'Move up', 'upload'], ['pdown', 'Move down', 'download'], ['rm', 'Remove from playlist', 'trash']].filter(([a]) => { const b = $(`[data-${a}]`, row); return b && !b.disabled; }).map(([a, label, ic]) => ({ label, icon: ic, run: () => $(`[data-${a}]`, row).click() })) : []);
           bindSongRows($('#plsongs'), songs, { rowExtra: rowActs });
           const pfr = $('#pfretry'); if (pfr) pfr.onclick = () => { state.plPf = null; render(); };
+          // A change by place still waiting for a read made after it holds this list too (plWrite),
+          // its bar too; the read after it ends the hold (before Select carries over, so its bar takes presses),
+          // and the focus the hold took goes back to its place (heldFocus, below)
+          let heldFocus = null;
+          const plHoldNow = plHolds.get(plId);
+          if (plHoldNow) {
+            if (plRead < plHoldNow.after) plHoldShow();
+            else { heldFocus = plHoldNow.focus; plHolds.delete(plId); }
+          }
           // Playlist rows can also be removed together (highest index first, so positions hold)
-          enableSelect($('#plsongs'), songs, { keys: d.playlist.items.map((it) => it.uri), remove: async (idx) => { try { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`); toast(`Removed ${countOf(idx.length, 'songs')}`); } finally { state.plPf = null; render(); } } });
+          enableSelect($('#plsongs'), songs, { keys: d.playlist.items.map((it) => it.uri), held: () => plHeld(plId), remove: (idx) => plWrite(plId, async (signal) => { try { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`, undefined, { signal }); toast(`Removed ${countOf(idx.length, 'songs')}`); } finally { state.plPf = null; } }) });
           if (localSongs.length) bindSongRows($('#pllocal'), localSongs, {});
-          $$('[data-lrm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/local/${b.dataset.lrm}`); render(); } catch (er) { toast(er.message, 'error'); } });
+          $$('[data-lrm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); return plWrite(plId, (signal) => api('DELETE', `/playlists/${d.summary.id}/local/${b.dataset.lrm}`, undefined, { signal })); });
           // Cards (web pages, posts) play nowhere: Play and Shuffle play the songs around them
           const playable = (list) => list.filter((t) => !t.unavailable && !t.card);
           // In this browser only a library song or a stream plays: a row with neither (a Spotify
@@ -8375,15 +8414,15 @@
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
             ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-rm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`); state.plPf = null; render(); } catch (er) { toast(er.message, 'error'); } });
+          $$('[data-rm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); return plWrite(plId, async (signal) => { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`, undefined, { signal }); state.plPf = null; }); });
           // (pressed from the keyboard, the focus follows the song to its new place, so a second
           // press moves it on rather than moving the song that took its place back; not when the
           // focus went elsewhere while the move was saved)
-          const pmove = async (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); const from = document.activeElement; const had = from && from.matches('[data-pup], [data-pdown]') ? (j2 < i2 ? 'pup' : 'pdown') : null; try { await api('PUT', `/playlists/${d.summary.id}`, { uris }); state.plPf = null; await render(); const now = document.activeElement; const still = !now || now === document.body || now === main || now === from || now.matches(`#plsongs [data-${had}="${i2}"]`); if (had && still && state.view === 'playlist' && state.viewArg === plId) { const b = $(`#plsongs [data-${had}="${j2}"]:not(:disabled)`, main) || $(`#plsongs [data-${had === 'pup' ? 'pdown' : 'pup'}="${j2}"]`, main); if (b) b.focus(); } } catch (e) { toast(e.message, 'error'); } };
+          const pmove = async (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); const from = document.activeElement; const had = from && from.matches('[data-pup], [data-pdown]') ? (j2 < i2 ? 'pup' : 'pdown') : null; if (!(await plWrite(plId, async (signal) => { await api('PUT', `/playlists/${d.summary.id}`, { uris }, { signal }); state.plPf = null; }, true))) return; const now = document.activeElement; const still = !now || now === document.body || now === main || now === from || now.matches(`#plsongs [data-${had}="${i2}"]`); if (had && still && state.view === 'playlist' && state.viewArg === plId) { const b = $(`#plsongs [data-${had}="${j2}"]:not(:disabled)`, main) || $(`#plsongs [data-${had === 'pup' ? 'pdown' : 'pup'}="${j2}"]`, main); if (b) b.focus(); } };
           $$('[data-pup]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); pmove(Number(b.dataset.pup), Number(b.dataset.pup) - 1); });
           $$('[data-pdown]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); pmove(Number(b.dataset.pdown), Number(b.dataset.pdown) + 1); });
           // Source chip → every source this song has here, plus Auto; picking one pins it.
-          const pin = async (k, body, msg) => { try { await api('PUT', `/playlists/${d.summary.id}/items/${k}/source`, body); state.plPf = null; toast(msg); render(); } catch (e) { toast(e.message, 'error'); } };
+          const pin = (k, body, msg) => plWrite(plId, async (signal) => { await api('PUT', `/playlists/${d.summary.id}/items/${k}/source`, body, { signal }); state.plPf = null; toast(msg); });
           $$('[data-psrc]', main).forEach((b) => b.onclick = (e) => {
             e.stopPropagation(); const k = Number(b.dataset.psrc); const t = songs[k]; const pinnedNow = t.pinned || t.pinLost;
             const opts = rankSvc([...(t.sources || [])], (x) => x.service).sort((a, b) => (b.available ? 1 : 0) - (a.available ? 1 : 0)).map((x) => ({ label: x.name, note: x.available ? x.label.replace(/^[^·]*·\s*/, '') || null : x.mode === 'preview' ? '30 s previews only' : 'not connected', svc: x.service, on: t.pinned && x.chosen, disabled: !x.available, run: () => pin(k, { service: x.service, uri: x.url || null }, `Pinned to ${x.name}`) }));
@@ -8405,6 +8444,8 @@
           const cl = $('#plcopylink'); if (cl) cl.onclick = async () => { const t = `pubky://${sharer.replace(/^pubky/, '')}/pub/social/v1/posts/${d.summary.id}`; try { await navigator.clipboard.writeText(t); toast('Link copied'); } catch { toast(t); } };
           $$('[data-pfilter]', main).forEach((b) => b.onclick = () => { state.plFilter = b.dataset.pfilter ? { id: plId, key: b.dataset.pfilter } : null; render(); });
           state.drawnPage = 'playlist'; if (place) place();
+          // (after the page's own place: focus they moved elsewhere meanwhile stays there)
+          if (heldFocus) { const now = document.activeElement; const box = !now || now === document.body || now === main ? $(`#${heldFocus.box}`, main) : null; const b = box ? $$(heldFocus.sel, box)[heldFocus.i] : null; if (b && !b.disabled) b.focus({ preventScroll: true }); }
           break;
         }
         case 'sources': {

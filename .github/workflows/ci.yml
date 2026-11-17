@@ -703,6 +703,7 @@ jobs:
           ui-list-redraw.js list-redraw-shots
           ui-song-links.js song-links-shots
           ui-phone-song-rows.js phone-song-rows-shots
+          ui-playlist-remove-window.js playlist-remove-window-shots
           ui-item-links.js item-links-shots
           ui-usage.js usage-shots
           ui-roon-import.js roon-import-shots
