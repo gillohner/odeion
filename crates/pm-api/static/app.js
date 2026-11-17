@@ -3832,8 +3832,11 @@
     // Scroll only this row: scrollIntoView can also move the page vertically.
     el.scrollLeft += chip.left - row.left - (width - chip.width) / 2;
   };
+  // The phone's pinned Library chips grow with larger text: the page keeps that much room above a
+  // row it scrolls to (app.css's --libnav-h, 60 px until measured)
+  const noteLibnavHeight = (el) => { const h = el.offsetHeight; if (h && el.parentElement.style.getPropertyValue('--libnav-h') !== `${h}px`) el.parentElement.style.setProperty('--libnav-h', `${h}px`); };
   let fadeQueued = false;
-  const fadeRows = () => { if (fadeQueued) return; fadeQueued = true; requestAnimationFrame(() => { fadeQueued = false; $$(CHIP_ROWS).forEach((el) => { if (el.matches('.libnav, .qualchips')) revealChosenChip(el); fadeRow(el); }); }); };
+  const fadeRows = () => { if (fadeQueued) return; fadeQueued = true; requestAnimationFrame(() => { fadeQueued = false; $$(CHIP_ROWS).forEach((el) => { if (el.matches('.libnav, .qualchips')) revealChosenChip(el); if (el.matches('.main > .libnav')) noteLibnavHeight(el); fadeRow(el); }); }); };
   document.addEventListener('scroll', (e) => { if (e.target instanceof Element && e.target.matches(CHIP_ROWS)) fadeRow(e.target); }, true);
   window.addEventListener('resize', fadeRows);
   new MutationObserver(fadeRows).observe(document.body, { childList: true, subtree: true });
@@ -10344,9 +10347,9 @@
   // Confirm matches with nothing to confirm: "Open Identify" opens Node library with the Identify card
   // in view and its title focused (the card is far down the page; Settings has no Identify)
   const openIdentify = () => { state.libToIdentify = true; setView('library', 'node'); };
-  // (the group with its IDENTIFY heading at the top, below the phone's sticky Library chips, at once;
-  // .main's scroll-padding keeps it 8 px clear)
-  const showIdentifyCard = () => { const grp = $('#idcard') && $('#idcard').closest('.set-group'); if (!grp || !focusLeft()) return; const nav = $('.main > .libnav'); const over = nav && getComputedStyle(nav).position === 'sticky' ? nav.offsetHeight : 0; grp.style.scrollMarginTop = `${over}px`; grp.scrollIntoView({ block: 'start', behavior: 'instant' }); focusCardTitle(); };
+  // (the group with its IDENTIFY heading at the top, at once; .main's scroll-padding keeps it 8 px
+  // clear of the top, or of the phone's sticky Library chips)
+  const showIdentifyCard = () => { const grp = $('#idcard') && $('#idcard').closest('.set-group'); if (!grp || !focusLeft()) return; grp.scrollIntoView({ block: 'start', behavior: 'instant' }); focusCardTitle(); };
   // Node library's top line says the unsure songs too, as the card does (the card is far down the
   // page): one press to the review, no scroll. Drawn with the page from the same answer, so the line
   // doesn't grow after it shows, and a page redrawn by a scan's poll says nothing new

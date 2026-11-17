@@ -2223,6 +2223,9 @@ html:not([data-shell="desktop"]) .main > .libnav { position: sticky; top: -24px;
 @media (max-width: 720px) { html:not([data-shell="desktop"]) .main > .libnav { top: -18px; } }
 /* the Sources page's side list sticks below the pinned chips */
 html:not([data-shell="desktop"]) .main:has(> .libnav) .set-nav { top: 46px; }
+/* a row the keyboard (or scrollIntoView) moves to stops 8 px below the pinned chips, not under them
+   (60 px tall: 44 px chips, 8 px above and below; app.js measures them, larger text makes them taller) */
+html:not([data-shell="desktop"]) .main:has(> .libnav) { scroll-padding-top: calc(var(--libnav-h, 60px) + 8px); }
 /* Dense lists in the desktop layout (tablets too): shorter rows, smaller covers */
 :where(html[data-dense]:not([data-shell="phone"])) .track { height: 42px; }
 :where(html[data-dense]:not([data-shell="phone"])) .list-row { padding-top: 8px; padding-bottom: 8px; }
