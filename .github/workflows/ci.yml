@@ -576,9 +576,12 @@ jobs:
         run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true; tail -n 30 /tmp/pwa/out/node.log || true
 
   # The UI pages checked against fixtures in a real Chromium (tools/ui-fixture.js: the app's own
-  # files, no node, no build), split over four runners; every page is in exactly one of them.
+  # files, no node, no build), split over five runners; every page is in exactly one of them.
+  # The pages that take a minute or more have a fixed runner (`pin` below), so new pages added to
+  # the list cannot shift them all onto one runner; the others go round robin. Each runner takes
+  # about 13-15 minutes.
   ui-fixtures:
-    name: ui-fixtures (${{ matrix.shard }}/4)
+    name: ui-fixtures (${{ matrix.shard }}/5)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -586,7 +589,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -603,12 +606,28 @@ jobs:
       - name: the pages, against fixtures
         env:
           SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
         run: |
           cd /tmp/pw
+          # The pages that took a minute or more on CI, as page=runner; each must be in the list below
+          pin='
+            ui-item-redraw.js=1 ui-review-fixes.js=1 ui-phone-action-rows.js=1
+            ui-native-player.js=2 ui-browser-place.js=2 ui-move-toast.js=2 ui-phone-simplify.js=2
+            ui-empty-queue.js=3 ui-browser-keys.js=3 ui-usb-dac.js=3 ui-motion.js=3
+            ui-shuffle-repeat.js=4 ui-similar-tiles.js=4
+            ui-browser-midsong.js=5 ui-library-count-redraw.js=5 ui-library-sort.js=5
+          '
+          pin=" $(echo $pin) "
           n=0
+          seen=' '
           while read -r script shots; do
-            n=$((n + 1))
-            [ $(( (n - 1) % 4 + 1 )) = "$SHARD" ] || continue
+            case "$seen" in *" $script "*) echo "::error::$script is in the list twice"; exit 1 ;; esac
+            seen="$seen$script "
+            case "$pin" in
+              *" $script="*) s=${pin#*" $script="}; s=${s%% *} ;;
+              *) n=$((n + 1)); s=$(( (n - 1) % SHARDS + 1 )) ;;
+            esac
+            [ "$s" = "$SHARD" ] || continue
             echo "::group::$script"
             node "$GITHUB_WORKSPACE/tools/$script" "$GITHUB_WORKSPACE" "/tmp/pm/$shots" < /dev/null
             echo "::endgroup::"
@@ -721,6 +740,10 @@ jobs:
           ui-move-toast.js move-toast-shots
           ui-queue-head-phone.js queue-head-phone-shots
           LIST
+          for p in $pin; do
+            case "$seen" in *" ${p%=*} "*) ;; *) echo "::error::pinned page ${p%=*} is not in the list"; exit 1 ;; esac
+            [ "${p#*=}" -ge 1 ] && [ "${p#*=}" -le "$SHARDS" ] || { echo "::error::$p: there is no runner ${p#*=}"; exit 1; }
+          done
       # feedback.js on a test page, the node mocked: text stays text, a draft is its sign-in's,
       # only ticked details are sent. It takes <token> <mock> <shots>, not the list's <repo> <shots>
       - name: problem reports (Help "?", the report dialog and My reports; mocked node)
