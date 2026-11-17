@@ -5,7 +5,11 @@
 // the first DELETE answered deleted two songs by old places too, and the Select bar's Remove gave
 // the list back before its own redraw. Now the list (and the bar) take no presses from the press
 // until a read made after the change is drawn; a failed redraw's Try again ends the hold, a change
-// that never answers is cut after 30 s, and the keyboard focus comes back to its place.
+// that never answers is cut after 30 s (the list stays held until the next library change, as the
+// node may still make it, or 30 s more), and the keyboard focus comes back to its place.
+// A read after a change that never answers ends in "Couldn't load this playlist" with Try again
+// after 15 s (case 7); a keyboard Move whose library change redraws the list first keeps the focus
+// on the moved song (case 8); and a playlist opened afresh doesn't take the focus back (case 9).
 // At 360 (phone) and 1280 px.
 //   node tools/ui-playlist-remove-window.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -20,7 +24,7 @@ const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Dat
 
 const song = (id, title) => ({ ...fx.track, id, title, canonical_uri: `https://musicbrainz.org/recording/0000000${id}-0000-4000-8000-000000000000`, mbid: null });
 const SONGS = { A: song(1, 'Alpha'), B: song(2, 'Bravo'), C: song(3, 'Charlie'), D: song(4, 'Delta') };
-const NAMES = { c1: 'Road trip', c2: 'Bar remove', c3: 'Failed redraw', c4: 'Keyboard', c5: 'No answer', c6: 'Select kept', c7: 'Left meanwhile' };
+const NAMES = { c1: 'Road trip', c2: 'Bar remove', c3: 'Failed redraw', c4: 'Keyboard', c5: 'No answer', c6: 'Select kept', c7: 'Left meanwhile', c8: 'Hung read', c9: 'Move race', c10: 'Fresh open', c11: 'Cut, no change' };
 const sum = (id, n) => ({ ...fx.summary, id, name: NAMES[id], items: n });
 const detailOf = (id, keys) => ({ summary: sum(id, keys.length), playlist: { ...sum(id, keys.length), items: keys.map((k) => ({ uri: SONGS[k].canonical_uri })) }, tracks: keys.map((k) => SONGS[k]), entries: keys.map((k) => ({ kind: 'track', uri: SONGS[k].canonical_uri })), local_tracks: [] });
 const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library', name: 'Your library', connected: true }] }, own_order: false, items: keys.map((k, i) => ({ index: i, uri: SONGS[k].canonical_uri, title: SONGS[k].title, artist: 'Sefa', track_id: SONGS[k].id, plays_from: { service: 'library', label: 'Your library' }, sources: [] })) });
@@ -35,10 +39,14 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
       await page.clock.install(); // (case 5 moves the clock on 30 s)
       // The server's lists; `hold[key]`: the next GET of that path (or 'del', the next DELETE's answer)
       // waits for its release
-      const lists = { c1: ['A', 'B', 'C', 'D'], c2: ['A', 'B', 'C', 'D'], c3: ['A', 'B'], c4: ['A', 'B', 'C'], c5: ['A', 'B'], c6: ['A', 'B', 'C', 'D'], c7: ['A', 'B', 'C'] };
-      const hold = {}; const writes = []; let mute = false;
+      const lists = { c1: ['A', 'B', 'C', 'D'], c2: ['A', 'B', 'C', 'D'], c3: ['A', 'B'], c4: ['A', 'B', 'C'], c5: ['A', 'B'], c6: ['A', 'B', 'C', 'D'], c7: ['A', 'B', 'C'], c8: ['A', 'B', 'C'], c9: ['A', 'B', 'C'], c10: ['A', 'B', 'C'], c11: ['A', 'B'] };
+      const hold = {}; const writes = []; const gets = []; let mute = false; let failPut = false;
+      // The node's event socket: a library change on demand
+      let socket = null;
+      await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
+      const libraryChanged = () => socket && socket.send(JSON.stringify({ type: 'library_changed' }));
       const gate = (key, fail) => { let open; const p = new Promise((res) => { open = res; }); hold[key] = { p, fail }; return open; };
-      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6|c7)(\/.*)?$/, async (r) => {
+      await page.route(/\/v1\/playlists\/(c\d+)(\/.*)?$/, async (r) => {
         const u = new URL(r.request().url()); const m = r.request().method();
         const [, , , id, ...rest] = u.pathname.split('/'); const sub = rest.join('/');
         if (m === 'DELETE' && sub.startsWith('items/')) {
@@ -48,9 +56,9 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
           const h = hold.del; delete hold.del; if (h) await h.p;
           return json(r, {}).catch(() => {});
         }
-        if (m === 'PUT' && !sub) { const b = JSON.parse(r.request().postData() || '{}'); writes.push(`${id} PUT ${b.uris.map(keyOf).join('')}`); lists[id] = b.uris.map(keyOf); return json(r, detailOf(id, lists[id])); }
+        if (m === 'PUT' && !sub) { const b = JSON.parse(r.request().postData() || '{}'); writes.push(`${id} PUT ${b.uris.map(keyOf).join('')}`); if (failPut) return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The node could not save it' }) }); lists[id] = b.uris.map(keyOf); return json(r, detailOf(id, lists[id])); }
         if (m !== 'GET') return r.fallback();
-        const key = `${id}${sub ? '/' + sub : ''}`;
+        const key = `${id}${sub ? '/' + sub : ''}`; gets.push(key);
         const then = [...lists[id]];
         const h = hold[key]; delete hold[key]; if (h) await h.p;
         if (h && h.fail) return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The node did not answer' }) });
@@ -191,10 +199,50 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
         check(await inert(), `${width}: held while the DELETE goes unanswered`);
         await page.clock.fastForward(31000);
         mute = false;
-        await until(async () => !(await inert()), 3000);
+        await until(async () => /didn.t answer in time/.test(await page.evaluate(() => [...document.querySelectorAll('.toast')].map((t) => t.textContent).join(' | '))), 3000);
         const toastText = await page.evaluate(() => [...document.querySelectorAll('.toast')].map((t) => t.textContent).join(' | '));
-        check(!(await inert()) && (await order()) === 'Alpha,Bravo', `${width}: after 30 s the list is read again and takes presses (${await order()})`);
-        check(/didn.t answer in time/.test(toastText), `${width}: and it says why ("${toastText}")`);
+        check(/didn.t answer in time/.test(toastText), `${width}: after 30 s it is cut and says why ("${toastText}")`);
+        await sleep(400);
+        check(await inert() && writes.length === w5 + 1, `${width}: the list stays held after the cut (the node may still remove it; inert ${await inert()})`);
+        await pressRm('Bravo'); await sleep(200);
+        check(writes.length === w5 + 1, `${width}: …so x on Bravo meanwhile deletes nothing (${writes.slice(w5)})`);
+        lists.c5.splice(0, 1); libraryChanged(); // (the node made the change after all)
+        await until(async () => (await order()) === 'Bravo' && !(await inert()), 3000);
+        check((await order()) === 'Bravo' && !(await inert()), `${width}: the library change reads it again and the list takes presses (${await order()})`);
+
+        // 5b. Cut, and no library change: 30 s more and the list is read again
+        await open('c11', 'Alpha,Bravo');
+        mute = true; const w5b = writes.length;
+        await pressRm('Alpha');
+        await until(async () => writes.length === w5b + 1, 2000);
+        await page.clock.fastForward(31000);
+        mute = false; await sleep(400);
+        check(await inert(), `${width}: cut and no library change: still held`);
+        await page.clock.fastForward(31000);
+        await until(async () => !(await inert()), 3000);
+        check(!(await inert()) && (await order()) === 'Alpha,Bravo', `${width}: 30 s later it is read again and takes presses (${await order()})`);
+
+        // 7. The read after a change never answers: Try again within 15 s, and the list works after it
+        await open('c8', 'Alpha,Bravo,Charlie');
+        gate('c8'); // (never released)
+        const w7 = writes.length;
+        if (mobile) await pressRm('Alpha'); else { await page.focus('#plsongs [data-rm="0"]'); await page.keyboard.press('Enter'); }
+        await until(async () => writes.length === w7 + 1, 2000);
+        await sleep(300);
+        check(await inert(), `${width}: held while the read after the change goes unanswered`);
+        await page.clock.fastForward(16000);
+        await until(async () => !!(await page.$('#navretry')), 3000);
+        const notice = await page.evaluate(() => { const n = document.querySelector('#main .notice'); return n ? n.textContent.trim() : ''; });
+        check(/Couldn.t load this playlist/.test(notice) && !!(await page.$('#navretry')), `${width}: after 15 s it says so with Try again ("${notice}")`);
+        await page.screenshot({ path: path.join(SHOTS, `hung-read-${width}.png`) });
+        if (mobile) await page.click('#navretry'); else { await page.focus('#navretry'); await page.keyboard.press('Enter'); }
+        await until(async () => (await order()) === 'Bravo,Charlie' && !(await inert()), 3000);
+        check((await order()) === 'Bravo,Charlie' && !(await inert()), `${width}: Try again draws the list and it takes presses (${await order()})`);
+        if (!mobile) { await sleep(200); const f7 = await page.evaluate(() => { const a = document.activeElement; return a && a.dataset && a.dataset.rm != null ? `${a.dataset.rm}|${a.getAttribute('aria-label')}` : String(a && a.tagName); }); check(/^0\|.*Bravo/.test(f7), `${width}: after Try again from the keyboard the focus is on the next song's x (${f7})`); }
+        await pressRm('Charlie');
+        await until(async () => writes.length === w7 + 2, 2000);
+        check(writes.slice(w7).join() === 'c8 DELETE 0,c8 DELETE 1', `${width}: and x on Charlie deletes Charlie (${writes.slice(w7)})`);
+        await until(async () => (await order()) === 'Bravo', 3000);
 
         // 6. Keyboard (desktop): the focus comes back to the same place; a second Move meanwhile is held
         if (!mobile) {
@@ -215,6 +263,48 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
           release();
           await until(async () => (await order()) === 'Charlie,Alpha' && !(await inert()), 3000);
           check((await order()) === 'Charlie,Alpha', `${width}: the moved list shows (${await order()})`);
+
+          // 8. Keyboard Move, and its library change redraws the list while the Move's own redraw is
+          // on its way: the focus stays with the moved song
+          await open('c9', 'Alpha,Bravo,Charlie');
+          const releaseOwn = gate('c9'); const g8 = gets.length; const w8 = writes.length;
+          await page.focus('#plsongs [data-pdown="0"]');
+          await page.keyboard.press('Enter');
+          await until(async () => writes.length === w8 + 1 && gets.slice(g8).includes('c9'), 2000);
+          const releaseLib = gate('c9'); libraryChanged(); // (the PUT's library change)
+          await until(async () => gets.slice(g8).filter((k) => k === 'c9').length === 2, 2000);
+          releaseOwn(); await sleep(300); // (the Move's own redraw lands first, behind the newer one)
+          releaseLib();
+          await until(async () => (await order()) === 'Bravo,Alpha,Charlie' && !(await inert()), 3000);
+          await sleep(300);
+          const f8 = await page.evaluate(() => { const a = document.activeElement; return a && a.closest('#plsongs') ? `${a.dataset.pdown ?? a.dataset.pup}|${a.getAttribute('aria-label')}` : String(a && a.tagName); });
+          check(writes.slice(w8).join() === 'c9 PUT BAC' && /^1\|.*Alpha/.test(f8), `${width}: after Move down the focus is on Alpha's Move down, in its new place (${f8})`);
+
+          // 8c. A Move the node refuses: the list stays, the focus stays on that song's Move down
+          await open('c4', 'Charlie,Alpha');
+          failPut = true; const w8c = writes.length;
+          await page.focus('#plsongs [data-pdown="0"]');
+          await page.keyboard.press('Enter');
+          await until(async () => writes.length === w8c + 1, 2000);
+          await until(async () => !(await inert()), 3000); await sleep(300);
+          failPut = false;
+          const f8c = await page.evaluate(() => { const a = document.activeElement; return a && a.closest('#plsongs') ? `${a.dataset.pdown ?? a.dataset.pup}|${a.getAttribute('aria-label')}` : String(a && a.tagName); });
+          check((await order()) === 'Charlie,Alpha' && /^0\|.*Charlie/.test(f8c), `${width}: a refused Move leaves the list and the focus on Charlie's Move down (${await order()}, ${f8c})`);
+
+          // 9. x from the keyboard, another playlist opened before the redraw, and this one opened
+          // again: a fresh page, the focus not pulled into its list
+          await open('c10', 'Alpha,Bravo,Charlie');
+          const release9 = gate('c10'); const w9 = writes.length;
+          await page.focus('#plsongs [data-rm="0"]');
+          await page.keyboard.press('Enter');
+          await until(async () => writes.length === w9 + 1, 2000);
+          await sleep(200);
+          await open('c4', 'Charlie,Alpha');
+          release9(); await sleep(300);
+          await open('c10', 'Bravo,Charlie');
+          await sleep(300);
+          const f9 = await page.evaluate(() => { const a = document.activeElement; return a && a.closest('#plsongs') ? `in the list: ${a.getAttribute('aria-label')}` : 'not in the list'; });
+          check((await order()) === 'Bravo,Charlie' && !(await inert()) && f9 === 'not in the list', `${width}: opened again the list takes presses and the focus isn't pulled into it (${f9})`);
         }
         await page.screenshot({ path: path.join(SHOTS, `after-${width}.png`) });
         check(!state.errors.length, `${width}: no page errors (${state.errors.join(' | ')})`);
