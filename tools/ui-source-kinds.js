@@ -1,0 +1,84 @@
+// Your library on Sources says which rows are albums and which are songs. Spotify's list (albums
+// first, then songs, under one heading) gave no kind at all, so an album and a song with the same
+// title looked the same and both Play buttons were named "Play X on Spotify". TIDAL's list showed
+// the service's own word ("track"), as did SoundCloud's likes. Now all three show "album" or "song"
+// at the row's end, and Spotify's Play on an album is named "Play the album X on Spotify" (a song's
+// stays "Play X on Spotify"; an untitled album's is "Play the album on Spotify"); the tooltip stays
+// "Play on Spotify", and Enter on each plays that row. At 1280, 1024 and 768 px.
+// Real candidate assets, isolated API fixtures; no node or network.
+//   node tools/ui-source-kinds.js [repo] [shots]
+const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
+const fs = require('node:fs'); const path = require('node:path');
+const fx = require('./ui-fixture');
+const SHOTS = path.resolve(process.argv[3] || path.join(process.env.TMPDIR || '/tmp', 'source-kinds-shots'));
+fs.mkdirSync(SHOTS, { recursive: true });
+let failed = 0; let passed = 0;
+const check = (ok, what) => { if (ok) { passed++; console.log(`ok   ${what}`); } else { failed++; console.log(`FAIL ${what}`); } };
+
+// The same title as an album and as a song; the quotes and ampersand must come through escaped
+const T = 'Rock & "Roll"';
+const items = [{ kind: 'album', id: 'spa1', title: T, creator: 'Sefa', year: 2024 }, { kind: 'track', id: 'spt1', title: T, creator: 'Sefa' }];
+const spItems = [items[0], { kind: 'album', id: 'spa2', title: '', creator: 'Sefa' }, items[1]];
+const spotify = { '/sources': { body: [{ id: 'spotify', name: 'Spotify', description: '', status: 'ready', enabled: true }] }, '/sources/spotify/status': { body: { signed_in: true } }, '/sources/spotify/signin': { body: { ways: [], in_use: { way: 'app' }, details: { status: { signed_in: true } } } }, '/sources/spotify/collection': { body: { items: spItems } }, '/sources/spotify/playlists': { body: [] }, '/sources/spotify/devices': { body: [{ id: 'd1', name: 'Desk', type: 'Computer', is_active: true }] }, '/sources/spotify/play': { body: {} } };
+const tidal = { '/sources': { body: [{ id: 'tidal', name: 'TIDAL', description: '', status: 'ready', enabled: true }] }, '/sources/tidal/signin': { body: { ways: [], in_use: { way: 'device' }, details: { status: { signed_in: true } } } }, '/sources/tidal/collection': { body: { albums: [{ ...items[0], id: 'ta1' }], tracks: [{ ...items[1], id: 'tt1' }] } }, '/sources/tidal/playlists': { body: [] } };
+const sc = { '/sources': { body: [{ id: 'soundcloud', name: 'SoundCloud', description: '', status: 'signed in', enabled: true }] }, '/sources/soundcloud/likes': { body: { tracks: [{ ...items[1], id: 'sct1' }, { ...items[1], id: 'sct2', title: 'Second' }], playlists: [] } }, '/sources/soundcloud/playlists': { body: [] } };
+const kinds = (page) => page.$$eval('.main [data-sitem]', (rs) => rs.map((r) => { const k = [...r.children].find((c) => c.matches('span.muted.small')); return k ? k.textContent.trim() : null; }));
+
+(async () => {
+  const browser = await chromium.launch();
+  try {
+    for (const width of [1280, 1024, 768]) {
+      // Spotify
+      {
+        const { page, context, state } = await fx.create(browser, width, { fixtures: spotify });
+        try {
+          await fx.go(page, '/sources/spotify');
+          const drawn = await page.waitForFunction(() => document.querySelectorAll('.main [data-sitem]').length === 3, null, { timeout: 8000 }).then(() => true, () => false);
+          check(drawn, `${width} spotify: album and song rows drawn`);
+          if (drawn) {
+            const k = await kinds(page);
+            check(k.join() === 'album,album,song', `${width} spotify: rows say album, album, song (${k.join()})`);
+            const got = await page.$$eval('.main [data-sitem] [data-splay]', (bs) => bs.map((b) => ({ label: b.getAttribute('aria-label'), title: b.getAttribute('title') })));
+            check(got[0] && got[0].label === `Play the album ${T} on Spotify`, `${width} spotify: the album's Play is "Play the album ${T} on Spotify" (${got[0] && got[0].label})`);
+            check(got[1] && got[1].label === 'Play the album on Spotify', `${width} spotify: the untitled album's Play is "Play the album on Spotify" (${got[1] && got[1].label})`);
+            check(got[2] && got[2].label === `Play ${T} on Spotify`, `${width} spotify: the song's Play is "Play ${T} on Spotify" (${got[2] && got[2].label})`);
+            check(got.every((g) => g.title === 'Play on Spotify'), `${width} spotify: tooltips still "Play on Spotify"`);
+            for (const [name, uri] of [[`Play the album ${T} on Spotify`, 'spa1'], [`Play ${T} on Spotify`, 'spt1']]) {
+              const b = page.getByRole('button', { name, exact: true });
+              const one = await b.count() === 1;
+              check(one, `${width} spotify: exactly one button named "${name}"`);
+              const before = state.hits.length;
+              const pressed = one && await b.focus({ timeout: 2000 }).then(() => page.keyboard.press('Enter')).then(() => true, () => false);
+              let played = false;
+              for (let i = 0; pressed && i < 40 && !played; i++) { played = state.hits.slice(before).some((h) => h.m === 'POST' && h.v === '/sources/spotify/play' && JSON.parse(h.body).uris.join() === uri); if (!played) await new Promise((r) => setTimeout(r, 50)); }
+              check(played, `${width} spotify: Enter on "${name}" plays ${uri}`);
+            }
+            await page.screenshot({ path: path.join(SHOTS, `spotify-${width}.png`) });
+            const o = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+            check(o <= 0, `${width} spotify: nothing wider than the screen (${o})`);
+          } else await page.screenshot({ path: path.join(SHOTS, `spotify-${width}-undrawn.png`) });
+          check(!state.errors.length, `${width} spotify: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
+      // TIDAL's collection and SoundCloud's likes
+      for (const [svc, fixtures, want] of [['tidal', tidal, 'album,song'], ['soundcloud', sc, 'song,song']]) {
+        const { page, context, state } = await fx.create(browser, width, { fixtures });
+        try {
+          await fx.go(page, `/sources/${svc}`);
+          const drawn = await page.waitForFunction(() => document.querySelectorAll('.main [data-sitem]').length === 2, null, { timeout: 8000 }).then(() => true, () => false);
+          check(drawn, `${width} ${svc}: rows drawn`);
+          if (drawn) {
+            const k = await kinds(page);
+            check(k.join() === want, `${width} ${svc}: rows say ${want}, not "track" (${k.join()})`);
+            await page.screenshot({ path: path.join(SHOTS, `${svc}-${width}.png`) });
+            const o = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+            check(o <= 0, `${width} ${svc}: nothing wider than the screen (${o})`);
+          } else await page.screenshot({ path: path.join(SHOTS, `${svc}-${width}-undrawn.png`) });
+          check(!state.errors.length, `${width} ${svc}: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
+    }
+  } finally { await browser.close(); }
+  console.log(failed ? `${passed} ok, ${failed} FAIL` : `${passed} ok, all passed`);
+  process.exit(failed ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(2); });
