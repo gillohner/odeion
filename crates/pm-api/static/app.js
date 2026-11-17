@@ -5622,7 +5622,7 @@
   // Your library › Node library › Cloud drives › Add a folder: browse the drive's folders, pick one.
   const driveFolderDialog = (provider, name) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
-    d.innerHTML = `<h2>A folder on ${esc(name)}</h2><p class="muted">Its songs join the library and play from the drive; nothing is copied.</p><div id="dfpath" class="muted small"></div><div id="dfbox" class="list"></div><p class="muted small" id="dfmsg"></p><div class="toolbar"><button class="btn primary" id="dfadd" disabled>Add this folder</button><button class="btn ghost" data-dfclose>Cancel</button></div>`;
+    d.innerHTML = `<h2>A folder on ${esc(name)}</h2><p class="muted">Its songs join the library and play from the drive; nothing is copied.</p><div id="dfpath" class="muted small"></div><div id="dfbox" class="list compact picker"></div><p class="muted small" id="dfmsg"></p><div class="toolbar"><button class="btn primary" id="dfadd" disabled>Add this folder</button><button class="btn ghost" data-dfclose>Cancel</button></div>`;
     document.body.appendChild(d);
     const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
     const done = (fromBack, added) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(added || null); };
@@ -5630,17 +5630,39 @@
     $('[data-dfclose]', d).onclick = () => done();
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
     const trail = [{ id: 'root', name }];
-    const show = async () => {
-      const here = trail[trail.length - 1];
+    // The list is drawn as Add to playlist's (.picker). A folder row opens that folder in place, so
+    // it ends in the right arrow of rows that go somewhere. The focus goes with you (it was lost
+    // with the list while the drive reads): a folder just opened gives it to its first folder, or
+    // to Add this folder when it has none; Back gives it to the folder you came out of. Only when
+    // it was in the list, not when it went to Cancel meanwhile. The list scrolls to it only for
+    // the keyboard: after a click or tap it starts at the top, with Back in view.
+    let draws = 0; let keyed = false;
+    d.addEventListener('keydown', () => { keyed = true; }, true);
+    d.addEventListener('pointerdown', () => { keyed = false; }, true);
+    const show = async (came) => {
+      const here = trail[trail.length - 1]; const mine = ++draws; const box = $('#dfbox', d);
+      const moved = trail.length > 1 || !!came;
       $('#dfpath', d).textContent = trail.map((t) => t.name).join(' › ');
       $('#dfadd', d).disabled = trail.length < 2;
-      $('#dfbox', d).innerHTML = '<p class="muted small"><span class="spin"></span> Reading the drive…</p>';
+      box.innerHTML = '<p class="muted small"><span class="spin"></span> Reading the drive…</p>';
+      const free = () => { const a = document.activeElement; return !a || a === document.body || a === d || box.contains(a); };
+      // (Back stays when a folder can't be read, so a folder that fails isn't a dead end)
+      const up = trail.length > 1 ? '<button class="list-row" data-dfup>‹ Back</button>' : '';
+      let to = null;
       try {
         const fs = await api('GET', `/library/drives/${provider}/folders?parent=${encodeURIComponent(here.id)}`);
-        $('#dfbox', d).innerHTML = (trail.length > 1 ? '<button class="list-row" data-dfup>‹ Back</button>' : '') + (fs.length ? fs.map((f, k) => `<button class="list-row" data-dfopen="${k}"><span class="grow">${esc(f.name)}</span>${icon('chevron')}</button>`).join('') : '<p class="muted small">No folders inside.</p>');
+        if (mine !== draws) return;
+        box.innerHTML = up + (fs.length ? fs.map((f, k) => `<button class="list-row" data-dfopen="${k}"><span class="grow">${esc(f.name)}</span>${icon('chevron', 'ic right')}</button>`).join('') : '<p class="muted small">No folders inside.</p>');
         $$('[data-dfopen]', d).forEach((b) => b.onclick = () => { trail.push(fs[Number(b.dataset.dfopen)]); show(); });
-        const up = $('[data-dfup]', d); if (up) up.onclick = () => { trail.pop(); show(); };
-      } catch (e) { $('#dfbox', d).innerHTML = `<p class="muted small">${esc(e.message)}</p>`; }
+        const k = came ? fs.findIndex((f) => f.id === came.id) : -1;
+        to = $(`[data-dfopen="${Math.max(k, 0)}"]`, d) || $('#dfadd:not([disabled])', d) || $('[data-dfup]', d);
+      } catch (e) {
+        if (mine !== draws) return;
+        box.innerHTML = `${up}<p class="muted small">${esc(e.message)}</p>`;
+        to = $('[data-dfup]', d);
+      }
+      const back = $('[data-dfup]', d); if (back) back.onclick = () => { const left = trail.pop(); show(left); };
+      if (moved && to && free()) { to.focus({ preventScroll: true }); if (keyed) to.scrollIntoView({ block: 'nearest' }); }
     };
     $('#dfadd', d).onclick = async () => {
       const here = trail[trail.length - 1];
