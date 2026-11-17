@@ -197,6 +197,44 @@ async function noPush(page, selector, at, most) {
         check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);
       } finally { await context.close(); }
     }
+    // A long name to go back to stays on one line, cut with …: the button keeps its height and its
+    // place, the page below doesn't move down, and the button still reads the whole name.
+    const LONG = 'Late night drives through the city with the windows down and nowhere to be';
+    const longFix = { ...fixtures, '/playlists/c1': { body: { ...fx.detail, summary: { ...fx.summary, name: LONG }, playlist: { ...fx.detail.playlist, name: LONG } } } };
+    const oneLine = (page, selector) => page.locator(selector).first().evaluate((el) => {
+      const l = el.querySelector('.back-l'); const b = el.getBoundingClientRect(); const lh = parseFloat(getComputedStyle(l || el).lineHeight);
+      return { text: el.textContent.trim(), height: b.height, labelHeight: l ? l.getBoundingClientRect().height : b.height, lh, left: b.left, right: b.right, cut: !!l && l.scrollWidth > l.clientWidth && getComputedStyle(l).textOverflow === 'ellipsis', wide: document.documentElement.scrollWidth - innerWidth };
+    });
+    for (const width of [360, 412]) for (const android of [false, true]) {
+      const at = `${android ? 'android' : 'browser'}-${width}`;
+      const { page, context, state } = await fx.create(browser, width, { mobile: true, fixtures: longFix });
+      try {
+        if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+        await fx.go(page, '/playlist/c1');
+        await page.waitForSelector('#main .srow a[href*="/album/"]');
+        // (the row's album name: a tap plays on a phone, so open it as a keyboard or screen reader would)
+        await page.locator('#main .srow a[href*="/album/"]').first().evaluate((a) => a.click());
+        await page.waitForSelector('#main .pagebar > .back');
+        const r = await oneLine(page, '#main .pagebar > .back');
+        check(r.text === LONG, `${at} album from a long-named playlist: Back reads the whole name (${r.text.slice(0, 30)}…)`);
+        check(r.labelHeight <= r.lh * 1.5, `${at} album: Back's name stays on one line (${r.labelHeight.toFixed(1)} px, line ${r.lh} px)`);
+        check(r.cut, `${at} album: Back's name is cut with …`);
+        check(r.left >= 0 && r.right <= width && r.wide <= 0, `${at} album: Back inside the screen, no sideways overflow (${r.left.toFixed(1)}–${r.right.toFixed(1)}, ${r.wide})`);
+        await noPush(page, '#main .pagebar', `${at} album bar under a long Back`, 43);
+        await page.screenshot({ path: path.join(SHOTS, `long-back-album-${at}.png`) });
+        await page.locator('#main .pagebar > .back').first().click();
+        await page.waitForFunction(() => location.pathname.startsWith('/playlist/'));
+        check(true, `${at} album: the long Back still goes back (${await page.evaluate(() => location.pathname)})`);
+        // A page whose Back sits on its own (a playlist's), with as long a name as a search's "Results for …"
+        await page.waitForSelector('#main > .back');
+        await page.locator('#main > .back').first().evaluate((b, t) => { const l = b.querySelector('.back-l') || [...b.childNodes].reverse().find((n) => n.nodeType === 3); l.textContent = t; }, `Results for “${LONG}”`);
+        const p = await oneLine(page, '#main > .back');
+        check(p.labelHeight <= p.lh * 1.5 && p.cut, `${at} playlist: a long Back stays on one line, cut with … (${p.labelHeight.toFixed(1)} px)`);
+        check(p.left >= 0 && p.right <= width && p.wide <= 0, `${at} playlist: Back inside the screen (${p.left.toFixed(1)}–${p.right.toFixed(1)}, ${p.wide})`);
+        await noPush(page, '#main > .back', `${at} playlist under a long Back`, 51);
+        check(!state.errors.length, `${at} long Back: no page errors (${state.errors.join('; ')})`);
+      } finally { await context.close(); }
+    }
     // These rules belong to the phone layout: the desktop layout keeps its compact Back and top bar.
     const { page, context } = await fx.create(browser, 1024, { fixtures });
     try {

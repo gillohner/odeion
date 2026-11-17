@@ -439,6 +439,9 @@ html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44p
 .simhead { font-weight: 600; margin: 0 0 8px; text-transform: none; }
 .back { display: inline-flex; align-items: center; gap: 4px; background: none; border: 0; color: var(--muted); cursor: pointer; padding: 4px 8px 4px 2px; border-radius: var(--r-sm); margin-bottom: 14px; }
 .back:hover { color: var(--fg); background: var(--surface-2); }
+/* A long name to go back to (a playlist, a search) stays on one line, cut with … (the button still reads all of it) */
+.back { max-width: 100%; }
+.back-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hero { display: grid; grid-template-columns: 220px 1fr; gap: 28px; align-items: end; }
 .hero .art { width: 220px; box-shadow: var(--shadow); }
 .hero h1 { margin-top: 6px; }
