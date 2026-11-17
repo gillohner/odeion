@@ -10301,8 +10301,9 @@
   // Confirm matches with nothing to confirm: "Open Identify" opens Node library with the Identify card
   // in view and its title focused (the card is far down the page; Settings has no Identify)
   const openIdentify = () => { state.libToIdentify = true; setView('library', 'node'); };
-  // (the group with its IDENTIFY heading at the top, below the phone's sticky Library chips, at once)
-  const showIdentifyCard = () => { const grp = $('#idcard') && $('#idcard').closest('.set-group'); if (!grp || !focusLeft()) return; const nav = $('.main > .libnav'); const over = nav && getComputedStyle(nav).position === 'sticky' ? nav.offsetHeight : 0; grp.style.scrollMarginTop = `${over + 8}px`; grp.scrollIntoView({ block: 'start', behavior: 'instant' }); focusCardTitle(); };
+  // (the group with its IDENTIFY heading at the top, below the phone's sticky Library chips, at once;
+  // .main's scroll-padding keeps it 8 px clear)
+  const showIdentifyCard = () => { const grp = $('#idcard') && $('#idcard').closest('.set-group'); if (!grp || !focusLeft()) return; const nav = $('.main > .libnav'); const over = nav && getComputedStyle(nav).position === 'sticky' ? nav.offsetHeight : 0; grp.style.scrollMarginTop = `${over}px`; grp.scrollIntoView({ block: 'start', behavior: 'instant' }); focusCardTitle(); };
   // Node library's top line says the unsure songs too, as the card does (the card is far down the
   // page): one press to the review, no scroll. Drawn with the page from the same answer, so the line
   // doesn't grow after it shows, and a page redrawn by a scan's poll says nothing new
