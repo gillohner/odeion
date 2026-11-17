@@ -449,7 +449,7 @@
     const t = upTotals(); const pct = t.bytes ? Math.round((100 * t.sent) / t.bytes) : 100;
     const word = { waiting: 'waiting', sending: 'sending', stored: 'added', already: 'already there', failed: 'failed' };
     const recent = up.files.slice(-30).reverse();
-    box.innerHTML = `<div class="jobbar"><span style="width:${pct}%"></span></div><p class="small" role="status">${up.running ? 'Uploading' : 'Uploaded'} ${t.done} of ${countOf(t.n, 'files')} · ${fmtBytes(t.sent)} of ${fmtBytes(t.bytes)}${t.failed ? ` · ${t.failed} failed` : ''}</p>`
+    box.innerHTML = `<div class="jobbar"><span style="width:${pct}%"></span></div><p class="small" role="status">${up.running ? 'Uploading' : 'Uploaded'} ${fmtCount(t.done)} of ${countOf(t.n, 'files')} · ${fmtBytes(t.sent)} of ${fmtBytes(t.bytes)}${t.failed ? ` · ${fmtCount(t.failed)} failed` : ''}</p>`
       + `<ul class="uplist">${recent.map((u) => `<li><span class="grow">${esc(u.rel || u.file.name)}</span><span class="muted small ${u.state === 'failed' ? 'joberr' : ''}" title="${esc(u.error || '')}">${u.state === 'sending' ? `${Math.round((100 * u.done) / (u.file.size || 1))}%` : word[u.state]}</span></li>`).join('')}</ul>`
       + (up.files.length > 30 ? `<p class="muted small">and ${countOf(up.files.length - 30, 'more files')}</p>` : '')
       + (!up.running ? '<button class="btn ghost sm" id="upclear">Clear the list</button>' : '');
@@ -488,7 +488,7 @@
       drawUploads();
     }
     up.running = false; drawUploads();
-    const t = upTotals(); toast(t.failed ? `${countOf(t.done, 'files')} added, ${t.failed} failed` : `${countOf(t.done, 'files')} added to your library`, t.failed ? 'error' : undefined);
+    const t = upTotals(); toast(t.failed ? `${countOf(t.done, 'files')} added, ${fmtCount(t.failed)} failed` : `${countOf(t.done, 'files')} added to your library`, t.failed ? 'error' : undefined);
   };
   const addUploads = (files) => {
     const list = [...files].filter((f) => f.size > 0 && AUDIO_EXT.test(f.name));
@@ -550,7 +550,7 @@
         out.innerHTML = `<p class="small" style="margin-top:10px">${countOf(r.total, 'files')} would change${r.total > r.files.length ? ` (the first ${r.files.length} below)` : ''}${r.cannot ? `; ${countOf(r.cannot, 'files')} in a format the writer leaves alone` : ''}.</p>
           <div class="set-list fixlist">${r.files.map((f) => `<div class="set-item"><div class="grow"><div class="name">${esc(f.title)}</div><div class="sub">${f.changes.map((c) => `${esc(label(c.key))}: ${c.now.length ? `<s>${esc(c.now.join(' · '))}</s> → ` : ''}${esc(c.then.join(' · '))}`).join('<br>')}</div></div></div>`).join('')}</div>
           <div class="actions" style="margin-top:10px"><button class="btn primary" id="fixgo">Write into ${countOf(r.total, 'files')}</button></div>`;
-        $('#fixgo').onclick = async () => { const b = $('#fixgo'); b.disabled = true; b.textContent = 'Writing…'; try { const w = await api('POST', '/library/tag-fixes', {}); toast(`${countOf(w.written, 'files')} fixed${w.skipped.length ? `; ${w.skipped.length} left as they were` : ''}. Backups: ${w.backup_dir}`); loadFixes(); } catch (e) { toast(e.message, 'error'); b.disabled = false; } };
+        $('#fixgo').onclick = async () => { const b = $('#fixgo'); b.disabled = true; b.textContent = 'Writing…'; try { const w = await api('POST', '/library/tag-fixes', {}); toast(`${countOf(w.written, 'files')} fixed${w.skipped.length ? `; ${fmtCount(w.skipped.length)} left as they were` : ''}. Backups: ${w.backup_dir}`); loadFixes(); } catch (e) { toast(e.message, 'error'); b.disabled = false; } };
       };
       const fc = $('#fixcheck'); if (fc) fc.onclick = loadFixes;
       $('#scan').onclick = async () => { try { await api('POST', '/library/scan', {}); toast('Scan started'); watchScan({ scanning: true }); } catch (e) { toast(e.message, 'error'); } };
@@ -674,7 +674,7 @@
         // What it is doing goes on the first line; the last results stay, dimmed, so the page keeps its height
         const say = (html) => { $$('.roonfile', out).forEach((e) => e.classList.add('stale')); const s = $('[data-roonstate]', out); if (s) s.outerHTML = html; else out.insertAdjacentHTML('afterbegin', html); };
         const parts = []; const ok = []; let matched = 0; let rows = 0; let failed = false;
-        const many = files.length > 1 ? ` ${files.length} files` : '';
+        const many = files.length > 1 ? ` ${fmtCount(files.length)} files` : '';
         tell(dry ? `Checking${many}…` : `Importing${many}…`);
         if (!dry) ctl.forEach((e) => { e.disabled = true; });
         try {
@@ -685,7 +685,7 @@
               const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
               const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
               const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}${r.playlist.kept ? ` and ${countOf(r.playlist.kept, 'links')} to match by hand` : ''}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
-              const row = `<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
+              const row = `<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${fmtCount(r.matched)} of ${fmtCount(r.rows)} matched this library${did ? ' · ' + esc(did) : ''}</p>`
                 + (r.tags_found.length ? `<p class="muted small">Roon tags: ${r.tags_found.slice(0, 12).map(([l, c]) => `${esc(l)} (${c})`).join(', ')}${r.tags_found.length > 12 ? '…' : ''}</p>` : '')
                 + (r.misses.length ? `<details class="small"><summary>${r.unmatched + r.not_identified} not moved, and why</summary><ul class="misses">${r.misses.map((m) => `<li><strong>${esc(m.what)}</strong>: ${esc(m.reason)}</li>`).join('')}</ul></details>` : '') + '</div>';
               // (counted, and offered to Import, only once its answer could be read in full)
@@ -697,14 +697,14 @@
         // (files whose check failed, not sent by Import: they stay chosen, for Check again)
         const left = dry ? 0 : roonFiles.length - files.length;
         if (dry) roonOk = ok; else if (left) roonFiles = roonFiles.filter((f) => !files.includes(f)); else roonDone = true;
-        const leftWords = left === 1 ? ' The file whose check failed was left out.' : left ? ` The ${left} files whose check failed were left out.` : '';
+        const leftWords = left === 1 ? ' The file whose check failed was left out.' : left ? ` The ${fmtCount(left)} files whose check failed were left out.` : '';
         out.innerHTML = (dry ? `<p class="muted small" data-roonstate>${failed ? 'Not every file could be checked; nothing changed yet. <button class="lnk" data-roon-again>Check again</button>' : 'Checked: nothing changed yet.'}</p>`
           : `<p class="small" data-roonstate>${matched ? 'Imported.' : 'Nothing was imported.'}${leftWords}${left ? ` <button class="lnk" data-roon-again>Check ${left === 1 ? 'it' : 'them'} again</button>` : ''}</p>`) + parts.join('');
         const again = $('[data-roon-again]', out); if (again) again.onclick = () => roonRun(true);
         go.disabled = !dry || !matched || roonDone;
         const nothing = dry && !matched && !failed;
         if (nothing) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Your library › Node library), then choose the files again.</p>');
-        const tally = `${matched} of ${rows} matched this library`;
+        const tally = `${fmtCount(matched)} of ${fmtCount(rows)} matched this library`;
         tell(nothing ? 'Checked: nothing in these files matched this library yet. Scan your music folders first, then choose the files again.'
           : dry ? (failed ? `Not every file could be checked${matched ? `; in the others, ${tally}` : ''}. Nothing changed yet.${matched ? ' Import is ready for those.' : ''} Check again is above the results.`
             : `Checked: ${tally}. Nothing changed yet${roonDone ? '' : '; Import is ready'}.`)
@@ -1266,9 +1266,9 @@
     const rows = files.map((f) => ({ f, why: brokenWhy(f, names) })).sort((a, b) => (b.why ? 1 : 0) - (a.why ? 1 : 0));
     const broken = rows.filter((r) => r.why);
     const total = files.reduce((n, f) => n + (f.size || 0), 0);
-    box.innerHTML = `<div class="eyebrow">Private files on the homeserver · ${files.length} · ${fileSize(total)}</div>`
+    box.innerHTML = `<div class="eyebrow">Private files on the homeserver · ${fmtCount(files.length)} · ${fileSize(total)}</div>`
       + (broken.length ? `<div class="set-warn small">${countOf(broken.length, 'files')} ${broken.length === 1 ? 'is' : 'are'} broken or a second copy. <button class="btn ghost sm" data-rmbroken>Remove ${broken.length === 1 ? 'it' : 'them'}</button></div>` : '')
-      + `<div class="list compact">${rows.slice(0, 50).map(({ f, why }) => `<div class="list-row${why ? ' broken' : ''}"><div class="grow"><div class="name">${esc(f.path.split('/').pop())}</div>${why ? `<div class="muted small">${esc(why)}</div>` : ''}</div><span class="muted small">${fileSize(f.size)}</span>${why ? `<button class="btn ghost sm" data-rmfile="${esc(f.path)}">Remove</button>` : ''}</div>`).join('')}${files.length > 50 ? `<div class="muted small">… and ${files.length - 50} more</div>` : ''}</div>`;
+      + `<div class="list compact">${rows.slice(0, 50).map(({ f, why }) => `<div class="list-row${why ? ' broken' : ''}"><div class="grow"><div class="name">${esc(f.path.split('/').pop())}</div>${why ? `<div class="muted small">${esc(why)}</div>` : ''}</div><span class="muted small">${fileSize(f.size)}</span>${why ? `<button class="btn ghost sm" data-rmfile="${esc(f.path)}">Remove</button>` : ''}</div>`).join('')}${files.length > 50 ? `<div class="muted small">… and ${fmtCount(files.length - 50)} more</div>` : ''}</div>`;
     const removeFiles = async (paths, btn) => { btn.disabled = true; try { drawHomeFiles(box, await api('DELETE', '/pubky/files', { paths })); toast(`Removed ${countOf(paths.length, 'files')} from your homeserver`); } catch (e) { toast(e.message, 'error'); btn.disabled = false; } };
     const all = $('[data-rmbroken]', box); if (all) all.onclick = () => removeFiles(broken.map((r) => r.f.path), all);
     $$('[data-rmfile]', box).forEach((b) => b.onclick = () => removeFiles([b.dataset.rmfile], b));
@@ -1304,7 +1304,7 @@
       else if (!files.length) list.innerHTML = '<p class="muted">Nothing matches.</p>';
       else list.innerHTML = (songs.length ? `<section class="section"><div class="section-head"><h3>On your homeserver</h3><span class="muted small">${st.q ? `${countOf(st.count, 'matches')}` : countOf(st.count, 'files')}</span></div><div class="list">${songs.map((f) => songRow(f, files.indexOf(f))).join('')}</div></section>` : '')
         + (loose.length ? `<section class="section"><div class="section-head"><h3>${loose.every((f) => f.removed) ? 'Not in the library' : 'Being added'}</h3></div><div class="list">${loose.map((f) => looseRow(f, files.indexOf(f))).join('')}</div></section>` : '')
-        + (files.length < st.count ? `<div class="row-btns"><button class="btn ghost" data-mmmore>Show more <span class="muted small">(${st.count - files.length} more)</span></button></div>` : '');
+        + (files.length < st.count ? `<div class="row-btns"><button class="btn ghost" data-mmmore>Show more <span class="muted small">(${fmtCount(st.count - files.length)} more)</span></button></div>` : '');
       $$('[data-mplay]', list).forEach((b) => b.onclick = async () => { b.classList.add('starting'); try { await playTracks([await api('GET', `/library/tracks/${b.dataset.mplay}`)], true); } catch (er) { toast(er.message, 'error'); } finally { b.classList.remove('starting'); } });
       $$('[data-mdel]', list).forEach((b) => b.onclick = () => delFile(files[Number(b.dataset.mdel)]));
       $$('[data-mmore]', list).forEach((b) => b.onclick = () => { const f = files[Number(b.dataset.mmore)]; showMenu(b, [{ title: f.song.title }, { label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(f.song.id) }, { label: 'Download', icon: 'download', run: () => { location.href = `/v1/library/tracks/${f.song.id}/download${tokenQ()}`; } }, ...(f.song.album_id ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: `lib-${f.song.album_id}` }) }] : []), { label: 'Delete from my homeserver', icon: 'trash', run: () => delFile(f) }]); });
@@ -6757,7 +6757,7 @@
       else if (kind === 'album' || kind === 'artist') body = itemTileGrid(items.slice(0, 12).map((h) => ({ ...h, year: h.year || h.subtitle })), kind);
       // People open their page; your playlists open here; posts and the rest open on their site
       else body = `<div class="list">${items.slice(0, 10).map((h, k) => { const own = kind === 'playlist' && h.sources.includes('library'); const lead = kind === 'person' ? (h.image ? `<img class="thumb round" src="${esc(imgSrc(h.image))}" alt="" loading="lazy" data-err="hide">` : `<div class="avatar">${esc(initials(h.title || 'P'))}</div>`) : own ? icon('playlist') : svcBadge(h.sources[0]); return `<div class="list-row clickable" data-sother="${kind}:${k}">${lead}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc(h.subtitle || '')}</div></div>${kind === 'person' || own ? icon('chevron', 'ic right') : icon('external')}</div>`; }).join('')}</div>`;
-      const more = kind === 'song' && items.length > songCap ? `<button class="btn ghost sm" data-sallsongs>See all ${items.length} songs</button>` : '';
+      const more = kind === 'song' && items.length > songCap ? `<button class="btn ghost sm" data-sallsongs>See all ${fmtCount(items.length)} songs</button>` : '';
       sections.push(`<section class="section ${items.length ? 'fadein' : ''}" data-skind="${kind}">${head}${body}${more}</section>`);
     }
     const short = (e, src) => { const m = humanError(String(e || ''), `/sources/${src}`).replace(/^[a-z]+: /, '').split(/(?<=\.)\s/)[0]; return m.length > 110 ? m.slice(0, 107) + '…' : m; };
@@ -7117,7 +7117,7 @@
   // in, so its notice approves them here (Settings › My accounts, the node's own Pubky sign-in).
   const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = state.token ? logOut : () => { state.autoResign = true; setView('settings', 'accounts'); });
   // A sync's answer as one plain line: the re-sign notice instead of a raw 403.
-  const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Saved: ${r.pushed} sent to your homeserver, ${r.pulled} received${r.errors.length ? `, ${r.errors.length} errors` : ''}${r.pending ? `; ${r.pending} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
+  const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Saved: ${fmtCount(r.pushed)} sent to your homeserver, ${fmtCount(r.pulled)} received${r.errors.length ? `, ${fmtCount(r.errors.length)} errors` : ''}${r.pending ? `; ${fmtCount(r.pending)} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
   // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).
   // opts.onPage(n): the rows so far, after each part; opts.wait: ms a part may take before it is given
   // up with STOPPED_ANSWERING (a node that stops answering mid-library doesn't leave it waiting for good)
@@ -10259,7 +10259,7 @@
         return `${bar}<p class="small idlegend">${c.total ? `${n(c.total)} ${c.total === 1 ? 'song' : 'songs'}:` : ''}${legend ? ` <span class="idkeys">${legend}</span>` : ''}</p>`;
       })()}
       ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.title_artist, 'by their exact title, artist and length'], [c.by.auto, 'picked automatically <span class="pill" data-auto>auto</span>'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
-      ${!p.running && p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}${(() => { const k = Object.values(p.settled || {}).reduce((a, b) => a + b, 0); return k ? `; ${k} unsure ${k === 1 ? 'song' : 'songs'} picked automatically` : ''; })()}.</p>` : ''}
+      ${!p.running && p.finished_at ? `<p class="small muted">Last run: ${fmtCount(p.identified)} identified${idHow(p.identified_by)}, ${fmtCount(p.suggested)} to confirm, ${fmtCount(p.unknown)} not found${p.errors ? `, ${fmtCount(p.errors)} errors` : ''}${(() => { const k = Object.values(p.settled || {}).reduce((a, b) => a + b, 0); return k ? `; ${fmtCount(k)} unsure ${k === 1 ? 'song' : 'songs'} picked automatically` : ''; })()}.</p>` : ''}
       ${(() => {
         // The AcoustID key lives here, with its state and a Check (owner, 2026-10-31): Settings
         // keeps no copy. Matching by how songs sound needs it; without it, title and artist only
@@ -10286,7 +10286,7 @@
     }
     const au = $('#idauto'); if (au) au.onchange = async () => { try { await api('PUT', '/library/identify/settings', { auto_match: au.checked }); toast(au.checked ? 'New songs are matched after each scan, and clear unsure ones settled' : 'Songs are matched only when you press Identify, and every unsure one waits for you'); renderIdentify(); } catch (e) { toast(e.message, 'error'); au.checked = !au.checked; } };
     const wr = $('#idwrite'); if (wr) wr.onchange = async () => { try { await api('PUT', '/library/identify/settings', { write_ids: wr.checked }); toast(wr.checked ? 'IDs will be written into your files' : 'Your files stay as they are'); renderIdentify(); } catch (e) { toast(e.message, 'error'); wr.checked = !wr.checked; } };
-    const wn = $('#idwritenow'); if (wn) wn.onclick = async () => { wn.disabled = true; try { const r = await api('POST', '/library/identify/write'); toast(`${r.written} file${r.written === 1 ? '' : 's'} updated${r.skipped.length ? `, ${r.skipped.length} left as they were (${r.skipped[0].reason})` : ''}`); } catch (e) { toast(e.message, 'error'); } wn.disabled = false; };
+    const wn = $('#idwritenow'); if (wn) wn.onclick = async () => { wn.disabled = true; try { const r = await api('POST', '/library/identify/write'); toast(`${fmtCount(r.written)} file${r.written === 1 ? '' : 's'} updated${r.skipped.length ? `, ${fmtCount(r.skipped.length)} left as they were (${r.skipped[0].reason})` : ''}`); } catch (e) { toast(e.message, 'error'); } wn.disabled = false; };
     const run = $('#idrun'); if (run) run.onclick = async () => { try { await api('POST', '/library/identify', { retry: !c.unchecked }); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
     // Skip all unsure: marked reviewed without an identity (kept out of re-checks); undoable
     // (the node's unskip of all brings back earlier skips too: the Undo says so when there are any)

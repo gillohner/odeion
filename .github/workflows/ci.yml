@@ -737,6 +737,7 @@ jobs:
           ui-zone-here-line.js zone-here-line-shots
           ui-action-gaps.js action-gaps-shots
           ui-queue-mark.js queue-mark-shots
+          ui-count-separators.js count-separators-shots
           ui-queue-empty-shuffle.js queue-empty-shuffle-shots
           ui-home-contact.js home-contact-shots
           ui-home-stale.js home-stale-shots
