@@ -171,6 +171,8 @@ html { -webkit-tap-highlight-color: transparent; }
   color: var(--fg-2); text-align: left; transition: background var(--dur-base) var(--ease), color var(--dur-base) var(--ease);
 }
 .nav-item:hover { background: var(--surface-2); color: var(--fg); }
+/* (inside: the side menu scrolls, so it cut the ring's sides) */
+.nav-item:focus-visible { outline-offset: -2px; }
 .nav-item.on { background: var(--accent-soft); color: var(--accent-strong); }
 .nav-item.on .ic { color: var(--accent-strong); }
 .node-status { margin-top: auto; padding: 10px; font-size: var(--fs-xs); color: var(--muted); display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--line); }
@@ -606,7 +608,7 @@ html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 .track:hover .row-actions .icon-btn, .track:focus-within .row-actions .icon-btn { opacity: 1 !important; }
 
 /* ---- lists & misc ---- */
-.list { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.list { --list-r: var(--r-md); border: 1px solid var(--line); border-radius: var(--list-r); overflow: hidden; }
 .list-row { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .list-row:last-child { border-bottom: 0; }
 .list-row:hover { background: var(--surface-2); }
@@ -614,6 +616,13 @@ html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
 .list-row .name { font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list-row .sub { color: var(--muted); font-size: var(--fs-xs); }
 .list-row.clickable { cursor: pointer; }
+/* A focused row draws its keyboard ring inside itself: the list cuts anything outside (overflow:
+   hidden, for its round corners; a picker scrolls), which left only a line under the row. While
+   ringed, an end row takes the list's corners (--list-r; 0 where the list is square), so the ring
+   follows them */
+.list .list-row:focus-visible { outline-offset: -2px; }
+.list > .list-row:first-child:focus-visible { border-top-left-radius: max(0px, var(--list-r) - 1px); border-top-right-radius: max(0px, var(--list-r) - 1px); }
+.list > .list-row:last-child:focus-visible { border-bottom-left-radius: max(0px, var(--list-r) - 1px); border-bottom-right-radius: max(0px, var(--list-r) - 1px); }
 .avatar { width: 40px; height: 40px; border-radius: 50%; background: var(--surface-3); display: flex; align-items: center; justify-content: center; font-weight: 700; color: rgba(255, 255, 255, 0.85); flex: none; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: var(--r-pill); background: var(--surface-2); border: 1px solid var(--line); font-size: var(--fs-xs); color: var(--fg-2); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -2466,7 +2475,7 @@ html[data-shell="phone"] .srow > [data-splay] { display: none; }
 html[data-shell="phone"] .srow > :is([data-smore], [data-cmore]) { width: 48px; height: 48px; flex: none; margin-left: -4px; }
 html[data-shell="phone"] .srow > .muted.small { flex: none; font-variant-numeric: tabular-nums; }
 html[data-shell="phone"] .list.nums .srow .num { display: block; width: 20px; margin-right: -4px; }
-html[data-shell="phone"] .list:has(> .srow) { border-left: 0; border-right: 0; border-radius: 0; }
+html[data-shell="phone"] .list:has(> .srow) { border-left: 0; border-right: 0; --list-r: 0px; }
 .srow .grow { min-width: 0; }
 html[data-shell="phone"] .srow .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .srow.cur .name, .srow.cur .name .lnk { color: var(--accent-strong); }
