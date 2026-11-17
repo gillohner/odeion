@@ -4,7 +4,8 @@
 // the person stayed on Playlists (typing a name, a menu open) didn't show up in the list until the
 // next visit. Now the page is drawn in place (redrawing/keepPlace): the boxes keep what is typed
 // and the caret, focus and scroll stay, and a finished import puts its row in the list at once.
-// Create empties the name box and leaves the keyboard in it for the next one. At 1280, 1024, 768 px.
+// Create empties the name box and leaves the keyboard in it for the next one (Enter or a mouse
+// click; a tap on a touch screen doesn't pull the on-screen keyboard up). At 1280, 1024, 768 px.
 //   node tools/ui-playlists-redraw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -101,13 +102,17 @@ const IMPORTED = { ...fx.summary, id: 'imp1', name: 'Road trip', items: 1 };
         const made = await until(() => page.evaluate(() => !!document.querySelector('#main [data-pl="new1"]')), 3000);
         await sleep(150); l = await look();
         check(made && l.name === '' && l.focus === 'plname', `${width}: Create draws the new row, empties the box and keeps the keyboard there (made ${made}, "${l.name}", ${l.focus})`);
-        // Enter on the Create button itself: the keyboard goes to the box; a click leaves focus be
+        // Enter on the Create button itself, or a mouse click on it: the keyboard goes to the box for
+        // the next name (before, a click left focus on Create, which then went grey, so it fell to the page)
         let n = await rows(); await page.fill('#plname', 'Monday'); await page.focus('#plcreate'); await page.keyboard.press('Enter');
         await until(async () => (await rows()) === n + 1, 3000); await sleep(150); l = await look();
         check(l.name === '' && l.focus === 'plname', `${width}: Enter on Create empties the box and puts the keyboard in it ("${l.name}", ${l.focus})`);
         n = await rows(); await page.fill('#plname', 'Tuesday'); await page.click('#plcreate');
         await until(async () => (await rows()) === n + 1, 3000); await sleep(150); l = await look();
-        check(l.name === '' && l.focus !== 'plname', `${width}: a click on Create empties the box and doesn't pull a phone keyboard up ("${l.name}", ${l.focus})`);
+        check(l.name === '' && l.focus === 'plname' && l.create === true, `${width}: a mouse click on Create empties the box and puts the keyboard in it, Create greyed until the next name ("${l.name}", ${l.focus}, disabled ${l.create})`);
+        if (l.focus === 'plname') { await page.keyboard.type('Wednesday'); l = await look(); } // (typed on the page, letters are shortcuts)
+        check(l.name === 'Wednesday' && l.create === false, `${width}: the next name is typed straight away after a click ("${l.name}", Create disabled ${l.create})`);
+        await page.fill('#plname', '');
 
         // 5. Opened again from the sidebar: drawn from the start, at the top, nothing typed carried over.
         await page.fill('#plname', 'Carry'); await page.evaluate(() => document.querySelector('#main').scrollTo({ top: 400, behavior: 'instant' }));
@@ -139,6 +144,28 @@ const IMPORTED = { ...fx.summary, id: 'imp1', name: 'Road trip', items: 1 };
           check(end.row && !end.notice, `${width}: an older ${old.status ? 'error' : 'answer'} after the newer list doesn't replace it (row ${end.row}, notice "${end.notice}")`);
         }
         check(!state.errors.length, `${width}: no page errors (${state.errors.join('; ')})`);
+      } finally { await context.close(); }
+    }
+    // A tap on Create (a touch screen, 1024 px tablet): the box empties but isn't focused, so no
+    // on-screen keyboard pops up over the list.
+    {
+      const { page, context, state } = await fx.create(browser, 1024, { touch: true });
+      state.collections = [pl(1)];
+      await page.route('**/v1/playlists', async (r) => {
+        if (r.request().method() !== 'POST') return r.fallback();
+        const name = JSON.parse(r.request().postData() || '{}').name;
+        state.collections = [...state.collections, { ...fx.summary, id: 'tap1', name, items: 0 }];
+        return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...fx.detail, summary: { ...fx.summary, id: 'tap1', name } }) });
+      });
+      try {
+        await fx.go(page, '/playlists');
+        await page.waitForSelector('#main [data-pl]');
+        await page.fill('#plname', 'Thursday'); await page.tap('#plcreate');
+        const made = await until(() => page.evaluate(() => !!document.querySelector('#main [data-pl="tap1"]')), 3000);
+        await sleep(150);
+        const l = await page.evaluate(() => ({ name: document.querySelector('#plname').value, focus: document.activeElement && (document.activeElement.id || document.activeElement.tagName) }));
+        check(made && l.name === '' && l.focus !== 'plname', `1024 touch: a tap on Create draws the row and empties the box without pulling the keyboard up (made ${made}, "${l.name}", ${l.focus})`);
+        check(!state.errors.length, `1024 touch: no page errors (${state.errors.join('; ')})`);
       } finally { await context.close(); }
     }
   } finally { await browser.close(); }

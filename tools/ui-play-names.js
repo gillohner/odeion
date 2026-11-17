@@ -5,7 +5,8 @@
 // Radio stations (Play), Spotify's library on Sources ("Play on Spotify") and the Play from order
 // in Settings (Earlier, Later). Now each says its row's name: "Play Night Drive",
 // "More for Night Drive", "Play Road trip", "Play Fixture FM", "Play Night Drive on Spotify",
-// "Move TIDAL earlier"; the short tooltips stay. And the button so named is the one that acts on
+// "Move TIDAL earlier"; the short tooltips stay. A Favourites song with no title is
+// "Untitled on bandcamp" on its row, its ⋯ and its menu's heading (not its web address). And the button so named is the one that acts on
 // that row (keyboard Enter). At 1280, 1024 and 768 px.
 // Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-play-names.js [repo] [shots]
@@ -93,6 +94,26 @@ const lists = [
           const o = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
           check(o <= 0, `${width} ${ls.name}: nothing wider than the screen (${o})`);
           check(!state.errors.length, `${width} ${ls.name}: no page errors (${state.errors.join(' | ')})`);
+        } finally { await context.close(); }
+      }
+      // Favourites: a song from another service with no title. Its ⋯ is "More for Untitled on
+      // bandcamp", and the menu it opens is headed the same, not by its raw web address.
+      {
+        const uri = 'https://someone.bandcamp.com/track/x7';
+        const { page, context, state } = await fx.create(browser, width, { fixtures: { '/favourites': { body: { uris: [uri], tracks: [], albums: [], artists: [], other: [uri] } }, '/discover/describe': { body: [{ uri, page: uri, title: null, artist: 'Someone Else', kind: 'track', site: 'bandcamp', also_on: [], connect: [] }] } } });
+        try {
+          await fx.go(page, '/favourites');
+          const b = page.getByRole('button', { name: 'More for Untitled on bandcamp', exact: true });
+          const found = await b.waitFor({ timeout: 8000 }).then(() => true, () => false);
+          check(found, `${width} favourites untitled: its ⋯ is named "More for Untitled on bandcamp"`);
+          if (found) {
+            await b.click();
+            const head = await page.waitForFunction(() => { const m = document.querySelector('.popover.menu:not([hidden]) .pop-title'); return m && m.textContent; }, null, { timeout: 3000 }).then((h) => h.jsonValue(), () => null);
+            check(head === 'Untitled on bandcamp', `${width} favourites untitled: its menu is headed "Untitled on bandcamp", like the row (${head})`);
+            await page.screenshot({ path: path.join(SHOTS, `favourites-untitled-menu-${width}.png`) });
+            await page.keyboard.press('Escape');
+          }
+          check(!state.errors.length, `${width} favourites untitled: no page errors (${state.errors.join(' | ')})`);
         } finally { await context.close(); }
       }
     }
