@@ -90,18 +90,27 @@ async function desktop(browser, width) {
   }
 }
 
-// On a phone a tap on the row already played; a double click there now starts it once too
-async function phone(browser, width) {
-  const { context, page, state } = await open(browser, width, { tracks });
+// On a phone a tap on the row already played; a double click there now starts it once too, and on a
+// touch screen (rows take no text selection there) text selected elsewhere doesn't hold the tap
+async function phone(browser, width, touch) {
+  const { context, page, state } = await open(browser, width, { tracks, touch });
   try {
     await fx.go(page, '/tracks');
-    await page.waitForFunction(() => document.documentElement.dataset.shell === 'phone');
+    if (width < 600) await page.waitForFunction(() => document.documentElement.dataset.shell === 'phone');
     const row = page.locator('.tracks[data-list="all"] .track').nth(1); await row.waitFor(); await page.waitForTimeout(400); await reset(page);
     await row.locator('.dur').click(); await page.waitForTimeout(500);
-    check(JSON.stringify(await starts(page)) === '["2"]', `${width} phone: a tap on the row plays that song (${JSON.stringify(await starts(page))})`);
+    check(JSON.stringify(await starts(page)) === '["2"]', `${width} ${touch ? 'touch' : 'phone'}: a tap on the row plays that song (${JSON.stringify(await starts(page))})`);
     await reset(page); await row.locator('.dur').dblclick(); await page.waitForTimeout(500);
-    check(JSON.stringify(await starts(page)) === '["2"]', `${width} phone: a double click starts it once (${JSON.stringify(await starts(page))})`);
-    check(state.errors.length === 0, `${width} phone: no page errors (${state.errors.join(' | ')})`);
+    check(JSON.stringify(await starts(page)) === '["2"]', `${width} ${touch ? 'touch' : 'phone'}: a double click starts it once (${JSON.stringify(await starts(page))})`);
+    if (touch) {
+      // the page's heading selected (a long press elsewhere), then a tap on a row: it plays
+      await reset(page);
+      const held = await page.evaluate(() => { const h = document.querySelector('#main h1, #main h2'); if (!h) return ''; const r = document.createRange(); r.selectNodeContents(h); getSelection().removeAllRanges(); getSelection().addRange(r); return String(getSelection()).trim(); });
+      check(held !== '', `${width} touch: the page's heading is selected ("${held}")`);
+      await row.locator('.dur').tap(); await page.waitForTimeout(500);
+      check(JSON.stringify(await starts(page)) === '["2"]', `${width} touch: with text selected elsewhere, a tap on the row still plays it (${JSON.stringify(await starts(page))})`);
+    }
+    check(state.errors.length === 0, `${width} ${touch ? 'touch' : 'phone'}: no page errors (${state.errors.join(' | ')})`);
   } finally { await context.close(); }
 }
 
@@ -110,6 +119,7 @@ async function phone(browser, width) {
   try {
     for (const w of [1280, 1024, 768]) await desktop(browser, w);
     await phone(browser, 412);
+    await phone(browser, 412, true); await phone(browser, 768, true);
   } finally { await browser.close(); }
   console.log(`\n${ok} ok, ${fail} failed`);
   process.exit(fail ? 1 : 0);

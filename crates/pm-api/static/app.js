@@ -5533,10 +5533,11 @@
       // A click on the row plays from there, as a playlist's or an album's song row does: with a mouse
       // too, not only on a touch screen (no hover to reveal the play button). Its names and buttons keep
       // their own click (on a phone the names take no taps, app.css, so a tap there plays), and the
-      // second click of a double click, or a drag that selects the row's text, doesn't start it.
+      // second click of a double click, or a drag that selects the row's text, doesn't start it (text
+      // selected elsewhere doesn't hold it: a tap on a touch screen's row leaves that selection alone).
       if (!btn) {
         const row = e.target.closest('.track'); const list = row && row.closest('[data-list]');
-        if (row && list && e.detail < 2 && !e.target.closest('a, button, input') && getSelection().isCollapsed) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
+        if (row && list && e.detail < 2 && !e.target.closest('a, button, input') && (getSelection().isCollapsed || !getSelection().containsNode(row, true))) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
         return;
       }
       const row = btn.closest('.track'); const list = btn.closest('[data-list]');
