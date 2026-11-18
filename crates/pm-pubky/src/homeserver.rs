@@ -480,6 +480,11 @@ impl NodeHomeserver {
         self
     }
 
+    /// The relay inbox set with [`Self::with_auth_relay`], if any.
+    pub fn auth_relay(&self) -> Option<&url::Url> {
+        self.auth_relay.as_ref()
+    }
+
     /// A grant auth flow on this client, through [`Self::with_auth_relay`]'s relay when set.
     fn grant_flow(
         &self,

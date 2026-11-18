@@ -65,11 +65,14 @@ async fn node_with(dir: &std::path::Path, token: Option<&str>) -> (Arc<NodeState
         outputs,
     );
     s.zones_for_all_outputs();
+    let inbox = relay.local_url().join("inbox").unwrap();
     s.set_homeserver(
         pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::config::Network::Mainnet)
             .unwrap()
-            .with_auth_relay(relay.local_url().join("inbox").unwrap()),
+            .with_auth_relay(inbox.clone()),
     );
+    // Not a client made before this one (`set_homeserver` keeps the first)
+    assert_eq!(s.homeserver().unwrap().auth_relay(), Some(&inbox));
     (s, relay)
 }
 

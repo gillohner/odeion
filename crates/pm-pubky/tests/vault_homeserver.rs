@@ -49,7 +49,6 @@ impl Admin {
     }
 }
 
-/// A person on the homeserver, and `n` clients they approved (each its own grant session).
 /// A client whose Ring sign-ins go through an HTTP relay of its own on this machine, not the
 /// public relay (a slow public relay once left approvals undelivered). Keep the relay while it
 /// signs in.
@@ -66,6 +65,7 @@ async fn signing_in() -> (NodeHomeserver, http_relay::HttpRelay) {
     )
 }
 
+/// A person on the homeserver, and `n` clients they approved (each its own grant session).
 async fn person_with_clients(a: &Admin, n: usize) -> (pubky::PubkySigner, Vec<pubky::PubkySession>) {
     let info = a.call(reqwest::Method::GET, "/info", None).await;
     let hs = PublicKey::try_from(info["public_key"].as_str().expect("homeserver key")).unwrap();
