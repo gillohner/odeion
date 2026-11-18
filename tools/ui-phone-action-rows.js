@@ -4,7 +4,8 @@
 // a 44 px tap. A playlist has the album page's compact header (the cover beside its name), so its first
 // song shows on the first screen, and its eyebrow there is just "Playlist" (the sharing note under the buttons
 // says where it is kept, once). A queue row's Move up / Move down / Remove are in its ⋯ (no hidden
-// buttons a finger could press unseen), and its drag grip is a 44 px tap. Desktop is unchanged.
+// buttons a finger could press unseen), and its drag grip is a 44 px tap. Desktop keeps its rows (its
+// playlist eyebrow is "Playlist" too: ui-playlist-said-once.js).
 // Real candidate assets, isolated responses: node tools/ui-phone-action-rows.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -303,7 +304,7 @@ async function playingBars(browser, width, mobile) {
     const dart = await page.evaluate(() => { const a = document.querySelector('#main > .hero > .art').getBoundingClientRect(); const h = document.querySelector('#main > .hero h1').getBoundingClientRect(); return { w: a.width, beside: h.left > a.right }; });
     check(dart.w === 220 && dart.beside, `desktop 1280: a playlist's header keeps its 220 px cover beside the words (${dart.w} px)`);
     const deb = await eyebrow(page);
-    check(/^Playlist · private · on this node$/i.test(deb.text), `desktop 1280: a playlist's eyebrow keeps where it is ("${deb.text}")`);
+    check(deb.text === 'Playlist' && /^Private on this node/.test(deb.note), `desktop 1280: a playlist's eyebrow is "Playlist" there too, its note says where ("${deb.text}"; "${deb.note}")`);
     await fx.go(page, '/library/import'); await page.waitForSelector('#roonfav'); await page.waitForTimeout(300);
     const dh = await page.evaluate(() => [...document.querySelectorAll('#main label.check:has(#roonfav, #roonpl, #roontags)')].map((l) => l.getBoundingClientRect().height));
     check(dh.length === 3 && dh.every((h) => h < 30), `desktop 1280: Roon's options stay lines of text (${dh.map((h) => h.toFixed(0)).join(' ')})`);
