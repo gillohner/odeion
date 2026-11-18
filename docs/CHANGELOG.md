@@ -4,6 +4,9 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-18
+- **A playlist changed on another device shows its new order at once.** When a song was moved or removed in a playlist on another device, the open playlist kept showing the old order for about a second while it found where each song plays. A × or Remove in that second went by the old places, so it could take a different song than the one you pressed. Now the new order is drawn straight away, with a small spinner on the songs still being looked up, and a song you're playing keeps its now-playing mark and still plays.
+
 ### 2026-11-17
 - **On a phone, going back up a Library list with the keyboard, the row you're on stays in sight.** The Library chips (Your library, Albums, Songs, …) stay at the top of the page while it scrolls. Going back up Songs, Playlists or another Library list with Shift+Tab stopped each row right at the top, under the chips, so a song's ⋯ or its play button was hidden. Now the row stops just below them. Open Identify still shows the Identify card right below the chips.
 - **A playlist waiting after a change always ends in its songs or Try again, and a playlist opened again starts at its top.** After you remove or move a song, a playlist waits for the new list before it takes another press, and says “Couldn’t load this playlist” with Try again if the node doesn’t answer in 15 s. If the app was still asking who you are on Pubky (after a “Save now” that needed you to sign in again, say), that wait had no end and the songs stayed greyed out. It now counts toward the 15 s too. And if a playlist didn’t load, you went elsewhere and opened it again, the keyboard focus jumped into its song list instead of starting at the top of the page. It now does that only right after you press Try again.
