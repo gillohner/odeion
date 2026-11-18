@@ -3,6 +3,8 @@
 //! publishes it) and `PM_BUNDLED_HS_PASSWORD`; skipped otherwise, so CI stays hermetic except in
 //! the `bundle` job, which runs it against `docker compose up`. A test signer stands in for
 //! Pubky Ring: it creates the account with the link's token and approves the node's access.
+//! The node and the signers sign in through local relays as well as the public network
+//! (`support/local_relays.rs`).
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -11,9 +13,12 @@ use pm_api::{router, NodeSettings, NodeState};
 use pm_audio::PipelineConfig;
 use pm_library::Library;
 use pm_zones::OutputRegistry;
-use pubky::{Keypair, Pubky, PublicKey};
+use pubky::{Keypair, PublicKey};
 use std::sync::Arc;
 use tower::ServiceExt;
+
+#[path = "support/local_relays.rs"]
+mod local_relays;
 
 fn bundled() -> Option<pm_api::bundled::AdminEndpoint> {
     pm_api::bundled::AdminEndpoint::new(
@@ -57,6 +62,9 @@ fn node_with(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
         outputs,
     );
     s.zones_for_all_outputs();
+    s.set_homeserver(local_relays::node_homeserver());
+    // Not a client made before this one (`set_homeserver` keeps the first)
+    assert_eq!(s.homeserver().unwrap().auth_relay(), Some(&local_relays::inbox()));
     s
 }
 
@@ -117,7 +125,7 @@ async fn the_owner_signs_up_on_the_bundled_homeserver() {
     assert_eq!(pending["status"], "pending", "{pending}");
 
     // "Pubky Ring": create the account with the token, then approve the node's access
-    let signer = Pubky::new().unwrap().signer(Keypair::random());
+    let signer = local_relays::pubky().signer(Keypair::random());
     let owner = signer.public_key().z32();
     signer
         .signup(&PublicKey::try_from(hs.as_str()).unwrap(), Some(&token))
@@ -181,7 +189,7 @@ async fn invites_become_people_with_quotas_and_access() {
         s.set_homeserver_files_dir(std::path::PathBuf::from(f));
     }
     let app = router(s.clone());
-    let pubky = Pubky::new().unwrap();
+    let pubky = local_relays::pubky();
 
     // Homeserver + music, 100 MB
     let (st, inv) = call_json(
@@ -351,7 +359,7 @@ async fn signed_up_owner(app: &axum::Router) -> String {
     let url = started["url"].as_str().unwrap().to_string();
     let hs = param(&url, "hs").unwrap();
     let token = param(&url, "st").unwrap();
-    let signer = Pubky::new().unwrap().signer(Keypair::random());
+    let signer = local_relays::pubky().signer(Keypair::random());
     signer
         .signup(&PublicKey::try_from(hs.as_str()).unwrap(), Some(&token))
         .await
@@ -603,7 +611,7 @@ async fn a_listener_signs_in_with_ring_and_plays_a_homeserver_only_account_canno
         .add_folder(&music.canonicalize().unwrap())
         .unwrap();
     s.start_scan(vec![music.canonicalize().unwrap()]).unwrap();
-    let pubky = Pubky::new().unwrap();
+    let pubky = local_relays::pubky();
 
     // Invited with music: signs up on the homeserver, then in to the node, as a listener
     let (_, inv) = call_json(
@@ -671,7 +679,7 @@ async fn owner_with_signer(app: &axum::Router, api: &str) -> pubky::PubkySigner 
     let url = started["url"].as_str().unwrap().to_string();
     let hs = param(&url, "hs").unwrap();
     let token = param(&url, "st").unwrap();
-    let signer = Pubky::new().unwrap().signer(Keypair::random());
+    let signer = local_relays::pubky().signer(Keypair::random());
     signer
         .signup(&PublicKey::try_from(hs.as_str()).unwrap(), Some(&token))
         .await
@@ -754,7 +762,7 @@ async fn the_owner_logs_in_and_out_and_a_wrong_identity_is_named() {
     assert_eq!(st, StatusCode::OK, "the owner's own session stays");
 
     // Another identity: refused, saying who approved and whose node it is
-    let stranger = Pubky::new().unwrap().signer(Keypair::random());
+    let stranger = local_relays::pubky().signer(Keypair::random());
     let (_, inv) = call_auth(
         &app,
         "POST",

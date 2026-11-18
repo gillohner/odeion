@@ -428,6 +428,9 @@ pub struct NodeHomeserver {
     /// Which network the client is on: on a local testnet a homeserver record naming the
     /// client's own machine is what the homeserver is; on the public network it isn't.
     network: Network,
+    /// The relay inbox Ring sign-ins go through; `None`: pubky's public relay. Tests that run
+    /// against a real homeserver bring a local relay, so a slow public relay can't fail them.
+    auth_relay: Option<url::Url>,
 }
 
 /// Pubky clients built in this process: each one starts its own DHT node and keeps its own
@@ -448,7 +451,11 @@ impl NodeHomeserver {
             Network::Mainnet => Pubky::new()?,
             Network::Testnet => Pubky::testnet()?,
         };
-        Ok(Self { pubky, network })
+        Ok(Self {
+            pubky,
+            network,
+            auth_relay: None,
+        })
     }
 
     /// Wrap a client the caller configured (timeouts, testnet host), on the public network.
@@ -458,7 +465,40 @@ impl NodeHomeserver {
 
     /// Wrap a client the caller configured, saying which network it is on.
     pub fn from_pubky_on(pubky: Pubky, network: Network) -> Self {
-        Self { pubky, network }
+        Self {
+            pubky,
+            network,
+            auth_relay: None,
+        }
+    }
+
+    /// Ring sign-ins and sign-ups started here go through the relay inbox `inbox` (e.g.
+    /// `http://127.0.0.1:<port>/inbox`) instead of pubky's public one. The link carries it, so
+    /// the signer posts its approval there too.
+    pub fn with_auth_relay(mut self, inbox: url::Url) -> Self {
+        self.auth_relay = Some(inbox);
+        self
+    }
+
+    /// The relay inbox set with [`Self::with_auth_relay`], if any.
+    pub fn auth_relay(&self) -> Option<&url::Url> {
+        self.auth_relay.as_ref()
+    }
+
+    /// A grant auth flow on this client, through [`Self::with_auth_relay`]'s relay when set.
+    fn grant_flow(
+        &self,
+        caps: &pubky::Capabilities,
+        kind: pubky::AuthFlowKind,
+        client_id: pubky::ClientId,
+    ) -> Result<pubky::PubkyGrantAuthFlow, HomeserverError> {
+        Ok(match &self.auth_relay {
+            Some(inbox) => pubky::PubkyGrantAuthFlow::builder(caps, kind, client_id)
+                .client(self.pubky.client().clone())
+                .relay(inbox.clone())
+                .start()?,
+            None => self.pubky.start_grant_auth_flow(caps, kind, client_id)?,
+        })
     }
 
     pub fn network(&self) -> Network {
@@ -1565,9 +1605,7 @@ impl NodeHomeserver {
             .map_err(|e| HomeserverError::Transport(e.to_string()))?;
         let client_id =
             pubky::ClientId::new(client_id).map_err(|e| HomeserverError::Transport(e.to_string()))?;
-        let flow = self
-            .pubky
-            .start_grant_auth_flow(&caps, pubky::AuthFlowKind::signin(), client_id)?;
+        let flow = self.grant_flow(&caps, pubky::AuthFlowKind::signin(), client_id)?;
         let url = flow.authorization_url().to_string();
         Ok(LoginFlow { flow, url })
     }
@@ -1602,7 +1640,7 @@ impl NodeHomeserver {
             pubky::ClientId::new(client_id).map_err(|e| HomeserverError::Transport(e.to_string()))?;
         let hs = PublicKey::try_from(homeserver).map_err(|e| HomeserverError::Key(e.to_string()))?;
         let kind = pubky::AuthFlowKind::signup(hs, Some(signup_token.to_string()));
-        let flow = self.pubky.start_grant_auth_flow(&caps, kind, client_id)?;
+        let flow = self.grant_flow(&caps, kind, client_id)?;
         let url = flow.authorization_url().to_string();
         Ok(LoginFlow { flow, url })
     }
@@ -1691,6 +1729,37 @@ mod capability_tests {
             "Server responded with an error: 403 Forbidden - Session does not have read access to path"
         ));
         assert!(!is_capability_error("connection reset"));
+    }
+
+    /// Sign-ins and sign-ups started on a client with its own relay name that relay in the link
+    /// (the signer posts there). A testnet client, so nothing here leaves the machine.
+    #[tokio::test]
+    async fn a_client_with_its_own_relay_names_it_in_the_link() {
+        let relay = |url: &str| {
+            url::Url::parse(url)
+                .unwrap()
+                .query_pairs()
+                .find(|(k, _)| k == "relay")
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default()
+        };
+        let local = NodeHomeserver::from_pubky_on(Pubky::testnet().unwrap(), Network::Testnet)
+            .with_auth_relay(url::Url::parse("http://127.0.0.1:9/inbox").unwrap());
+        let flow = local.start_login("relay-test.pubky.music").unwrap();
+        assert!(
+            relay(flow.url()).starts_with("http://127.0.0.1:9/inbox"),
+            "{}",
+            flow.url()
+        );
+        let hs = pubky::Keypair::random().public_key().z32();
+        let flow = local
+            .start_signup("relay-test.pubky.music", &hs, "AB12-CD34-EF56")
+            .unwrap();
+        assert!(
+            relay(flow.url()).starts_with("http://127.0.0.1:9/inbox"),
+            "{}",
+            flow.url()
+        );
     }
 }
 

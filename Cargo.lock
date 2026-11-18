@@ -1982,6 +1982,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-relay"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e59032dcf91c8618220edb7467d73835b9987decfeac79c77c835e5fc3bfaaa"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-server",
+ "bytes",
+ "futures-util",
+ "http-body",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3828,6 +3846,7 @@ dependencies = [
  "hex",
  "hound",
  "http-body-util",
+ "http-relay",
  "id3",
  "libc",
  "md-5",
@@ -4214,6 +4233,7 @@ dependencies = [
  "blake3",
  "bytes",
  "futures-util",
+ "http-relay",
  "pm-appdata",
  "pm-model",
  "pubky 0.16.2",
@@ -6217,6 +6237,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 

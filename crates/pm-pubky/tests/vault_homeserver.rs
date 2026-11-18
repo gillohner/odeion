@@ -13,6 +13,9 @@ use pm_pubky::vault::{Vault, VaultStoreError};
 use pubky::{Keypair, Pubky, PublicKey};
 use serde_json::json;
 
+#[path = "../../pm-api/tests/support/local_relays.rs"]
+mod local_relays;
+
 struct Admin {
     url: String,
     password: String,
@@ -65,7 +68,7 @@ async fn person_with_clients(a: &Admin, n: usize) -> (pubky::PubkySigner, Vec<pu
         .signup(&hs, Some(token.as_str().expect("a signup token")))
         .await
         .expect("sign-up");
-    let node = NodeHomeserver::new(network()).unwrap();
+    let node = signing_in();
     let mut sessions = Vec::new();
     for i in 0..n {
         let flow = node.start_login(&format!("vault-test-{i}.pubky.music")).unwrap();
@@ -87,11 +90,26 @@ fn network() -> pm_pubky::config::Network {
     }
 }
 
+/// A client on the network the test runs on; on the public network it also uses the local pkarr
+/// relay (`support/local_relays.rs`), so a new account's record is found at once.
+fn client() -> NodeHomeserver {
+    if testnet() {
+        NodeHomeserver::new(network()).unwrap()
+    } else {
+        local_relays::node_homeserver()
+    }
+}
+
+/// [`client`], with its Ring sign-ins through the local HTTP relay, not the public one.
+fn signing_in() -> NodeHomeserver {
+    client().with_auth_relay(local_relays::inbox())
+}
+
 fn pubky() -> Pubky {
     if testnet() {
         Pubky::testnet().unwrap()
     } else {
-        Pubky::new().unwrap()
+        local_relays::pubky()
     }
 }
 
@@ -815,7 +833,7 @@ async fn a_broad_grant_is_not_a_grant_for_the_sign_ins() {
         return;
     };
     let (signer, sessions) = person_with_clients(&a, 1).await;
-    let node = NodeHomeserver::new(network()).unwrap();
+    let node = signing_in();
     let flow = node.start_login_with("backup-tool.example", "/:rw").unwrap();
     signer.approve_auth(flow.url()).await.expect("approve");
     let broad = flow.await_approval().await.expect("session");
