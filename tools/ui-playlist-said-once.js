@@ -6,6 +6,9 @@
 // songs are in this library, is on the top line where nothing else says it: for a listener (who
 // gets no source chips) and when finding where the songs play failed ("· 1 in this library", as a
 // shared playlist's "N play here"). With the chips there ("1 Library"), the top line doesn't repeat it.
+// Who sees it and where it is kept is said once too, by the note under the buttons: the small line
+// above the name is the kind alone, "Playlist" (it said "PLAYLIST · PRIVATE · ON THIS NODE" above
+// "Private on this node; …"), and the note has 8 px of air under the buttons (it touched them).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-playlist-said-once.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -22,6 +25,8 @@ const withSummary = (o) => ({ ...fx.detail, summary: { ...fx.summary, ...o }, pl
 const cases = [
   { name: 'private', d: withSummary({}), note: /Private on this node/, sub: '1 song · 1 link · 4 min', chips: true },
   { name: 'public-synced', d: withSummary({ visibility: 'public', synced: true }), note: /Public on Pubky/, sub: '1 song · 1 link · 4 min', chips: true },
+  { name: 'private-synced', d: withSummary({ synced: true }), note: /^Private on your homeserver/, sub: '1 song · 1 link · 4 min', chips: true },
+  { name: 'public-pending', d: withSummary({ visibility: 'public' }), note: /^Public copy pending/, sub: '1 song · 1 link · 4 min', chips: true },
   { name: 'listener', role: 'listener', d: withSummary({}), note: /Private/, sub: '1 song · 1 link · 4 min · 1 in this library', chips: false },
   { name: 'sources-failed', d: withSummary({}), pfFail: true, note: /Private on this node/, sub: '1 song · 1 link · 4 min · 1 in this library', chips: false },
 ];
@@ -45,6 +50,9 @@ const cases = [
               sub: (main.querySelector('.hero .sub') || {}).textContent || '',
               note: (main.querySelector('.hero p[role="status"]') || {}).textContent || '',
               chips: !!main.querySelector('.plsummary [data-pfilter]'),
+              eyebrow: (main.querySelector('.hero .eyebrow') || {}).innerText || '',
+              eyebrowLines: (() => { const e = main.querySelector('.hero .eyebrow'); if (!e) return 0; const cs = getComputedStyle(e); return Math.round(e.getBoundingClientRect().height / (parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.2)); })(),
+              air: (() => { const a = main.querySelector('.hero .actions'); const n = a && a.nextElementSibling; return n ? n.getBoundingClientRect().top - Math.max(...[...a.children].filter((b) => b.getClientRects().length).map((b) => b.getBoundingClientRect().bottom)) : null; })(),
               text: main.innerText,
             };
           });
@@ -57,6 +65,9 @@ const cases = [
           check(got.chips === c.chips, `${at}: source chips ${got.chips ? 'shown' : 'not shown'} (want ${c.chips ? 'shown' : 'not shown'})`);
           check(!/\b2 · 1 in this library\b/.test(got.text), `${at}: the link is not counted as a second song`);
           check(c.note.test(got.note), `${at}: the note under the buttons still says who sees it and where (${JSON.stringify(got.note)})`);
+          check(/^playlist$/i.test(got.eyebrow.trim()) && got.eyebrowLines === 1, `${at}: the line above the name is the kind alone, on one line (${JSON.stringify(got.eyebrow.trim())}, ${got.eyebrowLines} lines)`);
+          check(!/\b(private|public|homeserver|this node)\b/i.test(got.eyebrow), `${at}: who sees it and where is not said again above the name`);
+          check(got.air >= 6, `${at}: the note has air under the buttons (${got.air == null ? 'no note' : got.air.toFixed(1) + ' px'})`);
           if (c.name === 'public-synced') check(!/\(private\)/.test(got.text), `${at}: a shared playlist is never called private`);
           let copy = null; try { await fx.cleanCopy(page); } catch (e) { copy = e.message; }
           check(!copy, `${at}: clean copy, no horizontal overflow ${copy || ''}`);
