@@ -37,9 +37,11 @@ struct Relays {
     pkarr: String,
 }
 
+/// The relays, started on first use. A start that failed is kept too, so every test after it fails
+/// at once with the same reason instead of starting them again.
 fn relays() -> &'static Relays {
-    static RELAYS: OnceLock<Relays> = OnceLock::new();
-    RELAYS.get_or_init(|| {
+    static RELAYS: OnceLock<Result<Relays, String>> = OnceLock::new();
+    let started = RELAYS.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -63,11 +65,13 @@ fn relays() -> &'static Relays {
                 std::future::pending::<()>().await;
             });
         });
-        match rx.recv().expect("the local relays started") {
-            Ok(relays) => relays,
-            Err(why) => panic!("{why}"),
-        }
-    })
+        rx.recv()
+            .unwrap_or_else(|_| Err("the local relays did not start".into()))
+    });
+    match started {
+        Ok(relays) => relays,
+        Err(why) => panic!("{why}"),
+    }
 }
 
 /// Packets by key (z32); a newer one replaces an older one, as on a real relay.
