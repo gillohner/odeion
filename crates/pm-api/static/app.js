@@ -5523,9 +5523,17 @@
   // Track rows on #main: one listener, bound once, reading the current page's lists (every render
   // used to add another, so ⋯ ran once per visit with the lists of pages left behind)
   let rowLists = {}; let rowsBound = false;
+  // Where the click before this one landed: a song row's list, place and song (a redraw keeps them),
+  // or '' off the rows. Every click counts, also one off the rows. One on a row's own button or link
+  // counts as '' (the heart, then a quick click on the row, plays it), but its play button counts as
+  // the row (that click already started it)
+  const trackSpot = (el) => { const row = el && el.closest && el.closest('[data-list] .track'); return row ? `${row.closest('[data-list]').dataset.list}:${row.dataset.i}:${row.dataset.tid || ''}` : ''; };
+  let trackWas = ''; let trackLast = '';
   const bindTrackRows = (container, pageLists) => {
     rowLists = pageLists; if (rowsBound) return; rowsBound = true;
-    // A song row's second click of a double click selects no word of it (the first one plays)
+    document.addEventListener('click', (e) => { const own = e.target.closest && e.target.closest('a, button, input'); trackWas = trackLast; trackLast = own && own.dataset.act !== 'play' ? '' : trackSpot(e.target); }, true);
+    // A song row's second click of a double click selects no word of it (the first one plays). This
+    // stays on every row: a word selected on the next row would hold that row's click
     container.addEventListener('mousedown', (e) => { if (e.detail > 1 && e.target.closest('[data-list] .track') && !e.target.closest('a, button, input, select, textarea, label')) e.preventDefault(); });
     onBusy(container, 'click', async (e) => {
       const lists = rowLists;
@@ -5533,11 +5541,17 @@
       // A click on the row plays from there, as a playlist's or an album's song row does: with a mouse
       // too, not only on a touch screen (no hover to reveal the play button). Its names and buttons keep
       // their own click (on a phone the names take no taps, app.css, so a tap there plays), and the
-      // second click of a double click, or a drag that selects the row's text, doesn't start it (text
-      // selected elsewhere doesn't hold it: a tap on a touch screen's row leaves that selection alone).
+      // second click of a double click, or a drag that selects the row's text, doesn't start it. Only a
+      // selection with words in it that starts or ends in the row holds it (a mouse drag's click has
+      // both ends there): on a touch screen the rows can't be selected, so a selection made elsewhere
+      // stays, even one across the rows or an empty one inside a row, and a tap on the row plays.
+      // A quick tap on the next row can come as a double tap's second (a phone counts taps up to 100 dp
+      // apart, more than a row), so only a second click on the row the first one hit is held.
       if (!btn) {
         const row = e.target.closest('.track'); const list = row && row.closest('[data-list]');
-        if (row && list && e.detail < 2 && !e.target.closest('a, button, input') && (getSelection().isCollapsed || !getSelection().containsNode(row, true))) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
+        const again = e.detail > 1 && trackWas === trackSpot(row);
+        const sel = getSelection(); const picked = !!row && String(sel) !== '' && (row.contains(sel.anchorNode) || row.contains(sel.focusNode));
+        if (row && list && !again && !picked && !e.target.closest('a, button, input')) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
         return;
       }
       const row = btn.closest('.track'); const list = btn.closest('[data-list]');
