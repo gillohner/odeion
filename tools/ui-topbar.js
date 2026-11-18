@@ -9,6 +9,14 @@
 //   * the search keeps its magnifier (44 px);
 //   * what gives way stays: a screen reader still reads "Scanning library…", and the warning's dot
 //     is drawn on screen.
+// On a touch screen (360 and 412 px, a browser with Install and the Android app without it, with and
+// without the "not answering" warning, with your picture in the account button), Help, the warning,
+// Install and the account button sit 6 px apart: each gap is shared half and half (a tap just right
+// of Help doesn't open Install, just right of Install not the account menu) with no dead pixel, each
+// reaches 44 px or more wide, the warning
+// (a 25 px line) 44 px or more tall inside the bar, the account button keeps 6 px to the screen
+// edge, Help doesn't reach down past its box, and the buttons are drawn 44 px as before. With a
+// mouse Help has no reach of its own.
 // Screenshots of the crowded bar go to the shots folder.
 //   node tools/ui-topbar.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -65,6 +73,87 @@ const STATES = [
       if (scanning && health === bad) await page.screenshot({ path: path.join(SHOTS, `topbar-${width}.png`), clip: { x: 0, y: 0, width, height: 72 } });
       await context.close();
     }
+  }
+  // Touch: who takes each tap along the bar's middle line
+  for (const width of [360, 412]) {
+    for (const android of [false, true]) {
+      for (const [name, health, pic] of [['nothing showing', ok, false], ['your picture in the account button', ok, true], ['a part not answering', bad, false]]) {
+        const { context, page, state } = await fx.create(browser, width, { mobile: true, fixtures: { '/info': info(false), '/health': { body: health } } });
+        if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+        await fx.go(page, '/');
+        await page.locator('#help button.fb-help').waitFor();
+        if (!android) await page.locator('#installbtn:not([hidden])').waitFor();
+        if (health === bad) await page.locator('.topbar #upstreams:not([hidden])').waitFor();
+        // The account button as drawMe draws a signed-in profile's picture (the fixture has no key)
+        if (pic) await page.evaluate(() => { const me = document.querySelector('#me'); me.classList.add('has-face'); me.innerHTML = '<img class="face md" alt="" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2264%22 height=%2264%22%3E%3Crect width=%2264%22 height=%2264%22 fill=%22%232a7%22/%3E%3C/svg%3E">'; });
+        const m = await page.evaluate(() => {
+          const shown = (e) => e && !e.hidden && e.getBoundingClientRect().width > 0 && getComputedStyle(e).display !== 'none';
+          const els = ['.topbar #upstreams', '#help button.fb-help', '#installbtn', '#me'].map((s) => document.querySelector(s)).filter(shown)
+            .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+          const id = (e) => (e ? e.id || e.className.split(' ').pop() : 'none');
+          const who = (x, y) => { const h = document.elementFromPoint(x, y); return id(h && els.find((e) => e === h || e.contains(h))); };
+          const y = (() => { const r = document.querySelector('#me').getBoundingClientRect(); return r.top + r.height / 2; })();
+          const gaps = []; const reach = {};
+          for (let i = 0; i + 1 < els.length; i++) {
+            const A = els[i].getBoundingClientRect(); const B = els[i + 1].getBoundingClientRect();
+            // whole pixels (hit testing snaps to the device grid): one more than a pixel from the middle
+            // is the nearer button's, the middle pixel either's; in a gap of 12 px or less none is nobody's
+            const wrong = [];
+            const near = B.left - A.right <= 12;
+            for (let x = Math.ceil(A.right); x < B.left; x++) {
+              const w = who(x, y); const da = x - A.right; const db = B.left - x;
+              if (w === id(els[i + 1]) && da < db - 2) wrong.push(`${x}→${w}`);
+              else if (w === id(els[i]) && da > db + 2) wrong.push(`${x}→${w}`);
+              else if (near && w === 'none') wrong.push(`${x}→none`);
+            }
+            gaps.push({ a: id(els[i]), b: id(els[i + 1]), gap: +(B.left - A.right).toFixed(1), wrong, at: A.right.toFixed(2) + '..' + B.left.toFixed(2) });
+          }
+          for (const e of els) {
+            const r = e.getBoundingClientRect(); const me = id(e);
+            let l = Math.floor(r.left); let rt = Math.ceil(r.right) - 1;
+            while (l > 0 && who(l - 1, y) === me) l--;
+            while (rt + 1 < innerWidth && who(rt + 1, y) === me) rt++;
+            rt += 1;
+            let t = Math.floor(r.top + 1); let bt = Math.ceil(r.bottom) - 1; const cx0 = Math.round(r.left + r.width / 2);
+            while (t > 0 && who(cx0, t - 1) === me) t--;
+            while (bt + 1 < innerHeight && who(cx0, bt + 1) === me) bt++;
+            bt += 1;
+            const cx = r.left + r.width / 2;
+            reach[me] = { drawn: +r.width.toFixed(1), drawnH: +r.height.toFixed(1), wide: +(rt - l).toFixed(1), tall: bt - t, top: t, bottom: bt, right: +(rt - r.right).toFixed(1), below: who(cx, r.bottom + 2) === me };
+          }
+          const bar = document.querySelector('.topbar').getBoundingClientRect();
+          return { gaps, reach, inner: innerWidth, bar: { top: bar.top, bottom: bar.bottom }, coarse: matchMedia('(pointer: coarse)').matches };
+        });
+        const where = `touch ${android ? 'Android app' : 'browser'} ${width} px, ${name}`;
+        check(m.coarse, `${where}: a coarse pointer`);
+        for (const g of m.gaps) check(!g.wrong.length, `${where}: ${g.a} | ${g.b} share their ${g.gap} px gap${g.wrong.length ? ': ' + g.wrong.join(' ') + ' (' + g.at + ')' : ''}`);
+        const want = android ? ['fb-help', 'me'] : ['fb-help', 'installbtn', 'me'];
+        check(want.every((k) => m.reach[k]) && (android ? !m.reach.installbtn : true), `${where}: the bar has ${want.join(', ')} (${Object.keys(m.reach).join(', ')})`);
+        for (const k of want) {
+          const r = m.reach[k]; if (!r) continue;
+          check(r.wide >= 44, `${where}: ${k} takes a ${r.wide} px wide tap (≥ 44)`);
+          check(Math.abs(r.drawn - 44) < 0.6 && Math.abs(r.drawnH - 44) < 0.6, `${where}: ${k} is drawn 44 × 44 (${r.drawn} × ${r.drawnH})`);
+        }
+        if (m.reach.me) check(m.reach.me.right >= 6, `${where}: the account button reaches ${m.reach.me.right} px towards the screen edge (≥ 6)`);
+        if (health === bad) {
+          const u = m.reach.upstreams;
+          check(!!u && u.tall >= 44 && u.top >= m.bar.top - 0.5 && u.bottom <= m.bar.bottom + 0.5, `${where}: the warning takes a ${u ? u.tall : 0} px tall tap (≥ 44), inside the bar (${u ? u.top + '–' + u.bottom : '-'} in ${Math.round(m.bar.top)}–${Math.round(m.bar.bottom)})`);
+        }
+        if (m.reach['fb-help']) check(!m.reach['fb-help'].below, `${where}: Help doesn't reach below its box`);
+        check(!state.errors.length, `${where}: no page errors ${state.errors.join('; ')}`);
+        if (!android && health === ok) await page.screenshot({ path: path.join(SHOTS, `topbar-touch-${width}${pic ? '-picture' : ''}.png`), clip: { x: 0, y: 0, width, height: 72 } });
+        await context.close();
+      }
+    }
+  }
+  // A mouse: Help has no reach of its own (the touch rule only)
+  {
+    const { context, page } = await fx.create(browser, 360, { fixtures: { '/info': info(false), '/health': { body: ok } } });
+    await fx.go(page, '/');
+    await page.locator('#help button.fb-help').waitFor();
+    const c = await page.evaluate(() => ({ fine: !matchMedia('(pointer: coarse)').matches, help: getComputedStyle(document.querySelector('#help button.fb-help'), '::before').content }));
+    check(c.fine && c.help === 'none', `mouse 360 px: Help has no reach (${c.fine ? 'fine' : 'coarse'} pointer, ::before ${c.help})`);
+    await context.close();
   }
   await browser.close();
   console.log(failed ? `${failed} failed` : 'all passed');

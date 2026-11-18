@@ -1694,6 +1694,21 @@ html[data-shell="phone"] .topbar { padding: 0 6px 0 14px; gap: 6px; }
    beside them (they were 36 px, and Install shrank to 33 px wide in a crowded bar). */
 html[data-shell="phone"] .topbar :is(.fb-help, .install-btn) { flex: none; min-width: 44px; height: 44px; min-height: 44px; justify-content: center; }
 html[data-shell="phone"] .topbar .install-btn { width: 44px; }
+/* On a touch screen the bar's buttons sit 6 px apart and each icon button reached 6 px round, so the
+   later one took the whole gap (a tap just right of Help opened Install, just right of Install the
+   account menu). Help, the "not answering" warning, Install and the account button share each gap
+   half and half; the account button keeps its 6 px to the screen edge, also with your picture in it
+   (the picture is round and fits the button, so the button needn't clip, which cut its reach off).
+   Help is already 44 px tall: it reaches sideways only, from inside its 1 px border. The warning is
+   a 25 px line: it reaches 10 px up and down (45 px), still inside the bar. Nothing drawn moves. */
+@media (pointer: coarse) {
+  html[data-shell="phone"] .topbar :is(.fb-help, .upstreams) { position: relative; isolation: isolate; }
+  html[data-shell="phone"] .topbar :is(.fb-help, .upstreams, .icon-btn)::before { content: ''; position: absolute; inset: -6px -3px; z-index: -1; }
+  html[data-shell="phone"] .topbar .fb-help::before { inset: -1px -4px; }
+  html[data-shell="phone"] .topbar .upstreams::before { inset: -10px -3px; }
+  html[data-shell="phone"] .topbar > .icon-btn:last-child::before { right: -6px; }
+  html[data-shell="phone"] .topbar .me-btn.has-face { overflow: visible; }
+}
 /* Phone: every way back (an item or playlist page's Back, a Settings or Sources panel's Back) takes
    a 44 px tall tap. The button and its margins stay as they are, so the page doesn't move; an
    invisible layer centred on it reaches into the space above and below. */
