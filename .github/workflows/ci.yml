@@ -59,7 +59,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # Usually 15-23 min; a Cargo.lock change misses the cache and has run past 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -578,8 +579,8 @@ jobs:
   # The UI pages checked against fixtures in a real Chromium (tools/ui-fixture.js: the app's own
   # files, no node, no build), split over five runners; every page is in exactly one of them.
   # The pages that take a minute or more have a fixed runner (`pin` below), so new pages added to
-  # the list cannot shift them all onto one runner; the others go round robin. Each runner takes
-  # about 13-15 minutes.
+  # the list cannot shift them all onto one runner; the others go round robin. Each runner has
+  # about 16 minutes of pages, plus the Playwright install (usually under a minute).
   ui-fixtures:
     name: ui-fixtures (${{ matrix.shard }}/5)
     needs: changes
@@ -609,13 +610,14 @@ jobs:
           SHARDS: ${{ strategy.job-total }}
         run: |
           cd /tmp/pw
-          # The pages that took a minute or more on CI, as page=runner; each must be in the list below
+          # The pages that took a minute or more on CI, as page=runner, spread so each runner has about
+          # the same total (runner 2 also runs the identify check, ~2 min); each must be in the list below
           pin='
-            ui-item-redraw.js=1 ui-review-fixes.js=1 ui-phone-action-rows.js=1
-            ui-native-player.js=2 ui-browser-place.js=2 ui-move-toast.js=2 ui-phone-simplify.js=2
-            ui-empty-queue.js=3 ui-browser-keys.js=3 ui-usb-dac.js=3 ui-motion.js=3
-            ui-shuffle-repeat.js=4 ui-similar-tiles.js=4 ui-select-bar-focus.js=4
-            ui-browser-midsong.js=5 ui-library-count-redraw.js=5 ui-library-sort.js=5 ui-sticky-focus.js=5
+            ui-motion.js=1 ui-shuffle-repeat.js=1 ui-move-toast.js=1
+            ui-usb-dac.js=2 ui-native-player.js=2 ui-item-redraw.js=2 ui-phone-libnav-focus.js=2
+            ui-similar-tiles.js=3 ui-phone-action-rows.js=3 ui-select-bar-focus.js=3 ui-browser-keys.js=3
+            ui-review-fixes.js=4 ui-phone-item-hero-row.js=4 ui-sticky-focus.js=4 ui-browser-place.js=4
+            ui-phone-simplify.js=5 ui-library-count-redraw.js=5 ui-empty-queue.js=5 ui-browser-midsong.js=5
           '
           pin=" $(echo $pin) "
           n=0
