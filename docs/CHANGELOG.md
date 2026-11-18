@@ -5,6 +5,8 @@ Newest first. Dates are when the change landed on `main`.
 ## Unreleased
 
 ### 2026-11-18
+
+- **A cloud drive folder that can't be read has Try again.** In Your library › Node library › Cloud drives › Add a folder, a folder the drive couldn't list showed only its error, and at the drive's top level (no Back) only Cancel was left. The error now has Try again, which asks the drive again and shows the folders when it works. Add this folder stays off until the folder can be read, since a folder the drive can't list can't be scanned either. The picker's text lines now sit inside the list like its rows.
 - **On a phone, larger text never puts the row you're on under the Library chips.** Changing the phone's text size while a Library page is open makes the chips at the top taller. The page only noticed when its content changed, so until then a row you went to with the keyboard could stop partly under the chips. Now the room kept above a row follows the chips' height straight away. A playlist waiting on a slow node also asks it about your Pubky sign-in once, not again each time it is drawn or you press Try again.
 
 ### 2026-11-17

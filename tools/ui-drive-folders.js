@@ -8,6 +8,11 @@
 // that rows going somewhere use; opening a folder puts the focus on its first folder (or on Add
 // this folder when it has none); Back puts it on the folder you came out of; a folder that fails
 // keeps Back, which has the focus. Focus moved elsewhere (Cancel) while the drive reads stays there.
+// A folder the drive couldn't read (the drive's top level too, which has no Back) said only its
+// error, with Add this folder still on for a folder that can't be listed or scanned. Now it says
+// it with Try again, which asks the drive again (the focus goes to the first folder
+// when it works, stays on Try again when it fails again), and Add this folder is off until a read
+// works.
 // A slow read of a folder left before it answered, landing after another folder was opened, draws
 // nothing; Add this folder adds the folder shown.
 // Real UI in Chromium against fixtures (no node).
@@ -28,11 +33,11 @@ const fixtures = {
   '/library/drives': { body: { providers: [google], roots: [] } },
 };
 // The drive's folders by parent: root › Albums (› Discs, Singles), Live (no folders), Broken (can't
-// be read), Many (40 folders, more than the list shows)
+// be read, until a test lets it: then Recovered), Many (40 folders, more than the list shows)
 const tree = {
   root: [{ id: 'f1', name: 'Albums' }, { id: 'f2', name: 'Live' }, { id: 'f3', name: 'Broken' }, { id: 'f4', name: 'Many' }],
   f1: [{ id: 'f11', name: 'Discs' }, { id: 'f12', name: 'Singles' }],
-  f2: [], f11: [], f12: [],
+  f2: [], f11: [], f12: [], f3: [{ id: 'f31', name: 'Recovered' }], // (once Broken can be read)
   f4: Array.from({ length: 40 }, (_, k) => ({ id: `f4-${k + 1}`, name: `Disc ${k + 1}` })),
 };
 
@@ -42,17 +47,18 @@ const tree = {
   const check = async (name, fn) => { try { await fn(); oks++; console.log('ok  ', name); } catch (e) { fails++; console.log('FAIL', name, '-', e.message.split('\n')[0]); } };
   for (const width of [1280, 1024, 768, 412]) {
     const file = (n) => path.join(shots, `${n}-${width}.png`);
-    const open = async (slow, inside) => {
-      const o = await fx.create(browser, width, { mobile: width < 600, fixtures });
+    // fail: the folders the drive can't read just now (a Set; change it to let a read work)
+    const open = async (slow, inside, fail = new Set(['f3'])) => {
+      const o = await fx.create(browser, width, { mobile: width < 600, fixtures }); o.reads = [];
       await o.page.route('**/v1/library/drives/google/folders*', async (r) => {
-        const parent = new URL(r.request().url()).searchParams.get('parent');
+        const parent = new URL(r.request().url()).searchParams.get('parent'); o.reads.push(parent);
         if (slow && slow.parent === parent) { await slow.wait; if (inside?.[parent]) return r.fulfill({ contentType: 'application/json', body: JSON.stringify(inside[parent]) }); }
-        if (parent === 'f3') return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The drive refused to list Broken' }) });
+        if (fail.has(parent)) return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The drive refused to list Broken' }) });
         return r.fulfill({ contentType: 'application/json', body: JSON.stringify(tree[parent] || []) });
       });
       await fx.go(o.page, '/settings/library');
       await o.page.locator('[data-dr-add="google"]').click();
-      await o.page.locator('dialog.dialog[open] [data-dfopen]').first().waitFor();
+      await o.page.locator(fail.has('root') ? 'dialog.dialog[open] #dfbox [data-dfretry]' : 'dialog.dialog[open] [data-dfopen]').first().waitFor();
       return o;
     };
     const focused = (page) => page.evaluate(() => { const a = document.activeElement; return a ? (a.id ? '#' + a.id : a.textContent.trim()) : ''; });
@@ -124,6 +130,74 @@ const tree = {
         await page.keyboard.press('Enter');
         await at(page, 'Google Drive');
         assert.equal(await focused(page), 'Broken');
+        // (Add this folder is on again for a folder that reads after one that didn't)
+        await page.locator('[data-dfopen="0"]').click();
+        await at(page, 'Google Drive › Albums');
+        assert.equal(await page.locator('#dfadd').isDisabled(), false, 'Add this folder is on for Albums');
+        assert.deepEqual(state.errors.filter((e) => !/500|refused/.test(e)), [], 'no other page errors');
+      } finally { await context.close(); }
+    });
+
+    await check(`a folder that can't be read says so with Try again, and Add this folder is off; Try again asks again (${width})`, async () => {
+      const fail = new Set(['f3']);
+      const o = await open(undefined, undefined, fail); const { page, context, state } = o;
+      const reads = () => o.reads.filter((x) => x === 'f3').length;
+      try {
+        await page.locator('[data-dfopen="2"]').click();
+        await at(page, 'Google Drive › Broken');
+        const note = page.locator('#dfbox [role="alert"]');
+        assert.match(await note.textContent(), /refused to list Broken/);
+        assert.equal(await note.locator('[data-dfretry]').textContent(), 'Try again');
+        // (the line sits in the rows' inset, not on the list's edge)
+        const inset = await page.evaluate(() => { const t = document.createRange(); const p = document.querySelector('#dfbox [role="alert"]'); t.selectNodeContents(p.firstChild); return t.getBoundingClientRect().left - document.querySelector('#dfbox').getBoundingClientRect().left; });
+        assert.ok(inset >= 8, `the error starts ${inset} px from the list's edge`);
+        assert.equal(await page.locator('#dfadd').isDisabled(), true, "Add this folder is off for a folder the drive can't list");
+        assert.equal(await focused(page), '‹ Back', 'just opened: Back has the focus');
+        // Try again by keyboard, failing again: the focus stays on Try again, Back stays
+        await page.keyboard.press('Tab');
+        assert.equal(await focused(page), 'Try again');
+        const before = reads();
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(() => document.querySelector('#dfbox [data-dfretry]') && !document.querySelector('#dfbox .spin'), null);
+        await page.waitForFunction(() => document.activeElement?.hasAttribute('data-dfretry'), null, { timeout: 3000 });
+        assert.equal(reads(), before + 1, 'the drive was asked again');
+        assert.equal(await page.locator('#dfbox [data-dfup]').count(), 1, 'Back is still there');
+        assert.equal(await page.locator('#dfadd').isDisabled(), true);
+        // The drive answers now, slowly: Add this folder stays off while it reads; then its
+        // folders, the focus on the first, Add this folder on
+        fail.delete('f3');
+        let go; const held = new Promise((res) => { go = res; });
+        await page.route('**/v1/library/drives/google/folders?parent=f3', async (r) => { await held; return r.fallback(); });
+        await page.keyboard.press('Enter');
+        await page.locator('#dfbox .spin').waitFor();
+        assert.equal(await page.locator('#dfadd').isDisabled(), true, 'Add this folder stays off while the folder is asked again');
+        go();
+        await page.locator('#dfbox [data-dfopen]').first().waitFor();
+        await page.screenshot({ path: file('after-retried') });
+        assert.equal(await page.locator('#dfpath').textContent(), 'Google Drive › Broken', 'still the same folder');
+        assert.equal(await page.locator('#dfbox [data-dfretry]').count(), 0, 'no error left');
+        assert.equal(await focused(page), 'Recovered', 'its first folder has the focus');
+        assert.equal(await page.locator('#dfadd').isDisabled(), false, 'Add this folder is on again');
+        assert.deepEqual(state.errors.filter((e) => !/500|refused/.test(e)), [], 'no other page errors');
+      } finally { await context.close(); }
+    });
+
+    await check(`the drive's top level that can't be read has Try again (no Back to go to); it then shows the folders (${width})`, async () => {
+      const fail = new Set(['root']);
+      const { page, context, state } = await open(undefined, undefined, fail);
+      try {
+        await at(page, 'Google Drive');
+        await page.screenshot({ path: file('after-top-failed') });
+        assert.equal(await page.locator('#dfbox [data-dfup]').count(), 0, 'no Back at the top');
+        const again = page.locator('#dfbox [role="alert"] [data-dfretry]');
+        assert.equal(await again.count(), 1, 'Try again is there');
+        assert.equal(await page.locator('#dfadd').isDisabled(), true);
+        fail.delete('root');
+        await again.click();
+        await page.locator('#dfbox [data-dfopen]').first().waitFor();
+        assert.equal(await page.locator('#dfbox [data-dfopen]').count(), 4, "the drive's folders");
+        assert.equal(await focused(page), 'Albums', 'the focus went with the list, to its first folder');
+        assert.equal(await page.locator('#dfadd').isDisabled(), true, 'the top level is never added (as before)');
         assert.deepEqual(state.errors.filter((e) => !/500|refused/.test(e)), [], 'no other page errors');
       } finally { await context.close(); }
     });

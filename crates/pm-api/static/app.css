@@ -1872,6 +1872,9 @@ html[data-shell="phone"] #jobpop, html[data-shell="phone"] #volpop { width: auto
 .picker .list-row { width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid var(--line); font: inherit; color: var(--fg); cursor: pointer; }
 .picker .list-row:first-child { border-top: 0; }
 .picker .list-row:hover { background: var(--surface-2); }
+/* A picker's line of text (reading, none inside, an error with Try again) sits in the rows' inset, not on the list's edge */
+.picker > p { margin: 0; padding: 8px 10px; }
+.picker .list-row + p { border-top: 1px solid var(--line); }
 /* Search: one scrolling row of sources on phones */
 @media (max-width: 720px) {
   .scopechips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -14px; margin-right: -14px; padding: 0 14px; scroll-padding-inline: 14px; }

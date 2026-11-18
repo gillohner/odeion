@@ -5657,27 +5657,33 @@
     let draws = 0; let keyed = false;
     d.addEventListener('keydown', () => { keyed = true; }, true);
     d.addEventListener('pointerdown', () => { keyed = false; }, true);
-    const show = async (came) => {
+    const show = async (came, again) => {
       const here = trail[trail.length - 1]; const mine = ++draws; const box = $('#dfbox', d);
-      const moved = trail.length > 1 || !!came;
+      const moved = trail.length > 1 || !!came || !!again;
       $('#dfpath', d).textContent = trail.map((t) => t.name).join(' › ');
-      $('#dfadd', d).disabled = trail.length < 2;
+      $('#dfadd', d).disabled = trail.length < 2 || !!again; // (off while a folder that failed is asked again)
       box.innerHTML = '<p class="muted small"><span class="spin"></span> Reading the drive…</p>';
       const free = () => { const a = document.activeElement; return !a || a === document.body || a === d || box.contains(a); };
-      // (Back stays when a folder can't be read, so a folder that fails isn't a dead end)
+      // (Back stays when a folder can't be read, and Try again asks the drive again, so a folder
+      // that fails isn't a dead end, the drive's top level included. Add this folder waits for a
+      // read that worked: a folder the drive can't list can't be scanned either. The focus goes to
+      // Back when you just opened it, to Try again when that failed again.)
       const up = trail.length > 1 ? '<button class="list-row" data-dfup>‹ Back</button>' : '';
       let to = null;
       try {
         const fs = await api('GET', `/library/drives/${provider}/folders?parent=${encodeURIComponent(here.id)}`);
         if (mine !== draws) return;
+        $('#dfadd', d).disabled = trail.length < 2;
         box.innerHTML = up + (fs.length ? fs.map((f, k) => `<button class="list-row" data-dfopen="${k}"><span class="grow">${esc(f.name)}</span>${icon('chevron', 'ic right')}</button>`).join('') : '<p class="muted small">No folders inside.</p>');
         $$('[data-dfopen]', d).forEach((b) => b.onclick = () => { trail.push(fs[Number(b.dataset.dfopen)]); show(); });
         const k = came ? fs.findIndex((f) => f.id === came.id) : -1;
-        to = $(`[data-dfopen="${Math.max(k, 0)}"]`, d) || $('#dfadd:not([disabled])', d) || $('[data-dfup]', d);
+        to = $(`[data-dfopen="${Math.max(k, 0)}"]`, d) || $('#dfadd:not([disabled])', d) || $('[data-dfup]', d) || $('[data-dfclose]', d);
       } catch (e) {
         if (mine !== draws) return;
-        box.innerHTML = `${up}<p class="muted small">${esc(e.message)}</p>`;
-        to = $('[data-dfup]', d);
+        box.innerHTML = `${up}<p class="muted small hfail" role="alert">${esc(e.message)} <button class="btn sm" type="button" data-dfretry>Try again</button></p>`;
+        $('#dfadd', d).disabled = true;
+        $('[data-dfretry]', d).onclick = () => show(null, true);
+        to = (!again && $('[data-dfup]', d)) || $('[data-dfretry]', d);
       }
       const back = $('[data-dfup]', d); if (back) back.onclick = () => { const left = trail.pop(); show(left); };
       if (moved && to && free()) { to.focus({ preventScroll: true }); if (keyed) to.scrollIntoView({ block: 'nearest' }); }
