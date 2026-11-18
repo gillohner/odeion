@@ -6585,11 +6585,19 @@
     const songs = all.filter((t) => !t.card); const at = (k) => Math.max(0, songs.indexOf(all[k]));
     $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, at(Number(b.dataset.splay)), 'replace', ctx.plays_from, b, ctx.fallback); });
     // While selecting, a tap on a row ticks it (on phones a long press starts selecting, and the
-    // next taps add songs): it never plays and replaces the queue then. Its box ticks itself
-    $$('[data-srow]:not([data-card]):not([data-search])', box).forEach((r) => r.onclick = (e) => {
-      if (e.target.closest('a,button')) return;
-      if (r.closest('.selecting')) { const c = $('.selbox input', r); if (c && !e.target.closest('.selbox')) { c.checked = !c.checked; c.dispatchEvent(new Event('change', { bubbles: true })); } return; }
-      playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback);
+    // next taps add songs): it never plays and replaces the queue then. Its box ticks itself.
+    // The second click of a double click doesn't start the song again and selects no word of the row,
+    // and a drag that selects the row's text doesn't start it, as on a library song row. Only a selection
+    // that starts or ends in the row holds it (a mouse drag's click has both ends there): on a touch
+    // screen the rows can't be selected, so a selection made elsewhere stays, even one across the rows
+    $$('[data-srow]:not([data-card]):not([data-search])', box).forEach((r) => {
+      r.onmousedown = (e) => { if (e.detail > 1 && !e.target.closest('a, button, input, select, textarea, label')) e.preventDefault(); };
+      r.onclick = (e) => {
+        if (e.target.closest('a,button')) return;
+        if (r.closest('.selecting')) { const c = $('.selbox input', r); if (c && !e.target.closest('.selbox')) { c.checked = !c.checked; c.dispatchEvent(new Event('change', { bubbles: true })); } return; }
+        const s = getSelection(); if (e.detail > 1 || (!s.isCollapsed && (r.contains(s.anchorNode) || r.contains(s.focusNode)))) return;
+        playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback);
+      };
     });
     fillCards(box);
     // A card's ⋯: open it, copy its link, and the row's own moves (on phones the only way to them)
@@ -7424,11 +7432,6 @@
   const listControls = (kind, pref, letters) => `<div class="listbar"><label class="small muted">Sort <select class="input sm" data-lsort aria-label="Sort">${LIST_SORTS[kind].map(([k, l]) => `<option value="${k}" ${pref.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${kind === 'albums' ? `<button class="chip ${pref.fav ? 'on' : ''}" data-lfav aria-pressed="${!!pref.fav}">${icon(pref.fav ? 'heart-fill' : 'heart')} Favourites</button>` : ''}${letters.length > 1 ? `<span class="azbar" role="group" aria-label="Jump to a letter">${letters.map((l) => `<button class="az" data-az="${l}" aria-pressed="false">${l}</button>`).join('')}</span>` : ''}</div>`;
   // Off while there is nothing to filter: what was typed stays and applies again once there is
   const filterBox = (placeholder, off = false) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}"${off ? ' disabled' : ''}>`;
-  const bindFilter = (selector) => {
-    const f = $('#filter'); if (!f) return;
-    f.oninput = () => { const q = f.value.trim().toLowerCase(); let n = 0; $$(selector, main).forEach((el) => { const show = !q || el.textContent.toLowerCase().includes(q); el.hidden = !show; if (show) n++; }); const c = $('.page-head .count'); if (c) c.dataset.filtered = q ? `${fmtCount(n)} shown` : ''; };
-    f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
-  };
   // (a load started before a newer one, or before the albums were let go (the library changed),
   // doesn't keep its answer: forgetAlbums)
   let albumsLoad = null;
