@@ -17,8 +17,26 @@ fs.mkdirSync(SHOTS, { recursive: true });
 let failed = 0; let passed = 0;
 const check = (ok, what) => { if (ok) { passed++; console.log(`ok   ${what}`); } else { failed++; console.log(`FAIL ${what}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// .main scrolls smoothly: read where a control stopped once the page stands still
-const settle = async (page) => { let was = null; for (let i = 0; i < 40; i++) { await sleep(40); const t = await page.evaluate(() => document.getElementById('main').scrollTop); if (t === was) return; was = t; } };
+// .main scrolls smoothly: read where a control stopped once the page stands still. On a slow runner
+// the smooth scroll can start after two equal reads, so first wait (up to 1 s, frame by frame) for the
+// focused control to stand inside the page's padded scrollport, where the scroll brings it (or the
+// page can't scroll further its way: a control at the very top; or it rides in a sticky bar, the
+// compact header, the phone's library chips); a control that never gets there is measured as it
+// stands after the wait, so a real miss still fails
+const settle = async (page) => {
+  await page.waitForFunction(() => {
+    const e = document.activeElement; const m = document.getElementById('main');
+    if (!e || !m.contains(e) || e === m) return true;
+    for (let x = e; x && x !== m; x = x.parentElement) if (/^(sticky|fixed)$/.test(getComputedStyle(x).position)) return true;
+    const r = e.getBoundingClientRect(); const b = m.getBoundingClientRect(); const cs = getComputedStyle(m);
+    const top = b.top + (parseFloat(cs.scrollPaddingTop) || 0); const bottom = b.bottom - (parseFloat(cs.scrollPaddingBottom) || 0);
+    if (r.height > bottom - top) return true;
+    if (r.top < top - 1) return m.scrollTop <= 0;
+    if (r.bottom > bottom + 1) return m.scrollTop >= m.scrollHeight - m.clientHeight - 1;
+    return true;
+  }, null, { timeout: 1000, polling: 'raf' }).catch(() => {});
+  let was = null; for (let i = 0; i < 40; i++) { await sleep(40); const t = await page.evaluate(() => document.getElementById('main').scrollTop); if (t === was) return; was = t; }
+};
 
 const A = [{ id: 11, name: 'Sefa' }];
 const fmt = { container: 'flac', format: { kind: 'pcm', bits: 16, rate_hz: 44100, channels: 2 } };
