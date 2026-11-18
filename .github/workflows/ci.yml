@@ -641,6 +641,7 @@ jobs:
           ui-personal-play-share.js personal-play-share-shots
           ui-tablet.js tablet-shots
           ui-topbar.js topbar-shots
+          ui-phone-mini-reach.js phone-mini-reach-shots
           ui-busy.js busy-shots
           ui-tag-page.js tag-page-shots
           ui-controls-search-check.js controls-search-shots

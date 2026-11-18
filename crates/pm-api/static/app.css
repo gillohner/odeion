@@ -2411,6 +2411,22 @@ html[data-shell="phone"] .player-center { order: 2; flex: none; }
 html[data-shell="phone"] .player #toggle { width: 48px; height: 48px; background: none; color: var(--fg); }
 html[data-shell="phone"] .player #toggle .ic { width: 28px; height: 28px; }
 @media (hover: hover) { html[data-shell="phone"] .player #toggle:hover { background: var(--surface-2); } }
+/* Every point of the mini player is a tap on what's nearest. The bar's edges (12 px at the left,
+   6 px above and below the song) and the gap before Play did nothing, and Play reached 6 px into
+   that 8 px gap. Now the song takes the bar's edges and half the gap, opening Now playing; on a
+   touch screen Play takes the other half and the whole height above and below it (the bar clips
+   the reach, also with larger text). A files job's chip between them (37 x 40 px; not offline or
+   listening along, where it is left out) shares each 4 px gap half and half and takes the whole
+   height. The song's focus ring sits inside the bar. Nothing drawn moves. */
+html[data-shell="phone"] .player .player-now { margin: -6px -4px -6px -12px; padding: 10px 4px 10px 12px; }
+html[data-shell="phone"] body:not(.offline):not(.listener) .player:has(#jobchip:not([hidden])) .player-now { margin-right: -2px; padding-right: 2px; }
+html[data-shell="phone"] .player .player-now:focus-visible { outline-offset: -2px; }
+@media (pointer: coarse) {
+  html[data-shell="phone"] .player #toggle::before { inset: -40px -6px -40px -4px; }
+  html[data-shell="phone"] body:not(.offline):not(.listener) .player:has(#jobchip:not([hidden])) #toggle::before { left: -2px; }
+  html[data-shell="phone"] .player #jobchip { overflow: visible; isolation: isolate; }
+  html[data-shell="phone"] .player #jobchip::before { content: ''; position: absolute; inset: -40px -3px; z-index: -1; }
+}
 html[data-shell="phone"] .player .np-art-wait { display: flex; align-items: center; justify-content: center; }
 html[data-shell="phone"] .player .np-art-wait .spin { width: 20px; height: 20px; }
 .np-art-wait { display: flex; align-items: center; justify-content: center; }
