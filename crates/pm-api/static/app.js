@@ -5661,7 +5661,7 @@
       const here = trail[trail.length - 1]; const mine = ++draws; const box = $('#dfbox', d);
       const moved = trail.length > 1 || !!came || !!again;
       $('#dfpath', d).textContent = trail.map((t) => t.name).join(' › ');
-      $('#dfadd', d).disabled = trail.length < 2 || !!again; // (off while a folder that failed is asked again)
+      $('#dfadd', d).disabled = true; // (off during every read: on again once it works)
       box.innerHTML = '<p class="muted small"><span class="spin"></span> Reading the drive…</p>';
       const free = () => { const a = document.activeElement; return !a || a === document.body || a === d || box.contains(a); };
       // (Back stays when a folder can't be read, and Try again asks the drive again, so a folder
