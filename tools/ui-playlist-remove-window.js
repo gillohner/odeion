@@ -240,9 +240,9 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
         // 7. The read after a change never answers: Try again within 15 s, and the list works after it
         await open('c8', 'Alpha,Bravo,Charlie');
         const releaseHung = gate('c8', false, ['A', 'B', 'C']); // (released only after Try again: a late answer with Alpha still in)
-        const w7 = writes.length;
+        const w7 = writes.length; const g7a = gets.length;
         if (mobile) await pressRm('Alpha'); else { await page.focus('#plsongs [data-rm="0"]'); await page.keyboard.press('Enter'); }
-        await until(async () => writes.length === w7 + 1, 2000);
+        await until(async () => writes.length === w7 + 1 && gets.slice(g7a).includes('c8'), 2000);
         await sleep(300);
         check(await inert(), `${width}: held while the read after the change goes unanswered`);
         await page.clock.fastForward(16000);
@@ -383,10 +383,12 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
           // another playlist opened instead, and this one opened again: a fresh page, the focus
           // not pulled into its list (Try again's own draw is in place only on its visit)
           await open('c12', 'Alpha,Bravo,Charlie');
-          gate('c12'); const w10 = writes.length;
+          gate('c12'); const w10 = writes.length; const g10a = gets.length;
           await page.focus('#plsongs [data-rm="0"]');
           await page.keyboard.press('Enter');
-          await until(async () => writes.length === w10 + 1, 2000);
+          // (the clock jumps only once the redraw's read is on its way: its 15 s starts just before it,
+          // and a slow runner may still be waiting on the DELETE's answer)
+          await until(async () => writes.length === w10 + 1 && gets.slice(g10a).includes('c12'), 2000);
           await page.clock.fastForward(16000);
           await until(async () => !!(await page.$('#navretry')), 3000);
           check(!!(await page.$('#navretry')), `${width}: its read cut at 15 s says so with Try again`);
