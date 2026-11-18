@@ -478,9 +478,6 @@ html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) > div:not
 html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) h1 { font-size: var(--fs-xl); line-height: 1.2; overflow-wrap: anywhere; }
 html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) .sub { font-size: var(--fs-md); }
 html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) .eyebrow { font-size: var(--fs-2xs); }
-/* (phones) The kind alone: where it is kept and who sees it is the sharing note's sentence under the buttons, so the
-   eyebrow beside the 112 px cover takes one line, not two saying it twice */
-html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) .eyebrow > .eb-where { display: none; }
 @container plhero (width < calc(276px + 9.7ch)) { #plshuffle > .ic { display: none; } }
 @container plhero (width < calc(250px + 9.7ch)) {
   .actions:has(> #plplay) { gap: 4px; }
@@ -493,8 +490,9 @@ html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) .eyebrow 
   .actions:has(> #plplay) { gap: 2px; }
   :is(#plplay, #plshuffle) { padding-left: 6px; padding-right: 6px; min-width: 44px; justify-content: center; }
 }
-/* (a playlist's sharing note: a little air under the taller row) */
-html[data-shell="phone"] #main > .hero .actions + p.muted { margin-top: 8px; }
+/* (a playlist's sharing note, a person's follower line: a little air under the buttons; on desktop
+   they touched them) */
+#main > .hero .actions + p.muted { margin-top: 8px; }
 /* Touch screens in the desktop layout (tablets): 40 px targets */
 @media (pointer: coarse) {
   .actions > .btn { min-height: 40px; }
