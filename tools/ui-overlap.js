@@ -30,10 +30,13 @@ const inspect = () => {
   // in its padding (no background, border or shadow) may pad itself and hand the room back with an
   // equal negative margin: song rows do that so a link's focus ring fits inside their "…" clip,
   // and that padding reaches into the next line while the text does not. Only such a side is
-  // measured at the content edge; every other box is measured whole.
+  // measured at the content edge; every other box is measured whole. A pointer cursor makes a box a
+  // control only where its parent's cursor is not a pointer too: the one a clickable row hands down
+  // (a library song row plays on a click) doesn't make the row's name lines controls.
   const seenBox = (el) => {
     const r = el.getBoundingClientRect(); const st = getComputedStyle(el);
-    const control = st.cursor === 'pointer' || el.matches('a, button, input, select, textarea, label, summary, [role], [tabindex], [contenteditable]');
+    const ownPointer = st.cursor === 'pointer' && !(el.parentElement && getComputedStyle(el.parentElement).cursor === 'pointer');
+    const control = ownPointer || el.matches('a, button, input, select, textarea, label, summary, [role], [tabindex], [contenteditable]');
     const paints = st.backgroundImage !== 'none' || !/^(transparent|rgba\(0, 0, 0, 0\))$/.test(st.backgroundColor) || st.boxShadow !== 'none'
       || ['Top', 'Right', 'Bottom', 'Left'].some((k) => parseFloat(st[`border${k}Width`]) > 0);
     if (control || paints) return r;
