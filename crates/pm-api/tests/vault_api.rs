@@ -23,6 +23,9 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+#[path = "support/local_relays.rs"]
+mod local_relays;
+
 fn admin() -> Option<(String, String)> {
     Some((
         std::env::var("PM_BUNDLED_HS_ADMIN").ok()?,
@@ -61,11 +64,26 @@ fn network() -> pm_pubky::config::Network {
     }
 }
 
+/// A client on the network the test runs on; on the public network it also uses the local pkarr
+/// relay (`support/local_relays.rs`), so a new account's record is found at once.
+fn client() -> NodeHomeserver {
+    if testnet() {
+        NodeHomeserver::new(network()).unwrap()
+    } else {
+        local_relays::node_homeserver()
+    }
+}
+
+/// [`client`], with its Ring sign-ins through the local HTTP relay, not the public one.
+fn signing_in() -> NodeHomeserver {
+    client().with_auth_relay(local_relays::inbox())
+}
+
 fn pubky() -> Pubky {
     if testnet() {
         Pubky::testnet().unwrap()
     } else {
-        Pubky::new().unwrap()
+        local_relays::pubky()
     }
 }
 
@@ -163,7 +181,7 @@ async fn the_device_list_and_signing_out_through_the_api() {
     .await;
     let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let homeserver = signing_in();
     let mut sessions = Vec::new();
     for id in ["node.pubky.music", "phone.pubky.music"] {
         let flow = homeserver.start_login(id).unwrap();
@@ -172,7 +190,7 @@ async fn the_device_list_and_signing_out_through_the_api() {
     }
     let phone_session = sessions.pop().unwrap();
     *s.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(network()).unwrap(),
+        client(),
         sessions.pop().unwrap(),
     )));
 
@@ -328,17 +346,14 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     .await;
     let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let homeserver = signing_in();
     let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (n1, n2) = (node(d1.path()), node(d2.path()));
     for (n, id) in [(&n1, "living-room.pubky.music"), (&n2, "kitchen.pubky.music")] {
         let flow = homeserver.start_login(id).unwrap();
         signer.approve_auth(flow.url()).await.unwrap();
         let session = flow.await_approval().await.unwrap();
-        *n.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
-            NodeHomeserver::new(network()).unwrap(),
-            session,
-        )));
+        *n.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(client(), session)));
     }
     let (a1, a2) = (router(n1.clone()), router(n2.clone()));
     let tidal_v1 =
@@ -425,10 +440,7 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
         let flow = homeserver.start_login("restored.pubky.music").unwrap();
         signer.approve_auth(flow.url()).await.unwrap();
         let session = flow.await_approval().await.unwrap();
-        *n3.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
-            NodeHomeserver::new(network()).unwrap(),
-            session,
-        )));
+        *n3.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(client(), session)));
     }
     let a3 = router(n3.clone());
     for k in ["vault.synced.tidal", "vault.synced.jamendo"] {
@@ -546,7 +558,7 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
     .await;
     let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let homeserver = signing_in();
     let (d1, d2, d3) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -561,10 +573,7 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
         let flow = homeserver.start_login(id).unwrap();
         signer.approve_auth(flow.url()).await.unwrap();
         let session = flow.await_approval().await.unwrap();
-        *n.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
-            NodeHomeserver::new(network()).unwrap(),
-            session,
-        )));
+        *n.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(client(), session)));
     }
     let (a1, a2, a3) = (router(n1.clone()), router(n2.clone()), router(n3.clone()));
     let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
@@ -798,17 +807,14 @@ async fn a_take_of_the_vaults_copy_that_doesnt_go_through_keeps_the_nodes_record
     .await;
     let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let homeserver = signing_in();
     let d1 = tempfile::tempdir().unwrap();
     let n1 = node(d1.path());
     {
         let flow = homeserver.start_login("living-room.pubky.music").unwrap();
         signer.approve_auth(flow.url()).await.unwrap();
         let session = flow.await_approval().await.unwrap();
-        *n1.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
-            NodeHomeserver::new(network()).unwrap(),
-            session,
-        )));
+        *n1.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(client(), session)));
     }
     let a1 = router(n1.clone());
     let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
@@ -896,7 +902,7 @@ async fn a_sign_in_switch_ends_the_old_vault_pass() {
     };
     let info = admin_call(&a, reqwest::Method::GET, "/info", None).await;
     let hs = PublicKey::try_from(info["public_key"].as_str().unwrap()).unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let homeserver = signing_in();
     let sign_up = |ids: Vec<&'static str>| {
         let (a, hs, homeserver) = (a.clone(), hs.clone(), homeserver.clone());
         async move {
@@ -924,7 +930,7 @@ async fn a_sign_in_switch_ends_the_old_vault_pass() {
     let dir = tempfile::tempdir().unwrap();
     let n = node(dir.path());
     n.set_sync(Some(Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(network()).unwrap(),
+        client(),
         a_sessions.pop().unwrap(),
     ))));
     let app = router(n.clone());
@@ -945,7 +951,7 @@ async fn a_sign_in_switch_ends_the_old_vault_pass() {
     let key = pm_pubky::vault::load_or_create_client_secret(&n.data_dir().join("vault").join("client.key"))
         .unwrap();
     n.set_sync(Some(Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(network()).unwrap(),
+        client(),
         b_sessions.pop().unwrap(),
     ))));
     assert!(sync_a.is_retired());
@@ -974,7 +980,7 @@ async fn identities_with_sessions(n: usize, ids: &[&str]) -> Option<Vec<Vec<pubk
     let a = admin()?;
     let info = admin_call(&a, reqwest::Method::GET, "/info", None).await;
     let hs = PublicKey::try_from(info["public_key"].as_str().unwrap()).unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let homeserver = signing_in();
     let mut out = Vec::new();
     for _ in 0..n {
         let token = admin_call(
@@ -1028,7 +1034,7 @@ async fn a_sign_in_switch_mid_sync_writes_nothing_more() {
     let mut b = ids.pop().unwrap();
     let mut a = ids.pop().unwrap();
     let (a_phone, a_node) = (a.pop().unwrap(), a.pop().unwrap());
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let homeserver = signing_in();
     // A's other device put a bookmark on A's homeserver
     let d_other = tempfile::tempdir().unwrap();
     let other = node(d_other.path());
@@ -1098,10 +1104,7 @@ async fn a_sign_in_switch_mid_vault_pass_writes_nothing_more() {
     let make = |session: pubky::PubkySession| {
         let d = tempfile::tempdir().unwrap();
         let n = node(d.path());
-        n.set_sync(Some(Arc::new(PubkySync::from_session(
-            NodeHomeserver::new(network()).unwrap(),
-            session,
-        ))));
+        n.set_sync(Some(Arc::new(PubkySync::from_session(client(), session))));
         (d, n)
     };
     let (_dn, n) = make(a_node);
@@ -1145,7 +1148,7 @@ async fn a_sign_in_switch_mid_vault_pass_writes_nothing_more() {
         .expect("the pass reached its pause")
         .unwrap();
     n.set_sync(Some(Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(network()).unwrap(),
+        client(),
         b.pop().unwrap(),
     ))));
     let _ = release.send(());
@@ -1171,7 +1174,7 @@ async fn a_replaced_first_sync_leaves_no_sync_running() {
     };
     let mut b = ids.pop().unwrap();
     let mut a = ids.pop().unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let homeserver = signing_in();
     let d = tempfile::tempdir().unwrap();
     let n = node(d.path());
     let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a.pop().unwrap()));
@@ -1214,7 +1217,7 @@ async fn a_replaced_settings_backup_adopts_no_history_delete() {
     let mut b = ids.pop().unwrap();
     let mut a = ids.pop().unwrap();
     let a_node = a.pop().unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let homeserver = signing_in();
     // A's settings copy says A deleted its history just now
     let now_us = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1266,7 +1269,7 @@ async fn a_replacement_while_the_backup_waits_for_the_library_adopts_nothing() {
     };
     let mut a = ids.pop().unwrap();
     let a_node = a.pop().unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let homeserver = signing_in();
     let now_us = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1341,10 +1344,7 @@ async fn an_accepted_clear_does_not_migrate_old_sign_ins_to_a_replacement_identi
     let mut a = ids.pop().unwrap();
     let d = tempfile::tempdir().unwrap();
     let n = node(d.path());
-    let sync_a = Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(network()).unwrap(),
-        a.pop().unwrap(),
-    ));
+    let sync_a = Arc::new(PubkySync::from_session(client(), a.pop().unwrap()));
     n.set_sync(Some(sync_a.clone()));
     let tidal = r#"{"access_token":"fixture-at","refresh_token":"fixture-rt","user_id":"7"}"#;
     {
@@ -1374,7 +1374,7 @@ async fn an_accepted_clear_does_not_migrate_old_sign_ins_to_a_replacement_identi
         .unwrap()
         .unwrap();
     n.set_sync(Some(Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(network()).unwrap(),
+        client(),
         b.pop().unwrap(),
     ))));
     {
@@ -1416,10 +1416,7 @@ async fn accepted_clear_remembers_its_owner_marker_before_any_later_sync() {
     let session = ids.pop().unwrap().pop().unwrap();
     let d = tempfile::tempdir().unwrap();
     let n = node(d.path());
-    let sync = Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(network()).unwrap(),
-        session,
-    ));
+    let sync = Arc::new(PubkySync::from_session(client(), session));
     n.set_sync(Some(sync.clone()));
     {
         let lib = n.library.lock().unwrap();
@@ -1490,7 +1487,7 @@ async fn accepted_clear_preserves_new_same_owner_lineage_through_next_sync() {
     let d = tempfile::tempdir().unwrap();
     let n = node(d.path());
     let sync = Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(network()).unwrap(),
+        client(),
         ids.pop().unwrap().pop().unwrap(),
     ));
     n.set_sync(Some(sync.clone()));
@@ -1554,7 +1551,7 @@ async fn failed_wipe_marker_persistence_keeps_local_clear_intent() {
     let d = tempfile::tempdir().unwrap();
     let n = node(d.path());
     n.set_sync(Some(Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(network()).unwrap(),
+        client(),
         ids.pop().unwrap().pop().unwrap(),
     ))));
     n.library
@@ -1584,12 +1581,7 @@ async fn overlapping_identity_swaps_retire_before_publication() {
         eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
         return;
     };
-    let make = |session| {
-        Arc::new(PubkySync::from_session(
-            NodeHomeserver::new(network()).unwrap(),
-            session,
-        ))
-    };
+    let make = |session| Arc::new(PubkySync::from_session(client(), session));
     let c = make(ids.pop().unwrap().pop().unwrap());
     let b = make(ids.pop().unwrap().pop().unwrap());
     let a = make(ids.pop().unwrap().pop().unwrap());
@@ -1651,12 +1643,7 @@ async fn stale_storage_completions_preserve_replacement_status_and_quota() {
         eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
         return;
     };
-    let make = |session| {
-        Arc::new(PubkySync::from_session(
-            NodeHomeserver::new(network()).unwrap(),
-            session,
-        ))
-    };
+    let make = |session| Arc::new(PubkySync::from_session(client(), session));
     let b = make(ids.pop().unwrap().pop().unwrap());
     let a = make(ids.pop().unwrap().pop().unwrap());
     let dir = tempfile::tempdir().unwrap();
