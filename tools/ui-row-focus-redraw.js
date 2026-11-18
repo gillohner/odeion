@@ -5,7 +5,8 @@
 // other services (drawn twice: kept as they were, then the new ones once described). The next Tab
 // goes on to the next row. Favourites' songs from other services are kept by song, not by place:
 // one gone or added above doesn't move the keyboard onto another song, Enter on the kept Play or
-// More is for that song, and a song moved far down is scrolled into sight. At 1280, 1024 and 768 px.
+// More is for that song, and a song moved far down or far up is scrolled into sight, within the
+// page's scroll padding (where a sticky head would be). At 1280, 1024 and 768 px.
 // Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-row-focus-redraw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -35,8 +36,8 @@ async function bySong(browser, width) {
   const favs = (list) => ({ '/favourites': { body: { uris: list.map((o) => o.uri), tracks: [], albums: [], artists: [], other: list } }, '/discover/describe': { body: list.map((o) => ({ also_on: [], ...o })) } });
   const start = [0, 1, 2, 3].map(song);
   const { context, page, state } = await fx.create(browser, width, { fixtures: favs(start) });
-  // (the focused row inside the page's own scrolling part, not under its edge)
-  const inSight = () => page.evaluate(() => { const r = document.activeElement.getBoundingClientRect(); const m = document.querySelector('#main').getBoundingClientRect(); return r.top >= m.top - 1 && r.bottom <= m.bottom + 1; });
+  // (the focused row inside the page's own scrolling part, within its scroll padding: not under its edge or a sticky head)
+  const inSight = () => page.evaluate(() => { const r = document.activeElement.getBoundingClientRect(); const el = document.querySelector('#main'); const m = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.top >= m.top + (parseFloat(cs.scrollPaddingTop) || 0) - 1 && r.bottom <= m.bottom - (parseFloat(cs.scrollPaddingBottom) || 0) + 1; });
   let socket = null;
   await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
   // Where the keyboard is: the song of the row it is in (read from the row's own title), and the control
@@ -52,6 +53,7 @@ async function bySong(browser, width) {
     { name: 'an address with a quote, a backslash and ], its Play', start: [0, odd, 2, 3], focus: 1, part: ' [data-dplay]', now: [9, 0, odd, 2, 3], want: 'Elsewhere odd Play', press: 'play', uri: odd.uri },
     { name: 'the same song hearted twice, the second one', start: [0, 1, twice, 2, 3], focus: 2, part: ' [data-dplay]', now: [9, 0, 1, twice, 2, 3], want: 'Elsewhere 1 again Play' },
     { name: 'the song moved far down the list, its row', start: many, focus: 2, part: '', now: [...many.filter((n) => n !== 2), 2], want: 'Elsewhere 2', sight: true },
+    { name: 'the song moved far up the list, its row', start: many, focus: 29, part: '', now: [29, ...many.filter((n) => n !== 29)], want: 'Elsewhere 29', sight: true, foot: true },
     { name: 'its row half off the foot and nothing moved, its Play', start: many, focus: 12, part: ' [data-dplay]', now: many, want: 'Elsewhere 12 Play', half: true },
   ];
   try {
@@ -69,6 +71,8 @@ async function bySong(browser, width) {
       await page.evaluate((s) => { const el = document.querySelector(s); el.tabIndex = el.tabIndex < 0 ? 0 : el.tabIndex; el.focus(); }, sel);
       // (scrolled so the row is half under the page's foot: a redraw that moved nothing leaves the page where it is)
       const halfAt = c.half ? await page.evaluate((s) => { const m = document.querySelector('#main'); const r = document.querySelector(s).getBoundingClientRect(); m.scrollTo({ top: m.scrollTop + r.bottom - m.getBoundingClientRect().bottom - (r.bottom - r.top) / 2, behavior: 'instant' }); return m.scrollTop; }, sel) : null;
+      // (the song at the list's foot scrolled into sight, wholly, before the list changes)
+      if (c.foot) { await page.evaluate((s) => document.querySelector(s).scrollIntoView({ block: 'nearest', behavior: 'instant' }), sel); check(await inSight(), `${at}: the row the keyboard is on is in sight at the list's foot`); }
       if (c.half) check(await page.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); const b = document.querySelector('#main').getBoundingClientRect().bottom; return r.top < b && r.bottom > b; }, sel), `${at}: its Play is half under the page's foot`);
       const was = await on();
       check(was.startsWith(first[c.focus].title), `${at}: the keyboard is on ${first[c.focus].title} (${was})`);
@@ -84,7 +88,7 @@ async function bySong(browser, width) {
       check(redrawn, `${at}: the list was drawn again with ${now.length} songs`);
       const kept = await on();
       check(kept === c.want, `${at}: the keyboard is on ${c.want} (${kept})`);
-      if (c.sight) check(await inSight(), `${at}: the row the keyboard is on is in sight, not off below`);
+      if (c.sight) check(await inSight(), `${at}: the row the keyboard is on is in sight, not off ${c.foot ? 'above' : 'below'}`);
       if (c.half) { const t = await page.evaluate(() => document.querySelector('#main').scrollTop); check(Math.abs(t - halfAt) <= 1, `${at}: the page didn't move (${halfAt} -> ${t})`); }
       if (width === 1280) await page.screenshot({ path: path.join(SHOTS, `favourites-by-song-${cases.indexOf(c)}-${width}.png`) });
       const uri = typeof c.uri === 'number' ? song(c.uri).uri : c.uri;
