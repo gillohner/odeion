@@ -6,6 +6,7 @@
 // scrolls the zone in use up above the mini player; redraws, Play to and Back keep the place.
 // On a phone's touch screen a slider (a card's volume, Now playing's seek and volume) is a 44 px
 // tall touch with nothing moved, and a swipe that starts on it scrolls without changing the volume.
+// Each card's Previous, Play/Pause and Next take a 44 px touch on a phone, drawn as before.
 // Real candidate assets, isolated responses: node tools/ui-phone-zone-cards.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -48,6 +49,16 @@ const cards = (page) => page.evaluate(() => [...document.querySelectorAll('#main
     note: note ? { text: note.textContent.trim(), shown: !!box(note) && note.getBoundingClientRect().width > 1 } : null,
     name: c.querySelector('h3').textContent.trim(),
   };
+}));
+
+// Each card's Previous / Play / Next: its drawn size, and how far a tap reaches it (px across and
+// down through its middle, 1 px steps: the run of points that land on it)
+const transportTouch = (page) => page.evaluate(() => [...document.querySelectorAll('#main .zone-card [data-zt]')].map((e) => {
+  e.scrollIntoView({ block: 'center', behavior: 'instant' });
+  const b = e.getBoundingClientRect(); const cx = b.left + b.width / 2, cy = b.top + b.height / 2;
+  const on = (x, y) => { const h = document.elementFromPoint(x, y); return !!h && (h === e || e.contains(h)); };
+  const run = (dx, dy) => { let n = 0; while (n < 40 && on(cx + dx * (n + 1), cy + dy * (n + 1))) n++; return n; };
+  return { card: e.closest('.zone-card').dataset.zcard, zt: e.dataset.zt, w: Math.round(b.width), h: Math.round(b.height), across: run(-1, 0) + run(1, 0) + 1, left: Math.round(run(-1, 0) - b.width / 2), right: Math.round(run(1, 0) - b.width / 2), down: run(0, -1) + run(0, 1) + 1 };
 }));
 
 const setup = async (browser, width, android, zone = 'linn-upnp') => {
@@ -96,6 +107,15 @@ const open = async (page) => { await fx.go(page, '/zones'); await page.waitForSe
         check(others.every((c) => c.h <= 190), `${at}: unselected cards are compact (${others.map((c) => Math.round(c.h)).join('/')} px)`);
         check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight + 1), `${at}: no sideways overflow, the page itself doesn't scroll`);
         await page.screenshot({ path: path.join(SHOTS, `zones-${at}.png`) });
+        // Previous, Play/Pause and Next take a 44 px touch each, drawn the same size as before (each
+        // touch reach was 6 px round but they sit 6 px apart, so the later button took the whole
+        // gap: a tap just right of Previous played, just right of Play skipped); now each takes half of each gap
+        const tz = await transportTouch(page);
+        check(tz.length === 15 && tz.every((b) => b.across >= 44 && b.down >= 44), `${at}: each card's Previous, Play and Next take a touch at least 44 px wide and tall (${[...new Set(tz.map((b) => `${b.zt} ${b.across}x${b.down}`))].join(', ')})`);
+        // …and the space between two of them is shared, not all the right-hand one's
+        const gaps = []; for (let k = 0; k < tz.length; k += 3) gaps.push([tz[k].right, tz[k + 1].left], [tz[k + 1].right, tz[k + 2].left]);
+        check(gaps.length === 10 && gaps.every(([a, z]) => Math.abs(a - z) <= 1), `${at}: the space between two of them is split half and half (${[...new Set(gaps.map(([a, z]) => `${a}|${z}`))].join(', ')} px past each edge)`);
+        check(tz.every((b) => b.w === (b.zt === 'toggle' ? 40 : 36) && b.h === b.w), `${at}: …and look as before (${[...new Set(tz.map((b) => `${b.w}x${b.h}`))].join(' ')})`);
         // Play to on a phone: one tap picks the zone, and the card's "selected" takes the button's place
         const target = others.find((c) => c.id === 'heimkino');
         const heimPlay = page.locator('[data-zcard="heimkino"] .zc-now [data-zsel="heimkino"]');
@@ -251,6 +271,8 @@ const open = async (page) => { await fx.go(page, '/zones'); await page.waitForSe
         let cs = await cards(page);
         check(cs.filter((c) => !c.on).every((c) => c.pickIn === 'zc-controls') && cs.find((c) => c.on).pickIn === 'zc-controls', 'desktop-1280: Play to and "selected" stay in the controls line');
         check(cs.filter((c) => !c.slider).every((c) => c.note && c.note.shown), 'desktop-1280: "Volume: set on the device" is shown');
+        const dz = await transportTouch(page);
+        check(dz.length === 15 && dz.every((b) => b.across === b.w && b.w === (b.zt === 'toggle' ? 40 : 36)), `desktop-1280: Previous, Play and Next keep their own size to click (${[...new Set(dz.map((b) => `${b.zt} ${b.across}`))].join(', ')})`);
         await page.screenshot({ path: path.join(SHOTS, 'zones-desktop-1280.png') });
         await page.setViewportSize({ width: 360, height: 640 });
         await page.waitForFunction(() => document.documentElement.dataset.shell === 'phone' && document.querySelector('#main .zone-card .zc-now > [data-zsel]'), null, { timeout: 3000 }).catch(() => {});
