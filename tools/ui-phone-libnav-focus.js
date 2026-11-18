@@ -4,8 +4,9 @@
 // song's More button and its play button wholly or half hidden, about 2 stops in 5). Now a control
 // the page scrolls to stops 8 px below them. Open Identify still lands with the IDENTIFY heading
 // right below the chips (it used to make that room itself; the page does now, so it isn't doubled).
-// Larger text makes the chips taller; the room kept above a row grows with them.
-// At 360 and 412 px.
+// Larger text makes the chips taller; the room kept above a row grows with them, also when only
+// the chips change size (the phone's text size changed while the page is open: nothing is added
+// to the page). At 360 and 412 px; Open Identify at 1280 px too (the heading 8 px from the top).
 // Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-phone-libnav-focus.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -91,14 +92,24 @@ const where = () => {
           await sleep(200);
           const big = await toTop(p.rows, 0.25);
           check(big.h >= 70 && big.gap >= 6 && big.gap <= 10, `${at}: with larger text (chips ${big.h} px tall) a row scrolled to the top still sits just below them (${big.gap} px)`);
+          // The chips grow again with nothing added to the page (no DOM insert, no window resize)
+          await page.evaluate(() => document.querySelectorAll('.main > .libnav .chip').forEach((c) => { c.style.fontSize = '44px'; }));
+          await sleep(200);
+          const bigger = await toTop(p.rows, 0.6);
+          check(bigger.h > big.h + 10 && bigger.gap >= 6 && bigger.gap <= 10, `${at}: the chips growing alone (${big.h} to ${bigger.h} px) keep a row scrolled to the top just below them (${bigger.gap} px)`);
+          await page.screenshot({ path: path.join(SHOTS, `chips-grown-${width}-${p.name}.png`) });
           check(!state.errors.length, `${at}: no page errors (${state.errors.join(' | ')})`);
         } finally { await context.close(); }
       }
       // Open Identify: the IDENTIFY heading lands right below the chips, not a chips' height lower
-      {
-        const at = `${width} Open Identify`;
-        const { context, page, state } = await fx.create(browser, width, { fixtures: nodeLib });
+      for (const desk of width === 412 ? [false, true] : [false]) {
+        // (1280 px: the chips scroll with the page and the heading stops 8 px below the top; a
+        // shorter window, so the page can scroll that far)
+        const w = desk ? 1280 : width;
+        const at = `${w} Open Identify`;
+        const { context, page, state } = await fx.create(browser, w, { fixtures: nodeLib });
         try {
+          if (desk) await page.setViewportSize({ width: w, height: 560 });
           await fx.go(page, '/identify');
           const shown = await page.waitForSelector('.main .empty button', { timeout: 8000 }).then(() => true, () => false);
           check(shown, `${at}: Nothing to confirm shows`);
@@ -108,9 +119,11 @@ const where = () => {
           check(landed, `${at}: Open Identify opens Node library`);
           if (!landed) continue;
           await sleep(400);
-          const m = await page.evaluate(() => { const nav = document.querySelector('.main > .libnav').getBoundingClientRect(); const h = document.querySelector('#idcard').closest('.set-group').querySelector('.set-h').getBoundingClientRect(); return { gap: Math.round(h.top - nav.bottom), scrolled: document.getElementById('main').scrollTop > 0 }; });
-          check(m.scrolled && m.gap >= 4 && m.gap <= 12, `${at}: the IDENTIFY heading sits just below the chips (${m.gap} px)`);
-          await page.screenshot({ path: path.join(SHOTS, `identify-${width}.png`) });
+          const m = await page.evaluate((desk) => { const main = document.getElementById('main'); const nav = main.querySelector(':scope > .libnav'); const h = document.querySelector('#idcard').closest('.set-group').querySelector('.set-h').getBoundingClientRect();
+            return { gap: Math.round(h.top - (desk ? main.getBoundingClientRect().top : nav.getBoundingClientRect().bottom)), scrolled: main.scrollTop > 0, shell: document.documentElement.dataset.shell }; }, desk);
+          if (desk) check(m.shell === 'desktop' && m.scrolled && m.gap >= 6 && m.gap <= 10, `${at}: the IDENTIFY heading sits 8 px below the top of the page (${m.gap} px, ${m.shell} shell)`);
+          else check(m.scrolled && m.gap >= 4 && m.gap <= 12, `${at}: the IDENTIFY heading sits just below the chips (${m.gap} px)`);
+          await page.screenshot({ path: path.join(SHOTS, `identify-${w}.png`) });
           check(!state.errors.length, `${at}: no page errors (${state.errors.join(' | ')})`);
         } finally { await context.close(); }
       }

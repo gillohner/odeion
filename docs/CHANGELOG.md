@@ -4,6 +4,9 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-18
+- **On a phone, larger text never puts the row you're on under the Library chips.** Changing the phone's text size while a Library page is open makes the chips at the top taller. The page only noticed when its content changed, so until then a row you went to with the keyboard could stop partly under the chips. Now the room kept above a row follows the chips' height straight away. A playlist waiting on a slow node also asks it about your Pubky sign-in once, not again each time it is drawn or you press Try again.
+
 ### 2026-11-17
 - **On a phone, going back up a Library list with the keyboard, the row you're on stays in sight.** The Library chips (Your library, Albums, Songs, …) stay at the top of the page while it scrolls. Going back up Songs, Playlists or another Library list with Shift+Tab stopped each row right at the top, under the chips, so a song's ⋯ or its play button was hidden. Now the row stops just below them. Open Identify still shows the Identify card right below the chips.
 - **A playlist waiting after a change always ends in its songs or Try again, and a playlist opened again starts at its top.** After you remove or move a song, a playlist waits for the new list before it takes another press, and says “Couldn’t load this playlist” with Try again if the node doesn’t answer in 15 s. If the app was still asking who you are on Pubky (after a “Save now” that needed you to sign in again, say), that wait had no end and the songs stayed greyed out. It now counts toward the 15 s too. And if a playlist didn’t load, you went elsewhere and opened it again, the keyboard focus jumped into its song list instead of starting at the top of the page. It now does that only right after you press Try again.

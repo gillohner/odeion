@@ -3834,7 +3834,14 @@
   };
   // The phone's pinned Library chips grow with larger text: the page keeps that much room above a
   // row it scrolls to (app.css's --libnav-h, 60 px until measured)
-  const noteLibnavHeight = (el) => { const h = el.offsetHeight; if (h && el.parentElement.style.getPropertyValue('--libnav-h') !== `${h}px`) el.parentElement.style.setProperty('--libnav-h', `${h}px`); };
+  // (measured when the page changes and when the chips change size alone, as with the phone's
+  // text size changed while the page is open)
+  const libnavSized = window.ResizeObserver ? new ResizeObserver((es) => es.forEach((e) => { if (e.target.isConnected) noteLibnavHeight(e.target); })) : null;
+  let libnavWatched = null; // (the one row watched: a page's new chips take its place)
+  const noteLibnavHeight = (el) => {
+    if (libnavSized && libnavWatched !== el) { if (libnavWatched) libnavSized.unobserve(libnavWatched); libnavWatched = el; libnavSized.observe(el); }
+    const h = el.offsetHeight; if (h && el.parentElement && el.parentElement.style.getPropertyValue('--libnav-h') !== `${h}px`) el.parentElement.style.setProperty('--libnav-h', `${h}px`);
+  };
   let fadeQueued = false;
   const fadeRows = () => { if (fadeQueued) return; fadeQueued = true; requestAnimationFrame(() => { fadeQueued = false; $$(CHIP_ROWS).forEach((el) => { if (el.matches('.libnav, .qualchips')) revealChosenChip(el); if (el.matches('.main > .libnav')) noteLibnavHeight(el); fadeRow(el); }); }); };
   document.addEventListener('scroll', (e) => { if (e.target instanceof Element && e.target.matches(CHIP_ROWS)) fadeRow(e.target); }, true);
@@ -7231,8 +7238,26 @@
     toast(on ? 'Added to favourites' + note : 'Removed from favourites');
     return true;
   };
-  // Whether the node holds a Pubky session (menus offer homeserver uploads then).
-  const pubkyUser = async () => { if (isListener()) return null; if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
+  // Whether the node holds a Pubky session (menus offer homeserver uploads then). Asked once at a
+  // time: a page drawn again while the node hasn't answered (Try again on a held playlist) waits on
+  // the same question, for 15 s at most (then the next page asks again); one asked before the user
+  // was forgotten no longer counts (forgetPubkyUser).
+  let pubkyAsking = null; let pubkyForgot = 0;
+  const forgetPubkyUser = () => { state.pubkyUser = undefined; pubkyAsking = null; pubkyForgot++; };
+  const pubkyUser = async () => {
+    if (isListener()) return null;
+    if (state.pubkyUser === undefined) {
+      if (!pubkyAsking) {
+        const asked = pubkyForgot;
+        const mine = pubkyAsking = api('GET', '/pubky')
+          .then((pk) => { if (asked === pubkyForgot) { state.pubkyUser = (pk && pk.user) || null; state.pubkyStatus = pk; } }, () => { if (asked === pubkyForgot && state.pubkyUser === undefined) state.pubkyUser = null; })
+          .finally(() => { clearTimeout(waitedOn); if (pubkyAsking === mine) pubkyAsking = null; });
+        const waitedOn = setTimeout(() => { if (pubkyAsking === mine) pubkyAsking = null; }, PL_READ_MS);
+      }
+      await pubkyAsking;
+    }
+    return state.pubkyUser === undefined ? null : state.pubkyUser;
+  };
   // A session approved for fewer folders than the node uses: one plain line with the way out.
   // The node's own Pubky session lacks folders: the owner's next log in with Pubky Ring asks for
   // them (one approval, no separate sign-in), so the way there is Log out
@@ -7242,7 +7267,7 @@
   // in, so its notice approves them here (Settings › My accounts, the node's own Pubky sign-in).
   const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = state.token ? logOut : () => { state.autoResign = true; setView('settings', 'accounts'); });
   // A sync's answer as one plain line: the re-sign notice instead of a raw 403.
-  const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Saved: ${fmtCount(r.pushed)} sent to your homeserver, ${fmtCount(r.pulled)} received${r.errors.length ? `, ${fmtCount(r.errors.length)} errors` : ''}${r.pending ? `; ${fmtCount(r.pending)} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
+  const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { forgetPubkyUser(); return toast(RESIGN_TEXT, 'error'); } toast(`Saved: ${fmtCount(r.pushed)} sent to your homeserver, ${fmtCount(r.pulled)} received${r.errors.length ? `, ${fmtCount(r.errors.length)} errors` : ''}${r.pending ? `; ${fmtCount(r.pending)} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
   // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).
   // opts.onPage(n): the rows so far, after each part; opts.wait: ms a part may take before it is given
   // up with STOPPED_ANSWERING (a node that stops answering mid-library doesn't leave it waiting for good)
@@ -8363,7 +8388,9 @@
           // after 15 s, plHolds)
           const plCut = plHolds.has(plId) ? new AbortController() : null; let plCutAt = null;
           if (plCut) { plCut.signal.why = new Error('Couldn’t load this playlist: the node didn’t answer in time.'); plCutAt = setTimeout(() => plCut.abort(plCut.signal.why), PL_READ_MS); }
-          await (plCut ? Promise.race([pubkyUser(), new Promise((_, no) => plCut.signal.addEventListener('abort', () => no(plCut.signal.why), { once: true }))]) : pubkyUser());
+          // (the 15 s timer ends with the read, whichever way it ends)
+          const plCutDone = () => clearTimeout(plCutAt);
+          try { await (plCut ? Promise.race([pubkyUser(), new Promise((_, no) => plCut.signal.addEventListener('abort', () => no(plCut.signal.why), { once: true }))]) : pubkyUser()); } catch (e) { plCutDone(); throw e; }
           // Where songs play from can take a while the first time (each service asked by ISRC):
           // the songs show at once, the chips follow.
           const cachedPf = state.plPf && state.plPf.id === plId && Date.now() - state.plPf.at < 30000 ? state.plPf.data : null;
@@ -8372,7 +8399,7 @@
           const mine = isListener();
           const askPf = () => api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true }; return null; });
           let pfP = mine ? Promise.resolve(null) : cachedPf ? Promise.resolve(cachedPf) : pfFailed ? Promise.resolve(null) : askPf();
-          const d = await api('GET', `/playlists/${encodeURIComponent(plId)}`, undefined, plCut ? { signal: plCut.signal } : {}).finally(() => clearTimeout(plCutAt));
+          const d = await api('GET', `/playlists/${encodeURIComponent(plId)}`, undefined, plCut ? { signal: plCut.signal } : {}).finally(plCutDone);
           // The answer kept from before goes by place too: if the list changed meanwhile (another
           // device moved or removed a song), a row would show one song and remove another, so it is
           // asked for again
@@ -10068,7 +10095,7 @@
                   ${r.signed_in.length ? `<p class="small">Signed in again: ${esc(r.signed_in.join(', '))}.</p>` : ''}${r.sign_in_again.length ? `<p class="small">Sign in again: ${esc(r.sign_in_again.join(', '))}.</p>` : ''}${r.notes.map((n) => `<p class="small muted">${esc(n)}</p>`).join('')}
                   ${r.missing_folders.map((m, k) => `<div class="toolbar" style="margin-top:8px"><span class="small">Not on this computer: <code>${esc(m)}</code>. Where is that music now?</span><input class="input" data-mvto="${k}" placeholder="/path/to/the/music" aria-label="New place of ${esc(m)}"><button class="btn sm" data-mv="${k}">Use this folder</button></div>`).join('')}</div>`;
                 $$('[data-mv]', out).forEach((mb) => mb.onclick = async () => { const k = Number(mb.dataset.mv); const to = $(`[data-mvto="${k}"]`, out).value.trim(); if (!to) return; try { const m = await api('POST', '/library/folders/move', { from: r.missing_folders[k], to }); toast(`${m.moved_files} files found in their new place`); mb.closest('.toolbar').remove(); } catch (er) { toast(er.message, 'error'); } });
-                b.textContent = 'Restored'; state.pubkyUser = undefined; forgetAlbums(); homeCache.clear(); toast('Backup restored');
+                b.textContent = 'Restored'; forgetPubkyUser(); forgetAlbums(); homeCache.clear(); toast('Backup restored');
               } catch (er) { toast(er.message, 'error'); b.disabled = false; b.textContent = 'Restore this backup'; delete b.dataset.armed; }
             };
           };
@@ -10202,7 +10229,7 @@
               $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve${what}. This page updates by itself.</p><p class="muted small">Pubky Ring is the free app (iPhone and Android, from your app store) that holds your Pubky identity; this node never sees your keys.</p><a class="btn sm" href="${esc(ringUrl(r.url))}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
               $('#pkurl').scrollIntoView({ behavior: 'smooth', block: 'center' }); // the QR, not below the fold
               const pc = $('#pkcopy'); if (pc) pc.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(r.url).then(() => toast('Link copied')).catch(() => toast(r.url)); };
-              const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); state.pubkyUser = undefined; toast('Signed in as ' + shortKey(st.user)); render(); } } catch (e) { clearInterval(t); toast(e.message, 'error'); } }, 2000);
+              const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); forgetPubkyUser(); toast('Signed in as ' + shortKey(st.user)); render(); } } catch (e) { clearInterval(t); toast(e.message, 'error'); } }, 2000);
             } catch (e) { toast(e.message, 'error'); }
           };
           const pl = $('#pklogin'); if (pl) pl.onclick = () => ringFlow('/pubky/login', '');

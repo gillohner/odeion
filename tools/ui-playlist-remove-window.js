@@ -11,8 +11,10 @@
 // after 15 s (case 7); a keyboard Move whose library change redraws the list first keeps the focus
 // on the moved song (case 8); and a playlist opened afresh doesn't take the focus back (case 9),
 // after a failed read too (case 10). The 15 s cover the Pubky user still to be asked as well (case
-// 11); a library change while a Move is on its way keeps the list held (case 12); and the late
-// answer of a read cut at 15 s draws nothing (case 7).
+// 11), Try again meanwhile waits on the same Pubky question instead of asking again, and its late
+// answer leaves Try again in place; a library change while a Move is on its way keeps the list held
+// (case 12); and the late answer of a read cut at 15 s, or of a slow read a newer one was drawn
+// before, draws nothing (case 7).
 // At 360 (phone) and 1280 px.
 //   node tools/ui-playlist-remove-window.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -257,6 +259,13 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
         await until(async () => writes.length === w7 + 2, 2000);
         check(writes.slice(w7).join() === 'c8 DELETE 0,c8 DELETE 1', `${width}: and x on Charlie deletes Charlie (${writes.slice(w7)})`);
         await until(async () => (await order()) === 'Bravo', 3000);
+        // A slow read that isn't cut, answering after a newer read was drawn: it draws nothing
+        const releaseSlow = gate('c8', false, ['A', 'B', 'C']); const g7 = gets.length;
+        libraryChanged(); await until(async () => gets.slice(g7).includes('c8'), 2000);
+        libraryChanged(); await until(async () => gets.slice(g7).filter((g) => g === 'c8').length === 2, 2000); await sleep(400);
+        check((await order()) === 'Bravo' && gets.slice(g7).filter((g) => g === 'c8').length === 2, `${width}: a newer read, after two library changes, is drawn first (${await order()})`);
+        releaseSlow(); await sleep(400);
+        check((await order()) === 'Bravo' && !(await inert()), `${width}: the slower read's late answer draws nothing (${await order()})`);
 
         // 11. A read under a hold, with the Pubky user still to be asked (a "Save now" that needs a
         // new sign-in forgot it) and no answer for it: Try again after 15 s too
@@ -274,11 +283,19 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
         await page.evaluate(() => { const st = { v: 'playlist', arg: 'c13' }; history.pushState(st, '', '/playlist/c13'); dispatchEvent(new PopStateEvent('popstate', { state: st })); });
         await until(async () => pubkyWaits.length > 0, 3000);
         check(hadSync && pubkyWaits.length > 0 && (await order()) === '', `${width}: Save now forgot the Pubky user and the playlist asks for it again (${pubkyWaits.length} waiting)`);
+        // The page drawn again while that question is unanswered (as Try again does): it waits on
+        // the same question, it doesn't ask a second time
+        const asked11 = pubkyWaits.length; const g11 = gets.length;
+        libraryChanged(); await sleep(400);
+        check(pubkyWaits.length === asked11 && (await order()) === '', `${width}: drawn again meanwhile, the playlist asks for the Pubky user no second time (${asked11} then ${pubkyWaits.length} waiting, ${gets.length - g11} playlist reads)`);
         await page.clock.fastForward(16000);
         await until(async () => !!(await page.$('#navretry')), 3000);
         const notice11 = await page.evaluate(() => { const n = document.querySelector('#main .notice'); return n ? n.textContent.trim() : ''; });
         check(/Couldn.t load this playlist/.test(notice11), `${width}: no Pubky answer: after 15 s it says so with Try again ("${notice11}")`);
-        pubkyFree(); await page.click('#navretry').catch(() => {});
+        // The Pubky answer coming late draws nothing over Try again
+        pubkyFree(); await sleep(400);
+        check(!!(await page.$('#navretry')) && (await order()) === '', `${width}: the Pubky user's late answer leaves Try again in place (rows "${await order()}")`);
+        await page.click('#navretry').catch(() => {});
         await until(async () => (await order()) === 'Bravo', 3000);
         check((await order()) === 'Bravo' && (await inert()), `${width}: Try again draws the list, still held while the DELETE is on its way (${await order()}, inert ${await inert()})`);
         releaseDel11();
