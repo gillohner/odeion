@@ -8447,12 +8447,14 @@
           const pfFits = fitsList(cachedPf);
           const shown = again && plShown && plShown.id === plId ? plShown.uris : null;
           const pfMoved = !mine && !pfFits && !pfFailed && !plHolds.has(plId) && !!shown && (shown.length !== d.playlist.items.length || shown.some((u, k) => u !== d.playlist.items[k].uri));
-          if (cachedPf && !pfFits && !mine) pfP = askPf();
+          const pfAfterRead = !!cachedPf && !pfFits && !mine;
+          if (pfAfterRead) pfP = askPf();
           let pf = (pfFits && cachedPf) || (pfMoved ? undefined : await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]));
           if (drawStale()) return;
-          // (an answer asked before another device changed the list would name and remove by the
-          // old places: the rows wait for one that fits)
-          if (pf && !fitsList(pf)) pf = undefined;
+          // (an answer asked before the list was read may be for the old places, another device having
+          // changed it meanwhile: the rows wait for one that fits. One asked after the read is used as
+          // it is, so a node that names a song otherwise than the list does can't keep the draw asking)
+          if (pf && !fitsList(pf) && !pfAfterRead) pf = undefined;
           const pfPending = pf === undefined;
           if (pfPending) { pf = null; let pfDone = false; pfP.then(() => { pfDone = true; if (state.view === 'playlist' && state.viewArg === plId) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
           state.itemTitle = d.summary.name;

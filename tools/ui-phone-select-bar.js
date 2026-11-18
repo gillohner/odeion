@@ -20,7 +20,9 @@ const uri = (n) => `https://musicbrainz.org/recording/00000000-0000-4000-8000-00
 const tracks = Array.from({ length: 14 }, (_, i) => i + 1).map((id) => ({ ...fx.track, id, mbid: uri(id).split('/').pop(), canonical_uri: uri(id), title: `Song ${id}` }));
 const summary = { ...fx.summary, items: tracks.length };
 const detail = { summary, playlist: { ...summary, items: tracks.map((t) => ({ uri: t.canonical_uri })) }, tracks, entries: tracks.map((t) => ({ kind: 'track', uri: t.canonical_uri })), local_tracks: [] };
-const fixtures = { '/playlists/c1': { body: detail } };
+// (where each song plays, under the list's own uris as the node answers them)
+const playFrom = { order: { order: ['library'], services: [{ id: 'library', name: 'Your library', connected: true }] }, own_order: false, items: tracks.map((t, index) => ({ index, uri: t.canonical_uri, title: t.title, artist: 'Sefa, Dr. Peacock', track_id: t.id, plays_from: { service: 'library', label: 'Your library' }, sources: [] })) };
+const fixtures = { '/playlists/c1': { body: detail }, '/playlists/c1/play-from': { body: playFrom } };
 
 // Scroll the page to its end (at once, not smoothly) and measure the bar and what is under it.
 const atEnd = (page) => page.evaluate(() => {
