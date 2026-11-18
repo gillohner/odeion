@@ -8,6 +8,9 @@
 // there; while it shows, the title and artist move to its right (it hid their first ~24 px). A tap
 // (or, in the phone layout, a mouse click) at the title's start still plays the row through the row itself, and a mouse over the row doesn't show the hidden button. Desktop and
 // tablet widths keep their numbers, and so does the Phone layout chosen on a window wider than 720 px.
+// While the keyboard's play button shows, the row (also the long title's) still fits: no sideways
+// scroll, its length and ⋯ inside the row and on screen. Only the keyboard moves the title: not a tap
+// (nor a script's focus after one), not desktop/tablet rows, not an album's numbered rows.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-phone-row-numbers.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -27,6 +30,26 @@ const rows = (page, list) => page.$$eval(`[data-list="${list}"] .track`, (rs) =>
   const n = r.querySelector('.num'); const box = r.getBoundingClientRect(); const t = r.querySelector('.main-col').getBoundingClientRect();
   return { num: n && n.getClientRects().length ? n.textContent.trim() : null, lead: Math.round(t.left - box.left), title: Math.round(t.width), row: Math.round(box.width) };
 }));
+// A row's own left padding (12 px on a phone list row; 48 only while the keyboard is on its play button)
+const padL = (row) => row.evaluate((r) => getComputedStyle(r).paddingLeft);
+// Tab from row i-1's ⋯ on to row i's play button; true once it has the keyboard's focus (focus-visible)
+async function tabToPlay(page, rows, i) {
+  await rows.nth(i - 1).locator('[data-act="more"]').focus();
+  const kb = rows.nth(i).locator('[data-act="play"]');
+  for (let k = 0; k < 10; k++) {
+    await page.keyboard.press('Tab');
+    if (await kb.evaluate((e) => e === document.activeElement)) return kb.evaluate((e) => e.matches(':focus-visible'));
+  }
+  return false;
+}
+// While a row's play button shows (the row 48 px in): no sideways scroll, and the row's length and ⋯
+// inside the row, and the row's end inside the list and the window (a clipped ⋯ is out of reach too)
+const fitsShown = (row) => row.evaluate((r) => {
+  const b = r.getBoundingClientRect(); const end = Math.min(b.right, r.parentElement.getBoundingClientRect().right, innerWidth);
+  const inside = (e) => { const x = e.getBoundingClientRect(); return x.width > 0 && x.left >= b.left - 0.5 && x.right <= end + 0.5; };
+  return { shown: r.querySelector('[data-act="play"]').matches(':focus-visible'), ov: document.documentElement.scrollWidth - innerWidth, pad: getComputedStyle(r).paddingLeft, dur: inside(r.querySelector('.dur')), more: inside(r.querySelector('[data-act="more"]')) };
+});
+const fitOk = (f) => f.shown && f.pad === '48px' && f.ov <= 0 && f.dur && f.more;
 const nowSrc = (page) => page.evaluate(() => (window.pmPlayer && window.pmPlayer.now().src) || '');
 const playing = (page, id) => page.waitForFunction((n) => [...document.querySelectorAll('audio, video')].some((a) => a.src.includes(`/library/tracks/${n}/file`)), id, { timeout: 4000 }).then(() => true, () => false);
 
@@ -55,6 +78,12 @@ async function phone(browser, width) {
     check(hit === 'main-col', `${at} Songs: the title's start is the row, not its hidden play button (${hit})`);
     await page.touchscreen.tap(b2.x + 16, b2.y + b2.height / 2);
     check(await playing(page, 2), `${at} Songs: a tap at row 2's start plays Bright Morning (${await nowSrc(page)})`);
+    // (a tap is not the keyboard: the row keeps its 12 px, the title doesn't move over, even when the
+    // play button then gets focus without the keyboard, as a script's focus after a tap)
+    const tapPad = await padL(r2);
+    const tapFocus = await r2.locator('[data-act="play"]').evaluate((e) => { e.focus(); return { focused: e === document.activeElement, fv: e.matches(':focus-visible'), pad: getComputedStyle(e.closest('.track')).paddingLeft }; });
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    check(tapPad === '12px' && tapFocus.focused && !tapFocus.fv && tapFocus.pad === '12px', `${at} Songs: after the tap row 2 keeps its 12 px start, also with its play button focused by a script (${tapPad}, ${JSON.stringify(tapFocus)})`);
     // The keyboard's play button: hidden until the keyboard is on it, then over the row's start
     const kb = r2.locator('[data-act="play"]');
     check(await kb.evaluate((e) => getComputedStyle(e).opacity === '0'), `${at} Songs: the row's play button is not shown`);
@@ -71,6 +100,9 @@ async function phone(browser, width) {
       return { gap: Math.round(t.left - ring), cur: mark, h: Math.round(row.getBoundingClientRect().height), next: Math.round(row.nextElementSibling.getBoundingClientRect().top - row.parentElement.getBoundingClientRect().top) };
     });
     check(clear.gap >= 4 && clear.gap <= 12 && clear.cur !== null && clear.cur >= 0, `${at} Songs: the shown play button leaves the playing row's mark, title and artist in sight, ${clear.gap} px right of its ring (mark at ${clear.cur})`);
+    // ...and the row still fits the screen
+    const fits = await fitsShown(r2);
+    check(fitOk(fits), `${at} Songs: with the play button shown the row fits: no horizontal overflow, length and ⋯ inside the row and the screen (${JSON.stringify(fits)})`);
     check(clear.h === before.h && clear.next === before.next, `${at} Songs: the row keeps its height (${before.h} → ${clear.h}) and the next row its place (${before.next} → ${clear.next})`);
     await page.screenshot({ path: path.join(SHOTS, `songs-keyboard-play-${width}.png`) });
     await page.keyboard.press('Tab');
@@ -84,6 +116,14 @@ async function phone(browser, width) {
     check(await kb3.evaluate((e) => e === document.activeElement && getComputedStyle(e).opacity === '1'), `${at} Songs: Tab goes on to row 3's play button, shown`);
     await page.keyboard.press('Enter');
     check(await playing(page, 3), `${at} Songs: Enter on it plays Cold River from there (${await nowSrc(page)})`);
+    // The long title's row (row 1, no row before it): Shift+Tab back from its ⋯ to its play button;
+    // the title shrinks for it, the length and ⋯ stay in the row and on screen
+    const all = page.locator('[data-list="all"] .track'); const kb1 = all.nth(0).locator('[data-act="play"]');
+    await all.nth(0).locator('[data-act="more"]').focus();
+    for (let k = 0; k < 10 && !(await kb1.evaluate((e) => e === document.activeElement)); k++) await page.keyboard.press('Shift+Tab');
+    const fits1 = await fitsShown(all.nth(0));
+    check(fitOk(fits1), `${at} Songs: the long title's row fits with its play button shown (${JSON.stringify(fits1)})`);
+    await page.screenshot({ path: path.join(SHOTS, `songs-keyboard-long-${width}.png`) });
     check(!state.errors.length, `${at}: no page errors (${state.errors.join(' | ')})`);
   } finally { await context.close(); }
   // Downloads (offline): All songs and Favourites drop the number; an opened album keeps its track numbers
@@ -94,6 +134,10 @@ async function phone(browser, width) {
     await off.page.click('[data-dlalbum="7"]'); await off.page.waitForSelector('[data-list="album"] .track');
     const al = await rows(off.page, 'album');
     check(JSON.stringify(al.map((r) => r.num)) === '["1","2","3"]' && al.every((r) => r.lead >= 30), `${at} Downloads › an album keeps its track numbers (${JSON.stringify(al.map((r) => r.num))}, title ${al[0].lead} px in)`);
+    // (its play button shows over the number, not over the title: the row doesn't make room for it)
+    const ar = off.page.locator('[data-list="album"] .track'); const aPad = await padL(ar.nth(1));
+    const aKb = await tabToPlay(off.page, ar, 1); const aPadKb = await padL(ar.nth(1));
+    check(aKb && aPadKb === aPad && aPadKb !== '48px', `${at} Downloads › an album: the keyboard on a row's play button leaves its start as it was (${aPad} → ${aPadKb}, focused ${aKb})`);
     await off.page.screenshot({ path: path.join(SHOTS, `downloads-album-${width}.png`) });
     check(!off.state.errors.length, `${at} Downloads: no page errors (${off.state.errors.join(' | ')})`);
   } finally { await off.context.close(); }
@@ -122,6 +166,11 @@ async function wide(browser, width) {
     check(JSON.stringify(rs.map((r) => r.num)) === '["1","2","3"]', `${width}px Songs: the rows keep their numbers (${JSON.stringify(rs.map((r) => r.num))})`);
     const r = page.locator('[data-list="all"] .track').nth(1); await r.hover();
     check(await r.locator('[data-act="play"]').evaluate((e) => getComputedStyle(e).opacity === '1'), `${width}px Songs: a hover shows the row's play button`);
+    // the keyboard on it: the button sits over the number, so the row's start stays as it was
+    await page.mouse.move(0, 0);
+    const all = page.locator('[data-list="all"] .track'); const p0 = await padL(r);
+    const kb = await tabToPlay(page, all, 1); const p1 = await padL(r);
+    check(kb && p1 === p0 && p1 !== '48px', `${width}px Songs: the keyboard on row 2's play button leaves the row's start as it was (${p0} → ${p1}, focused ${kb})`);
   } finally { await context.close(); }
 }
 
