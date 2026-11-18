@@ -6464,6 +6464,7 @@
   // this playlist" with Try again, so the list is never left inert. (one hold per playlist;
   // plDraws: each playlist draw's number)
   const plHolds = new Map(); let plDraws = 0; const PL_HOLD_MS = 30000; const PL_READ_MS = 15000;
+  let plShown = null; // (the playlist whose rows were drawn last, its songs' uris in their order)
   const plHeld = (id) => plHolds.has(id);
   const plHoldShow = () => { $$('#plsongs, #pllocal').forEach((x) => { x.inert = true; }); if (selBar) $$('button', selBar).forEach((b) => { b.disabled = true; }); };
   // (the control that had focus in the list, by its data attributes and its place among its likes:
@@ -7246,19 +7247,22 @@
   };
   // Whether the node holds a Pubky session (menus offer homeserver uploads then). Asked once at a
   // time: a page drawn again while the node hasn't answered (Try again on a held playlist) waits on
-  // the same question, for 15 s at most (then the next page asks again); one asked before the user
-  // was forgotten no longer counts (forgetPubkyUser).
-  let pubkyAsking = null; let pubkyForgot = 0;
+  // the same question, for 15 s at most: then everyone waiting on it goes on without an answer (a
+  // ⋯ menu opens, not cached) and the next call asks again. Only the latest question's answer
+  // counts (pubkyGen), and none asked before the user was forgotten (forgetPubkyUser).
+  let pubkyAsking = null; let pubkyForgot = 0; let pubkyGen = 0;
   const forgetPubkyUser = () => { state.pubkyUser = undefined; pubkyAsking = null; pubkyForgot++; };
   const pubkyUser = async () => {
     if (isListener()) return null;
     if (state.pubkyUser === undefined) {
       if (!pubkyAsking) {
-        const asked = pubkyForgot;
-        const mine = pubkyAsking = api('GET', '/pubky')
-          .then((pk) => { if (asked === pubkyForgot) { state.pubkyUser = (pk && pk.user) || null; state.pubkyStatus = pk; } }, () => { if (asked === pubkyForgot && state.pubkyUser === undefined) state.pubkyUser = null; })
+        const asked = pubkyForgot; const gen = ++pubkyGen;
+        const latest = () => asked === pubkyForgot && gen === pubkyGen;
+        let waitedOn;
+        const answer = api('GET', '/pubky')
+          .then((pk) => { if (latest()) { state.pubkyUser = (pk && pk.user) || null; state.pubkyStatus = pk; } }, () => { if (latest() && state.pubkyUser === undefined) state.pubkyUser = null; });
+        const mine = pubkyAsking = Promise.race([answer, new Promise((res) => { waitedOn = setTimeout(res, PL_READ_MS); })])
           .finally(() => { clearTimeout(waitedOn); if (pubkyAsking === mine) pubkyAsking = null; });
-        const waitedOn = setTimeout(() => { if (pubkyAsking === mine) pubkyAsking = null; }, PL_READ_MS);
       }
       await pubkyAsking;
     }
@@ -8390,8 +8394,9 @@
           const plRead = ++plDraws; // (plWrite: a change's hold ends with a draw that read after it)
           const plId = state.viewArg;
           const plMine = ++plGen; drawStale = () => plMine !== plGen || state.view !== 'playlist' || state.viewArg !== plId;
-          // (under a hold: a read that doesn't answer, the Pubky user's included, ends in Try again
-          // after 15 s, plHolds)
+          // (under a hold: a read that doesn't answer ends in Try again after 15 s, plHolds; the
+          // Pubky user's question gives up after 15 s of its own and the read goes on without it,
+          // pubkyUser, so whichever 15 s end first decides)
           const plCut = plHolds.has(plId) ? new AbortController() : null; let plCutAt = null;
           if (plCut) { plCut.signal.why = new Error('Couldn’t load this playlist: the node didn’t answer in time.'); plCutAt = setTimeout(() => plCut.abort(plCut.signal.why), PL_READ_MS); }
           // (the 15 s timer ends with the read, whichever way it ends)
@@ -8399,7 +8404,10 @@
           try { await (plCut ? Promise.race([pubkyUser(), new Promise((_, no) => plCut.signal.addEventListener('abort', () => no(plCut.signal.why), { once: true }))]) : pubkyUser()); } catch (e) { plCutDone(); throw e; }
           // Where songs play from can take a while the first time (each service asked by ISRC):
           // the songs show at once, the chips follow.
-          const cachedPf = state.plPf && state.plPf.id === plId && Date.now() - state.plPf.at < 30000 ? state.plPf.data : null;
+          // (lastPf: the latest answer whatever its age, for the names of songs moved meanwhile; the chips
+          // reuse it only under 30 s, cachedPf)
+          const lastPf = state.plPf && state.plPf.id === plId ? state.plPf.data : null;
+          const cachedPf = lastPf && Date.now() - state.plPf.at < 30000 ? lastPf : null;
           const pfFailed = !cachedPf && state.plPf && state.plPf.id === plId && state.plPf.failed && Date.now() - state.plPf.at < 30000;
           // A listener's collection plays what the library has: no play-from orders or pins (those are the owner's)
           const mine = isListener();
@@ -8408,20 +8416,24 @@
           const d = await api('GET', `/playlists/${encodeURIComponent(plId)}`, undefined, plCut ? { signal: plCut.signal } : {}).finally(plCutDone);
           // The answer kept from before goes by place too: if the list changed meanwhile (another
           // device moved or removed a song), a row would show one song and remove another, so it is
-          // asked for again, and the new order drawn at once with its chips still coming (the rows
-          // on screen would be the old order till then, each Remove going by place: no 1.2 s wait). Only
-          // for an answer that fitted the list before: one that never did waits as before (no redraw after redraw)
+          // asked for again. A list whose order differs from the rows on screen (plShown) is drawn
+          // at once with its chips still coming, whatever the age of the answer and whether one came
+          // yet (the old rows would stay up to 1.2 s, each Remove going by place). Not under a hold:
+          // its list takes no presses till the draw (plWrite)
           const fitsList = (x) => !!x && x.items.length === d.playlist.items.length && x.items.every((r, k) => r.uri === d.playlist.items[k].uri);
           const pfFits = fitsList(cachedPf);
-          const pfMoved = cachedPf && !pfFits && !mine && !!state.plPf.fitted;
+          const shown = again && plShown && plShown.id === plId ? plShown.uris : null;
+          const pfMoved = !mine && !pfFits && !pfFailed && !plHolds.has(plId) && !!shown && (shown.length !== d.playlist.items.length || shown.some((u, k) => u !== d.playlist.items[k].uri));
           if (cachedPf && !pfFits && !mine) pfP = askPf();
           let pf = (pfFits && cachedPf) || (pfMoved ? undefined : await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]));
-          if (pf && state.plPf && state.plPf.data === pf && fitsList(pf)) state.plPf.fitted = true;
           if (drawStale()) return;
           const pfPending = pf === undefined;
           if (pfPending) { pf = null; let pfDone = false; pfP.then(() => { pfDone = true; if (state.view === 'playlist' && state.viewArg === plId) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
           state.itemTitle = d.summary.name;
           // Each song as it plays here: the library file, a service, or unavailable (play_from.rs).
+          // (a song listed twice: its k-th copy takes the earlier answer's k-th copy, each place its own pin)
+          const lastByUri = new Map(); if (pfPending && lastPf) lastPf.items.forEach((x) => { if (!lastByUri.has(x.uri)) lastByUri.set(x.uri, []); lastByUri.get(x.uri).push(x); });
+          const copyNo = []; const copiesSeen = new Map(); d.playlist.items.forEach((it, k) => { const n = copiesSeen.get(it.uri) || 0; copyNo[k] = n; copiesSeen.set(it.uri, n + 1); });
           const songs = d.playlist.items.map((it, k) => {
             // A web page or a post plays nowhere: it shows as its card, in its place (B3)
             const kind = d.entries && d.entries[k] && d.entries[k].kind;
@@ -8439,7 +8451,7 @@
             if (r) return { ...base, no: k + 1, title: itemName({ title: r.title, site: r.site }), artist: r.artist, image: r.image, duration_ms: r.duration_ms, track_id: lib ? r.track_id : null, uri: r.stream_uri || null, page: r.page || it.uri, id: idOf(it.uri) };
             // (a song moved by another device keeps what the earlier answer gave it, its name and its
             // stream, while it's asked again: it plays and shows as playing meanwhile)
-            const was = pfPending && cachedPf && cachedPf.items.find((x) => x.uri === it.uri);
+            const was = pfPending && lastPf && (lastByUri.get(it.uri) || [])[copyNo[k]];
             if (was) return { no: k + 1, title: itemName({ title: was.title, site: was.site }), artist: was.artist, image: was.image, duration_ms: was.duration_ms, uri: was.stream_uri || null, pending: true, page: was.page || it.uri, id: idOf(it.uri) };
             return { no: k + 1, title: pfPending ? 'Loading…' : itemName({ title: null, site: null }), pending: pfPending, page: it.uri, id: idOf(it.uri) };
           });
@@ -8467,7 +8479,7 @@
           const place = again ? keepPlace() : null;
           main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist<span class="eb-where"> · ${esc(d.summary.visibility)} · ${d.summary.synced ? (mine ? 'on your homeserver' : 'synced to your homeserver') : mine ? 'waiting for your homeserver' : 'on this node'}</span></div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}${libNote}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
-            + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" data-wd="up" title="Move up" aria-label="${esc(rowWords.up(t.title))}" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" data-wd="down" title="Move down" aria-label="${esc(rowWords.down(t.title))}" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" data-wd="unlist" title="Remove" aria-label="${esc(rowWords.unlist(t.title))}">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', mine ? 'Add songs from any ⋯ menu.' : 'Add songs from any ⋯ menu, or import a file.')}</section>`
+            + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && !t.pending && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" data-wd="up" title="Move up" aria-label="${esc(rowWords.up(t.title))}" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" data-wd="down" title="Move down" aria-label="${esc(rowWords.down(t.title))}" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" data-wd="unlist" title="Remove" aria-label="${esc(rowWords.unlist(t.title))}">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', mine ? 'Add songs from any ⋯ menu.' : 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this playlist, shown with it when you share it.</p>'}</section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
@@ -8542,6 +8554,8 @@
           // Going public asks first, and says what happens without a Pubky sign-in (second review)
           const sh = $('#plshare'); if (sh) sh.onclick = async () => {
             const who = mine ? sharer : await pubkyUser();
+            // (no answer in 15 s: whether you're signed in isn't known, so it doesn't say you aren't)
+            if (!mine && state.pubkyUser === undefined) { toast('Couldn’t check your Pubky sign-in: the node didn’t answer. Try again in a moment.', 'error'); return; }
             const go = await choiceDialog({ title: `Share “${d.summary.name}”?`, text: who
               ? (mine ? 'A public copy goes to your homeserver' : 'A public copy goes to your homeserver with the next sync (in a few minutes)') + ': the songs and their order, never audio. Anyone with the link can open it, and people on Pubky can find it. You can make it private again at any time.'
               : 'You aren\'t signed in to Pubky yet, so there is nowhere to share it from. Sign in with Pubky Ring first (Settings › My accounts); the playlist stays on this node until then.',
@@ -8551,7 +8565,7 @@
           const us = $('#plunshare'); if (us) us.onclick = () => setVis(false);
           const cl = $('#plcopylink'); if (cl) cl.onclick = async () => { const t = `pubky://${sharer.replace(/^pubky/, '')}/pub/social/v1/posts/${d.summary.id}`; try { await navigator.clipboard.writeText(t); toast('Link copied'); } catch { toast(t); } };
           $$('[data-pfilter]', main).forEach((b) => b.onclick = () => { state.plFilter = b.dataset.pfilter ? { id: plId, key: b.dataset.pfilter } : null; render(); });
-          state.drawnPage = 'playlist'; if (place) place();
+          state.drawnPage = 'playlist'; plShown = { id: plId, uris: d.playlist.items.map((it) => it.uri) }; if (place) place();
           // (after the page's own place: focus they moved elsewhere meanwhile stays there)
           if (heldFocus) { const now = document.activeElement; const box = !now || now === document.body || now === main ? $(`#${heldFocus.box}`, main) : null; let b = box ? $$(heldFocus.sel, box)[heldFocus.i] : null; if ((!b || b.disabled) && box && heldFocus.alt) b = $(heldFocus.alt, box); if (b && !b.disabled) b.focus({ preventScroll: true }); }
           break;

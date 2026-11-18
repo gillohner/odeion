@@ -763,6 +763,7 @@ jobs:
           ui-page-title.js page-title-shots
           ui-row-focus-redraw.js row-focus-redraw-shots
           ui-phone-row-numbers.js phone-row-numbers-shots
+          ui-pubky-hang.js pubky-hang-shots
           LIST
           for p in $pin; do
             case "$seen" in *" ${p%=*} "*) ;; *) echo "::error::pinned page ${p%=*} is not in the list"; exit 1 ;; esac
