@@ -6577,6 +6577,11 @@
     const io = new IntersectionObserver(([en]) => { if (!document.body.contains(bar)) { io.disconnect(); return; } bar.hidden = en.isIntersecting; }, { root: main, threshold: 0 });
     io.observe(hero);
   };
+  // Where the click before this one landed: a song row's place and song (a redraw keeps them), or '' off
+  // the rows. Every click counts, also one on a row's own button or off the rows (bindSongRows)
+  const srowSpot = (r) => `${r.dataset.srow}:${r.dataset.tid || ''}`;
+  let srowWas = ''; let srowLast = '';
+  document.addEventListener('click', (e) => { const r = e.target.closest && e.target.closest('[data-srow]'); srowWas = srowLast; srowLast = r ? srowSpot(r) : ''; }, true);
   const bindSongRows = (box, all, ctx = {}) => {
     $$('[data-srow]', box).forEach((r) => { const t = all[Number(r.dataset.srow)]; if (t && t.track_id != null) r.dataset.tid = t.track_id; });
     markDownloads(box);
@@ -6589,13 +6594,17 @@
     // The second click of a double click doesn't start the song again and selects no word of the row,
     // and a drag that selects the row's text doesn't start it, as on a library song row. Only a selection
     // that starts or ends in the row holds it (a mouse drag's click has both ends there): on a touch
-    // screen the rows can't be selected, so a selection made elsewhere stays, even one across the rows
+    // screen the rows can't be selected, so a selection made elsewhere stays, even one across the rows.
+    // A quick tap on the next row can come as a double tap's second (a phone counts taps up to 100 dp
+    // apart, more than a row), so only a second click on the row the first one hit is held. The
+    // mousedown guard stays on every row: a word selected on the next row would hold its click too
     $$('[data-srow]:not([data-card]):not([data-search])', box).forEach((r) => {
       r.onmousedown = (e) => { if (e.detail > 1 && !e.target.closest('a, button, input, select, textarea, label')) e.preventDefault(); };
       r.onclick = (e) => {
+        const again = e.detail > 1 && srowWas === srowSpot(r);
         if (e.target.closest('a,button')) return;
         if (r.closest('.selecting')) { const c = $('.selbox input', r); if (c && !e.target.closest('.selbox')) { c.checked = !c.checked; c.dispatchEvent(new Event('change', { bubbles: true })); } return; }
-        const s = getSelection(); if (e.detail > 1 || (!s.isCollapsed && (r.contains(s.anchorNode) || r.contains(s.focusNode)))) return;
+        const s = getSelection(); if (again || (!s.isCollapsed && (r.contains(s.anchorNode) || r.contains(s.focusNode)))) return;
         playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback);
       };
     });
