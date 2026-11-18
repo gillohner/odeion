@@ -7264,7 +7264,8 @@
   // time: a page drawn again while the node hasn't answered (Try again on a held playlist) waits on
   // the same question, for 15 s at most: then everyone waiting on it goes on without an answer (a
   // ⋯ menu opens, not cached) and the next call asks again. Only the latest question's answer
-  // counts (pubkyGen), and none asked before the user was forgotten (forgetPubkyUser).
+  // counts (pubkyGen), or an older one while no answer is known yet (a node that always answers
+  // after 15 s), and none asked before the user was forgotten (forgetPubkyUser).
   let pubkyAsking = null; let pubkyForgot = 0; let pubkyGen = 0;
   const forgetPubkyUser = () => { state.pubkyUser = undefined; pubkyAsking = null; pubkyForgot++; };
   const pubkyUser = async () => {
@@ -7272,10 +7273,11 @@
     if (state.pubkyUser === undefined) {
       if (!pubkyAsking) {
         const asked = pubkyForgot; const gen = ++pubkyGen;
-        const latest = () => asked === pubkyForgot && gen === pubkyGen;
+        // (a failed older question says nothing while a newer one may still answer)
+        const latest = (anyAnswer) => asked === pubkyForgot && (gen === pubkyGen || (anyAnswer && state.pubkyUser === undefined));
         let waitedOn;
         const answer = api('GET', '/pubky')
-          .then((pk) => { if (latest()) { state.pubkyUser = (pk && pk.user) || null; state.pubkyStatus = pk; } }, () => { if (latest() && state.pubkyUser === undefined) state.pubkyUser = null; });
+          .then((pk) => { if (latest(true)) { state.pubkyUser = (pk && pk.user) || null; state.pubkyStatus = pk; } }, () => { if (latest() && state.pubkyUser === undefined) state.pubkyUser = null; });
         const mine = pubkyAsking = Promise.race([answer, new Promise((res) => { waitedOn = setTimeout(res, PL_READ_MS); })])
           .finally(() => { clearTimeout(waitedOn); if (pubkyAsking === mine) pubkyAsking = null; });
       }
@@ -7473,6 +7475,9 @@
     ]).catch(() => [null]);
     if (!info || !fs || state.view !== 'home' || !box.isConnected) return;
     state.info = info;
+    // (the node didn't say in 15 s whether it holds a Pubky session: the Pubky step is left out
+    // rather than offering a sign-in as if signed out)
+    if (owner && state.pubkyUser === undefined) fs.steps = fs.steps.filter((x) => x.id !== 'pubky' || x.done);
     // Hidden in this browser before the node kept it: the owner's choice moves to the node
     if (owner && setupHiddenHere() && !fs.hidden) { try { localStorage.removeItem('pm.setupHidden'); } catch { /* no storage */ } api('PUT', '/node/settings', { first_steps_hidden: true }).catch(() => {}); fs.show = false; }
     state.setupShown = fs.show && (owner || !setupHiddenHere());
@@ -8411,12 +8416,15 @@
           const plMine = ++plGen; drawStale = () => plMine !== plGen || state.view !== 'playlist' || state.viewArg !== plId;
           // (under a hold: a read that doesn't answer ends in Try again after 15 s, plHolds; the
           // Pubky user's question gives up after 15 s of its own and the read goes on without it,
-          // pubkyUser, so whichever 15 s end first decides)
+          // pubkyUser, so whichever 15 s end first decides. Drawn again (another device changed the
+          // list), it doesn't wait for a user not known yet: it draws without it, and again once
+          // the node answers; Share asks for itself)
           const plCut = plHolds.has(plId) ? new AbortController() : null; let plCutAt = null;
           if (plCut) { plCut.signal.why = new Error('Couldn’t load this playlist: the node didn’t answer in time.'); plCutAt = setTimeout(() => plCut.abort(plCut.signal.why), PL_READ_MS); }
           // (the 15 s timer ends with the read, whichever way it ends)
           const plCutDone = () => clearTimeout(plCutAt);
-          try { await (plCut ? Promise.race([pubkyUser(), new Promise((_, no) => plCut.signal.addEventListener('abort', () => no(plCut.signal.why), { once: true }))]) : pubkyUser()); } catch (e) { plCutDone(); throw e; }
+          if (again && state.pubkyUser === undefined) { const stale = drawStale; pubkyUser().then(() => { if (state.pubkyUser !== undefined && !stale()) render(); }); }
+          else try { await (plCut ? Promise.race([pubkyUser(), new Promise((_, no) => plCut.signal.addEventListener('abort', () => no(plCut.signal.why), { once: true }))]) : pubkyUser()); } catch (e) { plCutDone(); throw e; }
           // Where songs play from can take a while the first time (each service asked by ISRC):
           // the songs show at once, the chips follow.
           // (lastPf: the latest answer whatever its age, for the names of songs moved meanwhile; the chips
@@ -8439,9 +8447,14 @@
           const pfFits = fitsList(cachedPf);
           const shown = again && plShown && plShown.id === plId ? plShown.uris : null;
           const pfMoved = !mine && !pfFits && !pfFailed && !plHolds.has(plId) && !!shown && (shown.length !== d.playlist.items.length || shown.some((u, k) => u !== d.playlist.items[k].uri));
-          if (cachedPf && !pfFits && !mine) pfP = askPf();
+          const pfAfterRead = !!cachedPf && !pfFits && !mine;
+          if (pfAfterRead) pfP = askPf();
           let pf = (pfFits && cachedPf) || (pfMoved ? undefined : await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]));
           if (drawStale()) return;
+          // (an answer asked before the list was read may be for the old places, another device having
+          // changed it meanwhile: the rows wait for one that fits. One asked after the read is used as
+          // it is, so a node that names a song otherwise than the list does can't keep the draw asking)
+          if (pf && !fitsList(pf) && !pfAfterRead) pf = undefined;
           const pfPending = pf === undefined;
           if (pfPending) { pf = null; let pfDone = false; pfP.then(() => { pfDone = true; if (state.view === 'playlist' && state.viewArg === plId) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
           state.itemTitle = d.summary.name;

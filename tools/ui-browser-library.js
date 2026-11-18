@@ -8,7 +8,8 @@ const shots=path.resolve(process.argv[3]||path.join(process.env.TMPDIR||'.','bro
 function wav(){const rate=16000,n=rate*30,b=Buffer.alloc(44+n*2);b.write('RIFF');b.writeUInt32LE(b.length-8,4);b.write('WAVEfmt ',8);b.writeUInt32LE(16,16);b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(rate,24);b.writeUInt32LE(rate*2,28);b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(n*2,40);for(let i=0;i<n;i++)b.writeInt16LE(Math.round(Math.sin(i*2*Math.PI*220/rate)*1000),44+i*2);return b;}
 const audio=wav();
 const tracks=Array.from({length:9},(_,k)=>({...track,id:k+1,title:`Library ${k+1}`}));
-const tidal={index:9,uri:'tidal:track:999',title:'Muzika',artist:'Sefa, Dr. Peacock',stream_uri:'tidal:track:999',plays_from:{service:'tidal',label:'TIDAL'},sources:[]};
+// (the node answers each item under the list's own uri, play_from.rs; it streams as tidal:track:999)
+const tidal={index:9,uri:'https://tidal.com/track/999',title:'Muzika',artist:'Sefa, Dr. Peacock',stream_uri:'tidal:track:999',plays_from:{service:'tidal',label:'TIDAL'},sources:[]};
 async function setup(browser,width,mode='mixed',duplicate=false,token='fixture-owner'){
  const count=9,ts=tracks.map(t=>({...t})),items=ts.map((t,k)=>({uri:`https://musicbrainz.org/recording/00000000-0000-4000-8000-${String(k+1).padStart(12,'0')}`}));
  const ps=ts.map((t,k)=>({index:k,uri:items[k].uri,title:t.title,artist:'Sefa, Dr. Peacock',track_id:t.id,plays_from:{service:'library',label:'Your library'},sources:[]}));
