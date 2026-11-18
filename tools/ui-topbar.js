@@ -11,12 +11,13 @@
 //     is drawn on screen.
 // On a touch screen (360 and 412 px, a browser with Install and the Android app without it, with and
 // without the "not answering" warning, with your picture in the account button), Help, the warning,
-// Install and the account button sit 6 px apart: each gap is shared half and half (a tap just right
-// of Help doesn't open Install, just right of Install not the account menu) with no dead pixel, each
-// reaches 44 px or more wide, the warning
-// (a 25 px line) 44 px or more tall inside the bar, the account button keeps 6 px to the screen
-// edge, Help doesn't reach down past its box, and the buttons are drawn 44 px as before. With a
-// mouse Help has no reach of its own.
+// Install and the account button sit 6 px apart (the search 6 px before them): each gap is shared
+// half and half (a tap just right of Help doesn't open Install, just right of Install not the
+// account menu) with no dead pixel, each reaches 44 px or more wide, the warning (a 25 px line)
+// 44 px or more tall inside the bar, the account button keeps 6 px to the screen edge, Help doesn't
+// reach down past its box, and the buttons are drawn 44 px as before. The search (drawn 38 px tall)
+// takes the bar's height inside the bar and the 14 px to the screen's left edge. With a mouse Help
+// has no reach of its own.
 // Screenshots of the crowded bar go to the shots folder.
 //   node tools/ui-topbar.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -88,7 +89,7 @@ const STATES = [
         if (pic) await page.evaluate(() => { const me = document.querySelector('#me'); me.classList.add('has-face'); me.innerHTML = '<img class="face md" alt="" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2264%22 height=%2264%22%3E%3Crect width=%2264%22 height=%2264%22 fill=%22%232a7%22/%3E%3C/svg%3E">'; });
         const m = await page.evaluate(() => {
           const shown = (e) => e && !e.hidden && e.getBoundingClientRect().width > 0 && getComputedStyle(e).display !== 'none';
-          const els = ['.topbar #upstreams', '#help button.fb-help', '#installbtn', '#me'].map((s) => document.querySelector(s)).filter(shown)
+          const els = ['.topbar .search', '.topbar #upstreams', '#help button.fb-help', '#installbtn', '#me'].map((s) => document.querySelector(s)).filter(shown)
             .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
           const id = (e) => (e ? e.id || e.className.split(' ').pop() : 'none');
           const who = (x, y) => { const h = document.elementFromPoint(x, y); return id(h && els.find((e) => e === h || e.contains(h))); };
@@ -119,7 +120,7 @@ const STATES = [
             while (bt + 1 < innerHeight && who(cx0, bt + 1) === me) bt++;
             bt += 1;
             const cx = r.left + r.width / 2;
-            reach[me] = { drawn: +r.width.toFixed(1), drawnH: +r.height.toFixed(1), wide: +(rt - l).toFixed(1), tall: bt - t, top: t, bottom: bt, right: +(rt - r.right).toFixed(1), below: who(cx, r.bottom + 2) === me };
+            reach[me] = { left: l, drawn: +r.width.toFixed(1), drawnH: +r.height.toFixed(1), wide: +(rt - l).toFixed(1), tall: bt - t, top: t, bottom: bt, right: +(rt - r.right).toFixed(1), below: who(cx, r.bottom + 2) === me };
           }
           const bar = document.querySelector('.topbar').getBoundingClientRect();
           return { gaps, reach, inner: innerWidth, bar: { top: bar.top, bottom: bar.bottom }, coarse: matchMedia('(pointer: coarse)').matches };
@@ -140,6 +141,17 @@ const STATES = [
           check(!!u && u.tall >= 44 && u.top >= m.bar.top - 0.5 && u.bottom <= m.bar.bottom + 0.5, `${where}: the warning takes a ${u ? u.tall : 0} px tall tap (≥ 44), inside the bar (${u ? u.top + '–' + u.bottom : '-'} in ${Math.round(m.bar.top)}–${Math.round(m.bar.bottom)})`);
         }
         if (m.reach['fb-help']) check(!m.reach['fb-help'].below, `${where}: Help doesn't reach below its box`);
+        // The search is drawn 38 px tall: it takes the bar above and below it and the edge left of it
+        const sr = m.reach.search;
+        check(!!sr && sr.tall >= 44 && sr.top >= m.bar.top - 0.5 && sr.bottom <= m.bar.bottom + 0.5, `${where}: the search takes a ${sr ? sr.tall : 0} px tall tap (≥ 44), inside the bar (${sr ? sr.top + '–' + sr.bottom : '-'} in ${Math.round(m.bar.top)}–${Math.round(m.bar.bottom)})`);
+        check(!!sr && sr.left === 0 && Math.abs(sr.drawnH - 38) < 0.6, `${where}: the search reaches the screen edge (from x ${sr ? sr.left : '-'}) and is drawn ${sr ? sr.drawnH : '-'} px tall as before`);
+        // A press 8 px above the drawn box at the screen's left edge goes into the search
+        // (a mouse press at the point: a touch there could be snapped onto the box by the browser)
+        await page.evaluate(() => document.activeElement && document.activeElement.blur());
+        const sb = await page.locator('.topbar .search').boundingBox();
+        await page.mouse.click(3, sb.y - 8);
+        check(await page.evaluate(() => document.activeElement && document.activeElement.id === 'search'), `${where}: a press 8 px above the search, at the screen's left edge, focuses it`);
+        await page.evaluate(() => document.activeElement && document.activeElement.blur());
         check(!state.errors.length, `${where}: no page errors ${state.errors.join('; ')}`);
         if (!android && health === ok) await page.screenshot({ path: path.join(SHOTS, `topbar-touch-${width}${pic ? '-picture' : ''}.png`), clip: { x: 0, y: 0, width, height: 72 } });
         await context.close();

@@ -1705,6 +1705,11 @@ html[data-shell="phone"] .topbar .install-btn { width: 44px; }
   html[data-shell="phone"] .topbar :is(.fb-help, .upstreams) { position: relative; isolation: isolate; }
   html[data-shell="phone"] .topbar :is(.fb-help, .upstreams, .icon-btn)::before { content: ''; position: absolute; inset: -6px -3px; z-index: -1; }
   html[data-shell="phone"] .topbar .fb-help::before { inset: -1px -4px; }
+  /* The search box is drawn 38 px tall in the 60 px bar: it takes the bar's height above and below
+     it (the whole bar is its tap, no further), the 14 px to the screen edge, and half the gap to the
+     next button (from inside its 1 px border). A tap there focuses the search, as the label does. */
+  html[data-shell="phone"] .topbar .search { isolation: isolate; }
+  html[data-shell="phone"] .topbar .search::before { content: ''; position: absolute; inset: -11px -4px -12px -15px; z-index: -1; }
   html[data-shell="phone"] .topbar .upstreams::before { inset: -10px -3px; }
   html[data-shell="phone"] .topbar > .icon-btn:last-child::before { right: -6px; }
   html[data-shell="phone"] .topbar .me-btn.has-face { overflow: visible; }
