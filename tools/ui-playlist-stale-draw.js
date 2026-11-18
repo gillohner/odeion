@@ -6,8 +6,9 @@
 // previous one drawn under its address. Now only the latest draw of the playlist at the address
 // draws anything (its error too). A list another device changed draws at once, its sources
 // following, whatever the age of the answer kept from before and when no answer came yet; a source
-// filter doesn't hide the rows meanwhile, and a song listed twice keeps each copy's own name. At 360
-// (phone) and 1280 px.
+// filter doesn't hide the rows meanwhile, and a song listed twice keeps each copy's own name. An
+// answer for where the songs play asked before another device changed the list isn't used by place
+// on a first draw either. At 360 (phone) and 1280 px.
 //   node tools/ui-playlist-stale-draw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -38,20 +39,22 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
       const { page, state } = await fx.create(browser, width, { mobile });
       // The server's lists, each GET answered with the list as it was when asked; `hold`: the next
       // GET of that path waits for its release
-      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'] };
-      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice' };
+      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'], c7: ['P', 'Q', 'A'] };
+      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice', c7: 'Moved meanwhile' };
       const hold = {}; const deletes = []; const asks = [];
-      const gate = (key, fail) => { let open; const p = new Promise((res) => { open = res; }); hold[key] = { p, fail }; return open; };
+      // (`fresh`: the held GET answers with the list as it is when released)
+      const gate = (key, fail, fresh) => { let open; const p = new Promise((res) => { open = res; }); hold[key] = { p, fail, fresh }; return open; };
       let socket = null;
       await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
-      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6)(\/.*)?$/, async (r) => {
+      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6|c7)(\/.*)?$/, async (r) => {
         const u = new URL(r.request().url()); const m = r.request().method();
         const [, , , id, ...rest] = u.pathname.split('/'); const sub = rest.join('/');
         if (m === 'DELETE' && sub.startsWith('items/')) { const k = Number(sub.split('/')[1]); deletes.push(k); lists[id].splice(k, 1); return json(r, {}); }
         if (m !== 'GET') return r.fallback();
         const key = `${id}${sub ? '/' + sub : ''}`; asks.push(key);
-        const then = [...lists[id]];
+        let then = [...lists[id]];
         const h = hold[key]; delete hold[key]; if (h) await h.p;
+        if (h && h.fresh) then = [...lists[id]];
         if (h && h.fail) return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The node did not answer' }) });
         if (sub === 'play-from') { const a = pfOf(then); Object.entries(retitle[id] || {}).forEach(([k, t]) => { if (a.items[k]) a.items[k].title = t; }); return json(r, a); }
         if (!sub) return json(r, detailOf(id, names[id], then));
@@ -235,6 +238,26 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         check(JSON.stringify(await order()) === '["Quebec","Papa","Pinned"]', `${width}: moved, the first copy keeps its name and the second its own (${await order()})`);
         releasePf8();
         await until(async () => (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
+
+        // 9. Opened afresh, where its songs play answering at once, and another device moving a song
+        // before the list itself answers: that answer is for the old places, so the rows don't take
+        // their names (or their sources) from it by place: each streamed song keeps its own name,
+        // its source asked again (before: Quebec's row showed Papa, and its × removed Quebec)
+        const releaseRead9 = gate('c7', false, true);
+        const asked10 = asks.length;
+        await goPl('c7');
+        await until(async () => asks.slice(asked10).includes('c7') && asks.slice(asked10).includes('c7/play-from'), 2000);
+        await sleep(300); // (where they play has answered, for the old order)
+        lists.c7 = ['Q', 'P', 'A'];
+        releaseRead9();
+        await until(async () => (await order()).length === 3, 3000);
+        const o9 = await order();
+        check(JSON.stringify(o9) === '["Quebec","Papa","Alpha"]', `${width}: an answer for the old places: each row shows the song now in its place (${o9})`);
+        const papaRm9 = await page.evaluate(() => { const b = [...document.querySelectorAll('#plsongs [data-rm]')].find((x) => /Papa/.test(x.getAttribute('aria-label') || '')); return b ? b.dataset.rm : null; });
+        check(papaRm9 === '1', `${width}: Papa's Remove is for place 1, where the server has it (${papaRm9})`);
+        await until(async () => asks.slice(asked10).filter((x) => x === 'c7/play-from').length > 1 && (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
+        check(asks.slice(asked10).filter((x) => x === 'c7/play-from').length > 1 && JSON.stringify(await order()) === '["Quebec","Papa","Alpha"]', `${width}: where they play is asked again and fills in, the order kept (${asks.slice(asked10)}, ${await order()})`);
+        await page.screenshot({ path: path.join(SHOTS, `moved-before-read-${width}.png`) });
         check(state.errors.length === errs && !state.errors.length, `${width}: no page errors (${state.errors.join(' | ')})`);
       } catch (e) {
         check(false, `${width}: ${e.message.split('\n')[0]}`);
