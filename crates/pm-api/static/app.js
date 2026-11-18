@@ -8408,10 +8408,15 @@
           const d = await api('GET', `/playlists/${encodeURIComponent(plId)}`, undefined, plCut ? { signal: plCut.signal } : {}).finally(plCutDone);
           // The answer kept from before goes by place too: if the list changed meanwhile (another
           // device moved or removed a song), a row would show one song and remove another, so it is
-          // asked for again
-          const pfFits = cachedPf && cachedPf.items.length === d.playlist.items.length && cachedPf.items.every((r, k) => r.uri === d.playlist.items[k].uri);
+          // asked for again, and the new order drawn at once with its chips still coming (the rows
+          // on screen would be the old order till then, each Remove going by place: no 1.2 s wait). Only
+          // for an answer that fitted the list before: one that never did waits as before (no redraw after redraw)
+          const fitsList = (x) => !!x && x.items.length === d.playlist.items.length && x.items.every((r, k) => r.uri === d.playlist.items[k].uri);
+          const pfFits = fitsList(cachedPf);
+          const pfMoved = cachedPf && !pfFits && !mine && !!state.plPf.fitted;
           if (cachedPf && !pfFits && !mine) pfP = askPf();
-          let pf = (pfFits && cachedPf) || await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]);
+          let pf = (pfFits && cachedPf) || (pfMoved ? undefined : await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]));
+          if (pf && state.plPf && state.plPf.data === pf && fitsList(pf)) state.plPf.fitted = true;
           if (drawStale()) return;
           const pfPending = pf === undefined;
           if (pfPending) { pf = null; let pfDone = false; pfP.then(() => { pfDone = true; if (state.view === 'playlist' && state.viewArg === plId) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
@@ -8432,6 +8437,10 @@
             if (t && pfPending) return { pending: true, no: k + 1, title: t.title, artist: artists(t), artists: t.artists, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) };
             if (t && (!r || lib)) return { ...base, no: k + 1, title: t.title, artist: artists(t), artists: t.artists, artist_id: t.artists && t.artists[0] && t.artists[0].id != null ? 'lib-' + t.artists[0].id : null, album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) };
             if (r) return { ...base, no: k + 1, title: itemName({ title: r.title, site: r.site }), artist: r.artist, image: r.image, duration_ms: r.duration_ms, track_id: lib ? r.track_id : null, uri: r.stream_uri || null, page: r.page || it.uri, id: idOf(it.uri) };
+            // (a song moved by another device keeps what the earlier answer gave it, its name and its
+            // stream, while it's asked again: it plays and shows as playing meanwhile)
+            const was = pfPending && cachedPf && cachedPf.items.find((x) => x.uri === it.uri);
+            if (was) return { no: k + 1, title: itemName({ title: was.title, site: was.site }), artist: was.artist, image: was.image, duration_ms: was.duration_ms, uri: was.stream_uri || null, pending: true, page: was.page || it.uri, id: idOf(it.uri) };
             return { no: k + 1, title: pfPending ? 'Loading…' : itemName({ title: null, site: null }), pending: pfPending, page: it.uri, id: idOf(it.uri) };
           });
           const localSongs = (d.local_tracks || []).map((t, k) => ({ no: k + 1, title: t.title, artist: artists(t), artists: t.artists, artist_id: t.artists && t.artists[0] && t.artists[0].id != null ? 'lib-' + t.artists[0].id : null, album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) }));
