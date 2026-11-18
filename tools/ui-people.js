@@ -15,6 +15,9 @@ const TOKEN = process.argv[2] || 'ci-token';
 const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const KEY = 'pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy';
 const KEY2 = 'o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy';
+// A field's value, polled from here: the page's CSP has no 'unsafe-eval', so page.waitForFunction
+// could fail its first check with an EvalError (a CI flake)
+const valueBecomes = async (field, want, ms = 5000) => { const end = Date.now() + ms; let v = await field.inputValue(); while (v !== want && Date.now() < end) { await new Promise((r) => setTimeout(r, 50)); v = await field.inputValue(); } assert.equal(v, want); };
 const PEOPLE = { homeserver: { configured: true, reachable: true, version: '0.6.0', users: 1, disk_used_mb: 2, public_key: KEY }, people: [], invites: [] };
 (async () => {
   const browser = await chromium.launch();
@@ -80,7 +83,7 @@ const PEOPLE = { homeserver: { configured: true, reachable: true, version: '0.6.
       assert.equal(await key.inputValue(), '', 'the clipboard’s other text stays out of the field');
       await page.evaluate((k) => navigator.clipboard.writeText(`pubky://${k}/pub/social/v1/profile.json`), KEY);
       await box.locator('#pinvpaste').click();
-      await page.waitForFunction((k) => document.querySelector('#pinvkey').value === k, KEY);
+      await valueBecomes(key, KEY);
       assert.equal(await box.locator('#pinvkeyerr').isVisible(), false);
       // Scan, in a browser that can't read QR codes: the camera goes off and it says why
       await key.fill('');
@@ -95,7 +98,7 @@ const PEOPLE = { homeserver: { configured: true, reachable: true, version: '0.6.
       // Scan: the camera sees a QR code with the key
       await page.evaluate((k) => { window.__scanValue = `pubky${k}`; }, KEY2);
       await box.locator('#pinvscan').click();
-      await page.waitForFunction((k) => document.querySelector('#pinvkey').value === k, KEY2);
+      await valueBecomes(key, KEY2);
       assert.equal(await page.locator('dialog.scan-dialog').count(), 0, 'the scanner closes on a key');
       await box.locator('#pinvname').fill('Bo');
       await box.locator('#pinvgo').click();

@@ -4,7 +4,8 @@
 // order over the new one, and every Remove on that page goes by a song's place in the list, so the
 // × of one song deleted another. And a playlist opened while the previous one waited could get the
 // previous one drawn under its address. Now only the latest draw of the playlist at the address
-// draws anything (its error too). At 360 (phone) and 1280 px.
+// draws anything (its error too). A list another device changed draws at once, its sources
+// following. At 360 (phone) and 1280 px.
 //   node tools/ui-playlist-stale-draw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -135,6 +136,38 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         socket.send(JSON.stringify({ type: 'library_changed' })); await until(async () => asks.slice(asked5).includes('c4'), 2000); await sleep(300);
         check(!asks.slice(asked5).includes('c4/play-from') && JSON.stringify(await order()) === '["Quebec","Papa","Alpha"]', `${width}: an unchanged list keeps the answer it has (${asks.slice(asked5)})`);
         await page.screenshot({ path: path.join(SHOTS, `streamed-moved-${width}.png`) });
+
+        // 5. The list another device changed is drawn at once, while where its songs play is asked
+        // again (before: the old order stayed up to 1.2 s, each × removing by the new places), each
+        // streamed song named as the earlier answer had it, its chip a spinner till the answer. From a
+        // fresh open (another playlist's answer kept meanwhile), where the answer came within the wait
+        const goPl = (id) => page.evaluate((arg) => { const st = { v: 'playlist', arg }; history.pushState(st, '', `/playlist/${arg}`); dispatchEvent(new PopStateEvent('popstate', { state: st })); }, id);
+        await goPl('c2'); await until(async () => (await title()) === 'Quiet hours', 3000);
+        await sleep(300);
+        const asked5b = asks.length;
+        await goPl('c4');
+        await until(async () => JSON.stringify(await order()) === '["Quebec","Papa","Alpha"]' && (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
+        check(asks.slice(asked5b).includes('c4/play-from'), `${width}: opened again after another playlist, where its songs play is asked (${asks.slice(asked5b)})`);
+        const releasePf5 = gate('c4/play-from');
+        lists.c4 = ['A', 'Q', 'P'];
+        const asked6 = asks.length;
+        socket.send(JSON.stringify({ type: 'library_changed' }));
+        await until(async () => asks.slice(asked6).includes('c4/play-from'), 2000);
+        const fast = await until(async () => JSON.stringify(await order()) === '["Alpha","Quebec","Papa"]', 600);
+        check(fast, `${width}: the new order shows at once, its sources still coming (${await order()})`);
+        const spin = await page.locator('#plsongs .srcchip.wait').count();
+        const loadingRows = await page.locator('#plsongs', { hasText: 'Loading…' }).count();
+        check(spin === 3 && loadingRows === 0, `${width}: each row waits for its source, streamed songs keep their names (${spin} spinners, ${loadingRows} Loading…)`);
+        const papaRm5 = await page.evaluate(() => { const b = [...document.querySelectorAll('#plsongs [data-rm]')].find((x) => /Papa/.test(x.getAttribute('aria-label') || '')); return b ? b.dataset.rm : null; });
+        check(papaRm5 === '2', `${width}: Papa's Remove is for place 2 while its source is asked (${papaRm5})`);
+        const left = await page.evaluate(() => { const b = document.querySelector('#plplay'); b.click(); return new Promise((res) => setTimeout(() => res((document.querySelector('#toast') || {}).textContent || ''), 300)); });
+        check(!/left out/.test(left), `${width}: Play meanwhile keeps the streamed songs ("${left.trim()}")`);
+        await page.screenshot({ path: path.join(SHOTS, `moved-pending-${width}.png`) });
+        releasePf5();
+        await until(async () => (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
+        const o6 = await order();
+        check(JSON.stringify(o6) === '["Alpha","Quebec","Papa"]' && (await page.locator('#plsongs .srcchip.wait').count()) === 0, `${width}: the answer fills the chips, the order kept (${o6})`);
+        await page.screenshot({ path: path.join(SHOTS, `moved-answered-${width}.png`) });
         check(state.errors.length === errs && !state.errors.length, `${width}: no page errors (${state.errors.join(' | ')})`);
       } catch (e) {
         check(false, `${width}: ${e.message.split('\n')[0]}`);
