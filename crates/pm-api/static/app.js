@@ -7299,7 +7299,10 @@
   // ⋯ menu opens, not cached) and the next call asks again. Only the latest question's answer
   // counts (pubkyGen), or an older one while no answer is known yet (a node that always answers
   // after 15 s), and none asked before the user was forgotten (forgetPubkyUser).
-  let pubkyAsking = null; let pubkyForgot = 0; let pubkyGen = 0;
+  // (pubkyKnown: waits for the node's answer itself, past the 15 s too: a playlist drawn without
+  // the user draws again once it is known; a wait whose draw is out of date (gone) is let go)
+  let pubkyAsking = null; let pubkyForgot = 0; let pubkyGen = 0; let pubkyWaiting = [];
+  const pubkyHeard = () => { if (state.pubkyUser === undefined) return; const w = pubkyWaiting; pubkyWaiting = []; w.forEach((x) => x.res()); };
   const forgetPubkyUser = () => { state.pubkyUser = undefined; pubkyAsking = null; pubkyForgot++; };
   const pubkyUser = async () => {
     if (isListener()) return null;
@@ -7310,7 +7313,8 @@
         const latest = (anyAnswer) => asked === pubkyForgot && (gen === pubkyGen || (anyAnswer && state.pubkyUser === undefined));
         let waitedOn;
         const answer = api('GET', '/pubky')
-          .then((pk) => { if (latest(true)) { state.pubkyUser = (pk && pk.user) || null; state.pubkyStatus = pk; } }, () => { if (latest() && state.pubkyUser === undefined) state.pubkyUser = null; });
+          .then((pk) => { if (latest(true)) { state.pubkyUser = (pk && pk.user) || null; state.pubkyStatus = pk; } }, () => { if (latest() && state.pubkyUser === undefined) state.pubkyUser = null; })
+          .then(pubkyHeard);
         const mine = pubkyAsking = Promise.race([answer, new Promise((res) => { waitedOn = setTimeout(res, PL_READ_MS); })])
           .finally(() => { clearTimeout(waitedOn); if (pubkyAsking === mine) pubkyAsking = null; });
       }
@@ -7318,6 +7322,7 @@
     }
     return state.pubkyUser === undefined ? null : state.pubkyUser;
   };
+  const pubkyKnown = (gone) => new Promise((res) => { if (state.pubkyUser !== undefined) res(); else if (!isListener()) { pubkyWaiting = pubkyWaiting.filter((x) => !(x.gone && x.gone())); pubkyWaiting.push({ res, gone }); pubkyUser(); } });
   // A session approved for fewer folders than the node uses: one plain line with the way out.
   // The node's own Pubky session lacks folders: the owner's next log in with Pubky Ring asks for
   // them (one approval, no separate sign-in), so the way there is Log out
@@ -8446,12 +8451,12 @@
           // Pubky user's question gives up after 15 s of its own and the read goes on without it,
           // pubkyUser, so whichever 15 s end first decides. Drawn again (another device changed the
           // list), it doesn't wait for a user not known yet: it draws without it, and again once
-          // the node answers; Share asks for itself)
+          // the node answers, however late, pubkyKnown; Share asks for itself)
           const plCut = plHolds.has(plId) ? new AbortController() : null; let plCutAt = null;
           if (plCut) { plCut.signal.why = new Error('Couldn’t load this playlist: the node didn’t answer in time.'); plCutAt = setTimeout(() => plCut.abort(plCut.signal.why), PL_READ_MS); }
           // (the 15 s timer ends with the read, whichever way it ends)
           const plCutDone = () => clearTimeout(plCutAt);
-          if (again && state.pubkyUser === undefined) { const stale = drawStale; pubkyUser().then(() => { if (state.pubkyUser !== undefined && !stale()) render(); }); }
+          if (again && state.pubkyUser === undefined) { const stale = drawStale; pubkyKnown(stale).then(() => { if (!stale()) render(); }); }
           else try { await (plCut ? Promise.race([pubkyUser(), new Promise((_, no) => plCut.signal.addEventListener('abort', () => no(plCut.signal.why), { once: true }))]) : pubkyUser()); } catch (e) { plCutDone(); throw e; }
           // Where songs play from can take a while the first time (each service asked by ISRC):
           // the songs show at once, the chips follow.
@@ -8490,6 +8495,15 @@
           // (a song listed twice: its k-th copy takes the earlier answer's k-th copy, each place its own pin)
           const lastByUri = new Map(); if (pfPending && lastPf) lastPf.items.forEach((x) => { if (!lastByUri.has(x.uri)) lastByUri.set(x.uri, []); lastByUri.get(x.uri).push(x); });
           const copyNo = []; const copiesSeen = new Map(); d.playlist.items.forEach((it, k) => { const n = copiesSeen.get(it.uri) || 0; copyNo[k] = n; copiesSeen.set(it.uri, n + 1); });
+          // (an answer that doesn't fit the list, asked after the read: the list changed again
+          // meanwhile, or the node names a song otherwise. Each row takes its own song's answer, by
+          // uri and copy as lastByUri; only a name no song of the list has goes by place)
+          const pfAt = (() => {
+            if (!pf || fitsList(pf)) return (k) => pf && pf.items[k];
+            const byUri = new Map(); pf.items.forEach((x) => { if (!byUri.has(x.uri)) byUri.set(x.uri, []); byUri.get(x.uri).push(x); });
+            const listed = new Set(d.playlist.items.map((it) => it.uri));
+            return (k) => { const own = (byUri.get(d.playlist.items[k].uri) || [])[copyNo[k]]; if (own) return own; const at = pf.items[k]; return at && !listed.has(at.uri) ? at : undefined; };
+          })();
           const songs = d.playlist.items.map((it, k) => {
             // A web page or a post plays nowhere: it shows as its card, in its place (B3)
             const kind = d.entries && d.entries[k] && d.entries[k].kind;
@@ -8499,7 +8513,7 @@
             // songs there (listenerSongs), a row's own play skips it as it does any card
             const ea = mine && kind === 'album' && d.entries[k].album;
             if (ea) return { no: k + 1, card: true, title: ea.album_artist ? `${ea.title} · ${ea.album_artist}` : ea.title, page: it.uri };
-            const t = d.tracks[k]; const r = pf && pf.items[k];
+            const t = d.tracks[k]; const r = pfAt(k);
             const base = r ? { plays: r.plays_from, pinned: !!(r.pin && !r.pin_unavailable), pinLost: !!r.pin_unavailable, unavailable: r.plays_from ? null : (r.reason || 'Not on your connected services'), sources: r.sources, connect: r.connect } : {};
             const lib = r && r.plays_from && r.plays_from.service === 'library';
             if (t && pfPending) return { pending: true, no: k + 1, title: t.title, artist: artists(t), artists: t.artists, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) };
@@ -9902,7 +9916,7 @@
           const bundled = await api('GET', '/homeserver/bundled').catch(() => null);
           const tunnel = await api('GET', '/remote/tunnel').catch(() => null);
           const hsHere = !!(bundled && bundled.configured && bundled.reachable);
-          let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; } catch { /* no pubky config */ }
+          let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; pubkyHeard(); } catch { /* no pubky config */ }
           const fresh = (c) => c && Date.now() - c.at < 30000;
           const [nodeMap, prefs, apps, nodeHome] = await Promise.all([
             api('GET', '/node').catch(() => null),
