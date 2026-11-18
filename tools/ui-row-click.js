@@ -3,7 +3,9 @@
 // controls keep their click: the song's name opens its page, the heart and ⋯ are theirs, and none of
 // them plays. A double click starts the song once (not again on its second click) and selects no text,
 // and a drag that selects the row's text doesn't start it. A quick second click or tap on the next row
-// (one the browser counts as a double click's second) still plays that row.
+// (one the browser counts as a double click's second) still plays that row, as does one on the row
+// right after a click on its heart, Play next or Add to queue. An empty selection inside a row doesn't
+// hold a tap on it.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-row-click.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -108,6 +110,17 @@ async function desktop(browser, width) {
           check(said.includes(says) && (await starts(page)).length === 0, `${label}: a ${how === 'click' ? 'click' : 'double click'} on ${says === 'Playing next' ? 'Play next' : 'Add to queue'} says "${says}" and plays nothing ("${said}", ${JSON.stringify(await starts(page))})`);
         }
       }
+      // a click on the row's heart, Play next or Add to queue, then a quick click on the row that comes as
+      // a double click's second (a quick tap there does on a phone, which counts taps up to 100 dp
+      // apart): the row plays (the click before was the button's own); after its play button it doesn't
+      // start again
+      for (const [act, name] of [['fav', 'the heart'], ['next', 'Play next'], ['add', 'Add to queue'], ['play', 'its play button']]) {
+        await page.waitForTimeout(800); await reset(page); await row.hover();
+        await row.locator(`[data-act="${act}"]`).click(); await page.waitForTimeout(50);
+        const p2 = await blankPoint(row); await page.mouse.move(p2.x, p2.y); await page.mouse.down({ clickCount: 2 }); await page.mouse.up({ clickCount: 2 }); await page.waitForTimeout(600);
+        check(await lastDetail(page) === 2 && JSON.stringify(await starts(page)) === JSON.stringify([want]), `${label}: a click on ${name}, then a double click's second on the row, plays it${act === 'play' ? ' once' : ''} (${JSON.stringify(await starts(page))}, want [${want}])`);
+      }
+      await page.waitForTimeout(800);
       // the song's name keeps its link: it opens the song page and plays nothing
       if (pg.at === '/tracks') {
         await fx.go(page, pg.at); await row.waitFor(); await page.waitForTimeout(400); await reset(page);
@@ -146,6 +159,14 @@ async function phone(browser, width, touch) {
       check(across === 'across', `${width} touch: the selection runs across the rows (${across})`);
       await row.locator('.dur').tap(); await page.waitForTimeout(500);
       check(JSON.stringify(await starts(page)) === '["2"]', `${width} touch: with a selection across the rows, a tap on a row inside it still plays it (${JSON.stringify(await starts(page))})`);
+      await page.evaluate(() => getSelection().removeAllRanges());
+      // an empty selection inside the row (the rows take no selection here, so it has no words): a tap
+      // on the row still plays it
+      await page.waitForTimeout(800); await reset(page);
+      const inRow = await row.evaluate((r) => { const g = document.createRange(); g.selectNodeContents(r.querySelector('.dur')); getSelection().removeAllRanges(); getSelection().addRange(g); const s = getSelection(); return !s.isCollapsed && r.contains(s.anchorNode) && String(s) === ''; });
+      check(inRow, `${width} touch: an empty selection sits inside the row`);
+      await row.locator('.dur').tap(); await page.waitForTimeout(500);
+      check(JSON.stringify(await starts(page)) === '["2"]', `${width} touch: with an empty selection inside the row, a tap on it still plays it (${JSON.stringify(await starts(page))})`);
       await page.evaluate(() => getSelection().removeAllRanges());
       // a double tap on the row starts it once
       await page.waitForTimeout(800); await reset(page);
