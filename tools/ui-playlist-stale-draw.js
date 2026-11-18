@@ -5,7 +5,9 @@
 // × of one song deleted another. And a playlist opened while the previous one waited could get the
 // previous one drawn under its address. Now only the latest draw of the playlist at the address
 // draws anything (its error too). A list another device changed draws at once, its sources
-// following. At 360 (phone) and 1280 px.
+// following, whatever the age of the answer kept from before and when no answer came yet; a source
+// filter doesn't hide the rows meanwhile, and a song listed twice keeps each copy's own name. At 360
+// (phone) and 1280 px.
 //   node tools/ui-playlist-stale-draw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -25,6 +27,8 @@ Object.assign(SONGS, STREAMED);
 const sum = (id, name, n) => ({ ...fx.summary, id, name, items: n });
 const detailOf = (id, name, keys) => ({ summary: sum(id, name, keys.length), playlist: { ...sum(id, name, keys.length), items: keys.map((k) => ({ uri: SONGS[k].canonical_uri })) }, tracks: keys.map((k) => (STREAMED[k] ? null : SONGS[k])), entries: keys.map((k) => ({ kind: 'track', uri: SONGS[k].canonical_uri })), local_tracks: [] });
 const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library', name: 'Your library', connected: true }] }, own_order: false, items: keys.map((k, i) => (STREAMED[k] ? { index: i, uri: SONGS[k].canonical_uri, title: SONGS[k].title, artist: 'Sefa', track_id: null, stream_uri: `tidal:track:${SONGS[k].canonical_uri.split('/').pop()}`, page: SONGS[k].canonical_uri, plays_from: { service: 'tidal', label: 'TIDAL' }, sources: [], connect: [] } : { index: i, uri: SONGS[k].canonical_uri, title: SONGS[k].title, artist: 'Sefa', track_id: SONGS[k].id, plays_from: { service: 'library', label: 'Your library' }, sources: [] })) });
+// (`retitle`: a playlist's answer naming the song at a place otherwise, as a pin to another source can)
+const retitle = { c6: { 2: 'Pinned' } };
 const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
 
 (async () => {
@@ -34,13 +38,13 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
       const { page, state } = await fx.create(browser, width, { mobile });
       // The server's lists, each GET answered with the list as it was when asked; `hold`: the next
       // GET of that path waits for its release
-      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'] };
-      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed' };
+      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'] };
+      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice' };
       const hold = {}; const deletes = []; const asks = [];
       const gate = (key, fail) => { let open; const p = new Promise((res) => { open = res; }); hold[key] = { p, fail }; return open; };
       let socket = null;
       await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
-      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4)(\/.*)?$/, async (r) => {
+      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6)(\/.*)?$/, async (r) => {
         const u = new URL(r.request().url()); const m = r.request().method();
         const [, , , id, ...rest] = u.pathname.split('/'); const sub = rest.join('/');
         if (m === 'DELETE' && sub.startsWith('items/')) { const k = Number(sub.split('/')[1]); deletes.push(k); lists[id].splice(k, 1); return json(r, {}); }
@@ -49,7 +53,7 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         const then = [...lists[id]];
         const h = hold[key]; delete hold[key]; if (h) await h.p;
         if (h && h.fail) return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The node did not answer' }) });
-        if (sub === 'play-from') return json(r, pfOf(then));
+        if (sub === 'play-from') { const a = pfOf(then); Object.entries(retitle[id] || {}).forEach(([k, t]) => { if (a.items[k]) a.items[k].title = t; }); return json(r, a); }
         if (!sub) return json(r, detailOf(id, names[id], then));
         return r.fallback();
       });
@@ -168,6 +172,69 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         const o6 = await order();
         check(JSON.stringify(o6) === '["Alpha","Quebec","Papa"]' && (await page.locator('#plsongs .srcchip.wait').count()) === 0, `${width}: the answer fills the chips, the order kept (${o6})`);
         await page.screenshot({ path: path.join(SHOTS, `moved-answered-${width}.png`) });
+
+        // 6. The same with the answer kept from before older than 30 s (the page open a while): the
+        // new order still shows at once, the streamed songs named as that answer had them. With a
+        // source filter on, the rows waiting for their source aren't hidden meanwhile
+        await page.click('#plsongs [data-pfilter="tidal"]');
+        await until(async () => (await page.locator('#plsongs .filtered').count()) === 1, 2000);
+        check((await page.locator('#plsongs .filtered').count()) === 1, `${width}: the TIDAL filter hides the library song`);
+        await page.evaluate(() => { const real = Date.now; window.realNow = real; Date.now = () => real.call(Date) + 31000; });
+        const releasePf6 = gate('c4/play-from');
+        lists.c4 = ['P', 'A', 'Q'];
+        const asked7 = asks.length;
+        socket.send(JSON.stringify({ type: 'library_changed' }));
+        await until(async () => asks.slice(asked7).includes('c4/play-from'), 2000);
+        const fast6 = await until(async () => JSON.stringify(await order()) === '["Papa","Alpha","Quebec"]', 600);
+        check(fast6, `${width}: an answer older than 30 s: the new order shows at once (${await order()})`);
+        const papaRm6 = await page.evaluate(() => { const b = [...document.querySelectorAll('#plsongs [data-rm]')].find((x) => /Papa/.test(x.getAttribute('aria-label') || '')); return b ? b.dataset.rm : null; });
+        check(papaRm6 === '0', `${width}: Papa's Remove is for place 0 meanwhile (${papaRm6})`);
+        const hidden6 = await page.locator('#plsongs .filtered').count();
+        check(hidden6 === 0 && (await page.locator('#plsongs .srcchip.wait').count()) === 3, `${width}: under the filter, the rows waiting for their source stay shown (${hidden6} hidden)`);
+        await page.screenshot({ path: path.join(SHOTS, `moved-aged-filtered-${width}.png`) });
+        releasePf6();
+        await until(async () => (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
+        check((await page.locator('#plsongs .filtered').count()) === 1 && JSON.stringify(await order()) === '["Papa","Alpha","Quebec"]', `${width}: the answer filters again, the order kept (${await order()})`);
+        await page.click('#plsongs [data-pfilter=""]');
+        await page.evaluate(() => { Date.now = window.realNow; });
+
+        // 7. A playlist whose first answer is slower than the 1.2 s wait, changed on another device
+        // before any answer came: the new order shows at once too
+        const releaseFirst = gate('c5/play-from');
+        await goPl('c5');
+        await until(async () => JSON.stringify(await order()) === '["Alpha","Xylo","Bravo"]', 3000);
+        await sleep(1500); // (past the wait: the rows are drawn, their sources still coming)
+        check(JSON.stringify(await order()) === '["Alpha","Xylo","Bravo"]' && (await page.locator('#plsongs .srcchip.wait').count()) === 3, `${width}: a slow first answer: the songs show, their sources coming (${await order()})`);
+        const releaseSecond = gate('c5/play-from');
+        lists.c5 = ['B', 'A', 'X'];
+        const asked8 = asks.length;
+        socket.send(JSON.stringify({ type: 'library_changed' }));
+        await until(async () => asks.slice(asked8).includes('c5'), 2000);
+        const fast7 = await until(async () => JSON.stringify(await order()) === '["Bravo","Alpha","Xylo"]', 600);
+        check(fast7, `${width}: no answer yet: the new order shows at once (${await order()})`);
+        const bravoRm7 = await page.evaluate(() => { const b = [...document.querySelectorAll('#plsongs [data-rm]')].find((x) => /Bravo/.test(x.getAttribute('aria-label') || '')); return b ? b.dataset.rm : null; });
+        check(bravoRm7 === '0', `${width}: Bravo's Remove is for place 0 meanwhile (${bravoRm7})`);
+        // (the first answer, for the old order, then comes: it fills no chips by the wrong places)
+        releaseFirst(); await sleep(300);
+        check(JSON.stringify(await order()) === '["Bravo","Alpha","Xylo"]', `${width}: the first answer, for the old order, leaves the new one (${await order()})`);
+        releaseSecond();
+        await until(async () => (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
+        check(JSON.stringify(await order()) === '["Bravo","Alpha","Xylo"]' && (await page.locator('#plsongs .srcchip.wait').count()) === 0, `${width}: then the chips fill, the order kept (${await order()})`);
+
+        // 8. A song listed twice, each copy named otherwise by where it plays (a pin): moved on another
+        // device, each copy keeps its own name while the sources are asked again
+        await goPl('c6');
+        await until(async () => JSON.stringify(await order()) === '["Papa","Quebec","Pinned"]' && (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
+        check(JSON.stringify(await order()) === '["Papa","Quebec","Pinned"]', `${width}: a song listed twice shows each copy (${await order()})`);
+        const releasePf8 = gate('c6/play-from');
+        lists.c6 = ['Q', 'P', 'P'];
+        const asked9 = asks.length;
+        socket.send(JSON.stringify({ type: 'library_changed' }));
+        await until(async () => asks.slice(asked9).includes('c6/play-from'), 2000);
+        await until(async () => (await order())[0] === 'Quebec', 600);
+        check(JSON.stringify(await order()) === '["Quebec","Papa","Pinned"]', `${width}: moved, the first copy keeps its name and the second its own (${await order()})`);
+        releasePf8();
+        await until(async () => (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
         check(state.errors.length === errs && !state.errors.length, `${width}: no page errors (${state.errors.join(' | ')})`);
       } catch (e) {
         check(false, `${width}: ${e.message.split('\n')[0]}`);

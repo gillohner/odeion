@@ -10,9 +10,10 @@
 // A read after a change that never answers ends in "Couldn't load this playlist" with Try again
 // after 15 s (case 7); a keyboard Move whose library change redraws the list first keeps the focus
 // on the moved song (case 8); and a playlist opened afresh doesn't take the focus back (case 9),
-// after a failed read too (case 10). The 15 s cover the Pubky user still to be asked as well (case
-// 11), Try again meanwhile waits on the same Pubky question instead of asking again, and its late
-// answer leaves Try again in place; a library change while a Move is on its way keeps the list held
+// after a failed read too (case 10). The Pubky user still to be asked doesn't hold the list either
+// (case 11): a redraw meanwhile waits on the same Pubky question instead of asking again, and after
+// 15 s with no answer the playlist goes on without it, its list drawn (held while its change is on
+// its way), the late answer changing nothing; a library change while a Move is on its way keeps the list held
 // (case 12); and the late answer of a read cut at 15 s, or of a slow read a newer one was drawn
 // before, draws nothing (case 7).
 // At 360 (phone) and 1280 px.
@@ -268,7 +269,7 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
         check((await order()) === 'Bravo' && !(await inert()), `${width}: the slower read's late answer draws nothing (${await order()})`);
 
         // 11. A read under a hold, with the Pubky user still to be asked (a "Save now" that needs a
-        // new sign-in forgot it) and no answer for it: Try again after 15 s too
+        // new sign-in forgot it) and no answer for it: after 15 s the list is drawn without it
         await open('c13', 'Alpha,Bravo');
         const releaseDel11 = gate('del'); const w11 = writes.length;
         await pressRm('Alpha');
@@ -285,19 +286,18 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
         check(hadSync && pubkyWaits.length > 0 && (await order()) === '', `${width}: Save now forgot the Pubky user and the playlist asks for it again (${pubkyWaits.length} waiting)`);
         // The page drawn again while that question is unanswered (as Try again does): it waits on
         // the same question, it doesn't ask a second time
+        // (3 s on, so the question's 15 s end well before the redraw's own 15 s for its read)
+        await page.clock.fastForward(3000);
         const asked11 = pubkyWaits.length; const g11 = gets.length;
         libraryChanged(); await sleep(400);
         check(pubkyWaits.length === asked11 && (await order()) === '', `${width}: drawn again meanwhile, the playlist asks for the Pubky user no second time (${asked11} then ${pubkyWaits.length} waiting, ${gets.length - g11} playlist reads)`);
-        await page.clock.fastForward(16000);
-        await until(async () => !!(await page.$('#navretry')), 3000);
-        const notice11 = await page.evaluate(() => { const n = document.querySelector('#main .notice'); return n ? n.textContent.trim() : ''; });
-        check(/Couldn.t load this playlist/.test(notice11), `${width}: no Pubky answer: after 15 s it says so with Try again ("${notice11}")`);
-        // The Pubky answer coming late draws nothing over Try again
-        pubkyFree(); await sleep(400);
-        check(!!(await page.$('#navretry')) && (await order()) === '', `${width}: the Pubky user's late answer leaves Try again in place (rows "${await order()}")`);
-        await page.click('#navretry').catch(() => {});
+        await page.clock.fastForward(12500);
         await until(async () => (await order()) === 'Bravo', 3000);
-        check((await order()) === 'Bravo' && (await inert()), `${width}: Try again draws the list, still held while the DELETE is on its way (${await order()}, inert ${await inert()})`);
+        const notice11 = await page.evaluate(() => { const n = document.querySelector('#main .notice'); return n ? n.textContent.trim() : ''; });
+        check((await order()) === 'Bravo' && (await inert()) && !notice11, `${width}: no Pubky answer in 15 s: the list is drawn without it, still held while the DELETE is on its way (${await order()}, inert ${await inert()}, notice "${notice11}")`);
+        // The Pubky answer coming late changes nothing
+        pubkyFree(); await sleep(400);
+        check((await order()) === 'Bravo' && (await inert()) && !(await page.$('#navretry')), `${width}: the Pubky user's late answer changes nothing (rows "${await order()}")`);
         releaseDel11();
         await until(async () => !(await inert()), 3000);
         check((await order()) === 'Bravo' && !(await inert()), `${width}: the DELETE's answer ends the hold and the list takes presses (${await order()})`);
