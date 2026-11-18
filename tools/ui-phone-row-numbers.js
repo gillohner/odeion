@@ -5,8 +5,8 @@
 // Now the number goes on a phone and the title takes its room: 28 px more (222 / 274 px; it starts
 // 12 px in, as the other phone rows do); an album's real track numbers (Downloads › an album) stay. The row's play button stays for the
 // keyboard: it shows over the row's start only while the keyboard is on it, and Enter plays from
-// there. A tap (or, in the phone layout, a mouse click) at the title's start still plays the row
-// through the row itself, and a mouse over the row doesn't show the hidden button. Desktop and
+// there; while it shows, the title and artist move to its right (it hid their first ~24 px). A tap
+// (or, in the phone layout, a mouse click) at the title's start still plays the row through the row itself, and a mouse over the row doesn't show the hidden button. Desktop and
 // tablet widths keep their numbers, and so does the Phone layout chosen on a window wider than 720 px.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-phone-row-numbers.js [repo] [shots]
@@ -58,13 +58,26 @@ async function phone(browser, width) {
     // The keyboard's play button: hidden until the keyboard is on it, then over the row's start
     const kb = r2.locator('[data-act="play"]');
     check(await kb.evaluate((e) => getComputedStyle(e).opacity === '0'), `${at} Songs: the row's play button is not shown`);
+    const before = await r2.evaluate((row) => ({ h: Math.round(row.getBoundingClientRect().height), next: Math.round(row.nextElementSibling.getBoundingClientRect().top - row.parentElement.getBoundingClientRect().top) }));
     await page.locator('[data-list="all"] .track').nth(0).locator('[data-act="more"]').focus(); await page.keyboard.press('Tab');
     const shown = await kb.evaluate((e) => { const r = e.getBoundingClientRect(); const row = e.closest('.track').getBoundingClientRect(); return { focused: e === document.activeElement, op: getComputedStyle(e).opacity, inRow: r.left >= row.left && r.right <= row.left + 48 && r.top >= row.top && r.bottom <= row.bottom, top: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === e || e.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) }; });
     check(shown.focused && shown.op === '1' && shown.inRow && shown.top, `${at} Songs: Tab from row 1's ⋯ reaches row 2's play button, shown at the row's start (${JSON.stringify(shown)})`);
+    // While it shows, the title and artist (and the now-playing mark before the title) sit right of
+    // it and its focus ring, not under it; the row keeps its height and the next row stays put
+    const clear = await r2.evaluate((row) => {
+      const b = row.querySelector('[data-act="play"]').getBoundingClientRect(); const ring = b.right + 4;
+      const t = row.querySelector('.main-col').getBoundingClientRect(); const title = row.querySelector('.title');
+      const mark = row.classList.contains('cur') ? Math.round(title.getBoundingClientRect().left - ring) : null; // (the mark is the title's first part)
+      return { gap: Math.round(t.left - ring), cur: mark, h: Math.round(row.getBoundingClientRect().height), next: Math.round(row.nextElementSibling.getBoundingClientRect().top - row.parentElement.getBoundingClientRect().top) };
+    });
+    check(clear.gap >= 4 && clear.gap <= 12 && clear.cur !== null && clear.cur >= 0, `${at} Songs: the shown play button leaves the playing row's mark, title and artist in sight, ${clear.gap} px right of its ring (mark at ${clear.cur})`);
+    check(clear.h === before.h && clear.next === before.next, `${at} Songs: the row keeps its height (${before.h} → ${clear.h}) and the next row its place (${before.next} → ${clear.next})`);
     await page.screenshot({ path: path.join(SHOTS, `songs-keyboard-play-${width}.png`) });
     await page.keyboard.press('Tab');
     check(await r2.locator('[data-act="more"]').evaluate((e) => e === document.activeElement), `${at} Songs: Tab goes on to its ⋯`);
     check(await kb.evaluate((e) => getComputedStyle(e).opacity === '0'), `${at} Songs: and the play button hides again`);
+    const back = (await rows(page, 'all'))[1];
+    check(back.lead >= 10 && back.lead <= 14, `${at} Songs: and the title is back at the row's start (${back.lead} px in)`);
     // Enter on the next row's play button (row 2 already plays from the tap): row 3 plays
     await page.keyboard.press('Tab');
     const kb3 = page.locator('[data-list="all"] .track').nth(2).locator('[data-act="play"]');
