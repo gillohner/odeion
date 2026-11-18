@@ -61,6 +61,22 @@ fn network() -> pm_pubky::config::Network {
     }
 }
 
+/// A client whose Ring sign-ins go through an HTTP relay of its own on this machine, not the
+/// public relay (a slow public relay once left approvals undelivered). Keep the relay while it
+/// signs in.
+async fn signing_in() -> (NodeHomeserver, http_relay::HttpRelay) {
+    let relay = http_relay::HttpRelay::builder()
+        .http_port(0)
+        .run()
+        .await
+        .expect("a local relay");
+    let inbox = relay.local_url().join("inbox").unwrap();
+    (
+        NodeHomeserver::new(network()).unwrap().with_auth_relay(inbox),
+        relay,
+    )
+}
+
 fn pubky() -> Pubky {
     if testnet() {
         Pubky::testnet().unwrap()
@@ -163,7 +179,7 @@ async fn the_device_list_and_signing_out_through_the_api() {
     .await;
     let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let (homeserver, _relay) = signing_in().await;
     let mut sessions = Vec::new();
     for id in ["node.pubky.music", "phone.pubky.music"] {
         let flow = homeserver.start_login(id).unwrap();
@@ -328,7 +344,7 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     .await;
     let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let (homeserver, _relay) = signing_in().await;
     let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (n1, n2) = (node(d1.path()), node(d2.path()));
     for (n, id) in [(&n1, "living-room.pubky.music"), (&n2, "kitchen.pubky.music")] {
@@ -546,7 +562,7 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
     .await;
     let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let (homeserver, _relay) = signing_in().await;
     let (d1, d2, d3) = (
         tempfile::tempdir().unwrap(),
         tempfile::tempdir().unwrap(),
@@ -798,7 +814,7 @@ async fn a_take_of_the_vaults_copy_that_doesnt_go_through_keeps_the_nodes_record
     .await;
     let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let (homeserver, _relay) = signing_in().await;
     let d1 = tempfile::tempdir().unwrap();
     let n1 = node(d1.path());
     {
@@ -896,7 +912,7 @@ async fn a_sign_in_switch_ends_the_old_vault_pass() {
     };
     let info = admin_call(&a, reqwest::Method::GET, "/info", None).await;
     let hs = PublicKey::try_from(info["public_key"].as_str().unwrap()).unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let (homeserver, _relay) = signing_in().await;
     let sign_up = |ids: Vec<&'static str>| {
         let (a, hs, homeserver) = (a.clone(), hs.clone(), homeserver.clone());
         async move {
@@ -974,7 +990,7 @@ async fn identities_with_sessions(n: usize, ids: &[&str]) -> Option<Vec<Vec<pubk
     let a = admin()?;
     let info = admin_call(&a, reqwest::Method::GET, "/info", None).await;
     let hs = PublicKey::try_from(info["public_key"].as_str().unwrap()).unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let (homeserver, _relay) = signing_in().await;
     let mut out = Vec::new();
     for _ in 0..n {
         let token = admin_call(
@@ -1028,7 +1044,7 @@ async fn a_sign_in_switch_mid_sync_writes_nothing_more() {
     let mut b = ids.pop().unwrap();
     let mut a = ids.pop().unwrap();
     let (a_phone, a_node) = (a.pop().unwrap(), a.pop().unwrap());
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let (homeserver, _relay) = signing_in().await;
     // A's other device put a bookmark on A's homeserver
     let d_other = tempfile::tempdir().unwrap();
     let other = node(d_other.path());
@@ -1171,7 +1187,7 @@ async fn a_replaced_first_sync_leaves_no_sync_running() {
     };
     let mut b = ids.pop().unwrap();
     let mut a = ids.pop().unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let (homeserver, _relay) = signing_in().await;
     let d = tempfile::tempdir().unwrap();
     let n = node(d.path());
     let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a.pop().unwrap()));
@@ -1214,7 +1230,7 @@ async fn a_replaced_settings_backup_adopts_no_history_delete() {
     let mut b = ids.pop().unwrap();
     let mut a = ids.pop().unwrap();
     let a_node = a.pop().unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let (homeserver, _relay) = signing_in().await;
     // A's settings copy says A deleted its history just now
     let now_us = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1266,7 +1282,7 @@ async fn a_replacement_while_the_backup_waits_for_the_library_adopts_nothing() {
     };
     let mut a = ids.pop().unwrap();
     let a_node = a.pop().unwrap();
-    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let (homeserver, _relay) = signing_in().await;
     let now_us = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

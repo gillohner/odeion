@@ -50,6 +50,22 @@ impl Admin {
 }
 
 /// A person on the homeserver, and `n` clients they approved (each its own grant session).
+/// A client whose Ring sign-ins go through an HTTP relay of its own on this machine, not the
+/// public relay (a slow public relay once left approvals undelivered). Keep the relay while it
+/// signs in.
+async fn signing_in() -> (NodeHomeserver, http_relay::HttpRelay) {
+    let relay = http_relay::HttpRelay::builder()
+        .http_port(0)
+        .run()
+        .await
+        .expect("a local relay");
+    let inbox = relay.local_url().join("inbox").unwrap();
+    (
+        NodeHomeserver::new(network()).unwrap().with_auth_relay(inbox),
+        relay,
+    )
+}
+
 async fn person_with_clients(a: &Admin, n: usize) -> (pubky::PubkySigner, Vec<pubky::PubkySession>) {
     let info = a.call(reqwest::Method::GET, "/info", None).await;
     let hs = PublicKey::try_from(info["public_key"].as_str().expect("homeserver key")).unwrap();
@@ -65,7 +81,7 @@ async fn person_with_clients(a: &Admin, n: usize) -> (pubky::PubkySigner, Vec<pu
         .signup(&hs, Some(token.as_str().expect("a signup token")))
         .await
         .expect("sign-up");
-    let node = NodeHomeserver::new(network()).unwrap();
+    let (node, _relay) = signing_in().await;
     let mut sessions = Vec::new();
     for i in 0..n {
         let flow = node.start_login(&format!("vault-test-{i}.pubky.music")).unwrap();
@@ -815,7 +831,7 @@ async fn a_broad_grant_is_not_a_grant_for_the_sign_ins() {
         return;
     };
     let (signer, sessions) = person_with_clients(&a, 1).await;
-    let node = NodeHomeserver::new(network()).unwrap();
+    let (node, _relay) = signing_in().await;
     let flow = node.start_login_with("backup-tool.example", "/:rw").unwrap();
     signer.approve_auth(flow.url()).await.expect("approve");
     let broad = flow.await_approval().await.expect("session");

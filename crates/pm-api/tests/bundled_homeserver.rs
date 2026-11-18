@@ -3,6 +3,8 @@
 //! publishes it) and `PM_BUNDLED_HS_PASSWORD`; skipped otherwise, so CI stays hermetic except in
 //! the `bundle` job, which runs it against `docker compose up`. A test signer stands in for
 //! Pubky Ring: it creates the account with the link's token and approves the node's access.
+//! Each node signs in through an HTTP relay of its own on this machine (the one pubky's own
+//! tests run), not the public relay: a slow public relay once left approvals undelivered.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -22,12 +24,18 @@ fn bundled() -> Option<pm_api::bundled::AdminEndpoint> {
     )
 }
 
-fn node(dir: &std::path::Path) -> Arc<NodeState> {
-    node_with(dir, None)
+async fn node(dir: &std::path::Path) -> (Arc<NodeState>, http_relay::HttpRelay) {
+    node_with(dir, None).await
 }
 
-/// A node whose API is behind `token` (None: open, everyone counts as the owner).
-fn node_with(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
+/// A node whose API is behind `token` (None: open, everyone counts as the owner), with its relay
+/// (keep it for as long as the node signs anyone in).
+async fn node_with(dir: &std::path::Path, token: Option<&str>) -> (Arc<NodeState>, http_relay::HttpRelay) {
+    let relay = http_relay::HttpRelay::builder()
+        .http_port(0)
+        .run()
+        .await
+        .expect("a local relay");
     let db = dir.join("node.sqlite");
     let outputs = OutputRegistry::new();
     outputs.register(Arc::new(pm_zones::outputs::NullOutput::new()));
@@ -57,7 +65,12 @@ fn node_with(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
         outputs,
     );
     s.zones_for_all_outputs();
-    s
+    s.set_homeserver(
+        pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::config::Network::Mainnet)
+            .unwrap()
+            .with_auth_relay(relay.local_url().join("inbox").unwrap()),
+    );
+    (s, relay)
 }
 
 async fn call(app: &axum::Router, method: &str, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -89,7 +102,7 @@ async fn the_owner_signs_up_on_the_bundled_homeserver() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let s = node(dir.path());
+    let (s, _relay) = node(dir.path()).await;
     s.set_bundled_homeserver(ep);
     let app = router(s.clone());
 
@@ -173,7 +186,7 @@ async fn invites_become_people_with_quotas_and_access() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let s = node(dir.path());
+    let (s, _relay) = node(dir.path()).await;
     s.set_bundled_homeserver(ep);
     // With the homeserver's files folder, People shows what each account stores
     let files = std::env::var("PM_BUNDLED_HS_FILES").ok();
@@ -375,7 +388,7 @@ async fn music_added_to_the_homeserver_plays_from_its_own_folder() {
     };
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pm-audio/tests/fixtures");
     let dir = tempfile::tempdir().unwrap();
-    let s = node(dir.path());
+    let (s, _relay) = node(dir.path()).await;
     s.set_bundled_homeserver(ep);
     s.set_homeserver_files_dir(std::path::PathBuf::from(&files));
     let app = router(s.clone());
@@ -593,7 +606,7 @@ async fn a_listener_signs_in_with_ring_and_plays_a_homeserver_only_account_canno
     let music = dir.path().join("music");
     std::fs::create_dir_all(&music).unwrap();
     std::fs::copy(fixtures.join("60_mono_audio.flac"), music.join("song.flac")).unwrap();
-    let s = node(dir.path());
+    let (s, _relay) = node(dir.path()).await;
     s.set_bundled_homeserver(ep);
     let app = router(s.clone());
     signed_up_owner(&app).await;
@@ -698,7 +711,7 @@ async fn the_owner_logs_in_and_out_and_a_wrong_identity_is_named() {
     };
     const API: &str = "the-api-token";
     let dir = tempfile::tempdir().unwrap();
-    let s = node_with(dir.path(), Some(API));
+    let (s, _relay) = node_with(dir.path(), Some(API)).await;
     s.set_bundled_homeserver(ep);
     let app = router(s.clone());
     let owner = owner_with_signer(&app, API).await;
@@ -859,7 +872,7 @@ async fn a_device_signs_in_once_and_keeps_it_over_browser_log_outs() {
     };
     const API: &str = "the-api-token";
     let dir = tempfile::tempdir().unwrap();
-    let s = node_with(dir.path(), Some(API));
+    let (s, _relay) = node_with(dir.path(), Some(API)).await;
     // A token the node made itself (`<data_dir>/api-token`): only that one can be replaced with
     // Make a new token; one set in the config answers 409 ("change it there")
     let token_file = dir.path().join("api-token");
