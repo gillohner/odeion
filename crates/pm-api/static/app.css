@@ -2610,6 +2610,9 @@ html[data-shell="phone"] .track .main-col .lnk { pointer-events: none; }
   html[data-shell="phone"] .track.seq .num { display: none; }
   html[data-shell="phone"] .track.seq .rowplay:not(:focus-visible) { opacity: 0; }
   html[data-shell="phone"] .track.seq .rowplay:focus-visible { pointer-events: auto; }
+  /* (while it shows, the row's title and artist move over to its right, 8 px past its ring: over them
+     it hid the title's first word and the now-playing mark) */
+  html[data-shell="phone"] .track.seq:has(> .no .rowplay:focus-visible) { padding-left: 48px; }
 }
 @media (pointer: coarse) { .section-head > .btn.selstart { line-height: 40px; margin-top: -4px; margin-bottom: -4px; } }
 
