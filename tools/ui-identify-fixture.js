@@ -89,7 +89,10 @@ const server = http.createServer(async (req, res) => {
       await ctx.addInitScript(() => { localStorage.setItem('pm.token', 't'); localStorage.setItem('pm.zone', 'browser'); });
       const outside = [];
       await ctx.route((url) => url.origin !== BASE && !/^(data|blob):/.test(url.protocol), (r) => { outside.push(r.request().url()); return r.abort(); });
-      await ctx.routeWebSocket(/\/v1\/events/, (ws) => ws.close());
+      // connectToServer first (as ui-unskip-limit.js): otherwise Playwright opens the routed socket
+      // after this handler outside any await, and a reconnect landing while the context closes
+      // rejects with a TargetClosedError nobody catches (exit 1 after every check passed)
+      await ctx.routeWebSocket(/\/v1\/events/, (ws) => { ws.connectToServer(); return ws.close(); });
       const page = await ctx.newPage();
       const errors = []; page.on('pageerror', (e) => errors.push(e.message));
       const shot = async (what) => { if (SHOTS) await page.screenshot({ path: `${SHOTS}/${name}-${what}.png` }); };

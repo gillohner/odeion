@@ -2338,6 +2338,12 @@ html[data-shell="phone"] .page-head .actions > :is(#qtransfer, #qsave, #qclear) 
   .icon-btn, .chip, .btn.sm, .bnav, .pop-item { position: relative; isolation: isolate; }
   .icon-btn::before, .chip::before, .btn.sm::before { content: ''; position: absolute; inset: -6px; z-index: -1; }
   .chip::before, .btn.sm::before { inset: -8px -4px; }
+  /* A zone card's Previous, Play and Next sit 6 px apart: 6 px round gave each gap to the later
+     button (a tap just right of Previous played or paused, just right of Play skipped). The gaps
+     are shared half and half instead; the outer edges keep their 6 px (45/46/45 px wide) */
+  .zone-card .zc-controls > [data-zt="previous"]::before { inset: -6px -3px -6px -6px; }
+  .zone-card .zc-controls > [data-zt="toggle"]::before { inset: -6px -3px; }
+  .zone-card .zc-controls > [data-zt="next"]::before { inset: -6px -6px -6px -3px; }
   /* A row of chips that scrolls sideways keeps the reach inside its box (no vertical scroll, no clip):
      the room above and below is padding, taken out of the row's own margins so nothing moves
      (the library nav already has its 8 px; the scope chips scroll up to 720 px on any shell; the
