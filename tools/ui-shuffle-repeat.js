@@ -354,7 +354,8 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         check(allAre((await modes(page)).shuffle, true, 'Shuffle: on'), `${T} …every copy on: ${say((await modes(page)).shuffle)}`);
         // Next, then off: back in order with the current song in its place
         const drawn = (await saved(page)).q; const now = drawn[1];
-        await closeNp(page); await page.locator('body').click({ position: { x: 2, y: 2 } }).catch(() => {});
+        // (focus dropped, not a click on a corner: on a phone the top bar's corner is the search box's tap)
+        await closeNp(page); await page.evaluate(() => { if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); });
         await page.keyboard.press('ArrowRight');
         check(await until(async () => { const s = await saved(page); return s.at && s.q[s.at.index] === now; }, 6000), `${T} Next plays the drawn second song (${now})`);
         if (!(await page.locator('#shufflebtn').isVisible())) await openNp(page, w);
