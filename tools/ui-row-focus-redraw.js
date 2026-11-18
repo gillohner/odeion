@@ -4,7 +4,8 @@
 // to the page: the next Tab started again at the top. Artists' rows, and Favourites' songs from
 // other services (drawn twice: kept as they were, then the new ones once described). The next Tab
 // goes on to the next row. Favourites' songs from other services are kept by song, not by place:
-// one gone or added above doesn't move the keyboard onto another song. At 1280, 1024 and 768 px.
+// one gone or added above doesn't move the keyboard onto another song, Enter on the kept Play or
+// More is for that song, and a song moved far down is scrolled into sight. At 1280, 1024 and 768 px.
 // Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-row-focus-redraw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -24,11 +25,18 @@ const pages = [
   { name: 'Favourites', url: '/favourites', row: (k) => `#main [data-ditem="${k - 1}"]`, list: '#favother .list' },
 ];
 
-const song = (n) => ({ uri: `https://sefa.bandcamp.com/track/t${n}`, title: `Elsewhere ${n}`, artist: 'Sefa', kind: 'track', site: 'bandcamp' });
+const song = (n) => (typeof n === 'object' ? n : { uri: `https://sefa.bandcamp.com/track/t${n}`, title: `Elsewhere ${n}`, artist: 'Sefa', kind: 'track', site: 'bandcamp' });
+// (a song whose address has a quote, a backslash and a ] in it: found by it all the same)
+const odd = { uri: 'https://sefa.bandcamp.com/track/q"u\\o]te', title: 'Elsewhere odd', artist: 'Sefa', kind: 'track', site: 'bandcamp' };
+// (the same song hearted twice: the second one stays the second one)
+const twice = { uri: 'https://sefa.bandcamp.com/track/t1', title: 'Elsewhere 1 again', artist: 'Sefa', kind: 'track', site: 'bandcamp' };
+const many = Array.from({ length: 30 }, (_, i) => i);
 async function bySong(browser, width) {
-  const favs = (list) => ({ '/favourites': { body: { uris: list.map((o) => o.uri), tracks: [], albums: [], artists: [], other: list } }, '/discover/describe': { body: list } });
+  const favs = (list) => ({ '/favourites': { body: { uris: list.map((o) => o.uri), tracks: [], albums: [], artists: [], other: list } }, '/discover/describe': { body: list.map((o) => ({ also_on: [], ...o })) } });
   const start = [0, 1, 2, 3].map(song);
   const { context, page, state } = await fx.create(browser, width, { fixtures: favs(start) });
+  // (the focused row inside the page's own scrolling part, not under its edge)
+  const inSight = () => page.evaluate(() => { const r = document.activeElement.getBoundingClientRect(); const m = document.querySelector('#main').getBoundingClientRect(); return r.top >= m.top - 1 && r.bottom <= m.bottom + 1; });
   let socket = null;
   await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
   // Where the keyboard is: the song of the row it is in (read from the row's own title), and the control
@@ -39,12 +47,18 @@ async function bySong(browser, width) {
     { name: 'a favourite added above it, its row', focus: 2, part: '', now: [9, 0, 1, 2, 3], want: 'Elsewhere 2' },
     { name: 'that song itself gone, its row', focus: 1, part: '', now: [0, 2, 3], want: 'Elsewhere 2' },
     { name: 'that song, the last, gone, its Play', focus: 3, part: ' [data-dplay]', now: [0, 1, 2], want: 'Elsewhere 2 Play' },
-    { name: 'the songs in another order, its More', focus: 1, part: ' [data-dmore]', now: [0, 2, 3, 1], want: 'Elsewhere 1 More' },
+    { name: 'the songs in another order, its More', focus: 1, part: ' [data-dmore]', now: [0, 2, 3, 1], want: 'Elsewhere 1 More', press: 'more', uri: 1 },
+    { name: 'a favourite above it gone, Enter on its Play', focus: 2, part: ' [data-dplay]', now: [1, 2, 3], want: 'Elsewhere 2 Play', press: 'play', uri: 2 },
+    { name: 'an address with a quote, a backslash and ], its Play', start: [0, odd, 2, 3], focus: 1, part: ' [data-dplay]', now: [9, 0, odd, 2, 3], want: 'Elsewhere odd Play', press: 'play', uri: odd.uri },
+    { name: 'the same song hearted twice, the second one', start: [0, 1, twice, 2, 3], focus: 2, part: ' [data-dplay]', now: [9, 0, 1, twice, 2, 3], want: 'Elsewhere 1 again Play' },
+    { name: 'the song moved far down the list, its row', start: many, focus: 2, part: '', now: [...many.filter((n) => n !== 2), 2], want: 'Elsewhere 2', sight: true },
+    { name: 'its row half off the foot and nothing moved, its Play', start: many, focus: 12, part: ' [data-dplay]', now: many, want: 'Elsewhere 12 Play', half: true },
   ];
   try {
     for (const c of cases) {
       const at = `${width} Favourites by song, ${c.name}`;
-      Object.assign(state.fixtures, favs(start));
+      const first = (c.start || [0, 1, 2, 3]).map(song);
+      Object.assign(state.fixtures, favs(first));
       socket = null; // (the page's own socket, not the last load's)
       await fx.go(page, '/favourites');
       const drawn = await until(() => page.evaluate(() => [...document.querySelectorAll('#favother .list-row .name')].some((n) => n.textContent.includes('Elsewhere 3'))), 6000);
@@ -53,8 +67,11 @@ async function bySong(browser, width) {
       await sleep(150);
       const sel = `#favother .list-row:nth-child(${c.focus + 1})${c.part}`;
       await page.evaluate((s) => { const el = document.querySelector(s); el.tabIndex = el.tabIndex < 0 ? 0 : el.tabIndex; el.focus(); }, sel);
+      // (scrolled so the row is half under the page's foot: a redraw that moved nothing leaves the page where it is)
+      const halfAt = c.half ? await page.evaluate((s) => { const m = document.querySelector('#main'); const r = document.querySelector(s).getBoundingClientRect(); m.scrollTo({ top: m.scrollTop + r.bottom - m.getBoundingClientRect().bottom - (r.bottom - r.top) / 2, behavior: 'instant' }); return m.scrollTop; }, sel) : null;
+      if (c.half) check(await page.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); const b = document.querySelector('#main').getBoundingClientRect().bottom; return r.top < b && r.bottom > b; }, sel), `${at}: its Play is half under the page's foot`);
       const was = await on();
-      check(was.startsWith(`Elsewhere ${c.focus}`), `${at}: the keyboard is on Elsewhere ${c.focus} (${was})`);
+      check(was.startsWith(first[c.focus].title), `${at}: the keyboard is on ${first[c.focus].title} (${was})`);
       check(await until(() => !!socket), `${at}: the app's event socket is open`);
       if (!socket) continue;
       const now = c.now.map(song);
@@ -67,7 +84,25 @@ async function bySong(browser, width) {
       check(redrawn, `${at}: the list was drawn again with ${now.length} songs`);
       const kept = await on();
       check(kept === c.want, `${at}: the keyboard is on ${c.want} (${kept})`);
-      if (width === 1280) await page.screenshot({ path: path.join(SHOTS, `favourites-by-song-${c.focus}-${c.now.length}${c.part ? '-play' : ''}-${width}.png`) });
+      if (c.sight) check(await inSight(), `${at}: the row the keyboard is on is in sight, not off below`);
+      if (c.half) { const t = await page.evaluate(() => document.querySelector('#main').scrollTop); check(Math.abs(t - halfAt) <= 1, `${at}: the page didn't move (${halfAt} -> ${t})`); }
+      if (width === 1280) await page.screenshot({ path: path.join(SHOTS, `favourites-by-song-${cases.indexOf(c)}-${width}.png`) });
+      const uri = typeof c.uri === 'number' ? song(c.uri).uri : c.uri;
+      if (c.press === 'play') {
+        // Enter on the kept Play plays that song, not the one now in its old place
+        const since = Date.now(); await page.keyboard.press('Enter');
+        const asked = await until(() => state.hits.some((h) => h.v === '/discover/play' && h.at >= since));
+        const q = state.hits.filter((h) => h.v === '/discover/play' && h.at >= since).map((h) => new URLSearchParams(h.q).get('uri'));
+        check(asked && q.length === 1 && q[0] === uri, `${at}: Enter on it plays ${uri} (${q.join(', ') || 'nothing asked'})`);
+        await page.keyboard.press('Escape');
+      } else if (c.press === 'more') {
+        // Enter on the kept More opens that song's menu
+        await page.keyboard.press('Enter');
+        const named = await until(() => page.evaluate(() => { const m = document.querySelector('.popover.menu'); return !!m && !m.hidden && !!m.querySelector('.pop-title'); }));
+        const title = named ? await page.evaluate(() => document.querySelector('.popover.menu .pop-title').textContent.trim()) : '';
+        check(title === song(c.uri).title, `${at}: Enter on it opens the menu for ${song(c.uri).title} (${title || 'no menu'})`);
+        await page.keyboard.press('Escape');
+      }
     }
     check(!state.errors.length, `${width} Favourites by song: no page errors ${state.errors.join(' | ')}`);
   } finally { await context.close(); }

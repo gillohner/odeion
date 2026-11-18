@@ -7081,6 +7081,11 @@
   // its data attributes and address and its place among its likes). The returned call puts both
   // back on the new HTML; focus only when nothing else took it meanwhile. The place is read
   // before an earlier hold ends: its spacer going would cut a place at the foot short.
+  // Wholly within the page's own scrolling part, not under its sticky head (its scroll padding)
+  const inSight = (el) => {
+    const r = el.getBoundingClientRect(); const m = main.getBoundingClientRect(); const cs = getComputedStyle(main);
+    return r.top >= m.top + (parseFloat(cs.scrollPaddingTop) || 0) - 1 && r.bottom <= m.bottom - (parseFloat(cs.scrollPaddingBottom) || 0) + 1;
+  };
   const keepPlace = () => {
     const a = document.activeElement; const top = main.scrollTop; const tall = main.scrollHeight;
     // (focus an earlier hold still waits to put back, its part not drawn yet, is wanted here too)
@@ -7111,6 +7116,9 @@
         // (within the row: its kind of control, not its place in the list: data-dplay, not data-dplay="2")
         const part = row === a ? '' : ' ' + a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-') || x.name === 'href').map((x) => (x.name === 'href' ? `[href="${CSS.escape(x.value)}"]` : `[${x.name}]`)).join('');
         alt = { sel, i, last: `${rin}[data-uri]${part}` }; sel = `${rin}[data-uri="${CSS.escape(row.dataset.uri)}"]${part}`; i = at(sel).indexOf(a);
+        // (wholly in sight before: still in sight after, when the song moved far down or up the list;
+        // one half off the edge stays where it is)
+        alt.seen = inSight(a);
       }
     } else if (was && (!a || a === document.body || a === main)) { ({ sel, i, alt } = was); inside = true; }
     return () => {
@@ -7127,7 +7135,9 @@
         const now = document.activeElement; if (now && now !== document.body && now !== main) return true;
         const b = at(sel)[i] || (alt && (at(alt.sel)[alt.i] || at(alt.last).pop())); if (!b || b.disabled) return false;
         if (b.matches(UNTAGGED)) keyable(b);
-        b.focus({ preventScroll: true }); return document.activeElement === b;
+        b.focus({ preventScroll: true }); if (document.activeElement !== b) return false;
+        if (alt && alt.seen && !inSight(b)) b.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        return true;
       };
       let held = fit();
       if (main.scrollTop !== top) { try { main.scrollTo({ top, behavior: 'instant' }); } catch { main.scrollTop = top; } }
