@@ -5525,14 +5525,18 @@
   let rowLists = {}; let rowsBound = false;
   const bindTrackRows = (container, pageLists) => {
     rowLists = pageLists; if (rowsBound) return; rowsBound = true;
+    // A song row's second click of a double click selects no word of it (the first one plays)
+    container.addEventListener('mousedown', (e) => { if (e.detail > 1 && e.target.closest('[data-list] .track') && !e.target.closest('a, button, input, select, textarea, label')) e.preventDefault(); });
     onBusy(container, 'click', async (e) => {
       const lists = rowLists;
       const btn = e.target.closest('[data-act]');
-      // On a touch screen a tap on the row plays from there (no hover to reveal the play button); on a
-      // phone its names take no taps (app.css), so a click there plays too, with a mouse as well
+      // A click on the row plays from there, as a playlist's or an album's song row does: with a mouse
+      // too, not only on a touch screen (no hover to reveal the play button). Its names and buttons keep
+      // their own click (on a phone the names take no taps, app.css, so a tap there plays), and the
+      // second click of a double click, or a drag that selects the row's text, doesn't start it.
       if (!btn) {
         const row = e.target.closest('.track'); const list = row && row.closest('[data-list]');
-        if (row && list && !e.target.closest('a, button, input') && (shellMode() === 'phone' || (window.matchMedia && matchMedia('(hover: none)').matches))) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
+        if (row && list && e.detail < 2 && !e.target.closest('a, button, input') && getSelection().isCollapsed) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
         return;
       }
       const row = btn.closest('.track'); const list = btn.closest('[data-list]');
