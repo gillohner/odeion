@@ -7109,7 +7109,8 @@
   // One way back (08-item-page.md): history, labelled with the previous page; on a deep link the page's section.
   const backBtn = (view, label) => `<button class="back" data-back="${view}">${icon('back')} <span class="back-l">${esc((navDepth > 0 && history.state && history.state.backLabel) || label)}</span></button>`;
   // A name cut with … shows whole on hover, measured then (the window may have changed); a name that fits has no tooltip.
-  document.addEventListener('pointerover', (e) => { const b = e.target.closest && e.target.closest('.back'); const l = b && b.querySelector('.back-l'); if (!l) return; if (l.scrollWidth > l.clientWidth) b.title = l.textContent; else b.removeAttribute('title'); });
+  // Back's name, and the item page's own name at the end of its breadcrumb (cut at 32ch).
+  document.addEventListener('pointerover', (e) => { const b = e.target.closest && e.target.closest('.back, .crumbs li[aria-current]'); const l = b && (b.matches('.back') ? b.querySelector('.back-l') : b); if (!l) return; if (l.scrollWidth > l.clientWidth) b.title = l.textContent; else b.removeAttribute('title'); });
   const loading = () => { if (state.placeHold) state.placeHold(); main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
   // A page drawn again where it stands (its songs still coming, a heart, other sources found) stays
   // on screen until it is drawn anew: no skeleton, so it doesn't jump to the top, and the control
