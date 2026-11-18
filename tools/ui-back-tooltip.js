@@ -2,6 +2,8 @@
 // mouse on a desktop or tablet could not read where it goes back to (the button's own text still
 // names it whole for a screen reader). Now hovering a cut Back shows the whole name; a Back whose
 // name fits shows none, and the check is made at hover time, so a window made wide enough drops it.
+// The same for an item page's own name at the end of its breadcrumb ("Sefa › Late night drives…",
+// cut at 32ch): hovering it shows the whole name, one that fits shows none.
 // Real UI in Chromium against fixtures (no node).
 //   node tools/ui-back-tooltip.js [repo] [screenshot directory]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -83,6 +85,37 @@ async function openAlbum(page) {
         await hover(page);
         const s = await look(page);
         check(s.text === 'Road trip' && !s.cut && s.title === null, `${width}: a Back whose name fits has no tooltip (${s.title})`);
+      } finally { await context.close(); }
+    }
+    // An album page's breadcrumb (Sefa › album title): its last crumb, the album's own name, is cut
+    // at 32ch. Opened straight (no Back history needed), at each desktop width.
+    const CRUMB = '#main .pagebar .crumbs li[aria-current]';
+    const lookCrumb = (page) => page.locator(CRUMB).first().evaluate((c) => ({ text: c.textContent, cut: c.scrollWidth > c.clientWidth, title: c.getAttribute('title') }));
+    const hoverCrumb = async (page) => { await page.mouse.move(2, 2); await page.locator(CRUMB).first().hover(); };
+    const named = (title) => ({ '/item/album/lib-7': { body: { ...album, title } }, '/item/album/lib-7/extras': { body: { collections: [], related: [], concerts: [], similar: [] } } });
+    for (const width of [768, 1024, 1280]) {
+      const { page, context, state } = await fx.create(browser, width, { fixtures: named(LONG) });
+      try {
+        await fx.go(page, '/album/lib-7');
+        await page.waitForSelector(CRUMB);
+        const before = await lookCrumb(page);
+        check(before.text === LONG && before.cut, `${width} album with a long name: its crumb reads the whole name, cut with … on screen`);
+        check(before.title === null, `${width} crumb: no tooltip before the mouse comes`);
+        await hoverCrumb(page);
+        const on = await lookCrumb(page);
+        check(on.title === LONG, `${width}: hovering the cut crumb shows the whole name (${on.title === null ? 'no tooltip' : on.title.slice(0, 24) + '…'})`);
+        await page.screenshot({ path: path.join(SHOTS, `after-crumb-${width}.png`) });
+        check(!state.errors.length, `${width} crumb: no page errors (${state.errors.join('; ')})`);
+      } finally { await context.close(); }
+    }
+    for (const width of [768, 1280]) {
+      const { page, context } = await fx.create(browser, width, { fixtures: named('Journey') });
+      try {
+        await fx.go(page, '/album/lib-7');
+        await page.waitForSelector(CRUMB);
+        await hoverCrumb(page);
+        const s = await lookCrumb(page);
+        check(s.text === 'Journey' && !s.cut && s.title === null, `${width}: a crumb whose name fits has no tooltip (${s.title})`);
       } finally { await context.close(); }
     }
   } finally { await browser.close(); }
