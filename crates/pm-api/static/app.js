@@ -6591,13 +6591,15 @@
     const io = new IntersectionObserver(([en]) => { if (!document.body.contains(bar)) { io.disconnect(); return; } bar.hidden = en.isIntersecting; }, { root: main, threshold: 0 });
     io.observe(hero);
   };
-  // Where the click before this one landed: a song row's place and song (a redraw keeps them), or '' off
-  // the rows. Every click counts, also one on a row's own button or off the rows (bindSongRows)
-  const srowSpot = (r) => `${r.dataset.srow}:${r.dataset.tid || ''}`;
+  // Where the click before this one landed: a song row's list, place and song (its id, or its address
+  // when it has none; a redraw keeps them), or '' off the rows. Every click counts, also one off the
+  // rows. One on a row's own button or link counts as '' (the heart, then a quick click on the row,
+  // plays it), but its play button counts as the row (that click already started it) (bindSongRows)
+  const srowSpot = (r) => `${(r.closest('[id]') || {}).id || ''}:${r.dataset.srow}:${r.dataset.tid || r.dataset.suri || ''}`;
   let srowWas = ''; let srowLast = '';
-  document.addEventListener('click', (e) => { const r = e.target.closest && e.target.closest('[data-srow]'); srowWas = srowLast; srowLast = r ? srowSpot(r) : ''; }, true);
+  document.addEventListener('click', (e) => { const r = e.target.closest && e.target.closest('[data-srow]'); const own = r && e.target.closest('a, button, input'); srowWas = srowLast; srowLast = r && !(own && !own.matches('[data-splay]')) ? srowSpot(r) : ''; }, true);
   const bindSongRows = (box, all, ctx = {}) => {
-    $$('[data-srow]', box).forEach((r) => { const t = all[Number(r.dataset.srow)]; if (t && t.track_id != null) r.dataset.tid = t.track_id; });
+    $$('[data-srow]', box).forEach((r) => { const t = all[Number(r.dataset.srow)]; if (t && t.track_id != null) r.dataset.tid = t.track_id; else if (t && (t.uri || t.page)) r.dataset.suri = t.uri || t.page; });
     markDownloads(box);
     // Cards (web pages, posts) and unmatched lines don't play: play the songs only, from the one
     // clicked; a click on one that doesn't play does nothing
@@ -6607,8 +6609,9 @@
     // next taps add songs): it never plays and replaces the queue then. Its box ticks itself.
     // The second click of a double click doesn't start the song again and selects no word of the row,
     // and a drag that selects the row's text doesn't start it, as on a library song row. Only a selection
-    // that starts or ends in the row holds it (a mouse drag's click has both ends there): on a touch
-    // screen the rows can't be selected, so a selection made elsewhere stays, even one across the rows.
+    // with words in it that starts or ends in the row holds it (a mouse drag's click has both ends there):
+    // on a touch screen the rows can't be selected, so a selection made elsewhere stays, even one across
+    // the rows or an empty one inside a row, and a tap on the row plays.
     // A quick tap on the next row can come as a double tap's second (a phone counts taps up to 100 dp
     // apart, more than a row), so only a second click on the row the first one hit is held. The
     // mousedown guard stays on every row: a word selected on the next row would hold its click too
@@ -6618,7 +6621,7 @@
         const again = e.detail > 1 && srowWas === srowSpot(r);
         if (e.target.closest('a,button')) return;
         if (r.closest('.selecting')) { const c = $('.selbox input', r); if (c && !e.target.closest('.selbox')) { c.checked = !c.checked; c.dispatchEvent(new Event('change', { bubbles: true })); } return; }
-        const s = getSelection(); if (again || (!s.isCollapsed && (r.contains(s.anchorNode) || r.contains(s.focusNode)))) return;
+        const s = getSelection(); if (again || (String(s) !== '' && (r.contains(s.anchorNode) || r.contains(s.focusNode)))) return;
         playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback);
       };
     });

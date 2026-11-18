@@ -1,7 +1,9 @@
 // A click on a song row of an album or a playlist (`.srow`) plays from that row; the second click of a
 // double click doesn't start it again and selects no word of the row, and a drag that selects the row's
 // text doesn't start it, as on a library song row (Songs, Favourites). On a touch screen, text selected
-// elsewhere on the page doesn't hold a tap on a row. The row's Play button still plays at once.
+// elsewhere on the page doesn't hold a tap on a row, nor does an empty selection inside the row. The row's
+// Play button still plays at once. A quick click on the row right after one on its heart plays it, and a
+// quick click on a row of another list on the page plays that one, even the same song in the same place.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-srow-click.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -85,6 +87,15 @@ async function desktop(browser, width) {
         await page.mouse.click(h.x + 2, h.y + h.height / 2); await page.mouse.move(x, a.y + a.height / 2); await page.mouse.down({ clickCount: 2 }); await page.mouse.up({ clickCount: 2 }); await page.waitForTimeout(600);
         check(await page.evaluate(() => window.__details.slice(-1)[0]) === 2 && await starts(page) === want, `${label}: after a click off the rows, a double click's second on the row plays it (${await starts(page)}, want ${want})`);
       }
+      // a click on the row's heart, then a quick click on the row that comes as a double click's second
+      // (a quick tap there does on a phone, which counts taps up to 100 dp apart): the row plays (the
+      // click before was the heart's own); after its play button it doesn't start again
+      for (const [act, name] of [['sfav', 'the heart'], ['splay', 'its play button']]) {
+        await page.waitForTimeout(800); await reset(page); await row.hover();
+        await row.locator(`[data-${act}]`).click(); await page.waitForTimeout(50);
+        const p2 = await dur(row).boundingBox(); await page.mouse.move(p2.x + p2.width / 2, p2.y + p2.height / 2); await page.mouse.down({ clickCount: 2 }); await page.mouse.up({ clickCount: 2 }); await page.waitForTimeout(600);
+        check(await page.evaluate(() => window.__details.slice(-1)[0]) === 2 && await starts(page) === want, `${label}: a click on ${name}, then a double click's second on the row, plays it${act === 'splay' ? ' once' : ''} (${await starts(page)}, want ${want})`);
+      }
       // the row's Play button plays at once, and a double click on it still plays (its own control)
       await page.waitForTimeout(800); await reset(page); await row.hover();
       await row.locator('[data-splay]').click(); await page.waitForTimeout(500);
@@ -117,6 +128,13 @@ async function touch(browser, width) {
       check(across, `${label}: a selection runs from the heading down past the row`);
       await dur(row).tap(); await page.waitForTimeout(500);
       check(await starts(page) === want, `${label}: …and a tap on a row inside it still plays it (${await starts(page)})`);
+      // an empty selection inside the row (the rows take no selection here, so it has no words): a tap
+      // on the row still plays it
+      await page.waitForTimeout(800); await reset(page);
+      const inRow = await dur(row).evaluate((el) => { const g = document.createRange(); g.selectNodeContents(el); getSelection().removeAllRanges(); getSelection().addRange(g); const s = getSelection(); return !s.isCollapsed && el.contains(s.anchorNode) && String(s) === ''; });
+      check(inRow, `${label}: an empty selection sits inside the row`);
+      await dur(row).tap(); await page.waitForTimeout(500);
+      check(await starts(page) === want, `${label}: …and a tap on the row still plays it (${await starts(page)})`);
       // a double tap on the row starts it once
       await page.waitForTimeout(800); await reset(page);
       const d = await dur(row).boundingBox(); const tap = (y) => page.touchscreen.tap(d.x + d.width / 2, y);
@@ -138,10 +156,32 @@ async function touch(browser, width) {
   }
 }
 
+// Two lists on one page with the same song in the same place (a playlist's first song, and the first of
+// its songs on this node only): a click on the first list's row, then a quick click on the other's
+// that comes as a double click's second, plays both (they are two rows)
+async function twoLists(browser, width) {
+  const local = { ...fx.detail, local_tracks: [{ ...tracks[0] }] };
+  const { context, page, state } = await open(browser, width, { fixtures: { ...fixtures, '/playlists/c1': { body: local } } });
+  const label = `${width} two lists`;
+  try {
+    await fx.go(page, '/playlist/c1');
+    const a = page.locator('#plsongs .srow[data-srow]:not([data-card])').first(); const b = page.locator('#pllocal .srow[data-srow]').first();
+    await a.waitFor(); await b.waitFor(); await page.waitForTimeout(500);
+    check(await a.getAttribute('data-tid') === await b.getAttribute('data-tid') && await a.getAttribute('data-srow') === await b.getAttribute('data-srow'), `${label}: both lists have the same song in the same place`);
+    await reset(page);
+    await dur(a).click(); await page.waitForTimeout(50);
+    const p2 = await dur(b).boundingBox(); await page.mouse.move(p2.x + p2.width / 2, p2.y + p2.height / 2); await page.mouse.down({ clickCount: 2 }); await page.mouse.up({ clickCount: 2 }); await page.waitForTimeout(600);
+    await page.screenshot({ path: path.join(shots, `two-lists-${width}.png`) });
+    check(await page.evaluate(() => window.__details.slice(-1)[0]) === 2 && await starts(page) === '["1","1"]', `${label}: a double click's second on the other list's row plays it too (${await starts(page)}, want ["1","1"])`);
+    check(state.errors.length === 0, `${label}: no page errors (${state.errors.join(' | ')})`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
     for (const w of [1280, 1024, 768]) await desktop(browser, w);
+    await twoLists(browser, 1280);
     await touch(browser, 768); await touch(browser, 412);
   } finally { await browser.close(); }
   console.log(`\n${ok} ok, ${fail} failed`);
