@@ -8,7 +8,8 @@
 // that you aren't signed in. A playlist another device changes meanwhile shows its new order at once
 // rather than waiting on the question again; Home's Get started leaves out the Pubky sign-in step
 // rather than offering it as if signed out; and an older question's late answer counts while no
-// newer one has answered (a node that always answers after 15 s). At 360 (phone) and 1280 px.
+// newer one has answered (a node that always answers after 15 s), and draws a playlist drawn
+// without it again. At 360 (phone) and 1280 px.
 //   node tools/ui-pubky-hang.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -117,7 +118,9 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         await page.screenshot({ path: path.join(SHOTS, `share-unchecked-${width}.png`) });
         // 6. Still no answer, the playlist open over 15 s: another device moves a song. The new order
         // shows at once (before: the redraw asked again and waited up to 15 s, the old rows taking
-        // presses meanwhile), × removes the song shown, and the node's late answer draws it again
+        // presses meanwhile), × removes the song shown, and the node's late answer draws it again,
+        // past the question's 15 s too (before: only an answer within them did; Copy link stayed
+        // missing till the next draw)
         await page.keyboard.press('Escape').catch(() => {});
         check(JSON.stringify(await order()) === '["Journey","Bravo"]', `${width}: the playlist shows as the server has it (${await order()})`);
         lists = ['B', 'J'];
@@ -134,9 +137,11 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         check(asked6.length > 0, `${width}: the redraw still asks the node (${asked6.length} asked)`);
         // (the × draws the list again, its sources too: wait for those reads to end first)
         for (let n = -1; n !== plReads.length;) { n = plReads.length; await sleep(400); }
+        await page.clock.fastForward(16000);
+        for (let n = -1; n !== plReads.length;) { n = plReads.length; await sleep(400); }
         const r6b = plReads.length;
         asked6.forEach((n) => answer(n, SESSION));
-        check(await until(async () => plReads.length > r6b, 2000) && r6b > r6, `${width}: the node's late answer draws the playlist again (${plReads.length - r6b} more reads)`);
+        check(await until(async () => plReads.length > r6b, 2000) && r6b > r6, `${width}: the node's answer after its 15 s draws the playlist again (${plReads.length - r6b} more reads)`);
         // 7. Home's Get started, the node not answering: no "Sign in with Pubky Ring" as if signed out
         await fx.go(page, '/');
         const a7 = asks.length;
