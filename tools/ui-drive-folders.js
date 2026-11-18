@@ -15,6 +15,9 @@
 // works.
 // A slow read of a folder left before it answered, landing after another folder was opened, draws
 // nothing; Add this folder adds the folder shown.
+// Add this folder was on while a folder just opened (or gone Back to) was still being read, so it
+// could add a folder the drive then couldn't list. Now it is off during every read, and on again
+// once the folders show.
 // Real UI in Chromium against fixtures (no node).
 //   node tools/ui-drive-folders.js [repo] [screenshot directory]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -247,6 +250,39 @@ const tree = {
         await page.locator('[data-dfopen="1"]').click();
         await at(page, 'Google Drive › Albums › Singles');
         assert.equal(await page.locator('#dfadd:not([disabled])').count(), 1);
+        assert.deepEqual(state.errors, [], 'no page errors');
+      } finally { await context.close(); }
+    });
+
+    await check(`Add this folder is off while a folder opened or gone Back to is read, and on once its folders show (${width})`, async () => {
+      let go; const slow = { parent: 'f1', wait: new Promise((res) => { go = res; }) };
+      const { page, context, state } = await open(slow);
+      const adds = [];
+      await page.route('**/v1/library/drives', (r) => { if (r.request().method() !== 'POST') return r.fallback(); adds.push(r.request().postDataJSON()); return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ provider: 'google', folder_id: 'f1', name: 'Albums' }) }); });
+      try {
+        // The first read of Albums is slow: Add this folder is off until its folders show
+        await page.locator('[data-dfopen="0"]').click();
+        await page.locator('#dfbox .spin').waitFor();
+        assert.equal(await page.locator('#dfpath').textContent(), 'Google Drive › Albums');
+        await page.screenshot({ path: file('after-slow-first-read') });
+        assert.equal(await page.locator('#dfadd').isDisabled(), true, 'Add this folder is off during the first read of a folder just opened');
+        await page.locator('#dfadd').click({ force: true });
+        go();
+        await at(page, 'Google Drive › Albums');
+        assert.equal(await page.locator('#dfbox [data-dfopen]').count(), 2, "Albums' folders show");
+        assert.equal(await page.locator('#dfadd').isDisabled(), false, 'Add this folder is on once the folders show');
+        assert.deepEqual(adds, [], 'nothing was added during the read');
+        // Into Singles, then Back to Albums with a slow read: off again until it answers
+        await page.locator('[data-dfopen="1"]').click();
+        await at(page, 'Google Drive › Albums › Singles');
+        let again; const held = new Promise((res) => { again = res; });
+        await page.route('**/v1/library/drives/google/folders?parent=f1', async (r) => { await held; return r.fallback(); });
+        await page.locator('[data-dfup]').click();
+        await page.locator('#dfbox .spin').waitFor();
+        assert.equal(await page.locator('#dfadd').isDisabled(), true, 'Add this folder is off while the folder gone Back to is read');
+        again();
+        await at(page, 'Google Drive › Albums');
+        assert.equal(await page.locator('#dfadd').isDisabled(), false);
         assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
     });
