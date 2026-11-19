@@ -2,7 +2,7 @@
 // the browser or the system and leave the music alone. Before, Alt+← and Alt+→ (the browser's Back
 // and Forward on Windows and Linux) also went to the previous or next song, so going back a page
 // changed the song; Alt+Space and Ctrl+Space played or paused, and Alt+N opened Now playing.
-// Alt+Space or Ctrl+Space on a button a click left focused doesn't press that button again either.
+// Space held with Alt, Ctrl, Cmd or Ctrl+Alt on a button a click left focused doesn't press it again either.
 // The plain keys still do their job, and / and ? still work when the keyboard needs AltGr for them.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-shortcut-modifiers.js [repo] [shots]
@@ -59,10 +59,11 @@ async function run(browser, width) {
   }
   await page.screenshot({ path: path.join(shots, `alt-arrows-${width}.png`) });
 
-  // With Alt or Ctrl, Space neither plays nor pauses, and the page doesn't swallow it
-  for (const mod of ['Alt', 'Control']) {
+  // Space held with Alt, Ctrl, Cmd or Ctrl+Alt: neither plays nor pauses, and the page doesn't swallow it
+  const spaceMods = ['Alt', 'Control', 'Meta', 'Control+Alt'];
+  for (const mod of spaceMods) {
     const was = await calls();
-    const kept = await page.evaluate((m) => { const e = new KeyboardEvent('keydown', { key: ' ', code: 'Space', altKey: m === 'Alt', ctrlKey: m === 'Control', bubbles: true, cancelable: true }); document.body.dispatchEvent(e); return !e.defaultPrevented; }, mod);
+    const kept = await page.evaluate((m) => { const has = (k) => m.split('+').includes(k); const e = new KeyboardEvent('keydown', { key: ' ', code: 'Space', altKey: has('Alt'), ctrlKey: has('Control'), metaKey: has('Meta'), bubbles: true, cancelable: true }); document.body.dispatchEvent(e); return !e.defaultPrevented; }, mod);
     await page.keyboard.press(`${mod}+Space`); await sleep(300);
     check(kept && await calls() === was, `${width}: ${mod}+Space neither plays nor pauses (${await calls() - was} calls, left to the browser: ${kept})`);
   }
@@ -72,8 +73,8 @@ async function run(browser, width) {
     check(await calls() > was, `${width}: Space still plays or pauses`);
   }
 
-  // A button a click left focused isn't pressed again by Alt+Space or Ctrl+Space (Shuffle would
-  // shuffle again, an armed "Really delete?" would delete), and the music stays as it was
+  // A button a click left focused isn't pressed again by Space held with Alt, Ctrl, Cmd or Ctrl+Alt
+  // (Shuffle would shuffle again, an armed "Really delete?" would delete), and the music stays as it was
   await page.evaluate(() => {
     const b = document.createElement('button'); b.id = 'press-count'; b.textContent = 'Count'; b.dataset.n = '0';
     b.style.cssText = 'position:fixed;top:120px;left:300px;z-index:99999';
@@ -83,7 +84,7 @@ async function run(browser, width) {
   const presses = () => page.$eval('#press-count', (b) => +b.dataset.n);
   await page.click('#press-count');
   check(await presses() === 1 && await page.evaluate(() => document.activeElement.id === 'press-count'), `${width}: the clicked button is pressed once and keeps focus`);
-  for (const mod of ['Control', 'Alt']) {
+  for (const mod of spaceMods) {
     const was = await calls(); const n = await presses();
     await page.keyboard.press(`${mod}+Space`); await sleep(300);
     check(await presses() === n && await calls() === was, `${width}: ${mod}+Space on the clicked button presses it again: ${await presses() - n}, plays or pauses: ${await calls() - was}`);
