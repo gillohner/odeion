@@ -7888,14 +7888,22 @@
           $$('[data-tag-solo]', main).forEach((b) => b.onclick = () => redraw(b, [b.dataset.tagSolo]));
           // More labels than Pinakes takes (an old link): not asked; one can be removed above
           if (over) break;
-          const sc = await api('GET', `/home/tag?${new URLSearchParams({ labels: labels.join(','), limit: 60 })}`).catch((e) => ({ items: [], tags: [], error: e.message }));
-          if (state.view !== 'tag') return;
-          sc.items = sc.items || []; sc.tags = sc.tags || [];
-          // Narrowing further only while another label fits
-          const co = labels.length < MATCH_ALL_MAX ? sc.tags.filter(([l]) => !labels.includes(l)).slice(0, 24) : [];
-          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-add="${esc(l)}"`, title: `Narrow to ${labels.join(', ')} and ${l}` })).join('')}</div>` : '';
-          $$('[data-tag-add]', main).forEach((b) => b.onclick = () => setView('tag', [...labels, b.dataset.tagAdd].join(',')));
-          const el = $('#tagbody'); el.innerHTML = homeBody(sc, 'tag', true); el.classList.add('fadein'); bindHome(el, sc);
+          // A read that didn't answer has Try again, as Home's rows: it asks again in place (the
+          // picked tags stay; an answer for a page since left or drawn again draws nothing)
+          const el = $('#tagbody'); const cot = $('#tagcotags');
+          const fill = async (kept) => {
+            const sc = await api('GET', `/home/tag?${new URLSearchParams({ labels: labels.join(','), limit: 60 })}`).catch((e) => ({ items: [], tags: [], error: e.message }));
+            if (state.view !== 'tag' || !el.isConnected) return;
+            sc.items = sc.items || []; sc.tags = sc.tags || [];
+            // Narrowing further only while another label fits
+            const co = labels.length < MATCH_ALL_MAX ? sc.tags.filter(([l]) => !labels.includes(l)).slice(0, 24) : [];
+            cot.innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-add="${esc(l)}"`, title: `Narrow to ${labels.join(', ')} and ${l}` })).join('')}</div>` : '';
+            $$('[data-tag-add]', cot).forEach((b) => b.onclick = () => setView('tag', [...labels, b.dataset.tagAdd].join(',')));
+            el.innerHTML = homeBody(sc, 'tag', true); el.classList.add('fadein'); bindHome(el, sc);
+            retryOn(el, (k) => { holdRow(el); fill(k); });
+            focusRetry(el, kept);
+          };
+          await fill(false);
           break;
         }
         case 'favourites': {
