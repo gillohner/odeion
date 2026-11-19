@@ -4229,11 +4229,12 @@
   // `replace`: the queue is being replaced, so the song still playing does not end the wait.
   // `press`: a press of a play control starts this. A start nobody pressed Play for (Move here,
   // Switch source, a song ending or skipped, the playing song taken out of the queue) puts no
-  // spinner on a Play pressed just before, and that Play's next start doesn't take one either.
+  // spinner on a Play pressed just before. It leaves that press alone: a Play whose start comes
+  // after a wait (an album tile's songs still loading) still spins when the song before ended
+  // in that wait.
   const startWait = (what, zoneId = state.zone, title = '', replace = false, deferred = false, press = true) => {
     startDone(true);
-    if (!press) state.startAnchor = null;
-    const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
+    const a = press && state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
     if (a) a.classList.add('starting');
     const zw = state.zones[zoneId]; const oldItem = replace && zw && zw.now_playing ? zw.now_playing.item.id : null;
     // `sent`: a replace waits for the node's answer first, so the old queue moving on by itself
