@@ -3031,6 +3031,9 @@
   // screen's media keys (whichever zone is in use) take the same steps
   const browserStep = (action) => {
     const steps = ['toggle', 'play', 'next', 'previous'].includes(action.action);
+    // (only Play/Pause is the press that starts its song: a Next, Previous or queue tap, also a media
+    // key's, starts none, so a Play or Pause pressed just before puts no spinner on the song it starts)
+    if (action.action !== 'toggle') state.startAnchor = null;
     // (with Shuffle my music still reading the library, nothing: its songs are on their way)
     if (steps && !state.browserQueue.length) { if (!zoneBusy.get(BROWSER)) emptyQueue(BROWSER); return; }
     // Right after a reload the saved song and place come back when the node's events connect. A
@@ -3055,6 +3058,8 @@
   };
   const transport = async (action) => {
     const steps = ['toggle', 'play', 'next', 'previous'].includes(action.action);
+    // (the same on a node's zone: see browserStep)
+    if (action.action !== 'toggle') state.startAnchor = null;
     if (isBrowser()) { browserStep(action); return; }
     if (!state.zones[state.zone]) return;
     const zt = state.zones[state.zone];
@@ -4222,8 +4227,7 @@
   // `replace`: the queue is being replaced, so the song still playing does not end the wait
   const startWait = (what, zoneId = state.zone, title = '', replace = false, deferred = false) => {
     startDone(true);
-    // (one press, one wait: a Next or a media key's step soon after it isn't that button's start)
-    const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null; state.startAnchor = null;
+    const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
     if (a) a.classList.add('starting');
     const zw = state.zones[zoneId]; const oldItem = replace && zw && zw.now_playing ? zw.now_playing.item.id : null;
     // `sent`: a replace waits for the node's answer first, so the old queue moving on by itself

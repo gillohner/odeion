@@ -26,7 +26,19 @@ async function run(browser, width) {
     for (const k of ['play', 'pause']) { const f = HTMLMediaElement.prototype[k]; HTMLMediaElement.prototype[k] = function () { window.__calls++; return f.call(this); }; }
   });
   const back = async () => { await fx.go(page, '/playlists'); await page.waitForSelector(row); await page.waitForFunction((s) => document.querySelector(s).tabIndex === 0, row); };
+  // A song in this browser's queue, so a Space that reached play/pause would play or pause it (with
+  // nothing queued it would only say the queue is empty), and plain Space on the page shows it does
+  const notice = () => page.evaluate(() => { const t = document.querySelector('#toast'); return !!t && !t.hidden && t.classList.contains('show') && /queue is empty/i.test(t.textContent); });
+  await fx.go(page, '/tracks'); await page.waitForSelector('.tracks .track');
+  await page.locator('.tracks .track').first().dblclick();
+  await page.waitForFunction(() => /\S/.test(document.querySelector('#np .np-title')?.textContent || ''));
   await back();
+  {
+    const was = await page.evaluate(() => window.__calls);
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.keyboard.press('Space'); await sleep(300);
+    check(await page.evaluate(() => window.__calls) > was && !await notice(), `${width}: with a song queued, plain Space on the page plays or pauses (so the checks below can see a stray one)`);
+  }
 
   for (const mod of ['Alt', 'Control', 'Meta']) {
     // Focused with the keyboard, and focused by a click on the row's blank part
@@ -38,7 +50,7 @@ async function run(browser, width) {
       const calls = await page.evaluate(() => window.__calls);
       const left = await page.evaluate(([s, m]) => { const e = new KeyboardEvent('keydown', { key: ' ', code: 'Space', altKey: m === 'Alt', ctrlKey: m === 'Control', metaKey: m === 'Meta', bubbles: true, cancelable: true }); document.querySelector(s).dispatchEvent(e); return !e.defaultPrevented; }, [row, mod]);
       await page.keyboard.press(`${mod}+Space`); await sleep(300);
-      check(focused && !await opened() && left && await page.evaluate(() => window.__calls) === calls, `${width}: ${mod}+Space on a row (${how} focus) leaves it closed and the music alone (opened: ${await opened()}, left to the system: ${left})`);
+      check(focused && !await opened() && left && await page.evaluate(() => window.__calls) === calls && !await notice(), `${width}: ${mod}+Space on a row (${how} focus) leaves it closed and the music alone (opened: ${await opened()}, left to the system: ${left}, plays or pauses: ${await page.evaluate(() => window.__calls) - calls}, empty-queue notice: ${await notice()})`);
     }
   }
   await page.screenshot({ path: path.join(shots, `row-ctrl-space-${width}.png`) });
