@@ -5298,9 +5298,23 @@
   }, true);
   const isLink = (q) => /^https?:\/\/\S+$/i.test(q);
   const linkKind = (u) => (/\/(artist|artists)\//.test(u) ? 'artist' : /\/(album|albums|release|release-group)\//.test(u) ? 'album' : 'song');
+  // Leaving Search (Escape, or the box emptied): back to the page it was opened from, scrolled where it
+  // was (Search's entry was pushed from there), else Home, as before: Search opened by a link or a
+  // reload, from another search (a menu's Search “…”: Back would refill the box), with a menu open
+  // over it (Back would only close the menu), and the phone's Search tab. (one Back per Search entry:
+  // a second Escape before it lands goes nowhere)
+  let searchLeft = null;
+  const leaveSearch = () => {
+    if (state.view !== 'search') return;
+    const cur = history.state;
+    if (cur && cur === searchLeft) return;
+    const from = cur && typeof cur.fromPath === 'string' ? cur.fromPath.split('?')[0] : '';
+    if (from && from !== '/search' && navDepth > 0 && cur.v === 'search' && !cur.transient && shellMode() !== 'phone') { searchLeft = cur; history.back(); }
+    else setView('home');
+  };
   const runSearch = async (how, savedScope) => {
     const q = search.value.trim();
-    if (!q) { if (state.view === 'search') setView('home'); return; }
+    if (!q) { leaveSearch(); return; }
     // A pasted link skips searching: its item page (by-uri, then resolve; "Reading this link…").
     if (isLink(q)) { setView('item', { kind: linkKind(q), id: idOf(q) }); return; }
     // A pasted Pubky key (with or without pubky:// or the pubky prefix) opens that person
@@ -5311,7 +5325,7 @@
     setView('search', { q, in: scope }, how === 'pop' ? 'pop' : 'push');
   };
   search.addEventListener('input', () => { searchKeys.reset(); clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
-  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { search.value = ''; search.blur(); if (state.view === 'search') setView('home'); } });
+  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { clearTimeout(searchTimer); search.value = ''; search.blur(); leaveSearch(); } });
 
   // Whether the focused element got its focus from a click on it (not from the keyboard or the page)
   let pointerDown = { at: 0, target: null }, focusByPointer = false;
