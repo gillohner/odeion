@@ -9,8 +9,10 @@
 // filter doesn't hide the rows meanwhile, and a song listed twice keeps each copy's own name. An
 // answer for where the songs play asked before another device changed the list isn't used by place
 // on a first draw either; one asked after the read that doesn't fit (the list moved again) gives
-// each row its own song's answer, by uri, and one whose songs are named otherwise still shows its
-// chips, asked at most twice. At 360 (phone) and 1280 px.
+// each row its own song's answer, by uri and copy, never another song's by place, and the list is
+// read once more so Remove goes by the places the node has; a song that answer leaves out keeps the
+// earlier answer's copy; one whose songs are named otherwise gives no row a chip by place, asked at
+// most twice. At 360 (phone) and 1280 px.
 //   node tools/ui-playlist-stale-draw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -25,7 +27,7 @@ const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Dat
 const song = (id, title) => ({ ...fx.track, id, title, canonical_uri: `https://musicbrainz.org/recording/0000000${id}-0000-4000-8000-000000000000`, mbid: null });
 const SONGS = { A: song(1, 'Alpha'), X: song(2, 'Xylo'), B: song(3, 'Bravo'), C: song(4, 'Charlie') };
 // Songs that play from a service, not the library: their rows take their names from where they play
-const STREAMED = { P: { title: 'Papa', canonical_uri: 'https://tidal.com/browse/track/101' }, Q: { title: 'Quebec', canonical_uri: 'https://tidal.com/browse/track/102' } };
+const STREAMED = { P: { title: 'Papa', canonical_uri: 'https://tidal.com/browse/track/101' }, Q: { title: 'Quebec', canonical_uri: 'https://tidal.com/browse/track/102' }, Y: { title: 'Yankee', canonical_uri: 'https://tidal.com/browse/track/103' }, Z: { title: 'Xray', canonical_uri: 'https://tidal.com/browse/track/104' } };
 Object.assign(SONGS, STREAMED);
 const sum = (id, name, n) => ({ ...fx.summary, id, name, items: n });
 const detailOf = (id, name, keys) => ({ summary: sum(id, name, keys.length), playlist: { ...sum(id, name, keys.length), items: keys.map((k) => ({ uri: SONGS[k].canonical_uri })) }, tracks: keys.map((k) => (STREAMED[k] ? null : SONGS[k])), entries: keys.map((k) => ({ kind: 'track', uri: SONGS[k].canonical_uri })), local_tracks: [] });
@@ -33,7 +35,9 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
 // (`retitle`: a playlist's answer naming the song at a place otherwise, as a pin to another source can)
 const retitle = { c6: { 2: 'Pinned' } };
 // (`renamed`: a playlist whose answer names each song under another uri than the list's, as a node can)
-const renamed = { c8: true };
+const renamed = { c8: true, c11: true };
+// (`slow`: a playlist whose answer for where its songs play always comes after the draw's 1.2 s wait)
+const slow = { c11: 1600 };
 const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
 
 (async () => {
@@ -43,14 +47,14 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
       const { page, state } = await fx.create(browser, width, { mobile });
       // The server's lists, each GET answered with the list as it was when asked; `hold`: the next
       // GET of that path waits for its release
-      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'], c7: ['P', 'Q', 'A'], c8: ['P', 'Q', 'A'], c9: ['P', 'Q', 'A'] };
-      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice', c7: 'Moved meanwhile', c8: 'Other names', c9: 'Moved twice' };
+      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'], c7: ['P', 'Q', 'A'], c8: ['P', 'Q', 'A'], c9: ['P', 'Q', 'A'], c10: ['Y', 'P', 'Q'], c11: ['P', 'Q', 'A'] };
+      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice', c7: 'Moved meanwhile', c8: 'Other names', c9: 'Moved twice', c10: 'Swapped', c11: 'Slow other names' };
       const hold = {}; const deletes = []; const asks = [];
       // (`fresh`: the held GET answers with the list as it is when released)
       const gate = (key, fail, fresh) => { let open; const p = new Promise((res) => { open = res; }); hold[key] = { p, fail, fresh }; return open; };
       let socket = null;
       await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
-      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6|c7|c8|c9)(\/.*)?$/, async (r) => {
+      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6|c7|c8|c9|c10|c11)(\/.*)?$/, async (r) => {
         const u = new URL(r.request().url()); const m = r.request().method();
         const [, , , id, ...rest] = u.pathname.split('/'); const sub = rest.join('/');
         if (m === 'DELETE' && sub.startsWith('items/')) { const k = Number(sub.split('/')[1]); deletes.push(k); lists[id].splice(k, 1); return json(r, {}); }
@@ -59,6 +63,7 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         let then = [...lists[id]];
         const h = hold[key]; delete hold[key]; if (h) await h.p;
         if (h && h.fresh) then = [...lists[id]];
+        if (sub === 'play-from' && slow[id]) await sleep(slow[id]);
         if (h && h.fail) return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The node did not answer' }) });
         if (sub === 'play-from') { const a = pfOf(then); Object.entries(retitle[id] || {}).forEach(([k, t]) => { if (a.items[k]) a.items[k].title = t; }); if (renamed[id]) a.items.forEach((x, k) => { x.uri = `https://node.example/song/${id}-${k}`; }); return json(r, a); }
         if (!sub) return json(r, detailOf(id, names[id], then));
@@ -263,16 +268,19 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         check(asks.slice(asked10).filter((x) => x === 'c7/play-from').length > 1 && JSON.stringify(await order()) === '["Quebec","Papa","Alpha"]', `${width}: where they play is asked again and fills in, the order kept (${asks.slice(asked10)}, ${await order()})`);
         await page.screenshot({ path: path.join(SHOTS, `moved-before-read-${width}.png`) });
 
-        // 10. Sources that answer under other names than the list's: the chips still show, and where
-        // the songs play is asked at most twice (before c72c7851: asked again and again, no chips)
+        // 10. Sources that answer under other names than the list's (the node names each under the
+        // list's own uri): no row takes the answer at its place, whose song it can't tell, and where
+        // the songs play is asked at most twice (before c72c7851: asked again and again)
         const asked11 = asks.length;
         await goPl('c8');
-        await until(async () => (await page.locator('#plsongs .srcchip:not(.wait)').count()) === 3, 4000);
+        await until(async () => asks.slice(asked11).filter((x) => x === 'c8').length >= 2 && (await page.locator('#plsongs .srcchip.wait').count()) === 0, 4000);
         await sleep(1500);
         const pf11 = asks.slice(asked11).filter((x) => x === 'c8/play-from').length;
-        const chips11 = await page.locator('#plsongs .srcchip:not(.wait)').count();
-        check(chips11 === 3 && (await page.locator('#plsongs .srcchip.wait').count()) === 0 && JSON.stringify(await order()) === '["Papa","Quebec","Alpha"]', `${width}: an answer under other names: each row shows its chip and name (${chips11} chips, ${await order()})`);
-        check(pf11 >= 1 && pf11 <= 2, `${width}: where they play is asked at most twice (${pf11})`);
+        const reads11 = asks.slice(asked11).filter((x) => x === 'c8').length;
+        const chips11 = await page.locator('#plsongs .srcchip.tidal, #plsongs .srcchip:not(.wait):not(.none)').count();
+        const o11 = await order();
+        check((await page.locator('#plsongs .srcchip.wait').count()) === 0 && o11.length === 3 && o11[2] === 'Alpha' && !o11.includes('Papa') && !o11.includes('Quebec') && chips11 === 0, `${width}: an answer under other names: no row takes a name or chip by place (${chips11} chips, ${o11})`);
+        check(pf11 >= 1 && pf11 <= 2 && reads11 <= 3, `${width}: where they play is asked at most twice, the list read at most three times (${pf11}, ${reads11})`);
         await page.screenshot({ path: path.join(SHOTS, `other-names-${width}.png`) });
 
         // 11. Opened again within 30 s after another device moved a song, and moved once more before
@@ -292,12 +300,58 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         releasePf12();
         await until(async () => (await order()).length === 3 && (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
         await sleep(300);
+        await until(async () => JSON.stringify(await order()) === '["Papa","Alpha","Quebec"]', 3000);
         const o12 = await order();
-        check(JSON.stringify(o12) === '["Quebec","Papa","Alpha"]', `${width}: an answer that doesn't fit: each row keeps its own song's name (${o12})`);
-        check(asks.slice(asked12).filter((x) => x === 'c9').length === 1, `${width}: drawn from that answer, the list read once (${asks.slice(asked12)})`);
+        check(JSON.stringify(o12) === '["Papa","Alpha","Quebec"]', `${width}: an answer that doesn't fit: the list is read again and shows as the node has it (${o12})`);
+        check(asks.slice(asked12).filter((x) => x === 'c9').length === 2 && asks.slice(asked12).filter((x) => x === 'c9/play-from').length === 1, `${width}: the list read once more, where they play not asked again (${asks.slice(asked12)})`);
         const papaRm12 = await page.evaluate(() => { const b = [...document.querySelectorAll('#plsongs [data-rm]')].find((x) => /Papa/.test(x.getAttribute('aria-label') || '')); return b ? b.dataset.rm : null; });
-        check(papaRm12 === '1', `${width}: Papa's Remove is for place 1, where the list read has it (${papaRm12})`);
+        check(papaRm12 === '0', `${width}: Papa's Remove is for place 0, where the node has it (${papaRm12})`);
         await page.screenshot({ path: path.join(SHOTS, `moved-twice-${width}.png`) });
+
+        // 12. A song swapped for another between the read and the answer (list [Yankee, Papa, Quebec]
+        // read, the answer for [Papa, Xray, Quebec]), then swapped back before the list is read again:
+        // Yankee's row never shows Xray (before: the answer at its place, Xray, showed and played on
+        // Yankee's row while its × removed Yankee). It keeps the earlier answer's Yankee, and × on it
+        // removes Yankee on the server
+        await goPl('c10');
+        await until(async () => JSON.stringify(await order()) === '["Yankee","Papa","Quebec"]' && (await page.locator('#plsongs .srcchip:not(.wait)').count()) === 3, 3000);
+        await page.evaluate(() => { const st = { v: 'playlists' }; history.pushState(st, '', '/playlists'); dispatchEvent(new PopStateEvent('popstate', { state: st })); });
+        await page.waitForSelector('#main [data-pl="c1"]');
+        lists.c10 = ['P', 'Y', 'Q'];
+        const releasePf13 = gate('c10/play-from', false, true);
+        const asked13 = asks.length;
+        await goPl('c10');
+        // (the answer comes within the draw's 1.2 s wait; the read after it is held)
+        await until(async () => asks.slice(asked13).includes('c10/play-from'), 1000);
+        lists.c10 = ['P', 'Z', 'Q'];
+        const releaseRead13 = gate('c10', false, true);
+        releasePf13();
+        await until(async () => asks.slice(asked13).filter((x) => x === 'c10').length === 2, 2000);
+        await sleep(200);
+        const o13 = await order();
+        check(JSON.stringify(o13) === '["Papa","Yankee","Quebec"]', `${width}: an answer naming another song at a row's place: the row keeps its own song (${o13})`);
+        const yankeeChip = await page.evaluate(() => { const row = [...document.querySelectorAll('#plsongs .track, #plsongs .list-row')].find((x) => /Yankee/.test(x.textContent)); const c = row && row.querySelector('.srcchip'); return c ? c.className : 'none'; });
+        check(!/\bwait\b/.test(yankeeChip) && /srcchip/.test(yankeeChip), `${width}: it keeps the earlier answer's source (${yankeeChip})`);
+        await page.screenshot({ path: path.join(SHOTS, `swapped-${width}.png`) });
+        lists.c10 = ['P', 'Y', 'Q'];
+        releaseRead13();
+        await sleep(400);
+        const o13b = await order();
+        check(JSON.stringify(o13b) === '["Papa","Yankee","Quebec"]' && !o13b.includes('Xray'), `${width}: read again, the list shows as the node has it, Yankee its own (${o13b})`);
+        const del13 = deletes.length;
+        await page.evaluate(() => { const b = [...document.querySelectorAll('#plsongs [data-rm]')].find((x) => /Yankee/.test(x.getAttribute('aria-label') || '')); if (b) b.click(); });
+        await until(async () => deletes.length > del13, 2000);
+        check(JSON.stringify(deletes.slice(del13)) === '[1]' && JSON.stringify(lists.c10) === '["P","Q"]', `${width}: Yankee's × removes Yankee (DELETE ${deletes.slice(del13)}, server now ${lists.c10})`);
+        await until(async () => JSON.stringify(await order()) === '["Papa","Quebec"]', 3000);
+        check(JSON.stringify(await order()) === '["Papa","Quebec"]', `${width}: the list shows Yankee gone (${await order()})`);
+
+        // 13. The same other names, each answer slower than the 1.2 s wait: still asked at most twice
+        // (before: each slow answer drew the page again, which asked again, for good)
+        const asked14 = asks.length;
+        await goPl('c11');
+        await sleep(8000);
+        const pf14 = asks.slice(asked14).filter((x) => x === 'c11/play-from').length;
+        check(pf14 >= 1 && pf14 <= 2 && (await page.locator('#plsongs .srcchip.wait').count()) === 0, `${width}: slow answers under other names: asked at most twice, no row left waiting (${pf14} asked)`);
         check(state.errors.length === errs && !state.errors.length, `${width}: no page errors (${state.errors.join(' | ')})`);
       } catch (e) {
         check(false, `${width}: ${e.message.split('\n')[0]}`);

@@ -8455,13 +8455,18 @@
           // Pubky user's question gives up after 15 s of its own and the read goes on without it,
           // pubkyUser, so whichever 15 s end first decides. Drawn again (another device changed the
           // list), it doesn't wait for a user not known yet: it draws without it, and again once
-          // the node answers, however late, pubkyKnown; Share asks for itself)
+          // the node answers, however late, pubkyKnown; Share asks for itself. A first draw whose
+          // question gave up after its 15 s draws again on the late answer the same way)
           const plCut = plHolds.has(plId) ? new AbortController() : null; let plCutAt = null;
           if (plCut) { plCut.signal.why = new Error('Couldn’t load this playlist: the node didn’t answer in time.'); plCutAt = setTimeout(() => plCut.abort(plCut.signal.why), PL_READ_MS); }
           // (the 15 s timer ends with the read, whichever way it ends)
           const plCutDone = () => clearTimeout(plCutAt);
-          if (again && state.pubkyUser === undefined) { const stale = drawStale; pubkyKnown(stale).then(() => { if (!stale()) render(); }); }
-          else try { await (plCut ? Promise.race([pubkyUser(), new Promise((_, no) => plCut.signal.addEventListener('abort', () => no(plCut.signal.why), { once: true }))]) : pubkyUser()); } catch (e) { plCutDone(); throw e; }
+          const drawOnPubky = () => { const stale = drawStale; pubkyKnown(stale).then(() => { if (!stale()) render(); }); };
+          if (again && state.pubkyUser === undefined) drawOnPubky();
+          else {
+            try { await (plCut ? Promise.race([pubkyUser(), new Promise((_, no) => plCut.signal.addEventListener('abort', () => no(plCut.signal.why), { once: true }))]) : pubkyUser()); } catch (e) { plCutDone(); throw e; }
+            if (state.pubkyUser === undefined && !isListener()) drawOnPubky();
+          }
           // Where songs play from can take a while the first time (each service asked by ISRC):
           // the songs show at once, the chips follow.
           // (lastPf: the latest answer whatever its age, for the names of songs moved meanwhile; the chips
@@ -8471,7 +8476,9 @@
           const pfFailed = !cachedPf && state.plPf && state.plPf.id === plId && state.plPf.failed && Date.now() - state.plPf.at < 30000;
           // A listener's collection plays what the library has: no play-from orders or pins (those are the owner's)
           const mine = isListener();
-          const askPf = () => api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true }; return null; });
+          // (prev: the answer before, for a song the next one leaves out)
+          const prevPf = () => (state.plPf && state.plPf.id === plId ? state.plPf.data || state.plPf.prev : null);
+          const askPf = () => api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x, prev: prevPf() }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true, prev: prevPf() }; return null; });
           let pfP = mine ? Promise.resolve(null) : cachedPf ? Promise.resolve(cachedPf) : pfFailed ? Promise.resolve(null) : askPf();
           const d = await api('GET', `/playlists/${encodeURIComponent(plId)}`, undefined, plCut ? { signal: plCut.signal } : {}).finally(plCutDone);
           // The answer kept from before goes by place too: if the list changed meanwhile (another
@@ -8484,16 +8491,28 @@
           const pfFits = fitsList(cachedPf);
           const shown = again && plShown && plShown.id === plId ? plShown.uris : null;
           const pfMoved = !mine && !pfFits && !pfFailed && !plHolds.has(plId) && !!shown && (shown.length !== d.playlist.items.length || shown.some((u, k) => u !== d.playlist.items[k].uri));
-          const pfAfterRead = !!cachedPf && !pfFits && !mine;
+          // (reread: the list was already read again after this answer, which still doesn't fit; it
+          // is used as it is, by song, and not asked for again: a node naming songs otherwise than
+          // the list can't keep the draw asking. A page opened afresh asks again)
+          const pfReread = again && !!cachedPf && !pfFits && !mine && !!state.plPf.reread;
+          const pfAfterRead = !!cachedPf && !pfFits && !mine && !pfReread;
           if (pfAfterRead) pfP = askPf();
           let pf = (pfFits && cachedPf) || (pfMoved ? undefined : await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]));
           if (drawStale()) return;
           // (an answer asked before the list was read may be for the old places, another device having
-          // changed it meanwhile: the rows wait for one that fits. One asked after the read is used as
-          // it is, so a node that names a song otherwise than the list does can't keep the draw asking)
-          if (pf && !fitsList(pf) && !pfAfterRead) pf = undefined;
+          // changed it meanwhile: the rows wait for one that fits. One asked after the read that
+          // doesn't fit says the list moved past this read: each row takes its own song's answer, by
+          // uri and copy (never another song's by place), and the list is read once more, as for a
+          // list moved under the rows on screen, so Remove and Move go by the places the node has)
+          if (pf && !fitsList(pf) && !pfAfterRead && !pfReread) pf = undefined;
+          const pfReadAgain = !!pf && pfAfterRead && !fitsList(pf);
           const pfPending = pf === undefined;
-          if (pfPending) { pf = null; let pfDone = false; pfP.then(() => { pfDone = true; if (state.view === 'playlist' && state.viewArg === plId) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
+          // (the mark holds for the one read after it: an answer drawn otherwise loses it, so a list
+          // moved again later asks for where its songs play again)
+          if (!pfPending && state.plPf && state.plPf.id === plId) state.plPf.reread = pfReadAgain && state.plPf.data === pf;
+          if (pfReadAgain) { const stale = drawStale; setTimeout(() => { if (!stale()) render(); }, 0); }
+          // (a slow answer asked after the read that doesn't fit marks the next draw's read the same way)
+          if (pfPending) { pf = null; let pfDone = false; pfP.then((x) => { pfDone = true; if (pfAfterRead && x && !fitsList(x) && state.plPf && state.plPf.id === plId && state.plPf.data === x) state.plPf.reread = true; if (state.view === 'playlist' && state.viewArg === plId) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
           state.itemTitle = d.summary.name;
           // Each song as it plays here: the library file, a service, or unavailable (play_from.rs).
           // (a song listed twice: its k-th copy takes the earlier answer's k-th copy, each place its own pin)
@@ -8501,12 +8520,14 @@
           const copyNo = []; const copiesSeen = new Map(); d.playlist.items.forEach((it, k) => { const n = copiesSeen.get(it.uri) || 0; copyNo[k] = n; copiesSeen.set(it.uri, n + 1); });
           // (an answer that doesn't fit the list, asked after the read: the list changed again
           // meanwhile, or the node names a song otherwise. Each row takes its own song's answer, by
-          // uri and copy as lastByUri; only a name no song of the list has goes by place)
+          // uri and copy as lastByUri, never the one at its place; a song it leaves out keeps the
+          // earlier answer's, as a pending draw does)
           const pfAt = (() => {
             if (!pf || fitsList(pf)) return (k) => pf && pf.items[k];
-            const byUri = new Map(); pf.items.forEach((x) => { if (!byUri.has(x.uri)) byUri.set(x.uri, []); byUri.get(x.uri).push(x); });
-            const listed = new Set(d.playlist.items.map((it) => it.uri));
-            return (k) => { const own = (byUri.get(d.playlist.items[k].uri) || [])[copyNo[k]]; if (own) return own; const at = pf.items[k]; return at && !listed.has(at.uri) ? at : undefined; };
+            const byUriOf = (x) => { const m = new Map(); (x ? x.items : []).forEach((r) => { if (!m.has(r.uri)) m.set(r.uri, []); m.get(r.uri).push(r); }); return m; };
+            const earlier = state.plPf && state.plPf.id === plId && state.plPf.data === pf ? state.plPf.prev : lastPf !== pf ? lastPf : null;
+            const byUri = byUriOf(pf); const byUriWas = byUriOf(earlier);
+            return (k) => { const u = d.playlist.items[k].uri; return (byUri.get(u) || [])[copyNo[k]] || (byUriWas.get(u) || [])[copyNo[k]]; };
           })();
           const songs = d.playlist.items.map((it, k) => {
             // A web page or a post plays nowhere: it shows as its card, in its place (B3)

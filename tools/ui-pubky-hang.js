@@ -9,7 +9,7 @@
 // rather than waiting on the question again; Home's Get started leaves out the Pubky sign-in step
 // rather than offering it as if signed out; and an older question's late answer counts while no
 // newer one has answered (a node that always answers after 15 s), and draws a playlist drawn
-// without it again. At 360 (phone) and 1280 px.
+// without it again, a first draw that gave up after 15 s too. At 360 (phone) and 1280 px.
 //   node tools/ui-pubky-hang.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -172,6 +172,19 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         const opened8 = await until(menuOpen, 3000);
         check(opened8 && (await offersCopy()), `${width}: the first question's late answer counts: the next ⋯ offers the homeserver copy`);
         if (opened8) await closeMenu();
+        // 9. A playlist opened afresh (a page load: nothing known), its first draw giving up on the
+        // question after 15 s: the node's late answer draws it again (before: only a redraw waited for
+        // it, so a first draw stayed without what the answer brings, as Copy link, till the next change)
+        await fx.go(page, '/playlist/c1');
+        const a9 = asks.length;
+        await until(async () => asks.length > a9, 3000); await sleep(300);
+        const asked9 = [...held.keys()].filter((n) => n >= a9);
+        await page.clock.fastForward(16000);
+        check(await until(async () => !!(await page.$('#plsongs [data-rm]')), 3000), `${width}: no answer in 15 s: the playlist draws anyway`);
+        for (let n = -1; n !== plReads.length;) { n = plReads.length; await sleep(400); }
+        const r9 = plReads.length;
+        asked9.forEach((n) => answer(n, SESSION));
+        check(asked9.length > 0 && await until(async () => plReads.length > r9, 2000), `${width}: the late answer draws the first draw again (${asked9.length} asked, ${plReads.length - r9} more reads)`);
         check(!state.errors.length, `${width}: no page errors (${state.errors.join(' | ')})`);
       } catch (e) {
         check(false, `${width}: ${e.message.split('\n')[0]}`);

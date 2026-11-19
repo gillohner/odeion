@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-19
+
+- **A playlist row never shows one song and removes another.** When another device changed a playlist while it was opening, a row could show and play the song the node now had at its place (for example "Xray" on "Yankee"'s row) while its × removed Yankee. Each row now shows only its own song, keeping what was found for it before if the latest answer leaves it out, and the playlist is read once more so Move and Remove act on the order the node has. A playlist opened while the node was slow to say whether you are signed in to Pubky now draws again once it answers, so Copy link appears without reopening the page.
+
 ### 2026-11-18
 
 - **A playlist says once who sees it and where it is kept.** On a computer or tablet, the small line above a playlist's name read "Playlist · private · on this node", and the line under its buttons said the same again ("Private on this node; saved to your homeserver on the next sync"). The small line now just says "Playlist", as it already did on a phone, and the line under the buttons has a little space above it instead of touching them.
