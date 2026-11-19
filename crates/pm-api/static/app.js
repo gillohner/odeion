@@ -8544,11 +8544,8 @@
           // A listener's collection plays what the library has: no play-from orders or pins (those are the owner's)
           const mine = isListener();
           // (prev: the answer before, for a song the next one leaves out)
-          // (prevRead: the list the answer before was checked against and didn't fit, read before it was
-          // asked, its `offRead`; kept past the reread mark, which the next read takes)
           const prevPf = () => (state.plPf && state.plPf.id === plId ? state.plPf.data || state.plPf.prev : null);
-          const prevRead = () => (state.plPf && state.plPf.id === plId ? (state.plPf.data ? state.plPf.offRead : state.plPf.prevRead) : null);
-          const askPf = () => api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x, prev: prevPf(), prevRead: prevRead() }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true, prev: prevPf(), prevRead: prevRead() }; return null; });
+          const askPf = () => api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x, prev: prevPf() }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true, prev: prevPf() }; return null; });
           let pfP = mine ? Promise.resolve(null) : cachedPf ? Promise.resolve(cachedPf) : pfFailed ? Promise.resolve(null) : askPf();
           const d = await api('GET', `/playlists/${encodeURIComponent(plId)}`, undefined, plCut ? { signal: plCut.signal } : {}).finally(plCutDone);
           // The answer kept from before goes by place too: if the list changed meanwhile (another
@@ -8578,28 +8575,16 @@
           // uri and copy (never another song's by place), and the list is read once more, as for a
           // list moved under the rows on screen, so Remove and Move go by the places the node has)
           if (pf && !fitsList(pf) && !pfAfterRead && !pfReread) pf = undefined;
-          // (an answer naming none of the list's songs, as long as the list, after one before it did
-          // the same, is a node naming them otherwise, not a list moved: used by song with no read
-          // again and no hold, so a redraw from outside doesn't leave the list taking no presses for
-          // one more read. Seen first, it is held: another device may have put other songs in. The one
-          // before counts only if it was checked against this same list: a list another device changed
-          // twice, no song kept, has an answer before naming none of the songs read now too. And only
-          // the same answer again, its songs in the same order: one that changed while the list read
-          // didn't is a change on the node, a song moved by another device, so it is held)
-          const namesNone = (x) => !!x && x.items.length === d.playlist.items.length && !x.items.some((r) => d.playlist.items.some((it) => it.uri === r.uri));
-          const sameAnswer = (a, b) => !!a && !!b && a.items.length === b.items.length && a.items.every((r, k) => r.uri === b.items[k].uri);
-          const otherNames = (x) => namesNone(x) && !!state.plPf && state.plPf.id === plId && state.plPf.data === x && sameAnswer(x, state.plPf.prev) && listIs(state.plPf.prevRead);
-          const pfOff = !!pf && pfAfterRead && !fitsList(pf);
-          const pfReadAgain = pfOff && !otherNames(pf);
+          // (every answer asked after the read that doesn't fit holds, whatever its names: the node
+          // answers each song by the list's own uri (play_from.rs), so one that doesn't fit is a list
+          // changed under the read, a song moved or put in by another device)
+          const pfReadAgain = !!pf && pfAfterRead && !fitsList(pf);
           const pfPending = pf === undefined;
           // (the mark holds for the one read after it: an answer drawn otherwise loses it, so a list
           // moved again later asks for where its songs play again)
-          // (reread: the list this answer was checked against, its songs' uris; offRead keeps it past the
-          // next read, only for an answer the same as the one before (one that changed is another
-          // list's, a change, and no reference), and till an answer fits a read: a list from changes
-          // before can't count as this one's)
+          // (reread: the list this answer was checked against, its songs' uris)
           const readUris = d.playlist.items.map((it) => it.uri);
-          if (!pfPending && state.plPf && state.plPf.id === plId) { state.plPf.reread = pfOff && state.plPf.data === pf ? readUris : null; if (state.plPf.reread) state.plPf.offRead = sameAnswer(pf, state.plPf.prev) ? readUris : null; else if (fitsList(pf)) state.plPf.offRead = null; }
+          if (!pfPending && state.plPf && state.plPf.id === plId) state.plPf.reread = pfReadAgain && state.plPf.data === pf ? readUris : null;
           // (and the rows of this read go by places the node no longer has: until the read after
           // it has drawn them they take no presses, × / Move / a pin / the bar's Remove, as under a
           // change's hold, plWrite; that read ends the hold, or its 15 s end in Try again)
@@ -8608,7 +8593,7 @@
           const focusWas = pfReadAgain ? plFocusOf(document.activeElement) : null;
           if (pfReadAgain) { const stale = drawStale; setTimeout(() => { if (!stale()) render(); }, 0); }
           // (a slow answer asked after the read that doesn't fit marks the next draw's read the same way)
-          if (pfPending) { pf = null; let pfDone = false; pfP.then((x) => { pfDone = true; const here = state.view === 'playlist' && state.viewArg === plId; if (pfAfterRead && x && !fitsList(x) && state.plPf && state.plPf.id === plId && state.plPf.data === x) { state.plPf.reread = readUris; state.plPf.offRead = sameAnswer(x, state.plPf.prev) ? readUris : null; if (here && !otherNames(x) && plShown && plShown.id === plId && plShown.uris.join('\n') === readUris.join('\n')) holdForReread(plFocusOf(document.activeElement)); } else if (fitsList(x) && state.plPf && state.plPf.id === plId && state.plPf.data === x) state.plPf.offRead = null; if (here) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
+          if (pfPending) { pf = null; let pfDone = false; pfP.then((x) => { pfDone = true; const here = state.view === 'playlist' && state.viewArg === plId; if (pfAfterRead && x && !fitsList(x) && state.plPf && state.plPf.id === plId && state.plPf.data === x) { state.plPf.reread = readUris; if (here && plShown && plShown.id === plId && plShown.uris.join('\n') === readUris.join('\n')) holdForReread(plFocusOf(document.activeElement)); } if (here) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
           state.itemTitle = d.summary.name;
           // Each song as it plays here: the library file, a service, or unavailable (play_from.rs).
           // (a song listed twice: its k-th copy takes the earlier answer's k-th copy, each place its own pin)

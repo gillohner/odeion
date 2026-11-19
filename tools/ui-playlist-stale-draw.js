@@ -12,7 +12,9 @@
 // each row its own song's answer, by uri and copy, never another song's by place, and the list is
 // read once more so Remove goes by the places the node has; a song that answer leaves out keeps the
 // earlier answer's copy; one whose songs are named otherwise gives no row a chip by place, asked at
-// most twice, and a library change redraws it without holding its rows. The focus a hold took goes
+// most twice, and its rows wait for the read after each answer (the node names each song by the
+// list's own uri, so an answer that doesn't fit is a list changed under the read, never a reason to
+// let × act by place). The focus a hold took goes
 // back to the same song's control wherever the node now has it, never to another song at its old
 // place. At 360 (phone) and 1280 px.
 //   node tools/ui-playlist-stale-draw.js [repo] [shots]
@@ -36,8 +38,8 @@ const detailOf = (id, name, keys) => ({ summary: sum(id, name, keys.length), pla
 const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library', name: 'Your library', connected: true }] }, own_order: false, items: keys.map((k, i) => (STREAMED[k] ? { index: i, uri: SONGS[k].canonical_uri, title: SONGS[k].title, artist: 'Sefa', track_id: null, stream_uri: `tidal:track:${SONGS[k].canonical_uri.split('/').pop()}`, page: SONGS[k].canonical_uri, plays_from: { service: 'tidal', label: 'TIDAL' }, sources: [], connect: [] } : { index: i, uri: SONGS[k].canonical_uri, title: SONGS[k].title, artist: 'Sefa', track_id: SONGS[k].id, plays_from: { service: 'library', label: 'Your library' }, sources: [] })) });
 // (`retitle`: a playlist's answer naming the song at a place otherwise, as a pin to another source can)
 const retitle = { c6: { 2: 'Pinned' } };
-// (`renamed`: a playlist whose answer names each song under another uri than the list's, as a node can)
-const renamed = { c8: true, c11: true };
+// (`renamed`: a playlist whose answer names each song under another uri than the list's: a stand-in for a list changed under the read, which a real node's answer is the only way to show (play_from.rs answers each song by the list's own uri))
+const renamed = { c8: true, c11: true, c22: true };
 // (`renamedBySong`: the same, each song under its own other uri wherever it is, so a song moved moves its uri too)
 const renamedBySong = { c17: true };
 // (`slow`: a playlist whose answer for where its songs play always comes after the draw's 1.2 s wait)
@@ -51,14 +53,14 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
       const { page, state } = await fx.create(browser, width, { mobile });
       // The server's lists, each GET answered with the list as it was when asked; `hold`: the next
       // GET of that path waits for its release
-      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'], c7: ['P', 'Q', 'A'], c8: ['P', 'Q', 'A'], c9: ['P', 'Q', 'A'], c10: ['Y', 'P', 'Q'], c11: ['P', 'Q', 'A'], c12: ['Y', 'P', 'Q'], c13: ['A', 'X', 'B', 'C'], c14: ['Y', 'P', 'Q'], c15: ['Y', 'P'], c16: ['A'], c17: ['A', 'X', 'B'], c18: ['C'], c19: ['X'], c20: ['C'] };
-      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice', c7: 'Moved meanwhile', c8: 'Other names', c9: 'Moved twice', c10: 'Swapped', c11: 'Slow other names', c12: 'Added meanwhile', c13: 'Turned round', c14: 'Moved under the focus', c15: 'All swapped', c16: 'Replaced twice', c17: 'Other names moved', c18: 'Back and changed', c19: 'Back to Xylo', c20: 'Back and forth' };
+      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'], c7: ['P', 'Q', 'A'], c8: ['P', 'Q', 'A'], c9: ['P', 'Q', 'A'], c10: ['Y', 'P', 'Q'], c11: ['P', 'Q', 'A'], c12: ['Y', 'P', 'Q'], c13: ['A', 'X', 'B', 'C'], c14: ['Y', 'P', 'Q'], c15: ['Y', 'P'], c16: ['A'], c17: ['A', 'X', 'B'], c18: ['C'], c19: ['X'], c20: ['C'], c21: ['X'], c22: ['P', 'Q', 'A'] };
+      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice', c7: 'Moved meanwhile', c8: 'Other names', c9: 'Moved twice', c10: 'Swapped', c11: 'Slow other names', c12: 'Added meanwhile', c13: 'Turned round', c14: 'Moved under the focus', c15: 'All swapped', c16: 'Replaced twice', c17: 'Other names moved', c18: 'Back and changed', c19: 'Back to Xylo', c20: 'Back and forth', c21: 'Back, then off again', c22: 'Other names reordered' };
       const hold = {}; const deletes = []; const asks = [];
       // (`fresh`: the held GET answers with the list as it is when released)
       const gate = (key, fail, fresh) => { let open; const p = new Promise((res) => { open = res; }); hold[key] = { p, fail, fresh }; return open; };
       let socket = null;
       await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
-      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6|c7|c8|c9|c10|c11|c12|c13|c14|c15|c16|c17|c18|c19|c20)(\/.*)?$/, async (r) => {
+      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6|c7|c8|c9|c10|c11|c12|c13|c14|c15|c16|c17|c18|c19|c20|c21|c22)(\/.*)?$/, async (r) => {
         const u = new URL(r.request().url()); const m = r.request().method();
         const [, , , id, ...rest] = u.pathname.split('/'); const sub = rest.join('/');
         if (m === 'DELETE' && sub.startsWith('items/')) { const k = Number(sub.split('/')[1]); deletes.push(k); lists[id].splice(k, 1); return json(r, {}); }
@@ -286,15 +288,17 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         check((await page.locator('#plsongs .srcchip.wait').count()) === 0 && o11.length === 3 && o11[2] === 'Alpha' && !o11.includes('Papa') && !o11.includes('Quebec') && chips11 === 0, `${width}: an answer under other names: no row takes a name or chip by place (${chips11} chips, ${o11})`);
         check(pf11 >= 1 && pf11 <= 2 && reads11 <= 3, `${width}: where they play is asked at most twice, the list read at most three times (${pf11}, ${reads11})`);
         await page.screenshot({ path: path.join(SHOTS, `other-names-${width}.png`) });
-        // 10b. The same other names, the library changing twice: each redraw uses that answer by
-        // song and the rows never stop taking presses (before: every other library change held the
-        // whole list till one more read, though it hadn't changed)
+        const inertNow = () => page.evaluate(() => { const box = document.querySelector('#plsongs'); return !!box && box.inert; });
+        // 10b. The same other names, the library changing twice: each redraw's answer doesn't fit the
+        // list read, so its rows wait for the read after it, then take presses again, the order kept.
+        // (A node names each song by the list's own uri, play_from.rs: an answer that doesn't fit is a
+        // list changed under the read, and the rows can't tell which song each place has now)
         await page.evaluate(() => { window.__holds = 0; window.__holdMo = new MutationObserver((recs) => { window.__holds += recs.filter((r) => r.oldValue === null && (r.target.id === 'plsongs' || r.target.id === 'pllocal') && r.target.hasAttribute('inert')).length; }); window.__holdMo.observe(document.getElementById('main'), { subtree: true, attributes: true, attributeFilter: ['inert'], attributeOldValue: true }); });
         const asked11b = asks.length;
         for (let i = 0; i < 2; i++) { const n = asks.length; socket.send(JSON.stringify({ type: 'library_changed' })); await until(async () => asks.slice(n).includes('c8'), 2000); await sleep(1500); }
         const holds11b = await page.evaluate(() => { window.__holdMo.disconnect(); return window.__holds; });
         const reads11b = asks.slice(asked11b).filter((x) => x === 'c8').length;
-        check(holds11b === 0 && reads11b === 2 && JSON.stringify(await order()) === JSON.stringify(o11), `${width}: under other names, two library changes redraw the list without holding its rows (${holds11b} holds, ${asks.slice(asked11b)})`);
+        check(holds11b === 2 && reads11b === 4 && !(await inertNow()) && JSON.stringify(await order()) === JSON.stringify(o11), `${width}: under other names, each library change holds the rows till the read after it, then they take presses (${holds11b} holds, ${asks.slice(asked11b)})`);
 
         // 11. Opened again within 30 s after another device moved a song, and moved once more before
         // the new answer for where the songs play comes: that answer, asked after the read, doesn't
@@ -398,8 +402,7 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
 
         // 12e. As 12, but another device puts other songs in every place: an answer naming none of
         // the list's songs, seen first, may be such a change and not a node naming them otherwise,
-        // so the rows wait for the read after it (only a node that named them otherwise before too
-        // skips that, 10b)
+        // so the rows wait for the read after it (as every answer that doesn't fit does, 10b)
         await goPl('c15');
         await until(async () => JSON.stringify(await order()) === '["Yankee","Papa"]' && (await page.locator('#plsongs .srcchip:not(.wait)').count()) === 2, 3000);
         await page.evaluate(() => { const st = { v: 'playlists' }; history.pushState(st, '', '/playlists'); dispatchEvent(new PopStateEvent('popstate', { state: st })); });
@@ -446,19 +449,18 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         await until(async () => JSON.stringify(await order()) === '["Bravo"]' && !(await page.evaluate(() => document.querySelector('#plsongs').inert)), 3000);
         check(JSON.stringify(await order()) === '["Bravo"]' && JSON.stringify(lists.c16) === '["B"]', `${width}: then the list shows Bravo, still on the node (${await order()}, server ${lists.c16})`);
 
-        // 12g. A node naming the songs otherwise, known as such (its answer the same twice for the same
-        // list read: no hold), and another device moving a song between the list read and the answer
-        // asked after it: that answer names none of the list's songs as the one before, but in another
-        // order, so it is a change on the node, not the same other names: the rows wait for the read
-        // after it and a × reaches the node only then (before: the rows kept the old order and the
-        // × of Alpha's row, place 0, removed Bravo)
+        // 12g. A node naming the songs otherwise (each under its own other uri), opened again unchanged:
+        // the answer doesn't fit the list read, so the rows wait for the read after it, as for any list
+        // changed under the read (an answer the same as before is no proof: 12k, 12l). And another
+        // device moving a song between the list read and the answer asked after it: the rows wait for
+        // the read after it and a × reaches the node only then (before: the rows kept the old order and
+        // the × of Alpha's row, place 0, removed Bravo)
         const away = async () => { await page.evaluate(() => { const st = { v: 'playlists' }; history.pushState(st, '', '/playlists'); dispatchEvent(new PopStateEvent('popstate', { state: st })); }); await page.waitForSelector('#main [data-pl="c1"]'); };
-        const inertNow = () => page.evaluate(() => { const box = document.querySelector('#plsongs'); return !!box && box.inert; });
         const settled = (o) => until(async () => JSON.stringify(await order()) === JSON.stringify(o) && (await page.locator('#plsongs .srcchip.wait').count()) === 0 && !(await inertNow()), 4000);
         await goPl('c17');
         check(await settled(['Alpha', 'Xylo', 'Bravo']), `${width}: under other names by song, the list shows (${await order()})`);
         await sleep(1500);
-        // (opened again with nothing changed: the same answer again, no hold)
+        // (opened again with nothing changed: the same answer again, still held till the read after it)
         await away();
         await page.evaluate(() => { window.__holds20 = 0; window.__holdMo20 = new MutationObserver((recs) => { window.__holds20 += recs.filter((r) => r.oldValue === null && r.target.id === 'plsongs' && r.target.hasAttribute('inert')).length; }); window.__holdMo20.observe(document.getElementById('main'), { subtree: true, attributes: true, attributeFilter: ['inert'], attributeOldValue: true }); });
         const asked20a = asks.length;
@@ -466,7 +468,7 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         await until(async () => asks.slice(asked20a).includes('c17/play-from'), 2000);
         await settled(['Alpha', 'Xylo', 'Bravo']); await sleep(1500);
         const holds20a = await page.evaluate(() => { window.__holdMo20.disconnect(); return window.__holds20; });
-        check(holds20a === 0, `${width}: under other names by song, opened again unchanged: no hold (${holds20a} holds)`);
+        check(holds20a === 1 && !(await inertNow()), `${width}: under other names by song, opened again unchanged: held till the read after it, then the rows take presses (${holds20a} holds)`);
         await away();
         const releasePf20 = gate('c17/play-from', false, true); const asked20 = asks.length; const del20 = deletes.length;
         await goPl('c17');
@@ -539,8 +541,7 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         const heldNoDelete = async () => { const del = deletes.length; const held = await inertNow(); await page.evaluate(() => { const b = document.querySelector('#plsongs [data-rm="0"]'); if (b) b.click(); }); await sleep(300); return { held, sent: deletes.slice(del) }; };
 
         // 12i. Xylo shown; read as Alpha with Xylo back before the answer (the same answer as before:
-        // held, then read again, which fits); then the same once more. An answer fitted a read since
-        // the first: that read no longer counts, so this is held too (a × waits)
+        // held, then read again, which fits); then the same once more: held too (a × waits)
         await goPl('c19');
         check(await settled(['Xylo']), `${width}: a one-song list shows (${await order()})`);
         let go = await offList('c19', ['A'], ['X']);
@@ -554,8 +555,7 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
 
         // 12j. Charlie shown; read as Alpha, Xylo before the answer (held, a changed answer), and Alpha
         // back before the read after it (the list as read, so the hold ends with Alpha); then read as
-        // Alpha with Xylo before the answer again. That answer is the one before, but the one before
-        // was held as a change: no reference for the list read, so this is held too
+        // Alpha with Xylo before the answer again: the same answer as before, held too
         await goPl('c20');
         check(await settled(['Charlie']), `${width}: a one-song list shows (${await order()})`);
         go = await offList('c20', ['A'], ['X']);
@@ -566,6 +566,38 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         check(h24.held && !h24.sent.length, `${width}: changed the same way again: held, a × doesn't reach the node (held ${h24.held}, DELETE ${h24.sent})`);
         await settled(['Xylo']);
         check(JSON.stringify(await order()) === '["Xylo"]' && JSON.stringify(lists.c20) === '["X"]', `${width}: then the list shows Xylo, still on the node (${await order()}, server ${lists.c20})`);
+
+        // 12k. Xylo shown, its answer fitting; read as Alpha with Xylo back before the answer (the same
+        // answer as before: held), Alpha again before the read after it (the list as read: the hold
+        // ends with Alpha); then read as Alpha with Xylo back before the answer once more. The rows
+        // show Alpha, the node has Xylo: held, a × doesn't reach the node (before: an answer the same
+        // as one before for the same list read counted as the node naming songs otherwise, the rows
+        // showed Alpha unheld and its × removed Xylo)
+        await goPl('c21');
+        check(await settled(['Xylo']), `${width}: a one-song list shows (${await order()})`);
+        go = await offList('c21', ['A'], ['X']);
+        const h25a = await heldNoDelete(); go(['A']);
+        check(h25a.held && await settled(['Alpha']), `${width}: read as Alpha, Xylo back meanwhile, Alpha again: held, then Alpha (held ${h25a.held}, ${await order()})`);
+        go = await offList('c21', ['A'], ['X']);
+        const h25 = await heldNoDelete(); go();
+        check(h25.held && !h25.sent.length, `${width}: then Xylo back before the answer once more: held, a × doesn't reach the node (held ${h25.held}, DELETE ${h25.sent})`);
+        await settled(['Xylo']);
+        check(JSON.stringify(await order()) === '["Xylo"]' && JSON.stringify(lists.c21) === '["X"]', `${width}: then the list shows Xylo, still on the node (${await order()}, server ${lists.c21})`);
+
+        // 12l. A node naming the songs otherwise by place (the same other uris whatever the order),
+        // opened twice unchanged, then another device reordering the list between the read and the
+        // answer: the answer is the same as before and the list read the same, but the node has
+        // another order: held, a × doesn't reach the node (before: no hold, × on row 0 removed Quebec)
+        await goPl('c22');
+        const settled3 = () => until(async () => (await order()).length === 3 && (await page.locator('#plsongs .srcchip.wait').count()) === 0 && !(await inertNow()), 4000);
+        check(await settled3(), `${width}: under other names by place, the list shows (${await order()})`);
+        const o26 = await order();
+        await away(); await goPl('c22'); check(await settled(o26), `${width}: opened again unchanged, the list shows as before (${await order()})`);
+        go = await offList('c22', ['P', 'Q', 'A'], ['Q', 'P', 'A']);
+        const h26 = await heldNoDelete(); go();
+        check(h26.held && !h26.sent.length, `${width}: under other names by place, reordered meanwhile: held, a × doesn't reach the node (held ${h26.held}, DELETE ${h26.sent})`);
+        await until(async () => !(await inertNow()), 4000);
+        check(!(await inertNow()) && JSON.stringify(lists.c22) === '["Q","P","A"]', `${width}: then the rows take presses, every song still on the node (server ${lists.c22})`);
 
         // 12c. Keyboard (desktop): × on Xylo, and another device turns the list round while the read
         // after it is on its way: the focus goes to the × of the song after Xylo, Bravo, where the
