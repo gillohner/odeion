@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-19
 
+- **Try again on a tag page works.** When Pubky didn't answer, a tag page (a #tag opened from Home, a song or another tag) said so with a Try again button, but pressing it did nothing, so the only way on was to reload the page. Now Try again asks Pubky again right there: the tags you picked stay, and the results and their "Also tagged" chips appear as soon as Pubky answers, or Try again comes back if it still doesn't.
 - **Pause, then Next, no longer spins the Play button.** Playing in this browser, pausing and then pressing Next, Previous or a song in the queue within a second or so put the loading spinner on the player's Play button while the next song loaded, as if Play had started it. Now only the button that started a song shows its spinner.
 - **Alt+Space or Ctrl+Space on a focused row no longer opens it.** With the keyboard on a playlist, artist or search result row, Alt+Space (the window menu on Windows), Ctrl+Space (switching the input language) or Cmd+Space (Spotlight) also opened the row. Now they are left to the system. Enter or Space alone still opens the row.
 - **Next right after Play no longer spins the song you left.** Playing in this browser, pressing Next (or Previous, or a media key) within a second or so of a song's Play put the loading spinner back on that song's Play button, though another song was starting. The spinner now stays on the button you pressed to start, only for that start.
