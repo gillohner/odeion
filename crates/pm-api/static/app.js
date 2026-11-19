@@ -7001,7 +7001,10 @@
     const row = el.closest('.section') || el; row.tabIndex = -1; row.focus({ preventScroll: true });
   };
   const homeBody = (sec, name, full) => {
-    if (sec.error) return `<p class="muted small hfail">Pubky did not answer: ${esc(sec.error)} <button class="btn sm" type="button" data-hretry>Try again</button></p>`;
+    // (the reason is the Pinakes client's own words, a request URL or an HTTP body, the same on
+    // every row when Pubky is down: it is the line's tooltip, so each row is one line with Try again;
+    // a rate limit says to wait, so Try again isn't pressed over and over)
+    if (sec.error) return `<p class="muted small hfail"><span title="${esc(sec.error)}">${/rate.?limit|too many requests|answered 429/i.test(sec.error) ? 'Pubky is busy. Wait a minute.' : 'Pubky did not answer.'}</span> <button class="btn sm" type="button" data-hretry>Try again</button></p>`;
     if (sec.needs === 'pubky') return `<div class="card small">${esc(sec.note)} <button class="btn sm primary" data-home-signin>Sign in with Pubky Ring</button></div>`;
     if (sec.needs === 'location') return `<div class="card small">${esc(sec.note)} <span class="row" style="gap:6px;display:inline-flex"><input class="input" data-city placeholder="Your city" style="width:180px"><button class="btn sm primary" data-city-save>Save</button></span></div>`;
     if (sec.needs === 'contact') return `<p class="muted small">${esc(sec.note)}</p>`;
