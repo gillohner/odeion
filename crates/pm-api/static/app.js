@@ -6087,7 +6087,9 @@
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     return playlistPicker((pl) => addToPlaylist(pl, [], uris), name || 'New playlist', async (n) => { try { await api('POST', '/playlists', { name: n, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${n}”`); } catch (e) { toast(e.message, 'error'); } });
   };
-  const trackMenu = async (anchor, tracks) => {
+  // (head: items before the song's own, e.g. a queue row's name and its Move up / Move down / Remove;
+  // live: whether the menu is still wanted once its reads are in, e.g. that queue row still drawn)
+  const trackMenu = async (anchor, tracks, { head = [], live = () => true } = {}) => {
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     await pubkyUser();
     const single = tracks.length === 1 ? tracks[0] : null;
@@ -6123,7 +6125,8 @@
       ...(single ? [{ label: 'Copy link', icon: 'copy', run: () => copyLink(`/song/${trackPageId(single)}`) }] : []),
       ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(tracks.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: tracks.map((t) => t.id) }) }] : []),
     ];
-    showMenu(anchor, items);
+    if (!live()) return;
+    showMenu(anchor, [...head, ...items]);
   };
   const BAND_KINDS = ['peaking', 'low_shelf', 'high_shelf', 'low_pass', 'high_pass'];
   const dspEditor = (zone, cfg) => `<div class="card dsp" style="margin-top:12px"><div class="section-head"><h3>DSP · ${esc(zone.name)}</h3><span class="muted small">Every stage shows in the signal path; defaults keep the path bit-perfect.</span></div>
@@ -9586,7 +9589,8 @@
           // when the zone is known to be empty, as for the note: a node zone whose queue could not be
           // fetched, or that is paused on a song, draws no rows but still has music to lose.
           const qm = $('#qmine', main); if (qm) qm.onclick = forDrawn(async () => { try { await shuffleIfEmpty(drawnZone); } catch (e) { toast(e.message, 'error'); } });
-          const qedit = async (i, op, to, k) => {
+          // (entry: the song's queue entry, when i was looked up from it just now: a menu's edit)
+          const qedit = async (i, op, to, k, entry) => {
             if (zoneMoved()) return;
             // (from the ⋯ menu, whose closing takes the focus: the next draw puts it on the song's row)
             state.qMoved = k ? { k, i, gen: navGen } : null;
@@ -9601,7 +9605,7 @@
               }
               render(); return;
             }
-            const it = q[i]; if (!it) { state.qMoved = null; return; }
+            const it = entry || q[i]; if (!it) { state.qMoved = null; return; }
             try {
               // (in the zone's turn: a load on its way goes first, so it can't undo the edit afterwards)
               const zid = state.zone; const j = op === 'rm' ? null : op === 'to' ? to : op === 'up' ? i - 1 : i + 1; if (j === i) { state.qMoved = null; return; }
@@ -9649,11 +9653,44 @@
           });
           $$('[data-qdown]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qdown), 'down'));
           $$('[data-qrm]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qrm), 'rm'));
-          // Phones hide a row's Move up / Move down / Remove (no room beside the title, and no hover to
-          // show them): the row's ⋯ offers them, as a playlist's song row does
+          // A row's ⋯ is the song's own menu, as on Songs (Add to playlist…, favourites, Go to album…):
+          // a library song's from the node, another song's Go to song page. Phones hide a row's Move
+          // up / Move down / Remove (no room beside the title, and no hover to show them), so there
+          // the ⋯ offers them first, as a playlist's song row does; so does a row with nothing else.
+          // A tap on another ⋯ while one still reads: only the last one's menu opens (before, the
+          // slower one's opened over it, its Move/Remove where the other's were), and the first ⋯
+          // stops showing its progress.
+          let qMenuTap = 0; let qMenuDrop = null;
           $$('[data-qmore]', main).forEach((b) => b.onclick = (e) => {
             e.stopPropagation(); if (zoneMoved()) return; const i = Number(b.dataset.qmore); const it = q[i]; if (!it) return;
-            showMenu(b, [{ title: itemName(it) }, ...(i > 0 ? [{ label: 'Move up', icon: 'upload', run: () => qedit(i, 'up', null, 'qmore') }] : []), ...(i < q.length - 1 ? [{ label: 'Move down', icon: 'download', run: () => qedit(i, 'down', null, 'qmore') }] : []), { label: 'Remove from queue', icon: 'trash', run: () => qedit(i, 'rm', null, 'qmore') }]);
+            const tap = ++qMenuTap; if (qMenuDrop) qMenuDrop(); let shown = false;
+            // (the page drawn again meanwhile, here or during the menu's own reads: this ⋯ is gone.
+            // Asked once, just before a menu would show: after that no other path shows one.)
+            const live = () => { if (shown) return false; shown = true; return tap === qMenuTap && b.isConnected && !zoneMoved(); };
+            // An edit is for the song the menu was opened for, at its place when the item is picked (the
+            // queue can change while the menu is open: another song at the old place)
+            const edit = (op) => () => {
+              if (zoneMoved()) return;
+              const cur = (isBrowser() ? state.browserQueue : state.queue) || [];
+              const at = cur.findIndex((x) => qkey(x) === qkey(it));
+              if (at < 0) return toast('Nothing changed: that song isn’t in the queue any more');
+              if ((op === 'up' && at === 0) || (op === 'down' && at === cur.length - 1)) return toast(`Nothing changed: it’s ${op === 'up' ? 'first' : 'last'} in the queue now`);
+              return qedit(at, op, null, 'qmore', isBrowser() ? null : cur[at]);
+            };
+            const acts = $('.q-actions', b.closest('.list-row'));
+            const edits = [...(i > 0 ? [{ label: 'Move up', icon: 'upload', run: edit('up') }] : []), ...(i < q.length - 1 ? [{ label: 'Move down', icon: 'download', run: edit('down') }] : []), { label: 'Remove from queue', icon: 'trash', run: edit('rm') }];
+            const head = [{ title: itemName(it) }, ...(acts && getComputedStyle(acts).display !== 'none' ? [] : edits)];
+            const page = npPageId(it.uri);
+            const plain = () => { if (live()) showMenu(b, [...head, ...(page ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: page }) }] : head.length > 1 ? [] : edits)]); };
+            const tid = it.track_id ?? trackIdOf(it);
+            const full = (async () => {
+              const t = tid != null ? await api('GET', `/library/tracks/${tid}`).catch(() => null) : null;
+              if (t && !shown && tap === qMenuTap) await trackMenu(b, [t], { head, live });
+            })().catch(() => {}).then(plain);
+            // (the ⋯ shows its progress until its menu opens, or another ⋯ is tapped. Where the menu has
+            // the row's Move/Remove (phones), they wait at most 1.5 s for the song's own items: then
+            // the menu opens without them, as on a node that doesn't answer)
+            return Promise.race([full, new Promise((r) => { qMenuDrop = r; }), ...(head.length > 1 ? [new Promise((r) => setTimeout(r, 1500)).then(plain)] : [])]);
           });
           const qr = $('#qradio'); if (qr) qr.onclick = async () => {
             if (zoneMoved()) return;
