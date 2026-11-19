@@ -6088,8 +6088,9 @@
     return playlistPicker((pl) => addToPlaylist(pl, [], uris), name || 'New playlist', async (n) => { try { await api('POST', '/playlists', { name: n, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${n}”`); } catch (e) { toast(e.message, 'error'); } });
   };
   // (head: items before the song's own, e.g. a queue row's name and its Move up / Move down / Remove;
-  // live: whether the menu is still wanted once its reads are in, e.g. that queue row still drawn)
-  const trackMenu = async (anchor, tracks, { head = [], live = () => true } = {}) => {
+  // live: whether the menu is still wanted once its reads are in, e.g. that queue row still drawn;
+  // guard: wraps each item's action, e.g. a queue row's: nothing for another zone than the page's)
+  const trackMenu = async (anchor, tracks, { head = [], live = () => true, guard = (f) => f } = {}) => {
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     await pubkyUser();
     const single = tracks.length === 1 ? tracks[0] : null;
@@ -6100,7 +6101,7 @@
     if (single && single.id != null && single.isrc) {
       try { const vs = await api('GET', `/library/tracks/${single.id}/versions`); versionItems = vs.filter((v) => v.uri).map((v) => ({ label: `Stream from ${v.source.toUpperCase()} (${v.label.replace(/^TIDAL · /, '')})`, icon: 'zone', run: () => playSourceItems([{ uri: v.uri, title: single.title, artist: artists(single), album: single.album ? single.album.title : '', duration_ms: single.duration_ms }], true) })); const tv = vs.find((v) => v.source === 'tidal' && /^track:/.test(v.id)); if (tv) versionItems.push({ label: 'Full length in TIDAL\'s player (here)', icon: 'external', run: () => tidalEmbed('tracks', tv.id.replace(/^track:/, ''), single.title) }); } catch { /* no versions */ }
     }
-    const radioItem = seeds.length && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { const seed = single || seeds[Math.floor(Math.random() * seeds.length)]; try { await playTracks([seed], true); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; toast(`Radio from “${seed.title}”: similar music follows`); if (state.view === 'queue') render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
+    const radioItem = seeds.length && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { const seed = single || seeds[Math.floor(Math.random() * seeds.length)]; const zid = state.zone; try { await playTracks([seed], true); if (state.zone !== zid) return; await api('PUT', `/zones/${encodeURIComponent(zid)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(zid)}`); state.zones[zs.id] = zs; toast(`Radio from “${seed.title}”: similar music follows`); if (state.view === 'queue') render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     const nav = single ? [
       // (the song's own page first, as in itemMenu)
       { label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: trackPageId(single) }) },
@@ -6126,7 +6127,7 @@
       ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(tracks.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: tracks.map((t) => t.id) }) }] : []),
     ];
     if (!live()) return;
-    showMenu(anchor, [...head, ...items]);
+    showMenu(anchor, [...head, ...items.map((it) => (it.run ? { ...it, run: guard(it.run) } : it))]);
   };
   const BAND_KINDS = ['peaking', 'low_shelf', 'high_shelf', 'low_pass', 'high_pass'];
   const dspEditor = (zone, cfg) => `<div class="card dsp" style="margin-top:12px"><div class="section-head"><h3>DSP · ${esc(zone.name)}</h3><span class="muted small">Every stage shows in the signal path; defaults keep the path bit-perfect.</span></div>
@@ -9681,16 +9682,19 @@
             const edits = [...(i > 0 ? [{ label: 'Move up', icon: 'upload', run: edit('up') }] : []), ...(i < q.length - 1 ? [{ label: 'Move down', icon: 'download', run: edit('down') }] : []), { label: 'Remove from queue', icon: 'trash', run: edit('rm') }];
             const head = [{ title: itemName(it) }, ...(acts && getComputedStyle(acts).display !== 'none' ? [] : edits)];
             const page = npPageId(it.uri);
-            const plain = () => { if (live()) showMenu(b, [...head, ...(page ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: page }) }] : head.length > 1 ? [] : edits)]); };
+            const plain = () => { if (live()) showMenu(b, [...head, ...(page ? [{ label: 'Go to song page', icon: 'compass', run: forDrawn(() => setView('item', { kind: 'song', id: page })) }] : head.length > 1 ? [] : edits)]); };
             const tid = it.track_id ?? trackIdOf(it);
+            // (the song's own items too are for the zone the page shows: the zone can change while the
+            // menu is open, and Play next, Add to queue or Start radio then do nothing, not add to or
+            // replace the other zone's queue)
             const full = (async () => {
               const t = tid != null ? await api('GET', `/library/tracks/${tid}`).catch(() => null) : null;
-              if (t && !shown && tap === qMenuTap) await trackMenu(b, [t], { head, live });
+              if (t && !shown && tap === qMenuTap) await trackMenu(b, [t], { head, live, guard: forDrawn });
             })().catch(() => {}).then(plain);
-            // (the ⋯ shows its progress until its menu opens, or another ⋯ is tapped. Where the menu has
-            // the row's Move/Remove (phones), they wait at most 1.5 s for the song's own items: then
-            // the menu opens without them, as on a node that doesn't answer)
-            return Promise.race([full, new Promise((r) => { qMenuDrop = r; }), ...(head.length > 1 ? [new Promise((r) => setTimeout(r, 1500)).then(plain)] : [])]);
+            // (the ⋯ shows its progress until its menu opens, or another ⋯ is tapped. It waits at most
+            // 1.5 s for the song's own items: then the menu opens without them, as on a node that
+            // doesn't answer, with Go to song page, and on phones the row's Move/Remove)
+            return Promise.race([full, new Promise((r) => { qMenuDrop = r; }), new Promise((r) => setTimeout(r, 1500)).then(plain)]);
           });
           const qr = $('#qradio'); if (qr) qr.onclick = async () => {
             if (zoneMoved()) return;
