@@ -4,6 +4,7 @@
 // the text against the tint where the text starts (the gradient's first colour), the middle and
 // the end, in the light and the dark theme, for genre names that land on many hues, at 360, 412,
 // 768 and 1280 px; also with Settings › Appearance's Light on a dark device and Dark on a light one.
+// In the dark theme the tint starts at the colour it always had, hsl(hue(name) 32% 22%).
 //   node tools/ui-genre-card-contrast.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -13,6 +14,9 @@ fs.mkdirSync(SHOTS, { recursive: true });
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 const NAMES = ['Jazz', 'Rock', 'Hip-Hop', 'Classical', 'Electronic', 'Folk', 'Soul', 'Ambient', 'Metal', 'Reggae', 'Blues', 'Pop'];
+// app.js's hue(), and hsl to rgb, for the dark theme's first colour
+const hue = (s) => { let h = 0; for (const c of String(s || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h % 360; };
+const hsl = (h, sat, l) => { const a = sat * Math.min(l, 1 - l); const f = (n) => { const k = (n + h / 30) % 12; return 255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))); }; return [f(0), f(8), f(4)]; };
 const genres = { body: NAMES.map((name, i) => ({ id: i + 1, name, albums: i % 3 + 1, tracks: 4 + i })) };
 
 (async () => {
@@ -41,11 +45,12 @@ const genres = { body: NAMES.map((name, i) => ({ id: i + 1, name, albums: i % 3 
               const name = c.querySelector('h3'); const sub = c.querySelector('.muted');
               const fg = [name, sub].map((e) => rgb(getComputedStyle(e).color));
               const at = stops.length >= 2 ? [stops[0], mix(stops[0], stops[stops.length - 1]), stops[stops.length - 1]] : [];
-              return { name: name.textContent, sub: sub.textContent, stops: stops.length, nameMin: Math.min(...at.map((s) => ratio(fg[0], s))), subMin: Math.min(...at.map((s) => ratio(fg[1], s))), left: getComputedStyle(c).textAlign, cursor: getComputedStyle(c).cursor };
+              return { name: name.textContent, sub: sub.textContent, stops: stops.length, first: stops[0], nameMin: Math.min(...at.map((s) => ratio(fg[0], s))), subMin: Math.min(...at.map((s) => ratio(fg[1], s))), left: getComputedStyle(c).textAlign, cursor: getComputedStyle(c).cursor };
             });
           });
           for (const c of cards) {
             check(c.stops >= 2, `${scheme} ${width} ${c.name}: the card has its tint (${c.stops} colours)`);
+            if (scheme.endsWith('dark')) { const want = hsl(hue(c.name), 0.32, 0.22); check(!!c.first && want.every((v, i) => Math.abs(v - c.first[i]) <= 1), `${scheme} ${width} ${c.name}: the dark tint starts at hsl(${hue(c.name)} 32% 22%) (rgb ${want.map(Math.round).join(', ')}; drawn ${c.first ? c.first.join(', ') : 'none'})`); }
             check(c.nameMin >= 4.5, `${scheme} ${width} ${c.name}: the name reads on the tint (${c.nameMin.toFixed(2)}:1, needs 4.5)`);
             check(c.subMin >= 4.5, `${scheme} ${width} ${c.name}: "${c.sub}" reads on the tint (${c.subMin.toFixed(2)}:1, needs 4.5)`);
             check(c.left === 'left' && c.cursor === 'pointer', `${scheme} ${width} ${c.name}: still left-aligned with a pointer (${c.left}, ${c.cursor})`);
