@@ -3,6 +3,8 @@
 // shared-link box does, instead of searching for the link's text. Phone (360/412 px, the Search tab,
 // the Android app) and desktop. A bare key still opens the person; other text still searches.
 // Opened from the phone's empty Search tab, its Back says Search (it said Results for “”).
+// A link to a post that is no playlist (a comment, an ordinary post) is searched as text instead of
+// an error page; a playlist made private again still says so.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-search-shared-link.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -20,7 +22,17 @@ const shared = {
   entries: [{ kind: 'track', uri: fx.SONG }],
   play_from: { order: { order: ['library'], services: [] }, own_order: false, items: [{ index: 0, uri: fx.SONG, title: fx.track.title, artist: 'Sefa', track_id: 1, plays_from: { service: 'library', label: 'Your library' }, sources: [] }] },
 };
-const fixtures = { [`/shared/${KEY}/playlists/${ID}`]: { body: shared }, [`/shared/${KEY}/playlists`]: { body: [] } };
+// A post that is no playlist (a comment, an ordinary post) and a playlist made private again
+const NOTPL = '0035WKVKQDHSN'; const GONE = '0035WKVKQDHSP'; const SLOW = '0035WKVKQDHSQ';
+const NOTPL_LINK = `pubky://${KEY}/pub/social/v1/posts/${NOTPL}`;
+const fixtures = {
+  [`/shared/${KEY}/playlists/${ID}`]: { body: shared }, [`/shared/${KEY}/playlists`]: { body: [] },
+  [`/shared/${KEY}/playlists/${NOTPL}`]: { status: 422, body: { error: 'that post is not a playlist this node can read' } },
+  [`/shared/${KEY}/playlists/${GONE}`]: { status: 404, body: { error: 'no shared playlist with that id (it may be private again)' } },
+  [`/shared/${KEY}/playlists/${SLOW}`]: { status: 422, body: { error: 'that post is not a playlist this node can read' } },
+};
+// (the post that is no playlist and answers late: the box emptied meanwhile)
+const delay = (v) => (v === `/shared/${KEY}/playlists/${SLOW}` ? 1200 : 0);
 
 let ok = 0; let fail = 0;
 const check = (cond, msg) => { if (cond) { ok++; console.log(`ok   ${msg}`); } else { fail++; console.log(`FAIL ${msg}`); } };
@@ -34,7 +46,7 @@ const paste = (page, text) => page.evaluate((t) => { const s = document.getEleme
 
 async function run(browser, width, { phone, android }) {
   const tag = `${width}${android ? ' android' : ''}${phone ? ' phone' : ''}`;
-  const { context, page, state } = await fx.create(browser, width, { fixtures, ...(phone ? { mobile: true } : {}) });
+  const { context, page, state } = await fx.create(browser, width, { fixtures, delay, ...(phone ? { mobile: true } : {}) });
   if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
   try {
     await fx.go(page, '/tracks'); await page.locator('.tracks .track').first().waitFor();
@@ -61,6 +73,88 @@ async function run(browser, width, { phone, android }) {
       await paste(page, bad);
       check(await until(() => searched(state) > n), `${tag}: a link with ${label} is searched as text`);
       check(where(page) === '/search', `${tag}: and stays on Search (at ${where(page)})`);
+    }
+    // A link to a post that is no playlist is searched as text, in the shared page's place:
+    // Back goes where search was opened from (the phone's Search tab, desktop Songs)
+    const depth = () => page.evaluate(() => (history.state && history.state.depth) || 0);
+    const fresh = async () => {
+      await fx.go(page, '/tracks'); await page.locator('.tracks .track').first().waitFor();
+      if (phone) { await page.click('[data-bnav="search"]'); await until(() => where(page) === '/search'); } else await page.click('#search');
+    };
+    await fresh();
+    {
+      const n = searched(state); const d0 = await depth();
+      await paste(page, NOTPL_LINK);
+      check(await until(() => state.hits.some((h) => h.v === `/shared/${KEY}/playlists/${NOTPL}`)), `${tag}: a post link that is no playlist is asked for first`);
+      check(await until(() => searched(state) > n && where(page) === '/search'), `${tag}: then it is searched as text (at ${where(page)})`);
+      const q = new URL(page.url()).searchParams.get('q');
+      check(q === NOTPL_LINK, `${tag}: the search is for the link (${q})`);
+      check(await page.locator('#search').inputValue() === NOTPL_LINK, `${tag}: the box still holds the link`);
+      await sleep(300); await page.screenshot({ path: path.join(shots, `${width}${android ? '-android' : ''}${phone ? '-phone' : ''}-pasted-post-link.png`) });
+      check(!(await page.locator('#main .notice').count()), `${tag}: no "not a playlist" error is left on screen`);
+      check(await depth() === d0 + 1, `${tag}: the shared page left no entry of its own (${d0} → ${await depth()})`);
+      // Enter there (or the link again): the search, in the same entry, the post not asked again
+      const asked = state.hits.filter((h) => h.v === `/shared/${KEY}/playlists/${NOTPL}`).length;
+      await page.locator('#search').press('Enter');
+      await sleep(500);
+      check(new URL(page.url()).searchParams.get('q') === NOTPL_LINK, `${tag}: Enter on those results keeps them (q ${new URL(page.url()).searchParams.get('q')})`);
+      check(await depth() === d0 + 1 && where(page) === '/search', `${tag}: in the same entry (depth ${await depth()}, at ${where(page)})`);
+      check(state.hits.filter((h) => h.v === `/shared/${KEY}/playlists/${NOTPL}`).length === asked, `${tag}: the post known to be no playlist is not asked for again`);
+      await page.goBack();
+      const home = phone ? '/search' : '/tracks';
+      check(await until(() => where(page) === home && !new URL(page.url()).search), `${tag}: Back goes where search was opened from (at ${where(page)}${new URL(page.url()).search})`);
+    }
+    // A reload of those results: searched again in the reload's own entry (no second one to go Back to)
+    {
+      const n = searched(state);
+      await fx.go(page, `/search?q=${encodeURIComponent(NOTPL_LINK)}`);
+      check(await until(() => searched(state) > n && where(page) === '/search' && new URL(page.url()).searchParams.get('q') === NOTPL_LINK), `${tag}: a reload of the results searches the link again (at ${where(page)})`);
+      await sleep(300);
+      check(await depth() === 0, `${tag}: in the reload's own entry (depth ${await depth()})`);
+      // and a reload of a playlist link's search opens the playlist in its place
+      await fx.go(page, `/search?q=${encodeURIComponent(LINK)}`);
+      check(await until(() => where(page) === `/shared/${KEY}/${ID}`), `${tag}: a reload of a playlist link's search opens the playlist (at ${where(page)})`);
+      check(await depth() === 0, `${tag}: in the reload's own entry (depth ${await depth()})`);
+    }
+    // The box emptied while such a post is still being read: the link is not searched
+    await fresh();
+    {
+      const n = searched(state);
+      await paste(page, `pubky://${KEY}/pub/social/v1/posts/${SLOW}`);
+      await until(() => where(page) === `/shared/${KEY}/${SLOW}`);
+      await page.locator('#search').fill('');
+      await sleep(1800);
+      check(searched(state) === n, `${tag}: the box emptied before the post answered: nothing searched`);
+      if (phone) check(where(page) === '/search' && !new URL(page.url()).search, `${tag}: and the phone shows the Search tab's empty page (at ${where(page)}${new URL(page.url()).search})`);
+      else check(where(page) === `/shared/${KEY}/${SLOW}` && /not a playlist/.test((await page.locator('#main .notice').textContent().catch(() => '')) || ''), `${tag}: and the page says the post is no playlist (at ${where(page)})`);
+    }
+    // A playlist made private again still says so on its page (not searched)
+    await fresh();
+    {
+      const n = searched(state);
+      await paste(page, `pubky://${KEY}/pub/social/v1/posts/${GONE}`);
+      check(await until(() => where(page) === `/shared/${KEY}/${GONE}`), `${tag}: a playlist made private again opens its page (at ${where(page)})`);
+      check(await until(async () => /private again/.test((await page.locator('#main .notice').textContent().catch(() => '')) || '')), `${tag}: which says it is gone`);
+      await sleep(400);
+      check(searched(state) === n && where(page) === `/shared/${KEY}/${GONE}`, `${tag}: and nothing is searched`);
+      await page.goBack(); await until(() => where(page) !== `/shared/${KEY}/${GONE}`);
+    }
+    // Phone: Back to the Search tab from an opened playlist, then emptying the box: no navigation,
+    // the focus stays in the box to type again
+    if (phone) {
+      await fresh();
+      await paste(page, LINK);
+      await until(() => where(page) === `/shared/${KEY}/${ID}`);
+      await page.goBack();
+      check(await until(() => where(page) === '/search' && !new URL(page.url()).search), `${tag}: Back from the playlist goes to the Search tab (at ${where(page)})`);
+      const d1 = await depth(); const at = page.url();
+      check(await page.locator('#search').inputValue() === LINK, `${tag}: the box there still holds the link (${await page.locator('#search').inputValue()})`);
+      await page.locator('#search').focus();
+      await page.locator('#search').fill('');
+      await sleep(500);
+      check(page.url() === at && await depth() === d1, `${tag}: emptying the box there goes nowhere (at ${where(page)})`);
+      check(await page.evaluate(() => document.activeElement && document.activeElement.id === 'search'), `${tag}: and the focus stays in the box`);
+      check(await page.locator('[data-bnav="search"]').getAttribute('aria-current') === 'page' || await page.locator('[data-bnav="search"].on').count() > 0, `${tag}: on the Search tab`);
     }
     check(state.errors.length === 0, `${tag}: no page errors (${state.errors.join('; ')})`);
   } finally { await context.close(); }
