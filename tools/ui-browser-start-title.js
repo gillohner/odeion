@@ -1,8 +1,9 @@
 // This browser's "Starting on This browser…" names the song now starting. A song's Play pressed while
 // the song before is still loading (a slow stream, a quick click on another row), or Next pressed then,
 // shows the new song's name under it (before, the first song's name stayed until one played), and the
-// spinner moves to the button just pressed. The new song playing ends the wait, also when the first
-// song's file comes in late, and the same song played again while it loads keeps its one wait.
+// spinner moves to the button just pressed (Next pressed soon after puts it on no row). The new song
+// playing ends the wait, also when the first song's file comes in late, and the same song played again
+// while it loads keeps its one wait.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-browser-start-title.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -44,9 +45,11 @@ async function stillLoading(browser, width) {
     // Next while Song 2 still loads: Song 3
     await page.click('#next');
     await sleep(200);
+    await page.screenshot({ path: path.join(shots, `after-next-${width}.png`) });
     b = await bar(page);
     assert.equal(b.sub, 'Song 3', `${width}: Next while Song 2 loads: the bar names Song 3 (${JSON.stringify(b)})`);
     assert.match(await page.evaluate(() => document.querySelector('audio').getAttribute('src') || ''), /\/library\/tracks\/3\//, `${width}: Song 3 is the one loading`);
+    assert.deepEqual(await spinning(page), [], `${width}: Next soon after Song 2's Play: no row's Play spins (Song 3 wasn't started from one)`);
     assert.deepEqual(state.errors, [], `${width}: no page errors`);
   } finally { await context.close(); }
 }
