@@ -309,13 +309,14 @@ async function playingBars(browser, width, mobile) {
     const dh = await page.evaluate(() => [...document.querySelectorAll('#main label.check:has(#roonfav, #roonpl, #roontags)')].map((l) => l.getBoundingClientRect().height));
     check(dh.length === 3 && dh.every((h) => h < 30), `desktop 1280: Roon's options stay lines of text (${dh.map((h) => h.toFixed(0)).join(' ')})`);
     await context.close();
-    // Desktop: a queue row keeps its Move up / Move down / Remove (shown on hover), and has no ⋯
+    // Desktop: a queue row keeps its Move up / Move down / Remove (shown on hover), and its ⋯ (the
+    // song's menu, as on Songs; ui-queue-row-menu.js checks what is in it)
     const dq = await fx.create(browser, 1280, {});
     await dq.context.addInitScript((q) => { localStorage.setItem('pm.browserQueue', JSON.stringify(q)); }, QUEUE);
     await fx.go(dq.page, '/queue'); await dq.page.waitForSelector('.list.queue .list-row'); await dq.page.waitForTimeout(300);
     await dq.page.locator('.list.queue .list-row').nth(1).hover(); await dq.page.waitForTimeout(250);
     const dqr = await dq.page.evaluate(() => { const row = document.querySelectorAll('.list.queue .list-row')[1]; const a = row.querySelector('.q-actions'); return { acts: a.getClientRects().length > 0 && getComputedStyle(a).opacity === '1', buttons: a.querySelectorAll('button').length, more: row.querySelector('[data-qmore]')?.getClientRects().length ?? 0 }; });
-    check(dqr.acts && dqr.buttons === 3 && dqr.more === 0, `desktop 1280: a hovered queue row shows Move up / Move down / Remove and no ⋯ (${JSON.stringify(dqr)})`);
+    check(dqr.acts && dqr.buttons === 3 && dqr.more === 1, `desktop 1280: a hovered queue row shows Move up / Move down / Remove and its ⋯ (${JSON.stringify(dqr)})`);
     await dq.context.close();
     // Settings › Layout › Phone on an 800 px window: the mark, and no heart button beside it
     const wide = await fx.create(browser, 800, { tracks: BTRACKS, favs: ['track:1'] });
