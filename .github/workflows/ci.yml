@@ -729,6 +729,7 @@ jobs:
           ui-song-row-album.js song-row-album-shots
           ui-song-row-focus-ring.js song-row-focus-ring-shots
           ui-row-click.js row-click-shots
+          ui-menu-close-click.js menu-close-click-shots
           ui-list-focus-ring.js list-focus-ring-shots
           ui-list-filter-ends.js list-filter-ends-shots
           ui-srow-click.js srow-click-shots

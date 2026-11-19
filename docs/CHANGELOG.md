@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-19
 
+- **A click on a song right after closing its ⋯ menu plays it.** When you opened a song's ⋯ menu and clicked the song's row to close it, a quick next click on the same song did nothing: it was taken as the second half of a double click. Now it plays the song, in Songs, Favourites, on album and artist pages, in playlists and in Search. The click that only closes the menu still plays nothing, and a double click still starts a song once.
 - **"Starting on This browser…" names the song you just picked.** Playing in this browser, when you picked another song (or pressed Next) while the one before was still loading, the player bar kept the first song's name under "Starting on This browser…" until something played. It now names the new song, and the small spinner moves to the button you just pressed.
 - **A playlist row never shows one song and removes another.** When another device changed a playlist while it was opening, a row could show and play the song the node now had at its place (for example "Xray" on "Yankee"'s row) while its × removed Yankee. Each row now shows only its own song, keeping what was found for it before if the latest answer leaves it out, and the playlist is read once more so Move and Remove act on the order the node has. A playlist opened while the node was slow to say whether you are signed in to Pubky now draws again once it answers, so Copy link appears without reopening the page.
 
