@@ -3,7 +3,8 @@
 // shows the new song's name under it (before, the first song's name stayed until one played), and the
 // spinner moves to the button just pressed (Next pressed soon after puts it on no row, nor do Next or a
 // queue row on the bar's Play after a Pause, nor a song ending or taken out of the queue soon after its
-// row's Play, or a tap on another row then). The new song playing ends the wait, also when the first
+// row's Play, or a tap on another row then; a Play whose songs load late still spins when the song
+// before ends meanwhile). The new song playing ends the wait, also when the first
 // song's file comes in late, and the same song played again while it loads keeps its one wait.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-browser-start-title.js [repo] [shots]
@@ -136,8 +137,16 @@ async function pauseThen(browser, width, how) {
   } finally { await context.close(); }
 }
 
-// Every spinner put on a button, also on one no longer on the page (the Tracks page left for Queue)
-const logSpins = (page) => page.addInitScript(() => { window.__spins = []; const add = DOMTokenList.prototype.add; DOMTokenList.prototype.add = function (...c) { if (c.includes('starting')) window.__spins.push(Date.now()); return add.apply(this, c); }; });
+// Every spinner put on a button, also on one no longer on the page (the Tracks page left for Queue):
+// when, and on which button (its id, else its first data- attribute)
+const logSpins = (page) => page.addInitScript(() => {
+  window.__spins = []; const owner = new WeakMap();
+  const cl = Object.getOwnPropertyDescriptor(Element.prototype, 'classList');
+  Object.defineProperty(Element.prototype, 'classList', { ...cl, get() { const l = cl.get.call(this); owner.set(l, this); return l; } });
+  const who = (el) => (!el ? '?' : el.id ? `#${el.id}` : (() => { const d = [...el.attributes].find((a) => a.name.startsWith('data-')); return d ? `[${d.name}]` : el.tagName.toLowerCase(); })());
+  const add = DOMTokenList.prototype.add;
+  DOMTokenList.prototype.add = function (...c) { if (c.includes('starting')) window.__spins.push({ at: Date.now(), el: who(owner.get(this)) }); return add.apply(this, c); };
+});
 // A short WAV (`sec` seconds of silence), served whole
 const shortWav = (sec) => { const rate = 8000, n = Math.round(rate * sec), b = Buffer.alloc(44 + n * 2); b.write('RIFF'); b.writeUInt32LE(b.length - 8, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(n * 2, 40); return b; };
 
@@ -174,9 +183,17 @@ async function notPressedOnce(browser, width, how) {
       mark = await page.evaluate(() => window.__pressAt.playing);
       assert.ok(mark, `${width}: Song 1 played`);
     } else if (how === 'row') {
-      // (a click on the row itself, not on its names or buttons)
+      // (a real click on an empty spot of the row: its middle line, away from its links and buttons)
+      const row = page.locator('#tracklist .track').nth(1);
+      await row.hover();
+      const spot = await row.evaluate((r) => {
+        const b = r.getBoundingClientRect(); const y = b.top + b.height / 2;
+        for (let x = b.right - 4; x > b.left; x -= 4) { const e = document.elementFromPoint(x, y); if (e && r.contains(e) && !e.closest('a, button, input, select, label')) return { x, y }; }
+        return null;
+      });
+      assert.ok(spot, `${width}: Song 2's row has an empty spot to tap`);
       mark = await page.evaluate(() => Date.now());
-      await page.locator('#tracklist .track').nth(1).dispatchEvent('click', { detail: 1 });
+      await page.mouse.click(spot.x, spot.y);
     } else {
       await page.click('.sidebar .nav-item[data-view="queue"]');
       const x = page.locator('[data-qrow="0"] [data-qrm]');
@@ -190,7 +207,7 @@ async function notPressedOnce(browser, width, how) {
     if (gap >= 1500) { const e = new Error(`${width}: Song 2 started ${gap} ms after Song 1's Play (must be under 1.5 s for this check to mean anything)`); e.slow = true; throw e; }
     await page.waitForFunction(() => document.querySelector('#np .np-wait') && document.querySelector('#np .np-sub')?.textContent.trim() === 'Song 2');
     await page.screenshot({ path: path.join(shots, `not-pressed-${how}-${width}.png`) });
-    const later = await page.evaluate((m) => window.__spins.filter((t) => t >= m).length, mark);
+    const later = await page.evaluate((m) => window.__spins.filter((s) => s.at >= m).length, mark);
     assert.equal(later, 0, `${width}: Song 2 ${real ? 'after Song 1 ended' : how === 'row' ? "after a tap on Song 2's row" : 'after the x on Song 1'}: no Play spins`);
     if (how !== 'rm') assert.deepEqual(await spinning(page), [], `${width}: no row's Play spins`);
     assert.deepEqual(state.errors, [], `${width}: no page errors`);
@@ -211,13 +228,58 @@ async function playAfterGaveUp(browser, width) {
     await playRow(page, 0);
     await page.waitForFunction(() => /Can.t play here/.test(document.querySelector('#np')?.textContent || ''), null, { timeout: 10000 });
     await sleep(1600); // (Song 1's Play press is over)
+    const mark = await page.evaluate(() => Date.now());
     await page.click('#toggle');
     await page.waitForFunction(() => document.querySelector('#toggle.starting') || !document.querySelector('audio').paused, null, { timeout: 5000 });
-    const spun = await page.evaluate(() => !!document.querySelector('#toggle.starting') || window.__spins.length > 1);
+    const spun = await page.evaluate((m) => window.__spins.filter((s) => s.at >= m).map((s) => s.el), mark);
     await page.screenshot({ path: path.join(shots, `play-after-gave-up-${width}.png`) });
-    assert.ok(spun, `${width}: the bar's Play spins while the song tries again`);
+    assert.deepEqual(spun, ['#toggle'], `${width}: the bar's Play, and only it, spins while the song tries again (${JSON.stringify(spun)})`);
     for (let i = 0; i < 100; i++) { const n = await page.evaluate(() => pmPlayer.now()); if (!n.paused && n.time > 0) break; await sleep(50); }
     assert.equal((await page.evaluate(() => pmPlayer.now())).paused, false, `${width}: and the song plays`);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
+async function lateSongsAfterEnd(browser, width) {
+  // (Song 1 must end, and the album start, within 1.5 s of the tile's Play: a slow runner gets two more tries)
+  for (let n = 1; ; n++) { try { return await lateSongsAfterEndOnce(browser, width); } catch (e) { if (!e.slow || n >= 3) throw e; } }
+}
+async function lateSongsAfterEndOnce(browser, width) {
+  // 7. A Play whose start comes after a wait still spins when a start nobody pressed for comes in that
+  // wait: Song 1 (a 0.6 s song) playing, an album tile's Play on Albums, and the album's songs come
+  // only after Song 1 ended and Song 2 began (before, Song 2's start took the tile's press away, so
+  // the album started with no spinner anywhere)
+  const albums = [{ id: 7, title: 'Journey', album_artist: 'Sefa', year: 2020 }];
+  const album = [{ ...fx.track, id: 9, title: 'Album song', mbid: null, canonical_uri: null }];
+  const { page, context, state } = await fx.create(browser, width, { fixtures: { ...fixtures, '/library/albums': { body: albums }, '/library/tracks/9': { body: album[0] } }, realAudio: true });
+  await logSpins(page);
+  const short = shortWav(0.6);
+  await page.route(/\/v1\/library\/tracks\/\d+\/file/, async (r) => {
+    if (/\/tracks\/1\/file/.test(r.request().url())) return r.fulfill({ status: 200, contentType: 'audio/wav', headers: { 'content-length': String(short.length) }, body: short });
+    await sleep(2500); return serveWav(r).catch(() => {});
+  });
+  // (the album's songs held until Song 2 is the one loading, that is Song 1 ended meanwhile)
+  await page.route(/\/v1\/library\/albums\/7\/tracks/, async (r) => {
+    for (let i = 0; i < 100 && !(await page.evaluate(() => /\/tracks\/2\/file/.test(document.querySelector('audio').getAttribute('src') || '')).catch(() => false)); i++) await sleep(20);
+    return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ tracks: album }) }).catch(() => {});
+  });
+  try {
+    await fx.go(page, '/albums');
+    const tp = page.locator('.tile[data-album="7"] [data-tileplay]');
+    await tp.waitFor({ state: 'attached' });
+    await page.evaluate(() => { window.__pressAt = {}; document.addEventListener('click', (e) => { if (e.target.closest('[data-tileplay]')) window.__pressAt.tile = Date.now(); }, true); document.addEventListener('ended', () => { window.__pressAt.ended = Date.now(); }, true); });
+    await page.evaluate(() => pmPlayer.play([{ uri: 'track:1', title: 'Song 1' }, { uri: 'track:2', title: 'Song 2' }]));
+    await page.waitForFunction(() => !document.querySelector('audio').paused && document.querySelector('audio').currentTime > 0, null, { timeout: 5000 });
+    await page.locator('.tile[data-album="7"]').hover();
+    await tp.click({ force: true });
+    await page.waitForFunction(() => document.querySelector('#np .np-sub')?.textContent.trim() === 'Album song' || /\/tracks\/9\/file/.test(document.querySelector('audio').getAttribute('src') || ''), null, { timeout: 5000 });
+    const t = await page.evaluate(() => ({ ...window.__pressAt, now: Date.now() }));
+    // (Song 1 must end after the tile's Play, in its wait: a slow runner that clicked late tries again)
+    if (!(t.ended && t.ended >= t.tile)) { const e = new Error(`${width}: Song 1 did not end after the tile's Play (${JSON.stringify(t)})`); e.slow = true; throw e; }
+    if (t.now - t.tile >= 1500) { const e = new Error(`${width}: the album started ${t.now - t.tile} ms after its Play (must be under 1.5 s for this check to mean anything)`); e.slow = true; throw e; }
+    await page.screenshot({ path: path.join(shots, `late-songs-after-end-${width}.png`) });
+    const spun = await page.evaluate((m) => window.__spins.filter((s) => s.at >= m).map((s) => s.el), t.tile);
+    assert.deepEqual(spun, ['[data-tileplay]'], `${width}: the album tile's Play spins while the album starts, nothing else (${JSON.stringify(spun)})`);
     assert.deepEqual(state.errors, [], `${width}: no page errors`);
   } finally { await context.close(); }
 }
@@ -256,7 +318,7 @@ async function sameSongKeepsWait(browser, width) {
   let failed = 0;
   try {
     for (const width of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [1280, 1024, 768])) {
-      for (const [name, fn] of [['a second Play while the first song loads', stillLoading], ['a slow song, then a quick one', slowThenFast], ['Pause, then Next', (b, w) => pauseThen(b, w, 'next')], ['Pause, then a queue row', (b, w) => pauseThen(b, w, 'queue')], ['a song ending soon after its Play', (b, w) => notPressed(b, w, 'end')], ['the playing song taken out of the queue', (b, w) => notPressed(b, w, 'rm')], ['a row tapped soon after a Play', (b, w) => notPressed(b, w, 'row')], ['Play after a song gave up', playAfterGaveUp], ...(width === 1280 ? [['the same song again', sameSongKeepsWait]] : [])]) {
+      for (const [name, fn] of [['a second Play while the first song loads', stillLoading], ['a slow song, then a quick one', slowThenFast], ['Pause, then Next', (b, w) => pauseThen(b, w, 'next')], ['Pause, then a queue row', (b, w) => pauseThen(b, w, 'queue')], ['a song ending soon after its Play', (b, w) => notPressed(b, w, 'end')], ['the playing song taken out of the queue', (b, w) => notPressed(b, w, 'rm')], ['a row tapped soon after a Play', (b, w) => notPressed(b, w, 'row')], ['Play after a song gave up', playAfterGaveUp], ['a Play whose songs come after the song before ended', lateSongsAfterEnd], ...(width === 1280 ? [['the same song again', sameSongKeepsWait]] : [])]) {
         try { await fn(browser, width); console.log(`PASS ${width} ${name}`); } catch (e) { failed++; console.log(`FAIL ${width} ${name}: ${e.message}`); }
       }
     }
