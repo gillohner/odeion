@@ -5361,12 +5361,17 @@
     const onControl = e.target.closest('button, a, summary, .clickable[tabindex], [role="button"], [role="tab"], [role="menuitem"], [role="slider"]');
     if (e.code === 'Space' && onControl && !(focusByPointer && document.activeElement === e.target)) return;
     if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && e.target.closest('[role="tab"], [role="menuitem"], [role="slider"]')) return;
-    { const plain = !e.metaKey && !e.ctrlKey; const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' && plain ? 'next' : e.key === 'ArrowLeft' && plain ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
+    // Space, the arrows and N are shortcuts on their own: held with Alt, Ctrl or Cmd they are the
+    // browser's or the system's (Alt+← and Alt+→ are Back and Forward, Cmd+← too on a Mac), so they
+    // play, pause and skip nothing. (/ and ? go by the character typed: some keyboards need AltGr
+    // or Option for them)
+    if ((e.altKey || e.ctrlKey || e.metaKey) && (e.code === 'Space' || e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key.toLowerCase() === 'n')) return;
+    { const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' ? 'next' : e.key === 'ArrowLeft' ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
     // (the search field is under an open Now playing, out of reach there: it closes first)
     if (e.key === '/') { e.preventDefault(); if (!overlay.hidden) toggleNowPlaying(false); search.focus(); search.select(); return; }
     if (e.code === 'Space') { e.preventDefault(); transport({ action: 'toggle' }); }
-    if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey) transport({ action: 'next' });
-    if (e.key === 'ArrowLeft' && !e.metaKey && !e.ctrlKey) transport({ action: 'previous' });
+    if (e.key === 'ArrowRight') transport({ action: 'next' });
+    if (e.key === 'ArrowLeft') transport({ action: 'previous' });
     if (e.key.toLowerCase() === 'n') toggleNowPlaying();
     if (e.key === '?') { e.preventDefault(); choiceDialog({ title: 'Keyboard shortcuts', text: '/  search  ·  Space  play or pause  ·  ←  →  previous or next  ·  N  now playing  ·  Esc  close  ·  ?  this list', choices: [] }); }
   });
