@@ -2,7 +2,8 @@
 // the song before is still loading (a slow stream, a quick click on another row), or Next pressed then,
 // shows the new song's name under it (before, the first song's name stayed until one played), and the
 // spinner moves to the button just pressed (Next pressed soon after puts it on no row, nor do Next or a
-// queue row on the bar's Play after a Pause). The new song playing ends the wait, also when the first
+// queue row on the bar's Play after a Pause, nor a song ending or taken out of the queue soon after its
+// row's Play, or a tap on another row then). The new song playing ends the wait, also when the first
 // song's file comes in late, and the same song played again while it loads keeps its one wait.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-browser-start-title.js [repo] [shots]
@@ -135,6 +136,92 @@ async function pauseThen(browser, width, how) {
   } finally { await context.close(); }
 }
 
+// Every spinner put on a button, also on one no longer on the page (the Tracks page left for Queue)
+const logSpins = (page) => page.addInitScript(() => { window.__spins = []; const add = DOMTokenList.prototype.add; DOMTokenList.prototype.add = function (...c) { if (c.includes('starting')) window.__spins.push(Date.now()); return add.apply(this, c); }; });
+// A short WAV (`sec` seconds of silence), served whole
+const shortWav = (sec) => { const rate = 8000, n = Math.round(rate * sec), b = Buffer.alloc(44 + n * 2); b.write('RIFF'); b.writeUInt32LE(b.length - 8, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(n * 2, 40); return b; };
+
+async function notPressed(browser, width, how) {
+  // (Song 1 ending must come within 1.5 s of its Play: a slow runner gets two more tries)
+  for (let n = 1; ; n++) { try { return await notPressedOnce(browser, width, how); } catch (e) { if (!e.slow || n >= 3) throw e; } }
+}
+async function notPressedOnce(browser, width, how) {
+  // 5. A start nobody pressed Play for, soon after a row's Play, puts no spinner on that Play: Song 1
+  // ends by itself (a 0.2 s song) or is taken out of the queue (its x on Queue) within 1.5 s, and Song 2
+  // starts (before, Song 2's wait put the spinner back on Song 1's Play, as if it had been pressed again)
+  const real = how === 'end';
+  const { page, context, state } = await fx.create(browser, width, { fixtures, realAudio: real });
+  await logSpins(page);
+  if (real) {
+    const short = shortWav(0.2);
+    await page.route(/\/v1\/library\/tracks\/\d+\/file/, async (r) => {
+      if (/\/tracks\/1\/file/.test(r.request().url())) return r.fulfill({ status: 200, contentType: 'audio/wav', headers: { 'content-length': String(short.length) }, body: short });
+      await sleep(2500); return serveWav(r).catch(() => {});
+    });
+  }
+  try {
+    await fx.go(page, '/tracks');
+    await page.waitForSelector('#tracklist .track');
+    await sleep(300);
+    await page.evaluate(() => { window.__pressAt = {}; document.addEventListener('click', (e) => { const b = e.target.closest('#tracklist .track [data-act="play"], [data-qrm]'); if (b) window.__pressAt[b.matches('[data-qrm]') ? 'rm' : 'play'] = Date.now(); }, true); document.addEventListener('playing', () => { window.__pressAt.playing = window.__pressAt.playing || Date.now(); }, true); document.addEventListener('ended', () => { window.__pressAt.ended = Date.now(); }, true); });
+    await playRow(page, 0);
+    await page.waitForFunction(() => document.querySelector('#np .np-wait'));
+    assert.equal((await page.evaluate(() => window.__spins.length)), 1, `${width}: Song 1's Play spins while it starts`);
+    let mark;
+    if (real) {
+      // Song 1 plays (its wait over), then ends by itself, and Song 2 begins
+      await page.waitForFunction(() => /\/tracks\/2\/file/.test(document.querySelector('audio').getAttribute('src') || ''), null, { timeout: 5000 });
+      mark = await page.evaluate(() => window.__pressAt.playing);
+      assert.ok(mark, `${width}: Song 1 played`);
+    } else if (how === 'row') {
+      // (a click on the row itself, not on its names or buttons)
+      mark = await page.evaluate(() => Date.now());
+      await page.locator('#tracklist .track').nth(1).dispatchEvent('click', { detail: 1 });
+    } else {
+      await page.click('.sidebar .nav-item[data-view="queue"]');
+      const x = page.locator('[data-qrow="0"] [data-qrm]');
+      await x.waitFor();
+      mark = await page.evaluate(() => Date.now());
+      await x.click();
+      // (the gap is to when the x was clicked, not to before Playwright found it)
+      mark = await page.evaluate(() => window.__pressAt.rm);
+    }
+    const gap = await page.evaluate((m) => (window.__pressAt.ended || m) - window.__pressAt.play, mark);
+    if (gap >= 1500) { const e = new Error(`${width}: Song 2 started ${gap} ms after Song 1's Play (must be under 1.5 s for this check to mean anything)`); e.slow = true; throw e; }
+    await page.waitForFunction(() => document.querySelector('#np .np-wait') && document.querySelector('#np .np-sub')?.textContent.trim() === 'Song 2');
+    await page.screenshot({ path: path.join(shots, `not-pressed-${how}-${width}.png`) });
+    const later = await page.evaluate((m) => window.__spins.filter((t) => t >= m).length, mark);
+    assert.equal(later, 0, `${width}: Song 2 ${real ? 'after Song 1 ended' : how === 'row' ? "after a tap on Song 2's row" : 'after the x on Song 1'}: no Play spins`);
+    if (how !== 'rm') assert.deepEqual(await spinning(page), [], `${width}: no row's Play spins`);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
+async function playAfterGaveUp(browser, width) {
+  // 6. The bar's Play pressed on a song that couldn't play (its start and its retry both failed) tries
+  // it again, and that Play is the one that spins
+  const { page, context, state } = await fx.create(browser, width, { fixtures, realAudio: true });
+  await logSpins(page);
+  let fails = 4; // (the start and its retry: each asks for the file, then for what came back)
+  await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => (fails-- > 0 ? r.fulfill({ status: 404, contentType: 'text/plain', body: 'gone' }) : serveWav(r)));
+  try {
+    await fx.go(page, '/tracks');
+    await page.waitForSelector('#tracklist .track');
+    await sleep(300);
+    await playRow(page, 0);
+    await page.waitForFunction(() => /Can.t play here/.test(document.querySelector('#np')?.textContent || ''), null, { timeout: 10000 });
+    await sleep(1600); // (Song 1's Play press is over)
+    await page.click('#toggle');
+    await page.waitForFunction(() => document.querySelector('#toggle.starting') || !document.querySelector('audio').paused, null, { timeout: 5000 });
+    const spun = await page.evaluate(() => !!document.querySelector('#toggle.starting') || window.__spins.length > 1);
+    await page.screenshot({ path: path.join(shots, `play-after-gave-up-${width}.png`) });
+    assert.ok(spun, `${width}: the bar's Play spins while the song tries again`);
+    for (let i = 0; i < 100; i++) { const n = await page.evaluate(() => pmPlayer.now()); if (!n.paused && n.time > 0) break; await sleep(50); }
+    assert.equal((await page.evaluate(() => pmPlayer.now())).paused, false, `${width}: and the song plays`);
+    assert.deepEqual(state.errors, [], `${width}: no page errors`);
+  } finally { await context.close(); }
+}
+
 async function sameSongKeepsWait(browser, width) {
   // 3. The same song played again while it still loads (its row on Queue tapped) is the same start:
   // its one wait goes on, so 20 s after the first press the bar says it did not start (a fresh wait
@@ -169,7 +256,7 @@ async function sameSongKeepsWait(browser, width) {
   let failed = 0;
   try {
     for (const width of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [1280, 1024, 768])) {
-      for (const [name, fn] of [['a second Play while the first song loads', stillLoading], ['a slow song, then a quick one', slowThenFast], ['Pause, then Next', (b, w) => pauseThen(b, w, 'next')], ['Pause, then a queue row', (b, w) => pauseThen(b, w, 'queue')], ...(width === 1280 ? [['the same song again', sameSongKeepsWait]] : [])]) {
+      for (const [name, fn] of [['a second Play while the first song loads', stillLoading], ['a slow song, then a quick one', slowThenFast], ['Pause, then Next', (b, w) => pauseThen(b, w, 'next')], ['Pause, then a queue row', (b, w) => pauseThen(b, w, 'queue')], ['a song ending soon after its Play', (b, w) => notPressed(b, w, 'end')], ['the playing song taken out of the queue', (b, w) => notPressed(b, w, 'rm')], ['a row tapped soon after a Play', (b, w) => notPressed(b, w, 'row')], ['Play after a song gave up', playAfterGaveUp], ...(width === 1280 ? [['the same song again', sameSongKeepsWait]] : [])]) {
         try { await fn(browser, width); console.log(`PASS ${width} ${name}`); } catch (e) { failed++; console.log(`FAIL ${width} ${name}: ${e.message}`); }
       }
     }
