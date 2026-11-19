@@ -4222,7 +4222,8 @@
   // `replace`: the queue is being replaced, so the song still playing does not end the wait
   const startWait = (what, zoneId = state.zone, title = '', replace = false, deferred = false) => {
     startDone(true);
-    const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
+    // (one press, one wait: a Next or a media key's step soon after it isn't that button's start)
+    const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null; state.startAnchor = null;
     if (a) a.classList.add('starting');
     const zw = state.zones[zoneId]; const oldItem = replace && zw && zw.now_playing ? zw.now_playing.item.id : null;
     // `sent`: a replace waits for the node's answer first, so the old queue moving on by itself
