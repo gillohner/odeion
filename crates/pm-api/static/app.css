@@ -2419,16 +2419,23 @@ html[data-shell="phone"] .player #toggle .ic { width: 28px; height: 28px; }
    that 8 px gap. Now the song takes the bar's edges and half the gap, opening Now playing; on a
    touch screen Play takes the other half and the whole height above and below it (the bar clips
    the reach, also with larger text). A files job's chip between them (37 x 40 px; not offline or
-   listening along, where it is left out) shares each 4 px gap half and half and takes the whole
-   height. The song's focus ring sits inside the bar. Nothing drawn moves. */
+   on a listener's account, where it is left out) shares each 4 px gap half and half and takes the
+   whole height. Listening along with someone, the "Along with …" chip sits before Play: its words
+   do nothing, so the gaps on either side go to the control beside them (the song or the job's
+   chip, and Play), and Leave takes the whole height and the chip's edge after it. The song's focus
+   ring sits inside the bar. Nothing drawn moves. */
 html[data-shell="phone"] .player .player-now { margin: -6px -4px -6px -12px; padding: 10px 4px 10px 12px; }
 html[data-shell="phone"] body:not(.offline):not(.listener) .player:has(#jobchip:not([hidden])) .player-now { margin-right: -2px; padding-right: 2px; }
 html[data-shell="phone"] .player .player-now:focus-visible { outline-offset: -2px; }
 @media (pointer: coarse) {
   html[data-shell="phone"] .player #toggle::before { inset: -40px -6px -40px -4px; }
-  html[data-shell="phone"] body:not(.offline):not(.listener) .player:has(#jobchip:not([hidden])) #toggle::before { left: -2px; }
+  html[data-shell="phone"] body:not(.offline):not(.listener) .player:has(#jobchip:not([hidden])):not(:has(#along:not([hidden]))) #toggle::before { left: -2px; }
   html[data-shell="phone"] .player #jobchip { overflow: visible; isolation: isolate; }
   html[data-shell="phone"] .player #jobchip::before { content: ''; position: absolute; inset: -40px -3px; z-index: -1; }
+  /* (a reach is measured from inside the 1 px border: the job's chip to the along chip's edge, 4 px
+     on; Leave to the chip's right edge, its own border, 4 px and the chip's border on) */
+  html[data-shell="phone"] .player:has(#along:not([hidden])) #jobchip::before { right: -5px; }
+  html[data-shell="phone"] .player #alongleave::before { inset: -40px -6px -40px 0; }
 }
 html[data-shell="phone"] .player .np-art-wait { display: flex; align-items: center; justify-content: center; }
 html[data-shell="phone"] .player .np-art-wait .spin { width: 20px; height: 20px; }
