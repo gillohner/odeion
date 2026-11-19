@@ -1262,6 +1262,10 @@ a.btn { text-decoration: none; }
 .along-chip[hidden] { display: none; }
 .along-text { overflow: hidden; text-overflow: ellipsis; }
 .along-leave { padding: 2px 8px; cursor: pointer; }
+/* On a phone the chip is the name and Leave ("Along with" is read out, not drawn), so the song beside
+   it keeps its title at 360 px with a files job's chip too; a long name is cut with … */
+html[data-shell="phone"] .along-chip { max-width: 112px; }
+html[data-shell="phone"] .along-pre { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .jobchip:hover { border-color: var(--line-strong); }
 .jobchip .ic { width: 15px; height: 15px; }
 .jobchip .jc-text { line-height: 1; }
@@ -2425,7 +2429,7 @@ html[data-shell="phone"] .player #toggle .ic { width: 28px; height: 28px; }
    touch screen Play takes the other half and the whole height above and below it (the bar clips
    the reach, also with larger text). A files job's chip between them (37 x 40 px; not offline or
    on a listener's account, where it is left out) shares each 4 px gap half and half and takes the
-   whole height. Listening along with someone, the "Along with …" chip sits before Play: its words
+   whole height. Listening along with someone, the along chip (on a phone the name, and Leave) sits before Play: its words
    do nothing, so the gaps on either side go to the control beside them (the song or the job's
    chip, and Play), and Leave takes the whole height and the chip's edge after it. The song's focus
    ring sits inside the bar. Nothing drawn moves. */

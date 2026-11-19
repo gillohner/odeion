@@ -1,7 +1,7 @@
 // Every point of the phone mini player is a tap on what's nearest. Real candidate assets on the
 // fixture origin (tools/ui-fixture.js): no node, no network. At 360 and 412 px, in a browser and in
 // the Android app, a song playing, without and with a files job's chip beside Play, listening along
-// with someone while a job runs (the job's chip, then the "Along with …" chip with Leave), and on a
+// with someone while a job runs (the job's chip, then the along chip with Leave), and on a
 // listener's account listening along (no job chip there), on a touch screen:
 //   * every point of the bar below its 1 px top line hits the song (opens Now playing), Play, the
 //     job's chip or Leave; none is dead (only the along chip's words, which do nothing, may take
@@ -40,7 +40,7 @@ const queue = [{ id: 1, uri: 'track:1', title: 'Wonderful Tonight', artist: 'Eri
 const np = { item: { ...queue[0], album: 'Eric Clapton Story' }, index: 0, position_ms: 61000, duration_ms: 219000, source_format: fmt, output_format: fmt, format: { codec: 'FLAC', lossless: true, service: 'library', preview: false } };
 const zone = { id: 'linn', name: 'Linn Klimax DS3', output: 'upnp:linn', transport: 'playing', queue, queue_index: 0, queue_version: 1, repeat: 'off', radio: false, error: null, acked: 1, sync: 'single', crossfade_ms: 0, volume: { percent: 20, muted: false }, now_playing: np };
 const job = { id: 'j1', kind: 'copy', state: 'running', total: 25, done: 7, failed: 0, skipped: 0, bytes_total: 750e6, bytes_done: 210e6, errors: [], errors_count: 0, current_folder: '/music', speed_bps: 2.4e6, eta_s: 600 };
-// Listening along with someone (presence.rs's GET /v1/presence): their "Along with …" chip with Leave
+// Listening along with someone (presence.rs's GET /v1/presence): their along chip (on a phone the name) with Leave
 const along = { key: 'k-anna', name: 'Anna', mine: true, you: false, hosting: false, zone: { id: 'linn', name: 'Linn Klimax DS3' }, your_zone: 'linn' };
 const fixtures = (withJob, withAlong) => ({
   '/zones': { body: [zone] }, '/zones/linn/queue': { body: queue },
@@ -97,7 +97,7 @@ const measure = (page) => page.evaluate(() => {
         await fx.go(page, '/');
         await page.waitForFunction(() => /Wonderful Tonight/.test(document.querySelector('#np .np-title')?.textContent || ''));
         if (withJob) check(await until(() => page.isVisible('#jobchip')), `${where}: the files job's chip shows`);
-        if (withAlong) check(await until(() => page.isVisible('#along')), `${where}: the "Along with Anna" chip shows`);
+        if (withAlong) check(await until(() => page.isVisible('#along')), `${where}: the along chip shows`);
         if (R.listener) check(await until(() => page.evaluate(() => document.body.classList.contains('listener'))) && !(await page.isVisible('#jobchip')), `${where}: a listener's account, no job chip`);
         await sleep(400);
         const m = await measure(page);

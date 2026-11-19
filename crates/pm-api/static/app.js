@@ -3607,7 +3607,7 @@
   const VISIBLE = [['hidden', 'Only you', 'nobody else sees what you play'], ['followed', 'People you follow', 'on Pubky'], ['everyone', 'Everyone on this node', '']];
   const renderAlong = () => {
     const a = state.along; $('#along').hidden = !a;
-    if (a) $('#alongtext').textContent = `Along with ${personName(a)}`;
+    if (a) $('#alongname').textContent = personName(a);
   };
   // Follow your music: into the group it plays on (you host it or listen along) from your own
   // zone, and back to your own zone once that group is gone. A zone you picked yourself stays.
