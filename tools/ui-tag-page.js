@@ -6,6 +6,8 @@
 //   * one tag: no picked row, "Also tagged" adds;
 //   * three tags: no "Also tagged" chips, whatever the node lists;
 //   * four tags (an old link): nothing is asked, the chips and one line are shown, × leads to a page that asks;
+//   * Pubky didn't answer: Try again asks again in place (placeholder, picked tags kept), fails again with a
+//     new Try again, or draws the answer and its Also tagged; a late answer for a page left draws nothing;
 //   * chips wrap: nothing is wider than the screen;
 //   * keyboard: after × (Enter) focus is on the next × (the one before for the last), on the heading
 //     once one tag is left; after Enter on a picked tag, on the heading; never back on the page.
@@ -141,6 +143,48 @@ const fits = (r) => r.wide <= 0 && r.right <= r.vw;
       await sleep(100); const click = await focus();
       check(click === 'x:live', `${w}: a click on the first × moves focus to the next × (${click})`);
       check(!state.errors.length, `${w}: no page errors with the keyboard${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
+      await context.close();
+    }
+    // ---- Pubky didn't answer: Try again asks again in place (it did nothing before) ----
+    {
+      let plan = { status: 502, body: { error: PINAKES } };
+      const { page, context, state, asked } = await open(browser, w, '/tag/music,live', (l) => (l.length === 1 ? { body: { items: [item('On ' + l[0])], tags: [] } } : plan));
+      const keys = w >= 1025;
+      // (desktop presses with the keyboard, touch taps)
+      const press = async (sel) => { if (keys) { await page.focus(sel); await page.keyboard.press('Enter'); } else await page.tap(sel); };
+      const focusOn = (sel) => page.evaluate((q) => !!document.activeElement && document.activeElement.matches(q), sel);
+      await until(page, () => document.querySelector('#tagbody [data-hretry]'));
+      check(asked.length === 1 && /Pubky did not answer/.test((await read(page)).body), `${w}: an error from Pubky: Try again (${asked.length} asked)`);
+      // Fails again: asked once more, under a placeholder, the picked tags stay; a new Try again
+      plan = { status: 502, body: { error: PINAKES }, wait: 600 };
+      await press('#tagbody [data-hretry]');
+      const held = await until(page, () => !!document.querySelector('#tagbody .skeleton'), null, 500);
+      const mid = await read(page);
+      check(!!held && mid.del.join() === 'music,live', `${w}: Try again: a placeholder while Pubky is asked again, the picked tags stay (${mid.del.join()})`);
+      await until(page, () => document.querySelector('#tagbody [data-hretry]') && !document.querySelector('#tagbody .skeleton'));
+      check(asked.length === 2 && (await read(page)).path === '/tag/music,live', `${w}: failing again: asked once more on the same page, Try again again (${asked.length} asked)`);
+      if (keys) check(await focusOn('#tagbody [data-hretry]'), `${w}: failing again, the keyboard is on the new Try again`);
+      // Answers: the songs and Also tagged are drawn, no Try again left
+      plan = { body: { items: [item('On music and live')], tags: CO } };
+      await press('#tagbody [data-hretry]');
+      await until(page, () => /On music and live/.test(document.querySelector('#tagbody').textContent));
+      const ok = await read(page);
+      check(asked.length === 3 && !(await page.locator('#tagbody [data-hretry]').count()) && ok.add.join() === 'a-rather-long-tag-label-that-has-to-wrap,track,dracula' && fits(ok), `${w}: Try again draws the answer and its Also tagged (${ok.add.join()}, ${asked.length} asked)`);
+      if (keys) check(await focusOn('#tagbody'), `${w}: answered, the keyboard is on the tag page's results`);
+      await page.screenshot({ path: path.join(SHOTS, `retry-answered-${w}.png`) });
+      if (ok.add.includes('track')) { await page.click('[data-tag-add="track"]'); await until(page, () => location.pathname.endsWith('/tag/music,live,track')); }
+      check(asked[asked.length - 1] === 'music,live,track', `${w}: an Also tagged chip drawn by Try again narrows the page (${asked[asked.length - 1]})`);
+      // A late answer for a page since left draws nothing there
+      await fx.go(page, '/tag/music,live'); plan = { status: 502, body: { error: PINAKES } };
+      await until(page, () => document.querySelector('#tagbody [data-hretry]'));
+      plan = { body: { items: [item('Late for music and live')], tags: CO }, wait: 700 };
+      await press('#tagbody [data-hretry]');
+      await page.click('[data-tag-rm="live"]');
+      await until(page, () => /On music/.test(document.querySelector('#tagbody').textContent));
+      await sleep(1000);
+      const left = await read(page);
+      check(left.path === '/tag/music' && /On music/.test(left.body) && !/Late/.test(left.body) && !left.add.length, `${w}: a late answer for the page left draws nothing on the next one ("${left.body}")`);
+      check(!state.errors.length, `${w}: no page errors with Try again${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
       await context.close();
     }
     // ---- long labels, nothing found ----
