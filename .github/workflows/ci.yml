@@ -751,6 +751,7 @@ jobs:
           ui-empty-queue.js empty-queue-shots
           ui-browser-place.js browser-place-shots
           ui-browser-keys.js browser-keys-shots
+          ui-shortcut-modifiers.js shortcut-modifiers-shots
           ui-queue-keep-focus.js queue-keep-focus-shots
           ui-browser-midsong.js browser-midsong-shots
           ui-back-place.js back-place-shots
