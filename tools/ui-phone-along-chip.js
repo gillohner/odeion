@@ -2,12 +2,14 @@
 // song beside it keeps its title. Real candidate assets on the fixture origin (tools/ui-fixture.js):
 // no node, no network. At 360 and 412 px, in a browser and in the Android app, with a files job's
 // chip too, without one, and on a listener's account:
-//   * the chip draws the name ("Anna") and Leave; "Along with" is not drawn, but the chip's text
-//     still reads "Along with Anna" (screen readers); Leave's name starts with the word it shows
+//   * the chip draws the name ("Anna") and Leave; "Along with" is not drawn, but a screen reader
+//     still hears "Along with Anna" (accessibility tree; the words are clipped, not display: none
+//     or visibility: hidden); Leave's name starts with the word it shows
 //     ("Leave, stop listening along": a voice command "tap Leave" finds it);
 //   * the chip is at most 112 px and the song's title has 75 px or more (at 360 px with a job it
 //     had 30 px, "W…", while "Along with Anna" took 159 px);
-//   * a long name is cut with … inside the chip, the title keeps its room, no sideways scroll.
+//   * a long name is cut with … (text-overflow: ellipsis) inside the chip, the title keeps its
+//     room, no sideways scroll.
 // On a desktop width (1280 px) the chip still reads "Along with Anna" in full.
 //   node tools/ui-phone-along-chip.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -45,7 +47,9 @@ const look = (page) => page.evaluate(() => {
   const chip = document.querySelector('#along'); const text = document.querySelector('#alongtext');
   const pre = text.querySelector('.along-pre'); const leave = document.querySelector('#alongleave');
   const title = document.querySelector('#np .np-title');
+  const preCs = pre ? getComputedStyle(pre) : null;
   return {
+    preShown: !!preCs && preCs.display !== 'none' && preCs.visibility === 'visible', ellipsis: getComputedStyle(text).textOverflow,
     chip: w(chip), pre: w(pre), said: text.textContent.replace(/\s+/g, ' ').trim(), cut: text.scrollWidth > text.clientWidth + 1,
     nameW: w(text), leave: leave.getAttribute('aria-label'), leaveText: leave.textContent.trim(), title: w(title),
     titleCut: title.scrollWidth > title.clientWidth + 1, job: !document.querySelector('#jobchip').hidden && w(document.querySelector('#jobchip')) > 0,
@@ -72,12 +76,15 @@ const open = async (browser, width, R, android, mobile = true) => {
         if (R.job && !R.listener) check(await until(() => page.isVisible('#jobchip')), `${where}: the files job's chip shows`);
         await sleep(300);
         const m = await look(page);
+        const heard = (await page.locator('#along').ariaSnapshot()).replace(/\s+/g, ' ');
         check(m.pre >= 0 && m.pre <= 1, `${where}: "Along with" is not drawn (${m.pre < 0 ? 'no separate words' : Math.round(m.pre) + ' px'})`);
-        check(m.said === `Along with ${R.name}`, `${where}: the chip still reads "Along with ${R.name}" ("${m.said}")`);
+        check(m.said === `Along with ${R.name}`, `${where}: the chip's text is "Along with ${R.name}" ("${m.said}")`);
+        check(heard.includes(`Along with ${R.name}`), `${where}: a screen reader hears "Along with ${R.name}" (${heard})`);
+        check(m.preShown, `${where}: "Along with" is clipped, not display: none or visibility: hidden`);
         check(m.leave === 'Leave, stop listening along' && m.leaveText === 'Leave', `${where}: Leave says "${m.leaveText}" / "${m.leave}"`);
         check(m.chip > 0 && m.chip <= 112.5, `${where}: the chip takes ${Math.round(m.chip)} px (<= 112)`);
         check(m.title >= 75, `${where}: the song's title has ${Math.round(m.title)} px (>= 75)`);
-        if (R.name === LONG) check(m.cut && m.nameW > 20, `${where}: the long name is cut with … (${Math.round(m.nameW)} px shown)`);
+        if (R.name === LONG) check(m.cut && m.nameW > 20 && m.ellipsis === 'ellipsis', `${where}: the long name is cut with … (${Math.round(m.nameW)} px shown, text-overflow ${m.ellipsis})`);
         check(m.overflow <= 0, `${where}: no sideways scroll (${m.overflow})`);
         check(!state.errors.length, `${where}: no page errors (${state.errors.join('; ') || 'none'})`);
         await page.screenshot({ path: path.join(SHOTS, `along-${width}-${android ? 'app' : 'web'}-${R.file}.png`) });
