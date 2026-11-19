@@ -4,6 +4,8 @@
 // elsewhere on the page doesn't hold a tap on a row, nor does an empty selection inside the row. The row's
 // Play button still plays at once. A quick click on the row right after one on its heart plays it, and a
 // quick click on a row of another list on the page plays that one, even the same song in the same place.
+// The same holds on a playlist of streamed songs (no track id: the click before is keyed on the song's
+// address), also when the list is drawn again between the two clicks.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-srow-click.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -21,19 +23,31 @@ const songs = tracks.map((t, i) => ({ no: i + 1, title: t.title, artist: 'Sefa',
 const album = { kind: 'album', id: 'lib-7', uri: null, target: {}, title: 'Journey', artist: { name: 'Sefa', id: 'lib-11' }, album: null, year: 2020, image: null, source: 'library', source_id: '7', plays_from: { service: 'library', label: 'Your library' }, connect: [], reading: false, pending: false,
   songs, total_ms: 806000, albums: [], versions: [], also_on: [], about: [], open_on: [], related: [], concerts: [], about_pending: false, section: 'library' };
 const fixtures = { '/item/album/lib-7': { body: album }, '/item/album/lib-7/extras': { body: { collections: [], related: [], concerts: [], similar: [] } }, ...Object.fromEntries(tracks.map((t) => [`/library/tracks/${t.id}`, { body: t }])) };
+// A playlist of songs that play from a service, not the library: their rows have no track id, so the
+// click before is keyed on each song's address (`streamed(order)`: the list, and where each plays)
+const STREAMED = [101, 102, 103].map((n, i) => ({ n, title: ['Papa', 'Quebec', 'Romeo'][i], uri: `https://tidal.com/browse/track/${n}` }));
+const streamed = (order) => {
+  const list = order.map((n) => STREAMED.find((s) => s.n === n)); const sum = { ...fx.summary, id: 'c9', name: 'Streamed', items: list.length };
+  fixtures['/playlists/c9'] = { body: { summary: sum, playlist: { ...sum, items: list.map((s) => ({ uri: s.uri })) }, tracks: list.map(() => null), entries: list.map((s) => ({ kind: 'track', uri: s.uri })), local_tracks: [] } };
+  fixtures['/playlists/c9/play-from'] = { body: { order: { order: ['tidal'], services: [{ id: 'tidal', name: 'TIDAL', connected: true }] }, own_order: false,
+    items: list.map((s, i) => ({ index: i, uri: s.uri, title: s.title, artist: 'Sefa', duration_ms: 180000 + i * 1000, track_id: null, stream_uri: `tidal:track:${s.n}`, page: s.uri, plays_from: { service: 'tidal', label: 'TIDAL' }, sources: [], connect: [] })) } };
+};
+streamed([101, 102, 103]);
 const PAGES = [
   { at: '/album/lib-7', name: 'Album', rows: '.srow[data-srow]', nth: 1, want: '2', next: '3' },
   { at: '/playlist/c1', name: 'Playlist', rows: '#plsongs .srow[data-srow]:not([data-card])', nth: 0, want: '1' },
+  { at: '/playlist/c9', name: 'Streamed', rows: '#plsongs .srow[data-srow]:not([data-card])', nth: 0, want: 's101', next: 's102' },
 ];
 
-// Each time the app's player is given a song's file (a fixture's play() is a no-op), by track id
+// Each time the app's player is given a song's file (a fixture's play() is a no-op), by track id, or
+// s<id> for a song a service streams
 async function open(browser, width, opts) {
   const run = await fx.create(browser, width, { tracks, fixtures, ...opts });
   await run.context.addInitScript(() => {
     window.__starts = []; window.__details = [];
     document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('[data-srow]')) window.__details.push(e.detail); }, true);
     const d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
-    Object.defineProperty(HTMLMediaElement.prototype, 'src', { configurable: true, get() { return d.get.call(this); }, set(v) { const m = /\/library\/tracks\/(\d+)\/file/.exec(v); if (m) window.__starts.push(m[1]); d.set.call(this, v); } });
+    Object.defineProperty(HTMLMediaElement.prototype, 'src', { configurable: true, get() { return d.get.call(this); }, set(v) { const m = /\/library\/tracks\/(\d+)\/file/.exec(v) || /\/sources\/\w+\/stream\/(\w+)/.exec(v); if (m) window.__starts.push(/\/stream\//.test(v) ? `s${m[1]}` : m[1]); d.set.call(this, v); } });
   });
   return run;
 }
@@ -177,11 +191,49 @@ async function twoLists(browser, width) {
   } finally { await context.close(); }
 }
 
+// A streamed playlist drawn again between two quick clicks on its first row (another device moved its
+// songs, or nothing changed): a second click on a row that now holds another song plays that song;
+// one on the same song in the same place is still a double click's second and doesn't start it again
+async function streamedRedraw(browser, width) {
+  streamed([101, 102, 103]);
+  const { context, page, state } = await open(browser, width);
+  let socket = null;
+  await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
+  const label = `${width} streamed redraw`; const rows = '#plsongs .srow[data-srow]:not([data-card])';
+  const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await fn()) return true; await page.waitForTimeout(50); } return false; };
+  // (drawn again, and done: a moved list draws first from the earlier answer, its chips still waiting)
+  const redraw = async (order) => {
+    await page.evaluate((sel) => { document.querySelector(sel).dataset.old = '1'; }, rows);
+    streamed(order); socket.send(JSON.stringify({ type: 'library_changed' }));
+    return until(() => page.evaluate(([sel, uri]) => { const r = document.querySelector(sel); return !!r && !r.dataset.old && r.dataset.suri === uri && !document.querySelector('#plsongs .chip-sk'); }, [rows, `tidal:track:${order[0]}`]));
+  };
+  // a click on the row, then (after the redraw) a double click's second on the same place
+  const second = async () => { const b = await dur(page.locator(rows).first()).boundingBox(); await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2); await page.mouse.down({ clickCount: 2 }); await page.mouse.up({ clickCount: 2 }); await page.waitForTimeout(600); };
+  try {
+    await fx.go(page, '/playlist/c9');
+    const row = page.locator(rows).first(); await row.waitFor(); await page.waitForTimeout(500);
+    check(await row.getAttribute('data-tid') === null && await row.getAttribute('data-suri') === 'tidal:track:101', `${label}: the streamed row has no track id and is known by its address (${await row.getAttribute('data-suri')})`);
+    await reset(page);
+    await dur(row).click(); await page.waitForTimeout(300);
+    check(await redraw([102, 101, 103]), `${label}: the list was drawn again with Quebec first`);
+    await second();
+    await page.screenshot({ path: path.join(shots, `streamed-redraw-${width}.png`) });
+    check(await page.evaluate(() => window.__details.slice(-1)[0]) === 2 && await starts(page) === '["s101","s102"]', `${label}: a double click's second on the song that moved into the row plays it (${await starts(page)}, want ["s101","s102"])`);
+    await page.waitForTimeout(800); await reset(page);
+    await dur(page.locator(rows).first()).click(); await page.waitForTimeout(300);
+    check(await redraw([102, 101, 103]), `${label}: the list was drawn again unchanged`);
+    await second();
+    check(await page.evaluate(() => window.__details.slice(-1)[0]) === 2 && await starts(page) === '["s102"]', `${label}: …a double click's second on the same song in the same place doesn't start it again (${await starts(page)}, want ["s102"])`);
+    check(state.errors.length === 0, `${label}: no page errors (${state.errors.join(' | ')})`);
+  } finally { await context.close(); streamed([101, 102, 103]); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
     for (const w of [1280, 1024, 768]) await desktop(browser, w);
     await twoLists(browser, 1280);
+    await streamedRedraw(browser, 1280);
     await touch(browser, 768); await touch(browser, 412);
   } finally { await browser.close(); }
   console.log(`\n${ok} ok, ${fail} failed`);
