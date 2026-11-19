@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-19
+
+- **A click on a song right after closing its ⋯ menu plays it.** When you opened a song's ⋯ menu and clicked the song's row to close it, a quick next click on the same song did nothing: it was taken as the second half of a double click. Now it plays the song, in Songs, Favourites, on album and artist pages, in playlists and in Search. The click that only closes the menu still plays nothing, and a double click still starts a song once.
+
 ### 2026-11-18
 
 - **A playlist says once who sees it and where it is kept.** On a computer or tablet, the small line above a playlist's name read "Playlist · private · on this node", and the line under its buttons said the same again ("Private on this node; saved to your homeserver on the next sync"). The small line now just says "Playlist", as it already did on a phone, and the line under the buttons has a little space above it instead of touching them.

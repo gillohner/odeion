@@ -5523,15 +5523,23 @@
   // Track rows on #main: one listener, bound once, reading the current page's lists (every render
   // used to add another, so ⋯ ran once per visit with the lists of pages left behind)
   let rowLists = {}; let rowsBound = false;
-  // Where the click before this one landed: a song row's list, place and song (a redraw keeps them),
-  // or '' off the rows. Every click counts, also one off the rows. One on a row's own button or link
-  // counts as '' (the heart, then a quick click on the row, plays it), but its play button counts as
-  // the row (that click already started it)
-  const trackSpot = (el) => { const row = el && el.closest && el.closest('[data-list] .track'); return row ? `${row.closest('[data-list]').dataset.list}:${row.dataset.i}:${row.dataset.tid || ''}` : ''; };
-  let trackWas = ''; let trackLast = '';
+  // Where the click before this one landed, for both kinds of song row: a library row's list, place
+  // and song (bindTrackRows), or a playlist's, album's or search's row: its box, place and song (its id,
+  // or its address when it has none) (bindSongRows). A redraw keeps them. Every click counts, also one
+  // off the rows (''). One on a row's own button or link counts as '' (the heart, then a quick click on
+  // the row, plays it), but its play button counts as the row (that click already started it). One that
+  // only closes a ⋯ menu (showMenu's outside click, which the menu takes) counts as '' too: the next
+  // quick click on the row plays it rather than being held as a double click's second.
+  const trackSpot = (el) => { const row = el && el.closest && el.closest('[data-list] .track'); return row ? `t:${row.closest('[data-list]').dataset.list}:${row.dataset.i}:${row.dataset.tid || ''}` : ''; };
+  const srowSpot = (r) => `s:${(r.closest('[id]') || {}).id || ''}:${r.dataset.srow}:${r.dataset.tid || r.dataset.suri || ''}`;
+  const rowSpot = (el) => { const r = el && el.closest && el.closest('[data-srow]'); return r ? srowSpot(r) : trackSpot(el); };
+  let clickWas = ''; let clickLast = '';
+  document.addEventListener('click', (e) => {
+    const t = e.target; const own = t.closest && t.closest('a, button, input'); const menuTakes = !menuEl.hidden && !menuEl.contains(t);
+    clickWas = clickLast; clickLast = menuTakes || (own && !own.matches('[data-act="play"], [data-splay]')) ? '' : rowSpot(t);
+  }, true);
   const bindTrackRows = (container, pageLists) => {
     rowLists = pageLists; if (rowsBound) return; rowsBound = true;
-    document.addEventListener('click', (e) => { const own = e.target.closest && e.target.closest('a, button, input'); trackWas = trackLast; trackLast = own && own.dataset.act !== 'play' ? '' : trackSpot(e.target); }, true);
     // A song row's second click of a double click selects no word of it (the first one plays). This
     // stays on every row: a word selected on the next row would hold that row's click
     container.addEventListener('mousedown', (e) => { if (e.detail > 1 && e.target.closest('[data-list] .track') && !e.target.closest('a, button, input, select, textarea, label')) e.preventDefault(); });
@@ -5549,7 +5557,7 @@
       // apart, more than a row), so only a second click on the row the first one hit is held.
       if (!btn) {
         const row = e.target.closest('.track'); const list = row && row.closest('[data-list]');
-        const again = e.detail > 1 && trackWas === trackSpot(row);
+        const again = e.detail > 1 && clickWas === trackSpot(row);
         const sel = getSelection(); const picked = !!row && String(sel) !== '' && (row.contains(sel.anchorNode) || row.contains(sel.focusNode));
         if (row && list && !again && !picked && !e.target.closest('a, button, input')) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
         return;
@@ -6591,13 +6599,7 @@
     const io = new IntersectionObserver(([en]) => { if (!document.body.contains(bar)) { io.disconnect(); return; } bar.hidden = en.isIntersecting; }, { root: main, threshold: 0 });
     io.observe(hero);
   };
-  // Where the click before this one landed: a song row's list, place and song (its id, or its address
-  // when it has none; a redraw keeps them), or '' off the rows. Every click counts, also one off the
-  // rows. One on a row's own button or link counts as '' (the heart, then a quick click on the row,
-  // plays it), but its play button counts as the row (that click already started it) (bindSongRows)
-  const srowSpot = (r) => `${(r.closest('[id]') || {}).id || ''}:${r.dataset.srow}:${r.dataset.tid || r.dataset.suri || ''}`;
-  let srowWas = ''; let srowLast = '';
-  document.addEventListener('click', (e) => { const r = e.target.closest && e.target.closest('[data-srow]'); const own = r && e.target.closest('a, button, input'); srowWas = srowLast; srowLast = r && !(own && !own.matches('[data-splay]')) ? srowSpot(r) : ''; }, true);
+  // (the click before this one: clickWas, by rowSpot, above bindTrackRows)
   const bindSongRows = (box, all, ctx = {}) => {
     $$('[data-srow]', box).forEach((r) => { const t = all[Number(r.dataset.srow)]; if (t && t.track_id != null) r.dataset.tid = t.track_id; else if (t && (t.uri || t.page)) r.dataset.suri = t.uri || t.page; });
     markDownloads(box);
@@ -6618,7 +6620,7 @@
     $$('[data-srow]:not([data-card]):not([data-search])', box).forEach((r) => {
       r.onmousedown = (e) => { if (e.detail > 1 && !e.target.closest('a, button, input, select, textarea, label')) e.preventDefault(); };
       r.onclick = (e) => {
-        const again = e.detail > 1 && srowWas === srowSpot(r);
+        const again = e.detail > 1 && clickWas === srowSpot(r);
         if (e.target.closest('a,button')) return;
         if (r.closest('.selecting')) { const c = $('.selbox input', r); if (c && !e.target.closest('.selbox')) { c.checked = !c.checked; c.dispatchEvent(new Event('change', { bubbles: true })); } return; }
         const s = getSelection(); if (again || (String(s) !== '' && (r.contains(s.anchorNode) || r.contains(s.focusNode)))) return;
