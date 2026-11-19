@@ -732,6 +732,7 @@ jobs:
           ui-list-focus-ring.js list-focus-ring-shots
           ui-list-filter-ends.js list-filter-ends-shots
           ui-srow-click.js srow-click-shots
+          ui-browser-start-title.js browser-start-title-shots
           ui-sticky-focus.js sticky-focus-shots
           ui-select-bar-focus.js select-bar-focus-shots
           ui-row-line-focus.js row-line-focus-shots
