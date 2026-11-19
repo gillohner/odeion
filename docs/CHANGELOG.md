@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-19
+
+- **"Starting on This browser…" names the song you just picked.** Playing in this browser, when you picked another song (or pressed Next) while the one before was still loading, the player bar kept the first song's name under "Starting on This browser…" until something played. It now names the new song, and the small spinner moves to the button you just pressed.
+
 ### 2026-11-18
 
 - **A playlist says once who sees it and where it is kept.** On a computer or tablet, the small line above a playlist's name read "Playlist · private · on this node", and the line under its buttons said the same again ("Private on this node; saved to your homeserver on the next sync"). The small line now just says "Playlist", as it already did on a phone, and the line under the buttons has a little space above it instead of touching them.

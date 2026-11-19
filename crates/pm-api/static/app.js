@@ -2768,7 +2768,10 @@
     // (counted per song: another song at the same place in a new queue gets its own retry)
     state.browserRetry = state.browserRetry && state.browserRetry.it === it ? state.browserRetry : { it, n: 0 };
     state.browserRetry.gaveUp = null;
-    if (!(state.starting && state.starting.zone === BROWSER)) startWait('play', BROWSER, it.title || '');
+    // (the wait goes on only for this same song, as a retry; another song started while one still
+    // loads gets its own, so the bar names the song now starting, not the one before)
+    const sw = state.starting;
+    if (!(sw && sw.zone === BROWSER && sw.it === it)) { startWait('play', BROWSER, it.title || ''); state.starting.it = it; }
     nativeAhead();
     audio.play().catch(async (e) => {
       // (the app's own player says its failures through its events: nativefailed, nativerefused)
