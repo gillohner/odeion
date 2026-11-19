@@ -5323,6 +5323,7 @@
     if (from && from !== '/search' && navDepth > 0 && cur.v === 'search' && !cur.transient && shellMode() !== 'phone') { searchLeft = cur; history.back(); }
     else setView('home');
   };
+  const notPlaylists = new Set(); // "<user>/<id>" of posts the node read as no playlist (422)
   const runSearch = async (how, savedScope) => {
     const q = search.value.trim();
     if (!q) { if (shellMode() !== 'phone') leaveSearch(); else if (state.view === 'search' && state.viewArg && state.viewArg.q) setView('search'); return; }
@@ -5331,11 +5332,13 @@
     // A pasted Pubky key (with or without pubky:// or the pubky prefix) opens that person
     const pk = /^(?:pubky:\/\/|pubky)?([a-z0-9]{52})\/?$/.exec(q);
     if (pk) { setView('person', pk[1]); return; }
-    // A pasted playlist link (what a playlist's Copy link gives: pubky://<key>/pub/social/v1/posts/<id>)
-    // opens that playlist, as the Playlists page's shared-link box does
-    const post = /^(?:pubky:\/\/)?(?:pubky)?([a-zA-Z0-9]{52})\/pub\/social\/v1\/posts\/([0-9A-HJKMNP-TV-Z]{13})\/?$/.exec(q);
-    if (post) { setView('shared', { user: post[1].toLowerCase(), id: post[2] }); return; }
     const scope = savedScope || (state.viewArg && state.view === 'search' && state.viewArg.in) || state.searchScope || 'everywhere';
+    // A pasted playlist link (what a playlist's Copy link gives: pubky://<key>/pub/social/v1/posts/<id>)
+    // opens that playlist, as the Playlists page's shared-link box does. (q, in: a post that is no
+    // playlist, a comment or an ordinary post, is searched as text instead, on the shared page; one
+    // known to be none is searched at once, notPlaylists. A reload of its search takes its entry)
+    const post = /^(?:pubky:\/\/)?(?:pubky)?([a-zA-Z0-9]{52})\/pub\/social\/v1\/posts\/([0-9A-HJKMNP-TV-Z]{13})\/?$/.exec(q);
+    if (post && !notPlaylists.has(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope }, how === 'pop' ? 'replace' : 'push'); return; }
     startSearch(q, scope);
     setView('search', { q, in: scope }, how === 'pop' ? 'pop' : 'push');
   };
@@ -8481,7 +8484,21 @@
             $$('[data-shpl]', main).forEach((r) => r.onclick = () => setView('shared', { user: a.user, id: r.dataset.shpl }));
             break;
           }
-          let sp; try { sp = await api('GET', `/shared/${a.user}/playlists/${a.id}`); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          let sp; try { sp = await api('GET', `/shared/${a.user}/playlists/${a.id}`); } catch (e) {
+            if (state.view !== 'shared' || state.viewArg !== a) return;
+            // A link pasted into search that names a post but no playlist (a comment, an ordinary post,
+            // or one in a form this node can't read: 422): searched as text, as any other text, in this
+            // page's place (Back goes where search was opened from). A playlist gone or a homeserver that
+            // doesn't answer still says so here. (the box changed meanwhile: its own text decides; emptied
+            // on a phone, the Search tab's empty page, as emptying it there gives)
+            if (e.status === 422) notPlaylists.add(`${a.user}/${a.id}`);
+            if (a.q && e.status === 422) {
+              const sb = $('#search'); const typed = sb && document.activeElement === sb ? sb.value.trim() : a.q;
+              if (typed === a.q) { if (sb) sb.value = a.q; startSearch(a.q, a.in || 'everywhere'); setView('search', { q: a.q, in: a.in || 'everywhere' }, 'replace'); return; }
+              if (!typed && shellMode() === 'phone') { setView('search', undefined, 'replace'); return; }
+            }
+            main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break;
+          }
           if (state.view !== 'shared') return;
           state.itemTitle = sp.summary.name;
           // A web page or a post plays nowhere: its card, in its place (review of #155, M4)
