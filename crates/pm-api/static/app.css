@@ -672,6 +672,13 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .zone-card .icon-btn.big { width: 40px; height: 40px; background: var(--accent); color: var(--on-accent); border-radius: 50%; }
 @media (hover: hover) { .zone-card .icon-btn.big:hover { background: var(--accent-strong); } }
 .zone-card .zc-controls input[type=range] { flex: 1; min-width: 100px; }
+/* A card's volume is the bar's volume popover's: Mute, the slider, the level, kept together (where
+   the line has no room they go under the transport as one, not the level alone). Its slider gives up
+   some width for Mute so the cards keep the one line they had. A phone's card has no Mute (a phone's
+   volume has none anywhere) and keeps its one line with the wider slider */
+.zone-card .zc-vol { display: flex; align-items: center; gap: 6px; flex: 1; }
+html:not([data-shell="phone"]) .zone-card .zc-mute ~ input[type=range] { min-width: 56px; }
+html[data-shell="phone"] .zone-card .zc-mute { display: none; }
 /* A Home row that didn't answer: its words and Try again on one line of whole pixels, so the
    height kept for its next placeholder is the height it draws (no jump when Home opens again) */
 .hfail { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin: 0; line-height: 20px; }
@@ -2373,6 +2380,8 @@ html[data-shell="phone"] .page-head .actions > :is(#qtransfer, #qsave, #qclear) 
   .zone-card .zc-controls > [data-zt="previous"]::before { inset: -6px -3px -6px -6px; }
   .zone-card .zc-controls > [data-zt="toggle"]::before { inset: -6px -3px; }
   .zone-card .zc-controls > [data-zt="next"]::before { inset: -6px -6px -6px -3px; }
+  /* (Mute, drawn after Next, takes only 3 px of the gap between them: Next keeps the other 3) */
+  .zone-card .zc-vol > .zc-mute::before { inset: -6px -6px -6px -3px; }
   /* A row of chips that scrolls sideways keeps the reach inside its box (no vertical scroll, no clip):
      the room above and below is padding, taken out of the row's own margins so nothing moves
      (the library nav already has its 8 px; the scope chips scroll up to 720 px on any shell; the
