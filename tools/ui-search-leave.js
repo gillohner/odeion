@@ -1,7 +1,8 @@
 // Leaving Search (Escape in the search box, or emptying it) goes back to the page the search was
 // started from, scrolled where it was, instead of to Home. A search opened straight from a link or a
 // reload (nothing before it in the app), from another search, or with a menu open over it still goes
-// to Home, as does the phone's Search tab. Two Escapes in a row go back one page, not two.
+// to Home, as does the phone's Search tab. Two Escapes in a row go back one page, not two (one Back
+// asked for), and Escape still leaves a Search come back to with Back, then Forward.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-search-leave.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -59,15 +60,26 @@ async function run(browser, width) {
     await page.keyboard.press('Escape');
     check(await until(() => where(page) === '/tracks'), `${tag}: and Escape goes back to Songs again`);
 
+    // Back, then Forward to that same Search, then Escape: it leaves Search again (the Search entry the
+    // last Escape left is the one Forward comes back to)
+    await page.goForward();
+    check(await until(() => where(page) === '/search'), `${tag}: Forward comes back to Search (at ${where(page)})`);
+    await page.focus('#search'); await page.keyboard.press('Escape');
+    check(await until(() => where(page) === '/tracks'), `${tag}: after Back and Forward, Escape still leaves Search for Songs (at ${where(page)})`);
+
     // Two Escapes before the first lands: one page back (Albums), not two (Songs)
     await fx.go(page, '/tracks'); await page.locator('.tracks .track').first().waitFor();
     await page.click('.nav-item[data-view="albums"]');
     await until(() => where(page) === '/albums');
     await page.click('#search'); await page.keyboard.type('Golf');
     await until(() => where(page) === '/search');
-    await page.evaluate(() => { const s = document.getElementById('search'); for (let i = 0; i < 2; i++) s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    // (each history.back() the page asks for is counted: the second Escape must ask for none, also when
+    // the browser would fold two quick Backs into one)
+    await page.evaluate(() => { window.__backs = 0; const back = history.back.bind(history); history.back = () => { window.__backs++; back(); }; const s = document.getElementById('search'); for (let i = 0; i < 2; i++) s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
     await sleep(600);
     check(where(page) === '/albums', `${tag}: two Escapes go back one page (at ${where(page)})`);
+    const backs = await page.evaluate(() => { const n = window.__backs; delete history.back; return n; });
+    check(backs === 1, `${tag}: two Escapes ask for one Back (${backs})`);
 
     // Back from a result's page comes back to Search; Escape there goes to the page before Search
     await page.click('#search'); await page.keyboard.type('Hotel');

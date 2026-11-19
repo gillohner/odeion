@@ -2273,7 +2273,7 @@
     }
     if (onBrowser(o)) {
       const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
-      if (at === 'now' && state.browserQueue.length) { state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); browserPlay(state.browserIndex + 1); return; }
+      if (at === 'now' && state.browserQueue.length) { state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); browserPlay(state.browserIndex + 1, 0, true); return; }
       if (replace || at === 'now') browserLoad(bitems, o.shuffle); else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else browserAppend(bitems);
       if (!replace) toast(bitems.length === 1 ? 'Added to queue' : `${countOf(bitems.length, 'songs')} added`);
       return;
@@ -2741,7 +2741,8 @@
     add.click(); // its folder picker: the next step after a first sign-in
   };
   const hitItem = (h, album) => ({ uri: h.uri || `${h.source || 'tidal'}:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
-  const browserPlay = (i, startAt = 0) => {
+  // (`press`: a Play press starts it; a song ending, a skip, a retry or a queue change starts none)
+  const browserPlay = (i, startAt = 0, press = false) => {
     const it = state.browserQueue[i];
     state.restoredAt = null;
     // A pick-up still due for a song that broke off mid-song is off: this play is the one on. A
@@ -2771,7 +2772,7 @@
     // (the wait goes on only for this same song, as a retry; another song started while one still
     // loads gets its own, so the bar names the song now starting, not the one before)
     const sw = state.starting;
-    if (!(sw && sw.zone === BROWSER && sw.it === it)) { startWait('play', BROWSER, it.title || ''); state.starting.it = it; }
+    if (!(sw && sw.zone === BROWSER && sw.it === it)) { startWait('play', BROWSER, it.title || '', false, false, press); state.starting.it = it; }
     nativeAhead();
     audio.play().catch(async (e) => {
       // (the app's own player says its failures through its events: nativefailed, nativerefused)
@@ -2858,25 +2859,26 @@
   // broken stream, silent while the bar said playing). (A song that never opened, error 4, is the
   // start's own retry while that is due: Play does not open it a second time. Once the start and
   // its retry have both failed, "can't play here", a Play is the listener's own new try.)
-  const browserResume = () => {
+  // (`press`: the bar's Play pressed, so a song started again here takes its spinner; Move here, none)
+  const browserResume = (press = false) => {
     const i = state.browserIndex; const it = state.browserQueue[i]; const m = cancelPickUp();
     // A song brought back after a reload whose file didn't open (the node busy just then): Play
     // starts it where it was left, with the start's own retry and message (before, Play did
     // nothing and said nothing: no start had run, so there was no retry to wait for)
     const r = state.restoredAt;
     if (it && r && r.it === it && audio.readyState < 1) {
-      if (audio.error) { it.moved = true; browserPlay(i, r.pos); return; }
+      if (audio.error) { it.moved = true; browserPlay(i, r.pos, press); return; }
       // (its file still opening: if the open then fails, this Play becomes that start, from the
       // place held then; before, it went quiet and only a second Play said anything)
-      audio.play().catch((e) => { const h = state.restoredAt; if (e.name !== 'NotSupportedError' || !h || h.it !== it || state.browserQueue[state.browserIndex] !== it) return; it.moved = true; browserPlay(state.browserIndex, h.pos); });
+      audio.play().catch((e) => { const h = state.restoredAt; if (e.name !== 'NotSupportedError' || !h || h.it !== it || state.browserQueue[state.browserIndex] !== it) return; it.moved = true; browserPlay(state.browserIndex, h.pos, press); });
       return;
     }
     // A song that couldn't play here, its retry used too: Play tries it once more from where that
     // start was, and says so if it fails again (before, Play did nothing and said nothing)
     const g = state.browserRetry;
-    if (it && g && g.it === it && g.gaveUp && audio.error && audio.error.code === 4) { const at = g.gaveUp.at; g.gaveUp = null; it.moved = true; browserPlay(i, at); return; }
+    if (it && g && g.it === it && g.gaveUp && audio.error && audio.error.code === 4) { const at = g.gaveUp.at; g.gaveUp = null; it.moved = true; browserPlay(i, at, press); return; }
     const at = m && m.it === it ? m.at : audio.error && audio.error.code !== 4 ? audio.currentTime : null;
-    if (it && at != null) { it.moved = true; browserPlay(i, at); return; }
+    if (it && at != null) { it.moved = true; browserPlay(i, at, press); return; }
     audio.play().catch(() => {});
   };
   // For tests (tools/ui-youtube.js): queue items in the current zone, read the browser engine
@@ -3044,12 +3046,12 @@
     if (at) {
       const i = action.action === 'next' ? at.index + 1 : action.action === 'previous' && at.pos <= 3 ? Math.max(0, at.index - 1) : at.index;
       if (i === at.index) state.browserQueue[i].moved = true;
-      browserPlay(i, action.action === 'toggle' ? at.pos : 0); renderBar(); return;
+      browserPlay(i, action.action === 'toggle' ? at.pos : 0, action.action === 'toggle'); renderBar(); return;
     }
     // Songs queued while nothing played (Add to queue, Play next): Play starts the queue at its
     // first song (before, it played nothing and showed Pause)
-    if (action.action === 'toggle' && !state.browserQueue[state.browserIndex]) { browserPlay(0); return; }
-    if (action.action === 'toggle') { if (audio.paused) browserResume(); else browserPause(); }
+    if (action.action === 'toggle' && !state.browserQueue[state.browserIndex]) { browserPlay(0, 0, true); return; }
+    if (action.action === 'toggle') { if (audio.paused) browserResume(true); else browserPause(); }
     else if (action.action === 'next') browserPlay(state.browserIndex + 1);
     else if (action.action === 'previous') { if (browserTime() > 3) browserSeek(0); else browserPlay(Math.max(0, state.browserIndex - 1)); }
     else if (action.action === 'seek') browserSeek(action.position_ms / 1000);
@@ -3083,7 +3085,7 @@
     if (isBrowser()) {
       if (location.protocol === 'https:' && /^http:\/\//i.test(st.url)) { toast(`This page is served over HTTPS, so ${hereName().toLowerCase()} will not play an http:// stream. Pick a node zone, or a station with an https stream.`, 'error'); return; }
       state.browserQueue = [{ id: Date.now(), uri: st.url, stream: st.url, title: st.name, artist: [st.country, (st.tags || []).slice(0, 3).join(', ')].filter(Boolean).join(' · '), album: 'Internet radio', duration_ms: 0 }];
-      browserPlay(0); toast(`Tuning to ${st.name}`); return;
+      browserPlay(0, 0, true); toast(`Tuning to ${st.name}`); return;
     }
     // (in the zone's turn, like a page's Play: while it is on its way the zone's Play doesn't take the
     // queue for empty and offer a shuffle, and it goes after the zone's changes asked before it)
@@ -3277,7 +3279,7 @@
     if (shuffle !== undefined) setBrowserShuffle(shuffle);
     items.forEach((it, k) => { it.ord = k; });
     if (browserShuffle()) shuffleFrom(items, shuffle ? 0 : 1);
-    state.browserQueue = items; browserPlay(0); renderModes();
+    state.browserQueue = items; browserPlay(0, 0, true); renderModes();
   };
   const renderModes = () => {
     const r = !isBrowser() && repeatPending.has(state.zone) ? repeatPending.get(state.zone).value : zoneRepeat();
@@ -3594,7 +3596,7 @@
       state.zone = target; try { localStorage.setItem('pm.zone', target); } catch { /* storage unavailable */ }
       // The bar says "Moving to …" until the target plays (the node answered, but its player may still be opening the track)
       const tz = state.zones[target];
-      if (target !== BROWSER && wasPlaying && tz && tz.transport !== 'playing') startWait('move', target, curTitle);
+      if (target !== BROWSER && wasPlaying && tz && tz.transport !== 'playing') startWait('move', target, curTitle, false, false, false);
       renderZoneName(); renderBar(); refreshQueue();
       const name = (currentZone() || {}).name || target;
       moving = false; // before the menu draws again, so its Move here buttons are on
@@ -4224,9 +4226,13 @@
   // The play control just pressed: it shows a spinner until the music starts (capture phase, so
   // every play button on every page counts without each call site knowing)
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now() }; }, true);
-  // `replace`: the queue is being replaced, so the song still playing does not end the wait
-  const startWait = (what, zoneId = state.zone, title = '', replace = false, deferred = false) => {
+  // `replace`: the queue is being replaced, so the song still playing does not end the wait.
+  // `press`: a press of a play control starts this. A start nobody pressed Play for (Move here,
+  // Switch source, a song ending or skipped, the playing song taken out of the queue) puts no
+  // spinner on a Play pressed just before, and that Play's next start doesn't take one either.
+  const startWait = (what, zoneId = state.zone, title = '', replace = false, deferred = false, press = true) => {
     startDone(true);
+    if (!press) state.startAnchor = null;
     const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
     if (a) a.classList.add('starting');
     const zw = state.zones[zoneId]; const oldItem = replace && zw && zw.now_playing ? zw.now_playing.item.id : null;
@@ -4783,7 +4789,7 @@
     const name = v.label || srcName(srcSvc(v.source));
     b.disabled = true; b.innerHTML = '<span class="spin"></span> Switching…';
     const z0 = playingIt(); const version = z0.queue_version;
-    const wait = z0.transport === 'playing' ? startWait('play', zone, `${z0.now_playing.item.title || ''} · from ${name}`, true, true) : null;
+    const wait = z0.transport === 'playing' ? startWait('play', zone, `${z0.now_playing.item.title || ''} · from ${name}`, true, true, false) : null;
     try {
       // (read and loaded in one turn of the zone, so nothing of its queue changes in between)
       const zs = await zoneOp(zone, async (t) => {
@@ -5591,7 +5597,7 @@
         const row = e.target.closest('.track'); const list = row && row.closest('[data-list]');
         const again = e.detail > 1 && clickWas === trackSpot(row);
         const sel = getSelection(); const picked = !!row && String(sel) !== '' && (row.contains(sel.anchorNode) || row.contains(sel.focusNode));
-        if (row && list && !again && !picked && !e.target.closest('a, button, input')) { const ts = lists[list.dataset.list] || []; playTracks(ts.slice(Number(row.dataset.i)), true); }
+        if (row && list && !again && !picked && !e.target.closest('a, button, input')) { const ts = lists[list.dataset.list] || []; state.startAnchor = null; playTracks(ts.slice(Number(row.dataset.i)), true); }
         return;
       }
       const row = btn.closest('.track'); const list = btn.closest('[data-list]');
@@ -6656,6 +6662,7 @@
         if (e.target.closest('a,button')) return;
         if (r.closest('.selecting')) { const c = $('.selbox input', r); if (c && !e.target.closest('.selbox')) { c.checked = !c.checked; c.dispatchEvent(new Event('change', { bubbles: true })); } return; }
         const s = getSelection(); if (again || (String(s) !== '' && (r.contains(s.anchorNode) || r.contains(s.focusNode)))) return;
+        state.startAnchor = null; // (a tap on the row, not a press of a Play: no spinner on one pressed before)
         playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback);
       };
     });
@@ -9156,7 +9163,7 @@
           $('#rsearch').onclick = doSearch; $('#rq').onkeydown = (e) => { if (e.key === 'Enter') doSearch(); }; needsText($('#rq'), $('#rsearch'));
           $$('[data-st-play]', main).forEach((b) => b.onclick = () => playStation(byId(b.dataset.stPlay)));
           // The whole row plays the station, not only the small play button (fresh-eyes review)
-          $$('[data-st-row]', main).forEach((r) => r.onclick = (e) => { if (e.target.closest('button, a, input')) return; playStation(byId(r.dataset.stRow)); });
+          $$('[data-st-row]', main).forEach((r) => r.onclick = (e) => { if (e.target.closest('button, a, input')) return; state.startAnchor = null; playStation(byId(r.dataset.stRow)); });
           $$('[data-st-save]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/radio/stations', byId(b.dataset.stSave)); toast('Station saved'); render(); } catch (e) { toast(e.message, 'error'); } });
           $$('[data-st-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/radio/stations/${encodeURIComponent(b.dataset.stDel)}`); render(); } catch (e) { toast(e.message, 'error'); } });
           break;
