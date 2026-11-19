@@ -8508,8 +8508,11 @@
           const pfMoved = !mine && !pfFits && !pfFailed && !plHolds.has(plId) && !!shown && (shown.length !== d.playlist.items.length || shown.some((u, k) => u !== d.playlist.items[k].uri));
           // (reread: the list was already read again after this answer, which still doesn't fit; it
           // is used as it is, by song, and not asked for again: a node naming songs otherwise than
-          // the list can't keep the draw asking. A page opened afresh asks again)
-          const pfReread = again && !!cachedPf && !pfFits && !mine && !!state.plPf.reread;
+          // the list can't keep the draw asking. Only while the list is the one the answer was
+          // checked against: a read that also brings another device's change asks again, so a song
+          // added in it gets its name and where it plays. A page opened afresh asks again)
+          const listIs = (uris) => !!uris && uris.length === d.playlist.items.length && uris.every((u, k) => u === d.playlist.items[k].uri);
+          const pfReread = again && !!cachedPf && !pfFits && !mine && listIs(state.plPf.reread);
           const pfAfterRead = !!cachedPf && !pfFits && !mine && !pfReread;
           if (pfAfterRead) pfP = askPf();
           let pf = (pfFits && cachedPf) || (pfMoved ? undefined : await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]));
@@ -8524,10 +8527,18 @@
           const pfPending = pf === undefined;
           // (the mark holds for the one read after it: an answer drawn otherwise loses it, so a list
           // moved again later asks for where its songs play again)
-          if (!pfPending && state.plPf && state.plPf.id === plId) state.plPf.reread = pfReadAgain && state.plPf.data === pf;
+          // (reread: the list this answer was checked against, its songs' uris)
+          const readUris = d.playlist.items.map((it) => it.uri);
+          if (!pfPending && state.plPf && state.plPf.id === plId) state.plPf.reread = pfReadAgain && state.plPf.data === pf ? readUris : null;
+          // (and the rows of this read go by places the node no longer has: until the read after
+          // it has drawn them they take no presses, × / Move / a pin / the bar's Remove, as under a
+          // change's hold, plWrite; that read ends the hold, or its 15 s end in Try again)
+          // (the focus in the rows on screen, before this draw replaces them: the read that ends the hold gives it back)
+          const holdForReread = (focus) => { if (!plHolds.has(plId)) { plHolds.set(plId, { id: plId, after: plDraws + 1, focus }); plHoldShow(); } };
+          const focusWas = pfReadAgain ? plFocusOf(document.activeElement) : null;
           if (pfReadAgain) { const stale = drawStale; setTimeout(() => { if (!stale()) render(); }, 0); }
           // (a slow answer asked after the read that doesn't fit marks the next draw's read the same way)
-          if (pfPending) { pf = null; let pfDone = false; pfP.then((x) => { pfDone = true; if (pfAfterRead && x && !fitsList(x) && state.plPf && state.plPf.id === plId && state.plPf.data === x) state.plPf.reread = true; if (state.view === 'playlist' && state.viewArg === plId) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
+          if (pfPending) { pf = null; let pfDone = false; pfP.then((x) => { pfDone = true; const here = state.view === 'playlist' && state.viewArg === plId; if (pfAfterRead && x && !fitsList(x) && state.plPf && state.plPf.id === plId && state.plPf.data === x) { state.plPf.reread = readUris; if (here && plShown && plShown.id === plId && plShown.uris.join('\n') === readUris.join('\n')) holdForReread(plFocusOf(document.activeElement)); } if (here) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
           state.itemTitle = d.summary.name;
           // Each song as it plays here: the library file, a service, or unavailable (play_from.rs).
           // (a song listed twice: its k-th copy takes the earlier answer's k-th copy, each place its own pin)
@@ -8609,6 +8620,8 @@
             if (plRead < plHoldNow.after) plHoldShow();
             else { if (again || plHoldNow.retry === navGen) heldFocus = plHoldNow.focus; plHolds.delete(plId); } // (a fresh open keeps its own place; Try again, on this visit, is in place)
           }
+          // (after a change's hold this read ended: the read again takes its focus on)
+          if (pfReadAgain && !plHolds.has(plId)) { holdForReread(heldFocus || focusWas); heldFocus = null; }
           // Playlist rows can also be removed together (highest index first, so positions hold)
           enableSelect($('#plsongs'), songs, { keys: d.playlist.items.map((it) => it.uri), held: () => plHeld(plId), remove: (idx) => plWrite(plId, async (signal) => { try { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`, undefined, { signal }); toast(`Removed ${countOf(idx.length, 'songs')}`); } finally { state.plPf = null; } }) });
           if (localSongs.length) bindSongRows($('#pllocal'), localSongs, {});

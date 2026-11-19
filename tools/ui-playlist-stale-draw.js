@@ -47,14 +47,14 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
       const { page, state } = await fx.create(browser, width, { mobile });
       // The server's lists, each GET answered with the list as it was when asked; `hold`: the next
       // GET of that path waits for its release
-      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'], c7: ['P', 'Q', 'A'], c8: ['P', 'Q', 'A'], c9: ['P', 'Q', 'A'], c10: ['Y', 'P', 'Q'], c11: ['P', 'Q', 'A'] };
-      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice', c7: 'Moved meanwhile', c8: 'Other names', c9: 'Moved twice', c10: 'Swapped', c11: 'Slow other names' };
+      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'], c7: ['P', 'Q', 'A'], c8: ['P', 'Q', 'A'], c9: ['P', 'Q', 'A'], c10: ['Y', 'P', 'Q'], c11: ['P', 'Q', 'A'], c12: ['Y', 'P', 'Q'] };
+      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice', c7: 'Moved meanwhile', c8: 'Other names', c9: 'Moved twice', c10: 'Swapped', c11: 'Slow other names', c12: 'Added meanwhile' };
       const hold = {}; const deletes = []; const asks = [];
       // (`fresh`: the held GET answers with the list as it is when released)
       const gate = (key, fail, fresh) => { let open; const p = new Promise((res) => { open = res; }); hold[key] = { p, fail, fresh }; return open; };
       let socket = null;
       await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
-      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6|c7|c8|c9|c10|c11)(\/.*)?$/, async (r) => {
+      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6|c7|c8|c9|c10|c11|c12)(\/.*)?$/, async (r) => {
         const u = new URL(r.request().url()); const m = r.request().method();
         const [, , , id, ...rest] = u.pathname.split('/'); const sub = rest.join('/');
         if (m === 'DELETE' && sub.startsWith('items/')) { const k = Number(sub.split('/')[1]); deletes.push(k); lists[id].splice(k, 1); return json(r, {}); }
@@ -332,6 +332,14 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         check(JSON.stringify(o13) === '["Papa","Yankee","Quebec"]', `${width}: an answer naming another song at a row's place: the row keeps its own song (${o13})`);
         const yankeeChip = await page.evaluate(() => { const row = [...document.querySelectorAll('#plsongs .track, #plsongs .list-row')].find((x) => /Yankee/.test(x.textContent)); const c = row && row.querySelector('.srcchip'); return c ? c.className : 'none'; });
         check(!/\bwait\b/.test(yankeeChip) && /srcchip/.test(yankeeChip), `${width}: it keeps the earlier answer's source (${yankeeChip})`);
+        // (and till that read has drawn them, the rows take no presses: each goes by a place the
+        // node no longer has, Yankee's × would remove Xray. Before: × sent DELETE 1 at once)
+        const inert13 = await page.evaluate(() => { const box = document.querySelector('#plsongs'); return !!box && box.inert; });
+        check(inert13, `${width}: while the list is read again its rows take no presses`);
+        const delHeld = deletes.length;
+        await page.evaluate(() => { const b = [...document.querySelectorAll('#plsongs [data-rm]')].find((x) => /Yankee/.test(x.getAttribute('aria-label') || '')); if (b) b.click(); });
+        await sleep(300);
+        check(deletes.length === delHeld, `${width}: Yankee's × pressed meanwhile removes nothing (${deletes.slice(delHeld)})`);
         await page.screenshot({ path: path.join(SHOTS, `swapped-${width}.png`) });
         lists.c10 = ['P', 'Y', 'Q'];
         releaseRead13();
@@ -344,6 +352,36 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         check(JSON.stringify(deletes.slice(del13)) === '[1]' && JSON.stringify(lists.c10) === '["P","Q"]', `${width}: Yankee's × removes Yankee (DELETE ${deletes.slice(del13)}, server now ${lists.c10})`);
         await until(async () => JSON.stringify(await order()) === '["Papa","Quebec"]', 3000);
         check(JSON.stringify(await order()) === '["Papa","Quebec"]', `${width}: the list shows Yankee gone (${await order()})`);
+        check(!(await page.evaluate(() => document.querySelector('#plsongs').inert)), `${width}: the read again ends the hold: the rows take presses again`);
+
+        // 12b. The same, and another device adds a song before the list is read again: that read
+        // isn't the list the answer was checked against, so where its songs play is asked again and
+        // the new streamed song gets its name and source (before: the older answer was used by uri,
+        // not asked again, and Xray's row stayed blank till the next change)
+        await goPl('c12');
+        await until(async () => JSON.stringify(await order()) === '["Yankee","Papa","Quebec"]' && (await page.locator('#plsongs .srcchip:not(.wait)').count()) === 3, 3000);
+        await page.evaluate(() => { const st = { v: 'playlists' }; history.pushState(st, '', '/playlists'); dispatchEvent(new PopStateEvent('popstate', { state: st })); });
+        await page.waitForSelector('#main [data-pl="c1"]');
+        lists.c12 = ['P', 'Y', 'Q'];
+        const releasePf15 = gate('c12/play-from', false, true);
+        const asked15 = asks.length;
+        await goPl('c12');
+        await until(async () => asks.slice(asked15).includes('c12/play-from'), 1000);
+        lists.c12 = ['Q', 'P', 'Y'];
+        const releaseRead15 = gate('c12', false, true);
+        releasePf15();
+        await until(async () => asks.slice(asked15).filter((x) => x === 'c12').length === 2, 2000);
+        await sleep(200);
+        lists.c12 = ['Q', 'P', 'Y', 'Z'];
+        releaseRead15();
+        await until(async () => JSON.stringify(await order()) === '["Quebec","Papa","Yankee","Xray"]' && (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
+        const o15 = await order();
+        check(JSON.stringify(o15) === '["Quebec","Papa","Yankee","Xray"]', `${width}: a song another device added meanwhile shows its name (${o15})`);
+        const xrayChip = await page.evaluate(() => { const row = [...document.querySelectorAll('#plsongs .track, #plsongs .list-row')].find((x) => /Xray/.test(x.textContent)); const c = row && row.querySelector('.srcchip'); return c ? c.className : 'none'; });
+        check(/srcchip/.test(xrayChip) && !/\b(wait|none)\b/.test(xrayChip), `${width}: and where it plays (${xrayChip})`);
+        check(asks.slice(asked15).filter((x) => x === 'c12/play-from').length === 2, `${width}: where they play asked again for that read (${asks.slice(asked15)})`);
+        check(!(await page.evaluate(() => document.querySelector('#plsongs').inert)), `${width}: its rows take presses`);
+        await page.screenshot({ path: path.join(SHOTS, `added-meanwhile-${width}.png`) });
 
         // 13. The same other names, each answer slower than the 1.2 s wait: still asked at most twice
         // (before: each slow answer drew the page again, which asked again, for good)
@@ -352,6 +390,8 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         await sleep(8000);
         const pf14 = asks.slice(asked14).filter((x) => x === 'c11/play-from').length;
         check(pf14 >= 1 && pf14 <= 2 && (await page.locator('#plsongs .srcchip.wait').count()) === 0, `${width}: slow answers under other names: asked at most twice, no row left waiting (${pf14} asked)`);
+        // (a slow answer that doesn't fit holds the rows till the read after it: that hold ends too)
+        check(!(await page.evaluate(() => { const b = document.querySelector('#plsongs'); return !b || b.inert; })), `${width}: slow answers under other names: the rows take presses again`);
         check(state.errors.length === errs && !state.errors.length, `${width}: no page errors (${state.errors.join(' | ')})`);
       } catch (e) {
         check(false, `${width}: ${e.message.split('\n')[0]}`);

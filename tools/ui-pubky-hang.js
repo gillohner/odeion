@@ -20,6 +20,9 @@ let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 const until = async (fn, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await fn()) return true; await sleep(50); } return false; };
+// (until a count stays the same for 400 ms, at most `ms`: false when it still grew then, so a
+// read repeated for good fails the check rather than hanging the job)
+const settled = (count, ms = 5000) => until(async () => { const was = count(); await sleep(400); return was === count(); }, ms);
 const MENU = '.popover.menu:not([hidden])';
 const COPY = 'Copy to my homeserver';
 // An album of one library song (as the node sends its page, item.rs)
@@ -136,9 +139,9 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         const asked6 = [...held.keys()].filter((n) => n >= a6);
         check(asked6.length > 0, `${width}: the redraw still asks the node (${asked6.length} asked)`);
         // (the × draws the list again, its sources too: wait for those reads to end first)
-        for (let n = -1; n !== plReads.length;) { n = plReads.length; await sleep(400); }
+        check(await settled(() => plReads.length), `${width}: the playlist's reads stop after the ×`);
         await page.clock.fastForward(16000);
-        for (let n = -1; n !== plReads.length;) { n = plReads.length; await sleep(400); }
+        check(await settled(() => plReads.length), `${width}: the playlist's reads stop after the 15 s`);
         const r6b = plReads.length;
         asked6.forEach((n) => answer(n, SESSION));
         check(await until(async () => plReads.length > r6b, 2000) && r6b > r6, `${width}: the node's answer after its 15 s draws the playlist again (${plReads.length - r6b} more reads)`);
@@ -181,7 +184,7 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         const asked9 = [...held.keys()].filter((n) => n >= a9);
         await page.clock.fastForward(16000);
         check(await until(async () => !!(await page.$('#plsongs [data-rm]')), 3000), `${width}: no answer in 15 s: the playlist draws anyway`);
-        for (let n = -1; n !== plReads.length;) { n = plReads.length; await sleep(400); }
+        check(await settled(() => plReads.length), `${width}: the playlist's reads stop once it draws anyway`);
         const r9 = plReads.length;
         asked9.forEach((n) => answer(n, SESSION));
         check(asked9.length > 0 && await until(async () => plReads.length > r9, 2000), `${width}: the late answer draws the first draw again (${asked9.length} asked, ${plReads.length - r9} more reads)`);
