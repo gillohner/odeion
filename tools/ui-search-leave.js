@@ -1,7 +1,8 @@
 // Leaving Search (Escape in the search box, or emptying it) goes back to the page the search was
 // started from, scrolled where it was, instead of to Home. A search opened straight from a link or a
 // reload (nothing before it in the app), from another search, or with a menu open over it still goes
-// to Home, as does the phone's Search tab. Two Escapes in a row go back one page, not two.
+// to Home, as does Escape on the phone's Search tab; emptying the box there stays on the Search tab.
+// Two Escapes in a row go back one page, not two.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-search-leave.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -132,16 +133,57 @@ async function run(browser, width) {
   const browser = await chromium.launch();
   try {
     for (const w of [1280, 1024, 768]) await run(browser, w);
-    // The phone's Search tab (its own place in the bottom bar): Escape still goes Home
-    const { context, page } = await fx.create(browser, 360, { tracks, mobile: true });
-    await fx.go(page, '/tracks');
-    await page.locator('.tracks .track').first().waitFor();
-    await page.click('[data-bnav="search"]');
-    await page.focus('#search'); await page.keyboard.type('Delta');
-    await until(() => where(page) === '/search');
-    await page.keyboard.press('Escape');
-    check(await until(() => where(page) === '/'), `360: the phone's Search tab goes Home on Escape, as before (at ${where(page)})`);
-    await context.close();
+    // The phone's Search tab (its own place in the bottom bar): emptying the box stays on the Search
+    // tab (its empty page, as the tab opens), not Home; Escape still goes Home. Also in the Android app,
+    // where the tab doesn't focus the box (a tap on it does).
+    for (const [width, android] of [[360, false], [412, false], [360, true]]) {
+      const tag = `${width}${android ? ' android' : ''} phone`;
+      const { context, page, state } = await fx.create(browser, width, { tracks, mobile: true });
+      if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+      await fx.go(page, '/tracks');
+      await page.locator('.tracks .track').first().waitFor();
+      await page.click('[data-bnav="search"]');
+      await page.click('#search'); await page.keyboard.type('Delta');
+      await until(() => where(page) === '/search' && new URL(page.url()).searchParams.get('q') === 'Delta');
+      await page.locator('#main h2').filter({ hasText: 'Results for “Delta”' }).waitFor();
+      const depth = await page.evaluate(() => history.length);
+      await page.screenshot({ path: path.join(shots, `${width}${android ? '-android' : ''}-phone-results.png`) });
+      await page.keyboard.press('Control+A'); await page.keyboard.press('Backspace');
+      await sleep(600);
+      check(where(page) === '/search' && !new URL(page.url()).searchParams.get('q'), `${tag}: emptying the box stays on Search (at ${where(page)}${new URL(page.url()).search})`);
+      check(await page.locator('#main .empty').filter({ hasText: 'Type in the box above' }).isVisible(), `${tag}: Search shows its empty page`);
+      check(await page.locator('[data-bnav="search"]').getAttribute('aria-current') === 'page', `${tag}: the bottom bar's Search tab stays on`);
+      check(await page.evaluate(() => document.activeElement && document.activeElement.id === 'search'), `${tag}: the box keeps the focus to type again`);
+      check(await page.evaluate(() => history.length) === depth, `${tag}: no new history entry`);
+      await page.screenshot({ path: path.join(shots, `${width}${android ? '-android' : ''}-phone-emptied.png`) });
+      await page.keyboard.type('Echo');
+      check(await until(() => new URL(page.url()).searchParams.get('q') === 'Echo'), `${tag}: typing again searches again (q=${new URL(page.url()).searchParams.get('q')})`);
+      // The box's own clear (×) empties it with an input event: the same
+      await page.locator('#main h2').filter({ hasText: 'Results for “Echo”' }).waitFor();
+      await page.evaluate(() => { const s = document.getElementById('search'); s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); });
+      await sleep(600);
+      check(where(page) === '/search' && !new URL(page.url()).searchParams.get('q'), `${tag}: the box's clear stays on Search (at ${where(page)}${new URL(page.url()).search})`);
+      // Enter in the empty box: still Search
+      await page.focus('#search'); await page.keyboard.press('Enter'); await sleep(300);
+      check(where(page) === '/search', `${tag}: Enter in the empty box stays on Search (at ${where(page)})`);
+      // Back goes to the page before the Search tab (the emptied search took no entry of its own)
+      await page.goBack();
+      check(await until(() => where(page) === '/tracks'), `${tag}: Back goes to Songs (at ${where(page)})`);
+      // Escape still leaves the Search tab for Home, as before
+      await page.click('[data-bnav="search"]');
+      await page.click('#search'); await page.keyboard.type('Delta');
+      await until(() => new URL(page.url()).searchParams.get('q') === 'Delta');
+      await page.keyboard.press('Escape');
+      check(await until(() => where(page) === '/'), `${tag}: Escape on the Search tab goes Home, as before (at ${where(page)})`);
+      // Typed in the top box from another tab (Home here): emptying it stays on Search too
+      await page.click('#search'); await page.keyboard.type('Golf');
+      await until(() => new URL(page.url()).searchParams.get('q') === 'Golf');
+      await page.keyboard.press('Control+A'); await page.keyboard.press('Backspace');
+      await sleep(600);
+      check(where(page) === '/search' && await page.locator('[data-bnav="search"]').getAttribute('aria-current') === 'page', `${tag}: a search typed from Home, emptied, stays on Search (at ${where(page)}${new URL(page.url()).search})`);
+      check(state.errors.length === 0, `${tag}: no page errors ${JSON.stringify(state.errors)}`);
+      await context.close();
+    }
   } finally { await browser.close(); }
   console.log(`${ok} ok, ${fail} FAIL`);
   process.exit(fail ? 1 : 0);
