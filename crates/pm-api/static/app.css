@@ -2380,8 +2380,11 @@ html[data-shell="phone"] .page-head .actions > :is(#qtransfer, #qsave, #qclear) 
   .zone-card .zc-controls > [data-zt="previous"]::before { inset: -6px -3px -6px -6px; }
   .zone-card .zc-controls > [data-zt="toggle"]::before { inset: -6px -3px; }
   .zone-card .zc-controls > [data-zt="next"]::before { inset: -6px -6px -6px -3px; }
-  /* (Mute, drawn after Next, takes only 3 px of the gap between them: Next keeps the other 3) */
-  .zone-card .zc-vol > .zc-mute::before { inset: -6px -6px -6px -3px; }
+  /* Mute is drawn after the transport, so where their reaches meet it took the whole gap. It reaches
+     only 3 px towards them: beside Next, Next keeps the other 3 px; where the volume goes under the
+     transport (a touch tablet's narrower cards, Mute 8-10 px under Previous) a tap just under Previous
+     is Previous's again, which keeps its 6 px down. (Mute stays 45 px tall.) */
+  .zone-card .zc-vol > .zc-mute::before { inset: -3px -6px -6px -3px; }
   /* A row of chips that scrolls sideways keeps the reach inside its box (no vertical scroll, no clip):
      the room above and below is padding, taken out of the row's own margins so nothing moves
      (the library nav already has its 8 px; the scope chips scroll up to 720 px on any shell; the

@@ -6,7 +6,10 @@
 // back, and one muted or unmuted elsewhere (the node's zone event) follows. Enter on it works; Zones
 // drawn again gives a focused Mute its focus back. A zone without a volume has none. Mute, slider and
 // level stay on one line together; cards that had one line keep it (1024, ~1000, ~1150 px). On a
-// touch tablet Next and Mute share the 6 px between them. Phones are as before: no Mute, one line.
+// touch tablet Next and Mute share the 6 px between them, and where the volume goes under the
+// transport a press just under Previous is Previous's, not Mute's. Three quick presses while the zone
+// answers: busy at once, one request. With another zone in use, only the card's own zone changes.
+// Phones are as before: no Mute, one line.
 //   node tools/ui-zone-card-mute.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -26,8 +29,8 @@ const zones = [
 ];
 const outputs = zones.map((z) => ({ id: z.output, name: z.name, kind: z.output.split(':')[0], caps: z.volume ? { hw_volume: 'percent' } : {} }));
 
-const setup = async (browser, width, touch) => {
-  const { context, page, state } = await fx.create(browser, width, { mobile: width < 600, touch, fixtures: { '/zones': { body: zones }, '/outputs': { body: outputs }, '/zones/linn/volume': { body: {} }, '/zones/kitchen/volume': { body: {} }, '/zones/frame/volume': { body: { error: 'The TV did not answer' }, status: 502 } } });
+const setup = async (browser, width, touch, inUse) => {
+  const { context, page, state } = await fx.create(browser, width, { mobile: width < 600, touch, zone: inUse, fixtures: { '/zones': { body: zones }, '/outputs': { body: outputs }, '/zones/linn/volume': { body: {} }, '/zones/kitchen/volume': { body: {} }, '/zones/frame/volume': { body: { error: 'The TV did not answer' }, status: 502 } } });
   const sock = {};
   await context.routeWebSocket(/\/v1\/events/, (ws) => { sock.ws = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones })); });
   await fx.go(page, '/zones');
@@ -102,6 +105,82 @@ const lineOf = (page, id) => page.$eval(card(id), (c) => { const kids = [...c.qu
         return { gap: Math.round(b.left - a.right), nearNext: at(a.right + 1), nearMute: at(b.left - 1) };
       });
       check(hit.gap === 6 && hit.nearNext === 'next' && hit.nearMute === 'mute', `1024 touch: Next and Mute share the gap between them (${JSON.stringify(hit)})`);
+      await context.close();
+    }
+
+    // A touch tablet where a card's volume goes under the transport (cards ~304-320 px wide: windows
+    // 744-776, 1064-1096, 1224-1272 px): Mute sits 8-10 px under Previous, and the gap is shared, as
+    // the one between Next and Mute is (Mute, drawn later, took it all: a tap 4 px under Previous muted)
+    for (const width of [760, 1080, 1248]) {
+      const { context, page, state } = await setup(browser, width, true);
+      const scan = [];
+      for (const id of await page.$$eval('#main [data-zcard]', (cs) => cs.map((c) => c.dataset.zcard))) {
+        const r = await page.$eval(card(id), (c) => {
+          const p = c.querySelector('[data-zt="previous"]'); const m = c.querySelector('[data-volmute]'); if (!p || !m) return null;
+          p.scrollIntoView({ block: 'center', behavior: 'instant' });
+          const a = p.getBoundingClientRect(); const b = m.getBoundingClientRect(); if (b.top < a.bottom) return null; // one line
+          const x = a.left + a.width / 2;
+          const at = (y) => { const h = document.elementFromPoint(x, y); return h && (p.contains(h) ? 'previous' : m.contains(h) ? 'mute' : 'other'); };
+          const gap = Math.round(b.top - a.bottom); const own = [];
+          for (let d = 1; d < gap; d++) own.push(at(a.bottom + d));
+          return { gap, x: Math.round(x), y4: Math.round(a.bottom + 4), under4: at(a.bottom + 4), aboveMute: at(b.top - 1), own };
+        });
+        if (r) scan.push({ id, ...r });
+      }
+      check(scan.length >= 2, `${width} touch: cards whose volume went under the transport (${scan.map((r) => r.id).join(',') || 'none'})`);
+      for (const r of scan) {
+        // (what the reaches promise: Previous's first 4 px down are Previous's, the 2 px next to Mute are Mute's)
+        const fair = r.own.every((o, i) => { const d = i + 1; return d <= 4 ? o === 'previous' : d >= r.gap - 2 ? o === 'mute' : true; });
+        check(r.under4 === 'previous' && r.aboveMute === 'mute' && fair, `${width} touch, ${r.id}: a tap 4 px under Previous is Previous's, 1 px over Mute is Mute's, the ${r.gap} px between them shared (${r.own.join(' ')})`);
+      }
+      // Pressed for real 4 px under a node zone's Previous: never Mute. A click at that exact point (a
+      // stylus, a mouse on a touch screen) is what the reach decides: Previous. A finger's tap also
+      // goes through Chromium's touch adjustment, which may give it to the card instead: not Mute
+      const linn = scan.find((r) => r.id === 'linn');
+      if (linn) {
+        for (const how of ['tap', 'click']) {
+          await page.evaluate(() => { window.__pressed = []; window.__seen = (e) => { const b = e.target.closest && e.target.closest('button'); window.__pressed.push(b ? b.dataset.zt || (b.dataset.volmute != null ? 'mute' : b.title) : e.target.tagName); }; document.addEventListener('click', window.__seen, true); });
+          const at = await page.$eval(card('linn'), (c) => { const p = c.querySelector('[data-zt="previous"]'); p.scrollIntoView({ block: 'center', behavior: 'instant' }); const a = p.getBoundingClientRect(); return { x: a.left + a.width / 2, y: a.bottom + 4.5 }; });
+          if (how === 'click') await page.mouse.click(at.x, at.y); else await page.touchscreen.tap(at.x, at.y);
+          await page.waitForTimeout(300);
+          const pressed = await page.evaluate(() => { document.removeEventListener('click', window.__seen, true); return window.__pressed; });
+          check((how === 'click' ? JSON.stringify(pressed) === '["previous"]' : !pressed.includes('mute')) && !posts(state, 'linn').length && await page.$eval(mute('linn'), (b) => b.getAttribute('aria-pressed') === 'false'), `${width} touch: a ${how} 4 px under Linn's Previous ${how === 'click' ? 'presses Previous' : 'doesn\'t press Mute'} (${JSON.stringify(pressed)}, ${JSON.stringify(posts(state, 'linn'))})`);
+        }
+      } else check(false, `${width} touch: Linn's volume went under the transport`);
+      if (width === 1080) await page.screenshot({ path: path.join(SHOTS, 'zones-1080-touch.png') });
+      check(!state.errors.length, `${width} touch: no page errors (${state.errors.join('; ')})`);
+      await context.close();
+    }
+
+    // Mute pressed three times quickly while the zone hasn't answered: busy at once (aria-busy, the
+    // spinner), one request, and itself again once the answer is in
+    {
+      const { context, page, state } = await setup(browser, 1280, false);
+      state.delay = (v, m) => (v === '/zones/linn/volume' && m === 'POST' ? 1500 : 0);
+      for (let i = 0; i < 3; i++) await page.click(mute('linn'), { force: true });
+      const now = await page.$eval(mute('linn'), (b) => ({ busy: b.getAttribute('aria-busy'), off: b.getAttribute('aria-disabled'), pressed: b.getAttribute('aria-pressed') }));
+      check(now.busy === 'true' && now.off === 'true' && now.pressed === 'true', `1280: Mute pressed three times while the zone answers: busy at once, pressed (${JSON.stringify(now)})`);
+      await page.waitForTimeout(400);
+      check(await page.$eval(mute('linn'), (b) => b.classList.contains('is-spinning')), '1280: …and shows the spinner');
+      await page.waitForTimeout(1600);
+      check(JSON.stringify(posts(state, 'linn')) === '[{"mute":true}]', `1280: …one request (${JSON.stringify(posts(state, 'linn'))})`);
+      const after = await page.$eval(mute('linn'), (b) => ({ busy: b.getAttribute('aria-busy'), off: b.getAttribute('aria-disabled'), spin: b.classList.contains('is-spinning') || b.classList.contains('is-busy'), pressed: b.getAttribute('aria-pressed') }));
+      check(after.busy == null && after.off == null && !after.spin && after.pressed === 'true', `1280: …and after the answer it is itself again, pressed (${JSON.stringify(after)})`);
+      check(!state.errors.length, `1280: no page errors (${state.errors.join('; ')})`);
+      await context.close();
+    }
+
+    // Another zone in use (Kitchen): muting Linn from its card touches only Linn, Kitchen stays the zone
+    {
+      const { context, page, state } = await setup(browser, 1280, false, 'kitchen');
+      const was = await page.$eval(mute('kitchen'), (b) => b.getAttribute('aria-pressed'));
+      await press(page, mute('linn'));
+      check(JSON.stringify(posts(state, 'linn')) === '[{"mute":true}]', `1280, Kitchen in use: Mute on Linn's card mutes Linn (${JSON.stringify(posts(state, 'linn'))})`);
+      check(!state.hits.some((h) => h.v === '/zones/kitchen/volume'), `1280, Kitchen in use: Kitchen gets no volume request (${state.hits.filter((h) => h.v.startsWith('/zones/kitchen')).map((h) => `${h.m} ${h.v}`).join(', ') || 'none'})`);
+      check(await page.$eval(mute('kitchen'), (b) => b.getAttribute('aria-pressed')) === was, '1280, Kitchen in use: Kitchen\'s Mute is unchanged');
+      check(await page.evaluate(() => localStorage.getItem('pm.zone')) === 'kitchen', '1280, Kitchen in use: Kitchen stays the zone in use');
+      check(/Kitchen/.test(await page.evaluate(() => (document.querySelector('#zonename') || document.querySelector('.player')).textContent)), '1280, Kitchen in use: the player bar still names Kitchen');
+      check(!state.errors.length, `1280, Kitchen in use: no page errors (${state.errors.join('; ')})`);
       await context.close();
     }
 
