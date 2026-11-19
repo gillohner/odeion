@@ -1322,8 +1322,8 @@ html[data-shell="phone"] .along-pre { position: absolute; width: 1px; height: 1p
 .roonpick { margin-bottom: 6px; }
 .roonpick ~ .toolbar { margin-top: 8px; }
 .roonfile.stale { opacity: 0.5; }
-/* Phones: a checkbox's whole line is a 44 px tap (the box itself is 13 px; Roon, DSP, ListenBrainz, people) */
-html[data-shell="phone"] label.check { min-height: 44px; }
+/* Phones: a checkbox's whole line is a 44 px tap (the box itself is 13 px; Roon, DSP, ListenBrainz, people, Genres' publish) */
+html[data-shell="phone"] :is(label.check, .genre-pub) { min-height: 44px; }
 .steps { padding-left: 18px; margin: 4px 0 8px; }
 .roonfile { border-top: 1px solid var(--line); padding: 10px 0 4px; }
 .roonfile .name { font-weight: 600; overflow-wrap: anywhere; }
