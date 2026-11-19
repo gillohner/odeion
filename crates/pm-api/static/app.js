@@ -5311,8 +5311,9 @@
   // Leaving Search (Escape, or the box emptied): back to the page it was opened from, scrolled where it
   // was (Search's entry was pushed from there), else Home, as before: Search opened by a link or a
   // reload, from another search (a menu's Search “…”: Back would refill the box), with a menu open
-  // over it (Back would only close the menu), and the phone's Search tab. (one Back per Search entry:
-  // a second Escape before it lands goes nowhere)
+  // over it (Back would only close the menu), and Escape on the phone's Search tab. (one Back per Search
+  // entry: a second Escape before it lands goes nowhere) On a phone, emptying the box stays on the Search
+  // tab, on its empty page (as the tab opens), to type again: Home is another tab no one picked.
   let searchLeft = null;
   const leaveSearch = () => {
     if (state.view !== 'search') return;
@@ -5324,7 +5325,7 @@
   };
   const runSearch = async (how, savedScope) => {
     const q = search.value.trim();
-    if (!q) { leaveSearch(); return; }
+    if (!q) { if (shellMode() !== 'phone') leaveSearch(); else if (state.view === 'search' && state.viewArg && state.viewArg.q) setView('search'); return; }
     // A pasted link skips searching: its item page (by-uri, then resolve; "Reading this link…").
     if (isLink(q)) { setView('item', { kind: linkKind(q), id: idOf(q) }); return; }
     // A pasted Pubky key (with or without pubky:// or the pubky prefix) opens that person
