@@ -5351,9 +5351,10 @@
       return;
     }
     if (typing) return;
-    // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
+    // A clickable row (a div) is a button for the keyboard: Enter or Space opens it. (Space held with
+    // Alt, Ctrl or Cmd is the system's: the window menu, the input language, Spotlight)
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
-    if (row && e.target === row && (e.key === 'Enter' || e.code === 'Space')) { e.preventDefault(); row.click(); return; }
+    if (row && e.target === row && (e.key === 'Enter' || e.code === 'Space')) { if (e.code === 'Space' && (e.altKey || e.ctrlKey || e.metaKey)) return; e.preventDefault(); row.click(); return; }
     // A control reached with the keyboard (or focused by the page) owns Space: it presses it. The one
     // a click left focused doesn't (Space would press it again): Space plays or pauses there. Arrows
     // belong only to controls that move with them (tabs, menu items, sliders). Search, Help and Now
