@@ -2,6 +2,7 @@
 // the browser or the system and leave the music alone. Before, Alt+← and Alt+→ (the browser's Back
 // and Forward on Windows and Linux) also went to the previous or next song, so going back a page
 // changed the song; Alt+Space and Ctrl+Space played or paused, and Alt+N opened Now playing.
+// Alt+Space or Ctrl+Space on a button a click left focused doesn't press that button again either.
 // The plain keys still do their job, and / and ? still work when the keyboard needs AltGr for them.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-shortcut-modifiers.js [repo] [shots]
@@ -70,6 +71,25 @@ async function run(browser, width) {
     await page.keyboard.press('Space'); await sleep(300);
     check(await calls() > was, `${width}: Space still plays or pauses`);
   }
+
+  // A button a click left focused isn't pressed again by Alt+Space or Ctrl+Space (Shuffle would
+  // shuffle again, an armed "Really delete?" would delete), and the music stays as it was
+  await page.evaluate(() => {
+    const b = document.createElement('button'); b.id = 'press-count'; b.textContent = 'Count'; b.dataset.n = '0';
+    b.style.cssText = 'position:fixed;top:120px;left:300px;z-index:99999';
+    b.addEventListener('click', () => { b.dataset.n = String(+b.dataset.n + 1); });
+    document.body.append(b);
+  });
+  const presses = () => page.$eval('#press-count', (b) => +b.dataset.n);
+  await page.click('#press-count');
+  check(await presses() === 1 && await page.evaluate(() => document.activeElement.id === 'press-count'), `${width}: the clicked button is pressed once and keeps focus`);
+  for (const mod of ['Control', 'Alt']) {
+    const was = await calls(); const n = await presses();
+    await page.keyboard.press(`${mod}+Space`); await sleep(300);
+    check(await presses() === n && await calls() === was, `${width}: ${mod}+Space on the clicked button presses it again: ${await presses() - n}, plays or pauses: ${await calls() - was}`);
+  }
+  await page.evaluate(() => document.getElementById('press-count').remove());
+  await blank();
 
   // Alt+N doesn't open Now playing; N does, and N again closes it
   await page.keyboard.press('Alt+KeyN'); await sleep(300);

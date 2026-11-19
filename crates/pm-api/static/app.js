@@ -5364,8 +5364,12 @@
     // Space, the arrows and N are shortcuts on their own: held with Alt, Ctrl or Cmd they are the
     // browser's or the system's (Alt+← and Alt+→ are Back and Forward, Cmd+← too on a Mac), so they
     // play, pause and skip nothing. (/ and ? go by the character typed: some keyboards need AltGr
-    // or Option for them)
-    if ((e.altKey || e.ctrlKey || e.metaKey) && (e.code === 'Space' || e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key.toLowerCase() === 'n')) return;
+    // or Option for them). A control still left focused by a click doesn't take that Space as a
+    // press either (the browser would press it again on keyup)
+    if ((e.altKey || e.ctrlKey || e.metaKey) && (e.code === 'Space' || e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key.toLowerCase() === 'n')) {
+      if (e.code === 'Space' && onControl) e.preventDefault();
+      return;
+    }
     { const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' ? 'next' : e.key === 'ArrowLeft' ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
     // (the search field is under an open Now playing, out of reach there: it closes first)
     if (e.key === '/') { e.preventDefault(); if (!overlay.hidden) toggleNowPlaying(false); search.focus(); search.select(); return; }
