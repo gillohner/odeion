@@ -3,6 +3,9 @@
 // draws it in place under a placeholder of the row's height (nothing below moves): no reload of the
 // whole page, no other row asked again. A keyboard that pressed Try again is on the new Try again if
 // the row fails again, else on the row. A late See all answer for a window since left draws nothing.
+// A Pubky row's reason (the node's own words: a request URL, an HTTP body) is the line's tooltip,
+// not on screen: "Pubky did not answer." and Try again on one line, as the library's rows (a rate
+// limit: "Pubky is busy. Wait a minute.").
 // Phone (360, 412) and desktop (1280).
 // Real candidate assets, isolated responses: node tools/ui-home-retry.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -17,6 +20,10 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
 
 const BUSY = { status: 503, body: { error: 'busy' } };
 const HOME = { body: { recently_played: [{ id: 7, title: 'Journey', album_artist: 'Sefa', year: 2020 }], recently_added: [{ id: 7, title: 'Journey', album_artist: 'Sefa', year: 2020 }], forgotten: [] } };
+// (the node answers a Pubky row that failed with 200 and the Pinakes client's error)
+const WHY = 'transport: error sending request for url (https://pinakes.example.org/v1/search?kind=artist&sort=trending&window=7d&limit=12&collapse=group)';
+const REAL = { body: { section: 'trending-artists', items: [], tags: [], error: WHY } };
+const SLOW = { body: { section: 'following', items: [], tags: [], error: 'rate limited; retry after Some(30s)' } };
 const QUIET = { body: { section: 'trending-songs', items: [], tags: [], note: 'Nothing trending this week.' } };
 
 (async () => {
@@ -24,7 +31,7 @@ const QUIET = { body: { section: 'trending-songs', items: [], tags: [], note: 'N
   try {
     for (const [width, mobile] of [[360, true], [412, true], [1280, false]]) {
       const at = `${width}`;
-      const { context, page, state } = await fx.create(browser, width, { mobile, fixtures: { '/library/home': BUSY, '/home/trending-songs': BUSY, '/home/trending-albums': BUSY } });
+      const { context, page, state } = await fx.create(browser, width, { mobile, fixtures: { '/library/home': BUSY, '/home/trending-songs': BUSY, '/home/trending-albums': BUSY, '/home/trending-artists': REAL, '/home/following': SLOW } });
       const asked = (v) => state.hits.filter((h) => h.v === v && h.m === 'GET').length;
       const press = (loc) => (mobile ? loc.tap() : loc.click());
       const hold = new Set(); state.delay = (v) => (hold.has(v) ? 900 : 0);
@@ -36,6 +43,25 @@ const QUIET = { body: { section: 'trending-songs', items: [], tags: [], note: 'N
         check(tries === 2, `${at}: Recently played and Recently added say the library did not answer, each with Try again (${tries})`);
         await page.locator('#h-trending-songs [data-hretry]').waitFor().catch(() => {});
         check(await page.locator('#h-trending-songs [data-hretry]').isVisible(), `${at}: a Pubky row that did not answer has Try again`);
+        // One line each, the reason only as a tooltip (nothing technical on the main path)
+        await page.locator('#h-trending-artists [data-hretry]').waitFor().catch(() => {});
+        const line = (k) => page.evaluate((q) => {
+          const p = document.querySelector(`#h-${q} .hfail`); if (!p) return null;
+          const b = p.querySelector('[data-hretry]').getBoundingClientRect(); const r = p.getBoundingClientRect();
+          const t = p.querySelector('[title]');
+          return { text: p.innerText.replace(/\s+/g, ' ').trim(), why: (t || {}).title || '', lines: t ? t.getClientRects().length : 0, h: Math.round(r.height), bh: Math.round(b.height) };
+        }, k);
+        for (const k of ['trending-songs', 'trending-albums', 'trending-artists']) {
+          const l = await line(k);
+          check(l && l.text === 'Pubky did not answer. Try again', `${at}: ${k} says only "Pubky did not answer." with Try again (${l && l.text})`);
+          check(l && l.h <= l.bh + 1 && l.lines === 1, `${at}: …on one line with its Try again (${l && l.h} px for a ${l && l.bh} px button, ${l && l.lines} line)`);
+        }
+        await page.locator('#h-following [data-hretry]').waitFor().catch(() => {});
+        const busy = await line('following');
+        check(busy && busy.text === 'Pubky is busy. Wait a minute. Try again' && busy.why === SLOW.body.error && busy.lines === 1, `${at}: a rate-limited row says to wait a minute (${busy && busy.text})`);
+        const real = await line('trending-artists');
+        check(real && real.why === WHY, `${at}: the node's reason is the line's tooltip (${real && real.why.slice(0, 40)})`);
+        check(!(await page.locator('#main').innerText()).includes('http'), `${at}: no request URL on Home`);
         await page.screenshot({ path: path.join(SHOTS, `failed-${at}.png`) });
         await fx.cleanCopy(page);
         // (desktop presses with the keyboard, the phone taps)
