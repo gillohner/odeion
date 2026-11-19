@@ -6508,10 +6508,20 @@
   let plShown = null; // (the playlist whose rows were drawn last, its songs' uris in their order)
   const plHeld = (id) => plHolds.has(id);
   const plHoldShow = () => { $$('#plsongs, #pllocal').forEach((x) => { x.inert = true; }); if (selBar) $$('button', selBar).forEach((b) => { b.disabled = true; }); };
-  // (the control that had focus in the list, by its data attributes and its place among its likes:
-  // the list going inert takes the focus away, the new list gives it back)
+  // (the control that had focus in the list: the list going inert takes the focus away, the new
+  // list gives it back. In a song's row, to that song's row wherever the new list has it (its uri,
+  // or a local song's id, and which copy of it: a hold means the node may have another song at
+  // that place now, and a second Enter there would change that song), the same kind of control;
+  // nowhere if the song is gone. Elsewhere in the list, by its data attributes and its place
+  // among its likes)
+  const plKeysOf = (box) => (plShown && (box === 'pllocal' ? plShown.local : plShown.uris)) || [];
+  const plSongFocus = (box, keys, k, kind, alt) => (k >= 0 && k < keys.length ? { box, song: keys[k], copy: keys.slice(0, k).filter((u) => u === keys[k]).length, kind, alt } : null);
+  // (a song's × from the keyboard: the focus goes on to the song after it, else the one before)
+  const plNextFocus = (box, keys, k, kind) => { const rest = keys.filter((_, i) => i !== k); return plSongFocus(box, rest, k < rest.length ? k : k - 1, kind); };
   const plFocusOf = (a) => {
     const box = a && a.closest ? a.closest('#plsongs, #pllocal') : null; if (!box) return null;
+    const row = a.closest('[data-srow]');
+    if (row && box.contains(row)) { const f = plSongFocus(box.id, plKeysOf(box.id), Number(row.dataset.srow), a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => (x.value === row.dataset.srow ? `[${x.name}]` : `[${x.name}="${CSS.escape(x.value)}"]`)).join(''), a.dataset.pup != null ? 'button[data-pdown]' : a.dataset.pdown != null ? 'button[data-pup]' : undefined); if (f) return f; } // (Move up at the top: Move down)
     const sel = a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
     return { box: box.id, sel, i: $$(sel, box).indexOf(a) };
   };
@@ -8524,13 +8534,20 @@
           // uri and copy (never another song's by place), and the list is read once more, as for a
           // list moved under the rows on screen, so Remove and Move go by the places the node has)
           if (pf && !fitsList(pf) && !pfAfterRead && !pfReread) pf = undefined;
-          const pfReadAgain = !!pf && pfAfterRead && !fitsList(pf);
+          // (an answer naming none of the list's songs, as long as the list, after one before it did
+          // the same, is a node naming them otherwise, not a list moved: used by song with no read
+          // again and no hold, so a redraw from outside doesn't leave the list taking no presses for
+          // one more read. Seen first, it is held: another device may have put other songs in)
+          const namesNone = (x) => !!x && x.items.length === d.playlist.items.length && !x.items.some((r) => d.playlist.items.some((it) => it.uri === r.uri));
+          const otherNames = (x) => namesNone(x) && !!state.plPf && state.plPf.id === plId && state.plPf.data === x && namesNone(state.plPf.prev);
+          const pfOff = !!pf && pfAfterRead && !fitsList(pf);
+          const pfReadAgain = pfOff && !otherNames(pf);
           const pfPending = pf === undefined;
           // (the mark holds for the one read after it: an answer drawn otherwise loses it, so a list
           // moved again later asks for where its songs play again)
           // (reread: the list this answer was checked against, its songs' uris)
           const readUris = d.playlist.items.map((it) => it.uri);
-          if (!pfPending && state.plPf && state.plPf.id === plId) state.plPf.reread = pfReadAgain && state.plPf.data === pf ? readUris : null;
+          if (!pfPending && state.plPf && state.plPf.id === plId) state.plPf.reread = pfOff && state.plPf.data === pf ? readUris : null;
           // (and the rows of this read go by places the node no longer has: until the read after
           // it has drawn them they take no presses, × / Move / a pin / the bar's Remove, as under a
           // change's hold, plWrite; that read ends the hold, or its 15 s end in Try again)
@@ -8539,7 +8556,7 @@
           const focusWas = pfReadAgain ? plFocusOf(document.activeElement) : null;
           if (pfReadAgain) { const stale = drawStale; setTimeout(() => { if (!stale()) render(); }, 0); }
           // (a slow answer asked after the read that doesn't fit marks the next draw's read the same way)
-          if (pfPending) { pf = null; let pfDone = false; pfP.then((x) => { pfDone = true; const here = state.view === 'playlist' && state.viewArg === plId; if (pfAfterRead && x && !fitsList(x) && state.plPf && state.plPf.id === plId && state.plPf.data === x) { state.plPf.reread = readUris; if (here && plShown && plShown.id === plId && plShown.uris.join('\n') === readUris.join('\n')) holdForReread(plFocusOf(document.activeElement)); } if (here) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
+          if (pfPending) { pf = null; let pfDone = false; pfP.then((x) => { pfDone = true; const here = state.view === 'playlist' && state.viewArg === plId; if (pfAfterRead && x && !fitsList(x) && state.plPf && state.plPf.id === plId && state.plPf.data === x) { state.plPf.reread = readUris; if (here && !otherNames(x) && plShown && plShown.id === plId && plShown.uris.join('\n') === readUris.join('\n')) holdForReread(plFocusOf(document.activeElement)); } if (here) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
           state.itemTitle = d.summary.name;
           // Each song as it plays here: the library file, a service, or unavailable (play_from.rs).
           // (a song listed twice: its k-th copy takes the earlier answer's k-th copy, each place its own pin)
@@ -8577,6 +8594,7 @@
             if (was) return { no: k + 1, title: itemName({ title: was.title, site: was.site }), artist: was.artist, image: was.image, duration_ms: was.duration_ms, uri: was.stream_uri || null, pending: true, page: was.page || it.uri, id: idOf(it.uri) };
             return { no: k + 1, title: pfPending ? 'Loading…' : itemName({ title: null, site: null }), pending: pfPending, page: it.uri, id: idOf(it.uri) };
           });
+          const localKeys = (d.local_tracks || []).map((t) => String(t.id)); // (each local song's own id, plFocusOf)
           const localSongs = (d.local_tracks || []).map((t, k) => ({ no: k + 1, title: t.title, artist: artists(t), artists: t.artists, artist_id: t.artists && t.artists[0] && t.artists[0].id != null ? 'lib-' + t.artists[0].id : null, album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) }));
           const total = [...songs, ...localSongs].reduce((a, t) => a + (t.duration_ms || 0), 0);
           const songCount = songs.filter((t) => !t.card).length; const cardCount = songs.length - songCount;
@@ -8626,7 +8644,7 @@
           // Playlist rows can also be removed together (highest index first, so positions hold)
           enableSelect($('#plsongs'), songs, { keys: d.playlist.items.map((it) => it.uri), held: () => plHeld(plId), remove: (idx) => plWrite(plId, async (signal) => { try { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`, undefined, { signal }); toast(`Removed ${countOf(idx.length, 'songs')}`); } finally { state.plPf = null; } }) });
           if (localSongs.length) bindSongRows($('#pllocal'), localSongs, {});
-          $$('[data-lrm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); return plWrite(plId, (signal) => api('DELETE', `/playlists/${d.summary.id}/local/${b.dataset.lrm}`, undefined, { signal })); });
+          $$('[data-lrm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); return plWrite(plId, (signal) => api('DELETE', `/playlists/${d.summary.id}/local/${b.dataset.lrm}`, undefined, { signal }), document.activeElement === b ? plNextFocus('pllocal', localKeys, Number(b.dataset.lrm), 'button[data-lrm]') : null); });
           // Cards (web pages, posts) play nowhere: Play and Shuffle play the songs around them
           const playable = (list) => list.filter((t) => !t.unavailable && !t.card);
           // In this browser only a library song or a stream plays: a row with neither (a Spotify
@@ -8660,11 +8678,11 @@
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
             ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-rm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); return plWrite(plId, async (signal) => { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`, undefined, { signal }); state.plPf = null; }); });
+          $$('[data-rm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); return plWrite(plId, async (signal) => { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`, undefined, { signal }); state.plPf = null; }, document.activeElement === b ? plNextFocus('plsongs', d.playlist.items.map((it) => it.uri), Number(b.dataset.rm), 'button[data-rm]') : null); });
           // (pressed from the keyboard, the focus follows the song to its new place, so a second
           // press moves it on rather than moving the song that took its place back; not when the
           // focus went elsewhere while the move was saved; the list that ends the hold takes it there, heldFocus)
-          const pmove = (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); const from = document.activeElement; const had = from && from.matches('#plsongs [data-pup], #plsongs [data-pdown]') ? (j2 < i2 ? 'pup' : 'pdown') : null; const other = had === 'pup' ? 'pdown' : 'pup'; return plWrite(plId, async (signal) => { await api('PUT', `/playlists/${d.summary.id}`, { uris }, { signal }); state.plPf = null; }, had ? { box: 'plsongs', sel: `button[data-${had}="${j2}"]`, i: 0, alt: `button[data-${other}="${j2}"]` } : null); };
+          const pmove = (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); const from = document.activeElement; const had = from && from.matches('#plsongs [data-pup], #plsongs [data-pdown]') ? (j2 < i2 ? 'pup' : 'pdown') : null; const other = had === 'pup' ? 'pdown' : 'pup'; return plWrite(plId, async (signal) => { await api('PUT', `/playlists/${d.summary.id}`, { uris }, { signal }); state.plPf = null; }, had ? plSongFocus('plsongs', uris, j2, `button[data-${had}]`, `button[data-${other}]`) : null); };
           $$('[data-pup]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); pmove(Number(b.dataset.pup), Number(b.dataset.pup) - 1); });
           $$('[data-pdown]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); pmove(Number(b.dataset.pdown), Number(b.dataset.pdown) + 1); });
           // Source chip → every source this song has here, plus Auto; picking one pins it.
@@ -8691,9 +8709,19 @@
           const us = $('#plunshare'); if (us) us.onclick = () => setVis(false);
           const cl = $('#plcopylink'); if (cl) cl.onclick = async () => { const t = `pubky://${sharer.replace(/^pubky/, '')}/pub/social/v1/posts/${d.summary.id}`; try { await navigator.clipboard.writeText(t); toast('Link copied'); } catch { toast(t); } };
           $$('[data-pfilter]', main).forEach((b) => b.onclick = () => { state.plFilter = b.dataset.pfilter ? { id: plId, key: b.dataset.pfilter } : null; render(); });
-          state.drawnPage = 'playlist'; plShown = { id: plId, uris: d.playlist.items.map((it) => it.uri) }; if (place) place();
-          // (after the page's own place: focus they moved elsewhere meanwhile stays there)
-          if (heldFocus) { const now = document.activeElement; const box = !now || now === document.body || now === main ? $(`#${heldFocus.box}`, main) : null; let b = box ? $$(heldFocus.sel, box)[heldFocus.i] : null; if ((!b || b.disabled) && box && heldFocus.alt) b = $(heldFocus.alt, box); if (b && !b.disabled) b.focus({ preventScroll: true }); }
+          state.drawnPage = 'playlist'; plShown = { id: plId, uris: d.playlist.items.map((it) => it.uri), local: localKeys }; if (place) place();
+          // (after the page's own place: focus they moved elsewhere meanwhile stays there; a song's
+          // control goes to that song's row, plFocusOf)
+          if (heldFocus) {
+            const now = document.activeElement; const box = !now || now === document.body || now === main ? $(`#${heldFocus.box}`, main) : null; let b = null;
+            if (box && heldFocus.song != null) {
+              const keys = heldFocus.box === 'pllocal' ? localKeys : d.playlist.items.map((it) => it.uri); let j = -1;
+              for (let k = 0, c = 0; k < keys.length && j < 0; k++) if (keys[k] === heldFocus.song && c++ === heldFocus.copy) j = k;
+              const row = j < 0 ? null : $(`[data-srow="${j}"]`, box);
+              b = row && (row.matches(heldFocus.kind) ? row : $(heldFocus.kind, row)); if ((!b || b.disabled) && row && heldFocus.alt) b = $(heldFocus.alt, row);
+            } else if (box) { b = $$(heldFocus.sel, box)[heldFocus.i]; if ((!b || b.disabled) && heldFocus.alt) b = $(heldFocus.alt, box); }
+            if (b && !b.disabled) b.focus({ preventScroll: true });
+          }
           break;
         }
         case 'sources': {
