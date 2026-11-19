@@ -580,7 +580,7 @@ jobs:
   # files, no node, no build), split over five runners; every page is in exactly one of them.
   # The pages that take a minute or more have a fixed runner (`pin` below), so new pages added to
   # the list cannot shift them all onto one runner; the others go round robin. Each runner has
-  # about 16 minutes of pages, plus the Playwright install (usually under a minute).
+  # about 17 minutes of pages, plus the Playwright install (usually under a minute).
   ui-fixtures:
     name: ui-fixtures (${{ matrix.shard }}/5)
     needs: changes
@@ -613,11 +613,11 @@ jobs:
           # The pages that took a minute or more on CI, as page=runner, spread so each runner has about
           # the same total (runner 2 also runs the identify check, ~2 min); each must be in the list below
           pin='
-            ui-motion.js=1 ui-shuffle-repeat.js=1 ui-move-toast.js=1
-            ui-usb-dac.js=2 ui-native-player.js=2 ui-item-redraw.js=2 ui-phone-libnav-focus.js=2
-            ui-similar-tiles.js=3 ui-phone-action-rows.js=3 ui-select-bar-focus.js=3 ui-browser-keys.js=3
-            ui-review-fixes.js=4 ui-phone-item-hero-row.js=4 ui-sticky-focus.js=4 ui-browser-place.js=4
-            ui-phone-simplify.js=5 ui-library-count-redraw.js=5 ui-empty-queue.js=5 ui-browser-midsong.js=5
+            ui-usb-dac.js=1 ui-row-click.js=1 ui-sticky-focus.js=1 ui-phone-libnav-focus.js=1
+            ui-library-count-redraw.js=2 ui-phone-action-rows.js=2 ui-item-redraw.js=2 ui-browser-keys.js=2
+            ui-motion.js=3 ui-empty-queue.js=3 ui-browser-place.js=3 ui-browser-midsong.js=3
+            ui-similar-tiles.js=4 ui-phone-simplify.js=4 ui-shuffle-repeat.js=4 ui-srow-click.js=4
+            ui-review-fixes.js=5 ui-native-player.js=5 ui-select-bar-focus.js=5 ui-move-toast.js=5
           '
           pin=" $(echo $pin) "
           n=0
