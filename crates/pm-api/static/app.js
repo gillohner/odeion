@@ -2902,16 +2902,16 @@
   // the app's player paused (its USB DAC went away), as the bar does (it was drawn again only when
   // a node's zone changed). (One redraw for a burst: a song's end and the next one's start.)
   let hereCardT = null;
-  // (a card's Play, Next or Previous that had the focus has it again in the new drawing)
+  // (a card's Play, Next, Previous or Mute that had the focus has it again in the new drawing)
   const hereCardAgain = () => {
     clearTimeout(hereCardT);
     hereCardT = setTimeout(async () => {
       if (state.view !== 'zones') return;
-      const a = document.activeElement; const card = a && a.dataset && a.dataset.zt && a.closest('#main [data-zcard]');
-      const was = card ? [card.dataset.zcard, a.dataset.zt] : null;
+      const a = document.activeElement; const card = a && a.dataset && (a.dataset.zt || a.dataset.volmute != null) && a.closest('#main [data-zcard]');
+      const was = card ? [card.dataset.zcard, a.dataset.zt ? `[data-zt="${a.dataset.zt}"]` : '[data-volmute]'] : null;
       await render();
       const now = document.activeElement;
-      if (was && state.view === 'zones' && (!now || now === document.body)) { const b = $$('#main [data-zcard]').find((c) => c.dataset.zcard === was[0]); const t = b && $(`[data-zt="${was[1]}"]`, b); if (t) t.focus(); }
+      if (was && state.view === 'zones' && (!now || now === document.body)) { const b = $$('#main [data-zcard]').find((c) => c.dataset.zcard === was[0]); const t = b && $(was[1], b); if (t) t.focus(); }
     }, 150);
   };
   audio.addEventListener('play', () => { renderBar(); hereCardAgain(); });
@@ -9799,7 +9799,7 @@
           });
           const phone = shellMode() === 'phone';
           main.innerHTML = pageHead('Zones', cards.length, `<button class="btn iconic" id="zgroup" aria-label="Group outputs">${icon('plus')}<span class="btn-label">Group outputs…</span></button>`) + `<div class="cards">${cards.map(({ z, ways }) => {
-            const np = z.now_playing; const it = np && np.item; const caps = capsOf(z); const hv = caps && caps.hw_volume && caps.hw_volume.kind === 'db' ? caps.hw_volume : null;
+            const np = z.now_playing; const it = np && np.item; const caps = capsOf(z); const zv = zoneVolume(z); const hv = caps && caps.hw_volume && caps.hw_volume.kind === 'db' ? caps.hw_volume : null;
             const members = np && np.members && np.members.length ? `<span class="pill">${np.members.length} outputs</span>` : '';
             const title = ways ? esc(familyName(z)) : named(z);
             // (a stopped zone gets no state pill: its "Nothing playing" or its Play button says so)
@@ -9819,7 +9819,7 @@
                 <button class="icon-btn" data-zt="previous" data-repeat title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
                 <button class="icon-btn" data-zt="next" data-repeat title="Next">${icon('next')}</button>
-                ${zoneVolume(z) ? `<input type="range" data-zvol="${esc(z.id)}" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span>` : `<span class="${phone ? 'sr-only' : 'muted small'}">Volume: set on the device</span>`}
+                ${zv ? `<div class="zc-vol"><button class="icon-btn zc-mute" data-volmute="${esc(z.id)}" aria-pressed="${!!zv.muted}" title="${zv.muted ? 'Unmute' : 'Mute'}" aria-label="Mute ${esc(z.name)}">${icon('volume')}</button><input type="range" data-zvol="${esc(z.id)}" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : `<span class="${phone ? 'sr-only' : 'muted small'}">Volume: set on the device</span>`}
                 ${phone ? '' : pick}
                 ${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''}
               </div></div>`;
@@ -9833,7 +9833,8 @@
           $$('[data-zcard]', main).forEach((card) => {
             const zid = card.dataset.zcard;
             $$('[data-zt]', card).forEach((b) => b.onclick = () => zoneTransport(zid, b.dataset.zt));
-            const v = $('[data-zvol]', card); if (v) { const zoneOf = () => (zid === BROWSER ? browserState() : state.zones[zid]); applyVol(v, zoneVolume(zoneOf())); bindVolSlider(v, zoneOf); syncVolumeSliders(zoneOf()); }
+            // (its volume as in the bar's volume popover: Mute, the slider, the level)
+            const v = $('[data-zvol]', card); if (v) { const zoneOf = () => (zid === BROWSER ? browserState() : state.zones[zid]); applyVol(v, zoneVolume(zoneOf())); bindVolSlider(v, zoneOf); syncVolumeSliders(zoneOf()); const mb = $('[data-volmute]', card); if (mb) mb.onclick = () => setZoneMute(zoneOf(), mb.getAttribute('aria-pressed') !== 'true'); }
           });
           $$('[data-zsel]', main).forEach((b) => b.onclick = () => { state.zone = b.dataset.zsel; localStorage.setItem('pm.zone', state.zone); renderZoneName(); renderBar(); refreshQueue(); render(); });
           $$('[data-zone-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(b.dataset.zoneDel)}`); toast('Group removed'); if (state.zone === b.dataset.zoneDel) { ensureZone(); renderZoneName(); } render(); } catch (e) { toast(e.message, 'error'); } });

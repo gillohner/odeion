@@ -687,6 +687,7 @@ jobs:
           ui-zones-quiet.js zones-quiet-shots
           ui-zone-paused-error.js zone-paused-error-shots
           ui-zone-state-words.js zone-state-words-shots
+          ui-zone-card-mute.js zone-card-mute-shots
           ui-playto-follows.js playto-follows-shots
           ui-wrong-match.js wrong-match-shots
           ui-libstatus-wrap.js libstatus-wrap-shots
