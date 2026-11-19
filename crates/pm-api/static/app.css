@@ -750,8 +750,13 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
   .np-big .np-prev { display: none; }
 }
 
-.card.genre { border: 1px solid var(--line); color: var(--fg); font: inherit; transition: transform var(--dur-base) var(--ease), border-color var(--dur-base) var(--ease); }
+/* A genre's card is tinted by its name: dark in the dark theme, pale in the light one, so its name
+   and its "N albums · N songs" (fg-2, not muted: muted is under 4.5:1 on some tints) read on it */
+.card.genre { --genre-tint: 32% 22%; text-align: left; cursor: pointer; background: linear-gradient(135deg, hsl(var(--h, 250) var(--genre-tint)), var(--surface)); border: 1px solid var(--line); color: var(--fg); font: inherit; transition: transform var(--dur-base) var(--ease), border-color var(--dur-base) var(--ease); }
 .card.genre:hover { transform: translateY(-2px); border-color: var(--line-strong); }
+.card.genre .muted { color: var(--fg-2); }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .card.genre { --genre-tint: 45% 88%; } }
+:root[data-theme="light"] .card.genre { --genre-tint: 45% 88%; }
 
 /* ---- queue ---- */
 .list.queue .list-row { padding: 6px 10px 6px 6px; }
