@@ -7,6 +7,8 @@
 //     job's chip or Leave; none is dead (only the along chip's words, which do nothing, may take
 //     their own column) (the bar's 12 px left edge, the 6 px above and below the song and the gap
 //     before Play did nothing);
+//   * no point over the along chip's words goes to the song, the job's chip or Leave (a reach
+//     spread into the chip's padding), also with larger text;
 //   * which one is the nearer in its column: the song up to half the gap after its text, Play from
 //     there on (it reached 6 px into an 8 px gap, taking taps closer to the song), the chip sharing
 //     each 4 px gap half and half; the gaps beside the along chip go to the control beside them;
@@ -71,17 +73,21 @@ const measure = (page) => page.evaluate(() => {
   let words = null; if (shown(al)) { drawn.leave = r(lv); words = { left: al.getBoundingClientRect().left, right: lv.getBoundingClientRect().left }; }
   const who = (x, y) => { const h = document.elementFromPoint(x, y); return !h ? 'nothing' : tg.contains(h) ? 'toggle' : np.contains(h) ? 'np' : job.contains(h) ? 'job' : lv.contains(h) ? 'leave' : al.contains(h) ? 'along' : h === bar || bar.contains(h) ? 'bar' : h.tagName.toLowerCase(); };
   const near = (x) => { const d = Object.entries(drawn).map(([k, v]) => [k, x < v.left ? v.left - x : x > v.right ? x - v.right : 0]); const m = Math.min(...d.map((e) => e[1])); return { m, d: Object.fromEntries(d) }; };
-  const dead = []; const far = []; const top = b.top + bar.clientTop;
+  const dead = []; const far = []; const spill = []; const top = b.top + bar.clientTop;
   for (let y = Math.ceil(top); y < b.bottom; y += 1) {
     for (let x = 0; x < innerWidth; x += 1) {
       const h = who(x, y);
-      if (!(h in drawn)) { if (!(words && x >= words.left && x < words.right && (h === 'along' || h === 'bar')) && dead.length < 6) dead.push(`${x},${y}:${h}`); continue; }
+      const inWords = words && x >= words.left && x < words.right;
+      // (a point over the words going to the song, the job's chip or Leave: a reach spread into the
+      // chip; the column Leave's edge snaps into is left out)
+      if (inWords && (h === 'np' || h === 'job' || h === 'leave') && x + 1 <= Math.floor(words.right) && spill.length < 6) spill.push(`${x},${y}:${h}`);
+      if (!(h in drawn)) { if (!(inWords && (h === 'along' || h === 'bar')) && dead.length < 6) dead.push(`${x},${y}:${h}`); continue; }
       const n = near(x); if (n.d[h] > n.m + 1 && far.length < 6) far.push(`${x},${y}:${h}(${n.d[h]} vs ${n.m})`);
     }
   }
   const run = (k, x0, y0, dx, dy) => { let n = 0; for (let x = x0, y = y0; x >= 0 && x < innerWidth && y >= top && y < b.bottom; x += dx, y += dy) if (who(x, y) === k) n++; return n; };
   const span = (k) => { const v = drawn[k]; const cx = (v.left + v.right) / 2; const cy = (v.top + v.bottom) / 2; let w = 0; let h = 0; for (let x = 0; x < innerWidth; x++) if (who(x, cy) === k) w++; for (let y = Math.ceil(top); y < b.bottom; y++) if (who(cx, y) === k) h++; return { w, h }; };
-  return { bar: { top, bottom: b.bottom, h: b.bottom - top }, drawn, art, dead, far, tgSpan: span('toggle'), jobSpan: drawn.job ? span('job') : null, leaveSpan: drawn.leave ? span('leave') : null, listener: document.body.classList.contains('listener'), inner: innerWidth, coarse: matchMedia('(pointer: coarse)').matches, run: run('np', 0, (b.top + b.bottom) / 2, 1, 0) };
+  return { bar: { top, bottom: b.bottom, h: b.bottom - top }, drawn, art, dead, far, spill, words, tgSpan: span('toggle'), jobSpan: drawn.job ? span('job') : null, leaveSpan: drawn.leave ? span('leave') : null, listener: document.body.classList.contains('listener'), inner: innerWidth, coarse: matchMedia('(pointer: coarse)').matches, run: run('np', 0, (b.top + b.bottom) / 2, 1, 0) };
 });
 
 (async () => {
@@ -104,6 +110,7 @@ const measure = (page) => page.evaluate(() => {
         check(m.coarse, `${where}: a coarse pointer`);
         check(m.dead.length === 0, `${where}: no point of the bar is dead (${m.dead.join(' ') || 'none'})`);
         check(m.far.length === 0, `${where}: each point goes to the nearer control in its column (${m.far.join(' ') || 'all'})`);
+        if (withAlong) check(m.spill.length === 0, `${where}: no point on the along chip's words (x ${Math.round(m.words.left)}-${Math.round(m.words.right)}) goes to the song, the job's chip or Leave (${m.spill.join(' ') || 'none'})`);
         check(m.tgSpan.w >= 44 && m.tgSpan.h >= 44 && m.tgSpan.h >= m.bar.h - 1, `${where}: Play takes ${m.tgSpan.w} x ${m.tgSpan.h} px (>= 44, the bar's height ${Math.round(m.bar.h)})`);
         if (withJob) check(m.jobSpan.h >= m.bar.h - 1 && m.jobSpan.w >= m.drawn.job.w + 3, `${where}: the chip (${Math.round(m.drawn.job.w)} x ${Math.round(m.drawn.job.h)} drawn) takes ${m.jobSpan.w} x ${m.jobSpan.h} px`);
         if (withAlong) check(m.leaveSpan.h >= m.bar.h - 1 && m.leaveSpan.w >= m.drawn.leave.w + 4, `${where}: Leave (${Math.round(m.drawn.leave.w)} x ${Math.round(m.drawn.leave.h)} drawn) takes ${m.leaveSpan.w} x ${m.leaveSpan.h} px`);
@@ -114,7 +121,7 @@ const measure = (page) => page.evaluate(() => {
         // Larger text (as Android's font size makes it): the bar grows, Play and the chip still take its whole height
         await page.addStyleTag({ content: ':root { --fs-md: 22px; --fs-xs: 18px; --fs-sm: 19px; }' }); await sleep(100);
         const big = await measure(page);
-        check(big.bar.h > m.bar.h + 4 && big.dead.length === 0 && big.tgSpan.h >= big.bar.h - 1 && (!withJob || big.jobSpan.h >= big.bar.h - 1) && (!withAlong || big.leaveSpan.h >= big.bar.h - 1), `${where}, larger text: the bar is ${Math.round(big.bar.h)} px, no point dead (${big.dead.join(' ') || 'none'}), Play takes ${big.tgSpan.h} px${withJob ? `, the chip ${big.jobSpan.h} px` : ''}${withAlong ? `, Leave ${big.leaveSpan.h} px` : ''} of its height`);
+        check(big.bar.h > m.bar.h + 4 && big.dead.length === 0 && big.spill.length === 0 && big.tgSpan.h >= big.bar.h - 1 && (!withJob || big.jobSpan.h >= big.bar.h - 1) && (!withAlong || big.leaveSpan.h >= big.bar.h - 1), `${where}, larger text: the bar is ${Math.round(big.bar.h)} px, no point dead (${big.dead.join(' ') || 'none'}) or over the along chip's words taken (${big.spill.join(' ') || 'none'}), Play takes ${big.tgSpan.h} px${withJob ? `, the chip ${big.jobSpan.h} px` : ''}${withAlong ? `, Leave ${big.leaveSpan.h} px` : ''} of its height`);
         await page.evaluate(() => document.querySelectorAll('style').forEach((e) => { if (/--fs-md: 22px/.test(e.textContent)) e.remove(); }));
         if (withAlong) {
           // Real taps: just past the song (no job's chip there) opens Now playing; just after the
