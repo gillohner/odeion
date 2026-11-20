@@ -3,6 +3,9 @@
 // another zone while the song is on its way: before, the zone switched to got the radio and the one
 // now playing the song had none, without a word. Now the first zone's radio goes on and the toast
 // names it. Without a switch: that zone, and the same "Radio from “…”" toast as a Songs row.
+// The song refused by the zone (its queue answers an error), from either menu: no radio goes on and
+// no "Radio from …: similar music follows" shows, only the error. Before, both menus turned the radio
+// on and said similar music follows a song that never started.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-item-radio-zone.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -26,8 +29,9 @@ const fixtures = {
   '/outputs': { body: [{ id: 'upnp:z1', name: 'Kitchen', kind: 'upnp', caps: {} }, { id: 'upnp:z2', name: 'Living room', kind: 'upnp', caps: {} }] },
 };
 
-async function run(browser, width, switchZone) {
-  const { context, page, state } = await fx.create(browser, width, { fixtures, zone: 'z1' });
+async function run(browser, width, switchZone, failFrom) {
+  // (a matched song: a Songs row's ⋯ offers Start radio for those only)
+  const { context, page, state } = await fx.create(browser, width, { fixtures, zone: 'z1', tracks: [{ ...fx.track, canonical: { kind: 'recording', mbid: fx.track.mbid } }] });
   await context.routeWebSocket(/\/v1\/events/, (w) => { w.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') w.send(JSON.stringify({ type: 'pong', id: j.id })); }); w.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [z1, z2] })); });
   let go = null; const hold = { wait: new Promise((r) => { go = r; }) };
   await context.route(/\/v1\/zones\/z[12]\/(queue|radio|play|transport)$/, async (r) => {
@@ -36,9 +40,11 @@ async function run(browser, width, switchZone) {
     const v = new URL(q.url()).pathname.slice(3);
     state.hits.push({ v, m: q.method(), q: '', body: q.postData(), at: Date.now() });
     if (switchZone && q.method() === 'POST' && v === '/zones/z1/queue') await hold.wait;
+    if (failFrom && q.method() === 'POST' && v === '/zones/z1/queue') return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'the speaker refused the song' }) }).catch(() => {});
     return r.fulfill({ status: 200, contentType: 'application/json', body: '{}' }).catch(() => {});
   });
   const tag = `${width}${switchZone ? ', switched' : ''}`;
+  if (failFrom) return failCase(page, state, context, width, failFrom);
   await fx.go(page, '/album/lib-7');
   await page.waitForSelector('#isongs [data-smore="0"]');
   await page.waitForFunction(() => /Kitchen/.test((document.querySelector('#zonename, #zonebtn') || {}).textContent || ''));
@@ -69,9 +75,39 @@ async function run(browser, width, switchZone) {
   await context.close();
 }
 
+// The play refused: Start radio from a Songs row (trackMenu) or an album page's song row (itemMenu)
+async function failCase(page, state, context, width, from) {
+  const tag = `${width}, ${from}, play refused`;
+  if (from === 'songs') {
+    await fx.go(page, '/tracks');
+    await page.waitForSelector('#tracklist .track');
+    await page.locator('#tracklist .track').first().hover();
+    await page.click('#tracklist .track:first-child [data-act="more"]', { force: true });
+  } else {
+    await fx.go(page, '/album/lib-7');
+    await page.waitForSelector('#isongs [data-smore="0"]');
+    await page.click('#isongs [data-smore="0"]', { force: true });
+  }
+  await page.waitForFunction(() => /Kitchen/.test((document.querySelector('#zonename, #zonebtn') || {}).textContent || ''));
+  await page.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+  const n = state.hits.length;
+  const sent = () => state.hits.slice(n).filter((h) => h.m !== 'GET').map((h) => `${h.m} ${h.v}`);
+  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Start radio' }).click();
+  await page.getByText('the speaker refused the song').first().waitFor({ timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(400); // (time for a radio PUT that should not come)
+  const toasts = await page.$$eval('.toast, #toasts *', (els) => [...new Set(els.map((e) => e.textContent.trim()).filter(Boolean))]);
+  check(sent()[0] === 'POST /zones/z1/queue', `${tag}: Start radio sends the song to the Kitchen (${sent().join(', ')})`);
+  check(!sent().some((s) => /\/radio$/.test(s)), `${tag}: no radio goes on (${sent().join(', ')})`);
+  check(!toasts.some((t) => /similar music follows/.test(t)), `${tag}: no "similar music follows" (${toasts.join(' | ')})`);
+  check(toasts.some((t) => /the speaker refused the song/.test(t)), `${tag}: the error shows (${toasts.join(' | ')})`);
+  await page.screenshot({ path: path.join(SHOTS, `after-item-radio-${width}-${from}-refused.png`) });
+  check(state.errors.length === 0, `${tag}: no page errors ${state.errors.join('; ')}`);
+  await context.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
-  try { for (const w of [1280, 1024, 768]) { await run(browser, w, false); await run(browser, w, true); } } finally { await browser.close(); }
+  try { for (const w of [1280, 1024, 768]) { await run(browser, w, false); await run(browser, w, true); await run(browser, w, false, 'songs'); await run(browser, w, false, 'album'); } } finally { await browser.close(); }
   console.log(`${ok} ok, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
