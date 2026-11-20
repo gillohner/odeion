@@ -700,6 +700,7 @@ jobs:
           ui-add-music-ask.js add-music-ask-shots
           ui-phone-library-nav.js phone-library-nav-shots
           ui-phone-action-rows.js phone-action-rows-shots
+          ui-phone-queue-rows.js phone-queue-rows-shots
           ui-phone-item-hero-row.js phone-item-hero-row-shots
           ui-phone-home-trending.js phone-home-trending-shots
           ui-search-scopes.js search-scopes-shots

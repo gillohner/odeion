@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-20
+
+- **The Queue shows more songs on a phone.** A song's artist and album line wrapped onto two or three more lines when it was long, so a phone showed only a few songs at a time. It now stays on one line and ends in "…", as on Songs, so each song takes two lines and about half as many again fit on the screen. Titles have a little more room too, and the drag handle, Play and ⋯ are still full-size taps.
+
 ### 2026-11-19
 
 - **Mute any zone from its card on Zones.** A zone card's volume was just a slider with no speaker, so it looked like a seek bar, and in a wide window there was no Mute anywhere (the player bar shows a slider there, not the volume button with Mute). Each card with a volume now has the same Mute button as the volume popover, just before its slider: one click mutes that zone without choosing it, and a second unmutes it. Phones are unchanged.
