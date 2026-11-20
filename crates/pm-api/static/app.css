@@ -838,12 +838,23 @@ html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
    the stars with Add notes (the wider stars leave it no room beside them at 360 px); with no rating
    it takes no room, so Add notes starts at the left edge as before. The row under the stars is
    8 px down: a touch screen's small button reaches 8 px past its box (pointer: coarse, below), so
-   Add notes' reach ends where the stars do and never takes a press on a star. Desktop unchanged. */
+   Add notes' reach ends where the stars do and never takes a press on a star. Desktop unchanged.
+   Add notes (with "N of 5" before it once rated) always starts the line under the stars, so a first
+   rating never moves it down and its reach never touches Play on or More above: an empty line break
+   (::after, ordered after the stars) ends the stars' line, and the line under it is pulled up by the
+   8 px that break's own gap adds (the notes editor too, when it opens there with no rating). Below 340 px the stars are 40 px wide (still 44 px tall), so all
+   five stay on one line with "My rating". The half stars are square: no dead corners between two. */
 html[data-shell="phone"] .reviewrow { margin-top: 3px; row-gap: 8px; }
+html[data-shell="phone"] .reviewrow::after { content: ''; flex-basis: 100%; height: 0; order: 1; }
+html[data-shell="phone"] .reviewrow > :not(.eyebrow, .stars) { order: 2; }
+html[data-shell="phone"] .reviewrow > :is(.ratingval, #notesbtn) { margin-top: -8px; }
+html[data-shell="phone"] .reviewrow > .ratingval:empty ~ #notesbtn[hidden] ~ #notesedit { margin-top: -8px; }
+html[data-shell="phone"] .reviewrow .star .half { border-radius: 0; }
 html[data-shell="phone"] .reviewrow .ratingval { min-width: 0; }
 html[data-shell="phone"] .reviewrow .ratingval:empty { display: none; }
 html[data-shell="phone"] .reviewrow .stars { gap: 0; }
 html[data-shell="phone"] .reviewrow .star { width: 44px; height: 44px; line-height: 44px; }
+@media (max-width: 339.98px) { html[data-shell="phone"] .reviewrow .star { width: 40px; } }
 html[data-shell="phone"] .reviewrow :is(#notesbtn, #notessave, #notescancel) { min-height: 44px; }
 .ratingval { color: var(--muted); font-size: var(--fs-sm); margin-right: 8px; min-width: 4.5em; }
 .notes { flex-basis: 100%; color: var(--fg-2); white-space: pre-wrap; max-width: 560px; overflow-wrap: anywhere; }
@@ -1156,9 +1167,10 @@ html[data-shell="phone"] .about-top .blurb.clamp { -webkit-line-clamp: 2; }
 html[data-shell="phone"] #iblurbmore { position: relative; }
 html[data-shell="phone"] #iblurbmore::before { content: ''; position: absolute; inset: -12px -8px; }
 /* Wikipedia beside it is a 44 px tap the same way: 14 px up and down into the text around it (nothing
-   to tap there), 8 px to the right and 3 px to the left, stopping 1 px short of More's reach */
+   to tap there), 8 px after it and 3 px before it (on More's side, in either writing direction),
+   stopping 1 px short of More's reach */
 html[data-shell="phone"] .wikilink { position: relative; }
-html[data-shell="phone"] .wikilink::before { content: ''; position: absolute; inset: -14px -8px -14px -3px; }
+html[data-shell="phone"] .wikilink::before { content: ''; position: absolute; inset-block: -14px; inset-inline-start: -3px; inset-inline-end: -8px; }
 .credit a { color: inherit; text-decoration: underline; }
 /* "Also on" next to Play/Shuffle: one icon per service */
 .also-icons { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-left: 4px; }
