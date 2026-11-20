@@ -202,9 +202,21 @@ async function run(browser, width) {
   // Queue's rows still drawn): no menu opens over it. Before, the late answer opened the Queue song's
   // menu over the page being opened.
   {
+    // (the ⋯'s answer is held in the page and let go in the same step as the click on Sources, so
+    // it is handled within the page's 120 ms loading placeholder however slow the runner: an answer
+    // sent from here could come after it, and the case would then fail on a correct app)
+    await page.addInitScript(() => {
+      const f = window.fetch;
+      window.fetch = function (u, o) {
+        const held = window.versionsHeld;
+        if (!held || !/\/library\/tracks\/2\/versions/.test(String((u && u.url) || u))) return f.call(this, u, o);
+        window.versionsHeld = null;
+        return held.then(() => new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } }));
+      };
+    });
     await fx.go(page, '/queue');
     await page.locator('.list.queue .list-row').nth(1).waitFor();
-    let go; hold = { wait: new Promise((r) => { go = r; }) };
+    await page.evaluate(() => { window.versionsHeld = new Promise((r) => { window.releaseVersions = r; }); });
     // (Sources waits for its list before it draws: the Queue's rows stay until the page's 120 ms
     // loading placeholder)
     let goSources; const sourcesHeld = new Promise((r) => { goSources = r; });
@@ -218,8 +230,9 @@ async function run(browser, width) {
     const more = await qmore(page, 1).elementHandle();
     check(await more.getAttribute('aria-busy') === 'true', `${width}: the ⋯ shows its progress while it reads`);
     await more.evaluate((b) => { window.qmoreSettled = null; new MutationObserver((_, o) => { if (b.getAttribute('aria-busy') !== 'true') { window.qmoreSettled = b.isConnected; o.disconnect(); } }).observe(b, { attributes: true, attributeFilter: ['aria-busy'] }); });
-    await page.evaluate(() => document.querySelector('.nav-item[data-view="sources"]').click());
-    go(); hold = null;
+    // (the ⋯'s reads before it, sent from here, all in: the held one is the last it waits for)
+    await page.waitForFunction(() => window.versionsHeld === null, null, { timeout: 5000 });
+    await page.evaluate(() => { document.querySelector('.nav-item[data-view="sources"]').click(); window.releaseVersions(); });
     await page.waitForFunction(() => window.qmoreSettled !== null, null, { timeout: 3000 }).catch(() => {});
     check(await page.evaluate(() => window.qmoreSettled) === true, `${width}: the ⋯'s answer is handled while the Queue's rows are still in the page (${await page.evaluate(() => window.qmoreSettled)})`);
     await page.waitForTimeout(1800);

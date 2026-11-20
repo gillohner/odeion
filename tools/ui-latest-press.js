@@ -4,7 +4,9 @@
 // row's Play (before, it spun again, as if pressed a second time, and stayed spinning).
 // A picker the Play opens to finish it (a song not on your services: its 30 s preview, played in
 // this browser) keeps that press: the pick, made after 1.5 s, spins the Play pressed (before, the
-// pick's own click took the press away and nothing spun). The phone width too.
+// pick's own click took the press away and nothing spun). But only that Play's press, and only
+// with no newer one since: Space while the picker is open, or another Play pressed while the
+// first one's answer was still coming, leaves no Play spinning for the pick. The phone width too.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-latest-press.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -87,38 +89,71 @@ async function run(browser, width, how) {
   } finally { await context.close(); }
 }
 
-// A favourite from another service (none of yours has it): its Play opens "Not on your services"
-// with a 30 s preview, played in this browser
+// Favourites from another service (none of yours has them): a Play opens "Not on your services"
+// with a 30 s preview, played in this browser. `how`:
+//   'late':  picked after the 1.5 s a press lasts: the pick is the Play's press going on
+//   'space': Space pressed while the picker is open, then the pick: Space was the newer press, so
+//            no Play spins (before, the Play that opened the picker spun again)
+//   'other': B's Play pressed while A's answer is still coming, then A's picker opens and is picked:
+//            B's press is not A's picker's, so B doesn't spin (before, B spun for A's preview)
 const ELSE = 'https://sefa.bandcamp.com/track/elsewhere';
-async function picker(browser, width) {
-  const tag = `${width} picker`;
+const ELSE2 = 'https://sefa.bandcamp.com/track/elsewhere-too';
+async function picker(browser, width, how) {
+  const tag = `${width} picker ${how}`;
   const { context, page, state } = await fx.create(browser, width, { fixtures: {
-    '/favourites': { body: { uris: [ELSE], tracks: [], albums: [], artists: [], other: [ELSE] } },
-    '/discover/describe': { body: [{ uri: ELSE, page: ELSE, title: 'Elsewhere', artist: 'Sefa', kind: 'track', site: 'bandcamp', also_on: [], connect: [] }] },
-    '/discover/play': { body: { plays_from: null, items: [], connect: [], preview: { service: 'deezer', id: 'track:123' } } },
+    '/favourites': { body: { uris: [ELSE, ELSE2], tracks: [], albums: [], artists: [], other: [ELSE, ELSE2] } },
+    '/discover/describe': { body: [ELSE, ELSE2].map((u, i) => ({ uri: u, page: u, title: i ? 'Elsewhere too' : 'Elsewhere', artist: 'Sefa', kind: 'track', site: 'bandcamp', also_on: [], connect: [] })) },
   } });
+  // (A's answer, held in the page until the test lets it go; B's never comes)
+  const plan = { plays_from: null, items: [], connect: [], preview: { service: 'deezer', id: 'track:123' } };
+  await page.addInitScript(({ plan, hold }) => {
+    const f = window.fetch;
+    window.__release = () => {};
+    window.fetch = function (u, o) {
+      const url = String(u && u.url || u);
+      if (!/\/discover\/play\?/.test(url)) return f.call(this, u, o);
+      const answer = () => new Response(JSON.stringify(plan), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (!hold) return Promise.resolve(answer());
+      if (/elsewhere-too/.test(decodeURIComponent(url))) return new Promise(() => {});
+      return new Promise((res) => { window.__release = () => res(answer()); });
+    };
+  }, { plan, hold: how === 'other' });
   await logSpins(page);
   try {
     await fx.go(page, '/favourites');
-    const play = page.locator('#favother .list-row [data-dplay]').first();
-    await play.waitFor();
+    const plays = page.locator('#favother .list-row [data-dplay]');
+    await plays.nth(1).waitFor();
     await page.waitForTimeout(300);
-    await play.click();
     const menu = page.locator('.popover.menu:not([hidden])');
+    if (how === 'other') {
+      await plays.nth(0).click(); // (A: its answer is held)
+      await page.waitForTimeout(100);
+      await plays.nth(1).click(); // (B, pressed while A's answer is still coming)
+      await page.waitForTimeout(100);
+      await page.evaluate(() => window.__release());
+    } else await plays.nth(0).click();
     await menu.waitFor();
     check(/Not on your services/.test(await menu.textContent()), `${tag}: the Play opens "Not on your services"`);
     check((await page.evaluate(() => window.__spins.length)) === 0, `${tag}: nothing spins while the picker is open`);
-    // (picked after the 1.5 s a press lasts: the pick is the press going on, not the Play's old one)
-    await page.waitForTimeout(1700);
+    if (how === 'late') await page.waitForTimeout(1700);
+    if (how === 'space') {
+      // (off the Play the click left focused: Space is the zone's play or pause, a press of its own)
+      await page.evaluate(() => document.activeElement && document.activeElement.blur());
+      await page.keyboard.press('Space');
+      await page.waitForTimeout(100);
+      check(await menu.isVisible(), `${tag}: the picker is still open after Space`);
+    }
     const n = state.hits.length;
     await menu.locator('.pop-item', { hasText: '30 s preview' }).click();
-    await page.waitForFunction(() => window.__spins.length > 0, null, { timeout: 2000 }).catch(() => {});
+    if (how === 'late') await page.waitForFunction(() => window.__spins.length > 0, null, { timeout: 2000 }).catch(() => {});
+    else await page.waitForTimeout(400);
     const spins = await page.evaluate(() => window.__spins.map((s) => s.el));
-    check(spins.join() === '[data-dplay]', `${tag}: the pick spins the Play pressed (${JSON.stringify(spins)})`);
+    if (how === 'late') check(spins.join() === '[data-dplay]', `${tag}: the pick spins the Play pressed (${JSON.stringify(spins)})`);
+    else check(spins.length === 0, `${tag}: no Play spins for the pick (${JSON.stringify(spins)})`);
     const src = await page.evaluate(() => document.querySelector('audio') && document.querySelector('audio').getAttribute('src'));
     check(/\/sources\/deezer\/stream\/123/.test(src || ''), `${tag}: the preview plays in this browser (${src})`);
     check(!state.hits.slice(n).some((h) => /^\/zones\//.test(h.v)), `${tag}: no zone is sent anything`);
-    await page.screenshot({ path: path.join(SHOTS, `latest-press-picker-${width}.png`) });
+    await page.screenshot({ path: path.join(SHOTS, `latest-press-picker-${how}-${width}.png`) });
     check(state.errors.length === 0, `${tag}: no page errors (${state.errors.join(' | ')})`);
   } finally { await context.close(); }
 }
@@ -130,7 +165,9 @@ async function picker(browser, width) {
       for (const how of ['menu', 'space']) {
         try { await run(browser, width, how); } catch (e) { fail++; console.log(`FAIL ${width} ${how}: ${e.message}`); }
       }
-      try { await picker(browser, width); } catch (e) { fail++; console.log(`FAIL ${width} picker: ${e.message}`); }
+      for (const how of ['late', 'space', 'other']) {
+        try { await picker(browser, width, how); } catch (e) { fail++; console.log(`FAIL ${width} picker ${how}: ${e.message}`); }
+      }
     }
   } finally { await browser.close(); }
   console.log(`${ok} ok, ${fail} failed`);
