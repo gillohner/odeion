@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-20
+
+- **Click a song on a service's album page to play it.** On an album or set opened from Sources (SoundCloud, Bandcamp, archive.org …) only the small play button in front of a song played it, and that button only shows when the mouse is over the row, so on a touch screen there was nothing visible to press. Now a click or tap anywhere on the song's row plays from there, as on your library's albums and playlists. The row's own buttons still do just their own thing, and a double click starts the song once.
+
 ### 2026-11-19
 
 - **Mute any zone from its card on Zones.** A zone card's volume was just a slider with no speaker, so it looked like a seek bar, and in a wide window there was no Mute anywhere (the player bar shows a slider there, not the volume button with Mute). Each card with a volume now has the same Mute button as the volume popover, just before its slider: one click mutes that zone without choosing it, and a second unmutes it. Phones are unchanged.

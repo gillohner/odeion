@@ -750,6 +750,7 @@ jobs:
           ui-playlist-said-once.js playlist-said-once-shots
           ui-song-heart.js song-heart-shots
           ui-source-item-mark.js source-item-mark-shots
+          ui-source-item-row.js source-item-row-shots
           ui-source-kinds.js source-kinds-shots
           ui-empty-queue.js empty-queue-shots
           ui-browser-place.js browser-place-shots
