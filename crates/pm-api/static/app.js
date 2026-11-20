@@ -2278,7 +2278,8 @@
       const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
       if (at === 'now' && state.browserQueue.length) { state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); browserPlay(state.browserIndex + 1, 0, true); return; }
       if (replace || at === 'now') browserLoad(bitems, o.shuffle); else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else browserAppend(bitems);
-      if (!replace) toast(bitems.length === 1 ? 'Added to queue' : `${countOf(bitems.length, 'songs')} added`);
+      // (as on a zone and for library songs: one song played next says so; one played now says nothing, it plays)
+      if (!replace && at !== 'now') toast(bitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(bitems.length, 'songs')} added`);
       return;
     }
     // (every change of the zone's queue takes its turn: an add can't be lost to a replace still waiting)
