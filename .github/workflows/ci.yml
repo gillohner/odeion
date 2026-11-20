@@ -792,6 +792,7 @@ jobs:
           ui-phone-row-numbers.js phone-row-numbers-shots
           ui-pubky-hang.js pubky-hang-shots
           ui-item-radio-zone.js item-radio-zone-shots
+          ui-artist-top-songs.js artist-top-songs-shots
           LIST
           for p in $pin; do
             case "$seen" in *" ${p%=*} "*) ;; *) echo "::error::pinned page ${p%=*} is not in the list"; exit 1 ;; esac
