@@ -726,6 +726,7 @@ jobs:
           ui-albums-empty.js albums-empty-shots
           ui-genres-publish.js genres-publish-shots
           ui-genre-card-contrast.js genre-card-contrast-shots
+          ui-phone-head-level.js phone-head-level-shots
           ui-album-tile-line.js album-tile-line-shots
           ui-home-album-line.js home-album-line-shots
           ui-empty-ways-in.js empty-ways-in-shots
