@@ -843,14 +843,16 @@ html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
    rating never moves it down and its reach never touches Play on or More above: an empty line break
    (::after, ordered after the stars) ends the stars' line, and the line under it is pulled up by the
    8 px that break's own gap adds (the notes editor too, when it opens there with no rating). Below 340 px the stars are 40 px wide (still 44 px tall), so all
-   five stay on one line with "My rating". The half stars are square: no dead corners between two. */
+   five stay on one line with "My rating". The half stars are square: no dead corners between two.
+   "N of 5" is 44 px tall like Add notes beside it, so opening the notes editor (which hides Add
+   notes) doesn't shrink their line and move "N of 5" up. */
 html[data-shell="phone"] .reviewrow { margin-top: 3px; row-gap: 8px; }
 html[data-shell="phone"] .reviewrow::after { content: ''; flex-basis: 100%; height: 0; order: 1; }
 html[data-shell="phone"] .reviewrow > :not(.eyebrow, .stars) { order: 2; }
 html[data-shell="phone"] .reviewrow > :is(.ratingval, #notesbtn) { margin-top: -8px; }
 html[data-shell="phone"] .reviewrow > .ratingval:empty ~ #notesbtn[hidden] ~ #notesedit { margin-top: -8px; }
 html[data-shell="phone"] .reviewrow .star .half { border-radius: 0; }
-html[data-shell="phone"] .reviewrow .ratingval { min-width: 0; }
+html[data-shell="phone"] .reviewrow .ratingval { min-width: 0; min-height: 44px; display: inline-flex; align-items: center; }
 html[data-shell="phone"] .reviewrow .ratingval:empty { display: none; }
 html[data-shell="phone"] .reviewrow .stars { gap: 0; }
 html[data-shell="phone"] .reviewrow .star { width: 44px; height: 44px; line-height: 44px; }
