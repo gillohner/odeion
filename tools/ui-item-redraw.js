@@ -113,10 +113,13 @@ async function artistPage(browser, width) {
     assert.equal(await page.locator('#ifav').getAttribute('aria-pressed'), 'false', `${where}: and not pressed`);
     assert.equal(await page.locator('#ifav').evaluate((el) => el === document.activeElement), true, `${where}: the heart keeps focus after its redraw (${await active(page)})`);
     assert.equal(await page.evaluate(() => window.__skel), 0, `${where}: no skeleton after the heart`);
-    // Opening a page is unchanged: the same page from a link starts at the top
+    // Opening a page is unchanged: the same page opened again starts at the top. (Its own songs
+    // don't name it on their rows, so from the 13th song's ⋯ › Go to artist: the same setView an
+    // artist link takes)
     state.delay = 0;
     await scrollTo(page, 600);
-    await page.locator('[data-artist-credit]').nth(12).click();
+    await page.locator('[data-smore="12"]').click();
+    await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Go to artist' }).click();
     await page.waitForTimeout(600);
     await page.locator('#iplay').waitFor();
     assert.ok(await top(page) < 2, `${where}: a page opened from a link starts at the top (${await top(page)})`);
