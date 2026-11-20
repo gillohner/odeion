@@ -620,7 +620,7 @@ jobs:
             ui-usb-dac.js=2 ui-phone-action-rows.js=2 ui-browser-midsong.js=2 ui-srow-click.js=2
             ui-row-click.js=3 ui-phone-libnav-focus.js=3 ui-select-bar-focus.js=3
             ui-sticky-focus.js=4 ui-browser-keys.js=4 ui-similar-tiles.js=4 ui-phone-simplify.js=4
-            ui-empty-queue.js=5 ui-browser-place.js=5 ui-review-fixes.js=5
+            ui-empty-queue.js=5 ui-browser-place.js=5 ui-review-fixes.js=5 ui-search-shared-link.js=5
             ui-motion.js=6 ui-shuffle-repeat.js=6 ui-move-toast.js=6
           '
           pin=" $(echo $pin) "
