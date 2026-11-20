@@ -831,6 +831,20 @@ html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
 .star .half.l { left: 0; border-radius: var(--r-sm) 0 0 var(--r-sm); }
 .star .half.r { right: 0; border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .star .half:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Phones: each star is a 44 px tap (a half star 22 × 44 px, was 12 × 26 px, so a thumb set the
+   wrong rating or none). The stars sit side by side (no gap: a tap between two lands on one), the
+   glyphs keep their size and place (the row's top margin gives back what the taller stars add
+   above them). Add notes and the notes' Save and Cancel are 44 px taps too. "N of 5" goes under
+   the stars with Add notes (the wider stars leave it no room beside them at 360 px); with no rating
+   it takes no room, so Add notes starts at the left edge as before. The row under the stars is
+   8 px down: a touch screen's small button reaches 8 px past its box (pointer: coarse, below), so
+   Add notes' reach ends where the stars do and never takes a press on a star. Desktop unchanged. */
+html[data-shell="phone"] .reviewrow { margin-top: 3px; row-gap: 8px; }
+html[data-shell="phone"] .reviewrow .ratingval { min-width: 0; }
+html[data-shell="phone"] .reviewrow .ratingval:empty { display: none; }
+html[data-shell="phone"] .reviewrow .stars { gap: 0; }
+html[data-shell="phone"] .reviewrow .star { width: 44px; height: 44px; line-height: 44px; }
+html[data-shell="phone"] .reviewrow :is(#notesbtn, #notessave, #notescancel) { min-height: 44px; }
 .ratingval { color: var(--muted); font-size: var(--fs-sm); margin-right: 8px; min-width: 4.5em; }
 .notes { flex-basis: 100%; color: var(--fg-2); white-space: pre-wrap; max-width: 560px; overflow-wrap: anywhere; }
 .notes.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
@@ -881,6 +895,8 @@ html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
 .chips .chip .count { margin-left: 4px; color: var(--muted); font-size: var(--fs-xs); }
 .list.compact { margin-top: 8px; }
 .list.compact .list-row { padding: 6px 10px; min-height: 0; }
+/* Phones: a song page's "Play this version" (Versions) is a 44 px tap, like the song rows' buttons (was 36 px) */
+html[data-shell="phone"] #iversions .list-row .icon-btn { width: 44px; height: 44px; flex: none; }
 .page-head .count[data-filtered]:not([data-filtered=''])::after { content: ' · ' attr(data-filtered); color: var(--accent-strong); }
 .list-row .thumb { width: 44px; height: 44px; border-radius: var(--r-sm); object-fit: cover; flex: none; background: var(--surface-3); margin-right: 10px; }
 .src-badge { display: inline-block; padding: 0 5px; border-radius: var(--r-sm); font-size: var(--fs-xs); font-weight: 700; letter-spacing: 0.04em; background: var(--surface-3); color: var(--fg-2); vertical-align: 1px; margin-left: 4px; }
@@ -1098,7 +1114,7 @@ html[data-shell="phone"] .popover:not([hidden]):not(.menu), .popover.menu.sheet:
 /* Phones: Home's Trending heads keep the title and See all on one line and give Today / This week /
    This month a row of their own under it (beside the title, the title and the chips both broke onto
    two lines) */
-html[data-shell="phone"] .section-head:has(> .chips.win) { flex-wrap: wrap; row-gap: 8px; }
+html[data-shell="phone"] .section-head:has(> .chips.win) { flex-wrap: wrap; row-gap: 4px; }
 html[data-shell="phone"] .section-head > .chips.win { order: 1; flex: 1 0 100%; margin: 0; }
 
 /* Classes the design lint found without a rule (tools/design-lint.js) */
