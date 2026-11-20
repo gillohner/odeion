@@ -475,6 +475,23 @@ fn library_tagged(
     Ok(out)
 }
 
+/// One of the node's own playlists as a hit: "N songs" only when every item is a song, else
+/// "N items" (one that also holds links, albums, artists or posts), as the Playlists page says.
+fn own_playlist_hit(pl: &crate::types::PlaylistSummary) -> SearchHit {
+    let unit = if pl.tracks_only { "song" } else { "item" };
+    SearchHit {
+        kind: "playlist".into(),
+        title: pl.name.clone(),
+        subtitle: Some(format!(
+            "{} · your playlist",
+            crate::plural(pl.items as u64, unit)
+        )),
+        image: pl.image.clone(),
+        id: pl.id.clone(),
+        ..Default::default()
+    }
+}
+
 /// `owner`: the node's own playlists are the owner's; a listener's search leaves them out.
 fn library(s: &NodeState, q: &str, limit: u32, owner: bool) -> pm_library::Result<Vec<SearchHit>> {
     let lib = s.library.lock().expect("library poisoned");
@@ -497,18 +514,8 @@ fn library(s: &NodeState, q: &str, limit: u32, owner: bool) -> pm_library::Resul
     } else {
         Vec::new()
     };
-    for pl in own_playlists {
-        out.push(SearchHit {
-            kind: "playlist".into(),
-            title: pl.name.clone(),
-            subtitle: Some(format!(
-                "{} · your playlist",
-                crate::plural(pl.items as u64, "song")
-            )),
-            image: pl.image.clone(),
-            id: pl.id.clone(),
-            ..Default::default()
-        });
+    for pl in &own_playlists {
+        out.push(own_playlist_hit(pl));
     }
     for a in lib.search_albums(q, 12)? {
         out.extend(album_hit(&a));
@@ -1351,5 +1358,34 @@ mod ident_tests {
             assert!(kind_of_type(Some(t)).is_some(), "{t} has no kind");
         }
         assert_eq!(pm_pubky::pinakes::music_types().split(',').count(), 8);
+    }
+
+    #[test]
+    fn own_playlist_hit_says_songs_only_when_it_holds_only_songs() {
+        let pl = |items: usize, tracks_only: bool| crate::types::PlaylistSummary {
+            id: "p1".into(),
+            name: "Mix".into(),
+            description: None,
+            image: None,
+            items,
+            created_at: 1,
+            updated_at: 1,
+            visibility: "private".into(),
+            synced: false,
+            covers: Vec::new(),
+            layout: "list".into(),
+            tracks_only,
+        };
+        let sub = |items, tracks_only| own_playlist_hit(&pl(items, tracks_only)).subtitle;
+        assert_eq!(sub(3, true).as_deref(), Some("3 songs · your playlist"));
+        assert_eq!(sub(1, true).as_deref(), Some("1 song · your playlist"));
+        assert_eq!(sub(0, true).as_deref(), Some("0 songs · your playlist"));
+        assert_eq!(sub(2, false).as_deref(), Some("2 items · your playlist"));
+        assert_eq!(sub(1, false).as_deref(), Some("1 item · your playlist"));
+        let h = own_playlist_hit(&pl(2, false));
+        assert_eq!(
+            (h.kind.as_str(), h.title.as_str(), h.id.as_str()),
+            ("playlist", "Mix", "p1")
+        );
     }
 }
