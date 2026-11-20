@@ -727,6 +727,7 @@ jobs:
           ui-roon-import.js roon-import-shots
           ui-playlist-file-import.js playlist-file-import-shots
           ui-playlists-redraw.js playlists-redraw-shots
+          ui-playlist-count.js playlist-count-shots
           ui-playlist-stale-draw.js playlist-stale-draw-shots
           ui-rows-search-sort.js rows-search-sort-shots
           ui-filter-none.js filter-none-shots
