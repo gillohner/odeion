@@ -5169,8 +5169,25 @@
     return navigate(fresh).finally(() => { if (top && topLater === top) topNow(); });
   };
   // (a post that is no playlist pasted over a search with a query: that search's entry takes its
-  // search, as a new query there does, so Back and Escape go where Search was opened from: { q, in })
+  // search, as a new query there does, so Back and Escape go where Search was opened from: { q, in, depth
+  // (of that search's entry), escaped (Escape pressed meanwhile), late (when no Back came in 3 s and the
+  // box decided in the post's entry: the Back asked for landing within 2 s after that still takes this;
+  // later, a Back is the person's own, to the search under it) })
   let searchOver = null;
+  // What is in the box then decides, in the entry shown (the search's, Back landed; else the post's own):
+  // the old query, the text typed meanwhile (a link or key opens its page there), or, emptied, the
+  // phone's empty Search tab (Escape: Home, as Escape there gives) and on desktop the page Search was
+  // opened from (that entry kept as it was: Forward from there is the old query, not an empty Search)
+  // (no Back came: the post's entry, which then takes Home in its place, as it would its search)
+  const overDecide = (o) => {
+    const typed = search.value.trim(); clearTimeout(searchTimer);
+    const inPost = !!history.state && history.state.v === 'shared';
+    if (typed === o.q) { search.value = o.q; startSearch(o.q, o.in); setView('search', { q: o.q, in: o.in }, 'replace'); }
+    else if (typed) runSearch('replace', o.in);
+    else if (shellMode() !== 'phone' && !inPost) leaveSearch(true);
+    else if (o.escaped || shellMode() !== 'phone') setView('home', undefined, inPost ? 'replace' : 'push');
+    else setView('search', undefined, 'replace');
+  };
   window.addEventListener('popstate', async (e) => {
     if (popHandled) { popHandled = false; return; } // back only closed a menu or dialog
     if (e.state && e.state.transient) return; // forward onto a closed menu's entry: nothing to show
@@ -5181,12 +5198,7 @@
     // a link or key typed there opens its page in that entry too)
     if (searchOver) {
       const o = searchOver; searchOver = null;
-      if (st.v === 'search') {
-        const typed = search.value.trim(); clearTimeout(searchTimer);
-        if (typed === o.q) { search.value = o.q; startSearch(o.q, o.in); setView('search', o, 'replace'); } else if (typed) runSearch('replace', o.in);
-        else { setView('search', undefined, 'replace'); if (shellMode() !== 'phone') leaveSearch(); } // (emptied: as emptying the box gives)
-        return;
-      }
+      if (st.v === 'search' && (!o.late || (Date.now() - o.late < 2000 && (st.depth || 0) === o.depth))) { overDecide(o); return; }
     }
     let going;
     if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; startSearch(st.arg.q, st.arg.in || 'everywhere'); going = setView('search', st.arg, 'pop'); }
@@ -5335,8 +5347,9 @@
   // entry: a second Escape before it lands goes nowhere) On a phone, emptying the box stays on the Search
   // tab, on its empty page (as the tab opens), to type again: Home is another tab no one picked.
   let searchLeft = null;
-  const leaveSearch = () => {
-    if (state.view !== 'search') return;
+  // (over: from a post's Back onto the search under it, still drawn as the post's page)
+  const leaveSearch = (over) => {
+    if (state.view !== 'search' && !over) return;
     const cur = history.state;
     if (cur && cur === searchLeft) return;
     const from = cur && typeof cur.fromPath === 'string' ? cur.fromPath.split('?')[0] : '';
@@ -5348,6 +5361,8 @@
   const notPlaylists = new Map(); const NOT_PL_MS = 600000;
   const notPlaylist = (key) => Date.now() - (notPlaylists.get(key) ?? -Infinity) < NOT_PL_MS;
   const runSearch = async (how, savedScope) => {
+    // (a post's Back to the search under it not landed yet: the box's text then decides, there, overDecide)
+    if (searchOver && !searchOver.late && state.view === 'shared') return;
     const q = search.value.trim();
     if (!q) { if (shellMode() !== 'phone') leaveSearch(); else if (state.view === 'search' && state.viewArg && state.viewArg.q) setView('search'); return; }
     // A pasted link skips searching: its item page (by-uri, then resolve; "Reading this link…").
@@ -5361,12 +5376,12 @@
     // playlist, a comment or an ordinary post, is searched as text instead, on the shared page; one
     // known to be none is searched at once, notPlaylists. A reload of its search takes its entry)
     const post = /^(?:pubky:\/\/)?(?:pubky)?([a-zA-Z0-9]{52})\/pub\/social\/v1\/posts\/([0-9A-HJKMNP-TV-Z]{13})\/?$/.exec(q);
-    if (post && !notPlaylist(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope }, how === 'pop' || how === 'replace' ? 'replace' : 'push'); return; }
+    if (post && !notPlaylist(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope, ...(how === 'pop' || how === 'replace' ? { here: 1 } : {}) }, how === 'pop' || how === 'replace' ? 'replace' : 'push'); return; }
     startSearch(q, scope);
     setView('search', { q, in: scope }, how === 'pop' || how === 'replace' ? how : 'push');
   };
   search.addEventListener('input', () => { searchKeys.reset(); clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
-  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { clearTimeout(searchTimer); search.value = ''; search.blur(); leaveSearch(); } });
+  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { clearTimeout(searchTimer); search.value = ''; search.blur(); if (searchOver && !searchOver.late) searchOver.escaped = true; leaveSearch(); } });
 
   // Whether the focused element got its focus from a click on it (not from the keyboard or the page)
   let pointerDown = { at: 0, target: null }, focusByPointer = false;
@@ -8546,13 +8561,18 @@
                 if (sb) sb.value = a.q;
                 // (opened over a search with a query, the entry before: Back to it, which then takes this search, searchOver)
                 const cur = history.state;
-                if (navDepth > 0 && cur && cur.v === 'shared' && !cur.transient && typeof cur.fromPath === 'string' && cur.fromPath.startsWith('/search?')) {
-                  if (searchOver) return; // (another draw of this page already went Back)
+                // (one opened in that search's place, here, takes its search in its own entry: that Back would leave a search behind it)
+                if (!a.here && navDepth > 0 && cur && cur.v === 'shared' && !cur.transient && typeof cur.fromPath === 'string' && cur.fromPath.startsWith('/search?')) {
+                  if (searchOver && !searchOver.late) return; // (another draw of this page already went Back)
                   // (this entry, left as Forward, keeps no search: Forward onto it says the post is no playlist, never Back again)
                   try { history.replaceState({ ...cur, arg: { user: a.user, id: a.id } }, '', location.pathname + location.search); } catch { /* sandboxed */ }
-                  const over = { q: a.q, in: a.in || 'everywhere' }; searchOver = over; history.back();
-                  // (no Back came, the history still on this entry: in this entry, as before; the box edited meanwhile, its own text decides)
-                  setTimeout(() => { if (searchOver !== over) return; searchOver = null; if (search.value.trim() === over.q && state.view === 'shared' && state.viewArg === a && history.state && history.state.v === 'shared') { startSearch(over.q, over.in); setView('search', over, 'replace'); } }, 3000);
+                  const over = { q: a.q, in: a.in || 'everywhere', depth: (cur.depth || 0) - 1 }; searchOver = over; history.back();
+                  // (no Back came in 3 s, the history still on this entry: the box's text decides in this entry; a Back landing later still takes over)
+                  setTimeout(() => {
+                    if (searchOver !== over) return; searchOver = null;
+                    if (state.view !== 'shared' || state.viewArg !== a || !history.state || history.state.v !== 'shared') return;
+                    overDecide(over); searchOver = { ...over, late: Date.now() };
+                  }, 3000);
                   return;
                 }
                 startSearch(a.q, a.in || 'everywhere'); setView('search', { q: a.q, in: a.in || 'everywhere' }, 'replace'); return;
