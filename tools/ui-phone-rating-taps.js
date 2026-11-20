@@ -208,7 +208,9 @@ async function pressEach(page, store, at, what, cur, before) {
     const { page, context } = await open(browser, 1280, 'song', null, false);
     const m = await measure(page);
     check(m.stars.every((s) => s.w === 24 && s.h === 26) && Math.abs(m.stars[1].l - m.stars[0].r - 2) < 0.5, `1280: the stars are 24 × 26 px, 2 px apart, as before`);
-    check(m.val && m.val.w > 0 && m.valMin !== '0px', `1280: "N of 5" keeps its reserved width (${m.valMin})`);
+    // (unrated, the empty "N of 5" takes no room, so Add notes sits right after the stars; once rated
+    // it keeps its reserved width: tools/ui-rating-hero.js)
+    check(m.val === null && m.valMin !== '0px', `1280: "N of 5" takes no room while unrated (its reserved width stays set for a rating) (${m.valMin}, ${m.val ? m.val.w + ' px' : 'no box'} now)`);
     check(m.radius !== '0px', `1280: the half stars keep their rounded ends (${m.radius})`);
     check(m.notes && Math.abs(m.notes.t + m.notes.h / 2 - (m.stars[0].t + m.stars[0].h / 2)) < 3, `1280: Add notes stays beside the stars`);
     check(m.version && m.version.w === 36 && m.version.h === 36, `1280: Play this version stays 36 px (${m.version && m.version.w})`);
