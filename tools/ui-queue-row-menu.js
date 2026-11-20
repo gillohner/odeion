@@ -6,7 +6,8 @@
 // song the node can't answer for still gets a menu (Go to song page). A ⋯ whose queue is drawn again
 // while its menu still reads opens its menu on the same song's new ⋯, with Move up / Move down for
 // where the song is now (before, nothing opened); none opens once that song has gone (a toast says
-// so). Two ⋯ tapped
+// so), nor once another page was opened (its answer in while that page still loads, the Queue's
+// rows still in it). Two ⋯ tapped
 // quickly open only the last one's menu (the
 // first's, slower, opened over it before), and the first ⋯ stops showing its progress. A ⋯ waits
 // at most 1.5 s for the song's own items (then it opens with Go to song page, and a phone's
@@ -196,6 +197,26 @@ async function run(browser, width) {
     go(); hold = null; await page.waitForTimeout(1800);
     check(await page.locator('.popover.menu:not([hidden])').count() === 0, `${width}: a ⋯ whose song left the queue while its menu read opens no menu`);
     check(await page.getByText('Song 2 isn’t in the queue any more').count() > 0, `${width}: and says the song isn’t in the queue any more`);
+  }
+  // Another page opened while a ⋯'s menu reads, its answer in while that page still loads (the
+  // Queue's rows still drawn): no menu opens over it. Before, the late answer opened the Queue song's
+  // menu over the page being opened.
+  {
+    await fx.go(page, '/queue');
+    await page.locator('.list.queue .list-row').nth(1).waitFor();
+    let go; hold = { wait: new Promise((r) => { go = r; }) };
+    // (Sources waits for its list before it draws: the Queue's rows stay until then)
+    let goSources; const sourcesHeld = new Promise((r) => { goSources = r; });
+    await context.route('**/v1/sources', async (r) => { await sourcesHeld; r.fallback(); });
+    await tapMore(page, 1, phone);
+    await page.waitForTimeout(300);
+    check(await page.locator('.popover.menu:not([hidden])').count() === 0, `${width}: no menu yet while the ⋯ reads`);
+    await page.evaluate(() => document.querySelector('.nav-item[data-view="sources"]').click());
+    go(); hold = null;
+    await page.waitForTimeout(1800);
+    check(await page.locator('.popover.menu:not([hidden])').count() === 0, `${width}: a ⋯ whose answer comes in after another page was opened opens no menu (${await title(page)})`);
+    await page.screenshot({ path: path.join(shots, `queue-menu-other-page-${width}.png`) });
+    goSources(); await context.unroute('**/v1/sources');
   }
   check(state.errors.length === 0, `${width}: no page errors ${state.errors.join('; ')}`);
   await context.close();
