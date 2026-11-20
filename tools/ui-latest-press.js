@@ -6,7 +6,9 @@
 // this browser) keeps that press: the pick, made after 1.5 s, spins the Play pressed (before, the
 // pick's own click took the press away and nothing spun). But only that Play's press, and only
 // with no newer one since: Space while the picker is open, or another Play pressed while the
-// first one's answer was still coming, leaves no Play spinning for the pick. The phone width too.
+// first one's answer was still coming, leaves no Play spinning for the pick. A row drawn anew
+// while its Play's answer was still coming: the pick spins that row's Play as it is now on screen
+// (before, the spin went to the old button, no longer on screen). The phone width too.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-latest-press.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -96,6 +98,8 @@ async function run(browser, width, how) {
 //            no Play spins (before, the Play that opened the picker spun again)
 //   'other': B's Play pressed while A's answer is still coming, then A's picker opens and is picked:
 //            B's press is not A's picker's, so B doesn't spin (before, B spun for A's preview)
+//   'redraw': the list is drawn anew while A's answer is still coming, then A's picker is picked:
+//            A's Play in the list as drawn now spins (before, the old, detached one did)
 const ELSE = 'https://sefa.bandcamp.com/track/elsewhere';
 const ELSE2 = 'https://sefa.bandcamp.com/track/elsewhere-too';
 async function picker(browser, width, how) {
@@ -117,7 +121,7 @@ async function picker(browser, width, how) {
       if (/elsewhere-too/.test(decodeURIComponent(url))) return new Promise(() => {});
       return new Promise((res) => { window.__release = () => res(answer()); });
     };
-  }, { plan, hold: how === 'other' });
+  }, { plan, hold: how === 'other' || how === 'redraw' });
   await logSpins(page);
   try {
     await fx.go(page, '/favourites');
@@ -131,6 +135,10 @@ async function picker(browser, width, how) {
       await plays.nth(1).click(); // (B, pressed while A's answer is still coming)
       await page.waitForTimeout(100);
       await page.evaluate(() => window.__release());
+    } else if (how === 'redraw') {
+      await plays.nth(0).click(); // (A: its answer is held)
+      await page.waitForTimeout(100);
+      await page.evaluate(() => { const l = document.querySelector('#favother .list'); l.innerHTML = l.innerHTML; window.__release(); });
     } else await plays.nth(0).click();
     await menu.waitFor();
     check(/Not on your services/.test(await menu.textContent()), `${tag}: the Play opens "Not on your services"`);
@@ -149,6 +157,10 @@ async function picker(browser, width, how) {
     else await page.waitForTimeout(400);
     const spins = await page.evaluate(() => window.__spins.map((s) => s.el));
     if (how === 'late') check(spins.join() === '[data-dplay]', `${tag}: the pick spins the Play pressed (${JSON.stringify(spins)})`);
+    else if (how === 'redraw') {
+      const now = await page.evaluate((u) => [...document.querySelectorAll('.starting')].map((b) => `${b.closest('[data-uri]') && b.closest('[data-uri]').dataset.uri === u ? 'A' : 'other'}:${b.isConnected}`), ELSE);
+      check(spins.join() === '[data-dplay]' && now.join() === 'A:true', `${tag}: the pick spins A's Play as the list is drawn now (${JSON.stringify(spins)}, on screen ${JSON.stringify(now)})`);
+    }
     else check(spins.length === 0, `${tag}: no Play spins for the pick (${JSON.stringify(spins)})`);
     const src = await page.evaluate(() => document.querySelector('audio') && document.querySelector('audio').getAttribute('src'));
     check(/\/sources\/deezer\/stream\/123/.test(src || ''), `${tag}: the preview plays in this browser (${src})`);
@@ -165,7 +177,7 @@ async function picker(browser, width, how) {
       for (const how of ['menu', 'space']) {
         try { await run(browser, width, how); } catch (e) { fail++; console.log(`FAIL ${width} ${how}: ${e.message}`); }
       }
-      for (const how of ['late', 'space', 'other']) {
+      for (const how of ['late', 'space', 'other', 'redraw']) {
         try { await picker(browser, width, how); } catch (e) { fail++; console.log(`FAIL ${width} picker ${how}: ${e.message}`); }
       }
     }
