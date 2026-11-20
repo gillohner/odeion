@@ -561,8 +561,8 @@ html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) .eyebrow 
 }
 .track:last-child { border-bottom: 0; }
 .track:hover, .track:focus-within { background: var(--surface-2); }
-/* A click on a library song row plays from there, as on a playlist's (.list-row.clickable) */
-[data-list] > .track { cursor: pointer; }
+/* A click on a library song row (or a service album's) plays from there, as on a playlist's (.list-row.clickable) */
+:is([data-list], .src-tracks) > .track { cursor: pointer; }
 .track.cur .title { color: var(--accent-strong); }
 .track.compact { grid-template-columns: 40px minmax(0, 1fr) 92px 64px 112px; }
 .track .no { position: relative; display: flex; align-items: center; justify-content: center; color: var(--muted); font-variant-numeric: tabular-nums; font-size: var(--fs-sm); }
