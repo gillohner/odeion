@@ -61,8 +61,9 @@ const pages = [
           const more = page.getByRole('button', { name: `More for ${titles[1]}`, exact: true });
           const menu = await more.count() === 1 && await more.focus({ timeout: 2000 }).then(() => page.keyboard.press('Enter')).then(() => page.waitForSelector('.popover.menu:not([hidden])', { timeout: 3000 })).then(() => true, () => false);
           check(menu, `${width} ${pg.name}: Enter on "More for ${titles[1]}" opens its menu`);
-          // (the button so named is the one in that song's row)
-          const inRow = await page.evaluate((sel) => { const rows = [...document.querySelectorAll(sel)]; return rows.indexOf(document.activeElement && document.activeElement.closest(sel)); }, pg.row);
+          // (the button so named is the one in that song's row; the open menu has the focus now, so
+          // the button itself is asked, not the focused element)
+          const inRow = await more.count() === 1 ? await more.evaluate((b, sel) => [...document.querySelectorAll(sel)].indexOf(b.closest(sel)), pg.row) : -1;
           check(inRow === 1, `${width} ${pg.name}: and it is the ⋯ in that song's row (row ${inRow + 1})`);
           await page.screenshot({ path: path.join(SHOTS, `${pg.name}-${width}.png`) });
           await page.keyboard.press('Escape');
