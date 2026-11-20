@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-20
+
+- **Start radio from an album or song page goes on where the song plays.** If you switched speakers right after choosing Start radio from a page's ⋯, the song started on the first speaker but the radio was turned on for the one you switched to, so the music stopped after that song. The radio now goes on for the speaker playing the song, and the message names that speaker. The message also reads the same as a Songs row's Start radio: "Radio from “song”: similar music follows".
+
 ### 2026-11-19
 
 - **Mute any zone from its card on Zones.** A zone card's volume was just a slider with no speaker, so it looked like a seek bar, and in a wide window there was no Mute anywhere (the player bar shows a slider there, not the volume button with Mute). Each card with a volume now has the same Mute button as the volume popover, just before its slider: one click mutes that zone without choosing it, and a second unmutes it. Phones are unchanged.
