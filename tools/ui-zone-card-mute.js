@@ -7,7 +7,8 @@
 // drawn again gives a focused Mute its focus back. A zone without a volume has none. Mute, slider and
 // level stay on one line together; cards that had one line keep it (1024, ~1000, ~1150 px). On a
 // touch tablet Next and Mute share the 6 px between them, and where the volume goes under the
-// transport a press just under Previous is Previous's, not Mute's. Three quick presses while the zone
+// transport a press just under Previous is Previous's, not Mute's (the split checked by the half
+// pixel: 4 / 4.5 px on this browser's card, 5.5 / 6.5 px on a node's). Three quick presses while the zone
 // answers: busy at once, one request. With another zone in use, only the card's own zone changes.
 // Phones are as before: no Mute, one line.
 //   node tools/ui-zone-card-mute.js [repo] [shots]
@@ -123,7 +124,9 @@ const lineOf = (page, id) => page.$eval(card(id), (c) => { const kids = [...c.qu
           const at = (y) => { const h = document.elementFromPoint(x, y); return h && (p.contains(h) ? 'previous' : m.contains(h) ? 'mute' : 'other'); };
           const gap = Math.round(b.top - a.bottom); const own = [];
           for (let d = 1; d < gap; d++) own.push(at(a.bottom + d));
-          return { gap, x: Math.round(x), y4: Math.round(a.bottom + 4), under4: at(a.bottom + 4), aboveMute: at(b.top - 1), own };
+          // (and every half pixel down the gap: where Previous's reach ends and Mute's starts)
+          const half = []; for (let d = 0.5; d < gap; d += 0.5) half.push([d, at(a.bottom + d)]);
+          return { gap, x: Math.round(x), y4: Math.round(a.bottom + 4), under4: at(a.bottom + 4), aboveMute: at(b.top - 1), own, half };
         });
         if (r) scan.push({ id, ...r });
       }
@@ -132,6 +135,13 @@ const lineOf = (page, id) => page.$eval(card(id), (c) => { const kids = [...c.qu
         // (what the reaches promise: Previous's first 4 px down are Previous's, the 2 px next to Mute are Mute's)
         const fair = r.own.every((o, i) => { const d = i + 1; return d <= 4 ? o === 'previous' : d >= r.gap - 2 ? o === 'mute' : true; });
         check(r.under4 === 'previous' && r.aboveMute === 'mute' && fair, `${width} touch, ${r.id}: a tap 4 px under Previous is Previous's, 1 px over Mute is Mute's, the ${r.gap} px between them shared (${r.own.join(' ')})`);
+        // The split itself, measured by the half pixel: this browser's card (Mute 8 px under Previous)
+        // gives 4 px to Previous and 4.5 px on to Mute; a node's card (10 px) gives up to 5.5 px to
+        // Previous, 6 px to the card, 6.5 px on to Mute. Previous's reach (6 px down) or Mute's
+        // (3 px up) grown or shrunk by half a pixel moves it.
+        const [prevTo, muteFrom] = r.id === 'browser' ? [4, 4.5] : [5.5, 6.5];
+        const split = r.half.every(([d, o]) => (d <= prevTo ? o === 'previous' : d >= muteFrom ? o === 'mute' : o === 'other'));
+        check(split, `${width} touch, ${r.id}: Previous to ${prevTo} px under it, Mute from ${muteFrom} px (${r.half.map(([d, o]) => `${d}:${o}`).join(' ')})`);
       }
       // Pressed for real 4 px under a node zone's Previous: never Mute. A click at that exact point (a
       // stylus, a mouse on a touch screen) is what the reach decides: Previous. A finger's tap also
