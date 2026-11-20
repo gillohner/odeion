@@ -4226,7 +4226,10 @@
   // ---- immediate feedback on play (owner, 2026-10-29) ----
   // The play control just pressed: it shows a spinner until the music starts (capture phase, so
   // every play button on every page counts without each call site knowing)
-  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now() }; }, true);
+  // The latest press wins: any other control pressed since (a ⋯ and its menu's rows, such as Start
+  // radio) takes the press away, so the start it makes spins no Play pressed just before. (A click
+  // on an empty spot leaves it: an album tile's Play still spins when its songs come.)
+  document.addEventListener('click', (e) => { if (!e.target.closest) return; const b = e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now() }; else if (e.target.closest('button, a, input, select, summary, label, [role="button"], [role="menuitem"], .clickable')) state.startAnchor = null; }, true);
   // `replace`: the queue is being replaced, so the song still playing does not end the wait.
   // `press`: a press of a play control starts this. A start nobody pressed Play for (Move here,
   // Switch source, a song ending or skipped, the playing song taken out of the queue) puts no
@@ -5427,7 +5430,8 @@
     { const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' ? 'next' : e.key === 'ArrowLeft' ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
     // (the search field is under an open Now playing, out of reach there: it closes first)
     if (e.key === '/') { e.preventDefault(); if (!overlay.hidden) toggleNowPlaying(false); search.focus(); search.select(); return; }
-    if (e.code === 'Space') { e.preventDefault(); transport({ action: 'toggle' }); }
+    // (Space is a press of its own: it spins no Play clicked just before)
+    if (e.code === 'Space') { e.preventDefault(); state.startAnchor = null; transport({ action: 'toggle' }); }
     if (e.key === 'ArrowRight') transport({ action: 'next' });
     if (e.key === 'ArrowLeft') transport({ action: 'previous' });
     if (e.key.toLowerCase() === 'n') toggleNowPlaying();
