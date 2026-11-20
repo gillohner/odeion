@@ -1775,6 +1775,11 @@ html[data-shell="phone"] .player .np-art { width: 44px; height: 44px; }
    (it reads as a second queue icon at this size) is left out. */
 html[data-shell="phone"] .player { margin: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--surface); box-shadow: none; padding: 6px 12px; min-height: 58px; }
 html[data-shell="phone"] .bottomnav { border-top: 0; }
+/* A page's title sits level with the buttons on its row (Zones' +, Your library's Add music, a short
+   Songs' Play all, Home's Edit Home): at the buttons' foot a 24 px title read 8-10 px lower than
+   40-44 px buttons. Only the row's items line up (a head that wraps keeps its rows), and the head
+   keeps its height, so nothing under it moves. */
+html[data-shell="phone"] .page-head { align-items: center; }
 /* Library: the filter row and the quality chips under it had no space between them */
 html[data-shell="phone"] .main > .page-head + .chips { margin-top: 12px; }
 /* Songs and Albums: the filter takes the row's free width, so Play all and Add music (its icon on a

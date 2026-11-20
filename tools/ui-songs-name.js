@@ -118,7 +118,7 @@ async function run(browser, width) {
       assert.equal((await back.innerText()).trim(), 'Songs', `${T}: a song page's Back says Songs`);
       await noTrack(page, `${T} song page`);
       // The empty Queue and Playlists pages say what to add as songs
-      for (const [url, want] of [['/queue', /^Play an album or add songs with the row actions\.$/], ['/playlists', /add songs from any list/]]) {
+      for (const [url, want] of [['/queue', /^Play an album, or add a song from its ⋯ menu\.$/], ['/playlists', /add songs from any list/]]) {
         await fx.go(page, url);
         await page.locator('main .empty p').first().waitFor();
         assert.match(await page.locator('main .empty p').first().textContent(), want, `${T} ${url}: the empty page`);

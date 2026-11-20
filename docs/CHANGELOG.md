@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-20
+
+- **On a phone, a page's title sits level with its buttons.** On Home, Your library, Songs and Zones the title sat about 10 px lower than Edit Home, Add music, Play all or the + beside it, so the head looked crooked. Their middles now line up; nothing else on the page moves.
+- **The empty Queue says how to add a song in plain words.** It said “add songs with the row actions”; it now says “add a song from its ⋯ menu”, as the empty Playlists page does.
+
 ### 2026-11-19
 
 - **Mute any zone from its card on Zones.** A zone card's volume was just a slider with no speaker, so it looked like a seek bar, and in a wide window there was no Mute anywhere (the player bar shows a slider there, not the volume button with Mute). Each card with a volume now has the same Mute button as the volume popover, just before its slider: one click mutes that zone without choosing it, and a second unmutes it. Phones are unchanged.
