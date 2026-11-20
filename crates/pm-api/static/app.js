@@ -5173,7 +5173,17 @@
     const st = e.state || routeFromPath() || { v: 'home' };
     navDepth = st.depth || 0;
     // (Back from a post that is no playlist onto the search it was pasted over: that entry takes the post's search)
-    if (searchOver) { const o = searchOver; searchOver = null; if (st.v === 'search' && search.value.trim() === o.q) { search.value = o.q; startSearch(o.q, o.in); setView('search', o, 'replace'); return; } }
+    // (the box edited before that Back landed: what is in it now takes that entry, never the old query put back over it;
+    // a link or key typed there opens its page in that entry too)
+    if (searchOver) {
+      const o = searchOver; searchOver = null;
+      if (st.v === 'search') {
+        const typed = search.value.trim(); clearTimeout(searchTimer);
+        if (typed === o.q) { search.value = o.q; startSearch(o.q, o.in); setView('search', o, 'replace'); } else if (typed) runSearch('replace', o.in);
+        else { setView('search', undefined, 'replace'); if (shellMode() !== 'phone') leaveSearch(); } // (emptied: as emptying the box gives)
+        return;
+      }
+    }
     let going;
     if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; startSearch(st.arg.q, st.arg.in || 'everywhere'); going = setView('search', st.arg, 'pop'); }
     else going = setView(st.v, st.arg, 'pop');
@@ -5337,19 +5347,19 @@
     const q = search.value.trim();
     if (!q) { if (shellMode() !== 'phone') leaveSearch(); else if (state.view === 'search' && state.viewArg && state.viewArg.q) setView('search'); return; }
     // A pasted link skips searching: its item page (by-uri, then resolve; "Reading this link…").
-    if (isLink(q)) { setView('item', { kind: linkKind(q), id: idOf(q) }); return; }
+    if (isLink(q)) { setView('item', { kind: linkKind(q), id: idOf(q) }, how === 'replace' ? 'replace' : 'push'); return; }
     // A pasted Pubky key (with or without pubky:// or the pubky prefix) opens that person
     const pk = /^(?:pubky:\/\/|pubky)?([a-z0-9]{52})\/?$/.exec(q);
-    if (pk) { setView('person', pk[1]); return; }
+    if (pk) { setView('person', pk[1], how === 'replace' ? 'replace' : 'push'); return; }
     const scope = savedScope || (state.viewArg && state.view === 'search' && state.viewArg.in) || state.searchScope || 'everywhere';
     // A pasted playlist link (what a playlist's Copy link gives: pubky://<key>/pub/social/v1/posts/<id>)
     // opens that playlist, as the Playlists page's shared-link box does. (q, in: a post that is no
     // playlist, a comment or an ordinary post, is searched as text instead, on the shared page; one
     // known to be none is searched at once, notPlaylists. A reload of its search takes its entry)
     const post = /^(?:pubky:\/\/)?(?:pubky)?([a-zA-Z0-9]{52})\/pub\/social\/v1\/posts\/([0-9A-HJKMNP-TV-Z]{13})\/?$/.exec(q);
-    if (post && !notPlaylist(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope }, how === 'pop' ? 'replace' : 'push'); return; }
+    if (post && !notPlaylist(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope }, how === 'pop' || how === 'replace' ? 'replace' : 'push'); return; }
     startSearch(q, scope);
-    setView('search', { q, in: scope }, how === 'pop' ? 'pop' : 'push');
+    setView('search', { q, in: scope }, how === 'pop' || how === 'replace' ? how : 'push');
   };
   search.addEventListener('input', () => { searchKeys.reset(); clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { clearTimeout(searchTimer); search.value = ''; search.blur(); leaveSearch(); } });
@@ -8535,8 +8545,8 @@
                   // (this entry, left as Forward, keeps no search: Forward onto it says the post is no playlist, never Back again)
                   try { history.replaceState({ ...cur, arg: { user: a.user, id: a.id } }, '', location.pathname + location.search); } catch { /* sandboxed */ }
                   const over = { q: a.q, in: a.in || 'everywhere' }; searchOver = over; history.back();
-                  // (no Back came, the history still on this entry: in this entry, as before)
-                  setTimeout(() => { if (searchOver !== over) return; searchOver = null; if (state.view === 'shared' && state.viewArg === a && history.state && history.state.v === 'shared') { startSearch(over.q, over.in); setView('search', over, 'replace'); } }, 3000);
+                  // (no Back came, the history still on this entry: in this entry, as before; the box edited meanwhile, its own text decides)
+                  setTimeout(() => { if (searchOver !== over) return; searchOver = null; if (search.value.trim() === over.q && state.view === 'shared' && state.viewArg === a && history.state && history.state.v === 'shared') { startSearch(over.q, over.in); setView('search', over, 'replace'); } }, 3000);
                   return;
                 }
                 startSearch(a.q, a.in || 'everywhere'); setView('search', { q: a.q, in: a.in || 'everywhere' }, 'replace'); return;

@@ -6,7 +6,8 @@
 // A link to a post that is no playlist (a comment, an ordinary post) is searched as text instead of
 // an error page; a playlist made private again, or one whose homeserver doesn't answer, still says so.
 // Pasted over a search with a query, that search's entry takes it (Back and Escape go where Search was
-// opened from); a post read as no playlist is asked for again after 10 minutes.
+// opened from); a post read as no playlist is asked for again after 10 minutes. The box edited while
+// that Back lands: what was typed is searched there (the old query is not put back over it).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-search-shared-link.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -28,6 +29,8 @@ const shared = {
 const NOTPL = '0035WKVKQDHSN'; const GONE = '0035WKVKQDHSP'; const SLOW = '0035WKVKQDHSQ';
 // (another post that is no playlist, pasted over a search with a query; a homeserver that doesn't answer)
 const OVER = '0035WKVKQDHSR'; const DOWN = '0035WKVKQDHSS';
+// (one more, the box edited while its Back to the search under it lands)
+const EDITS = ['0035WKVKQDHST', '0035WKVKQDHSV', '0035WKVKQDHSW'];
 const NOTPL_LINK = `pubky://${KEY}/pub/social/v1/posts/${NOTPL}`;
 const fixtures = {
   [`/shared/${KEY}/playlists/${ID}`]: { body: shared }, [`/shared/${KEY}/playlists`]: { body: [] },
@@ -35,6 +38,7 @@ const fixtures = {
   [`/shared/${KEY}/playlists/${GONE}`]: { status: 404, body: { error: 'no shared playlist with that id (it may be private again)' } },
   [`/shared/${KEY}/playlists/${SLOW}`]: { status: 422, body: { error: 'that post is not a playlist this node can read' } },
   [`/shared/${KEY}/playlists/${OVER}`]: { status: 422, body: { error: 'that post is not a playlist this node can read' } },
+  ...Object.fromEntries(EDITS.map((e) => [`/shared/${KEY}/playlists/${e}`, { status: 422, body: { error: 'that post is not a playlist this node can read' } }])),
   [`/shared/${KEY}/playlists/${DOWN}`]: { status: 502, body: { error: 'the homeserver doesn’t answer' } },
 };
 // (the post that is no playlist and answers late: the box emptied meanwhile)
@@ -78,7 +82,7 @@ async function run(browser, width, { phone, android }) {
       const n = searched(state);
       await paste(page, bad);
       check(await until(() => searched(state) > n), `${tag}: a link with ${label} is searched as text`);
-      check(where(page) === '/search', `${tag}: and stays on Search (at ${where(page)})`);
+      check(await until(() => where(page) === '/search'), `${tag}: and stays on Search (at ${where(page)})`);
     }
     // A link to a post that is no playlist is searched as text, in the shared page's place:
     // Back goes where search was opened from (the phone's Search tab, desktop Songs)
@@ -196,6 +200,31 @@ async function run(browser, width, { phone, android }) {
       }
       await page.goBack();
       check(await until(() => where(page) === home && !new URL(page.url()).search), `${tag}: Back goes where Search was opened from, not to “Night” (at ${where(page)}${new URL(page.url()).search})`);
+    }
+    // The box edited while that Back to the search under it lands: what is in it then decides, in that
+    // entry (before, the old query was put back over the typing): a new search, a key's person page, or,
+    // emptied, the phone's empty Search tab and on desktop the page Search was opened from
+    for (const [i, [label, typed]] of [['a new search', 'Sefa'], ['a Pubky key', `pubky://${KEY}`], ['the box emptied', '']].entries()) {
+      await fresh();
+      await paste(page, 'Night');
+      await until(() => new URL(page.url()).searchParams.get('q') === 'Night');
+      const d0 = await depth();
+      // (typed the moment the page goes Back: before the search's entry is shown again)
+      await page.evaluate((t) => { const real = history.back; history.back = function () { history.back = real; const s = document.getElementById('search'); s.value = t; s.dispatchEvent(new Event('input', { bubbles: true })); return real.call(history); }; }, typed);
+      await paste(page, `pubky://${KEY}/pub/social/v1/posts/${EDITS[i]}`);
+      check(await until(() => state.hits.some((h) => h.v === `/shared/${KEY}/playlists/${EDITS[i]}`)), `${tag}: ${label} during Back: the post link is asked for first`);
+      const want = typed === 'Sefa' ? (p) => p === '/search?q=Sefa' : typed ? (p) => p === `/person/${KEY}` : phone ? (p) => p === '/search' : (p) => p === '/tracks';
+      const at = () => where(page) + new URL(page.url()).search;
+      check(await until(() => want(at())), `${tag}: ${label} meanwhile: that is what shows (at ${at()})`);
+      await sleep(600);
+      check(want(at()), `${tag}: ${label}: and stays (at ${at()})`);
+      check(await page.locator('#search').inputValue() !== 'Night', `${tag}: ${label}: the old query is not put back in the box (${await page.locator('#search').inputValue()})`);
+      if (typed === 'Sefa') check(await page.locator('#search').inputValue() === 'Sefa', `${tag}: the box keeps what was typed`);
+      if (where(page) !== '/tracks') {
+        check(await depth() === d0, `${tag}: ${label}: in the old query's entry (depth ${d0} → ${await depth()})`);
+        await page.goBack();
+        check(await until(() => where(page) === '/tracks' && !new URL(page.url()).search), `${tag}: ${label}: Back goes where Search was opened from (at ${at()})`);
+      }
     }
     // Phone: Back to the Search tab from an opened playlist, then emptying the box: no navigation,
     // the focus stays in the box to type again
