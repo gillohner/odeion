@@ -351,7 +351,8 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     // DSD by name, an unknown way just "DSD"
     for (const [dsd, words] of [['native', 'DSD (native)'], ['dop', 'DSD (DoP)'], ['unknown', 'DSD']]) {
       await plug(run, { ...KA17, dsd });
-      await page.waitForFunction(() => /DSD/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
+      // Wait for these words, not any DSD: the last plug's "DSD (native)" can still be on screen
+      await page.waitForFunction((w) => (((document.querySelector('#set-dac') || {}).innerText || '').match(/DSD[^·\n]*/) || [''])[0].trim() === w, words, { timeout: 5000 }).catch(() => {});
       const txt = (await dacTab(page)) || '';
       const shown = (txt.match(/DSD[^·\n]*/) || [''])[0].trim();
       check(shown === words, `${at}: dsd "${dsd}" reads "${words}" ("${shown}")`);
