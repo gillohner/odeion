@@ -1155,6 +1155,10 @@ details.idetails > .credit, details.idetails > .kv { margin-top: 12px; }
 html[data-shell="phone"] .about-top .blurb.clamp { -webkit-line-clamp: 2; }
 html[data-shell="phone"] #iblurbmore { position: relative; }
 html[data-shell="phone"] #iblurbmore::before { content: ''; position: absolute; inset: -12px -8px; }
+/* Wikipedia beside it is a 44 px tap the same way: 14 px up and down into the text around it (nothing
+   to tap there), 8 px to the right and 3 px to the left, stopping 1 px short of More's reach */
+html[data-shell="phone"] .wikilink { position: relative; }
+html[data-shell="phone"] .wikilink::before { content: ''; position: absolute; inset: -14px -8px -14px -3px; }
 .credit a { color: inherit; text-decoration: underline; }
 /* "Also on" next to Play/Shuffle: one icon per service */
 .also-icons { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-left: 4px; }
@@ -1572,7 +1576,10 @@ code.path { font-size: var(--fs-sm); overflow-wrap: anywhere; }
 /* Tag chips: 40 px to touch on phones and touch screens (UX sweep 2026-11-01 S4) */
 /* Tag chips (tagChip, pubky.app's): × and move a finger-sized target each, the chip a little wider for them */
 html[data-shell="phone"] :is(.ptag, .tagfaces, .tgroup-name) { min-height: 40px; height: auto; }
-html[data-shell="phone"] .ptag-add { width: 40px; }
+html[data-shell="phone"] .ptag-add { width: 40px; position: relative; }
+/* The tag + reaches 2 px past its edge (3 px from inside its 1 px border), a 44 px tap, into the 8 px
+   between chips; it stays drawn at 40 */
+html[data-shell="phone"] .ptag-add::before { content: ''; position: absolute; inset: -3px; }
 html[data-shell="phone"] .ptag .chipx { min-width: 40px; }
 html[data-shell="phone"] span.ptag { padding-right: 0; gap: 0; min-height: 42px; }
 html[data-shell="phone"] span.ptag .chiplink { padding-right: 4px; min-width: 40px; justify-content: center; }
@@ -1657,6 +1664,11 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 .dialog.wide { width: min(640px, calc(100vw - 32px)); }
 .genre-pub { display: flex; gap: 8px; align-items: center; margin-top: 10px; color: var(--muted); }
 .to-global { margin: 6px 0 0; }
+/* Phones: "All about this song →" is a 44 px tap: its whole paragraph (the "every source, versions and
+   tags" under it too) and 5 px past it either way, half the 10 px to the line above (the source line,
+   or the byline). Nothing drawn moves */
+html[data-shell="phone"] .to-global { position: relative; }
+html[data-shell="phone"] #iglobal::before { content: ''; position: absolute; inset: -5px 0; }
 .tagged-by { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; color: var(--accent-strong); }
 .hero .art.monogram { display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.88); font-size: var(--fs-art); font-weight: 700; letter-spacing: 0.02em; }
 /* People on tags: faces of who tagged, stacked */

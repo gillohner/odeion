@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-20
 
+- **On a phone, "All about this song →", the tag + and About's Wikipedia link take a whole fingertip.** On an album, song or artist page, "All about this song →" was a 14 px line to hit: now its whole paragraph, "every source, versions and tags" too, opens it. The tag + and the Wikipedia link under About also reach a little past what is drawn, so a thumb that lands just beside them still counts. Nothing on the page moves.
 - **Rating an album or song with your thumb lands on the star you meant.** On a phone the stars under a page's Play button were small (each half star 12 px wide and 26 px tall), so a tap often set the wrong rating or none. Each star is now a full 44 px tap, a half star 22 px wide, and the stars sit where they were. Add notes and the notes' Save and Cancel are full-size taps too, and a song page's play button for another version is as big as the other buttons. Computers are unchanged.
 - **Start radio no longer says similar music follows when the song didn't start.** If the speaker refuses the song (or it can't be read), Start radio from a song's ⋯ now shows only that error and leaves the radio off. Before, it turned the radio on and said "similar music follows" for a song that never played.
 - **A Queue song's ⋯ no longer opens its menu over the next page.** Tap a song's ⋯ on the Queue and open another page before its menu is ready: the menu now stays closed. Before, it could pop up over the page you had just opened.
