@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-20
 
+- **The Queue shows more songs on a phone.** A song's artist and album line wrapped onto two or three more lines when it was long, so a phone showed only a few songs at a time. It now stays on one line and ends in "…", as on Songs, so each song takes two lines and about half as many again fit on the screen. Titles have a little more room too, and the drag handle, Play and ⋯ are still full-size taps.
 - **On a phone, a page's title sits level with its buttons.** On Home, Your library, Songs and Zones the title sat about 10 px lower than Edit Home, Add music, Play all or the + beside it, so the head looked crooked. Their middles now line up; nothing else on the page moves.
 - **The empty Queue says how to add a song in plain words.** It said “add songs with the row actions”; it now says “add a song from its ⋯ menu”, as the empty Playlists page does.
 

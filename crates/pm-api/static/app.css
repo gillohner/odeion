@@ -781,6 +781,15 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
 html[data-shell="phone"] .list.queue .q-actions { display: none; }
 html[data-shell="phone"] .list.queue .qgrip { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; min-height: 44px; margin: -4px 0; padding: 0 2px 0 0; flex: none; position: relative; }
 html[data-shell="phone"] .list.queue .qgrip::before { content: ''; position: absolute; inset: 0 -8px; }
+/* Phones: a queue row is two lines, as a Songs row is. Its artist · album line stays on one line and
+   ends in "…" (a long one wrapped to three more lines: a 103 px row at 360 px), and the row's gaps are
+   8 px, not 14, so the title gets 20 px more. The grip is 4 px wider and it and Play from here share
+   the gap between them, so each is still a 44 px tap (6 + 34 + 4; 4 + 36 + 4); ⋯ keeps its 6 px. */
+html[data-shell="phone"] .list.queue .list-row { gap: 8px; }
+html[data-shell="phone"] .list.queue .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html[data-shell="phone"] .list.queue .qgrip { min-width: 34px; }
+html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
+@media (pointer: coarse) { html[data-shell="phone"] .list.queue [data-qi]::before { inset: -6px -4px; } }
 .list.queue .icon-btn:disabled { opacity: 0.3; cursor: default; }
 
 /* ---- DSP editor ---- */
