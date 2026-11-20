@@ -9,7 +9,10 @@
 // opened from); a post read as no playlist is asked for again after 10 minutes. The box edited while
 // that Back lands: what was typed is searched there (the old query is not put back over it), also when
 // the Back lands after 3 s or never comes; Escape then goes Home on a phone; a second post typed then
-// takes its search in its own entry.
+// takes its search in its own entry. A Back landing after the box decided, or after the person opened
+// another page or went Back themselves meanwhile, is undone (what shows stays); the person's own Back is
+// theirs; a Back onto another search entry is that search; an emptied box's Back that never lands
+// (desktop) still draws the page Search was opened from.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-search-shared-link.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -32,7 +35,7 @@ const NOTPL = '0035WKVKQDHSN'; const GONE = '0035WKVKQDHSP'; const SLOW = '0035W
 // (another post that is no playlist, pasted over a search with a query; a homeserver that doesn't answer)
 const OVER = '0035WKVKQDHSR'; const DOWN = '0035WKVKQDHSS';
 // (one more, the box edited while its Back to the search under it lands)
-const EDITS = ['0035WKVKQDHST', '0035WKVKQDHSV', '0035WKVKQDHSW', '0035WKVKQDHSX', '0035WKVKQDHSY', '0035WKVKQDHSZ', '0035WKVKQDHT0', '0035WKVKQDHT1', '0035WKVKQDHT2', '0035WKVKQDHT3', '0035WKVKQDHT4', '0035WKVKQDHT5'];
+const EDITS = ['0035WKVKQDHST', '0035WKVKQDHSV', '0035WKVKQDHSW', '0035WKVKQDHSX', '0035WKVKQDHSY', '0035WKVKQDHSZ', '0035WKVKQDHT0', '0035WKVKQDHT1', '0035WKVKQDHT2', '0035WKVKQDHT3', '0035WKVKQDHT4', '0035WKVKQDHT5', '0035WKVKQDHT6', '0035WKVKQDHT7', '0035WKVKQDHT8', '0035WKVKQDHT9', '0035WKVKQDHTA', '0035WKVKQDHTB', '0035WKVKQDHTC'];
 const NOTPL_LINK = `pubky://${KEY}/pub/social/v1/posts/${NOTPL}`;
 const fixtures = {
   [`/shared/${KEY}/playlists/${ID}`]: { body: shared }, [`/shared/${KEY}/playlists`]: { body: [] },
@@ -227,7 +230,7 @@ async function run(browser, width, { phone, android }) {
       await paste(page, `pubky://${KEY}/pub/social/v1/posts/${EDITS[i]}`);
       check(await until(() => state.hits.some((h) => h.v === `/shared/${KEY}/playlists/${EDITS[i]}`)), `${tag}: ${label}: the post link is asked for first`);
       const want = typed === 'Sefa' ? (p) => p === '/search?q=Sefa' : typed === LINK ? (p) => p === `/shared/${KEY}/${ID}` : typed ? (p) => p === `/person/${KEY}`
-        : escape && phone ? (p) => p === '/' : phone ? (p) => p === '/search' : back === null ? (p) => p === '/' : (p) => p === '/tracks';
+        : escape && phone ? (p) => p === '/' : phone ? (p) => p === '/search' : back !== 0 ? (p) => p === '/' : (p) => p === '/tracks';
       check(await until(() => want(at()), back !== 0 ? 4500 : 3000), `${tag}: ${label}: that is what shows (at ${at()})`);
       // (a Back landing late: once it did)
       await sleep(back ? Math.max(600, back - 2400) : back === null ? 1000 : 600);
@@ -240,9 +243,10 @@ async function run(browser, width, { phone, android }) {
       check(searched(state) === n + (typed === 'Sefa' ? 1 : 0) && (typed !== 'Sefa' || searchedFor(state, 'Sefa') === nSefa + 1), `${tag}: ${label}: searched once for new text, never for a link, key or empty box (${searched(state) - n})`);
       if (typed === LINK) check(await until(async () => (await page.locator('#main h1').textContent().catch(() => '')) === 'Night drives'), `${tag}: ${label}: the playlist shows`);
       if (escape && phone) return;
-      if (back === null) {
-        // (no Back came: the post's own entry took it, the search under it is still there; a Back pressed
-        // 2 s after that is the person's own: it shows that search and stays, no entry taken over)
+      if (back !== 0) {
+        // (no Back came in 3 s: the post's own entry took it, the search under it is still there; the app's
+        // Back landing later is undone, no second entry decides; a Back pressed after that is the person's
+        // own: it shows that search and stays, no entry taken over)
         check(await depth() === d0 + 1, `${tag}: ${label}: in the post's entry, none pushed over it (depth ${d0} → ${await depth()})`);
         await sleep(1500);
         await page.goBack();
@@ -266,6 +270,106 @@ async function run(browser, width, { phone, android }) {
       { label: 'a new search, no Back', typed: 'Sefa', back: null }, { label: 'the box emptied, no Back', typed: '', back: null },
     ];
     for (const [i, c] of cases.entries()) await over(i, c);
+    // (what the person does the moment the page asks for its Back: t typed; ms: when that Back lands, null
+    // never; drop: the app's next Back never lands; fake: a search entry of another depth under it; open:
+    // Albums opened the moment after, that Back still on its way)
+    const arm = (o) => page.evaluate(({ t, ms, drop, fake, open }) => {
+      const real = history.back;
+      history.back = function () {
+        history.back = drop ? function () { history.back = real; return undefined; } : real;
+        if (t !== undefined) { const s = document.getElementById('search'); s.value = t; s.dispatchEvent(new Event('input', { bubbles: true })); }
+        if (fake) { const st = history.state; history.pushState({ v: 'search', arg: { q: 'Zed' }, depth: 42 }, '', '/search?q=Zed'); history.pushState(st, '', location.pathname + location.search); }
+        if (ms === null) return undefined; if (ms) { setTimeout(() => real.call(history), ms); return undefined; }
+        const r = real.call(history); if (open) document.querySelector('.nav-item[data-view="albums"]').click(); return r;
+      };
+    }, o);
+    const overNight = async () => { await fresh(); await paste(page, 'Night'); await until(() => new URL(page.url()).searchParams.get('q') === 'Night'); return depth(); };
+    const postLink = (k) => `pubky://${KEY}/pub/social/v1/posts/${EDITS[k]}`;
+    const asked = (k) => until(() => state.hits.some((h) => h.v === `/shared/${KEY}/playlists/${EDITS[k]}`));
+    // Another page opened while that Back is landing (1.5 s): that page stays, the Back is undone, nothing
+    // is decided later; Back from it is the post's page, which says it is no playlist
+    {
+      const d0 = await overNight(); const n = searched(state);
+      await arm({ t: 'Sefa', ms: 1500 });
+      await paste(page, postLink(12)); await asked(12); await sleep(300);
+      await page.evaluate(() => document.querySelector('.nav-item[data-view="albums"]').click());
+      check(await until(() => where(page) === '/albums'), `${tag}: another page opened during Back opens (at ${at()})`);
+      await sleep(3500);
+      check(at() === '/albums' && await depth() === d0 + 2, `${tag}: and stays, the Back landing after it undone (at ${at()}, depth ${d0} → ${await depth()})`);
+      check(searched(state) === n, `${tag}: nothing searched there later (${searched(state) - n})`);
+      await page.goBack();
+      check(await until(async () => where(page) === `/shared/${KEY}/${EDITS[12]}` && /not a playlist/.test((await page.locator('#main .notice').textContent().catch(() => '')) || '')), `${tag}: Back from it: the post's page, no playlist (at ${at()})`);
+      await sleep(800);
+      check(where(page) === `/shared/${KEY}/${EDITS[12]}` && searched(state) === n, `${tag}: and stays, nothing decided again (at ${at()})`);
+    }
+    // (the same, the Back already on its way: it lands 2 entries down, under the post's; undone back to Albums)
+    {
+      const d0 = await overNight(); const n = searched(state);
+      await arm({ open: true });
+      await paste(page, postLink(17)); await asked(17);
+      check(await until(() => where(page) === '/albums'), `${tag}: Albums opened while the Back is on its way (at ${at()})`);
+      await sleep(1200);
+      check(at() === '/albums' && await depth() === d0 + 2 && await page.evaluate(() => history.state && history.state.v) === 'albums', `${tag}: and its own entry shown with it (at ${at()}, depth ${d0} → ${await depth()})`);
+      check(await page.locator('.nav-item.on[data-view="albums"]').count() === 1 && searched(state) === n, `${tag}: Albums drawn, nothing searched (${searched(state) - n})`);
+    }
+    // No Back came and a playlist link was typed: the playlist shows in the post's entry; its own ‹ Back
+    // pressed at once goes back to the search under it (not taken for the app's Back and undone)
+    {
+      await overNight();
+      await arm({ t: LINK, ms: null });
+      await paste(page, postLink(18)); await asked(18);
+      check(await until(async () => where(page) === `/shared/${KEY}/${ID}` && (await page.locator('#main h1').textContent().catch(() => '')) === 'Night drives', 4500), `${tag}: no Back, a playlist link typed: the playlist shows (at ${at()})`);
+      await page.locator('#main .back').first().click();
+      check(await until(() => at() === '/search?q=Night'), `${tag}: its ‹ Back at once goes to the search under it (at ${at()})`);
+    }
+    // The person's own Back while the app's is still landing: theirs takes the search under it (what was
+    // typed is searched there); the app's, landing after, is undone
+    {
+      const d0 = await overNight(); const nSefa = searchedFor(state, 'Sefa');
+      await arm({ t: 'Sefa', ms: 1500 });
+      await paste(page, postLink(13)); await asked(13); await sleep(300);
+      await page.goBack();
+      check(await until(() => at() === '/search?q=Sefa'), `${tag}: the person's own Back during the app's: what was typed is searched (at ${at()})`);
+      await sleep(2000);
+      check(at() === '/search?q=Sefa' && await depth() === d0, `${tag}: in the search's entry, and stays: the app's Back after it undone (at ${at()}, depth ${d0} → ${await depth()})`);
+      check(searchedFor(state, 'Sefa') === nSefa + 1, `${tag}: searched once (${searchedFor(state, 'Sefa') - nSefa})`);
+      await page.goBack();
+      check(await until(() => where(page) === '/tracks' && !new URL(page.url()).search), `${tag}: Back then goes where Search was opened from (at ${at()})`);
+    }
+    // No Back came, the box decided in the post's entry: a Back the person presses within 2 s is theirs,
+    // to the search under it with its own query (not the typed one put over it)
+    {
+      const d0 = await overNight();
+      await arm({ t: 'Sefa', ms: null });
+      await paste(page, postLink(14)); await asked(14);
+      check(await until(() => at() === '/search?q=Sefa', 4500), `${tag}: no Back: the box decides in the post's entry (at ${at()})`);
+      await sleep(400); await page.goBack();
+      check(await until(() => at() === '/search?q=Night'), `${tag}: the person's Back at once after that: the search under it (at ${at()})`);
+      await sleep(800);
+      check(at() === '/search?q=Night' && await depth() === d0 && await page.locator('#search').inputValue() === 'Night', `${tag}: and stays, its query in the box (at ${at()}, depth ${await depth()}, box ${await page.locator('#search').inputValue()})`);
+      await page.goForward();
+      check(await until(() => at() === '/search?q=Sefa'), `${tag}: Forward: the typed search (at ${at()})`);
+    }
+    // The page's Back lands on another search entry (not the one it was pasted over): that search shows,
+    // as it is; the typing doesn't take it
+    {
+      await overNight(); const nSefa = searchedFor(state, 'Sefa');
+      await arm({ t: 'Sefa', fake: true });
+      await paste(page, postLink(16)); await asked(16);
+      check(await until(() => at() === '/search?q=Zed'), `${tag}: a Back onto another search entry shows that search (at ${at()})`);
+      await sleep(3300);
+      check(at() === '/search?q=Zed' && searchedFor(state, 'Sefa') === nSefa, `${tag}: and stays, the typing not put over it (at ${at()}, Sefa searched ${searchedFor(state, 'Sefa') - nSefa})`);
+    }
+    // Desktop, the box emptied during that Back: its Back where Search was opened from never lands: that
+    // page is drawn anyway, never the post's loading skeleton left
+    if (!phone) {
+      const d0 = await overNight();
+      await arm({ t: '', drop: true });
+      await paste(page, postLink(15)); await asked(15);
+      check(await until(() => at() === '/tracks', 3000), `${tag}: emptied, its Back never landing: Songs drawn (at ${at()})`);
+      check(await until(async () => (await page.locator('.tracks .track').count()) > 0), `${tag}: with its songs`);
+      check(!(await page.locator('#main .skeleton').count()) && await depth() === d0, `${tag}: no skeleton left, in the search's entry (depth ${d0} → ${await depth()})`);
+    }
     // A search opened over another search (a menu's Search “…”), then a post that is no playlist pasted,
     // and another one typed while its Back lands: that one takes its search in its own entry, the first
     // search's entry stays under it

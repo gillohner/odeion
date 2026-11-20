@@ -5130,6 +5130,8 @@
     if (how !== 'pop') popTransient(true); // a page opened from a sheet takes Now playing's entry, not the sheet's
     if (popPending && how !== 'pop') return popPending.then(() => setView(v, arg, how)); // a menu's entry is still being popped
     cancelArtistReads(); // the page being left reads no more credits
+    // (a page opened while a post's Back to the search under it is landing: that page stays, nothing decides there)
+    if (searchOver && how !== 'pop') { searchOver = null; overDone(); }
     { const t = toItem(v, arg); if (t) { v = 'item'; arg = t; } }
     if (v === 'discover') { if (arg && arg.tag) { v = 'tag'; arg = arg.tag; } else { v = 'home'; arg = undefined; } }
     // A section of its own starts with an empty search box (second review: "queen" stayed after leaving Search)
@@ -5181,10 +5183,20 @@
   };
   // (a post that is no playlist pasted over a search with a query: that search's entry takes its
   // search, as a new query there does, so Back and Escape go where Search was opened from: { q, in, depth
-  // (of that search's entry), escaped (Escape pressed meanwhile), late (when no Back came in 3 s and the
-  // box decided in the post's entry: the Back asked for landing within 2 s after that still takes this;
-  // later, a Back is the person's own, to the search under it) })
+  // (of that search's entry), escaped (Escape pressed meanwhile) }. Ended undecided when the person opens
+  // another page before it lands (theirs stays); no Back in 3 s: the box decides in the post's entry.
   let searchOver = null;
+  // (the app's own Back asked for it, not landed yet: { at, done }; done: the person went elsewhere or
+  // Back themselves meanwhile, or the box decided in the post's entry. Landing then, it is undone (Forward
+  // again, as far as it went, nothing redrawn): what shows stays, no entry decides twice. 5 s after it was
+  // asked, or once the app goes Back for anything else, a Back is never taken for it. Where the person's
+  // own Back can't be told from it (no Navigation API) it is forgotten instead: never undone)
+  let overBack = null; let overUndo = null;
+  // (the Back or Forward coming is the person's own, the browser's or the system's, not a history.back()
+  // of the app's: the Navigation API says so where there is one)
+  let popByPerson = false; const popWho = !!(window.navigation && navigation.addEventListener);
+  if (popWho) navigation.addEventListener('navigate', (e) => { if (e.navigationType === 'traverse' && e.destination && e.destination.sameDocument) popByPerson = !!e.userInitiated; });
+  const overDone = () => { if (overBack) { if (popWho) overBack.done = true; else overBack = null; } };
   // What is in the box then decides, in the entry shown (the search's, Back landed; else the post's own):
   // the old query, the text typed meanwhile (a link or key opens its page there), or, emptied, the
   // phone's empty Search tab (Escape: Home, as Escape there gives) and on desktop the page Search was
@@ -5200,16 +5212,27 @@
     else setView('search', undefined, 'replace');
   };
   window.addEventListener('popstate', async (e) => {
+    const byPerson = popByPerson; popByPerson = false;
+    // (a Forward undoing the app's late Back: nothing to show, whatever entry it lands on; one at a time, as
+    // Chromium refuses a go(2) onto an entry pushed while that Back was on its way)
+    // (only a pop one entry up from the last step, within 1 s: any other is the person's)
+    if (overUndo) { const u = overUndo; overUndo = null; const d = (e.state && e.state.depth) || 0; if (Date.now() - u.at < 1000 && d === u.from + 1) { popHandled = false; navDepth = d; if (u.steps > 1) { overUndo = { at: Date.now(), steps: u.steps - 1, from: d }; history.forward(); } return; } }
+    if (overBack && (Date.now() - overBack.at >= 5000 || (popHandled && !byPerson))) overBack = null; // (spent closing a menu)
     if (popHandled) { popHandled = false; return; } // back only closed a menu or dialog
     if (e.state && e.state.transient) return; // forward onto a closed menu's entry: nothing to show
     const st = e.state || routeFromPath() || { v: 'home' };
-    navDepth = st.depth || 0;
+    const was = navDepth; navDepth = st.depth || 0;
+    // (the app's own Back for a post's search landing: once the person went elsewhere or the box decided,
+    // undone, back to the entry it left: a page opened before it landed leaves it 2 entries down)
+    const appBack = !byPerson && overBack; if (appBack) overBack = null;
+    if (appBack && appBack.done && was > navDepth) { overUndo = { at: Date.now(), steps: was - navDepth, from: navDepth }; navDepth = was; history.forward(); return; }
     // (Back from a post that is no playlist onto the search it was pasted over: that entry takes the post's search)
     // (the box edited before that Back landed: what is in it now takes that entry, never the old query put back over it;
-    // a link or key typed there opens its page in that entry too)
+    // a link or key typed there opens its page in that entry too. The person's own Back there does as the app's
+    // would: that one, landing later, is undone)
     if (searchOver) {
-      const o = searchOver; searchOver = null;
-      if (st.v === 'search' && (!o.late || (Date.now() - o.late < 2000 && (st.depth || 0) === o.depth))) { overDecide(o); return; }
+      const o = searchOver; searchOver = null; overDone();
+      if (st.v === 'search' && (st.depth || 0) === o.depth) { overDecide(o); return; }
     }
     let going;
     if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; startSearch(st.arg.q, st.arg.in || 'everywhere'); going = setView('search', st.arg, 'pop'); }
@@ -5221,7 +5244,7 @@
     if (st.scroll && gen === navGen) mainTo(st.scroll);
   });
   // The back arrow: one step back when there is in-app history, else the parent page.
-  const goBack = (fallback) => { if (navDepth > 0) history.back(); else if (fallback && fallback.startsWith('item:')) { const [, kind, ...id] = fallback.split(':'); setView('item', { kind, id: id.join(':') }); } else setView(fallback || 'home'); };
+  const goBack = (fallback) => { if (navDepth > 0) { overBack = null; history.back(); } else if (fallback && fallback.startsWith('item:')) { const [, kind, ...id] = fallback.split(':'); setView('item', { kind, id: id.join(':') }); } else setView(fallback || 'home'); };
   $$('.nav-item').forEach((b) => b.onclick = () => setView(b.dataset.view));
   // Back from TIDAL's or Spotify's sign-in page (its callback sends the browser to /?tidal=… or
   // /?spotify=…): once the first page is drawn (connect), the place the sign-in was started opens,
@@ -5364,7 +5387,12 @@
     const cur = history.state;
     if (cur && cur === searchLeft) return;
     const from = cur && typeof cur.fromPath === 'string' ? cur.fromPath.split('?')[0] : '';
-    if (from && from !== '/search' && navDepth > 0 && cur.v === 'search' && !cur.transient && shellMode() !== 'phone') { searchLeft = cur; history.back(); }
+    if (from && from !== '/search' && navDepth > 0 && cur.v === 'search' && !cur.transient && shellMode() !== 'phone') {
+      searchLeft = cur; overBack = null; history.back();
+      // (over a post's page still drawn as its loading skeleton: that Back not landed in 1.5 s, the page
+      // Search was opened from is drawn in this entry, never the skeleton left)
+      if (over) { const drawn = state.viewArg; setTimeout(() => { if (state.view !== 'shared' || state.viewArg !== drawn || history.state !== cur) return; searchLeft = null; try { history.replaceState(cur, '', cur.fromPath); } catch { /* sandboxed */ } const r = routeFromPath() || { v: 'home' }; setView(r.v, r.arg, 'replace'); }, 1500); }
+    }
     else setView('home');
   };
   // "<user>/<id>" of posts the node read as no playlist (422), when: 10 minutes, then asked again
@@ -5373,7 +5401,7 @@
   const notPlaylist = (key) => Date.now() - (notPlaylists.get(key) ?? -Infinity) < NOT_PL_MS;
   const runSearch = async (how, savedScope) => {
     // (a post's Back to the search under it not landed yet: the box's text then decides, there, overDecide)
-    if (searchOver && !searchOver.late && state.view === 'shared') return;
+    if (searchOver && state.view === 'shared') return;
     const q = search.value.trim();
     if (!q) { if (shellMode() !== 'phone') leaveSearch(); else if (state.view === 'search' && state.viewArg && state.viewArg.q) setView('search'); return; }
     // A pasted link skips searching: its item page (by-uri, then resolve; "Reading this link…").
@@ -5392,7 +5420,7 @@
     setView('search', { q, in: scope }, how === 'pop' || how === 'replace' ? how : 'push');
   };
   search.addEventListener('input', () => { searchKeys.reset(); clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
-  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { clearTimeout(searchTimer); search.value = ''; search.blur(); if (searchOver && !searchOver.late) searchOver.escaped = true; leaveSearch(); } });
+  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { clearTimeout(searchTimer); search.value = ''; search.blur(); if (searchOver) searchOver.escaped = true; leaveSearch(); } });
 
   // Whether the focused element got its focus from a click on it (not from the keyboard or the page)
   let pointerDown = { at: 0, target: null }, focusByPointer = false;
@@ -8577,15 +8605,16 @@
                 const cur = history.state;
                 // (one opened in that search's place, here, takes its search in its own entry: that Back would leave a search behind it)
                 if (!a.here && navDepth > 0 && cur && cur.v === 'shared' && !cur.transient && typeof cur.fromPath === 'string' && cur.fromPath.startsWith('/search?')) {
-                  if (searchOver && !searchOver.late) return; // (another draw of this page already went Back)
+                  if (searchOver) return; // (another draw of this page already went Back)
                   // (this entry, left as Forward, keeps no search: Forward onto it says the post is no playlist, never Back again)
                   try { history.replaceState({ ...cur, arg: { user: a.user, id: a.id } }, '', location.pathname + location.search); } catch { /* sandboxed */ }
-                  const over = { q: a.q, in: a.in || 'everywhere', depth: (cur.depth || 0) - 1 }; searchOver = over; history.back();
-                  // (no Back came in 3 s, the history still on this entry: the box's text decides in this entry; a Back landing later still takes over)
+                  const over = { q: a.q, in: a.in || 'everywhere', depth: (cur.depth || 0) - 1 }; searchOver = over;
+                  const ask = { at: Date.now() }; overBack = ask; history.back();
+                  // (no Back came in 3 s, the history still on this entry: the box's text decides in this entry; the Back landing later is undone)
                   setTimeout(() => {
-                    if (searchOver !== over) return; searchOver = null;
+                    if (searchOver !== over) return; searchOver = null; if (overBack === ask) overDone();
                     if (state.view !== 'shared' || state.viewArg !== a || !history.state || history.state.v !== 'shared') return;
-                    overDecide(over); searchOver = { ...over, late: Date.now() };
+                    overDecide(over);
                   }, 3000);
                   return;
                 }
