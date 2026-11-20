@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-20
+
+- **Start radio keeps going when you switch speakers, and a queue song's ⋯ still opens after the queue changes.** If you picked Start radio and switched to another speaker before the song started, the first speaker's queue was replaced but its radio stayed off, with no word. The radio now goes on there too, and the message names that speaker. On the Queue, a song's ⋯ that was still loading when the queue changed (a song removed, moved, or changed on another device) opened nothing; it now opens on the same song's new row, with Move up and Move down for where the song is now.
+
 ### 2026-11-19
 
 - **Mute any zone from its card on Zones.** A zone card's volume was just a slider with no speaker, so it looked like a seek bar, and in a wide window there was no Mute anywhere (the player bar shows a slider there, not the volume button with Mute). Each card with a volume now has the same Mute button as the volume popover, just before its slider: one click mutes that zone without choosing it, and a second unmutes it. Phones are unchanged.

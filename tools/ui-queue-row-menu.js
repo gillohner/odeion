@@ -3,8 +3,11 @@
 // a streamed song's has Go to song page. Desktop rows show the ⋯ (before, only phones did, and a
 // queued song had to be found again on Songs to be added to a playlist); their Move up / Move down /
 // Remove stay buttons on the row, not menu items. Phones keep those three first in the ⋯. A library
-// song the node can't answer for still gets a menu (Go to song page). A ⋯ whose row is drawn again
-// while its menu still reads opens nothing. Two ⋯ tapped quickly open only the last one's menu (the
+// song the node can't answer for still gets a menu (Go to song page). A ⋯ whose queue is drawn again
+// while its menu still reads opens its menu on the same song's new ⋯, with Move up / Move down for
+// where the song is now (before, nothing opened); none opens once that song has gone (a toast says
+// so). Two ⋯ tapped
+// quickly open only the last one's menu (the
 // first's, slower, opened over it before), and the first ⋯ stops showing its progress. A ⋯ waits
 // at most 1.5 s for the song's own items (then it opens with Go to song page, and a phone's
 // Move/Remove). An edit picked from the menu is for its
@@ -13,7 +16,9 @@
 // page (its ⋯ then has Move/Remove). On a node zone: the zone the page shows changes while the menu
 // is open (the page follows the host to another device): Play next, Add to queue and Start radio send
 // nothing (before, they added to or replaced the other device's queue); the queue changes while a
-// phone's menu is open: Move/Remove ask the node for that song's own queue entry.
+// phone's menu is open: Move/Remove ask the node for that song's own queue entry. Start radio picked
+// before the page follows to another device turns the radio on for the queue it replaced, and the
+// toast names that device (before, that queue was replaced and its radio left off without a word).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-queue-row-menu.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -116,16 +121,47 @@ async function run(browser, width) {
     await close(page);
   }
 
-  // The page drawn again while the menu still reads (Song 1 removed): no menu opens for the ⋯ that
-  // went (before, it opened at the window's corner, its Move/Remove for the row's old place)
+  // The page drawn again while the menu still reads (Song 1 removed, Song 2 moves up to the first
+  // row): the menu opens on Song 2's new ⋯, Move up gone with it (before, no menu opened at all;
+  // before that, one at the window's corner with Move/Remove for the row's old place)
+  const atMore = (n) => page.evaluate((k) => {
+    const m = document.querySelector('.popover.menu:not([hidden])'); const b = document.querySelectorAll('.list.queue .list-row [data-qmore]')[k];
+    if (!m || !b) return null; const r = b.getBoundingClientRect(); const t = m.getBoundingClientRect().top;
+    return Math.abs(t - Math.min(window.innerHeight - m.offsetHeight - 8, r.bottom + 6)) <= 1;
+  }, n);
   {
     let go; hold = { wait: new Promise((r) => { go = r; }) };
     await tapMore(page, 1, phone);
     await page.waitForTimeout(300);
     await removeRow(page, 0);
     await page.waitForFunction(() => document.querySelectorAll('.list.queue .list-row').length === 3);
-    go(); hold = null; await page.waitForTimeout(phone ? 1800 : 500);
-    check(await page.locator('.popover.menu:not([hidden])').count() === 0, `${width}: a ⋯ whose row was drawn again while its menu read opens no menu`);
+    go(); hold = null;
+    await page.locator('.popover.menu:not([hidden]) .pop-item').first().waitFor({ timeout: 2500 }).catch(() => {});
+    const its = await menuItems(page);
+    check(await title(page) === 'Song 2' && its.includes('Add to playlist…'), `${width}: a ⋯ whose queue was drawn again while its menu read opens the song's menu (${await title(page)}: ${its.join(' | ')})`);
+    check(!its.includes('Move up') && its.includes('Move down') === phone, `${width}: with Move up / Move down for where the song is now (${its.join(' | ')})`);
+    if (!phone) check(await atMore(0), `${width}: at the song's new ⋯`);
+    await page.screenshot({ path: path.join(shots, `queue-menu-redrawn-${width}.png`) });
+    await close(page);
+  }
+  // The same, its read slower than 1.5 s (Song 2 moved down meanwhile, then back): the menu without
+  // the song's own items opens on its new ⋯, with Move up and Move down
+  {
+    let go; hold = { wait: new Promise((r) => { go = r; }) };
+    const t0 = Date.now();
+    await tapMore(page, 0, phone);
+    await page.waitForTimeout(300);
+    await page.evaluate(() => { const b = document.querySelector('[data-qdown="0"]'); b.onclick.call(b, new MouseEvent('click')); });
+    await page.waitForFunction(() => (document.querySelector('.list.queue .list-row .name') || {}).textContent === 'Song 3');
+    await page.locator('.popover.menu:not([hidden]) .pop-item').first().waitFor({ timeout: 2500 }).catch(() => {});
+    const took = Date.now() - t0; const its = await menuItems(page);
+    check(took < 2500 && await title(page) === 'Song 2' && its.includes('Go to song page'), `${width}: a slow ⋯ whose queue was drawn again opens within 1.5 s (${took} ms, ${await title(page)}: ${its.join(' | ')})`);
+    check(its.includes('Move up') === phone && its.includes('Move down') === phone, `${width}: its Move up / Move down for the song's new place (${its.join(' | ')})`);
+    if (!phone) check(await atMore(1), `${width}: at the song's new ⋯`);
+    go(); hold = null; await page.waitForTimeout(400);
+    await close(page);
+    await page.evaluate(() => { const b = document.querySelector('[data-qup="1"]'); b.onclick.call(b, new MouseEvent('click')); });
+    await page.waitForFunction(() => (document.querySelector('.list.queue .list-row .name') || {}).textContent === 'Song 2');
   }
 
   // The queue changes while a phone's menu is open (Song 2, before Song 3, removed): its Remove
@@ -149,6 +185,17 @@ async function run(browser, width) {
       await page.waitForTimeout(400);
       check(await page.getByText('that song isn’t in the queue any more').count() > 0, `${width}: Remove for a song gone meanwhile says so and changes nothing`);
     } else check(false, `${width}: the menu stays open while its song is removed`);
+  }
+  // The song itself removed while its menu reads: no menu opens, and a toast says why
+  if (!phone) {
+    let go; hold = { wait: new Promise((r) => { go = r; }) };
+    await tapMore(page, 0, phone);
+    await page.waitForTimeout(300);
+    await removeRow(page, 0);
+    await page.waitForFunction(() => document.querySelectorAll('.list.queue .list-row').length === 2);
+    go(); hold = null; await page.waitForTimeout(1800);
+    check(await page.locator('.popover.menu:not([hidden])').count() === 0, `${width}: a ⋯ whose song left the queue while its menu read opens no menu`);
+    check(await page.getByText('Song 2 isn’t in the queue any more').count() > 0, `${width}: and says the song isn’t in the queue any more`);
   }
   check(state.errors.length === 0, `${width}: no page errors ${state.errors.join('; ')}`);
   await context.close();
@@ -193,11 +240,14 @@ async function runZone(browser, width) {
   const { context, page, state } = await fx.create(browser, width, { fixtures: zf, zone: 'z1', tracks, collections: [fx.summary], ...(phone ? { mobile: true } : {}) });
   let ws = null;
   await context.routeWebSocket(/\/v1\/events/, (w) => { ws = w; w.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') w.send(JSON.stringify({ type: 'pong', id: j.id })); }); w.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [z1, z2] })); });
-  await context.route(/\/v1\/zones\/z[12]\/(queue(\/\d+)?|radio|play|transport)$/, (r) => {
+  let seedHold = null;
+  await context.route(/\/v1\/zones\/z[12]\/(queue(\/\d+)?|radio|play|transport)$/, async (r) => {
     // (answered here, so noted here: the fixture's own log never sees them)
     const q = r.request(); if (q.method() === 'GET') return r.fallback();
-    state.hits.push({ v: new URL(q.url()).pathname.slice(3), m: q.method(), q: '', body: q.postData(), at: Date.now() });
-    return r.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+    const v = new URL(q.url()).pathname.slice(3);
+    state.hits.push({ v, m: q.method(), q: '', body: q.postData(), at: Date.now() });
+    if (seedHold && q.method() === 'POST' && v === '/zones/z1/queue') await seedHold.wait;
+    return r.fulfill({ status: 200, contentType: 'application/json', body: '{}' }).catch(() => {});
   });
   await fx.go(page, '/queue');
   await page.locator('.list.queue .list-row').nth(2).waitFor();
@@ -249,6 +299,24 @@ async function runZone(browser, width) {
     await page.waitForTimeout(500);
     const put = state.hits.slice(m).filter((h) => h.m !== 'GET');
     check(put.map((h) => `${h.m} ${h.v} ${h.body}`).join(',') === 'PUT /zones/z1/queue/103 {"to_index":1}', `${width}: Move up after the queue changed moves Song 3's own entry from where it is now (${put.map((h) => `${h.m} ${h.v} ${h.body}`).join(', ')})`);
+  }
+  // Start radio picked in the Kitchen; the page follows the host to the Living room while the song
+  // is on its way: the Kitchen's queue was replaced, so its radio goes on too, and the toast says where
+  {
+    await page.waitForFunction(() => /Kitchen/.test((document.querySelector('.page-head') || {}).textContent || ''));
+    let go; seedHold = { wait: new Promise((r) => { go = r; }) };
+    await openMenu(page, 1, phone);
+    const n = state.hits.length;
+    await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Start radio' }).click();
+    for (let t = 0; t < 40 && !sent(n).includes('POST /zones/z1/queue'); t++) await page.waitForTimeout(50);
+    zf['/presence'] = { body: [{ mine: true, key: 'host', name: 'Host', zone: { id: 'z2', name: 'Living room' }, your_zone: 'z1' }] };
+    zf['/me/presence'] = { body: { visible: 'hidden' } };
+    ws.send(JSON.stringify({ type: 'zone_removed', seq: 9, zone: 'z9' }));
+    await page.waitForFunction(() => /Living room/.test((document.querySelector('.page-head') || {}).textContent || ''));
+    go(); seedHold = null; await page.waitForTimeout(800);
+    const radio = state.hits.slice(n).filter((h) => /\/radio$/.test(h.v)).map((h) => `${h.m} ${h.v} ${h.body}`);
+    check(sent(n)[0] === 'POST /zones/z1/queue' && radio.join(',') === 'PUT /zones/z1/radio {"on":true}', `${width}: Start radio, then the page follows to the Living room: the Kitchen's radio goes on (${sent(n).join(', ')}; ${radio.join(', ')})`);
+    check(await page.getByText('Radio from “Song 2” on Kitchen: similar music follows').count() > 0, `${width}: and the toast names the Kitchen`);
   }
   check(state.errors.length === 0, `${width}: no page errors ${state.errors.join('; ')}`);
   await context.close();
