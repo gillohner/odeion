@@ -424,6 +424,10 @@ html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44p
 /* ---- page scaffolding ---- */
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .page-head .count { color: var(--muted); font-weight: 500; font-size: var(--fs-md); margin-left: 10px; }
+/* A one-line title (Songs, Your library, Zones, Home) sits level with the buttons on its row: at
+   their foot a 24 px title read 3-7 px lower than 31-38 px buttons. A head with an eyebrow and a
+   counts line (a genre, a source's album) keeps its buttons on the foot line. */
+.page-head:has(> h2) { align-items: center; }
 .eyebrow { font-size: var(--fs-xs); font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
 .section { }
 .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
