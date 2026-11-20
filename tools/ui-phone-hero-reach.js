@@ -8,7 +8,11 @@
 //   * the tag + (.ptag-add, drawn 40 × 40 px) reaches 2 px past its edge (44 × 44 px), and a press
 //     just outside it opens the tag field; the group's name and the chips beside it keep theirs;
 //   * About's "Wikipedia" link (17 px tall) reaches 14 px up and down, 8 px right and 3 px left,
-//     where More's reach (8 px) stops: More keeps its own reach.
+//     where More's reach (8 px) stops: More keeps its own reach. On a right-to-left page (dir=rtl)
+//     the same, mirrored: 3 px on More's side (its right), 8 px on the other;
+//   * with own and public tags over several rows (two groups on the album, so own chips have a move
+//     handle too), every chip's link, ×, move handle and faces, the group names and "+N more" keep
+//     every point of their own box next to the enlarged +, folded and shown whole.
 // At 320, 360 and 412 px (360 as the Android app too), album, song and artist pages. Desktop
 // (1280 px) has none of these layers. Nothing is wider than the screen.
 // Presses use page.mouse.click at exact points (a touchscreen tap snaps onto a nearby target).
@@ -37,10 +41,18 @@ const fixtures = {
   '/item/album/lib-7/extras': { body: {} }, '/item/song/lib-1/extras': { body: {} }, '/item/artist/lib-2/extras': { body: {} },
   '/reviews': { body: { reviews: [] } }, '/tags': { body: { tags: [], uri: SONG } }, '/comments': { body: { comments: [], indexed: true } },
 };
+// Own and public tags over several rows (tagged pages only)
+const P = Array.from({ length: 6 }, (_, i) => `pppp${String.fromCharCode(97 + i)}`.padEnd(52, 'y'));
+const tagged = {
+  ...fixtures,
+  '/tags': { body: { uri: SONG, tags: [{ label: 'frenchcore', synced: true }, { label: 'melodic', synced: true }, { label: 'not-yet-pushed', synced: false }] } },
+  '/discover/uri': { body: { uri: SONG, indexed: true, taggers: 9, tags: [['frenchcore', 7], ['hardcore', 5], ['melodic', 3], ['uptempo', 2], ['classical', 2], ['dutch', 1], ['festival anthem', 1]], faces: { frenchcore: P.slice(0, 5), hardcore: P.slice(1, 6), melodic: P.slice(2, 5), uptempo: P.slice(0, 2), classical: [P[3]], dutch: [P[4]], 'festival anthem': [P[5]] } } },
+  '/profiles': { body: [] },
+};
 const PAGES = [['album', '/album/lib-7'], ['song', '/song/lib-1'], ['artist', '/artist/lib-2']];
 
-async function open(browser, width, route, android) {
-  const { page, context, state } = await fx.create(browser, width, width < 600 ? { mobile: true, fixtures: { ...fixtures } } : { fixtures: { ...fixtures } });
+async function open(browser, width, route, android, fx0 = fixtures) {
+  const { page, context, state } = await fx.create(browser, width, width < 600 ? { mobile: true, fixtures: { ...fx0 } } : { fixtures: { ...fx0 } });
   if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
   await fx.go(page, route);
   await page.waitForSelector('#iplay'); await sleep(300);
@@ -122,11 +134,64 @@ const reach = (page, sel) => page.evaluate((sel) => {
         const rm = await reach(page, '#iblurbmore');
         check(rm.h >= 44 && rm.right >= more.r + 7, `${w}: More keeps its reach (${rm.w} × ${rm.h}, right edge +${(rm.right - more.r).toFixed(1)})`);
         check(rw.left >= rm.right - 0.5, `${w}: Wikipedia's reach starts where More's stops (${rw.left.toFixed(1)} ≥ ${rm.right.toFixed(1)})`);
+        // Right to left: More is on Wikipedia's right; the 3 px side faces it, the 8 px side the other way
+        if (kind === 'artist') {
+          await page.evaluate(() => { document.documentElement.dir = 'rtl'; document.querySelector('.blurb-foot').scrollIntoView({ block: 'center' }); }); await sleep(100);
+          const wr = await rect(page, '.wikilink'); const mr = await rect(page, '#iblurbmore');
+          const rwr = await reach(page, '.wikilink'); const rmr = await reach(page, '#iblurbmore');
+          check(wr.r <= mr.l, `${w} rtl: More is on Wikipedia's right (${wr.r.toFixed(1)} ≤ ${mr.l.toFixed(1)})`);
+          check(rwr.h >= 44 && rwr.w >= 44, `${w} rtl: Wikipedia is a 44 px tap (${rwr.w} × ${rwr.h})`);
+          check(rmr.h >= 44 && rmr.left <= mr.l - 7, `${w} rtl: More keeps its reach (left edge -${(mr.l - rmr.left).toFixed(1)})`);
+          check(rwr.right <= rmr.left + 0.5 && Math.abs(rwr.right - wr.r - 3) <= 1 && Math.abs(wr.l - rwr.left - 8) <= 1, `${w} rtl: Wikipedia reaches 3 px towards More, 8 px away from it, and stops where More's reach starts (${(rwr.right - wr.r).toFixed(1)} / ${(wr.l - rwr.left).toFixed(1)}, ${rwr.right.toFixed(1)} ≤ ${rmr.left.toFixed(1)})`);
+          await page.evaluate(() => { document.documentElement.dir = ''; });
+        }
       }
       const wide = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       check(wide <= 0, `${w}: nothing is wider than the screen (${wide})`);
       check(!state.errors.length, `${w}: no page errors (${state.errors.join('; ')})`);
       if (kind === 'song' || width === 360) { await page.evaluate(() => scrollTo(0, 0)); await page.screenshot({ path: path.join(SHOTS, `${width}${android ? '-android' : ''}-${kind}.png`) }); }
+      await context.close();
+    }
+  }
+  // ---- tags over several rows: every chip part next to the enlarged + keeps its own box ----
+  for (const [width, android] of [[320, false], [360, false], [412, false], [360, true]]) {
+    const at = `${width}${android ? ' Android' : ''}`;
+    for (const [kind, route] of PAGES.slice(0, 2)) {
+      const { page, context, state } = await open(browser, width, route, android, tagged);
+      const w = `${at} ${kind} tagged`;
+      await until(() => page.evaluate(() => document.querySelectorAll('.item-hero .tagfaces').length > 0 && !document.querySelector('.item-hero .tag-skel')));
+      // Each part of the hero's tags, scrolled into view and probed 1 px inside its edge middles, at its
+      // middle, and near its corners (30 % in, inside a rounded or round shape)
+      const parts = () => page.evaluate(async () => {
+        const els = [...document.querySelectorAll('#htags :is(.chiplink, .chipx, .tagfaces, .tagitem > button.ptag, .tgroup-name, [data-htag-more])')].filter((e) => e.getClientRects().length && e.getBoundingClientRect().width);
+        const bad = [];
+        for (const e of els) {
+          e.scrollIntoView({ block: 'center', behavior: 'instant' }); await new Promise(requestAnimationFrame);
+          const b = e.getBoundingClientRect(); const ix = Math.min(b.width, b.height) * 0.3;
+          const pts = [[b.left + 1, b.top + b.height / 2], [b.right - 1, b.top + b.height / 2], [b.left + b.width / 2, b.top + 1], [b.left + b.width / 2, b.bottom - 1], [b.left + b.width / 2, b.top + b.height / 2],
+            [b.left + ix, b.top + ix], [b.right - ix, b.top + ix], [b.left + ix, b.bottom - ix], [b.right - ix, b.bottom - ix]];
+          for (const [x, y] of pts) { const t = document.elementFromPoint(x, y); if (!t || !(t === e || e.contains(t))) bad.push(`${e.className.split(' ')[0]}${e.dataset.label ? ` ${e.dataset.label}` : ''} at ${x.toFixed(0)},${y.toFixed(0)} → ${t ? (t.closest('.ptag-add') ? 'the +' : t.className || t.tagName) : 'nothing'}`); }
+        }
+        const shown = [...document.querySelectorAll('#htags .tgroup > *')].filter((e) => !e.hidden && e.getClientRects().length && !e.classList.contains('tgroup-name'));
+        document.querySelectorAll('#htags .ptag-add').forEach((e, i) => { e.dataset.probeplus = String(i); });
+        return { n: els.length, bad, rows: new Set(shown.map((e) => Math.round(e.getBoundingClientRect().top + scrollY))).size, moves: document.querySelectorAll('#htags [data-htag-move]').length, plus: document.querySelectorAll('#htags .ptag-add').length };
+      });
+      for (const shown of ['folded', 'shown whole']) {
+        if (shown === 'shown whole') { for (let i = 0; i < 4; i++) { const more = page.locator('.item-hero [data-htag-more]:visible'); if (!(await more.count())) break; await more.first().click(); await sleep(150); } }
+        const r = await parts();
+        check(r.rows >= (shown === 'folded' ? 2 : 3) && r.plus >= 1 && (kind !== 'album' || r.moves > 0), `${w} ${shown}: tags over ${r.rows} rows, ${r.plus} +, ${r.moves} move handles, ${r.n} parts`);
+        check(!r.bad.length, `${w} ${shown}: every chip link, ×, move handle, faces and name keeps its whole box (${r.bad.slice(0, 4).join('; ') || 'all'})`);
+        for (let i = 0; i < r.plus; i++) {
+          const sel = `#htags [data-probeplus="${i}"]`;
+          await page.evaluate((sel) => document.querySelector(sel).scrollIntoView({ block: 'center', behavior: 'instant' }), sel); await sleep(50);
+          const rp = await reach(page, sel);
+          check(rp.w >= 44 && rp.h >= 44 && rp.w <= 45 && rp.h <= 45, `${w} ${shown}: group ${i + 1}'s + is a 44 × 44 px tap (${rp.w} × ${rp.h})`);
+        }
+      }
+      const wide = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      check(wide <= 0, `${w}: nothing is wider than the screen (${wide})`);
+      check(!state.errors.length, `${w}: no page errors (${state.errors.join('; ')})`);
+      if (width === 360 && !android) { await page.evaluate(() => document.querySelector('#htags').scrollIntoView({ block: 'center' })); await page.screenshot({ path: path.join(SHOTS, `${width}-${kind}-tagged.png`) }); }
       await context.close();
     }
   }
