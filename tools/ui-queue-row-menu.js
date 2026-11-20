@@ -205,14 +205,23 @@ async function run(browser, width) {
     await fx.go(page, '/queue');
     await page.locator('.list.queue .list-row').nth(1).waitFor();
     let go; hold = { wait: new Promise((r) => { go = r; }) };
-    // (Sources waits for its list before it draws: the Queue's rows stay until then)
+    // (Sources waits for its list before it draws: the Queue's rows stay until the page's 120 ms
+    // loading placeholder)
     let goSources; const sourcesHeld = new Promise((r) => { goSources = r; });
     await context.route('**/v1/sources', async (r) => { await sourcesHeld; r.fallback(); });
     await tapMore(page, 1, phone);
     await page.waitForTimeout(300);
     check(await page.locator('.popover.menu:not([hidden])').count() === 0, `${width}: no menu yet while the ⋯ reads`);
+    // (the case holds only while its answer is handled with the Queue's rows still drawn: after the
+    // placeholder the ⋯ is gone, and no menu could open without the fix either. Whether its ⋯ is
+    // still in the page is read the moment it stops showing its progress, before any timer can run)
+    const more = await qmore(page, 1).elementHandle();
+    check(await more.getAttribute('aria-busy') === 'true', `${width}: the ⋯ shows its progress while it reads`);
+    await more.evaluate((b) => { window.qmoreSettled = null; new MutationObserver((_, o) => { if (b.getAttribute('aria-busy') !== 'true') { window.qmoreSettled = b.isConnected; o.disconnect(); } }).observe(b, { attributes: true, attributeFilter: ['aria-busy'] }); });
     await page.evaluate(() => document.querySelector('.nav-item[data-view="sources"]').click());
     go(); hold = null;
+    await page.waitForFunction(() => window.qmoreSettled !== null, null, { timeout: 3000 }).catch(() => {});
+    check(await page.evaluate(() => window.qmoreSettled) === true, `${width}: the ⋯'s answer is handled while the Queue's rows are still in the page (${await page.evaluate(() => window.qmoreSettled)})`);
     await page.waitForTimeout(1800);
     check(await page.locator('.popover.menu:not([hidden])').count() === 0, `${width}: a ⋯ whose answer comes in after another page was opened opens no menu (${await title(page)})`);
     await page.screenshot({ path: path.join(shots, `queue-menu-other-page-${width}.png`) });
