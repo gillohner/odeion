@@ -6,6 +6,10 @@
 // The song refused by the zone (its queue answers an error), from either menu: no radio goes on and
 // no "Radio from …: similar music follows" shows, only the error. Before, both menus turned the radio
 // on and said similar music follows a song that never started.
+// A page that plays on a Spotify Connect device (plays_from mode 'connect': Spotify first in the play
+// order, or picked for this album): its song's Start radio plays the song in the zone and turns that
+// zone's radio on, as a Songs row does. Before, it sent the song to Spotify and turned the zone's
+// radio on beside it ("similar music follows" a song the zone never got).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-item-radio-zone.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -29,9 +33,15 @@ const fixtures = {
   '/outputs': { body: [{ id: 'upnp:z1', name: 'Kitchen', kind: 'upnp', caps: {} }, { id: 'upnp:z2', name: 'Living room', kind: 'upnp', caps: {} }] },
 };
 
+// (Spotify Connect: one active device, so a Play there needs no device pick)
+const connectFixtures = { ...fixtures,
+  '/item/album/lib-7': { body: { ...albumPage, plays_from: { service: 'spotify', kind: 'album', id: 'album:sp7', label: 'Spotify · plays on a Connect device', url: 'https://open.spotify.com/album/sp7', mode: 'connect' }, connect: ['spotify'], songs: [{ ...song, uri: 'spotify:track:sp1' }] } },
+  '/sources/spotify/devices': { body: [{ id: 'sp-phone', name: 'Phone', type: 'Smartphone', is_active: true }] },
+  '/sources/spotify/play': { body: {} } };
+
 async function run(browser, width, switchZone, failFrom) {
   // (a matched song: a Songs row's ⋯ offers Start radio for those only)
-  const { context, page, state } = await fx.create(browser, width, { fixtures, zone: 'z1', tracks: [{ ...fx.track, canonical: { kind: 'recording', mbid: fx.track.mbid } }] });
+  const { context, page, state } = await fx.create(browser, width, { fixtures: failFrom === 'connect' ? connectFixtures : fixtures, zone: 'z1', tracks: [{ ...fx.track, canonical: { kind: 'recording', mbid: fx.track.mbid } }] });
   await context.routeWebSocket(/\/v1\/events/, (w) => { w.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') w.send(JSON.stringify({ type: 'pong', id: j.id })); }); w.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [z1, z2] })); });
   let go = null; const hold = { wait: new Promise((r) => { go = r; }) };
   await context.route(/\/v1\/zones\/z[12]\/(queue|radio|play|transport)$/, async (r) => {
@@ -40,10 +50,11 @@ async function run(browser, width, switchZone, failFrom) {
     const v = new URL(q.url()).pathname.slice(3);
     state.hits.push({ v, m: q.method(), q: '', body: q.postData(), at: Date.now() });
     if (switchZone && q.method() === 'POST' && v === '/zones/z1/queue') await hold.wait;
-    if (failFrom && q.method() === 'POST' && v === '/zones/z1/queue') return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'the speaker refused the song' }) }).catch(() => {});
+    if (failFrom && failFrom !== 'connect' && q.method() === 'POST' && v === '/zones/z1/queue') return r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'the speaker refused the song' }) }).catch(() => {});
     return r.fulfill({ status: 200, contentType: 'application/json', body: '{}' }).catch(() => {});
   });
   const tag = `${width}${switchZone ? ', switched' : ''}`;
+  if (failFrom === 'connect') return connectCase(page, state, context, width);
   if (failFrom) return failCase(page, state, context, width, failFrom);
   await fx.go(page, '/album/lib-7');
   await page.waitForSelector('#isongs [data-smore="0"]');
@@ -105,9 +116,33 @@ async function failCase(page, state, context, width, from) {
   await context.close();
 }
 
+// An album page that plays on Spotify Connect: its song's ⋯ › Start radio
+async function connectCase(page, state, context, width) {
+  const tag = `${width}, page plays on Spotify Connect`;
+  await fx.go(page, '/album/lib-7');
+  await page.waitForSelector('#isongs [data-smore="0"]');
+  await page.waitForFunction(() => /Kitchen/.test((document.querySelector('#zonename, #zonebtn') || {}).textContent || ''));
+  await page.click('#isongs [data-smore="0"]', { force: true });
+  await page.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+  const n = state.hits.length;
+  const sent = () => state.hits.slice(n).filter((h) => h.m !== 'GET' || /spotify/.test(h.v)).map((h) => `${h.m} ${h.v}${/\/radio$/.test(h.v) ? ' ' + h.body : ''}`);
+  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Start radio' }).click();
+  const want = `Radio from “${fx.track.title}”: similar music follows`;
+  await page.getByText(want, { exact: true }).first().waitFor({ timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(300); // (time for a Spotify play that should not come)
+  const toasts = await page.$$eval('.toast, #toasts *', (els) => [...new Set(els.map((e) => e.textContent.trim()).filter(Boolean))]);
+  check(sent()[0] === 'POST /zones/z1/queue', `${tag}: Start radio puts the song in the Kitchen's queue (${sent().join(', ')})`);
+  check(sent().filter((s) => /\/radio /.test(s)).join(',') === 'PUT /zones/z1/radio {"on":true}', `${tag}: and turns the Kitchen's radio on (${sent().join(', ')})`);
+  check(!sent().some((s) => /spotify/.test(s)), `${tag}: nothing goes to Spotify (${sent().join(', ')})`);
+  check(!toasts.some((t) => /Playing on Spotify/.test(t)) && toasts.includes(want), `${tag}: the toast says "${want}" only (${toasts.join(' | ')})`);
+  await page.screenshot({ path: path.join(SHOTS, `after-item-radio-${width}-connect.png`) });
+  check(state.errors.length === 0, `${tag}: no page errors ${state.errors.join('; ')}`);
+  await context.close();
+}
+
 (async () => {
   const browser = await chromium.launch();
-  try { for (const w of [1280, 1024, 768]) { await run(browser, w, false); await run(browser, w, true); await run(browser, w, false, 'songs'); await run(browser, w, false, 'album'); } } finally { await browser.close(); }
+  try { for (const w of [1280, 1024, 768]) { await run(browser, w, false); await run(browser, w, true); await run(browser, w, false, 'songs'); await run(browser, w, false, 'album'); await run(browser, w, false, 'connect'); } } finally { await browser.close(); }
   console.log(`${ok} ok, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
