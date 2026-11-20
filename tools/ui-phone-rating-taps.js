@@ -12,7 +12,8 @@
 // 412 and 430 px (360 as the Android app too) every half star is pressed unrated, rated, and with the
 // notes editor open: each press is one PUT with that half's value (a press on the rating it already
 // has clears it). Before each press the point is probed until it names that half (a redraw can still
-// be on its way).
+// be on its way). Rated, opening the notes editor (which hides Add notes) leaves "N of 5" where it
+// was: its line keeps Add notes' 44 px, so it doesn't jump up ~12 px; Cancel puts both back.
 // Presses use page.mouse.click at exact points (a touchscreen tap snaps onto a nearby target).
 // Real candidate assets, isolated responses: node tools/ui-phone-rating-taps.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -181,6 +182,10 @@ async function pressEach(page, store, at, what, cur, before) {
       check(m.wide <= 0, `${at} rated: nothing wider than the screen (${m.wide})`);
       await page.screenshot({ path: path.join(SHOTS, `song-rated-${width}${android ? '-android' : ''}.png`) });
       await page.click('#notesbtn');
+      // Opening the editor hides Add notes: "N of 5" stays where it was (its line keeps its 44 px)
+      const mo = await measure(page);
+      check(mo.val && Math.abs(mo.val.t + mo.val.h / 2 - (m.val.t + m.val.h / 2)) < 0.5, `${at} rated: opening the notes editor leaves "${m.valText}" where it was (moved ${mo.val && (mo.val.t + mo.val.h / 2 - (m.val.t + m.val.h / 2)).toFixed(1)} px)`);
+      await page.screenshot({ path: path.join(SHOTS, `song-rated-notes-open-${width}${android ? '-android' : ''}.png`) });
       const ed = await page.evaluate(() => ['notessave', 'notescancel'].map((id) => { const b = document.getElementById(id).getBoundingClientRect(); return { id, h: b.height }; }));
       check(ed.every((b) => b.h >= 44), `${at}: the notes' Save and Cancel are 44 px taps (${ed.map((b) => `${b.id} ${b.h}`).join(', ')})`);
       await page.click('#notescancel');
@@ -194,6 +199,13 @@ async function pressEach(page, store, at, what, cur, before) {
     {
       const { page, context, state, store } = await open(browser, width, 'song', { rating: 4, text: 'Great drop at 2:10' }, android);
       const openEditor = async () => { await page.waitForSelector('#notesbtn:not([hidden])'); await page.click('#notesbtn'); await page.waitForSelector('#notesedit:not([hidden])'); };
+      const m0 = await measure(page);
+      await openEditor();
+      const m1 = await measure(page);
+      check(m0.val && m1.val && Math.abs(m1.val.t + m1.val.h / 2 - (m0.val.t + m0.val.h / 2)) < 0.5, `${at} notes: opening the notes editor leaves "${m0.valText}" where it was (moved ${m1.val && (m1.val.t + m1.val.h / 2 - (m0.val.t + m0.val.h / 2)).toFixed(1)} px)`);
+      await page.click('#notescancel');
+      const m2 = await measure(page);
+      check(m2.val && m2.notes && Math.abs(m2.val.t - m0.val.t) < 0.5 && Math.abs(m2.notes.t - m0.notes.t) < 0.5, `${at} notes: Cancel puts "${m0.valText}" and Edit notes back where they were`);
       await openEditor();
       await page.screenshot({ path: path.join(SHOTS, `song-notes-open-${width}${android ? '-android' : ''}.png`) });
       const first = store.puts.length;
