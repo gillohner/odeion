@@ -2956,15 +2956,16 @@
         const st = await api('POST', `/zones/${encodeURIComponent(zid)}/load`, { items, index, transport: 'playing', shuffle, repeat: z.repeat || 'off', radio: !!z.radio }, { signal: t.signal });
         applyAnswer(st, ev0);
       }, o.turn);
-      startSent(wait); refreshQueue();
-    } catch (e) { startFail(e.message, false, wait); } finally { if (!o.mode) doneMode(shufflePending, zid, mine); }
+      startSent(wait); refreshQueue(); return true;
+    } catch (e) { startFail(e.message, false, wait); return false; } finally { if (!o.mode) doneMode(shufflePending, zid, mine); }
   };
   // A page's Play and Shuffle (`o.shuffle` false or true) load the queue in its order with that mode:
   // Shuffle starts on a random song. Without it a new queue keeps the zone's mode (shuffled after its
-  // first song when on)
+  // first song when on). (true once it is in, false when it failed and said so: Start radio then
+  // turns no radio on)
   const playTracks = async (tracks, replace = true, at = 'end', o = {}) => {
     tracks = (tracks || []).filter((t) => t && t.id != null);
-    if (!tracks.length) return;
+    if (!tracks.length) return false;
     rememberTracks(tracks);
     if (onBrowser(o)) {
       const items = tracks.map((t) => ({ id: t.id, uri: 'track:' + t.id, track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album ? t.album.title : '', duration_ms: t.duration_ms }));
@@ -2973,7 +2974,7 @@
       else browserAppend(items);
       if (!replace) toast(items.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(items.length, 'songs')} added`);
       if (state.view === 'queue') render();
-      return;
+      return true;
     }
     if (replace && o.shuffle !== undefined) return loadZoneQueue(tracks.map((t) => ({ uri: `track:${t.id}`, title: t.title || null, artist: artists(t) || null, album: t.album ? t.album.title : null, duration_ms: t.duration_ms || null })), o.shuffle, o);
     const zid = zoneOf(o); const wait = replace ? startWait('play', zid, tracks[0].title, true, true) : null;
@@ -2981,8 +2982,8 @@
       await zoneOp(zid, (t) => { if (replace) startSending(wait, zid); return api('POST', `/zones/${encodeURIComponent(zid)}/queue`, { track_ids: tracks.map((t) => t.id), replace, play: replace, at }, { signal: t.signal }); }, o.turn);
       if (replace) startSent(wait);
       if (!replace) toast(tracks.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(tracks.length, 'songs')} added`);
-      refreshQueue();
-    } catch (e) { if (replace) startFail(e.message, false, wait); else toast(e.message, 'error'); }
+      refreshQueue(); return true;
+    } catch (e) { if (replace) startFail(e.message, false, wait); else toast(e.message, 'error'); return false; }
   };
   // Up to 200 of the library's songs (albums or not: untagged files have none), shuffled, on zone
   // `zid` (default the zone in use): Get started's Shuffle my music, and an empty queue's Play. The
@@ -6119,7 +6120,7 @@
     if (single && single.id != null && single.isrc) {
       try { const vs = await api('GET', `/library/tracks/${single.id}/versions`); versionItems = vs.filter((v) => v.uri).map((v) => ({ label: `Stream from ${v.source.toUpperCase()} (${v.label.replace(/^TIDAL · /, '')})`, icon: 'zone', run: () => playSourceItems([{ uri: v.uri, title: single.title, artist: artists(single), album: single.album ? single.album.title : '', duration_ms: single.duration_ms }], true) })); const tv = vs.find((v) => v.source === 'tidal' && /^track:/.test(v.id)); if (tv) versionItems.push({ label: 'Full length in TIDAL\'s player (here)', icon: 'external', run: () => tidalEmbed('tracks', tv.id.replace(/^track:/, ''), single.title) }); } catch { /* no versions */ }
     }
-    const radioItem = seeds.length && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { const seed = single || seeds[Math.floor(Math.random() * seeds.length)]; const zid = state.zone; try { await playTracks([seed], true); await api('PUT', `/zones/${encodeURIComponent(zid)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(zid)}`); state.zones[zs.id] = zs; const away = state.zone !== zid; toast(`Radio from “${seed.title}”${away ? ` on ${zs.name || 'the other device'}` : ''}: similar music follows`); if (state.view === 'queue' && !away) render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
+    const radioItem = seeds.length && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { const seed = single || seeds[Math.floor(Math.random() * seeds.length)]; const zid = state.zone; try { if (await playTracks([seed], true) === false) return; await api('PUT', `/zones/${encodeURIComponent(zid)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(zid)}`); state.zones[zs.id] = zs; const away = state.zone !== zid; toast(`Radio from “${seed.title}”${away ? ` on ${zs.name || 'the other device'}` : ''}: similar music follows`); if (state.view === 'queue' && !away) render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     const nav = single ? [
       // (the song's own page first, as in itemMenu)
       { label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: trackPageId(single) }) },
@@ -6377,6 +6378,7 @@
     return ids.map((id, k) => out[k] || got.get(id));
   };
   // Play a list of item songs from index k: library tracks, streamed items, or Spotify Connect.
+  // (library songs: true once in, false when it failed and said so, as playTracks)
   const playSongs = async (songs, k = 0, how = 'replace', pf, anchorEl, fallback, o = {}) => {
     // (a node zone's turn first: the library read and the finding wait inside it, and it goes to the
     // zone it was asked on)
@@ -6390,10 +6392,10 @@
       return discoverPlay({ uri: first.page, page: first.page, title: first.title, artist: first.artist, image: first.image }, null, anchorEl, { ...o, how });
     }
     const list = songs.slice(k).filter((t) => t.track_id != null || t.uri);
-    if (!list.length) return toast('Nothing here plays on your services', 'error');
+    if (!list.length) { toast('Nothing here plays on your services', 'error'); return false; }
     // (Spotify plays it on its own device, not in the zone's queue: no turn to hold)
     if (pf && pf.mode === 'connect') { spotifyPlay((o.shuffle ? shuffleFrom([...list]) : list).map((t) => t.uri).filter(Boolean), anchorEl); return; }
-    if (list.every((t) => t.track_id != null)) { try { const tr = await readTracks(list.map((t) => t.track_id), o.turn && o.turn.signal); return how === 'replace' ? playTracks(tr, true, 'end', o) : playTracks(tr, false, how, o); } catch (e) { return toast(e.message, 'error'); } }
+    if (list.every((t) => t.track_id != null)) { try { const tr = await readTracks(list.map((t) => t.track_id), o.turn && o.turn.signal); return how === 'replace' ? playTracks(tr, true, 'end', o) : playTracks(tr, false, how, o); } catch (e) { toast(e.message, 'error'); return false; } }
     // In a mixed queue a library row has track_id, not a provider URI.
     // Keep every playable row (and duplicates) in its original position.
     const items = list.map((t) => qOf(t, fallback));
@@ -6447,7 +6449,7 @@
       // (as a song row's Start radio, trackMenu: the radio goes on for the zone whose queue the song
       // replaced, also when you switch zone while it is sent, and the toast then names that zone;
       // before, the zone switched to got the radio and the one playing the song had none)
-      ...(single && trackIds.length === 1 && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { const zid = state.zone; try { await playSongs([single], 0, 'replace', o.plays_from, anchorEl, o.fallback); await api('PUT', `/zones/${encodeURIComponent(zid)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(zid)}`); state.zones[zs.id] = zs; const away = state.zone !== zid; toast(`Radio from “${single.title}”${away ? ` on ${zs.name || 'the other device'}` : ''}: similar music follows`); if (state.view === 'queue' && !away) render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
+      ...(single && trackIds.length === 1 && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { const zid = state.zone; try { if (await playSongs([single], 0, 'replace', o.plays_from, anchorEl, o.fallback) === false) return; await api('PUT', `/zones/${encodeURIComponent(zid)}/radio`, { on: true }); const zs = await api('GET', `/zones/${encodeURIComponent(zid)}`); state.zones[zs.id] = zs; const away = state.zone !== zid; toast(`Radio from “${single.title}”${away ? ` on ${zs.name || 'the other device'}` : ''}: similar music follows`); if (state.view === 'queue' && !away) render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && single.id && !onThis('song', single.id) ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: single.id }) }] : []),
       ...(goArtists(o.credits) || (o.artistId ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: o.artistId }) }] : o.artistName ? [{ label: `Search “${o.artistName}”`, icon: 'artist', run: () => { search.value = o.artistName; runSearch(); } }] : [])),
       ...(o.albumId && !onThis('album', o.albumId) ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: o.albumId }) }] : []),
@@ -9764,8 +9766,11 @@
             const live = () => {
               if (shown) return null; shown = true;
               if (tap !== state.qMenuTap) return null;
+              // (another page opened, the Queue again too, first: its rows stay in the page until it
+              // is drawn, and a late answer opened the menu over the page loading)
+              if (state.view !== 'queue' || navGen !== gen) return null;
               if (b.isConnected) return zoneMoved() ? null : b;
-              if (state.view !== 'queue' || navGen !== gen || state.zone !== drawnZone) return null;
+              if (state.zone !== drawnZone) return null;
               const cur = state.qDrawn || []; const k = qkey(it);
               const j = cur[i] !== undefined && qkey(cur[i]) === k ? i : cur.findIndex((x) => qkey(x) === k);
               if (j < 0) { toast(`${itemName(it)} isn’t in the queue any more`); return null; }
