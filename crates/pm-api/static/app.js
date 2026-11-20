@@ -5164,11 +5164,16 @@
     // (a page that drew nothing, its code done or failed: at its top then, unless a newer page waits)
     return navigate(fresh).finally(() => { if (top && topLater === top) topNow(); });
   };
+  // (a post that is no playlist pasted over a search with a query: that search's entry takes its
+  // search, as a new query there does, so Back and Escape go where Search was opened from: { q, in })
+  let searchOver = null;
   window.addEventListener('popstate', async (e) => {
     if (popHandled) { popHandled = false; return; } // back only closed a menu or dialog
     if (e.state && e.state.transient) return; // forward onto a closed menu's entry: nothing to show
     const st = e.state || routeFromPath() || { v: 'home' };
     navDepth = st.depth || 0;
+    // (Back from a post that is no playlist onto the search it was pasted over: that entry takes the post's search)
+    if (searchOver) { const o = searchOver; searchOver = null; if (st.v === 'search' && search.value.trim() === o.q) { search.value = o.q; startSearch(o.q, o.in); setView('search', o, 'replace'); return; } }
     let going;
     if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; startSearch(st.arg.q, st.arg.in || 'everywhere'); going = setView('search', st.arg, 'pop'); }
     else going = setView(st.v, st.arg, 'pop');
@@ -5324,7 +5329,10 @@
     if (from && from !== '/search' && navDepth > 0 && cur.v === 'search' && !cur.transient && shellMode() !== 'phone') { searchLeft = cur; history.back(); }
     else setView('home');
   };
-  const notPlaylists = new Set(); // "<user>/<id>" of posts the node read as no playlist (422)
+  // "<user>/<id>" of posts the node read as no playlist (422), when: 10 minutes, then asked again
+  // (a node updated meanwhile may read that form)
+  const notPlaylists = new Map(); const NOT_PL_MS = 600000;
+  const notPlaylist = (key) => Date.now() - (notPlaylists.get(key) ?? -Infinity) < NOT_PL_MS;
   const runSearch = async (how, savedScope) => {
     const q = search.value.trim();
     if (!q) { if (shellMode() !== 'phone') leaveSearch(); else if (state.view === 'search' && state.viewArg && state.viewArg.q) setView('search'); return; }
@@ -5339,7 +5347,7 @@
     // playlist, a comment or an ordinary post, is searched as text instead, on the shared page; one
     // known to be none is searched at once, notPlaylists. A reload of its search takes its entry)
     const post = /^(?:pubky:\/\/)?(?:pubky)?([a-zA-Z0-9]{52})\/pub\/social\/v1\/posts\/([0-9A-HJKMNP-TV-Z]{13})\/?$/.exec(q);
-    if (post && !notPlaylists.has(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope }, how === 'pop' ? 'replace' : 'push'); return; }
+    if (post && !notPlaylist(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope }, how === 'pop' ? 'replace' : 'push'); return; }
     startSearch(q, scope);
     setView('search', { q, in: scope }, how === 'pop' ? 'pop' : 'push');
   };
@@ -8515,10 +8523,24 @@
             // page's place (Back goes where search was opened from). A playlist gone or a homeserver that
             // doesn't answer still says so here. (the box changed meanwhile: its own text decides; emptied
             // on a phone, the Search tab's empty page, as emptying it there gives)
-            if (e.status === 422) notPlaylists.add(`${a.user}/${a.id}`);
+            if (e.status === 422) notPlaylists.set(`${a.user}/${a.id}`, Date.now());
             if (a.q && e.status === 422) {
               const sb = $('#search'); const typed = sb && document.activeElement === sb ? sb.value.trim() : a.q;
-              if (typed === a.q) { if (sb) sb.value = a.q; startSearch(a.q, a.in || 'everywhere'); setView('search', { q: a.q, in: a.in || 'everywhere' }, 'replace'); return; }
+              if (typed === a.q) {
+                if (sb) sb.value = a.q;
+                // (opened over a search with a query, the entry before: Back to it, which then takes this search, searchOver)
+                const cur = history.state;
+                if (navDepth > 0 && cur && cur.v === 'shared' && !cur.transient && typeof cur.fromPath === 'string' && cur.fromPath.startsWith('/search?')) {
+                  if (searchOver) return; // (another draw of this page already went Back)
+                  // (this entry, left as Forward, keeps no search: Forward onto it says the post is no playlist, never Back again)
+                  try { history.replaceState({ ...cur, arg: { user: a.user, id: a.id } }, '', location.pathname + location.search); } catch { /* sandboxed */ }
+                  const over = { q: a.q, in: a.in || 'everywhere' }; searchOver = over; history.back();
+                  // (no Back came, the history still on this entry: in this entry, as before)
+                  setTimeout(() => { if (searchOver !== over) return; searchOver = null; if (state.view === 'shared' && state.viewArg === a && history.state && history.state.v === 'shared') { startSearch(over.q, over.in); setView('search', over, 'replace'); } }, 3000);
+                  return;
+                }
+                startSearch(a.q, a.in || 'everywhere'); setView('search', { q: a.q, in: a.in || 'everywhere' }, 'replace'); return;
+              }
               if (!typed && shellMode() === 'phone') { setView('search', undefined, 'replace'); return; }
             }
             main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break;
@@ -8623,8 +8645,11 @@
           const holdForReread = (focus) => { if (!plHolds.has(plId)) { plHolds.set(plId, { id: plId, after: plDraws + 1, focus }); plHoldShow(); } };
           const focusWas = pfReadAgain ? plFocusOf(document.activeElement) : null;
           if (pfReadAgain) { const stale = drawStale; setTimeout(() => { if (!stale()) render(); }, 0); }
-          // (a slow answer asked after the read that doesn't fit marks the next draw's read the same way)
-          if (pfPending) { pf = null; let pfDone = false; pfP.then((x) => { pfDone = true; const here = state.view === 'playlist' && state.viewArg === plId; if (pfAfterRead && x && !fitsList(x) && state.plPf && state.plPf.id === plId && state.plPf.data === x) { state.plPf.reread = readUris; if (here && plShown && plShown.id === plId && plShown.uris.join('\n') === readUris.join('\n')) holdForReread(plFocusOf(document.activeElement)); } if (here) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
+          // (a slow answer asked after the read that doesn't fit marks the next draw's read the same way.
+          // One asked before the read that doesn't fit, dropped above, holds the rows too: the list
+          // changed between the two, and which came first isn't known, so the rows on screen may go by
+          // places the node no longer has. The read it asks for ends the hold, plWrite)
+          if (pfPending) { pf = null; let pfDone = false; pfP.then((x) => { pfDone = true; const here = state.view === 'playlist' && state.viewArg === plId; if (!pfReread && x && !fitsList(x) && state.plPf && state.plPf.id === plId && state.plPf.data === x) { if (pfAfterRead) state.plPf.reread = readUris; if (here && plShown && plShown.id === plId && plShown.uris.join('\n') === readUris.join('\n')) holdForReread(plFocusOf(document.activeElement)); } if (here) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
           state.itemTitle = d.summary.name;
           // Each song as it plays here: the library file, a service, or unavailable (play_from.rs).
           // (a song listed twice: its k-th copy takes the earlier answer's k-th copy, each place its own pin)

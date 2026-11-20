@@ -16,7 +16,8 @@
 // list's own uri, so an answer that doesn't fit is a list changed under the read, never a reason to
 // let × act by place). The focus a hold took goes
 // back to the same song's control wherever the node now has it, never to another song at its old
-// place. At 360 (phone) and 1280 px.
+// place. A playlist opened afresh, its answer asked before the read and not fitting it, holds its rows
+// till the read after it too. At 360 (phone) and 1280 px.
 //   node tools/ui-playlist-stale-draw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -53,14 +54,14 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
       const { page, state } = await fx.create(browser, width, { mobile });
       // The server's lists, each GET answered with the list as it was when asked; `hold`: the next
       // GET of that path waits for its release
-      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'], c7: ['P', 'Q', 'A'], c8: ['P', 'Q', 'A'], c9: ['P', 'Q', 'A'], c10: ['Y', 'P', 'Q'], c11: ['P', 'Q', 'A'], c12: ['Y', 'P', 'Q'], c13: ['A', 'X', 'B', 'C'], c14: ['Y', 'P', 'Q'], c15: ['Y', 'P'], c16: ['A'], c17: ['A', 'X', 'B'], c18: ['C'], c19: ['X'], c20: ['C'], c21: ['X'], c22: ['P', 'Q', 'A'] };
-      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice', c7: 'Moved meanwhile', c8: 'Other names', c9: 'Moved twice', c10: 'Swapped', c11: 'Slow other names', c12: 'Added meanwhile', c13: 'Turned round', c14: 'Moved under the focus', c15: 'All swapped', c16: 'Replaced twice', c17: 'Other names moved', c18: 'Back and changed', c19: 'Back to Xylo', c20: 'Back and forth', c21: 'Back, then off again', c22: 'Other names reordered' };
+      const lists = { c1: ['A', 'X', 'B', 'A'], c2: ['C'], c3: ['B', 'X'], c4: ['P', 'Q', 'A'], c5: ['A', 'X', 'B'], c6: ['P', 'Q', 'P'], c7: ['P', 'Q', 'A'], c8: ['P', 'Q', 'A'], c9: ['P', 'Q', 'A'], c10: ['Y', 'P', 'Q'], c11: ['P', 'Q', 'A'], c12: ['Y', 'P', 'Q'], c13: ['A', 'X', 'B', 'C'], c14: ['Y', 'P', 'Q'], c15: ['Y', 'P'], c16: ['A'], c17: ['A', 'X', 'B'], c18: ['C'], c19: ['X'], c20: ['C'], c21: ['X'], c22: ['P', 'Q', 'A'], c23: ['A', 'X', 'B'], c24: ['A', 'X', 'B'] };
+      const names = { c1: 'Road trip', c2: 'Quiet hours', c3: 'Long drive', c4: 'Streamed', c5: 'Slow sources', c6: 'Twice', c7: 'Moved meanwhile', c8: 'Other names', c9: 'Moved twice', c10: 'Swapped', c11: 'Slow other names', c12: 'Added meanwhile', c13: 'Turned round', c14: 'Moved under the focus', c15: 'All swapped', c16: 'Replaced twice', c17: 'Other names moved', c18: 'Back and changed', c19: 'Back to Xylo', c20: 'Back and forth', c21: 'Back, then off again', c22: 'Other names reordered', c23: 'Moved before the read', c24: 'Moved before a slow read' };
       const hold = {}; const deletes = []; const asks = [];
       // (`fresh`: the held GET answers with the list as it is when released)
       const gate = (key, fail, fresh) => { let open; const p = new Promise((res) => { open = res; }); hold[key] = { p, fail, fresh }; return open; };
       let socket = null;
       await page.routeWebSocket(/\/v1\/events/, (ws) => { socket = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [] })); });
-      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6|c7|c8|c9|c10|c11|c12|c13|c14|c15|c16|c17|c18|c19|c20|c21|c22)(\/.*)?$/, async (r) => {
+      await page.route(/\/v1\/playlists\/(c1|c2|c3|c4|c5|c6|c7|c8|c9|c10|c11|c12|c13|c14|c15|c16|c17|c18|c19|c20|c21|c22|c23|c24)(\/.*)?$/, async (r) => {
         const u = new URL(r.request().url()); const m = r.request().method();
         const [, , , id, ...rest] = u.pathname.split('/'); const sub = rest.join('/');
         if (m === 'DELETE' && sub.startsWith('items/')) { const k = Number(sub.split('/')[1]); deletes.push(k); lists[id].splice(k, 1); return json(r, {}); }
@@ -642,6 +643,31 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
           const f17 = await rmFocus();
           check(/^1\|.*Yankee/.test(f17a) && held17 && /^0\|.*Yankee/.test(f17), `${width}: read again under a hold, the focus comes back to Yankee's ×, in its new place (${f17a} → ${f17}, held ${held17})`);
           await page.screenshot({ path: path.join(SHOTS, `focus-by-song-${width}.png`) });
+        }
+
+        // 12m. A playlist opened afresh (no answer kept): where its songs play is asked before the list
+        // is read. Another device moves a song between the read and that answer: the answer doesn't
+        // fit and isn't used, and the rows of that read wait for the read it asks for (which came
+        // first isn't known, so the rows may go by places the node no longer has): a × doesn't reach
+        // the node. Before: the rows took × at once, and × on Alpha (place 0) removed Xylo. The answer
+        // within the 1.2 s wait (c23), and after it (c24)
+        for (const [id, late] of [['c23', 0], ['c24', 1500]]) {
+          const releasePf = gate(`${id}/play-from`, false, true); const asked = asks.length;
+          await goPl(id);
+          await until(async () => asks.slice(asked).includes(id) && asks.slice(asked).includes(`${id}/play-from`), 2000);
+          if (late) await until(async () => JSON.stringify(await order()) === '["Alpha","Xylo","Bravo"]', 3000);
+          lists[id] = ['X', 'A', 'B'];
+          const releaseRead = gate(id, false, true);
+          releasePf();
+          await until(async () => asks.slice(asked).filter((x) => x === id).length === 2, 2000);
+          await sleep(200);
+          const shown = await order();
+          const h = await heldNoDelete();
+          check(JSON.stringify(shown) === '["Alpha","Xylo","Bravo"]' && h.held && !h.sent.length, `${width}: opened afresh, moved before the answer${late ? ' (a late one)' : ''}: the rows wait for the read after it, a × doesn't reach the node (${shown}, held ${h.held}, DELETE ${h.sent})`);
+          releaseRead();
+          check(await settled(['Xylo', 'Alpha', 'Bravo']) && JSON.stringify(lists[id]) === '["X","A","B"]', `${width}: then the list shows as the node has it, every song still there (${await order()}, server ${lists[id]})`);
+          const alphaRm = await page.evaluate(() => { const b = [...document.querySelectorAll('#plsongs [data-rm]')].find((x) => /Alpha/.test(x.getAttribute('aria-label') || '')); return b ? b.dataset.rm : null; });
+          check(alphaRm === '1', `${width}: and Alpha's × is for place 1, where the node has it (${alphaRm})`);
         }
 
         // 13. The same other names, each answer slower than the 1.2 s wait: still asked at most twice
