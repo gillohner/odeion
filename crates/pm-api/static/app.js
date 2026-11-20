@@ -4230,6 +4230,14 @@
   // radio) takes the press away, so the start it makes spins no Play pressed just before. (A click
   // on an empty spot leaves it: an album tile's Play still spins when its songs come.)
   document.addEventListener('click', (e) => { if (!e.target.closest) return; const b = e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now() }; else if (e.target.closest('button, a, input, select, summary, label, [role="button"], [role="menuitem"], .clickable')) state.startAnchor = null; }, true);
+  // A picker a Play opens to finish it (the 30 s preview of a song not on your services): its pick
+  // goes on with that Play's press, so the Play pressed spins while the music starts, as with no
+  // picker (the pick's own click took the press away). Wrap the picker's run with it as the picker
+  // opens; a press already gone (another control pressed since, or 1.5 s past) stays gone, and the
+  // pick lasts the 1.5 s from when it is made. (Only on This browser: a preview on a speaker zone,
+  // and the other pickers a Play opens, YouTube's Play in this browser and the Spotify device list,
+  // start no wait, so nothing spins for them, with or without a picker.)
+  const pressFor = (run) => { const p = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null; return (...a) => { if (p) state.startAnchor = { el: p, at: Date.now() }; return run(...a); }; };
   // `replace`: the queue is being replaced, so the song still playing does not end the wait.
   // `press`: a press of a play control starts this. A start nobody pressed Play for (Move here,
   // Switch source, a song ending or skipped, the playing song taken out of the queue) puts no
@@ -7164,7 +7172,7 @@
     if (pf && pf.mode === 'connect') { spotifyPlay(o.shuffle ? shuffleFrom([...plan.spotify_uris]) : plan.spotify_uris, anchor); return; }
     if (pf && plan.items.length) { toast(`Playing from ${pf.label}`); return playSourceItems(plan.items, replace, at, o); }
     const options = [{ title: 'Not on your services' }, ...(plan.connect || []).map((c) => ({ label: `Connect ${SERVICE_NAMES[c] || c}`, icon: 'zone', run: () => setView('sources', { source: c }) }))];
-    if (plan.preview) options.push({ label: `Play a 30 s preview (${SERVICE_NAMES[plan.preview.service] || plan.preview.service})`, icon: 'play', run: () => playSourceItems([{ uri: plan.preview.id.startsWith('track:') ? `${plan.preview.service}:${plan.preview.id}` : plan.preview.id, title: it.title || '', artist: it.artist || '', album: `30 s preview · ${SERVICE_NAMES[plan.preview.service] || plan.preview.service}`, duration_ms: 30000, image: it.image || null }], false, 'now') });
+    if (plan.preview) options.push({ label: `Play a 30 s preview (${SERVICE_NAMES[plan.preview.service] || plan.preview.service})`, icon: 'play', run: pressFor(() => playSourceItems([{ uri: plan.preview.id.startsWith('track:') ? `${plan.preview.service}:${plan.preview.id}` : plan.preview.id, title: it.title || '', artist: it.artist || '', album: `30 s preview · ${SERVICE_NAMES[plan.preview.service] || plan.preview.service}`, duration_ms: 30000, image: it.image || null }], false, 'now')) });
     if (anchor) showMenu(anchor, options); else toast('Not on your services: connect one in Sources', 'error');
   };
   const bindDiscoverRows = (items) => {

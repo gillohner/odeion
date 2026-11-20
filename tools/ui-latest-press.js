@@ -2,6 +2,9 @@
 // row's Play spins while its song starts. Another row's ⋯ › Start radio, or Space (play the
 // Kitchen), pressed within 1.5 s of it starts again, and that start puts no spinner back on the
 // row's Play (before, it spun again, as if pressed a second time, and stayed spinning).
+// A picker the Play opens to finish it (a song not on your services: its 30 s preview, played in
+// this browser) keeps that press: the pick, made after 1.5 s, spins the Play pressed (before, the
+// pick's own click took the press away and nothing spun). The phone width too.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-latest-press.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -49,7 +52,8 @@ async function run(browser, width, how) {
     await page.waitForFunction(() => /Kitchen/.test((document.querySelector('#zonename, #zonebtn') || {}).textContent || ''));
     await page.waitForTimeout(300);
     const row = page.locator('#tracklist .track').nth(0);
-    await row.hover(); await row.locator('[data-act="play"]').click();
+    // (on a phone a tap on the row plays it, not a press of its Play: its Play is the keyboard's, Enter on it)
+    if (width < 600) { await row.locator('[data-act="play"]').focus(); await page.keyboard.press('Enter'); } else { await row.hover(); await row.locator('[data-act="play"]').click(); }
     const t0 = Date.now();
     await page.waitForFunction(() => window.__spins.length > 0);
     check((await page.evaluate(() => window.__spins.map((s) => s.el))).join() === '[data-act]', `${tag}: Song 1's Play spins while it starts`);
@@ -62,7 +66,9 @@ async function run(browser, width, how) {
       for (let t = 0; t < 40 && !state.hits.slice(n).some((h) => h.m === 'POST' && h.v === '/zones/z1/queue'); t++) await page.waitForTimeout(50);
       check(state.hits.slice(n).some((h) => h.m === 'POST' && h.v === '/zones/z1/queue'), `${tag}: Start radio sends Song 2 to the Kitchen`);
     } else {
-      // (the Play the click left focused doesn't take Space: Space plays or pauses the zone)
+      // (the Play the click left focused doesn't take Space: Space plays or pauses the zone. One the
+      // keyboard is on would take it, as a press of its own: on a phone the keyboard leaves it first)
+      if (width < 600) await page.evaluate(() => document.activeElement.blur());
       await page.keyboard.press('Space');
       for (let t = 0; t < 40 && !state.hits.slice(n).some((h) => h.v === '/zones/z1/transport'); t++) await page.waitForTimeout(50);
       const sent = state.hits.slice(n).filter((h) => h.v === '/zones/z1/transport').map((h) => h.body);
@@ -81,13 +87,50 @@ async function run(browser, width, how) {
   } finally { await context.close(); }
 }
 
+// A favourite from another service (none of yours has it): its Play opens "Not on your services"
+// with a 30 s preview, played in this browser
+const ELSE = 'https://sefa.bandcamp.com/track/elsewhere';
+async function picker(browser, width) {
+  const tag = `${width} picker`;
+  const { context, page, state } = await fx.create(browser, width, { fixtures: {
+    '/favourites': { body: { uris: [ELSE], tracks: [], albums: [], artists: [], other: [ELSE] } },
+    '/discover/describe': { body: [{ uri: ELSE, page: ELSE, title: 'Elsewhere', artist: 'Sefa', kind: 'track', site: 'bandcamp', also_on: [], connect: [] }] },
+    '/discover/play': { body: { plays_from: null, items: [], connect: [], preview: { service: 'deezer', id: 'track:123' } } },
+  } });
+  await logSpins(page);
+  try {
+    await fx.go(page, '/favourites');
+    const play = page.locator('#favother .list-row [data-dplay]').first();
+    await play.waitFor();
+    await page.waitForTimeout(300);
+    await play.click();
+    const menu = page.locator('.popover.menu:not([hidden])');
+    await menu.waitFor();
+    check(/Not on your services/.test(await menu.textContent()), `${tag}: the Play opens "Not on your services"`);
+    check((await page.evaluate(() => window.__spins.length)) === 0, `${tag}: nothing spins while the picker is open`);
+    // (picked after the 1.5 s a press lasts: the pick is the press going on, not the Play's old one)
+    await page.waitForTimeout(1700);
+    const n = state.hits.length;
+    await menu.locator('.pop-item', { hasText: '30 s preview' }).click();
+    await page.waitForFunction(() => window.__spins.length > 0, null, { timeout: 2000 }).catch(() => {});
+    const spins = await page.evaluate(() => window.__spins.map((s) => s.el));
+    check(spins.join() === '[data-dplay]', `${tag}: the pick spins the Play pressed (${JSON.stringify(spins)})`);
+    const src = await page.evaluate(() => document.querySelector('audio') && document.querySelector('audio').getAttribute('src'));
+    check(/\/sources\/deezer\/stream\/123/.test(src || ''), `${tag}: the preview plays in this browser (${src})`);
+    check(!state.hits.slice(n).some((h) => /^\/zones\//.test(h.v)), `${tag}: no zone is sent anything`);
+    await page.screenshot({ path: path.join(SHOTS, `latest-press-picker-${width}.png`) });
+    check(state.errors.length === 0, `${tag}: no page errors (${state.errors.join(' | ')})`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
-    for (const width of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [1280, 1024, 768])) {
+    for (const width of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [1280, 1024, 768, 412])) {
       for (const how of ['menu', 'space']) {
         try { await run(browser, width, how); } catch (e) { fail++; console.log(`FAIL ${width} ${how}: ${e.message}`); }
       }
+      try { await picker(browser, width); } catch (e) { fail++; console.log(`FAIL ${width} picker: ${e.message}`); }
     }
   } finally { await browser.close(); }
   console.log(`${ok} ok, ${fail} failed`);
