@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-20
+
+- **A pasted post link that isn't a playlist no longer leaves an extra step on Back.** Pasting such a link over a search you had typed now replaces that search, as typing a new one does, so Back and Escape go to where you opened Search from, not to the old search. A post found not to be a playlist is checked again after 10 minutes instead of never.
+- **A playlist opened while another device changes it waits before × works.** When the list changed on another device just as you opened it, its rows could take × for a moment with the old order and remove the wrong song. They now wait for the list as it is now, as they already did when the list changes while you're on it.
+
 ### 2026-11-19
 
 - **Mute any zone from its card on Zones.** A zone card's volume was just a slider with no speaker, so it looked like a seek bar, and in a wide window there was no Mute anywhere (the player bar shows a slider there, not the volume button with Mute). Each card with a volume now has the same Mute button as the volume popover, just before its slider: one click mutes that zone without choosing it, and a second unmutes it. Phones are unchanged.

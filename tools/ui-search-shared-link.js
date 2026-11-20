@@ -4,7 +4,9 @@
 // the Android app) and desktop. A bare key still opens the person; other text still searches.
 // Opened from the phone's empty Search tab, its Back says Search (it said Results for “”).
 // A link to a post that is no playlist (a comment, an ordinary post) is searched as text instead of
-// an error page; a playlist made private again still says so.
+// an error page; a playlist made private again, or one whose homeserver doesn't answer, still says so.
+// Pasted over a search with a query, that search's entry takes it (Back and Escape go where Search was
+// opened from); a post read as no playlist is asked for again after 10 minutes.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-search-shared-link.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -24,12 +26,16 @@ const shared = {
 };
 // A post that is no playlist (a comment, an ordinary post) and a playlist made private again
 const NOTPL = '0035WKVKQDHSN'; const GONE = '0035WKVKQDHSP'; const SLOW = '0035WKVKQDHSQ';
+// (another post that is no playlist, pasted over a search with a query; a homeserver that doesn't answer)
+const OVER = '0035WKVKQDHSR'; const DOWN = '0035WKVKQDHSS';
 const NOTPL_LINK = `pubky://${KEY}/pub/social/v1/posts/${NOTPL}`;
 const fixtures = {
   [`/shared/${KEY}/playlists/${ID}`]: { body: shared }, [`/shared/${KEY}/playlists`]: { body: [] },
   [`/shared/${KEY}/playlists/${NOTPL}`]: { status: 422, body: { error: 'that post is not a playlist this node can read' } },
   [`/shared/${KEY}/playlists/${GONE}`]: { status: 404, body: { error: 'no shared playlist with that id (it may be private again)' } },
   [`/shared/${KEY}/playlists/${SLOW}`]: { status: 422, body: { error: 'that post is not a playlist this node can read' } },
+  [`/shared/${KEY}/playlists/${OVER}`]: { status: 422, body: { error: 'that post is not a playlist this node can read' } },
+  [`/shared/${KEY}/playlists/${DOWN}`]: { status: 502, body: { error: 'the homeserver doesn’t answer' } },
 };
 // (the post that is no playlist and answers late: the box emptied meanwhile)
 const delay = (v) => (v === `/shared/${KEY}/playlists/${SLOW}` ? 1200 : 0);
@@ -103,6 +109,16 @@ async function run(browser, width, { phone, android }) {
       await page.goBack();
       const home = phone ? '/search' : '/tracks';
       check(await until(() => where(page) === home && !new URL(page.url()).search), `${tag}: Back goes where search was opened from (at ${where(page)}${new URL(page.url()).search})`);
+      // Pasted again: searched at once; 10 minutes later the post is asked for again (the node may read it by then)
+      await paste(page, NOTPL_LINK);
+      check(await until(() => where(page) === '/search' && new URL(page.url()).searchParams.get('q') === NOTPL_LINK), `${tag}: pasted again, it is searched at once (at ${where(page)})`);
+      await sleep(300);
+      check(state.hits.filter((h) => h.v === `/shared/${KEY}/playlists/${NOTPL}`).length === asked, `${tag}: without asking for the post`);
+      await page.evaluate(() => { const real = Date.now; Date.now = () => real.call(Date) + 601000; });
+      await page.locator('#search').fill('');
+      await paste(page, NOTPL_LINK);
+      check(await until(() => state.hits.filter((h) => h.v === `/shared/${KEY}/playlists/${NOTPL}`).length > asked), `${tag}: 10 minutes later the post is asked for again`);
+      check(await until(() => where(page) === '/search' && new URL(page.url()).searchParams.get('q') === NOTPL_LINK), `${tag}: and searched as text again (at ${where(page)})`);
     }
     // A reload of those results: searched again in the reload's own entry (no second one to go Back to)
     {
@@ -138,6 +154,48 @@ async function run(browser, width, { phone, android }) {
       await sleep(400);
       check(searched(state) === n && where(page) === `/shared/${KEY}/${GONE}`, `${tag}: and nothing is searched`);
       await page.goBack(); await until(() => where(page) !== `/shared/${KEY}/${GONE}`);
+    }
+    // A homeserver that doesn't answer (502) still says so on the playlist's page (not searched)
+    await fresh();
+    {
+      const n = searched(state);
+      await paste(page, `pubky://${KEY}/pub/social/v1/posts/${DOWN}`);
+      check(await until(() => where(page) === `/shared/${KEY}/${DOWN}`), `${tag}: a playlist whose homeserver doesn't answer opens its page (at ${where(page)})`);
+      check(await until(async () => /doesn’t answer/.test((await page.locator('#main .notice').textContent().catch(() => '')) || '')), `${tag}: which says the homeserver doesn't answer`);
+      await sleep(400);
+      check(searched(state) === n && where(page) === `/shared/${KEY}/${DOWN}`, `${tag}: and nothing is searched (at ${where(page)})`);
+    }
+    // A post that is no playlist pasted over a search with a query: its search takes that search's
+    // entry (as a new query there does), so Back goes where Search was opened from, not to the old query
+    await fresh();
+    {
+      await paste(page, 'Night');
+      await until(() => new URL(page.url()).searchParams.get('q') === 'Night');
+      const d0 = await depth(); const n = searched(state);
+      const overLink = `pubky://${KEY}/pub/social/v1/posts/${OVER}`;
+      await paste(page, overLink);
+      check(await until(() => state.hits.some((h) => h.v === `/shared/${KEY}/playlists/${OVER}`)), `${tag}: over a search, the post link is asked for first`);
+      check(await until(() => searched(state) > n && where(page) === '/search' && new URL(page.url()).searchParams.get('q') === overLink), `${tag}: then it is searched as text (at ${where(page)}?q=${new URL(page.url()).searchParams.get('q')})`);
+      await sleep(300);
+      check(await depth() === d0, `${tag}: in the old query's entry (depth ${d0} → ${await depth()})`);
+      check(await page.locator('#search').inputValue() === overLink, `${tag}: the box holds the link`);
+      await page.screenshot({ path: path.join(shots, `${width}${android ? '-android' : ''}${phone ? '-phone' : ''}-post-link-over-search.png`) });
+      // Forward onto the post's page left behind: it says the post is no playlist, and stays (no Back again)
+      const nf = searched(state);
+      await page.goForward();
+      check(await until(async () => where(page) === `/shared/${KEY}/${OVER}` && /not a playlist/.test((await page.locator('#main .notice').textContent().catch(() => '')) || '')), `${tag}: Forward onto the post's page says it is no playlist (at ${where(page)})`);
+      await sleep(800);
+      check(where(page) === `/shared/${KEY}/${OVER}` && searched(state) === nf, `${tag}: and stays there, nothing searched (at ${where(page)})`);
+      await page.goBack();
+      check(await until(() => where(page) === '/search' && new URL(page.url()).searchParams.get('q') === overLink), `${tag}: Back from it: the link's search (at ${where(page)})`);
+      const home = '/tracks'; // (the phone's Search tab took the query's entry)
+      if (!phone) {
+        await page.locator('#search').focus(); await page.locator('#search').press('Escape');
+        check(await until(() => where(page) === home && !new URL(page.url()).search), `${tag}: Escape goes where Search was opened from (at ${where(page)}${new URL(page.url()).search})`);
+        await page.goForward(); await until(() => where(page) === '/search');
+      }
+      await page.goBack();
+      check(await until(() => where(page) === home && !new URL(page.url()).search), `${tag}: Back goes where Search was opened from, not to “Night” (at ${where(page)}${new URL(page.url()).search})`);
     }
     // Phone: Back to the Search tab from an opened playlist, then emptying the box: no navigation,
     // the focus stays in the box to type again
