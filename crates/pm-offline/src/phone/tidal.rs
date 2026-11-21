@@ -85,7 +85,8 @@ pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError
             };
             match ended {
                 // Another vault step renews it, or holds the vault: the same, never beside it
-                Some(Ok(Ok(super::vault::Renewal::Busy))) => {
+                Some(Ok(Ok(super::vault::Renewal::Busy)))
+                | Some(Ok(Err(pm_pubky::vault::VaultStoreError::Busy(_)))) => {
                     return current(p).ok_or_else(being_renewed);
                 }
                 Some(Ok(Err(e))) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}"),
