@@ -818,13 +818,17 @@
   // (anchor: the ⋯ it was chosen from; on a search result, the focus goes on to the next result's ⋯
   // once the song leaves the list, else to the search box, not to the page's top)
   const removeFromLibrary = async (id, title, anchor) => {
+    // (its file, asked while the question is open: Bring back names the file, not the song, and the
+    // node has no file for it once it is out)
+    const file = api('GET', `/library/tracks/${id}`).then((t) => (t && t.file && t.file.path) || null, () => null);
     const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true }] });
     if (!ok) return;
     try {
       await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library');
       // (the kept searches' answers lose the song now: the search on screen is drawn again from its
       // kept answer, not asked again, so it would list the song until started again; withoutTrack)
-      removedTracks.push(Number(id));
+      const mark = { id: Number(id), path: null, back: false }; removedTracks.push(mark);
+      file.then((f) => { mark.path = f; });
       for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) r.answers[src] = withoutTrack(a, src, id);
       const at = anchor ? $$('#sresults [data-smore]').indexOf(anchor) : -1;
       const focused = at >= 0 && document.activeElement === anchor;
@@ -5399,8 +5403,11 @@
   const SEARCH_REFRESH_MS = 15000;
   // (an answer the same but for the time it took)
   // Songs removed from the library this session, in order (removeFromLibrary): an answer asked before
-  // a removal and landing after it drops them (refreshSearch)
+  // a removal and landing after it drops them (refreshSearch, startSearch), unless Bring back put the
+  // song back since (back: its file, or one whose file is not known, brought back; Node library)
   const removedTracks = [];
+  const goneSince = (since) => removedTracks.slice(since).filter((m) => !m.back).map((m) => m.id);
+  const broughtBack = (path) => { for (const m of removedTracks) if (!m.path || m.path === path) m.back = true; };
   // An answer without library song id: the library's copy goes; a service's copy stays, without the
   // library's id (no Remove or Edit tags on it, its page not the removed song's)
   const withoutTrack = (a, src, id) => {
@@ -5424,7 +5431,7 @@
         if (!fresh || fresh.status !== 'ok') throw new Error('Library answer missing');
         ok = true;
         if (searchRuns.get(searchKey(run.q, run.scope)) !== run) return; // (replaced meanwhile: Retry)
-        for (const id of removedTracks.slice(since)) fresh = withoutTrack(fresh, 'library', id);
+        for (const id of goneSince(since)) fresh = withoutTrack(fresh, 'library', id);
         same = sameAnswer(run.answers.library, fresh);
         run.answers = { ...run.answers, library: fresh };
         // (it was the one missing, or the stream broke after every source answered: the banner goes,
@@ -5449,6 +5456,7 @@
     }
     for (const r of searchRuns.values()) if (r.pending && r !== old) { try { r.ctrl.abort(); } catch { /* */ } r.pending = false; }
     const run = { q, scope, sources: [], answers: {}, startedAt: Date.now(), firstAt: null, doneAt: null, ctrl: new AbortController(), pending: true, slow: new Set() };
+    const since = removedTracks.length; // (an answer landing after a removal may be older than it)
     searchRuns.set(key, run);
     // Tag labels as you type (yours first), beside the results: STEWARD-FIX-search-tags.md
     const word = (/(?:#|\btag:)(\S+)$/.exec(q.trim()) || [])[1] || (/#|\btag:/.test(q) ? '' : q.trim().toLowerCase().replace(/\s+/g, '-'));
@@ -5460,6 +5468,7 @@
           searchChanged(run);
           setTimeout(() => { if (!run.pending) return; for (const src of run.sources) if (!run.answers[src]) run.slow.add(src); searchChanged(run); }, 5000);
         }, (a) => {
+          for (const id of goneSince(since)) a = withoutTrack(a, a.source, id);
           run.answers[a.source] = a; run.slow.delete(a.source);
           if (!run.firstAt) run.firstAt = Date.now();
           searchChanged(run);
@@ -7281,11 +7290,13 @@
     const counts = {}; for (const ans of Object.values(run.answers)) for (const [k, c] of ans.counts || []) counts[k] = Math.max(counts[k] || 0, c);
     // A Top result only when it really matches; a fuzzy hit is not promoted
     // (the Top result opens an item page: songs, albums and artists have one)
-    const exactHit = ['song', 'album', 'artist'].map((k) => byKind[k].find((x) => x.exact)).find(Boolean);
-    const top = exactHit || [byKind.artist.find((x) => x.sources.includes('library')), byKind.song.find((x) => x.sources.includes('library')), byKind.artist[0], byKind.album[0], byKind.song[0]].find((x) => x && closeMatch(x, run.q));
+    // (and only one with a page to open: a copy left without one when its library song was removed)
+    const exactHit = ['song', 'album', 'artist'].map((k) => byKind[k].find((x) => x.exact && x.id != null)).find(Boolean);
+    const top = exactHit || [byKind.artist.find((x) => x.sources.includes('library')), byKind.song.find((x) => x.sources.includes('library')), byKind.artist[0], byKind.album[0], byKind.song[0]].find((x) => x && x.id != null && closeMatch(x, run.q));
     const anyHits = SEARCH_KINDS.some(([k]) => byKind[k].length);
     const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => tagChip(t.label, { own: true, count: t.count, attrs: `data-stag="${esc(t.label)}"`, title: `Your tag · ${countOf(t.count, 'items')}` })).join('')}${(tg.others || []).map((l) => tagChip(l, { attrs: `data-stag="${esc(l)}"` })).join('')}</div></section>`);
-    if (!top && anyHits && !run.q.includes('#')) sections.push('<p class="muted small" id="snomatch">No exact match. The closest results are below.</p>');
+    // (an exact copy left without a page is listed below, so this would be untrue)
+    if (!top && anyHits && !run.q.includes('#') && !['song', 'album', 'artist'].some((k) => byKind[k].some((x) => x.exact))) sections.push('<p class="muted small" id="snomatch">No exact match. The closest results are below.</p>');
     if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" data-err="remove">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top"${hrefAttr(pathFor('item', { kind: top.kind, id: top.id }))}>${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Playlist', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div>${top.also && top.also.length ? `<div class="sub" id="stopalso">Also on ${esc(top.also.join(' · '))}</div>` : ''}</div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
     const songCap = run.allSongs ? 50 : 6;
     for (const [kind, label] of SEARCH_KINDS) {
@@ -10382,7 +10393,7 @@
             const le = $('#liberrs'); if (le) le.onclick = () => { const d = $('#scanerrs'); const sm = d && $('summary', d); if (!sm) return; d.open = true; sm.scrollIntoView({ block: 'center', behavior: 'instant' }); sm.focus({ preventScroll: true }); }; // (its title centred: a long list stays below it)
             driveReturn(drv);
             if (toCard) showIdentifyCard();
-            $$('[data-unhide]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', '/library/hidden/restore', { path: hidden[Number(b.dataset.unhide)].path }); toast(r.scan_started ? 'Back: reading it again' : 'Back with the next scan'); watchScan({ scanning: !!r.scan_started }); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } });
+            $$('[data-unhide]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const back = hidden[Number(b.dataset.unhide)].path; const r = await api('POST', '/library/hidden/restore', { path: back }); broughtBack(back); toast(r.scan_started ? 'Back: reading it again' : 'Back with the next scan'); watchScan({ scanning: !!r.scan_started }); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } });
             if (info.scanning) { clearTimeout(state.libPoll); state.libPoll = setTimeout(() => { if (state.view === 'library' && state.viewArg === 'node') render(); }, 3000); }
           } else {
             main.innerHTML = head + libPanel(tab, importHtml());
