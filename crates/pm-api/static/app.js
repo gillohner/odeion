@@ -5380,20 +5380,38 @@
   // services' answers stay as they were). The old results stay drawn, under the progress line, until
   // the new library answer is in, then it takes the old one's place (no empty page, Back keeps the
   // scroll); a failed ask keeps the old one. The one on screen is not asked again by its page being drawn again
-  // (keepShown), and one still on its way is neither cut off nor asked again.
+  // (keepShown), and one still on its way is neither cut off nor asked again. The library changing
+  // again while it is asked keeps it stale (that answer may be older than the change): on screen, it
+  // is asked once more as soon as that answer is in (once: a long scan's stream of changes does not
+  // keep it asking). An ask that hangs is given up after SEARCH_REFRESH_MS (the old results stay,
+  // still stale). One that ended in an error is asked for its library answer only too (no automatic
+  // Retry of the services; its Retry button stays, unless that answer was the one missing).
   let shownSearch = null; // (the run whose results #sresults shows, renderSearchBody)
   const forgetLibrarySearches = () => { for (const r of searchRuns.values()) if (['everywhere', 'library'].includes(r.scope) || r.sources.includes('library')) r.stale = true; };
   libWrote = forgetLibrarySearches;
-  const refreshSearch = (run) => {
-    run.stale = false; if (run.refreshing || !run.sources.includes('library')) return; run.refreshing = true;
+  const SEARCH_REFRESH_MS = 15000;
+  // (an answer the same but for the time it took)
+  const sameAnswer = (a, b) => !!a && !!b && JSON.stringify({ ...a, ms: 0 }) === JSON.stringify({ ...b, ms: 0 });
+  const refreshSearch = (run, again) => {
+    if (run.refreshing) return; // (stays stale: asked once more when that answer is in)
+    run.stale = false; if (!run.sources.includes('library')) return; run.refreshing = true;
     (async () => {
+      let ok = false; let same = false;
+      const ctrl = new AbortController(); const cut = setTimeout(() => ctrl.abort(), SEARCH_REFRESH_MS);
       try {
         let fresh = null;
-        await readSearch(run.q, 'library', undefined, () => {}, (a) => { if (a.source === 'library') fresh = a; });
+        await readSearch(run.q, 'library', ctrl.signal, () => {}, (a) => { if (a.source === 'library') fresh = a; });
         if (!fresh || fresh.status !== 'ok') throw new Error('Library answer missing');
+        ok = true;
         if (searchRuns.get(searchKey(run.q, run.scope)) !== run) return; // (replaced meanwhile: Retry)
+        same = sameAnswer(run.answers.library, fresh);
         run.answers = { ...run.answers, library: fresh };
-      } catch { run.stale = true; } finally { run.refreshing = false; searchChanged(run); }
+        if (run.error && run.sources.every((src) => run.answers[src])) run.error = false; // (it was the one missing)
+      } catch { run.stale = true; } finally {
+        clearTimeout(cut); run.refreshing = false;
+        if (ok && run.stale && !again && currentSearch(run)) refreshSearch(run, true);
+        searchChanged(run, same);
+      }
     })();
   };
   const startSearch = (q, scope, keepShown) => {
@@ -5402,7 +5420,7 @@
     const onScreen = keepShown && old === shownSearch && state.view === 'search' && !!$('#sresults');
     if (old && (old.pending || Date.now() - old.startedAt < SEARCH_TTL)) {
       if (!old.stale || onScreen || old.pending) return old;
-      if (!old.error) { refreshSearch(old); return old; }
+      refreshSearch(old); return old;
     }
     for (const r of searchRuns.values()) if (r.pending && r !== old) { try { r.ctrl.abort(); } catch { /* */ } r.pending = false; }
     const run = { q, scope, sources: [], answers: {}, startedAt: Date.now(), firstAt: null, doneAt: null, ctrl: new AbortController(), pending: true, slow: new Set() };
@@ -5433,11 +5451,12 @@
   // slow-source timers must never replace the new results or change their progress.
   const displayedSearch = () => state.view === 'search' && state.viewArg && searchRuns.get(searchKey(state.viewArg.q, state.viewArg.in || 'everywhere'));
   const currentSearch = (run) => !!run && displayedSearch() === run;
-  const searchChanged = (run) => {
+  // (same: a library answer asked again came back unchanged, so only the progress line moves)
+  const searchChanged = (run, same) => {
     if (!currentSearch(run)) return;
     const prog = $('#sprog'); const total = Math.max(run.sources.length, 1); const got = Object.keys(run.answers).length;
     if (prog) { prog.hidden = !run.pending && !run.refreshing; prog.firstElementChild.style.width = `${Math.max(8, (got / total) * 100)}%`; }
-    renderSearchBody(run);
+    if (!same) renderSearchBody(run);
   };
   // Keyboard on the search box (TASK-pinakes-social-ux A1): ↑/↓ walk the results across the
   // groups, Enter opens the one in focus, Shift+Enter plays it; the box keeps the focus and says
