@@ -940,6 +940,7 @@ html[data-shell="phone"] #iversions .list-row .icon-btn { width: 44px; height: 4
 .list-row .thumbwrap .thumb { margin-right: 0; display: block; }
 .list-row .thumbwrap .thumb.mono { display: flex; align-items: center; justify-content: center; color: rgba(255, 255, 255, 0.85); font-weight: 700; font-size: var(--fs-sm); line-height: 1; letter-spacing: 0.02em; }
 .list-row .thumbwrap .thumb.mono + img.thumb { position: absolute; inset: 0; background: transparent; }
+.list-row .thumbwrap .thumb.mono + img.thumb.loaded { background: var(--surface-3); }
 .list-row .thumbwrap .thumb.mono.badged { padding: 0 0 10px 10px; font-size: var(--fs-xs); }
 @media (max-width: 600px) { .srow .thumbwrap .thumb.mono.badged { padding: 0 0 14px 14px; } }
 .chip-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 6px; }

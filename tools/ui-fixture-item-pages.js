@@ -65,6 +65,17 @@ async function run(browser, width) {
     await fx.go(page, '/album/lib-99');
     await page.locator('#main .notice, #main h1').first().waitFor({ timeout: 5000 }).catch(() => {});
     check(await text(page, '#main h1') !== 'Journey' && /no album 99/.test(await page.locator('#main').innerText()), `${at} a missing album says so (${(await page.locator('#main').innerText()).slice(0, 60)})`);
+    // A catalogue id (mb-…, deezer-…) is a page the fixture can't reach: a 404 in the node's
+    // "no <kind> …" shape (the fixture's own words; a node would ask the service), for song, album and artist alike, never the library's first page in its place (the
+    // fixture used to draw Journey for /album/deezer-…, and leave /song/mb-… with no songs unanswered)
+    const ask = (u) => page.evaluate((x) => Promise.race([fetch(x).then(async (r) => ({ status: r.status, body: await r.json() })), new Promise((ok) => setTimeout(() => ok({ status: 'no answer' }), 3000))]), u);
+    for (const [kind, id, word] of [['song', 'mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69', 'track'], ['album', 'deezer-1007320461', 'album'], ['artist', 'mb-a74b1b7f-71a5-4011-9441-d0b5e4122711', 'artist']]) {
+      const got = await ask(`/v1/item/${kind}/${id}`);
+      check(got.status === 404 && got.body && got.body.error === `no ${word} ${id}`, `${at} /v1/item/${kind}/${id} is a 404 "no ${word} …" (${JSON.stringify(got)})`);
+    }
+    await fx.go(page, '/album/deezer-1007320461');
+    await page.locator('#main .notice, #main h1').first().waitFor({ timeout: 5000 }).catch(() => {});
+    check(await text(page, '#main h1') !== 'Journey' && /no album deezer-1007320461/.test(await page.locator('#main').innerText()), `${at} a catalogue album isn't drawn as a library album (${(await page.locator('#main').innerText()).slice(0, 60)})`);
     await fx.go(page, '/artist/lib-22');
     await page.locator('#isongs .list-row').first().waitFor({ timeout: 5000 }).catch(() => {});
     await fx.cleanCopy(page).then(() => check(true, `${at} artist: no undefined, no overflow`), (e) => check(false, `${at} artist: ${e.message}`));
