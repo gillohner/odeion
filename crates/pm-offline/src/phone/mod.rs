@@ -114,6 +114,8 @@ pub struct Phone {
     pub(crate) vault_lock: tokio::sync::Mutex<()>,
     /// Whether the person's homeserver is the one installed with their node, as last known.
     pub(crate) bundled_here: std::sync::Mutex<Option<bool>>,
+    /// Songs being copied to the homeserver.
+    pub(crate) copier: files::Copier,
     /// One change at a time to what the phone keeps of the person's data (`data.json`).
     pub(crate) data_lock: std::sync::Mutex<()>,
 }
@@ -151,6 +153,7 @@ impl Phone {
             vault_lock: Default::default(),
             data_lock: Default::default(),
             bundled_here: Default::default(),
+            copier: Default::default(),
         }))
     }
 
@@ -507,10 +510,7 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
             tracing::info!(?r, "phone mode: Pubky data synced");
         }
         if full {
-            let r = files::sync(&p, &acct).await;
-            if r != files::Report::default() {
-                tracing::info!(?r, "phone mode: songs copied to the homeserver");
-            }
+            files::start(&p, &acct);
         }
         let (now, data_now) = (p.sync_now.clone(), p.data_now.clone());
         drop(p);

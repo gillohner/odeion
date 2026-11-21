@@ -297,18 +297,23 @@ impl PubkySync {
         let _one = ONE.lock().await;
         let iroh = s.ensure_remote().await;
         // Read first: the old record is overwritten only once what it held is noted
-        if let Some(old) = self.homeserver.read_node_record(&self.session).await? {
+        let old = self.homeserver.read_node_record(&self.session).await?;
+        if let Some(old) = &old {
             if !old.token.is_empty() {
                 self.current()?;
                 crate::access_token::note_published(s, &old.token)?;
             }
         }
-        // The homeserver installed with the node, when it runs one (its key, from its admin API)
+        // The homeserver installed with the node, when it runs one (its key, from its admin API;
+        // the record's until then when that doesn't answer now)
         let bundled = match s.bundled_homeserver() {
-            Some(_) => crate::bundled::admin(s, reqwest::Method::GET, "/info", None)
-                .await
-                .ok()
-                .and_then(|v| crate::bundled::status_from_info(&v).public_key),
+            Some(_) => match crate::bundled::admin(s, reqwest::Method::GET, "/info", None).await {
+                Ok(v) => crate::bundled::status_from_info(&v).public_key,
+                Err(e) => {
+                    tracing::warn!("the bundled homeserver's key is not known now, the node record keeps the one it had: {}", e.message);
+                    old.and_then(|o| o.bundled_homeserver)
+                }
+            },
             None => None,
         };
         self.current()?;

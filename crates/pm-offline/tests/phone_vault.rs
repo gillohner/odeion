@@ -470,7 +470,7 @@ async fn songs_added_on_the_phone_reach_the_homeserver_installed_with_the_node()
     std::fs::write(&part, &flac).unwrap();
     let song = p.songs().store(&part, "Mono.flac").unwrap();
     // On by default for the node's own homeserver: copied there under the node's name for it
-    let r = phone::files::sync(&p, &acct).await;
+    let r = phone::files::copy(&p, &acct).await;
     assert_eq!(r, phone::files::Report { copied: 1, left: 0 });
     let names: Vec<String> = hs
         .list_private_files(&sessions[0])
@@ -482,7 +482,44 @@ async fn songs_added_on_the_phone_reach_the_homeserver_installed_with_the_node()
     assert!(names.contains(&song.file), "{names:?}");
     // Nothing twice
     assert_eq!(
-        phone::files::sync(&p, &acct).await,
+        phone::files::copy(&p, &acct).await,
         phone::files::Report::default()
     );
+    // The same music the node already put there under its own name is there: not copied again
+    let other = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pm-audio/tests/fixtures/14_wasted_bits.flac"
+    ))
+    .unwrap();
+    let h = blake3::hash(&other).to_hex().to_string();
+    let nodes = format!("{}-01_From_The_Node.flac", &h[..16]);
+    hs.upload_private(
+        &sessions[0],
+        &format!("{}{nodes}", pm_appdata::files::FILES_DIR),
+        other.clone(),
+    )
+    .await
+    .unwrap();
+    std::fs::write(&part, &other).unwrap();
+    let same = p.songs().store(&part, "Picked On The Phone.flac").unwrap();
+    assert_ne!(same.file, nodes);
+    assert_eq!(
+        phone::files::copy(&p, &acct).await,
+        phone::files::Report::default()
+    );
+    let names = hs.list_private_file_names(&sessions[0]).await.unwrap();
+    assert!(!names.contains(&same.file), "no second copy: {names:?}");
+    // A song the person removed from their homeserver isn't put back
+    hs.delete_private(
+        &sessions[0],
+        &format!("{}{}", pm_appdata::files::FILES_DIR, song.file),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        phone::files::copy(&p, &acct).await,
+        phone::files::Report::default()
+    );
+    let names = hs.list_private_file_names(&sessions[0]).await.unwrap();
+    assert!(!names.contains(&song.file), "{names:?}");
 }

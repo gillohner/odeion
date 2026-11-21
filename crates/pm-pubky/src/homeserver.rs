@@ -39,6 +39,18 @@ pub fn is_full(e: &HomeserverError) -> bool {
     )
 }
 
+/// The homeserver refused a write for good: a 4xx other than a timeout or too many requests
+/// (`413` too large, `403` not allowed). Trying the same write again gets the same answer.
+pub fn refused_for_good(e: &HomeserverError) -> bool {
+    matches!(
+        e,
+        HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+            if status.is_client_error()
+                && *status != reqwest::StatusCode::REQUEST_TIMEOUT
+                && *status != reqwest::StatusCode::TOO_MANY_REQUESTS
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HomeserverError {
     #[error(transparent)]
@@ -1272,6 +1284,72 @@ impl NodeHomeserver {
         Ok(())
     }
 
+    /// Uploads the file at `local` to `path` (under the private files folder) as it is read, never
+    /// whole in memory.
+    pub async fn upload_private_file(
+        &self,
+        session: &PubkySession,
+        path: &str,
+        local: &std::path::Path,
+    ) -> Result<(), HomeserverError> {
+        if !path.starts_with(PRIVATE_FILES_DIR) {
+            return Err(HomeserverError::Transport(format!(
+                "refusing to upload audio outside {PRIVATE_FILES_DIR}: {path}"
+            )));
+        }
+        let file = tokio::fs::File::open(local)
+            .await
+            .map_err(|e| HomeserverError::Transport(format!("{}: {e}", local.display())))?;
+        let stream = futures_util::stream::try_unfold(file, |mut f| async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 256 * 1024];
+            let n = f.read(&mut buf).await?;
+            if n == 0 {
+                return Ok::<_, std::io::Error>(None);
+            }
+            buf.truncate(n);
+            Ok(Some((bytes::Bytes::from(buf), f)))
+        });
+        session
+            .storage()
+            .put(path, reqwest::Body::wrap_stream(stream))
+            .await?;
+        Ok(())
+    }
+
+    /// The names of every file under the private files folder (complete, or an error), without
+    /// their sizes: one request per page of the listing.
+    pub async fn list_private_file_names(
+        &self,
+        session: &PubkySession,
+    ) -> Result<Vec<String>, HomeserverError> {
+        let storage = session.storage();
+        let listing = list_within(ListBounds::OWNER, PRIVATE_FILES_DIR, |cursor| {
+            let storage = &storage;
+            async move {
+                let mut b = storage.list(PRIVATE_FILES_DIR)?.limit(LIST_LIMIT).shallow(true);
+                if let Some(c) = &cursor {
+                    b = b.cursor(c);
+                }
+                match within(OBJECT_TIMEOUT, async { Ok(b.send().await) }).await? {
+                    Ok(p) => Ok(Some(
+                        p.into_iter()
+                            .map(|e| (e.path.to_string(), e.to_pubky_url()))
+                            .collect(),
+                    )),
+                    Err(e) if is_not_found(&e) => Ok(None),
+                    Err(e) => Err(e.into()),
+                }
+            }
+        })
+        .await?;
+        Ok(listing
+            .entries
+            .into_iter()
+            .map(|path: String| path.rsplit('/').next().unwrap_or(&path).to_string())
+            .collect())
+    }
+
     /// Check authenticated private storage with one bounded listing, not a file inventory.
     /// A new account's missing directory is healthy; access and transport errors propagate.
     pub async fn probe_private_storage(&self, session: &PubkySession) -> Result<(), HomeserverError> {
@@ -1798,6 +1876,23 @@ mod full_tests {
         assert!(server(404).is_not_found());
         assert!(!server(403).is_not_found());
         assert!(!HomeserverError::Transport("reset".into()).is_not_found());
+    }
+
+    #[test]
+    fn only_a_lasting_4xx_is_refused_for_good() {
+        let server = |status: u16| {
+            HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server {
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                message: String::new(),
+            }))
+        };
+        assert!(refused_for_good(&server(413)));
+        assert!(refused_for_good(&server(403)));
+        assert!(!refused_for_good(&server(408)));
+        assert!(!refused_for_good(&server(429)));
+        assert!(!refused_for_good(&server(507)), "full: try again later");
+        assert!(!refused_for_good(&server(503)));
+        assert!(!refused_for_good(&HomeserverError::Transport("reset".into())));
     }
 }
 
