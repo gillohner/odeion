@@ -13,6 +13,36 @@ const track = {id: 1, title: 'Journey Through Time', artists, album: {id: 7, tit
 const summary = {id: 'c1', name: 'Music and notes', items: 2, covers: [], visibility: 'private', synced: false, layout:'list'};
 const detail = {summary, playlist:{...summary,items:[{uri:SONG},{uri:LINK}]}, tracks:[track,null], entries:[{kind:'track',uri:SONG},{kind:'link',uri:LINK}], local_tracks:[]};
 const pf = {order:{order:['library'],services:[{id:'library',name:'Your library',connected:true}]},own_order:false,items:[{index:0,uri:SONG,title:track.title,artist:'Sefa, Dr. Peacock',track_id:1,plays_from:{service:'library',label:'Your library'},sources:[]},{index:1,uri:LINK,plays_from:null,sources:[]}]};
+// GET /v1/item/<kind>/<id>: a library song, album or artist page in the node's shape
+// (crates/pm-api/src/item.rs library_song, library_album, library_artist) built from the fixture's
+// songs, so those pages draw (the page reads its target, and artist/album are { name, id } links).
+// 'lib-<n>' is song, album or artist n (none there: 404, as the node says); another id (mb-…,
+// isrc-…) takes the first song's. No About facts (the page says "Nothing more is known yet.").
+// A test that needs another page passes its own answer in opts.fixtures.
+const cover = (t) => (t.album ? `/v1/library/albums/${t.album.id}/cover` : null);
+const itemRow = (t) => ({no:t.track_no??null,title:t.title,artist:(t.artists||[]).map((a)=>a.name).join(', ')||null,duration_ms:t.duration_ms??null,uri:null,track_id:t.id,page:null,image:cover(t),id:`lib-${t.id}`,artist_id:t.artists?.[0]?`lib-${t.artists[0].id}`:null,album:t.album?.title??null,album_id:t.album?`lib-${t.album.id}`:null,versions:[]});
+function itemPage(kind, id, tracks) {
+ const n=/^lib-\d+$/.test(id)?Number(id.slice(4)):null;
+ const base={kind,id,source:'Your library',source_id:'library',connect:[],reading:false,pending:false,versions:[],also_on:[],open_on:[],related:[],concerts:[],albums:[],about:[]};
+ const none=n!=null?{error:`no ${kind==='song'?'track':kind} ${n}`,status:404}:null;
+ const from=(k,i,label='Your library')=>({service:'library',kind:k,id:String(i),label,url:null,mode:'full'});
+ const total=(ts)=>ts.reduce((s,t)=>s+(t.duration_ms||0),0);
+ const albumOf=(t)=>t.album?[{id:`lib-${t.album.id}`,title:t.album.title,year:t.album.year??null,image:cover(t),page:''}]:[];
+ if(kind==='song'){
+  const t=n==null?tracks[0]:tracks.find((x)=>x.id===n);if(!t) return none;const a=t.artists?.[0];
+  return {...base,id:`lib-${t.id}`,uri:t.canonical_uri||null,song_uri:t.canonical_uri||null,target:{track_id:t.id},title:t.title,artist:a?{name:(t.artists||[]).map((x)=>x.name).join(', '),id:`lib-${a.id}`}:null,album:t.album?{name:t.album.title,id:`lib-${t.album.id}`}:null,year:t.album?.year??null,image:cover(t),plays_from:from('track',t.id),total_ms:t.duration_ms||0,songs:[itemRow(t)],albums:albumOf(t),versions:[{page:null,source:'library',id:String(t.id),label:'Your library',url:'',uri:`track:${t.id}`}],section:'tracks'};
+ }
+ if(kind==='album'){
+  const first=tracks.find((t)=>t.album);const id=n??first?.album.id;const ts=tracks.filter((t)=>t.album&&t.album.id===id);if(!ts.length) return none||{error:'no album',status:404};const al=ts[0].album;const a=ts[0].artists?.[0];
+  return {...base,id:`lib-${al.id}`,target:{album_id:al.id},title:al.title,artist:a?{name:a.name,id:`lib-${a.id}`}:null,album:null,year:al.year??null,image:cover(ts[0]),plays_from:from('album',al.id),total_ms:total(ts),songs:ts.map(itemRow),section:'albums'};
+ }
+ if(kind==='artist'){
+  const id=n??tracks.find((t)=>t.artists?.length)?.artists[0].id;const ts=tracks.filter((t)=>(t.artists||[]).some((a)=>a.id===id));if(!ts.length) return none||{error:'no artist',status:404};const ar=ts[0].artists.find((a)=>a.id===id);
+  const albums=[...new Map(ts.flatMap(albumOf).map((a)=>[a.id,a])).values()];
+  return {...base,id:`lib-${ar.id}`,target:{artist_id:ar.id},title:ar.name,artist:null,album:null,year:null,plays_from:from('artist',ar.id),total_ms:total(ts.slice(0,10)),songs:ts.slice(0,10).map(itemRow),albums,section:'artists'};
+ }
+ return {...base,target:{},title:'Item page',songs:[],plays_from:null,section:'home'};
+}
 const json = (r, body, status=200) => r.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
 async function create(browser, width, opts={}) {
  const state = {role:'owner',token:'fixture-owner',offline:false,collections:[],favs:[],hits:[],errors:[],unhandled:[],...opts};
@@ -42,7 +72,7 @@ async function create(browser, width, opts={}) {
   if(v==='/library/tracks') return json(r,{tracks:state.tracks||[track],next:null});
   if(v==='/library/tracks/1') return json(r,(state.tracks||[track])[0]);
   if(v==='/library/albums/7') return json(r,{...track.album,tracks:state.tracks||[track],artists});
-  if(v.startsWith('/item/')) return json(r,{kind:v.split('/')[2],id:v.split('/')[3],title:'Artist page',songs:[],releases:[],links:[],also_on:[],tags:[]});
+  if(v.startsWith('/item/')) {const [,,kind,id,more]=v.split('/');if(more==='extras') return json(r,{related:[],concerts:[],similar:[]});const pg=itemPage(kind,decodeURIComponent(id),state.tracks||[track]);return pg.status===404?json(r,{error:pg.error},404):json(r,pg);}
   if(v==='/node/settings') return json(r,{contact:'',discovery:false,token_replaceable:true});
   if(v==='/me/prefs') return json(r,{});
   if(v==='/play-order') return json(r,{order:['library'],services:[{id:'library',name:'Your library',connected:true}]});
