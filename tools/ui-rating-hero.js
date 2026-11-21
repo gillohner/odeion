@@ -1,12 +1,15 @@
 // My rating sits in the item page's top card (TASK-rating-in-hero-1112; owner: "move rating to top
 // card"). Real candidate assets on the fixture origin (tools/ui-fixture.js), the node's /v1/reviews
-// answered by a small in-test store; an album, a song and an artist at 360 and 412 (phone) and 1385 px:
+// answered by a small in-test store; an album, a song and an artist at 360 and 412 (phone) and
+// 768, 1024 and 1385 px:
 //   * the stars, "N of 5" and the notes are inside .item-hero, directly under the action row, above
 //     the songs; there is no #ireview section and only one rating row;
 //   * unrated: empty stars under "My rating"; one click on a half star sends one PUT and shows it;
 //   * long notes are clamped to three lines with More/Less; short notes have no More;
 //   * the notes editor opens in the hero and saves; Cancel brings the notes back;
-//   * nothing is wider than the screen.
+//   * nothing is wider than the screen;
+//   * desktop and tablet: unrated, Add notes sits right after the stars (no empty "N of 5" space
+//     between them); rated, "N of 5" sits between them and a different rating doesn't move Add notes.
 //   node tools/ui-rating-hero.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -59,14 +62,18 @@ const layout = (page) => page.evaluate(() => {
     label: row ? row.querySelector('.eyebrow').textContent : null, val: q('#ratingval') ? q('#ratingval').textContent : null,
     fills: [...document.querySelectorAll('#stars .star')].map((x) => x.className.replace('star ', '')).join(','),
     half: Math.min(...[...document.querySelectorAll('#stars .half')].map((b) => b.getBoundingClientRect().width)),
+    // Add notes: how far right of the stars it starts, whether it is on the stars' line, and where "N of 5" ends
+    notes: (() => { const s = box(q('#stars')); const b = box(q('#notesbtn')); const v = q('#ratingval'); const vb = v && v.getClientRects().length ? box(v) : null;
+      return s && b && !q('#notesbtn').hidden ? { gap: Math.round(b.left - s.right), left: Math.round(b.left), sameLine: Math.abs((b.top + b.bottom) / 2 - (s.top + s.bottom) / 2) < 8, valRight: vb ? Math.round(vb.right) : null } : null; })(),
   };
 });
 
 (async () => {
   const browser = await chromium.launch();
-  for (const w of [360, 412, 1385]) {
+  for (const w of [360, 412, 768, 1024, 1385]) {
+    const desk = w >= 600;
     for (const key of ['album', 'song', 'artist']) {
-      const at = `${key} at ${w}`;
+      const at = `${key} at ${w}`; let ratedLeft = null;
       // ---- unrated: where the row is, then one click rates ----
       {
         const { page, context, state, store } = await open(browser, w, key, null);
@@ -77,6 +84,7 @@ const layout = (page) => page.evaluate(() => {
         check(r.wide <= 0 && r.rowRight <= r.vw, `${at}: nothing wider than the screen (page ${r.wide}, row ends at ${r.rowRight} of ${r.vw})`);
         check(r.label === 'My rating' && r.val === '' && r.fills === 'f0,f0,f0,f0,f0', `${at}: unrated shows empty stars under "My rating" (${r.fills}, "${r.val}")`);
         check(r.half >= 12, `${at}: half-star targets keep their size (${r.half} px)`);
+        if (desk) check(r.notes && r.notes.sameLine && r.notes.gap >= 0 && r.notes.gap <= 12 && r.notes.valRight == null, `${at}: unrated, Add notes sits right after the stars (${r.notes ? `${r.notes.gap} px, same line ${r.notes.sameLine}, "N of 5" ${r.notes.valRight == null ? 'takes no room' : 'takes room'}` : 'missing'})`);
         if (key === 'album') await page.screenshot({ path: path.join(SHOTS, `album-unrated-${w}.png`) });
         if (r.stars) {
           await page.click('[data-rate="7"]');
@@ -84,6 +92,7 @@ const layout = (page) => page.evaluate(() => {
           await sleep(300);
           const r2 = await layout(page);
           check(!!shown && store.puts.length === 1 && store.puts[0].rating === 7 && r2.fills === 'f2,f2,f2,f1,f0' && r2.inHero, `${at}: one click saves 3½ once and the hero shows it (${store.puts.length} PUT, ${r2.fills})`);
+          if (desk) { check(r2.notes && r2.notes.sameLine && r2.notes.valRight != null && r2.notes.left >= r2.notes.valRight, `${at}: rated, "3½ of 5" sits between the stars and Add notes (${r2.notes ? `"N of 5" ends at ${r2.notes.valRight}, Add notes at ${r2.notes.left}` : 'missing'})`); ratedLeft = r2.notes ? r2.notes.left : null; }
           // The same value again clears it
           await page.click('[data-rate="7"]');
           // (the pointer still rests on the star, whose hover preview fills it: the saved value is the text)
@@ -107,6 +116,7 @@ const layout = (page) => page.evaluate(() => {
         check(a.inHero && a.val === '4½ of 5' && a.btn === 'Edit notes', `${at}: saved notes and the rating are in the top card ("${a.val}", ${a.btn})`);
         check(a.lines <= 3 && a.cut && a.more && !a.more.hidden && a.more.text === 'More' && a.more.open === 'false' && a.more.inHero, `${at}: long notes are clamped to three lines with More (${a.lines} lines)`);
         check(a.wide <= 0, `${at}: long notes don't widen the page (${a.wide})`);
+        if (desk) { const l = await layout(page); check(l.notes && ratedLeft != null && l.notes.left === ratedLeft, `${at}: a different rating (4½ for 3½) doesn't move Edit notes (${l.notes ? l.notes.left : 'missing'} px, was ${ratedLeft})`); }
         await page.screenshot({ path: path.join(SHOTS, `${key}-notes-${w}.png`) });
         await page.click('#notesmore'); const b = await n();
         check(b.lines > 3 && !b.cut && b.more.text === 'Less' && b.more.open === 'true' && b.heroH > a.heroH, `${at}: More shows all the notes (${b.lines} lines) and says Less`);

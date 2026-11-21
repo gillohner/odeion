@@ -859,6 +859,10 @@ html[data-shell="phone"] .reviewrow .star { width: 44px; height: 44px; line-heig
 @media (max-width: 339.98px) { html[data-shell="phone"] .reviewrow .star { width: 40px; } }
 html[data-shell="phone"] .reviewrow :is(#notesbtn, #notessave, #notescancel) { min-height: 44px; }
 .ratingval { color: var(--muted); font-size: var(--fs-sm); margin-right: 8px; min-width: 4.5em; }
+/* With no rating there is no "N of 5": its empty space no longer pushes Add notes ~90 px away from
+   the stars (desktop and tablet; phones already hid it). Your first rating (or clearing it) moves
+   Add notes over once, as on phones; between two ratings it keeps its width, so Add notes stays. */
+.ratingval:empty { display: none; }
 .notes { flex-basis: 100%; color: var(--fg-2); white-space: pre-wrap; max-width: 560px; overflow-wrap: anywhere; }
 .notes.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .notes[hidden] { display: none; }
