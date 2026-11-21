@@ -7045,6 +7045,8 @@
       }
       if (found) { if (h.tagged && !found.tagged) found.tagged = h.tagged; if (h.exact) { found.exact = true; found.also = h.also; } if (!found.sources.includes(ans.source)) found.sources.push(ans.source); for (const k of h.keys || []) index.set(h.kind + '|' + k, found); continue; }
       const m = { ...h, sources: [ans.source] };
+      // Your playlist's count as the Playlists page writes it ("1,200 songs", not "1200 songs")
+      if (h.kind === 'playlist' && ans.source === 'library' && h.subtitle) m.subtitle = h.subtitle.replace(/^\d+(?= )/, (d) => fmtCount(Number(d)));
       byKind[h.kind].push(m);
       for (const k of h.keys || []) index.set(h.kind + '|' + k, m);
       if (byName) index.set('artist-name|' + byName, m);

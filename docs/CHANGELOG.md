@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-21
 
+- **Search shows a playlist's new size right after you change it.** After you added to, removed from, renamed, deleted or imported a playlist, searching for it could still show the old count (or the old playlist) for up to 5 minutes. Search now forgets what it kept from your library whenever a playlist is made, changed, deleted or imported, so the next search shows the playlist as it is now.
+- **Search writes big playlist counts the way the Playlists page does.** A playlist with 1200 songs read "1200 songs · your playlist" in search but "1,200 songs" on the Playlists page; search now writes "1,200 songs" too.
 - **Rating an album or song no longer makes the page jump.** Saving a rating redrew the top card, and its tags turned into grey placeholders until they loaded again. On a phone that moved your stars and Add notes by about 45 px for a moment, so a quick second tap could miss. The tags now stay as they were while the page checks for new ones, and only change if someone added or removed one. A tag you remove yourself never comes back from the older copy.
 
 ### 2026-11-20

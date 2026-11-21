@@ -11,9 +11,10 @@
 // "My rating"'s line; the half stars are square (no dead corners where two meet). At 320, 360, 390,
 // 412 and 430 px (360 as the Android app too) every half star is pressed unrated, rated, and with the
 // notes editor open: each press is one PUT with that half's value (a press on the rating it already
-// has clears it). Before each press the point is probed until it names that half (a redraw can still
-// be on its way). Rated, opening the notes editor (which hides Add notes) leaves "N of 5" where it
-// was: its line keeps Add notes' 44 px, so it doesn't jump up ~12 px; Cancel puts both back.
+// has clears it). Before each press the half is measured again and its point probed until it names
+// that half (a redraw can still be on its way). Rated, opening the notes editor (which hides Add
+// notes) leaves "N of 5" where it was: its line keeps Add notes' 44 px, so it doesn't jump up
+// ~12 px; Cancel puts both back.
 // The top card's Pubky tags answer 120 ms late, so each save's redraw shows the tags skeleton for a
 // moment (the stars up to 42 px lower): a press is measured only once that redraw is done.
 // Presses use page.mouse.click at exact points (a touchscreen tap snaps onto a nearby target).
@@ -71,14 +72,24 @@ const measure = (page) => page.evaluate(() => {
     radius: getComputedStyle(document.querySelector('#stars .half.l')).borderTopLeftRadius,
   };
 });
-// What a press at (x, y) lands on (its data-rate), asked again until it is the half wanted: the
-// previous press's redraw may not be drawn yet (bounded; whatever it names last is returned)
-const probeRate = async (page, x, y, want) => {
-  let hit = null;
-  await until(async () => { hit = await page.evaluate(([x, y]) => { const e = document.elementFromPoint(x, y); return e && e.dataset ? e.dataset.rate || null : null; }, [x, y]); return hit === want; }, 2000);
-  return hit;
+// Where to press half star v: its box measured now, and the point `at` picks in it (its middle by
+// default). Each retry measures the half again: any late redraw of the top card (the tags skeleton,
+// or anything else) may have moved the stars since the last look, so a point measured earlier would
+// name nothing ("hit null"). Asked until the point names half v (bounded); returns the last point
+// and what it named, so the press goes where the probe last looked.
+const middle = (b) => ({ x: b.l + b.w / 2, y: b.t + b.h / 2 });
+const probeRate = async (page, v, at = middle) => {
+  let got = { hit: null, x: 0, y: 0 };
+  await until(async () => {
+    const box = await page.evaluate((v) => { const e = document.querySelector(`#stars [data-rate="${v}"]`); if (!e) return null; const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, w: r.width, h: r.height, r: r.right, b: r.bottom }; }, v);
+    if (!box) { got = { hit: null, x: 0, y: 0 }; return false; }
+    const { x, y } = at(box);
+    const hit = await page.evaluate(([x, y]) => { const e = document.elementFromPoint(x, y); return e && e.dataset ? e.dataset.rate || null : null; }, [x, y]);
+    got = { hit, x, y };
+    return hit === String(v);
+  }, 2000);
+  return got;
 };
-const halfAt = (page, v) => page.evaluate((v) => { const b = document.querySelector(`#stars [data-rate="${v}"]`).getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; }, v);
 // The page drawn again with rating v (null: none), and done: the top card's tags line has its answer
 // (while it is a skeleton the stars sit lower, so a point measured then misses once it lands)
 const drawn = (page, v) => page.waitForFunction((v) => { const t = document.getElementById('ratingval'); const p = document.querySelector('#stars [aria-pressed="true"]'); return !document.querySelector('#main .item-hero .tag-skel') && t && (v == null ? t.textContent === '' && !p : !!p && p.dataset.rate === String(v)); }, v);
@@ -89,8 +100,7 @@ async function pressEach(page, store, at, what, cur, before) {
   const bad = [];
   for (let v = 1; v <= 10; v++) {
     if (before) await before();
-    const { x, y } = await halfAt(page, v);
-    const hit = await probeRate(page, x, y, String(v));
+    const { hit, x, y } = await probeRate(page, v);
     const puts = store.puts.length; const dels = store.dels;
     await page.mouse.click(x, y);
     const clears = cur === v;
@@ -135,10 +145,9 @@ async function pressEach(page, store, at, what, cur, before) {
       check(Math.abs(ed0 - (m.stars[0].b + 8)) < 1, `${at}: with no rating the notes editor opens 8 px under the stars, where Add notes was (${(ed0 - m.stars[0].b).toFixed(1)})`);
       await page.click('#notescancel');
       // A press 2 px inside the 3rd star's right half, at its top edge, its bottom edge, and next to star 4
-      const s = m.halves[5];
-      for (const [what, x, y] of [['top edge', s.l + s.w / 2, s.t + 2], ['bottom edge', s.l + s.w / 2, s.b - 2], ['side next to star 4', s.r - 2, s.t + s.h / 2]]) {
+      for (const [what, pick] of [['top edge', (b) => ({ x: b.l + b.w / 2, y: b.t + 2 })], ['bottom edge', (b) => ({ x: b.l + b.w / 2, y: b.b - 2 })], ['side next to star 4', (b) => ({ x: b.r - 2, y: b.t + b.h / 2 })]]) {
         const before = store.puts.length;
-        const hit = await probeRate(page, x, y, '6');
+        const { hit, x, y } = await probeRate(page, 6, pick);
         await page.mouse.click(x, y);
         await until(() => store.puts.length > before);
         const put = store.puts[store.puts.length - 1];
@@ -150,15 +159,14 @@ async function pressEach(page, store, at, what, cur, before) {
           check(r.notes && Math.abs(r.notes.t - m.notes.t) < 0.5 && r.val && Math.abs(r.val.t + r.val.h / 2 - (r.notes.t + r.notes.h / 2)) < 3 && r.notes.l >= r.val.r, `${at}: a first rating doesn't move Add notes down ("${r.valText}" before it, top ${r.notes && r.notes.t.toFixed(1)}, was ${m.notes.t.toFixed(1)})`);
         }
         // Back to unrated for the next press (the same value again clears it)
-        await probeRate(page, x, y, '6'); await page.mouse.click(x, y); await until(() => !store.review);
+        const again = await probeRate(page, 6, pick); await page.mouse.click(again.x, again.y); await until(() => !store.review);
         await drawn(page, null);
       }
       // Every half, unrated: set it, then clear it again
       const bad = [];
       for (let v = 1; v <= 10; v++) {
         for (const clears of [false, true]) {
-          const { x, y } = await halfAt(page, v);
-          const hit = await probeRate(page, x, y, String(v));
+          const { hit, x, y } = await probeRate(page, v);
           const puts = store.puts.length; const dels = store.dels;
           await page.mouse.click(x, y);
           await until(() => (clears ? store.dels > dels : store.puts.length > puts));

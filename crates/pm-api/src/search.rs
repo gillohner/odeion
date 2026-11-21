@@ -18,6 +18,7 @@ use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -168,6 +169,32 @@ pub(crate) fn forget_answers(s: &NodeState) {
     s.search_answers.lock().expect("search cache").clear();
 }
 
+/// Drop this node's cached library answers (the owner's and each listener's): a playlist was
+/// created, edited, deleted or imported (`NodeState::notify_library`), so a library hit's count
+/// ("3 songs · your playlist") may be old. Other sources keep theirs. A library answer being made
+/// right now isn't kept either (the epoch, bumped under the cache's lock, see [`keep_answer`]).
+pub(crate) fn forget_library_answers(s: &NodeState) {
+    let mut cache = s.search_answers.lock().expect("search cache");
+    s.search_library_epoch.fetch_add(1, Ordering::SeqCst);
+    cache.retain(|(_, src), _| !is_library(src));
+}
+
+/// The library source's answers: the owner's ("library") and a listener's ("library|<who>").
+fn is_library(src: &str) -> bool {
+    src == "library" || src.starts_with("library|")
+}
+
+/// Keep a fresh answer for [`CACHE_TTL`], unless it is the library's and its cached answers were
+/// dropped since `epoch` (read before the answer was made): a playlist written meanwhile could
+/// make it old for 5 minutes.
+fn keep_answer(s: &NodeState, key: (String, String), a: SourceAnswer, epoch: u64) {
+    let mut cache = s.search_answers.lock().expect("search cache");
+    if is_library(&key.1) && s.search_library_epoch.load(Ordering::SeqCst) != epoch {
+        return;
+    }
+    cache.insert(key, (Instant::now(), a));
+}
+
 /// Drops one person's cached answers (`Who::tag`): they were removed.
 pub(crate) fn forget_answers_of(s: &NodeState, tag: &str) {
     let suffix = format!("|{tag}");
@@ -222,6 +249,7 @@ pub(crate) async fn search(
                     format!("{src}|{}", who.tag())
                 },
             );
+            let epoch = s.search_library_epoch.load(Ordering::SeqCst);
             let hit = s
                 .search_answers
                 .lock()
@@ -264,10 +292,7 @@ pub(crate) async fn search(
                         },
                     };
                     if a.status == "ok" {
-                        s.search_answers
-                            .lock()
-                            .expect("search cache")
-                            .insert(key, (Instant::now(), a.clone()));
+                        keep_answer(&s, key, a.clone(), epoch);
                     }
                     a
                 }
@@ -1382,10 +1407,63 @@ mod ident_tests {
         assert_eq!(sub(0, true).as_deref(), Some("0 songs · your playlist"));
         assert_eq!(sub(2, false).as_deref(), Some("2 items · your playlist"));
         assert_eq!(sub(1, false).as_deref(), Some("1 item · your playlist"));
+        assert_eq!(sub(0, false).as_deref(), Some("0 items · your playlist"));
         let h = own_playlist_hit(&pl(2, false));
         assert_eq!(
             (h.kind.as_str(), h.title.as_str(), h.id.as_str()),
             ("playlist", "Mix", "p1")
         );
+    }
+
+    /// A playlist written while a library answer was being made: that answer isn't kept (it may
+    /// already be old), and the next search asks the library again. Other sources keep theirs.
+    #[test]
+    fn a_library_answer_made_across_a_playlist_write_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lib.sqlite");
+        let s = NodeState::new(
+            crate::NodeSettings {
+                name: "t".into(),
+                version: "0".into(),
+                db_path: db.clone(),
+                scan_folders: vec![],
+                art_dir: dir.path().join("art"),
+                mirror_dir: dir.path().join("homeserver"),
+                pipeline: pm_audio::PipelineConfig::default(),
+                token: None,
+                subsonic_user: "pubky".into(),
+                pubky: Default::default(),
+                public_url: "http://127.0.0.1:7788".into(),
+                upnp: false,
+                cast: false,
+                slimproto_port: 0,
+                session_secret_path: None,
+                tidal: Default::default(),
+                spotify: Default::default(),
+                acoustid_key: String::new(),
+                jamendo: Default::default(),
+            },
+            pm_library::Library::open(&db).unwrap(),
+            pm_zones::OutputRegistry::new(),
+        );
+        let key = |src: &str| ("mix".to_string(), src.to_string());
+        let kept = |src: &str| s.search_answers.lock().unwrap().contains_key(&key(src));
+        // Unchanged meanwhile: kept
+        let epoch = s.search_library_epoch.load(Ordering::SeqCst);
+        keep_answer(&s, key("library"), SourceAnswer::default(), epoch);
+        assert!(kept("library"));
+        // Asked before a playlist write, answered after it: neither the old answer nor this one stays
+        let epoch = s.search_library_epoch.load(Ordering::SeqCst);
+        s.notify_library();
+        assert!(!kept("library"));
+        keep_answer(&s, key("library"), SourceAnswer::default(), epoch);
+        keep_answer(&s, key("library|listener"), SourceAnswer::default(), epoch);
+        keep_answer(&s, key("pubky"), SourceAnswer::default(), epoch);
+        assert!(!kept("library") && !kept("library|listener"));
+        assert!(kept("pubky"));
+        // Asked after it: kept again
+        let epoch = s.search_library_epoch.load(Ordering::SeqCst);
+        keep_answer(&s, key("library"), SourceAnswer::default(), epoch);
+        assert!(kept("library"));
     }
 }
