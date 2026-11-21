@@ -80,6 +80,11 @@ impl HomeserverError {
                 if status.is_server_error()
         )
     }
+
+    /// The homeserver has nothing at that path (404): a delete of it is done already.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, HomeserverError::Pubky(e) if is_not_found(e))
+    }
 }
 
 /// Reads in flight at once during a sync.
@@ -1785,6 +1790,9 @@ mod full_tests {
         assert!(!is_full(&server(404)));
         assert!(!is_full(&server(413)));
         assert!(!is_full(&HomeserverError::Transport("reset".into())));
+        assert!(server(404).is_not_found());
+        assert!(!server(403).is_not_found());
+        assert!(!HomeserverError::Transport("reset".into()).is_not_found());
     }
 }
 

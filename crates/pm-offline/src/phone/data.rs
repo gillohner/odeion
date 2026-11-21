@@ -237,10 +237,11 @@ async fn write(acct: &Account, p: &Phone, op: &Pending, history: History) -> Res
         }
         Pending::Bookmark { url, on: false, .. } => {
             let path = v1::bookmark_path(url)?;
-            acct.hs
-                .delete(&acct.session, &path)
-                .await
-                .map_err(|e| e.to_string())
+            match acct.hs.delete(&acct.session, &path).await {
+                // Not there (never written, or removed elsewhere): done, as on a node
+                Err(e) if e.is_not_found() => Ok(()),
+                r => r.map_err(|e| e.to_string()),
+            }
         }
         Pending::Listen {
             url,

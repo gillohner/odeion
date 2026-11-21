@@ -376,6 +376,17 @@ async fn bookmarks_listens_and_prefs_reach_the_homeserver_as_a_node_reads_them()
     phone::data::sync(&p, &acct).await;
     let marks = hs.read_v1_bookmarks(&sessions[0]).await.unwrap();
     assert!(!marks.iter().any(|(_, u, _)| *u == url));
+    // Removed again (another device removed it meanwhile, say): nothing there is done, the queue
+    // goes on
+    let r = http
+        .delete(format!("{base}/v1/favourites?uri={}", urlencode(&url)))
+        .bearer_auth(p.key())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let r = phone::data::sync(&p, &acct).await;
+    assert_eq!((r.written, r.left), (1, 0), "{r:?}");
     // A quality set on the phone goes into prefs.json, keeping what else is there
     let r = http
         .put(format!("{base}/v1/sources/tidal/unofficial"))
