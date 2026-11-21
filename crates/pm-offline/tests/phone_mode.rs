@@ -446,3 +446,94 @@ async fn a_fetch_nobody_plays_any_more_stops_and_leaves_nothing() {
     assert_eq!(&again.bytes().await.unwrap()[..], AUDIO);
     assert_eq!(f.tidal.playback.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn a_song_added_from_the_phone_is_kept_listed_found_and_played() {
+    let f = Fixture::new().await;
+    let flac = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+    ))
+    .unwrap();
+    let upload = |name: &'static str| {
+        let (f, flac) = (&f, flac.clone());
+        async move {
+            let r: Value = f
+                .http
+                .post(format!("{}/v1/library/uploads", f.base))
+                .bearer_auth(f.phone.key())
+                .json(&json!({"name": name, "size": flac.len()}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let id = r["id"].as_str().unwrap().to_string();
+            // A part at the wrong place is refused with where the upload is
+            let wrong = f
+                .http
+                .put(format!("{}/v1/library/uploads/{id}?offset=5", f.base))
+                .bearer_auth(f.phone.key())
+                .body(flac.clone())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(wrong.status(), 409);
+            let done: Value = f
+                .http
+                .put(format!("{}/v1/library/uploads/{id}?offset=0", f.base))
+                .bearer_auth(f.phone.key())
+                .body(flac.clone())
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(done["state"], "stored", "{done}");
+        }
+    };
+    upload("01 Mono Test.flac").await;
+    // The same file again is the same song
+    upload("01 Mono Test.flac").await;
+    let (_, list) = f.json("/v1/offline").await;
+    let tracks = list["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 1, "{list}");
+    let id = tracks[0]["id"].as_i64().unwrap();
+    assert_eq!(tracks[0]["offline"]["bytes"], flac.len());
+    // Kept under the node's file name for it
+    let hash = blake3::hash(&flac).to_hex().to_string();
+    assert!(f
+        ._dir
+        .path()
+        .join("music")
+        .join(format!("{}-01_Mono_Test.flac", &hash[..16]))
+        .is_file());
+    // It plays from the phone, with ranges
+    let r = f
+        .get(&format!("/v1/library/tracks/{id}/file"))
+        .header(header::RANGE, "bytes=0-3")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 206);
+    assert_eq!(&r.bytes().await.unwrap()[..], b"fLaC");
+    // Search finds it among the phone's songs
+    let title = tracks[0]["title"].as_str().unwrap().to_string();
+    let word = title.split_whitespace().next().unwrap().to_string();
+    let r = f.get(&format!("/v1/search?q={word}")).send().await.unwrap();
+    assert!(r.headers()["x-pm-sources"].to_str().unwrap().contains("library"));
+    let text = r.text().await.unwrap();
+    assert!(text.contains(&format!("\"track_id\":{id}")), "{text}");
+    // Only music files
+    let r = f
+        .http
+        .post(format!("{}/v1/library/uploads", f.base))
+        .bearer_auth(f.phone.key())
+        .json(&json!({"name": "setup.exe", "size": 10}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+}
