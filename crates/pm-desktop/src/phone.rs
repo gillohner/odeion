@@ -39,11 +39,26 @@ fn saved_path(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("phone.json"))
 }
 
-/// Phone mode's folder: the sign-ins, the stream cache, the Pubky session.
-fn dir(app: &AppHandle) -> Result<PathBuf, String> {
+/// Phone mode's folder for one person (their Pubky): their sign-ins, vault records and Pubky
+/// session, apart from anyone else who used phone mode on this device.
+fn dir(app: &AppHandle, pubky: &str) -> Result<PathBuf, String> {
+    let base = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    person_dir(&base, pubky)
+}
+
+/// `<base>/phone/<pubky>`; only a Pubky's own letters and digits make a folder name.
+fn person_dir(base: &std::path::Path, pubky: &str) -> Result<PathBuf, String> {
+    if pubky.is_empty() || !pubky.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err("not a Pubky".into());
+    }
+    Ok(base.join("phone").join(pubky))
+}
+
+/// Where TIDAL tracks are cached while they play: the app's cache folder (the system may empty it).
+fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
-        .app_local_data_dir()
-        .map(|d| d.join("phone"))
+        .app_cache_dir()
+        .map(|d| d.join("phone-streams"))
         .map_err(|e| e.to_string())
 }
 
@@ -131,7 +146,7 @@ pub async fn phone_ring(app: AppHandle, state: State<'_, AppState>) -> Result<()
         pubky: session.public_key().to_string(),
     };
     if let Some(secret) = pm_pubky::homeserver::export_session_secret(&session).await {
-        keep_session_secret(&dir(&app)?, &secret)?;
+        keep_session_secret(&dir(&app, &saved.pubky)?, &secret)?;
     }
     drop(hs);
     let path = saved_path(&app).ok_or("no folder for the app's settings")?;
@@ -171,7 +186,7 @@ pub fn seed_fixture(app: &AppHandle) {
     let fixture = Saved {
         pubky: "o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo".into(),
     };
-    let seeded = dir(app).and_then(|d| {
+    let seeded = dir(app, &fixture.pubky).and_then(|d| {
         let store = pm_offline::phone::store::FileStore::open(&d).map_err(|e| e.to_string())?;
         let st = pm_sources::tidal::full::ModeState {
             enabled: true,
@@ -207,7 +222,8 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<(), St
         Some(o) => o,
         None => {
             let phone = pm_offline::phone::Phone::open(pm_offline::phone::Config {
-                dir: dir(app)?,
+                dir: dir(app, &saved.pubky)?,
+                cache: cache_dir(app)?,
                 version: env!("CARGO_PKG_VERSION").into(),
                 pubky: Some(saved.pubky.clone()),
                 tidal: tidal_conf(),
@@ -290,6 +306,18 @@ mod tests {
         assert_eq!(load_saved(&path), None);
         store_saved(&path, None).unwrap();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn each_person_has_a_folder_of_their_own() {
+        let base = std::path::Path::new("/data");
+        let a = person_dir(base, "o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo").unwrap();
+        let b = person_dir(base, "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo").unwrap();
+        assert_ne!(a, b);
+        assert!(a.starts_with("/data/phone"));
+        for bad in ["", "..", "a/b", "../x"] {
+            assert!(person_dir(base, bad).is_err(), "{bad}");
+        }
     }
 
     #[cfg(unix)]

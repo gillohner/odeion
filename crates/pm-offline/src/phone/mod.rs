@@ -66,8 +66,12 @@ impl Default for TidalConf {
 
 /// How the app starts phone mode.
 pub struct Config {
-    /// The app's own folder for phone mode (`<app data>/phone`).
+    /// The app's own folder for phone mode, one per person (`<app data>/phone/<pubky>`): their
+    /// sign-ins never meet another person's.
     pub dir: PathBuf,
+    /// Where TIDAL tracks are cached while they play (the app's cache folder, which the system
+    /// may empty).
+    pub cache: PathBuf,
     /// The app's version (`/v1/info`).
     pub version: String,
     /// The person's Pubky (z32), from their Ring sign-in.
@@ -96,7 +100,7 @@ fn new_key() -> String {
 impl Phone {
     pub fn open(c: Config) -> std::io::Result<Arc<Self>> {
         let store = Arc::new(store::FileStore::open(&c.dir)?);
-        let streams = stream::Streams::open(&c.dir.join("streams"))?;
+        let streams = stream::Streams::open(&c.cache)?;
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
@@ -122,6 +126,11 @@ impl Phone {
     /// Phone mode's folder on the phone.
     pub fn dir(&self) -> &std::path::Path {
         &self.dir
+    }
+
+    /// The cache of TIDAL tracks.
+    pub fn streams(&self) -> &stream::Streams {
+        &self.streams
     }
 
     /// The streaming sign-ins kept on the phone.

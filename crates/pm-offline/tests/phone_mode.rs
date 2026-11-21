@@ -22,6 +22,8 @@ struct Tidal {
     playback: AtomicUsize,
     encrypted: std::sync::atomic::AtomicBool,
     base: std::sync::OnceLock<String>,
+    /// The slow track's second half comes only once this is told
+    rest: tokio::sync::Notify,
 }
 
 fn signed(h: &HeaderMap) -> bool {
@@ -49,6 +51,15 @@ async fn v1(State(t): State<Arc<Tidal>>, Path(rest): Path<String>, headers: Head
         }
         "albums/1" => album(),
         "albums/1/tracks" => json!({"items": [song()], "totalNumberOfItems": 1}),
+        "tracks/3/playbackinfopostpaywall" => {
+            t.playback.fetch_add(1, Ordering::SeqCst);
+            let base = t.base.get().unwrap();
+            let manifest = json!({"mimeType": "audio/flac", "codecs": "flac", "encryptionType": "NONE",
+                "urls": [format!("{base}/media/slow.flac")]});
+            json!({"assetPresentation": "FULL", "audioQuality": "LOSSLESS",
+                   "manifestMimeType": "application/vnd.tidal.bts",
+                   "manifest": base64::engine::general_purpose::STANDARD.encode(manifest.to_string())})
+        }
         "tracks/2/playbackinfopostpaywall" => {
             t.playback.fetch_add(1, Ordering::SeqCst);
             let base = t.base.get().unwrap();
@@ -64,6 +75,29 @@ async fn v1(State(t): State<Arc<Tidal>>, Path(rest): Path<String>, headers: Head
     Json(body).into_response()
 }
 
+/// A track whose first part comes at once and the rest only when the test says.
+async fn slow(State(t): State<Arc<Tidal>>) -> Response {
+    let (a, b) = AUDIO.split_at(10);
+    let body = futures_util::stream::unfold(0, move |step| {
+        let t = t.clone();
+        async move {
+            match step {
+                0 => Some((Ok::<_, std::io::Error>(a.to_vec()), 1)),
+                1 => {
+                    t.rest.notified().await;
+                    Some((Ok(b.to_vec()), 2))
+                }
+                _ => None,
+            }
+        }
+    });
+    (
+        [(header::CONTENT_TYPE, "audio/flac")],
+        axum::body::Body::from_stream(body),
+    )
+        .into_response()
+}
+
 async fn tidal() -> (Arc<Tidal>, String) {
     let t = Arc::new(Tidal::default());
     let app = Router::new()
@@ -72,6 +106,7 @@ async fn tidal() -> (Arc<Tidal>, String) {
             "/media/song.flac",
             get(|| async { ([(header::CONTENT_TYPE, "audio/flac")], AUDIO) }),
         )
+        .route("/media/slow.flac", get(slow))
         .with_state(t.clone());
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
@@ -94,6 +129,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let phone = Phone::open(Config {
             dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
             version: "0.0.0-test".into(),
             pubky: Some("o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo".into()),
             tidal: TidalConf {
@@ -305,4 +341,43 @@ async fn the_sign_in_pages_have_the_nodes_shape() {
     // Nothing secret in what the page gets
     let (_, s) = f.json("/v1/sources/tidal/unofficial").await;
     assert!(!s.to_string().contains(TOKEN));
+}
+
+#[tokio::test]
+async fn a_slow_track_starts_before_it_is_whole_and_is_fetched_once() {
+    let f = Fixture::new().await;
+    f.phone
+        .streams()
+        .set_whole_within(std::time::Duration::from_millis(200));
+    // The first ask is answered while the track is still on its way
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        f.get("/v1/sources/tidal/stream/3").send(),
+    )
+    .await
+    .expect("an answer before the track is whole")
+    .unwrap();
+    assert_eq!(first.status(), 200);
+    assert_eq!(first.headers()[header::CONTENT_TYPE], "audio/flac");
+    assert!(
+        first.headers().get(header::CONTENT_LENGTH).is_none(),
+        "its length isn't known yet"
+    );
+    // A second ask meanwhile follows the same fetch
+    let second = f.get("/v1/sources/tidal/stream/3").send().await.unwrap();
+    assert_eq!(second.status(), 200);
+    f.tidal.rest.notify_one();
+    let (a, b) = tokio::join!(first.bytes(), second.bytes());
+    assert_eq!(&a.unwrap()[..], AUDIO);
+    assert_eq!(&b.unwrap()[..], AUDIO);
+    assert_eq!(f.tidal.playback.load(Ordering::SeqCst), 1, "one fetch for both");
+    // Whole now: the next ask has ranges
+    let r = f
+        .get("/v1/sources/tidal/stream/3")
+        .header(header::RANGE, "bytes=0-3")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 206);
+    assert_eq!(&r.bytes().await.unwrap()[..], b"fLaC");
 }
