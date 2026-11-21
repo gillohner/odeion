@@ -648,4 +648,5 @@ jobs:
           path: |
             /tmp/pm/*.png
             /tmp/pm/*.txt
+            /tmp/pm/*.xml
           retention-days: 7

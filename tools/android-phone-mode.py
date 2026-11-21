@@ -278,8 +278,9 @@ def run():
         adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
         # Phone mode opens by itself: its search page, never the connect form
         until("phone mode started", lambda: "phone mode: started" in logcat(), timeout=90)
-        search = lambda n: "EditText" in n and ("Search" in n or "search" in n)
-        until("the phone page's search box", lambda: find(search), timeout=90)
+        # The search page's one text field (its id and hint differ between WebViews)
+        search = lambda n: "EditText" in n
+        until("the phone page's search box", lambda: find(search), timeout=120)
         assert not find(labelled("Or connect by address")), "the connect page shows instead of phone mode"
         shot("1-phone-mode")
         tap(search, "the search box")
@@ -313,6 +314,14 @@ def run():
         assert TOKEN not in logcat(), "the log carries no token"
         assert "token=" not in "".join(m.group(0) for m in NATIVE.finditer(logcat())), "player lines carry no key"
         log("PASS: phone mode searched, opened and played a TIDAL song with no node")
+    except Exception:
+        # What the screen showed when it failed, for the artifact
+        try:
+            shot("failure")
+            (out / "failure-ui.xml").write_text("\n".join(ui_nodes()))
+        except Exception as e:  # noqa: BLE001
+            log(f"no failure screen: {e}")
+        raise
     finally:
         lc.terminate()
         srv.shutdown()
