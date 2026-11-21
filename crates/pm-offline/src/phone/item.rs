@@ -36,7 +36,7 @@ pub(crate) fn service_item(kind: &str, id: &str) -> Option<(&'static str, &'stat
 }
 
 /// The service page of a queue URI (`qobuz:track:1` → its open.qobuz.com page).
-fn song_page(uri: &str) -> Option<String> {
+pub(crate) fn song_page(uri: &str) -> Option<String> {
     let (svc, rest) = uri.split_once(':')?;
     let (kind, id) = rest.split_once(':')?;
     match svc {

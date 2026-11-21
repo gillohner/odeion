@@ -393,6 +393,8 @@ jobs:
           # The sources vault on the same homeserver: two clients, ciphertext only (VAULT.md)
           cargo test -p pm-pubky --test vault_homeserver
           cargo test -p pm-api --test vault_api
+          # Phone mode as a vault client beside a node: take, write in the node's form, renew under the lock
+          cargo test -p pm-offline --test phone_vault -- --nocapture
       - name: backup.sh, then restore.sh into a fresh install (as on a new disk)
         working-directory: deploy/bundle
         run: |

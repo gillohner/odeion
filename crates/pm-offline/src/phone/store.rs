@@ -130,6 +130,19 @@ impl AppCache for FileStore {
     }
 }
 
+/// The vault form reads and writes the phone's sign-ins like the node's settings.
+impl pm_sources::vault_form::Settings for FileStore {
+    fn get(&self, key: &str) -> Result<Option<String>, String> {
+        Ok(SessionStore::get(self, key))
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), String> {
+        self.put(key, Some(value)).map_err(|e| e.to_string())
+    }
+    fn delete(&self, key: &str) -> Result<(), String> {
+        self.put(key, None).map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
