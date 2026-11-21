@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-21
+
+- **Rating an album or song no longer makes the page jump.** Saving a rating redrew the top card, and its tags turned into grey placeholders until they loaded again. On a phone that moved your stars and Add notes by about 45 px for a moment, so a quick second tap could miss. The tags now stay as they were while the page checks for new ones, and only change if someone added or removed one. A tag you remove yourself never comes back from the older copy.
+
 ### 2026-11-20
 
 - **A slow step back from a pasted post link no longer takes you off the page you opened.** When the app's own step back to your search came very late (5 s or more, or while the app was paused), or arrived while a menu was open on the page you had opened meanwhile, it could leave you on that page with Back pointing the wrong way, or pull you off it. Now that step is undone and you stay where you were, in the right place for Back. On a computer, when you empty the box there and the step back to where you opened Search comes late, the page you see isn't drawn a second time, and a page you open in the meantime stays.
