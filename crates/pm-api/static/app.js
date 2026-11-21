@@ -61,6 +61,9 @@
   // Images that fail to load are removed, or hidden where they hold their place. One listener instead of
   // inline onerror handlers, which the page's Content-Security-Policy does not run.
   document.addEventListener('error', (e) => { const t = e.target; const how = t && t.dataset && t.dataset.err; if (how === 'remove') t.remove(); else if (how === 'hide') t.style.visibility = 'hidden'; }, true);
+  // A song row's cover that has loaded gets a backing of its own (.loaded), so the initials under it
+  // don't show through a cover with transparent parts; while it loads it has none, and the initials show
+  document.addEventListener('load', (e) => { const t = e.target; if (t instanceof HTMLImageElement && t.matches('.thumbwrap > img.thumb')) t.classList.add('loaded'); }, true);
   const icon = (name, cls = 'ic') => `<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
   const fmt = (ms) => {
     if (ms === Infinity) return 'Live'; // a radio stream has no length
