@@ -12,7 +12,7 @@ use pm_pubky::homeserver::HomeserverError;
 use pm_sources::SessionStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -86,6 +86,8 @@ pub struct Copier {
     again: AtomicBool,
     there: Mutex<Option<HashSet<String>>>,
     retry: Mutex<Option<(Instant, Duration)>>,
+    /// Songs that took too long to copy (by content hash): each waits on its own, doubling.
+    slow: Mutex<HashMap<String, (Instant, Duration)>>,
 }
 
 /// After a failed upload the next pass waits this long, doubled after each failure up to
@@ -224,17 +226,31 @@ pub async fn copy_while(weak: &Weak<Phone>, remote: &impl Remote) -> Report {
             return r;
         }
     }
-    // The songs that may need copying; the homeserver is asked only when there are some
+    // The songs that may need copying now; the homeserver is asked only when there are some. Too
+    // big, gone from the phone, or waiting after being too slow: left for later
     let copies = load_copies(&p);
-    let todo: Vec<_> = p
-        .songs
-        .list()
-        .into_iter()
-        .filter_map(|s| {
-            let h = hash_of(&s.file)?.to_string();
-            (!copies.copied.contains(&h) && !copies.refused.contains_key(&h)).then_some((s, h))
-        })
-        .collect();
+    let now = Instant::now();
+    let mut todo = Vec::new();
+    for s in p.songs.list() {
+        let Some(h) = hash_of(&s.file).map(str::to_string) else {
+            continue;
+        };
+        if copies.copied.contains(&h) || copies.refused.contains_key(&h) {
+            continue;
+        }
+        let waits = p
+            .copier
+            .slow
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&h)
+            .is_some_and(|(at, _)| now < *at);
+        if s.bytes > MAX_COPY || !p.songs.path_of(&s).is_file() || waits {
+            r.left += 1;
+            continue;
+        }
+        todo.push((s, h));
+    }
     if todo.is_empty() {
         return r;
     }
@@ -267,11 +283,6 @@ pub async fn copy_while(weak: &Weak<Phone>, remote: &impl Remote) -> Report {
             continue;
         }
         let local = p.songs.path_of(&s);
-        // Too big, or no longer on the phone: the others go on
-        if s.bytes > MAX_COPY || !local.is_file() {
-            r.left += 1;
-            continue;
-        }
         drop(p);
         let path = format!("{}{}", pm_appdata::files::FILES_DIR, s.file);
         let sent = tokio::time::timeout(upload_for(s.bytes), remote.upload(&path, &local)).await;
@@ -279,6 +290,7 @@ pub async fn copy_while(weak: &Weak<Phone>, remote: &impl Remote) -> Report {
         match sent {
             Ok(Ok(())) => {
                 r.copied += 1;
+                p.copier.slow.lock().unwrap_or_else(|e| e.into_inner()).remove(&h);
                 let mut copies = load_copies(&p);
                 copies.copied.insert(h.clone());
                 save_copies(&p, &copies);
@@ -294,9 +306,12 @@ pub async fn copy_while(weak: &Weak<Phone>, remote: &impl Remote) -> Report {
                 save_copies(&p, &copies);
                 r.left += 1;
             }
-            // Too slow for this one: it waits for the next pass, the others go on
+            // Too slow for this one: it waits on its own (doubling), the others go on
             Err(_) => {
                 tracing::warn!("phone mode: a song took too long to copy to the homeserver");
+                let mut slow = p.copier.slow.lock().unwrap_or_else(|e| e.into_inner());
+                let wait = next_wait(slow.get(&h).map(|(_, w)| *w));
+                slow.insert(h, (Instant::now() + wait, wait));
                 r.left += 1;
             }
             Ok(Err(e)) => {
@@ -471,6 +486,36 @@ mod tests {
         let r = copy_while(&Arc::downgrade(&p), &f).await;
         assert_eq!(r, Report { copied: 2, left: 1 });
         assert_eq!(uploaded(&f), 2);
+        // Left as it is, it doesn't make every later pass ask the homeserver
+        assert_eq!(
+            copy_while(&Arc::downgrade(&p), &f).await,
+            Report { copied: 0, left: 1 }
+        );
+        assert_eq!(f.listed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_song_too_slow_to_copy_waits_on_its_own() {
+        let (_d, p, songs) = phone(2);
+        let f = Fake::default();
+        // As if its upload had timed out just now
+        let h = hash_of(&songs[0].file).unwrap().to_string();
+        p.copier
+            .slow
+            .lock()
+            .unwrap()
+            .insert(h.clone(), (Instant::now() + BACKOFF, BACKOFF));
+        let r = copy_while(&Arc::downgrade(&p), &f).await;
+        assert_eq!(r, Report { copied: 1, left: 1 }, "the other goes on");
+        // Asked again at once (songs added meanwhile): it still waits, nothing is sent
+        assert_eq!(
+            copy_while(&Arc::downgrade(&p), &f).await,
+            Report { copied: 0, left: 1 }
+        );
+        assert_eq!(uploaded(&f), 1);
+        // Its wait over, it goes
+        p.copier.slow.lock().unwrap().insert(h, (Instant::now(), BACKOFF));
+        assert_eq!(copy_while(&Arc::downgrade(&p), &f).await.copied, 1);
     }
 
     #[tokio::test]
