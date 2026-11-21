@@ -102,6 +102,11 @@ const shown = (page, sel) => page.evaluate((s) => { const el = document.querySel
     // Its links stay on the phone: no artist page, no Match, the album opens the phone's album page
     const links = await p.evaluate(() => { const row = document.querySelector('#main .track'); return row ? { artist: !!row.querySelector('.by [data-artist-credit]'), match: !!row.querySelector('[data-act="identify"]'), by: (row.querySelector('.by') || {}).innerText || '' } : null; });
     check(links && !links.artist && !links.match && /Phone Band/.test(links.by), `${at}: a phone song names its artist without a link, and has no Match (${JSON.stringify(links)})`);
+    // Its ⋯ menu: no artist page to go to on a phone, a search for the artist instead
+    await p.click('#main .track [data-act="more"]').catch(() => {}); await sleep(400);
+    const menu = await p.evaluate(() => [...document.querySelectorAll('[role="menu"] [role="menuitem"], .menu button, .sheet button')].map((b) => b.innerText.trim()).filter(Boolean));
+    check(menu.length > 0 && !menu.some((t) => /^Go to artist/.test(t)) && menu.some((t) => /Search .Phone Band/.test(t)), `${at}: the ⋯ menu searches for the artist instead of an artist page (${menu.join(' | ')})`);
+    await p.keyboard.press('Escape'); await sleep(300);
     // The heart of a phone song (rows show it from tablet widths; phones use the ⋯ menu): on once
     // bookmarked, also after the list is drawn again, and off again
     const heart = '#main .track [data-act="fav"]';

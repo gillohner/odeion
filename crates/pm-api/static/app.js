@@ -6422,7 +6422,9 @@
     const nav = single ? [
       // (the song's own page first, as in itemMenu)
       { label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: trackPageId(single) }) },
-      ...(goArtists(artistCredits({ ...single, track_id: single.id })) || (single.artists && single.artists[0] && single.artists[0].id != null ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: 'lib-' + single.artists[0].id }) }] : [])),
+      // (a phone without a node has no artist pages: its songs' artists are a search there)
+      ...(phoneMode() && !can('library') ? (single.artists || []).slice(0, 1).map((a) => ({ label: `Search “${a.name}”`, icon: 'artist', run: () => { search.value = a.name; runSearch(); } }))
+        : goArtists(artistCredits({ ...single, track_id: single.id })) || (single.artists && single.artists[0] && single.artists[0].id != null ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: 'lib-' + single.artists[0].id }) }] : [])),
       ...(single.album && single.album.id != null ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: 'lib-' + single.album.id }) }] : []),
     ] : [];
     const items = [
