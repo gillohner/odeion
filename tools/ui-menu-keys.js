@@ -8,6 +8,10 @@
 // a clicked item Space still plays or pauses (it doesn't open the ⋯ again), also after Now playing's
 // ⋯ › Sleep timer (a menu that opens another: by mouse its first item doesn't take the focus, so
 // Space doesn't set a timer; by keyboard it does). Songs' and an album's song ⋯ behave the same.
+// /, N and ? from a ⋯ (a song's, Now playing's and its Sleep timer's) close it first; after Back no
+// menu's history entry is left and the page is the one the person was on. N then Back (or Esc) puts
+// the focus back on the ⋯ it had, not on the mini player; Help opened over Now playing closes alone
+// on Back, Now playing stays. Phones (412/360 px, the ⋯ sheet) the same.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-menu-keys.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -45,6 +49,9 @@ const spyPlayer = (context) => context.addInitScript(() => {
   window.__presses = 0;
   for (const k of ['play', 'pause']) { const f = HTMLMediaElement.prototype[k]; HTMLMediaElement.prototype[k] = function (...a) { window.__presses++; return f.apply(this, a); }; }
 });
+const transient = (page) => page.evaluate(() => !!(history.state && history.state.transient));
+const helpOpen = (page) => page.evaluate(() => [...document.querySelectorAll('dialog[open]')].some((d) => /Keyboard shortcuts/.test(d.textContent)));
+const npShown = (page) => page.locator('#nowplaying').isVisible();
 const playingRow = (page) => page.evaluate(() => { const r = document.querySelector('.list.queue .list-row.cur .name'); return r ? r.textContent.trim() : null; });
 
 async function queue(browser, width) {
@@ -93,12 +100,13 @@ async function queue(browser, width) {
     inMenu = await fromMenu('n');
     check(inMenu && !await menuOpen(page) && await page.locator('#nowplaying').isVisible(), `${width} Queue: N in the menu closes it and opens Now playing`);
     await page.goBack(); await page.waitForTimeout(500);
-    check(!await page.locator('#nowplaying').isVisible() && !await menuOpen(page) && new URL(page.url()).pathname === '/queue' && await page.locator('.list.queue .list-row').count() === 3, `${width} Queue: then Back closes Now playing and stays on the Queue (${new URL(page.url()).pathname})`);
-    const help = () => page.evaluate(() => [...document.querySelectorAll('dialog[open]')].some((d) => /Keyboard shortcuts/.test(d.textContent)));
+    check(!await page.locator('#nowplaying').isVisible() && !await menuOpen(page) && new URL(page.url()).pathname === '/queue' && await page.locator('.list.queue .list-row').count() === 3 && !await transient(page), `${width} Queue: then Back closes Now playing and stays on the Queue, no entry left in the history (${new URL(page.url()).pathname})`);
+    check(await where(page) === 'qmore@Song 2', `${width} Queue: and the focus is back on Song 2's ⋯, not the mini player (${await where(page)})`);
+    const help = () => helpOpen(page);
     inMenu = await fromMenu('?');
     check(inMenu && !await menuOpen(page) && await help(), `${width} Queue: ? in the menu closes it and opens the list of shortcuts`);
     await page.goBack(); await page.waitForTimeout(500);
-    check(!await help() && new URL(page.url()).pathname === '/queue' && await page.locator('.list.queue .list-row').count() === 3, `${width} Queue: Back closes it and stays on the Queue (${new URL(page.url()).pathname})`);
+    check(!await help() && new URL(page.url()).pathname === '/queue' && await page.locator('.list.queue .list-row').count() === 3 && !await transient(page), `${width} Queue: Back closes it and stays on the Queue, no entry left in the history (${new URL(page.url()).pathname})`);
     inMenu = await fromMenu('?');
     check(inMenu && !await menuOpen(page) && await help(), `${width} Queue: ? in the menu again: the list of shortcuts`);
     await page.keyboard.press('Escape'); await page.waitForTimeout(400);
@@ -151,6 +159,107 @@ async function queue(browser, width) {
   } finally { await context.close(); }
 }
 
+// Now playing's ⋯ and its Sleep timer menu: /, N and ? from inside them; N then Back or Esc gives the
+// focus back to the ⋯ it had. Also at phone widths (412/360: the ⋯ is a sheet there)
+async function nowPlaying(browser, width) {
+  const phone = width < 600;
+  const { context, page, state } = await fx.create(browser, width, { fixtures, tracks, collections: [fx.summary], touch: width < 1025 });
+  await context.addInitScript(([q, a]) => { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', a); }, [JSON.stringify(saved), JSON.stringify({ index: 0, id: saved[0].id, pos: 0 })]);
+  const more = (n) => page.locator('.list.queue .list-row').nth(n).locator('[data-qmore]');
+  const at = async () => `${new URL(page.url()).pathname}${await transient(page) ? ' +entry' : ''}`;
+  const onQueue = async () => new URL(page.url()).pathname === '/queue' && !await transient(page) && await page.locator('.list.queue .list-row').count() === 3;
+  const label = `${width} ${phone ? 'Phone' : 'Desktop'}`;
+  // (after a failed check: back on the Queue with nothing open, so the next checks still run)
+  const reset = async () => {
+    if (await helpOpen(page)) { await page.keyboard.press('Escape'); await page.waitForTimeout(400); }
+    if (await npShown(page)) { await page.keyboard.press('Escape'); await page.waitForTimeout(400); }
+    if (new URL(page.url()).pathname !== '/queue' || await transient(page)) { await fx.go(page, '/queue'); await page.locator('.list.queue .list-row').nth(2).waitFor(); await page.waitForTimeout(300); }
+  };
+  try {
+    await fx.go(page, '/queue');
+    await page.locator('.list.queue .list-row').nth(2).waitFor();
+    await page.waitForTimeout(300);
+    if (phone) {
+      // (a phone's song ⋯: /, N and ? from the sheet as on a desktop)
+      const fromRow = async (key) => { await more(1).focus(); await page.keyboard.press('Enter'); const s = await shown(page); await page.keyboard.press(key); await page.waitForTimeout(500); return s; };
+      let s = await fromRow('n');
+      check(s && !await menuOpen(page) && await npShown(page), `${label} Queue: N in a song's ⋯ sheet closes it and opens Now playing`);
+      await page.screenshot({ path: path.join(shots, `phone-np-from-sheet-${width}.png`) });
+      await page.goBack(); await page.waitForTimeout(500);
+      check(!await npShown(page) && await onQueue(), `${label} Queue: Back closes Now playing, on the Queue, no entry left (${await at()})`);
+      check(await where(page) === 'qmore@Song 2', `${label} Queue: the focus back on Song 2's ⋯ (${await where(page)})`);
+      await reset();
+      s = await fromRow('?');
+      check(s && !await menuOpen(page) && await helpOpen(page), `${label} Queue: ? in the ⋯ sheet closes it and opens the list of shortcuts`);
+      await page.screenshot({ path: path.join(shots, `phone-help-from-sheet-${width}.png`) });
+      await page.goBack(); await page.waitForTimeout(500);
+      check(!await helpOpen(page) && await onQueue(), `${label} Queue: Back closes it, on the Queue, no entry left (${await at()})`);
+      await reset();
+      s = await fromRow('/');
+      check(s && !await menuOpen(page) && !await transient(page) && await page.evaluate(() => document.activeElement && document.activeElement.id === 'search'), `${label} Queue: / in the ⋯ sheet closes it and goes to the search field, no entry left (${await where(page)})`);
+      await page.keyboard.press('Escape'); await page.waitForTimeout(400);
+      await reset();
+    }
+    // N on a ⋯ (no menu) then Back, then Esc: the focus back on that ⋯
+    await more(2).focus(); await page.keyboard.press('n'); await page.waitForTimeout(400);
+    check(await npShown(page), `${label}: N on Song 3's ⋯ opens Now playing`);
+    await page.goBack(); await page.waitForTimeout(500);
+    check(!await npShown(page) && await onQueue() && await where(page) === 'qmore@Song 3', `${label}: Back closes it, the focus back on Song 3's ⋯ (${await where(page)}, ${await at()})`);
+    await reset(); await more(2).focus(); await page.keyboard.press('n'); await page.waitForTimeout(400);
+    await page.keyboard.press('Escape'); await page.waitForTimeout(500);
+    check(!await npShown(page) && await onQueue() && await where(page) === 'qmore@Song 3', `${label}: Esc closes it, the focus back on Song 3's ⋯ (${await where(page)}, ${await at()})`);
+    // Now playing's ⋯ (and Sleep timer's menu): /, N, ?
+    const npMenu = async (sleep) => {
+      if (!await npShown(page)) { await page.keyboard.press('n'); await page.locator('#npmore').waitFor({ timeout: 3000 }).catch(() => {}); await page.waitForTimeout(300); }
+      await page.locator('#npmore').focus(); await page.keyboard.press('Enter'); let s = await shown(page);
+      if (sleep) {
+        for (let k = 0; k < 10 && !(await where(page)).includes('Sleep'); k++) await page.keyboard.press('ArrowDown');
+        await page.keyboard.press('Enter'); await page.waitForTimeout(300);
+        s = s && await where(page) === 'menu:15 minutes';
+      }
+      return s && (await where(page)).startsWith('menu:');
+    };
+    for (const sleep of [false, true]) {
+      const m = sleep ? 'Now playing ⋯ › Sleep timer' : 'Now playing ⋯';
+      let s = await npMenu(sleep);
+      await page.keyboard.press('?'); await page.waitForTimeout(400);
+      check(s && !await menuOpen(page) && await helpOpen(page) && await npShown(page), `${label} ${m}: ? closes the menu and opens the list of shortcuts over Now playing`);
+      if (!sleep) await page.screenshot({ path: path.join(shots, `np-help-${width}.png`) });
+      await page.goBack(); await page.waitForTimeout(500);
+      check(!await helpOpen(page) && await npShown(page) && new URL(page.url()).pathname === '/queue' && await transient(page), `${label} ${m}: Back closes only the list of shortcuts, Now playing stays (${await npShown(page)}, ${await at()})`);
+      await page.goBack(); await page.waitForTimeout(500);
+      check(!await npShown(page) && await onQueue(), `${label} ${m}: Back again closes Now playing, on the Queue, no entry left (${await at()})`);
+      await reset();
+      s = await npMenu(sleep);
+      await page.keyboard.press('?'); await page.waitForTimeout(400);
+      await page.keyboard.press('Escape'); await page.waitForTimeout(500);
+      check(s && !await helpOpen(page) && await npShown(page) && await transient(page), `${label} ${m}: Esc closes only the list of shortcuts, Now playing stays (${await at()})`);
+      await page.goBack(); await page.waitForTimeout(500);
+      check(!await npShown(page) && await onQueue(), `${label} ${m}: then Back closes Now playing, on the Queue, no entry left (${await at()})`);
+      await reset();
+      // (N pressed with the list of shortcuts open over Now playing closes Now playing under it: Esc
+      // then leaves no entry in the history)
+      s = await npMenu(sleep);
+      await page.keyboard.press('?'); await page.waitForTimeout(400);
+      await page.keyboard.press('n'); await page.waitForTimeout(400);
+      await page.keyboard.press('Escape'); await page.waitForTimeout(500);
+      check(s && !await helpOpen(page) && !await npShown(page) && await onQueue(), `${label} ${m}: ?, N, then Esc: all closed, on the Queue, no entry left (${await at()})`);
+      await reset();
+      s = await npMenu(sleep);
+      await page.keyboard.press('n'); await page.waitForTimeout(500);
+      check(s && !await menuOpen(page) && !await npShown(page) && await onQueue(), `${label} ${m}: N closes the menu and Now playing, on the Queue, no entry left (${await at()})`);
+      await reset();
+      s = await npMenu(sleep);
+      await page.keyboard.press('/'); await page.waitForTimeout(500);
+      check(s && !await menuOpen(page) && !await npShown(page) && !await transient(page) && await page.evaluate(() => document.activeElement && document.activeElement.id === 'search'), `${label} ${m}: / closes the menu and Now playing, the search field has the focus, no entry left (${await where(page)}, ${await at()})`);
+      await page.keyboard.press('Escape'); await page.waitForTimeout(500);
+      await reset();
+      check(await page.getByText(/Sleeping in/).count() === 0, `${label} ${m}: no sleep timer set`);
+    }
+    check(state.errors.length === 0, `${label}: no page errors ${state.errors.join('; ')}`);
+  } finally { await context.close(); }
+}
+
 // Songs and an album's songs: a song row's ⋯ by keyboard
 const PAGES = [
   { at: '/tracks', name: 'Songs', row: '.tracks[data-list="all"] .track', more: '[data-act="more"]' },
@@ -185,7 +294,10 @@ async function lists(browser, width) {
 
 (async () => {
   const browser = await chromium.launch();
-  try { for (const w of [1280, 1024, 768]) { await queue(browser, w); await lists(browser, w); } } finally { await browser.close(); }
+  try {
+    for (const w of [1280, 1024, 768]) { await queue(browser, w); await lists(browser, w); await nowPlaying(browser, w); }
+    for (const w of [412, 360]) await nowPlaying(browser, w);
+  } finally { await browser.close(); }
   console.log(`${ok} ok, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

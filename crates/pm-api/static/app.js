@@ -887,13 +887,14 @@
       look();
     })();
   });
-  const choiceDialog = ({ title, text, choices, field }) => new Promise((resolve) => {
+  // `layer`: opened over Now playing, it gets a history entry of its own, so Back closes it alone
+  const choiceDialog = ({ title, text, choices, field, layer }) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
     d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}${field ? `<label class="dialog-field"><span class="muted small">${esc(field.label)}</span><input class="input" data-field value="${esc(field.value || '')}" aria-label="${esc(field.label)}"></label>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
     document.body.appendChild(d);
-    const tr = { open: () => d.open, close: (fromBack) => done(null, fromBack) };
-    const done = (v, fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(v); };
-    transients.push(tr); pushTransient();
+    const tr = { layer: !!layer, open: () => d.open, close: (fromBack) => done(null, fromBack) };
+    const done = (v, fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(!!layer && transients.some((t) => t.open())); resolve(v); };
+    transients.push(tr); pushTransient(!!layer);
     $$('[data-ci]', d).forEach((b) => b.onclick = () => { const i = Number(b.dataset.ci); if (i < 0) return done(null); const v = choices[i].value; done(field ? { value: v, text: $('[data-field]', d).value.trim() } : v); });
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
     if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
@@ -4475,9 +4476,11 @@
   const overlay = $('#nowplaying');
   // Back closes it like a menu; opening a page from it takes its history entry (setView)
   const npTr = { open: () => !overlay.hidden, close: (fromBack) => toggleNowPlaying(false, fromBack) };
+  let npReturn = null; // (what had the focus when it opened: it gets it back on close)
   const toggleNowPlaying = (force, fromBack) => {
     const open = force === true ? true : force === false ? false : overlay.hidden;
     const was = !overlay.hidden;
+    if (open && !was) { const a = document.activeElement; npReturn = a && a !== document.body && !overlay.contains(a) ? a : null; }
     overlay.hidden = !open;
     document.body.classList.toggle('np-open', open);
     // (a toast on screen moves with the bars: Now playing hides the mini player and the tabs)
@@ -4489,8 +4492,14 @@
     const k = transients.indexOf(npTr); if (k >= 0) transients.splice(k, 1);
     const ks = transients.indexOf(npSheetTr); if (ks >= 0) transients.splice(ks, 1);
     if (npCompact()) state.npSheet = null;
-    // Focus goes back to the mini player that opened it, not to the page's top
-    if (was && (!document.activeElement || document.activeElement === document.body || overlay.contains(document.activeElement))) { const b = $('#np'); if (b) b.focus({ preventScroll: true }); }
+    // Focus goes back to what had it when it opened (the ⋯ or row N was pressed on, the mini player
+    // clicked), if it is still there; else to the mini player, not to the page's top
+    if (was && (!document.activeElement || document.activeElement === document.body || overlay.contains(document.activeElement))) {
+      // (not a text field: on a phone its keyboard would come up)
+      const r = npReturn; const b = r && r.isConnected && !r.closest('[inert]') && r.getClientRects().length && !r.matches('input, textarea, [contenteditable]') ? r : $('#np');
+      if (b) b.focus({ preventScroll: true });
+    }
+    if (was) npReturn = null;
     if (was && fromBack !== true) popTransient();
   };
   // Swipes on a phone (owner, 2026-11-08: "use swipe gestures … down swipe, up on song, and next song
@@ -5589,7 +5598,8 @@
     if (e.key === 'ArrowRight') transport({ action: 'next' });
     if (e.key === 'ArrowLeft') transport({ action: 'previous' });
     if (e.key.toLowerCase() === 'n') toggleNowPlaying();
-    if (e.key === '?') { e.preventDefault(); choiceDialog({ title: 'Keyboard shortcuts', text: '/  search  ·  Space  play or pause  ·  ←  →  previous or next  ·  N  now playing  ·  Esc  close  ·  ?  this list', choices: [] }); }
+    // (over Now playing it has its own history entry: Back closes it and Now playing stays)
+    if (e.key === '?') { e.preventDefault(); choiceDialog({ title: 'Keyboard shortcuts', text: '/  search  ·  Space  play or pause  ·  ←  →  previous or next  ·  N  now playing  ·  Esc  close  ·  ?  this list', choices: [], layer: !overlay.hidden && transients.every((t) => t === npTr || !t.open()) }); }
   });
 
   // ---- templates -----------------------------------------------------------
