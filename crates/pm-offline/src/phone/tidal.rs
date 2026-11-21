@@ -40,6 +40,15 @@ pub(crate) fn endpoints(p: &Phone) -> Endpoints<'_> {
 /// The person's session when TIDAL can answer for them (renewed first when it is about to run
 /// out), else why not.
 pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
+    // Renewed under the vault's lock where the vault has this sign-in (the person's other devices
+    // never renew it at the same time); otherwise, or offline, here (the next sync writes it)
+    if super::vault::tidal_due(p) {
+        if let Some(acct) = p.account().await {
+            if let Err(e) = super::vault::renew_tidal(p, &acct).await {
+                tracing::warn!("phone mode: TIDAL renewal in the vault: {e}");
+            }
+        }
+    }
     let p2 = p.clone();
     let r = tokio::task::spawn_blocking(move || {
         full::token(
@@ -209,10 +218,13 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
                 st.health = None;
             }
         }
-        if let Some(q) = u.quality {
+        if let Some(q) = u.quality.clone() {
             st.quality = q;
         }
     });
+    if u.quality.is_some() {
+        super::data::prefs_changed(&p);
+    }
     Json(view(&p)).into_response()
 }
 

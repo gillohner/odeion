@@ -183,10 +183,13 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
                 st.health = None;
             }
         }
-        if let Some(q) = u.quality {
+        if let Some(q) = u.quality.clone() {
             st.quality = q;
         }
     });
+    if u.quality.is_some() {
+        super::data::prefs_changed(&p);
+    }
     Json(view(&p)).into_response()
 }
 
