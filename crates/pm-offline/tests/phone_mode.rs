@@ -689,6 +689,11 @@ async fn a_phone_song_is_bookmarked_and_listened_by_its_canonical_url() {
         assert_eq!(st, 200, "{page}: {pg}");
         assert_eq!(pg["title"], "Tagged Song");
         assert_eq!(pg["songs"][0]["track_id"], tagged, "it plays from the phone");
+        assert_eq!(
+            pg["songs"][0]["page"],
+            format!("https://musicbrainz.org/recording/{MBID}"),
+            "its heart knows its Bookmark"
+        );
     }
     let (st, _) = f.json("/v1/item/song/lib-999").await;
     assert_eq!(st, 404);

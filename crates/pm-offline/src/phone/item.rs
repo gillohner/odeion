@@ -251,6 +251,8 @@ fn own_page(p: &Phone, kind: &str, id: &str) -> Option<Value> {
                 "id": format!("lib-{}", s.id),
                 "image": image,
                 "album": s.album,
+                // What its heart bookmarks (and how the page knows it is bookmarked)
+                "page": s.canonical,
             })
         })
         .collect();
