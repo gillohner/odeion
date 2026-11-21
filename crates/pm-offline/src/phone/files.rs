@@ -185,6 +185,13 @@ pub trait Remote: Sync {
         path: &str,
         local: &std::path::Path,
     ) -> impl std::future::Future<Output = Result<(), HomeserverError>> + Send;
+    /// The size of the file at `path`, when it is there and the homeserver says.
+    fn size(
+        &self,
+        path: &str,
+    ) -> impl std::future::Future<Output = Result<Option<u64>, HomeserverError>> + Send;
+    /// Removes the file at `path`.
+    fn delete(&self, path: &str) -> impl std::future::Future<Output = Result<(), HomeserverError>> + Send;
 }
 
 impl Remote for Account {
@@ -193,6 +200,12 @@ impl Remote for Account {
     }
     async fn upload(&self, path: &str, local: &std::path::Path) -> Result<(), HomeserverError> {
         self.hs.upload_private_file(&self.session, path, local).await
+    }
+    async fn size(&self, path: &str) -> Result<Option<u64>, HomeserverError> {
+        Ok(self.hs.stat_private(&self.session, path).await?.flatten())
+    }
+    async fn delete(&self, path: &str) -> Result<(), HomeserverError> {
+        self.hs.delete_private(&self.session, path).await
     }
 }
 
@@ -255,19 +268,24 @@ pub async fn copy_while(weak: &Weak<Phone>, remote: &impl Remote) -> Report {
         return r;
     }
     drop(p);
-    let there: HashSet<String> = match remote.names().await {
-        Ok(names) => names
-            .iter()
-            .filter_map(|n| hash_of(n))
-            .map(str::to_string)
-            .collect(),
+    // Each content hash there, with the names it has
+    let there: HashMap<String, Vec<String>> = match remote.names().await {
+        Ok(names) => {
+            let mut m: HashMap<String, Vec<String>> = HashMap::new();
+            for n in names {
+                if let Some(h) = hash_of(&n) {
+                    m.entry(h.to_string()).or_default().push(n);
+                }
+            }
+            m
+        }
         Err(e) => {
             tracing::warn!("phone mode: the homeserver's files can't be listed now: {e}");
             return r;
         }
     };
     let Some(p) = weak.upgrade() else { return r };
-    *p.copier.there.lock().unwrap_or_else(|e| e.into_inner()) = Some(there.clone());
+    *p.copier.there.lock().unwrap_or_else(|e| e.into_inner()) = Some(there.keys().cloned().collect());
     drop(p);
     for (s, h) in todo {
         let Some(p) = weak.upgrade() else { break };
@@ -275,17 +293,38 @@ pub async fn copy_while(weak: &Weak<Phone>, remote: &impl Remote) -> Report {
         if !on(&p) {
             break;
         }
-        if there.contains(&h) {
+        let local = p.songs.path_of(&s);
+        drop(p);
+        let path = format!("{}{}", pm_appdata::files::FILES_DIR, s.file);
+        // There already, whole (a copy cut short by a failure or a kill is not): copied. A short
+        // one under the phone's own name is replaced
+        let mut whole = false;
+        for name in there.get(&h).into_iter().flatten() {
+            let at = format!("{}{name}", pm_appdata::files::FILES_DIR);
+            match remote.size(&at).await {
+                Ok(Some(n)) if n == s.bytes => {
+                    whole = true;
+                    break;
+                }
+                Ok(Some(_)) if at == path => {
+                    let _ = remote.delete(&at).await;
+                }
+                _ => {}
+            }
+        }
+        if whole {
+            let Some(p) = weak.upgrade() else { break };
             let mut copies = load_copies(&p);
             if copies.copied.insert(h) {
                 save_copies(&p, &copies);
             }
             continue;
         }
-        let local = p.songs.path_of(&s);
-        drop(p);
-        let path = format!("{}{}", pm_appdata::files::FILES_DIR, s.file);
         let sent = tokio::time::timeout(upload_for(s.bytes), remote.upload(&path, &local)).await;
+        if !matches!(sent, Ok(Ok(()))) {
+            // Whatever part of it arrived goes (a later pass sends it whole)
+            let _ = remote.delete(&path).await;
+        }
         let Some(p) = weak.upgrade() else { break };
         match sent {
             Ok(Ok(())) => {
@@ -400,6 +439,9 @@ mod tests {
         answers: Mutex<std::collections::VecDeque<u16>>,
         /// Called at each upload (the person turning the setting off, say).
         during: Option<Box<dyn Fn() + Send + Sync>>,
+        /// The size of each file there (what was uploaded, or set by a test).
+        sizes: Mutex<HashMap<String, u64>>,
+        deleted: Mutex<Vec<String>>,
     }
 
     impl Remote for Fake {
@@ -407,13 +449,15 @@ mod tests {
             self.listed.fetch_add(1, Ordering::SeqCst);
             Ok(self.names.clone())
         }
-        async fn upload(&self, path: &str, _local: &std::path::Path) -> Result<(), HomeserverError> {
+        async fn upload(&self, path: &str, local: &std::path::Path) -> Result<(), HomeserverError> {
             if let Some(f) = &self.during {
                 f();
             }
             match self.answers.lock().unwrap().pop_front() {
                 None => {
                     self.uploaded.lock().unwrap().push(path.to_string());
+                    let n = std::fs::metadata(local).map(|m| m.len()).unwrap_or(0);
+                    self.sizes.lock().unwrap().insert(path.to_string(), n);
                     Ok(())
                 }
                 Some(0) => Err(HomeserverError::Transport("connection reset".into())),
@@ -423,6 +467,23 @@ mod tests {
                         message: String::new(),
                     },
                 ))),
+            }
+        }
+        async fn size(&self, path: &str) -> Result<Option<u64>, HomeserverError> {
+            Ok(self.sizes.lock().unwrap().get(path).copied())
+        }
+        async fn delete(&self, path: &str) -> Result<(), HomeserverError> {
+            self.deleted.lock().unwrap().push(path.to_string());
+            self.sizes.lock().unwrap().remove(path);
+            Ok(())
+        }
+    }
+
+    impl Fake {
+        fn listing(names: Vec<String>) -> Self {
+            Fake {
+                names,
+                ..Default::default()
             }
         }
     }
@@ -562,6 +623,42 @@ mod tests {
         // A new choice doesn't wait
         choose(State(p.clone()), Json(Choice { on: Some(true) })).await;
         assert_eq!(copy_while(&Arc::downgrade(&p), &f).await.copied, 2);
+    }
+
+    #[tokio::test]
+    async fn a_copy_cut_short_is_sent_again_whole() {
+        let (_d, p, songs) = phone(2);
+        let path = |s: &crate::phone::songs::Song| format!("{}{}", pm_appdata::files::FILES_DIR, s.file);
+        // The first is there whole under another name (the node's), the second only partly under
+        // its own (an upload cut by a kill)
+        let h0 = hash_of(&songs[0].file).unwrap();
+        let theirs = format!("{h0}-01_From_The_Node.flac");
+        let f = Fake::listing(vec![theirs.clone(), songs[1].file.clone()]);
+        f.sizes.lock().unwrap().insert(
+            format!("{}{theirs}", pm_appdata::files::FILES_DIR),
+            songs[0].bytes,
+        );
+        f.sizes.lock().unwrap().insert(path(&songs[1]), 10);
+        let r = copy_while(&Arc::downgrade(&p), &f).await;
+        assert_eq!(r.copied, 1, "only the short one is sent");
+        assert_eq!(*f.uploaded.lock().unwrap(), [path(&songs[1])]);
+        assert_eq!(
+            *f.deleted.lock().unwrap(),
+            [path(&songs[1])],
+            "the short copy went first"
+        );
+        assert_eq!(load_copies(&p).copied.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_upload_leaves_nothing_behind() {
+        let (_d, p, songs) = phone(1);
+        let f = Fake::default();
+        f.answers.lock().unwrap().push_back(0);
+        copy_while(&Arc::downgrade(&p), &f).await;
+        let path = format!("{}{}", pm_appdata::files::FILES_DIR, songs[0].file);
+        assert_eq!(*f.deleted.lock().unwrap(), [path]);
+        assert!(load_copies(&p).copied.is_empty());
     }
 
     #[test]
