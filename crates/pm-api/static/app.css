@@ -938,6 +938,10 @@ html[data-shell="phone"] #iversions .list-row .icon-btn { width: 44px; height: 4
 .np-big .src-badge.ico.cover svg { width: 18px; height: 18px; }
 .list-row .thumbwrap { position: relative; display: block; flex: none; margin-right: 10px; line-height: 0; }
 .list-row .thumbwrap .thumb { margin-right: 0; display: block; }
+.list-row .thumbwrap .thumb.mono { display: flex; align-items: center; justify-content: center; color: rgba(255, 255, 255, 0.85); font-weight: 700; font-size: var(--fs-sm); line-height: 1; letter-spacing: 0.02em; }
+.list-row .thumbwrap .thumb.mono + img.thumb { position: absolute; inset: 0; background: transparent; }
+.list-row .thumbwrap .thumb.mono.badged { padding: 0 0 10px 10px; font-size: var(--fs-xs); }
+@media (max-width: 600px) { .srow .thumbwrap .thumb.mono.badged { padding: 0 0 14px 14px; } }
 .chip-avatar { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; vertical-align: middle; margin-right: 6px; }
 
 /* Pubky Ring sign-in: a QR tile next to the instructions. */
@@ -1208,7 +1212,7 @@ html[data-shell="phone"] .wikilink::before { content: ''; position: absolute; in
 .srcchip.pinned { border-color: var(--accent); }
 .srcchip.pinned .ic { width: 12px; height: 12px; color: var(--accent-strong); }
 .srcchip.none { color: var(--muted); border-style: dashed; padding-left: 8px; }
-.list-row.unavail .grow, .list-row.unavail .thumb, .list-row.unavail [data-splay] { opacity: 0.45; }
+.list-row.unavail .grow, .list-row.unavail > .thumb, .list-row.unavail .thumbwrap, .list-row.unavail [data-splay] { opacity: 0.45; }
 /* A collection item that doesn't play (a web page, a post): its card in the list (B3) */
 .card-row .card-thumb { display: grid; place-items: center; color: var(--muted); }
 .card-row .card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
