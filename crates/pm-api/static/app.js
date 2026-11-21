@@ -3977,11 +3977,12 @@
     ? { label: `Go to ${a.name}`, icon: 'artist', run: () => setView('item', { kind: 'artist', id: a.id }) }
     : { label: `Search “${a.name}”`, icon: 'artist', run: () => { search.value = a.name; runSearch(); } })) : null);
   // (`tab`: a song row's names on a phone are not Tab stops, rowLinkTab)
+  // A library song whose row carries no structured artists (nor has them read yet): its track id, as
+  // only such a song is read again (hydrateArtistCredits); else null
+  const creditsFlat = (it) => { const tid = it.track_id ?? trackIdOf(it); return tid != null && !Array.isArray(it.artists) && !Array.isArray((state.trackCache.get('track:' + tid) || {}).artists) ? tid : null; };
   const artistLinksHtml = (it, tab = '') => {
-    const credits = artistCredits(it); const tid = it.track_id ?? trackIdOf(it);
-    // Only a library song whose row carries no structured artists is read again (hydrateArtistCredits)
-    const flat = tid != null && !Array.isArray(it.artists) && !Array.isArray((state.trackCache.get('track:' + tid) || {}).artists);
-    return `<span${flat ? ` data-credit-track="${esc(tid)}"` : ''}>${credits.map((a, i) => `<a class="lnk" data-artist-credit="${esc(a.name)}"${a.id ? ` data-credit-id="${esc(a.id)}"` : ''} href="${esc(a.id ? '/artist/' + encodeURIComponent(a.id) : '/search?q=' + encodeURIComponent(a.name))}" title="Open ${esc(a.name)}"${tab}>${esc(a.name)}</a>${i < credits.length - 1 ? esc(a.join) : ''}`).join('')}</span>`;
+    const credits = artistCredits(it); const flat = creditsFlat(it);
+    return `<span${flat != null ? ` data-credit-track="${esc(flat)}"` : ''}>${credits.map((a, i) => `<a class="lnk" data-artist-credit="${esc(a.name)}"${a.id ? ` data-credit-id="${esc(a.id)}"` : ''} href="${esc(a.id ? '/artist/' + encodeURIComponent(a.id) : '/search?q=' + encodeURIComponent(a.name))}" title="Open ${esc(a.name)}"${tab}>${esc(a.name)}</a>${i < credits.length - 1 ? esc(a.join) : ''}`).join('')}</span>`;
   };
   // A click the browser takes elsewhere (a new tab or window): Ctrl, Cmd, Shift or not the main button.
   // Not Alt: Alt+click on a link downloads the page in Chrome and Edge, so it stays in the app.
@@ -4017,11 +4018,24 @@
   // A structured answer worth showing: at least one named artist (else the flattened credit stays)
   const namedCredits = (t) => Array.isArray(t && t.artists) && t.artists.some((a) => a && a.name);
   const showCredits = (id, t) => creditEls(id).forEach((el) => {
+    if (el.dataset.pageArtist != null) { showPageCredits(el, t); return; }
     const focused = el.contains(document.activeElement);
     el.insertAdjacentHTML('afterend', artistLinksHtml({ track_id: Number(id), artists: t.artists }, el.closest('.srow:not(.card-row), .track') ? rowLinkTab() : ''));
     const fresh = el.nextElementSibling; el.remove();
     if (focused && fresh) { const a = $('[data-artist-credit]', fresh); if (a) a.focus(); }
   });
+  // A song row on an artist page whose flat credit was the page's artist (songRows' pageCredit): the
+  // read says who. That artist alone stays unsaid; anyone else (a co-artist, another artist of that
+  // name) comes in front of the album, in the row's second line (made when it had none)
+  const showPageCredits = (el, t) => {
+    const grow = el.parentElement; el.remove();
+    if (!grow || soleCredit(artistCredits({ artists: t.artists }), { name: el.dataset.pageArtist, id: el.dataset.pageArtistId || null })) return;
+    let sub = grow.querySelector(':scope > .sub');
+    if (!sub) { grow.insertAdjacentHTML('beforeend', '<div class="sub"></div>'); sub = grow.lastElementChild; }
+    const box = sub.querySelector(':scope > .subtext') || sub; const had = box.textContent.trim() !== '';
+    box.insertAdjacentHTML('afterbegin', artistLinksHtml({ artists: t.artists }, grow.closest('.srow:not(.card-row)') ? rowLinkTab() : '') + (had ? ' · ' : ''));
+    if (box !== sub && !had) box.insertAdjacentHTML('afterend', '<span aria-hidden="true">·</span>');
+  };
   const pumpCredits = () => {
     while (hyd.reading < 2 && hyd.queue.length) {
       const id = hyd.queue.shift(); const s = hyd.seen.get(id);
@@ -4233,8 +4247,24 @@
   // The latest press wins: any other control pressed since (a ⋯ and its menu's rows, such as Start
   // radio) takes the press away, so the start it makes spins no Play pressed just before. (A click
   // on an empty spot leaves it: an album tile's Play still spins when its songs come.)
+  // A song row's Play, found again when its row is drawn anew while its answer comes (a picker still
+  // to open): the same list (its section's id), the same song (the row's data-np or data-uri) and the
+  // same kind of Play. A Play without one, or a key that finds no Play or more than one, spins
+  // nothing (not a button no longer on screen)
+  const PRESS_ROW = '[data-np], [data-uri]';
+  const pressKey = (b) => {
+    const attr = ['data-splay', 'data-dplay'].find((a) => b.hasAttribute(a)); const row = attr && b.closest(PRESS_ROW);
+    const song = row && (row.dataset.np || row.dataset.uri); const sec = row && row.closest('[id]');
+    return song && sec ? { attr, sec: sec.id, song } : null;
+  };
+  const pressEl = (p) => {
+    if (p.el.isConnected || !p.key) return p.el.isConnected ? p.el : null;
+    const sec = document.getElementById(p.key.sec);
+    const found = sec ? [...sec.querySelectorAll(`[${p.key.attr}]`)].filter((b) => { const r = b.closest(PRESS_ROW); return r && (r.dataset.np || r.dataset.uri) === p.key.song; }) : [];
+    return found.length === 1 ? found[0] : null;
+  };
   // (`pressBefore`: the press as it stood just before this click, for a picker's pick below)
-  document.addEventListener('click', (e) => { if (!e.target.closest) return; state.pressBefore = state.startAnchor; const b = e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now() }; else if (e.target.closest('button, a, input, select, summary, label, [role="button"], [role="menuitem"], .clickable')) state.startAnchor = null; }, true);
+  document.addEventListener('click', (e) => { if (!e.target.closest) return; state.pressBefore = state.startAnchor; const b = e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now(), key: pressKey(b) }; else if (e.target.closest('button, a, input, select, summary, label, [role="button"], [role="menuitem"], .clickable')) state.startAnchor = null; }, true);
   // A picker a Play opens to finish it (the 30 s preview of a song not on your services): its pick
   // goes on with that Play's press, so the Play pressed spins while the music starts, as with no
   // picker (the pick's own click took the press away). Wrap the picker's run with it as the picker
@@ -4245,7 +4275,7 @@
   // so up to the pick's own click. (Only on This browser: a preview on a speaker zone,
   // and the other pickers a Play opens, YouTube's Play in this browser and the Spotify device list,
   // start no wait, so nothing spins for them, with or without a picker.)
-  const pressFor = (run, anchor) => { const p = state.startAnchor && state.startAnchor.el === anchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor : null; return (...a) => { if (p && (state.startAnchor === p || state.pressBefore === p)) state.startAnchor = { el: p.el, at: Date.now() }; return run(...a); }; };
+  const pressFor = (run, anchor) => { const p = state.startAnchor && state.startAnchor.el === anchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor : null; return (...a) => { if (p && (state.startAnchor === p || state.pressBefore === p)) state.startAnchor = { ...p, at: Date.now() }; return run(...a); }; };
   // `replace`: the queue is being replaced, so the song still playing does not end the wait.
   // `press`: a press of a play control starts this. A start nobody pressed Play for (Move here,
   // Switch source, a song ending or skipped, the playing song taken out of the queue) puts no
@@ -4254,7 +4284,7 @@
   // in that wait.
   const startWait = (what, zoneId = state.zone, title = '', replace = false, deferred = false, press = true) => {
     startDone(true);
-    const a = press && state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
+    const a = press && state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? pressEl(state.startAnchor) : null;
     if (a) a.classList.add('starting');
     const zw = state.zones[zoneId]; const oldItem = replace && zw && zw.now_playing ? zw.now_playing.item.id : null;
     // `sent`: a replace waits for the node's answer first, so the old queue moving on by itself
@@ -6587,14 +6617,27 @@
   // (owner: "maybe have some indication or version chooser, very subtle").
   const versionMark = (t, k) => (Array.isArray(t.versions) && t.versions.length > 1 ? `<button class="lnk vmark" data-sver="${k}" aria-label="${t.versions.length} versions of ${esc(t.title)}: choose which to play" title="Choose which copy plays">${t.versions.length} versions</button>` : '');
   // The row's second line; with a marker, the words shrink to an ellipsis and the marker keeps its width
-  const subLine = (html, mark) => (mark ? `<div class="sub subv"><span class="subtext">${html}</span>${html ? '<span aria-hidden="true">·</span>' : ''}${mark}</div>` : `<div class="sub">${html}</div>`);
+  // (none when it has nothing to say)
+  const subLine = (html, mark) => (!html && !mark ? '' : mark ? `<div class="sub subv"><span class="subtext">${html}</span>${html ? '<span aria-hidden="true">·</span>' : ''}${mark}</div>` : `<div class="sub">${html}</div>`);
   const VERSION_FROM = { library: 'Your library', homeserver: 'Your homeserver' };
   const versionLabel = (v) => [VERSION_FROM[v.source] || v.source, v.format || (v.container || '').toUpperCase(), v.size_bytes ? fileSize(v.size_bytes) : ''].filter(Boolean).join(' · ');
   // (`data-np`: what the row plays, so the playing one is marked; `opts.oneArtist`: the album's songs
   // are all by its artist, said once in the header and not on every row)
-  // (`opts.pageArtist`: an artist page's own name; a row credited to that artist alone says only its
-  // album, as the page's title already says who; a row with other artists too keeps all its credits)
-  const byPageArtist = (t, name) => { if (!name) return false; const c = artistCredits(t); return c.length === 1 && c[0].name === name; };
+  // (`opts.pageArtist`: an artist page's own { name, id }; a row credited to that artist alone says
+  // only its album, as the page's title already says who; a row with other artists too keeps all its
+  // credits. The page's artist is its name and, when both the credit and the page know one, its id:
+  // another artist of the same name keeps the credit. A library row with only its flat credit
+  // ('wait') says nothing of it until its structured read (showPageCredits): that read may name a
+  // co-artist, or another artist of that name)
+  const soleCredit = (c, page) => c.length === 1 && c[0].name === page.name && !(c[0].id && page.id && c[0].id !== page.id);
+  const pageCredit = (t, page) => (!page || !page.name || !soleCredit(artistCredits(t), page) ? 'show' : creditsFlat(t) != null ? 'wait' : 'hide');
+  // A song row's second line: its artists and album, and its versions marker
+  const songSub = (t, k, opts) => {
+    const credit = (t.artist || t.artists) && !opts.oneArtist ? pageCredit(t, opts.pageArtist) : 'hide';
+    const album = t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}" href="${esc(pathFor('item', { kind: 'album', id: t.album_id }))}"${rowLinkTab()}>${esc(t.album)}</a>` : esc(t.album)) : '';
+    const wait = credit === 'wait' ? `<span data-credit-track="${esc(creditsFlat(t))}" data-page-artist="${esc(opts.pageArtist.name)}" data-page-artist-id="${esc(opts.pageArtist.id || '')}"></span>` : '';
+    return wait + subLine([credit === 'show' ? artistLinksHtml(t, rowLinkTab()) : '', album].filter(Boolean).join(' · '), versionMark(t, k));
+  };
   const songNpKey = (t) => (t.track_id != null ? `track:${t.track_id}` : t.uri || '');
   // On phones a song row is one button (a tap plays it; its names don't take taps, app.css): its song,
   // artist and album links are not separate Tab stops there either (its ⋯ has their pages), in the
@@ -6616,7 +6659,7 @@
   const songHeart = (t, k) => `<button class="icon-btn heart${songFav(t) ? ' on' : ''}" data-sfav="${k}" aria-pressed="${songFav(t)}" title="${songFav(t) ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(songFav(t), t.title))}">${icon(songFav(t) ? 'heart-fill' : 'heart')}</button>`;
   // The heart turned over without redrawing anything around it
   const setHeart = (b, on, title) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.innerHTML = icon(on ? 'heart-fill' : 'heart'); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.setAttribute('aria-label', heartWords(on, title)); };
-  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist && !byPageArtist(t, opts.pageArtist) ? artistLinksHtml(t, rowLinkTab()) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}" href="${esc(pathFor('item', { kind: 'album', id: t.album_id }))}"${rowLinkTab()}>${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
+  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${songSub(t, k, opts)}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
   // The list being selected from (while the bar is up): its page, its part of the page, each song's
   // key and the ticks. The same list drawn again where it stands (a playlist's sources answering, a
   // pin, the next search source, See all songs) takes Select over with the same songs ticked;
@@ -9550,7 +9593,7 @@
               <div class="hmatch-slot" id="hmatch"></div>
               </div></div>`
             + (aboutTop ? aboutTopHtml(pg) : '')
-            + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index', pageArtist: pg.title } : {}), ...(kind === 'album' ? { listClass: 'nums', oneArtist: songs.length > 1 && songs.every((t) => (t.artist || '') === (songs[0].artist || '')) && !!songs[0].artist } : {}) }) : pg.unavailable ? empty(`${esc(pg.unavailable)}${pg.link ? ` <a href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener">Open on ${esc(pg.source)}</a>` : ''}`) : empty(pg.connect.length ? `Not on your services · ${connectLink(pg.connect)}` : 'No connected service lists songs for this yet.')}</section>`)
+            + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index', pageArtist: { name: pg.title, id: pg.id } } : {}), ...(kind === 'album' ? { listClass: 'nums', oneArtist: songs.length > 1 && songs.every((t) => (t.artist || '') === (songs[0].artist || '')) && !!songs[0].artist } : {}) }) : pg.unavailable ? empty(`${esc(pg.unavailable)}${pg.link ? ` <a href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener">Open on ${esc(pg.source)}</a>` : ''}`) : empty(pg.connect.length ? `Not on your services · ${connectLink(pg.connect)}` : 'No connected service lists songs for this yet.')}</section>`)
             + (kind === 'song' && pg.albums.length ? `<section class="section" id="ialbums"><div class="section-head"><h3>On the album</h3><span class="muted small">${pg.albums.length}</span></div>${itemTileGrid(pg.albums, 'album')}</section>` : '')
             // An artist's releases: Albums, EPs & singles, Other releases (each with View all), or
             // what the list is when it isn't there: loading, an error with Retry, nothing found
