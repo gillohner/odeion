@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// The person's choice on this phone (`on` / `off`; none: the default).
@@ -128,16 +128,19 @@ pub fn start(p: &Arc<Phone>, acct: &Arc<Account>) {
     if p.copier.running.swap(true, Ordering::SeqCst) {
         return;
     }
-    let (p, acct) = (p.clone(), acct.clone());
+    let (weak, acct) = (Arc::downgrade(p), acct.clone());
     tokio::spawn(async move {
-        struct Done<'a>(&'a AtomicBool);
-        impl Drop for Done<'_> {
+        // Done (or phone mode left): another pass may start
+        struct Done(Weak<Phone>);
+        impl Drop for Done {
             fn drop(&mut self) {
-                self.0.store(false, Ordering::SeqCst);
+                if let Some(p) = self.0.upgrade() {
+                    p.copier.running.store(false, Ordering::SeqCst);
+                }
             }
         }
-        let _done = Done(&p.copier.running);
-        let r = copy(&p, &acct).await;
+        let _done = Done(weak.clone());
+        let r = copy_while(&weak, &acct).await;
         if r != Report::default() {
             tracing::info!(?r, "phone mode: songs copied to the homeserver");
         }
@@ -147,13 +150,20 @@ pub fn start(p: &Arc<Phone>, acct: &Arc<Account>) {
 /// Copies the songs added here that the homeserver doesn't have (by content hash), one at a time,
 /// when the setting is on. A song copied before, or refused for good, isn't tried again; after
 /// any other failure the pass stops and the next one waits (doubling, up to 6 hours).
-pub async fn copy(p: &Phone, acct: &Account) -> Report {
+pub async fn copy(p: &Arc<Phone>, acct: &Account) -> Report {
+    copy_while(&Arc::downgrade(p), acct).await
+}
+
+/// [`copy`], holding phone mode only between uploads: leaving it, or turning the setting off,
+/// ends the pass before the next song.
+async fn copy_while(weak: &Weak<Phone>, acct: &Account) -> Report {
+    let mut r = Report::default();
     let known = bundled_here(acct).await;
+    let Some(p) = weak.upgrade() else { return r };
     if known.is_some() {
         *p.bundled_here.lock().unwrap_or_else(|e| e.into_inner()) = known;
     }
-    let mut r = Report::default();
-    if !on(p) {
+    if !on(&p) {
         return r;
     }
     if let Some((at, _)) = *p.copier.retry.lock().unwrap_or_else(|e| e.into_inner()) {
@@ -161,6 +171,7 @@ pub async fn copy(p: &Phone, acct: &Account) -> Report {
             return r;
         }
     }
+    drop(p);
     let there: HashSet<String> = match acct.hs.list_private_file_names(&acct.session).await {
         Ok(names) => names
             .iter()
@@ -172,15 +183,23 @@ pub async fn copy(p: &Phone, acct: &Account) -> Report {
             return r;
         }
     };
+    let Some(p) = weak.upgrade() else { return r };
     *p.copier.there.lock().unwrap_or_else(|e| e.into_inner()) = Some(there.clone());
-    let mut copies = load_copies(p);
-    for s in p.songs.list() {
+    let songs = p.songs.list();
+    drop(p);
+    for s in songs {
+        let Some(p) = weak.upgrade() else { break };
+        // Turned off meanwhile: no more uploads
+        if !on(&p) {
+            break;
+        }
         let Some(h) = hash_of(&s.file).map(str::to_string) else {
             continue;
         };
+        let mut copies = load_copies(&p);
         if there.contains(&h) {
             if copies.copied.insert(h) {
-                save_copies(p, &copies);
+                save_copies(&p, &copies);
             }
             continue;
         }
@@ -188,22 +207,26 @@ pub async fn copy(p: &Phone, acct: &Account) -> Report {
         if copies.copied.contains(&h) || copies.refused.contains_key(&h) {
             continue;
         }
-        if s.bytes > MAX_COPY {
+        let local = p.songs.path_of(&s);
+        // Too big, or no longer on the phone: the others go on
+        if s.bytes > MAX_COPY || !local.is_file() {
             r.left += 1;
             continue;
         }
+        drop(p);
         let path = format!("{}{}", pm_appdata::files::FILES_DIR, s.file);
         let sent = tokio::time::timeout(
             upload_for(s.bytes),
-            acct.hs
-                .upload_private_file(&acct.session, &path, &p.songs.path_of(&s)),
+            acct.hs.upload_private_file(&acct.session, &path, &local),
         )
         .await;
+        let Some(p) = weak.upgrade() else { break };
         match sent {
             Ok(Ok(())) => {
                 r.copied += 1;
+                copies = load_copies(&p);
                 copies.copied.insert(h.clone());
-                save_copies(p, &copies);
+                save_copies(&p, &copies);
                 if let Some(t) = p.copier.there.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                     t.insert(h);
                 }
@@ -211,8 +234,9 @@ pub async fn copy(p: &Phone, acct: &Account) -> Report {
             }
             Ok(Err(e)) if pm_pubky::homeserver::refused_for_good(&e) => {
                 tracing::warn!("phone mode: the homeserver refused a song: {e}");
+                copies = load_copies(&p);
                 copies.refused.insert(h, e.to_string());
-                save_copies(p, &copies);
+                save_copies(&p, &copies);
                 r.left += 1;
             }
             failed => {
@@ -279,6 +303,13 @@ pub(crate) async fn choose(State(p): State<Arc<Phone>>, Json(c): Json<Choice>) -
     if let Err(e) = p.store.put(KEY, v) {
         return err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
+    // A new choice tries the songs the homeserver refused again (it may have room now)
+    let mut copies = load_copies(&p);
+    if !copies.refused.is_empty() {
+        copies.refused.clear();
+        save_copies(&p, &copies);
+    }
+    *p.copier.retry.lock().unwrap_or_else(|e| e.into_inner()) = None;
     p.sync_soon();
     Json(view(&p)).into_response()
 }

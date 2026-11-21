@@ -39,8 +39,9 @@ pub fn is_full(e: &HomeserverError) -> bool {
     )
 }
 
-/// The homeserver refused a write for good: a 4xx other than a timeout or too many requests
-/// (`413` too large, `403` not allowed). Trying the same write again gets the same answer.
+/// The homeserver refused a write for good: a 4xx other than a timeout, too many requests or a
+/// session it no longer takes (`413` too large, `403` not allowed). Trying the same write again
+/// gets the same answer.
 pub fn refused_for_good(e: &HomeserverError) -> bool {
     matches!(
         e,
@@ -48,6 +49,7 @@ pub fn refused_for_good(e: &HomeserverError) -> bool {
             if status.is_client_error()
                 && *status != reqwest::StatusCode::REQUEST_TIMEOUT
                 && *status != reqwest::StatusCode::TOO_MANY_REQUESTS
+                && *status != reqwest::StatusCode::UNAUTHORIZED
     )
 }
 
@@ -1890,6 +1892,10 @@ mod full_tests {
         assert!(refused_for_good(&server(403)));
         assert!(!refused_for_good(&server(408)));
         assert!(!refused_for_good(&server(429)));
+        assert!(
+            !refused_for_good(&server(401)),
+            "signed out: not the song's fault"
+        );
         assert!(!refused_for_good(&server(507)), "full: try again later");
         assert!(!refused_for_good(&server(503)));
         assert!(!refused_for_good(&HomeserverError::Transport("reset".into())));
