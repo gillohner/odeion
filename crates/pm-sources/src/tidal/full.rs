@@ -1044,3 +1044,110 @@ pub fn status(st: &ModeState, client_from: Option<String>, browser_available: bo
         warning: WARNING.into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MemoryStore;
+    use std::sync::{Arc, Mutex};
+
+    /// TIDAL's token endpoint on a thread of its own (the renewal is a blocking call): answers a
+    /// new access token, records each form, and first runs `meanwhile` (another device's write).
+    fn token_endpoint(meanwhile: Arc<dyn Fn() + Send + Sync>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let forms = Arc::new(Mutex::new(Vec::new()));
+        let f2 = forms.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let app = axum::Router::new().route(
+                    "/v1/oauth2/token",
+                    axum::routing::post(move |body: String| {
+                        let (f2, meanwhile) = (f2.clone(), meanwhile.clone());
+                        async move {
+                            f2.lock().unwrap().push(body);
+                            meanwhile();
+                            axum::Json(serde_json::json!({"access_token": "renewed", "expires_in": 3600}))
+                        }
+                    }),
+                );
+                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                tx.send(format!("http://{}", l.local_addr().unwrap())).unwrap();
+                axum::serve(l, app).await.unwrap();
+            });
+        });
+        (rx.recv().unwrap(), forms)
+    }
+
+    fn signed_in(store: &MemoryStore, token: &str, expires_at: i64) {
+        update(store, |st| {
+            st.enabled = true;
+            st.session = Some(Session {
+                access_token: token.into(),
+                refresh_token: Some("refresh-1".into()),
+                expires_at,
+                country: "CH".into(),
+                ..Default::default()
+            });
+        });
+    }
+
+    fn endpoints(base: &str) -> Endpoints<'_> {
+        Endpoints {
+            auth_base: base,
+            v1_base: base,
+            browser: None,
+            device: Some(Client {
+                id: "device-id".into(),
+                secret: "device-secret".into(),
+                from: "builtin".into(),
+            }),
+            no_device: "no device client",
+        }
+    }
+
+    #[test]
+    fn a_session_about_to_run_out_is_renewed_with_its_client_and_kept() {
+        let (base, forms) = token_endpoint(Arc::new(|| {}));
+        let store = MemoryStore::default();
+        signed_in(&store, "old", now() + 30);
+        let client = reqwest::blocking::Client::new();
+        let (sess, quality) = token(&store, &client, &endpoints(&base)).unwrap().unwrap();
+        assert_eq!(sess.access_token, "renewed");
+        assert_eq!(
+            sess.refresh_token.as_deref(),
+            Some("refresh-1"),
+            "TIDAL kept the refresh token"
+        );
+        assert_eq!(quality, "HI_RES_LOSSLESS");
+        assert_eq!(load(&store).session.unwrap().access_token, "renewed");
+        let form = forms.lock().unwrap().join("&");
+        assert!(
+            form.contains("grant_type=refresh_token") && form.contains("client_id=device-id"),
+            "{form}"
+        );
+        // Not due: nothing asked
+        token(&store, &client, &endpoints(&base)).unwrap().unwrap();
+        assert_eq!(forms.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_sign_in_written_meanwhile_wins_over_the_renewal() {
+        let store = Arc::new(MemoryStore::default());
+        signed_in(&store, "old", now() + 30);
+        let s2 = store.clone();
+        let (base, _) = token_endpoint(Arc::new(move || signed_in(&s2, "from-the-vault", now() + 3600)));
+        let client = reqwest::blocking::Client::new();
+        let (sess, _) = token(store.as_ref(), &client, &endpoints(&base))
+            .unwrap()
+            .unwrap();
+        assert_eq!(sess.access_token, "from-the-vault");
+        assert_eq!(
+            load(store.as_ref()).session.unwrap().access_token,
+            "from-the-vault"
+        );
+    }
+}
