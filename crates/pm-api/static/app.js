@@ -6868,8 +6868,14 @@
   // among its likes)
   const plKeysOf = (box) => (plShown && (box === 'pllocal' ? plShown.local : plShown.uris)) || [];
   const plSongFocus = (box, keys, k, kind, alt) => (k >= 0 && k < keys.length ? { box, song: keys[k], copy: keys.slice(0, k).filter((u) => u === keys[k]).length, kind, alt } : null);
-  // (a song's × from the keyboard: the focus goes on to the song after it, else the one before)
-  const plNextFocus = (box, keys, k, kind, alt) => { const rest = keys.filter((_, i) => i !== k); return plSongFocus(box, rest, k < rest.length ? k : k - 1, kind, alt); };
+  // (a song's × from the keyboard: the focus goes on to the song after it, else the one before.
+  // `hid`: the places a source chip hides; it skips those (the next song that shows, else the shown
+  // one before). When none shows any more the chip goes off, and it's the next song again)
+  const plNextFocus = (box, keys, k, kind, alt, hid) => {
+    const rest = keys.map((_, i) => i).filter((i) => i !== k); const shows = (i) => !hid || !hid.has(i);
+    let j = rest.findIndex((i) => i > k && shows(i)); if (j < 0) j = rest.findLastIndex((i) => i < k && shows(i)); if (j < 0) j = k < rest.length ? k : k - 1;
+    return plSongFocus(box, rest.map((i) => keys[i]), j, kind, alt);
+  };
   const plFocusOf = (a) => {
     const box = a && a.closest ? a.closest('#plsongs, #pllocal') : null; if (!box) return null;
     const row = a.closest('[data-srow]');
@@ -9004,6 +9010,9 @@
           const empty = (t) => `<p class="muted small">${t}</p>`;
           // Summary bar: "12 songs · 8 Library · 3 TIDAL · 1 unavailable", each part a filter.
           const counts = new Map(); songs.forEach((t) => { const key = t.unavailable ? 'none' : t.plays ? t.plays.service : null; if (key) counts.set(key, (counts.get(key) || 0) + 1); });
+          // (a chip whose songs are all gone, removed or now playing from elsewhere, goes off: the
+          // whole playlist shows again with "N songs" on, never an empty list with no chip on)
+          if (state.plFilter && state.plFilter.id === plId && !pfPending && !counts.has(state.plFilter.key)) state.plFilter = null;
           const filt = state.plFilter && state.plFilter.id === plId ? state.plFilter.key : null;
           // While the play-from answer is on its way, its chip row keeps its place, so the songs don't jump (second review #20)
           const summaryBar = pfPending && songs.length ? '<div class="chips plsummary" aria-hidden="true"><span class="chip skeleton chip-sk"></span><span class="chip skeleton chip-sk"></span></div>' : pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songCount} song${songCount === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
@@ -9081,7 +9090,7 @@
           // (Remove chosen from the keyboard in the row's ⋯ menu, as phones offer it: the menu gave the
           // focus back to that ⋯, so it goes on to the next song's ⋯, a card's if that one is a card)
           const viaMenu = (b) => { const fa = document.activeElement; const row = b.closest('[data-srow]'); return keyedLast && fa && row && row.contains(fa) && fa.matches('button[data-smore], button[data-cmore]'); };
-          $$('[data-rm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const keys = d.playlist.items.map((it) => it.uri); const k = Number(b.dataset.rm); const next = document.activeElement === b ? plNextFocus('plsongs', keys, k, 'button[data-rm]') : viaMenu(b) ? plNextFocus('plsongs', keys, k, 'button[data-smore]', 'button[data-cmore]') : null; return plWrite(plId, async (signal) => { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`, undefined, { signal }); state.plPf = null; }, next); });
+          $$('[data-rm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const keys = d.playlist.items.map((it) => it.uri); const k = Number(b.dataset.rm); const hid = new Set($$('#plsongs [data-srow].filtered', main).map((row) => Number(row.dataset.srow))); const next = document.activeElement === b ? plNextFocus('plsongs', keys, k, 'button[data-rm]', undefined, hid) : viaMenu(b) ? plNextFocus('plsongs', keys, k, 'button[data-smore]', 'button[data-cmore]', hid) : null; return plWrite(plId, async (signal) => { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`, undefined, { signal }); state.plPf = null; }, next); });
           // (pressed from the keyboard, the focus follows the song to its new place, so a second
           // press moves it on rather than moving the song that took its place back; not when the
           // focus went elsewhere while the move was saved; the list that ends the hold takes it there, heldFocus)
