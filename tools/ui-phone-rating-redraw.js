@@ -6,7 +6,8 @@
 // top stays within 1 px on every frame until the new answer is in, no skeleton is drawn, Pubky is
 // asked again, and a changed answer (a tag someone added meanwhile) is shown. A tag you remove isn't
 // shown again from an earlier answer (a tag edit asks Pubky afresh), not even one a rating's redraw
-// got while the removal was on its way, and another page never gets this page's tags.
+// got while the removal was on its way, and another page never gets this page's tags. Two quick saves
+// whose answers land out of order: the next redraw stands in the newer answer, not the one that landed last.
 // Real candidate assets, isolated responses: node tools/ui-phone-rating-redraw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -35,7 +36,7 @@ const LAG = 700; // Pubky's answer, late enough for a frame-by-frame look
 async function open(browser, width, { android = false } = {}) {
   const { page, context } = await fx.create(browser, width, { mobile: width < 600, fixtures });
   if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
-  const s = { review: null, mine: [], pub: { 7: [['dreamy', 3], ['jazz', 2], ['live', 1], ['late night', 1]], 8: [['other page', 1]] }, asked: 0, delLag: 0 };
+  const s = { review: null, mine: [], pub: { 7: [['dreamy', 3], ['jazz', 2], ['live', 1], ['late night', 1]], 8: [['other page', 1]] }, asked: 0, delLag: 0, lags: [], landed: [] };
   const album = (u) => Number(new URL(u).searchParams.get('album_id'));
   await page.route(/\/v1\/reviews(\?.*)?$/, async (r) => {
     const m = r.request().method(); await sleep(150);
@@ -50,7 +51,7 @@ async function open(browser, width, { android = false } = {}) {
     const id = album(u);
     return r.fulfill({ json: { tags: id === 7 ? s.mine.map((label) => ({ label, synced: true })) : [], uri: id === 7 ? RELEASE : OTHER } });
   });
-  await page.route(/\/v1\/discover\/uri(\?.*)?$/, async (r) => { const id = album(r.request().url()); s.asked++; const tags = s.pub[id] || []; await sleep(LAG); return r.fulfill({ json: { tags, faces: {} } }); });
+  await page.route(/\/v1\/discover\/uri(\?.*)?$/, async (r) => { const id = album(r.request().url()); s.asked++; const tags = s.pub[id] || []; await sleep(s.lags.length ? s.lags.shift() : LAG); s.landed.push(tags.map(([l]) => l)); return r.fulfill({ json: { tags, faces: {} } }); });
   return { page, context, s };
 }
 const settled = (page) => until(() => page.evaluate(() => !!document.querySelector('#htags .tagitem') && !document.querySelector('#htags .tag-skel') && !!document.querySelector('#stars')));
@@ -100,6 +101,34 @@ const press = async (page, v) => { const b = await page.evaluate((x) => { const 
     await press(page, 6); await sleep(80);
     check(await until(() => s.review && s.review.rating === 6) && before2 === 8, `${at}: a second press right after sets 3 stars`);
     await settled(page); await sleep(LAG + 300);
+    // Two quick saves whose Pubky answers land out of order (the first one's late, without "fresh"):
+    // the next redraw shows the newer answer at once, never the older one that landed last
+    const old7 = s.pub[7];
+    s.lags = [1800]; const a1 = s.asked; const l0 = s.landed.length;
+    await press(page, 10);
+    await until(() => s.asked > a1);
+    s.pub[7] = [...old7, ['fresh', 1]];
+    s.lags = [150]; const a2 = s.asked;
+    await press(page, 2);
+    await until(() => s.asked > a2);
+    await sleep(2200);
+    // (the race really happened: the second save's answer, with "fresh", landed first)
+    const order = s.landed.slice(l0).map((t) => (t.includes('fresh') ? 'newer' : 'older'));
+    check(order.join(',') === 'newer,older', `${at}: the older answer landed last (${order.join(', ')})`);
+    const both = await page.evaluate(() => [...document.querySelectorAll('#htags .tagitem')].map((t) => t.dataset.label));
+    check(both.includes('fresh'), `${at}: after both answers are in, the newer one is shown (${both.join(', ')})`);
+    s.lags = [1500];
+    await watch(page);
+    await press(page, 8);
+    await until(() => s.review && s.review.rating === 8);
+    await sleep(450);
+    if (width === 360 && !android) await page.screenshot({ path: path.join(SHOTS, 'redraw-after-two-quick-saves-360.png') });
+    await sleep(450);
+    const fz = await frames(page);
+    const older = fz.filter((x) => x.tags.length && !x.tags.includes('fresh')).length;
+    check(fz.length > 20 && !older, `${at}: the next redraw stands in the newer answer, not the one that landed last (${older} of ${fz.length} frames without "fresh")`);
+    await sleep(900); await settled(page);
+    s.pub[7] = old7;
     // Another album: never this one's tags
     await watch(page);
     await inApp(page, '/album/lib-8');
