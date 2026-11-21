@@ -392,10 +392,26 @@ const RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The Pubky account restored, then a vault sync now and every [`SYNC_EVERY`], and whenever a
 /// sign-in changed here; until the phone backend is gone. Nothing without a session.
+/// Waits for the next pass: `true` for a whole one (asked for, or `next_full` reached), `false`
+/// for the waiting writes only. Writes don't move `next_full`, so listening all day still syncs.
+async fn next_wake(
+    now: &tokio::sync::Notify,
+    data: &tokio::sync::Notify,
+    next_full: tokio::time::Instant,
+) -> bool {
+    tokio::select! {
+        _ = now.notified() => true,
+        _ = data.notified() => false,
+        _ = tokio::time::sleep_until(next_full) => true,
+    }
+}
+
 async fn sync_loop(weak: std::sync::Weak<Phone>) {
     // A whole pass (the vault, the person's data read back) at start, every SYNC_EVERY and when a
     // sign-in changed; only the waiting writes when the page changed something
     let mut full = true;
+    // When the next whole pass is due (a write in between doesn't move it)
+    let mut next_full = tokio::time::Instant::now();
     loop {
         let Some(p) = weak.upgrade() else { return };
         let acct = match p.account().await {
@@ -426,6 +442,7 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
             },
         };
         if full {
+            next_full = tokio::time::Instant::now() + SYNC_EVERY;
             match vault::pass(&p, &acct).await {
                 Ok(r) if r != vault::Report::default() => tracing::info!(?r, "phone mode: vault synced"),
                 Ok(_) => {}
@@ -443,17 +460,38 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
         let (now, data_now) = (p.sync_now.clone(), p.data_now.clone());
         drop(p);
         drop(acct);
-        full = tokio::select! {
-            _ = now.notified() => true,
-            _ = data_now.notified() => false,
-            _ = tokio::time::sleep(SYNC_EVERY) => true,
-        };
+        full = next_wake(&now, &data_now, next_full).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn writes_in_between_dont_put_off_the_whole_sync() {
+        let (now, data) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        let due = tokio::time::Instant::now() + std::time::Duration::from_millis(150);
+        // A song starts every 40 ms (a listen to write each time)
+        let d2 = data.clone();
+        let songs = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                d2.notify_one();
+            }
+        });
+        let mut writes = 0;
+        while !next_wake(&now, &data, due).await {
+            writes += 1;
+            assert!(writes < 20, "the whole sync never came");
+        }
+        songs.abort();
+        assert!(writes >= 2, "the writes went in between ({writes})");
+        assert!(tokio::time::Instant::now() >= due);
+    }
 
     #[test]
     fn the_key_is_needed_and_compared_whole() {
