@@ -5843,6 +5843,8 @@
     container.addEventListener('mousedown', (e) => { if (e.detail > 1 && e.target.closest('[data-list] .track') && !e.target.closest('a, button, input, select, textarea, label')) e.preventDefault(); });
     onBusy(container, 'click', async (e) => {
       const lists = rowLists;
+      // (a service album's rows have their own handlers: their ⋯ is not a library song's)
+      if (e.target.closest('.src-tracks')) return;
       const btn = e.target.closest('[data-act]');
       // A click on the row plays from there, as a playlist's or an album's song row does: with a mouse
       // too, not only on a touch screen (no hover to reveal the play button). Its names and buttons keep
@@ -9530,7 +9532,7 @@
           const playFrom = (i, replace = true) => playSourceItems(qitems.slice(i), replace, 'end', replace ? { shuffle: false } : {}); // (Play: in order, shuffle off)
           const canHeart = !!(await (async () => { try { await api('GET', '/favourites?uri=' + encodeURIComponent(it.url)); return true; } catch { return false; } })());
           main.innerHTML = backBtn('sources', srcName) + `<div class="artist-hero"><div class="portrait" style="border-radius:12px;background:hsl(${hue(it.title)} 35% 28%)">${it.image ? `<img src="${esc(it.image)}" alt="" data-err="remove">` : esc(initials(it.title))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, countOf(it.tracks.length, 'songs')].filter(Boolean).join(' · '))} · <a href="${esc(webUrl(it.url))}" target="_blank" rel="noopener">open</a>${it.licence ? (/^https?:/.test(it.licence) ? ` · <a href="${esc(webUrl(it.licence))}" target="_blank" rel="noopener">licence</a>` : ` · ${esc(it.licence)}`) : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to playlist">${icon('playlist')} Playlist</button>${it.library_album_id ? `<button class="btn ghost" id="ainlib" title="You already have this album">${icon('disc')} In your library</button>` : ''}${canHeart ? `<button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart" aria-pressed="${state.favUris.has(it.url)}">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Favourited' : 'Favourite'}</button>` : ''}</div></div>${it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : ''}</div></div>`
-            + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div class="fmt-col"><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button></div></div>`; }).join('')}</div>`;
+            + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div class="fmt-col"><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>${t.url ? `<button class="icon-btn" data-act="more" data-amore1="${i}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>` : ''}</div></div>`; }).join('')}</div>`;
           $('#aplay').onclick = () => playFrom(0, true); $('#aadd').onclick = () => playFrom(0, false);
           $('#amore').onclick = (e) => { e.stopPropagation(); uriMenu($('#amore'), it.tracks.map((t) => t.url), it.title); };
           const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { if (await setFavourite({ uri: it.url }, !on)) render(); } catch (er) { toast(er.message, 'error'); } };
@@ -9548,7 +9550,17 @@
             };
           });
           const ainlib = $('#ainlib'); if (ainlib) ainlib.onclick = () => setView('album', it.library_album_id);
-          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; browserAppend([{ id: Date.now(), uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }]); toast('Added to queue'); return; } try { const zid = state.zone; await zoneOp(zid, (t) => api('POST', `/zones/${encodeURIComponent(zid)}/queue`, { items: [qitems[i]], at: 'end' }, { signal: t.signal })); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
+          // (the + and the ⋯'s Add to queue: one song to the end, the same way as Play next)
+          const add1 = (i) => playSourceItems([qitems[i]], false, 'end');
+          $$('[data-aadd1]', main).forEach((b) => b.onclick = () => add1(Number(b.dataset.aadd1)));
+          // A song's ⋯, as on every other song row: Play next, Add to queue, Add to playlist… (one song
+          // by its address). Phones and touch screens then show only the ⋯ (the + is in it), and a
+          // swipe or a long press on the row works as on a library row. Before, the rows had only +, so
+          // a phone could neither play one song next nor put one in a playlist from here.
+          $$('[data-amore1]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const i = Number(b.dataset.amore1); const t = it.tracks[i]; showMenu(b, [{ title: t.title },
+            { label: 'Play next', icon: 'playnext', run: () => playSourceItems([qitems[i]], false, 'next') },
+            { label: 'Add to queue', icon: 'plus', run: () => add1(i) },
+            { label: 'Add to playlist…', icon: 'playlist', run: () => uriMenu(b, [t.url], t.title) }]); });
           break;
         }
         case 'radio': {
