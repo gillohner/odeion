@@ -1744,6 +1744,17 @@
   // app says where it is in `pmdesktop:native` events. What it can't play (a playlist stream,
   // another codec) the page plays itself (`nativerefused`).
   const tauriInvoke = () => (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) || null;
+  // A phone-mode command to the app (Add songs, Connect to a node): busy at once, sent once (keep:
+  // still busy after it went, as the app is leaving this page)
+  const phoneCmd = (b, cmd, keep = false) => {
+    if (!b || b.disabled || b.getAttribute('aria-busy') === 'true') return Promise.resolve(false);
+    const f = tauriInvoke(); if (!f) { toast('That needs the Odeion app', 'error'); return Promise.resolve(false); }
+    b.disabled = true; b.setAttribute('aria-busy', 'true'); b.classList.add('is-busy', 'is-spinning');
+    const done = () => { b.disabled = false; b.removeAttribute('aria-busy'); b.classList.remove('is-busy', 'is-spinning'); };
+    return Promise.resolve().then(() => f(cmd, {})).then(() => { if (!keep) done(); return true; }, (e) => { done(); toast(String((e && e.message) || e || 'That didn’t work; try again.'), 'error'); return false; });
+  };
+  // Add songs (phone mode): the app picks them; the library page shows them after
+  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-phoneadd]'); if (!b) return; e.preventDefault(); phoneCmd(b, 'phone_add_songs').then((ok) => { if (ok) { forgetAlbums(); render(); } }); });
   const nativeOk = () => !!(window.pmDesktop && window.pmDesktop.nativePlayer && tauriInvoke());
   const nat = (() => {
     const ev = new EventTarget(); const fire = (t, detail) => ev.dispatchEvent(new CustomEvent(t, { detail }));
@@ -1944,7 +1955,7 @@
   // The app keeps them (pm-offline) and says what it has (`pmdesktop:downloads`); online, the
   // Downloads view is its storage screen. Only the library's own files: a streaming service's
   // songs get no Download.
-  const appDl = () => nativeOk() && !isOffline();
+  const appDl = () => nativeOk() && !isOffline() && can('downloads');
   const dlCall = (cmd, args) => { const f = tauriInvoke(); return f ? f(cmd, args || {}) : Promise.reject(new Error('the app’s downloads are off')); };
   let dlRevision = 0; let dlRead = 0;
   const dlSet = (d) => { dlRevision += 1; state.dl = d || null; state.dlTracks = new Set((d && d.track_ids) || []); state.dlAlbums = new Set((d && d.album_ids) || []); };
@@ -2080,6 +2091,14 @@
   // Offline (the app's local server, pm-offline): only what this device keeps, played here
   const isOffline = () => !!(state.info && state.info.offline);
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
+  // Phone mode (the app's own backend, no node): /v1/info lists what it can do. A node lists no
+  // capabilities and can do everything; a name the phone doesn't list (zones, home, pubky…) is off
+  const phoneMode = () => !!(state.info && state.info.mode === 'phone');
+  const can = (cap) => !state.info || !Array.isArray(state.info.capabilities) || state.info.capabilities.includes(cap);
+  const PHONE_CAPS = ['search', 'items', 'sources', 'library', 'bookmarks', 'collections', 'listens', 'reviews', 'tags', 'add-songs'];
+  const PHONE_VIEWS = { search: ['search'], items: ['item', 'releases', 'source-item', 'source-artist'], sources: ['sources'], library: ['albums', 'artists', 'tracks', 'genres', 'genre'], bookmarks: ['favourites'], collections: ['playlists', 'playlist'] };
+  const phoneView = (v) => v === 'queue' || v === 'settings' || Object.entries(PHONE_VIEWS).some(([c, vs]) => can(c) && vs.includes(v));
+  const phoneHome = () => (can('search') ? 'search' : can('library') ? 'tracks' : 'settings');
   const LISTENER_VIEWS_OFF = new Set(['home', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
   const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
   // The phone's own zone (the node's, on this app's output) while the app plays its music itself:
@@ -2826,7 +2845,7 @@
       toast(`“${it.title || 'This song'}” can't play here: ${why}.${it.track_id != null ? '' : ' Try another version on the song\u2019s page.'}`, 'error');
     });
     // A song moved in from a zone was counted there already
-    if (it.track_id != null && !it.moved) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
+    if (it.track_id != null && !it.moved && can('listens')) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
     it.moved = false;
     mediaSessionUpdate(it);
     renderBar();
@@ -3498,6 +3517,7 @@
   // answer older than the newest installed is never installed
   const outputsLoad = { seq: 0, applied: 0, inflight: null, again: false };
   const loadOutputs = () => {
+    if (!can('zones')) return Promise.resolve(state.outputs = []); // (a phone has no outputs but itself)
     if (outputsLoad.inflight) { outputsLoad.again = true; return outputsLoad.inflight; }
     const seq = ++outputsLoad.seq;
     outputsLoad.inflight = api('GET', '/outputs')
@@ -3658,7 +3678,7 @@
     renderZoneName(); renderBar(); refreshQueue();
   };
   const refreshAlong = async () => {
-    if (!state.me || isOffline() || document.hidden) return;
+    if (!state.me || isOffline() || !can('along') || document.hidden) return;
     try {
       const ls = await api('GET', '/presence');
       state.along = ls.find((l) => l.mine) || null; state.hosting = ls.find((l) => l.you && l.hosting) || null; state.presence = ls;
@@ -3755,7 +3775,7 @@
       // is each device's Move here above, one way only (UX sweep A14); the Queue page has Move to…
       + `<div class="pop-title">This zone</div>`
       + `<button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`
-      + (isOffline() ? '' : `<div class="pop-title">Listening together</div><button class="pop-item" id="zpvisible">${icon('artist')}<span><span class="name">Who sees what you play</span><span class="sub">${esc((VISIBLE.find((x) => x[0] === (state.presenceVisible || 'hidden')) || VISIBLE[0])[1])}</span></span></button>`);
+      + (isOffline() || !can('along') ? '' : `<div class="pop-title">Listening together</div><button class="pop-item" id="zpvisible">${icon('artist')}<span><span class="name">Who sees what you play</span><span class="sub">${esc((VISIBLE.find((x) => x[0] === (state.presenceVisible || 'hidden')) || VISIBLE[0])[1])}</span></span></button>`);
   };
   const renderZonePop = (err) => {
     zonePopErr = err || null;
@@ -3794,11 +3814,12 @@
   // The tabs' Library: the library page last open. The tabs' Search focuses the field, except in
   // the Android app: its WebView doesn't open the keyboard for a focus set by script, so the field
   // showed focused with no keyboard (owner's recording); there a tap on the field opens it.
-  const libHome = () => state.lastLib || 'library';
+  const libHome = () => state.lastLib || (phoneMode() ? 'tracks' : 'library');
   $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); if (appPlatform() !== 'android') search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? libHome() : k); });
   // The account menu: who you are here, Settings and Log out (on every shell). A node that needs
   // no token has nothing to log out of.
   $('#me').onclick = async () => {
+    if (phoneMode()) { setView('settings'); return; } // (no node account here: this phone's Settings)
     const me = state.me || {}; const [who] = me.key ? await loadProfiles([me.key]) : [];
     const name = (who && who.name) || (isListener() ? 'Listener' : 'Owner');
     // What you are here, in words (UX sweep 11-01, A8): how this browser is logged in, and whether
@@ -4453,7 +4474,7 @@
     const ref = () => (tid != null ? { track_id: Number(tid) } : pageUri ? { uri: pageUri } : null);
     const drawHeart = () => {
       const h = $('#npheart', overlay); if (!h || !live()) return;
-      if (!ref()) { h.innerHTML = ''; return; }
+      if (!ref() || !can('bookmarks')) { h.innerHTML = ''; return; }
       const word = fav ? 'In favourites' : 'Add to favourites';
       const had = document.activeElement && document.activeElement.id === 'npfav';
       h.innerHTML = `<button class="icon-btn np-heart ${fav ? 'on' : ''}" id="npfav" aria-pressed="${fav}" aria-label="${word}" title="${word}">${icon(fav ? 'heart-fill' : 'heart')}</button>`;
@@ -4588,7 +4609,7 @@
   const NP_PART = { details: 'Details', sources: 'Sources', tags: 'Tags' };
   const NP_COMPACT = [['queue', 'Up next', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['more', 'More', 'info']];
   const NP_SHEETS_ALL = [['queue', 'Queue', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['details', 'Details', 'info'], ['sources', 'Sources', 'archive'], ['tags', 'Tags', 'compass']];
-  const npSheets = () => NP_SHEETS_ALL.filter(([k]) => k !== 'tags' || isOwner()); // listeners cannot tag
+  const npSheets = () => NP_SHEETS_ALL.filter(([k]) => k !== 'tags' || (isOwner() && can('tags'))); // listeners cannot tag
   // Compact: the phone arrangement (sheets over the player), also in a desktop window narrower than two columns need
   const npCompact = () => shellMode() === 'phone' || window.innerWidth <= 720;
   // (on a phone Details, Sources and Tags are parts of More: asking for one opens More at it; More
@@ -4663,7 +4684,7 @@
             + `<dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd>${(() => { const o = outputFacts(z); return o ? `<dt>Output</dt><dd class="np-output">${esc(o[0])}${o[1] ? `<span class="muted small np-output-why">${esc(o[1])}</span>` : ''}</dd>` : ''; })()}</dl>`;
       }
       // More (phones): Details, Sources and Tags, one heading each, and the song's page once at the end
-      if (k === 'more') return Object.keys(NP_PART).filter((x) => x !== 'tags' || isOwner()).map((x) => `<section class="np-part" id="nppart-${x}" aria-labelledby="nppart-h-${x}"><h3 id="nppart-h-${x}">${NP_PART[x]}</h3>${sheetBody(x)}</section>`).join('')
+      if (k === 'more') return Object.keys(NP_PART).filter((x) => x !== 'tags' || (isOwner() && can('tags'))).map((x) => `<section class="np-part" id="nppart-${x}" aria-labelledby="nppart-h-${x}"><h3 id="nppart-h-${x}">${NP_PART[x]}</h3>${sheetBody(x)}</section>`).join('')
         + (songPage ? `<div class="np-sheet-foot"><button class="btn sm ghost" id="nppage">${icon('compass')} Go to song page</button></div>` : '');
       if (k === 'sources') return `<div id="npsources">${songPage ? '<div class="skeleton" style="height:80px"></div>' : '<p class="muted">This song has no page of its own yet, so its other sources are not known.</p>'}</div>`;
       return '<div class="np-pubky" id="nppubky" aria-live="polite"></div>';
@@ -5206,6 +5227,7 @@
     const asked = v; // (usage insights: a page sent elsewhere below is a redirect)
     if (isListener() && LISTENER_VIEWS_OFF.has(v)) { v = 'albums'; arg = undefined; }
     if (isOffline() && !OFFLINE_VIEWS.has(v)) { v = 'downloads'; arg = undefined; }
+    if (phoneMode() && !phoneView(v)) { v = phoneHome(); arg = undefined; }
     // (a drive's sign-in answer for a page that isn't Node library, or a listener's: the message, as before)
     if (driveBack && (isListener() || !(v === 'library' && arg === 'node'))) { const b = driveBack; driveBack = null; toast(b.text, b.kind); }
     { const sb = document.getElementById('search'); if (sb && NAV_VIEWS.includes(v) && document.activeElement !== sb) sb.value = ''; }
@@ -5427,7 +5449,7 @@
     searchRuns.set(key, run);
     // Tag labels as you type (yours first), beside the results: STEWARD-FIX-search-tags.md
     const word = (/(?:#|\btag:)(\S+)$/.exec(q.trim()) || [])[1] || (/#|\btag:/.test(q) ? '' : q.trim().toLowerCase().replace(/\s+/g, '-'));
-    if (word && word.length <= 20) api('GET', `/search/tags?prefix=${encodeURIComponent(word)}`).then((t) => { run.tags = t; searchChanged(run); }).catch(() => {});
+    if (word && word.length <= 20 && can('tags')) api('GET', `/search/tags?prefix=${encodeURIComponent(word)}`).then((t) => { run.tags = t; searchChanged(run); }).catch(() => {});
     (async () => {
       try {
         await readSearch(q, scope, run.ctrl.signal, (srcs) => {
@@ -5544,14 +5566,14 @@
     if (isLink(q)) { setView('item', { kind: linkKind(q), id: idOf(q) }, how === 'replace' ? 'replace' : 'push'); return; }
     // A pasted Pubky key (with or without pubky:// or the pubky prefix) opens that person
     const pk = /^(?:pubky:\/\/|pubky)?([a-z0-9]{52})\/?$/.exec(q);
-    if (pk) { setView('person', pk[1], how === 'replace' ? 'replace' : 'push'); return; }
+    if (pk && can('pubky')) { setView('person', pk[1], how === 'replace' ? 'replace' : 'push'); return; }
     const scope = savedScope || (state.viewArg && state.view === 'search' && state.viewArg.in) || state.searchScope || 'everywhere';
     // A pasted playlist link (what a playlist's Copy link gives: pubky://<key>/pub/social/v1/posts/<id>)
     // opens that playlist, as the Playlists page's shared-link box does. (q, in: a post that is no
     // playlist, a comment or an ordinary post, is searched as text instead, on the shared page; one
     // known to be none is searched at once, notPlaylists. A reload of its search takes its entry)
     const post = /^(?:pubky:\/\/)?(?:pubky)?([a-zA-Z0-9]{52})\/pub\/social\/v1\/posts\/([0-9A-HJKMNP-TV-Z]{13})\/?$/.exec(q);
-    if (post && !notPlaylist(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope, ...(how === 'pop' || how === 'replace' ? { here: 1 } : {}) }, how === 'pop' || how === 'replace' ? 'replace' : 'push'); return; }
+    if (post && can('pubky') && !notPlaylist(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope, ...(how === 'pop' || how === 'replace' ? { here: 1 } : {}) }, how === 'pop' || how === 'replace' ? 'replace' : 'push'); return; }
     startSearch(q, scope);
     setView('search', { q, in: scope }, how === 'pop' || how === 'replace' ? how : 'push');
   };
@@ -6350,10 +6372,10 @@
   // (or the control to open it at instead: the same song's ⋯ on the queue drawn again);
   // guard: wraps each item's action, e.g. a queue row's: nothing for another zone than the page's)
   const trackMenu = async (anchor, tracks, { head = [], live = () => true, guard = (f) => f } = {}) => {
-    if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
+    if (can('collections') && !state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     await pubkyUser();
     const single = tracks.length === 1 ? tracks[0] : null;
-    const favItem = single ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite({ track_id: single.id }, !isFav(single))) render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
+    const favItem = single && can('bookmarks') ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite({ track_id: single.id }, !isFav(single))) render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     // Start radio: from the single track, or from a random track of a set (album page menu).
     // (the radio goes on for the zone whose queue the seed replaced, also when you switch zone while
     // the seed is sent: before, that queue was replaced and its radio silently left off; the toast
@@ -6374,17 +6396,17 @@
       // The same order and words as a song's ⋯ on its page, an album or search (itemMenu)
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
-      { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”` + stayNote(tracks)); } catch (e) { toast(e.message, 'error'); } }) },
+      ...(can('collections') ? [{ label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”` + stayNote(tracks)); } catch (e) { toast(e.message, 'error'); } }) }] : []),
       ...(single && single.id != null ? dlItem('track', single.id, single.title, artists(single)) : []),
       ...favItem,
       ...radioItem,
       ...nav,
       ...versionItems,
       // The owner's library: edit tags on the node, take the song out (Your library › Node library)
-      ...(single && single.id != null && isOwner() ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.id, single.title) }] : []),
+      ...(single && single.id != null && isOwner() && can('library-admin') ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.id, single.title) }] : []),
       // Phones hide the "Match" chip in song rows (no room), so matching is offered here too
-      ...(single && single.id != null && !trackHasId(single) && isOwner() ? [{ label: 'Which song is this?…', icon: 'search', run: async () => { const done = await whichSong(single); if (done) { toast(`Identified: ${done.title}`); render(); } } }] : []),
-      ...(single && canFixMatch(single) ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: [single.id] }) }] : []),
+      ...(single && single.id != null && !trackHasId(single) && isOwner() && can('library-admin') ? [{ label: 'Which song is this?…', icon: 'search', run: async () => { const done = await whichSong(single); if (done) { toast(`Identified: ${done.title}`); render(); } } }] : []),
+      ...(single && can('library-admin') && canFixMatch(single) ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: [single.id] }) }] : []),
       ...(single ? [{ label: 'Copy link', icon: 'copy', run: () => copyLink(`/song/${trackPageId(single)}`) }] : []),
       ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(tracks.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: tracks.map((t) => t.id) }) }] : []),
     ];
@@ -6671,7 +6693,7 @@
   });
   const itemMenu = async (anchorEl, o) => {
     await pubkyUser();
-    if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
+    if (can('collections') && !state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     const uris = (o.songs || []).map((t) => t.page || (t.id && (uriOf('song', t.id) || null))).filter(Boolean);
     // A library song's page id is lib-<n> until it is matched (trackPageId)
     const libSongs = (o.songs || []).filter((t) => t.track_id != null).map((t) => ({ id: t.track_id, local: !t.id || /^lib-\d+$/.test(String(t.id)) }));
@@ -6686,9 +6708,9 @@
     showMenu(anchorEl, [{ title: o.title || 'Item' },
       { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
-      { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New playlist', async (name) => { try { await api('POST', '/playlists', byIds ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”` + (byIds ? stayNote(libSongs) : '')); } catch (e) { toast(e.message, 'error'); } }) },
+      ...(can('collections') ? [{ label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New playlist', async (name) => { try { await api('POST', '/playlists', byIds ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”` + (byIds ? stayNote(libSongs) : '')); } catch (e) { toast(e.message, 'error'); } }) }] : []),
       ...(o.dl ? dlItem(o.dl.kind, o.dl.id, o.title, o.dl.sub, o.dl.online, o.dl.songs) : single && single.track_id != null ? dlItem('track', single.track_id, single.title, single.artist) : []),
-      ...(single ? [{ label: singleFav ? 'Remove from favourites' : 'Add to favourites', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav)) render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
+      ...(single && can('bookmarks') ? [{ label: singleFav ? 'Remove from favourites' : 'Add to favourites', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav)) render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
       // (as a song row's Start radio, trackMenu: the radio goes on for the zone whose queue the song
       // replaced, also when you switch zone while it is sent, and the toast then names that zone;
       // before, the zone switched to got the radio and the one playing the song had none)
@@ -6711,10 +6733,10 @@
       ...(o.alsoHere && o.alsoHere.length ? [{ label: 'Also on…', icon: 'compass', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl.isConnected ? anchorEl : ($('#imore') || anchorEl), [{ title: 'Also on' }, ...o.alsoHere.map((x) => ({ label: x.label, svc: x.svc, run: () => o.switchTo(x.k) }))]); }, 0); } }] : []),
       ...(o.extra || []),
       // The owner's library: edit tags on the node, take a song out (Your library › Node library)
-      ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title) }] : []),
-      ...(isOwner() && /^\/album\/lib-\d+$/.test(o.path || '') ? [{ label: 'Rename album…', icon: 'disc', run: () => editAlbumTags(Number(o.path.split('-').pop()), o.title) }] : []),
+      ...(isOwner() && can('library-admin') && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title) }] : []),
+      ...(isOwner() && can('library-admin') && /^\/album\/lib-\d+$/.test(o.path || '') ? [{ label: 'Rename album…', icon: 'disc', run: () => editAlbumTags(Number(o.path.split('-').pop()), o.title) }] : []),
       // A library song's or album's match corrected: the Confirm matches view for its songs
-      ...(isOwner() && trackIds.length && /^\/(song|album)\//.test(o.path || '') ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: trackIds.slice(0, 500) }) }] : []),
+      ...(isOwner() && can('library-admin') && trackIds.length && /^\/(song|album)\//.test(o.path || '') ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: trackIds.slice(0, 500) }) }] : []),
       ...(o.path ? [{ label: 'Copy link', icon: 'copy', run: () => copyLink(o.path) }] : []),
       // Library files only: services' songs are not the user's files
       ...(state.pubkyUser && trackIds.length ? [{ label: trackIds.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(trackIds.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: trackIds }) }] : []),
@@ -7157,7 +7179,7 @@
     chips.setAttribute('role', 'group'); chips.setAttribute('aria-label', 'Search in');
     const { scrollLeft, focused, focusWasVisible } = before;
     const services = (state.sources || []).filter((x) => x.enabled !== false && (!x.features || x.features.includes('search')) && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
-    const scopes = new Map([['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])]);
+    const scopes = new Map([['everywhere', 'Everywhere'], ...(can('library') ? [['library', 'Library']] : []), ...(can('pubky') ? [['pubky', 'Pubky']] : []), ...services.map((x) => [x.id, x.name])]);
     // A listener does not read the owner's /sources. A requested service uses its public name,
     // even for tag searches (whose replies come from Library/Pubky). Keep it available after
     // choosing another source, but never reintroduce a service explicitly switched off.
@@ -7290,7 +7312,7 @@
     const failure = $('#sfailure', box);
     if (run.error && !failure) box.insertAdjacentHTML('afterbegin', '<div class="snotes" id="sfailure"><div class="notice" role="status"><div class="row"><span class="grow">Search couldn’t finish.</span><button class="btn sm" data-sretry>Retry</button></div></div></div>');
     else if (!run.error && failure) failure.remove();
-    const rest = facetBar + (nothingAtAll && !run.error ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
+    const rest = facetBar + (nothingAtAll && !run.error ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? (phoneMode() ? 'Not on your music services.' : 'Not in your library, your services or on Pubky.') : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
     // The same goes for a source's own Retry: its line stays put while it says the same thing
     const kept = $(':scope > .snotes', content);
     if (notes && kept && kept.pmNotes === notes) { [...content.childNodes].forEach((n) => { if (n !== kept) n.remove(); }); kept.insertAdjacentHTML('afterend', rest); }
@@ -7434,8 +7456,8 @@
   // Songs' and Albums' heads carry the owner's Add music; on a page whose empty state has the same
   // button (no music at all) the head leaves it out (one Add music on the page). Albums with songs but
   // no album tags keeps it: its empty state offers Open Songs
-  const headAddMusic = (n) => (isOwner() && n ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '');
-  const noMusicYet = (what) => (isOwner() ? ['Add the folder with your music, or upload files from this device.', { view: 'add-music', label: 'Add music' }] : [`${what} show up here once the node’s owner adds music.`]);
+  const headAddMusic = (n) => (phoneMode() ? (can('add-songs') ? `<button class="btn iconic" data-phoneadd aria-label="Add songs">${icon('plus')}<span class="btn-label">Add songs</span></button>` : '') : isOwner() && n ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '');
+  const noMusicYet = (what) => (phoneMode() ? [`${what} show up here once you add songs to this phone${can('add-songs') ? ' with Add songs' : ''}.`] : isOwner() ? ['Add the folder with your music, or upload files from this device.', { view: 'add-music', label: 'Add music' }] : [`${what} show up here once the node’s owner adds music.`]);
   const LAYOUTS = [['auto', 'Automatic', 'Phone under 600 px wide, desktop from there (tablets too)'], ['phone', 'Phone', 'Tabs and a mini player, at any width'], ['desktop', 'Desktop', 'The sidebar and the full player bar, also in windows from 480 px']];
   const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
     + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<input type="checkbox" class="switch" role="switch" id="densepick" ${densePref() ? 'checked' : ''} aria-label="Dense lists">`));
@@ -7665,7 +7687,7 @@
   const pubkyHeard = () => { if (state.pubkyUser === undefined) return; const w = pubkyWaiting; pubkyWaiting = []; w.forEach((x) => x.res()); };
   const forgetPubkyUser = () => { state.pubkyUser = undefined; pubkyAsking = null; pubkyForgot++; };
   const pubkyUser = async () => {
-    if (isListener()) return null;
+    if (isListener() || !can('pubky')) return null;
     if (state.pubkyUser === undefined) {
       if (!pubkyAsking) {
         const asked = pubkyForgot; const gen = ++pubkyGen;
@@ -8626,7 +8648,7 @@
           if (!a.q) {
             $('#sprog').hidden = true; searchKeys.reset();
             search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls');
-            main.innerHTML = emptyState('search', 'Search', 'Type in the box above: your library, your services and Pubky at once. Paste a link to open it.'); break;
+            main.innerHTML = emptyState('search', 'Search', phoneMode() ? 'Type in the box above: your music services at once. Paste a link to open it.' : 'Type in the box above: your library, your services and Pubky at once. Paste a link to open it.'); break;
           }
           const scope = a.in || 'everywhere'; state.searchScope = scope;
           if (search.value.trim() !== a.q) search.value = a.q;
@@ -9609,7 +9631,7 @@
           const songs = pg.songs || [];
           const target = pg.target;
           // What comments are about: the song's own link, else this item's (a web link only)
-          const commentUri = [pg.song_uri, target && target.uri, pg.link].find((u) => /^https?:\/\//.test(u || '')) || '';
+          const commentUri = can('pubky') ? [pg.song_uri, target && target.uri, pg.link].find((u) => /^https?:\/\//.test(u || '')) || '' : '';
           const qs = new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)])).toString();
           // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3),
           // each on its own URI: without a MusicBrainz identity there is only the link, never a guess
@@ -9619,10 +9641,10 @@
           const hereName = pg.source === 'Your library' ? 'your library' : pg.source;
           const refQs = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
           // An item with no identity yet (needs_match) takes no tags: the hero says so and leads to a match
-          const ownTags = (ref) => (!ref || isListener() ? Promise.resolve({ tags: null }) : api('GET', `/tags?${refQs(ref)}`).then((r) => ({ tags: r.needs_match ? null : r.tags || [], needsMatch: !!r.needs_match, uri: r.uri || null })).catch(() => ({ tags: null })));
+          const ownTags = (ref) => (!ref || isListener() || !can('tags') ? Promise.resolve({ tags: null }) : api('GET', `/tags?${refQs(ref)}`).then((r) => ({ tags: r.needs_match ? null : r.tags || [], needsMatch: !!r.needs_match, uri: r.uri || null })).catch(() => ({ tags: null })));
           const [songOwn, linkOwn, myReview] = await Promise.all([
             ownTags(songRef), ownTags(linkRef),
-            isListener() ? Promise.resolve(undefined) : api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
+            isListener() || !can('reviews') ? Promise.resolve(undefined) : api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
           ]);
           if (!live()) return;
           // The hero's tag groups. Public tags and people come from Pubky for each group's own URI: for a
@@ -9638,7 +9660,7 @@
           const keptOf = (scope, ref) => { const k = kept.get(pubKey({ scope, ref })); return k && k.p; };
           const pubFrom = (uri, scope, ref) => (uri && pg.on_pubky && pg.on_pubky.uri === uri ? { state: 'ok', tags: pg.on_pubky.tags || [], faces: pg.on_pubky.faces || {} } : keptOf(scope, ref) ? { ...keptOf(scope, ref), kept: true } : { state: 'loading', tags: [], faces: {} });
           const linkName = pg.source || 'source';
-          const tagGroups = [
+          const tagGroups = !can('tags') ? [] : [
             ...(shownSong ? [{ scope: 'song', name: `On this ${kind}`, ref: songRef, own: songOwn.tags, pub: pubFrom(songUri, 'song', songRef) }] : []),
             ...(linkRef ? [{ scope: 'link', name: `On the ${linkName} link`, ref: linkRef, own: linkOwn.tags, pub: pubFrom(linkRef.uri, 'link', linkRef) }] : []),
           ];
@@ -9825,7 +9847,7 @@
             const cs = $('#iconcerts-slot'); if (cs) { cs.outerHTML = (pg.concerts && pg.concerts.length ? `<section class="section" id="iconcerts"><div class="section-head"><h3>Upcoming concerts</h3></div><div class="list">${pg.concerts.map((c, k) => `<div class="list-row clickable" data-iconcert="${k}"><div class="grow"><div class="name">${esc(itemName(c))}</div><div class="sub">${esc([c.description, c.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div></section>` : ''); }
             $$('[data-iconcert]', main).forEach((r) => r.onclick = () => { const c = pg.concerts[Number(r.dataset.iconcert)]; openWeb(c.page || c.uri); });
           }).catch(() => { /* extras are a bonus */ });
-          drawHeroTags(ht);
+          if (can('tags')) drawHeroTags(ht);
           for (const g of tagGroups) {
             if (g.pub.state !== 'loading' && !g.pub.kept) continue;
             const was = g.pub; const at = heroPub.by; const ask = ++heroPubAsk;
@@ -9965,7 +9987,7 @@
             return true;
           };
           const forDrawn = (f) => (...a) => (zoneMoved() ? undefined : f(...a));
-          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || !isListener() || !isBrowser()) ? `<button class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
+          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() && can('collections') ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || (!isListener() && can('collections')) || !isBrowser()) ? `<button class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
             + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="${esc(rowWords.drag(itemName(it)))}" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here" aria-label="${esc(rowWords.play(itemName(it)))}">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" aria-label="${esc(rowWords.up(itemName(it)))}" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" aria-label="${esc(rowWords.down(itemName(it)))}" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove" aria-label="${esc(rowWords.unqueue(itemName(it)))}">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album, or add a song from its ⋯ menu.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null, true));
           $$('[data-qi]', main).forEach((b) => b.onclick = forDrawn(() => transport({ action: 'play', index: Number(b.dataset.qi) })));
           // An empty queue offers the library shuffled here too, on the zone the page is for (before,
@@ -10411,6 +10433,30 @@
               + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${l}</button>`).join('')}</div>`));
             $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); });
             $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
+            break;
+          }
+          if (phoneMode()) {
+            // Phone mode: this phone, its Pubky account, its streaming accounts, the theme, and the way to a node
+            const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
+            const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+            const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
+            const pm = (state.me || {}).pubky; const pk = typeof pm === 'string' ? pm : pm && (pm.key || pm.public_key);
+            const srcs = !can('sources') ? [] : state.sources || await api('GET', '/sources').then((l) => (state.sources = l)).catch(() => []);
+            if (state.view !== 'settings') return;
+            const svcs = srcs.filter((x) => (x.id === 'tidal' || x.id === 'qobuz') && x.enabled !== false);
+            main.innerHTML = pageHead('Settings', null)
+              + group('This phone', row('Odeion is running on this phone without a node', 'It plays here, from your music services.', '')
+                + (pk ? row('Pubky account', keyHtml(pk), '') : '')
+                + row('Your node', 'Connect to your Odeion node to play its music, on its zones too.', '<button class="btn primary" id="phoneleave">Connect to a node</button>'))
+              + (svcs.length ? group('My streaming accounts', svcs.map((v) => `<details class="set-row svc-own" data-svc="${esc(v.id)}"><summary class="set-label"><span class="set-name">${esc(v.name)}</span><span class="set-help">${srcHealthy(v) ? 'Signed in.' : 'Not signed in. Sign in to play from it here.'}</span></summary><div class="svc-body"></div></details>`).join('')) : '')
+              + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`));
+            $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); });
+            // A service opens its own sign-in ways (the Sources page's)
+            $$('details[data-svc]', main).forEach((d) => d.addEventListener('toggle', () => {
+              const body = $('.svc-body', d); if (!d.open || body.dataset.drawn) return; body.dataset.drawn = '1';
+              if (d.dataset.svc === 'qobuz') qobuzSetup(body); else signinChooser(tidalSigninCfg(body));
+            }));
+            $('#phoneleave').onclick = (e) => phoneCmd(e.currentTarget, 'phone_leave', true);
             break;
           }
           if (isListener()) {
@@ -11184,6 +11230,22 @@
         renderZoneName(); renderBar();
         link.loaded = true;
         if (!OFFLINE_VIEWS.has(state.view)) setView('downloads', undefined, 'replace'); else render();
+        return;
+      }
+      document.body.classList.toggle('phone', phoneMode());
+      if (phoneMode()) {
+        // The app's own backend, no node: what it lists only (PHONE_CAPS); no zones, no events
+        for (const c of PHONE_CAPS) document.body.classList.toggle(`no-${c}`, !can(c));
+        setConn(true, state.info.name || 'This phone');
+        search.placeholder = 'Search your music services'; search.setAttribute('aria-label', search.placeholder);
+        try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
+        state.zones = {}; state.zonesSeen = true; state.zone = BROWSER; state.pubkyUser = null; state.favUris = new Set();
+        if (can('sources')) api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {}); else state.sources = [];
+        if (can('bookmarks')) loadFavourites().catch(() => {});
+        dlLoad(); renderZoneName(); renderBar(); refreshQueue(false);
+        link.loaded = true;
+        const r = routeFromPath();
+        if (r && r.v === 'search' && r.arg && r.arg.q) { search.value = r.arg.q; runSearch('replace', r.arg.in || 'everywhere'); } else if (r) setView(r.v, r.arg, 'replace'); else setView(phoneHome(), undefined, 'replace');
         return;
       }
       setConn(true, `${state.info.name} · ${countOf(state.info.library.tracks, 'songs')}`);
