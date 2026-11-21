@@ -37,6 +37,7 @@ on:
       - crates/pm-zones/**
       - crates/pm-node/**
       - crates/pm-pubky/**
+      - crates/pm-sources/**
       - Cargo.toml
       - Cargo.lock
       - tools/android-*.py
@@ -86,6 +87,7 @@ jobs:
       ring: ${{ steps.pick.outputs.ring }}
       update: ${{ steps.pick.outputs.update }}
       background: ${{ steps.pick.outputs.background }}
+      sources: ${{ steps.pick.outputs.sources }}
       node: ${{ steps.pick.outputs.node }}
       zone_matrix: ${{ steps.pick.outputs.zone_matrix }}
       ring_matrix: ${{ steps.pick.outputs.ring_matrix }}
@@ -126,6 +128,7 @@ jobs:
           ring=$(covers 'crates/(pm-desktop|pm-pubky)/|tools/android-ring-probe\.py$|tools/release/android-patch\.py$')
           update=$(covers 'crates/pm-desktop/|tools/android-update-probe\.py$|tools/release/(android-patch\.py|android/|updater-manifest\.py|aab-check\.py|android-sign\.sh)|\.github/workflows/release\.yml$')
           background=$(covers 'crates/(pm-desktop|pm-app-player|pm-audio)/|tools/release/android/|tools/release/android-patch\.py$|tools/android-background-probe\.py$|tools/android-endpoint\.py$')
+          sources=$(covers 'crates/pm-sources/|Cargo\.(toml|lock)$')
           node=false
           if [ "$zone" = true ] || [ "$background" = true ]; then node=true; fi
           one='{"include":[{"api":"35","target":"google_apis"}]}'
@@ -139,10 +142,37 @@ jobs:
           zone_full='{"include":[{"api":"30","target":"google_apis"},{"api":"35","target":"google_apis"}]}'
           if [ "$full" = true ]; then zm=$zone_full; rm=$three; um=$two; bm=$three; else zm=$one; rm=$one; um=$one; bm=$one; fi
           {
-            echo "zone=$zone"; echo "ring=$ring"; echo "update=$update"; echo "background=$background"; echo "node=$node"
+            echo "zone=$zone"; echo "ring=$ring"; echo "update=$update"; echo "background=$background"; echo "node=$node"; echo "sources=$sources"
             echo "zone_matrix=$zm"; echo "ring_matrix=$rm"; echo "update_matrix=$um"; echo "background_matrix=$bm"
           } | tee -a "$GITHUB_OUTPUT"
           echo "$(printf '%s\n' "$files" | grep -c . || true) files changed; full matrix: $full"
+
+  # TIDAL and Qobuz (pm-sources, shared by the node and the app's phone mode) for the phones' own
+  # target: the library and its test binaries build and link for aarch64-linux-android with the NDK.
+  sources-arm64:
+    needs: changes
+    if: needs.changes.outputs.sources == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: android-sources-arm64
+      - name: pm-sources for aarch64-linux-android
+        run: |
+          tc="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$tc/aarch64-linux-android26-clang"
+          export AR_aarch64_linux_android="$tc/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$tc/aarch64-linux-android26-clang"
+          cargo build --locked --release -p pm-sources --target aarch64-linux-android
+          cargo test --locked -p pm-sources --target aarch64-linux-android --no-run
+          ls -l target/aarch64-linux-android/release/libpm_sources.rlib
 
   # Every APK the checks install, built once: the plain x86_64 APK (phone-as-zone, background), the
   # ring-transport-probe one and the update pair N/N+1 plus the .aab check. Each signed with this
@@ -268,6 +298,13 @@ jobs:
         run: |
           (cd crates/pm-desktop && bash "$RUNNER_TEMP/tauri.sh" --ci --apk --target x86_64)
           bash "$RUNNER_TEMP/sign.sh" "$(bash "$RUNNER_TEMP/built.sh")" out/plain/app.apk
+          # The APK's size and its largest parts, so a change that grows the app shows in the run
+          {
+            echo "### APK (x86_64, plain): $(stat -c %s out/plain/app.apk) bytes"
+            echo '```'
+            unzip -lv out/plain/app.apk | sort -k1 -n -r | sed -n 1,8p
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: the APK with the Ring transport probe (x86_64)
         if: env.RING == 'true'
         run: |
