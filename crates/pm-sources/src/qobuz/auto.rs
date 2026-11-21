@@ -2,8 +2,7 @@
 //! Same method as qobuz-dl / spoofbuz; independently implemented in Rust.
 
 use super::{api_base, app_refused, file_url_query, now, App, CHECK_TRACK};
-use crate::ApiError;
-use axum::http::StatusCode;
+use crate::{SourceError, StatusCode};
 use base64::Engine;
 use std::time::Duration;
 
@@ -12,21 +11,21 @@ const HTML_LIMIT: usize = 512 * 1024;
 const BUNDLE_LIMIT: usize = 12 * 1024 * 1024;
 const MAX_CANDIDATES: usize = 16;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 static PLAYER: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
-#[cfg(test)]
-pub(crate) fn set_player(url: &str) {
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn set_player(url: &str) {
     *PLAYER.write().expect("Qobuz player") = Some(url.trim_end_matches('/').into());
 }
 
 /// One fixed browser-like User-Agent for every request to Qobuz (the web player and the API), as
 /// qobuz-dl: Qobuz never sees the node's own User-Agent or its operator's contact.
-pub(super) const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:83.0) Gecko/20100101 Firefox/83.0";
+pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:83.0) Gecko/20100101 Firefox/83.0";
 
 /// Why automatic setup did not work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Fail {
+pub enum Fail {
     /// A transport error, a timeout or an unexpected answer: nothing is wrong with the app values.
     Unreachable,
     /// The web player is not what discovery expects, or Qobuz refused every candidate.
@@ -42,7 +41,7 @@ pub(super) enum Fail {
 }
 
 impl Fail {
-    pub(super) fn message(self) -> &'static str {
+    pub fn message(self) -> &'static str {
         match self {
             Self::Unreachable => "Could not reach Qobuz. Try again later.",
             Self::Changed => {
@@ -55,22 +54,22 @@ impl Fail {
     }
 }
 
-impl From<Fail> for ApiError {
+impl From<Fail> for SourceError {
     fn from(f: Fail) -> Self {
         let status = match f {
             Fail::Interrupted => StatusCode::SERVICE_UNAVAILABLE,
             Fail::Declined => StatusCode::BAD_REQUEST,
             Fail::Unreachable | Fail::Changed | Fail::NoStream => StatusCode::BAD_GATEWAY,
         };
-        ApiError::new(status, f.message())
+        SourceError::new(status, f.message())
     }
 }
 
-pub(super) fn discovery_failed() -> ApiError {
+pub fn discovery_failed() -> SourceError {
     Fail::Changed.into()
 }
 
-pub(super) fn client() -> Result<reqwest::Client, Fail> {
+pub fn client() -> Result<reqwest::Client, Fail> {
     client_with_timeout(Duration::from_secs(20))
 }
 
@@ -85,7 +84,7 @@ fn client_with_timeout(timeout: Duration) -> Result<reqwest::Client, Fail> {
 }
 
 fn player_origin() -> String {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     if let Some(origin) = PLAYER.read().expect("Qobuz player").clone() {
         return origin;
     }
@@ -231,7 +230,7 @@ fn parse_bundle(bundle: &str, bundle_url: &str) -> Result<Vec<App>, Fail> {
 }
 
 /// A body up to `limit` bytes, also when it comes without a length.
-pub(super) async fn bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, Fail> {
+pub async fn bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, Fail> {
     if response.content_length().is_some_and(|n| n > limit as u64) {
         return Err(Fail::Changed);
     }
@@ -267,7 +266,7 @@ async fn text(client: &reqwest::Client, url: &str, limit: usize) -> Result<Strin
 }
 
 /// The web player's app ID with every candidate secret, in qobuz-dl's order.
-pub(super) async fn discover(client: &reqwest::Client) -> Result<Vec<App>, Fail> {
+pub async fn discover(client: &reqwest::Client) -> Result<Vec<App>, Fail> {
     let origin = player_origin();
     let html = text(client, &format!("{origin}/login"), HTML_LIMIT).await?;
     let path = bundle_path(&html).ok_or(Fail::Changed)?;
@@ -277,7 +276,7 @@ pub(super) async fn discover(client: &reqwest::Client) -> Result<Vec<App>, Fail>
 }
 
 /// An error answer's JSON, `null` when it has none (only its message is read).
-pub(super) async fn json_of(response: reqwest::Response) -> serde_json::Value {
+pub async fn json_of(response: reqwest::Response) -> serde_json::Value {
     match bounded(response, 64 * 1024).await {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(_) => serde_json::Value::Null,
@@ -287,7 +286,7 @@ pub(super) async fn json_of(response: reqwest::Response) -> serde_json::Value {
 /// Whether Qobuz takes `app`'s secret: a signed probe answered 2xx is yes, a 400 about the
 /// signature or the app ID is no, any other 400 is [`Fail::NoStream`] (this person's alone), and
 /// anything else (another status, a transport error, a timeout) is [`Fail::Unreachable`].
-pub(super) async fn secret_works(client: &reqwest::Client, app: &App, token: &str) -> Result<bool, Fail> {
+pub async fn secret_works(client: &reqwest::Client, app: &App, token: &str) -> Result<bool, Fail> {
     let response = client
         .get(format!("{}/track/getFileUrl", api_base()))
         .header("X-App-Id", &app.id)
@@ -306,11 +305,7 @@ pub(super) async fn secret_works(client: &reqwest::Client, app: &App, token: &st
 
 /// The first candidate whose secret works; a 400 about the app values moves on to the next,
 /// anything else stops. [`Fail::Changed`] means Qobuz refused every one of them.
-pub(super) async fn select_secret(
-    client: &reqwest::Client,
-    candidates: &[App],
-    token: &str,
-) -> Result<App, Fail> {
+pub async fn select_secret(client: &reqwest::Client, candidates: &[App], token: &str) -> Result<App, Fail> {
     for app in candidates {
         if secret_works(client, app, token).await? {
             return Ok(app.clone());
@@ -602,8 +597,8 @@ mod tests {
             select_secret(&c, &[candidate("100000001")], "mock-token").await,
             Err(Fail::Changed)
         );
-        assert_eq!(ApiError::from(Fail::Declined).status, StatusCode::BAD_REQUEST);
-        assert_eq!(ApiError::from(Fail::NoStream).status, StatusCode::BAD_GATEWAY);
+        assert_eq!(SourceError::from(Fail::Declined).status, StatusCode::BAD_REQUEST);
+        assert_eq!(SourceError::from(Fail::NoStream).status, StatusCode::BAD_GATEWAY);
         server.abort();
     }
 
