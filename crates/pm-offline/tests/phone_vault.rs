@@ -240,6 +240,42 @@ async fn the_phone_and_a_node_share_tidal_through_the_vault() {
     let r = phone::vault::pass(&p, &acct).await.unwrap();
     assert_eq!(r.removed, ["tidal-full"], "{r:?}");
     assert!(node.read("tidal-full").await.unwrap().is_none());
+
+    // A node signs in anew and the phone, renewing, takes that one (not due, so as it is): the
+    // phone holds the new sign-in's id, so the node signing out later is a sign-out here too
+    node.write_shared("tidal-full", &node_copy(&travels("node-again", "44", now + 3600)))
+        .await
+        .unwrap();
+    phone::vault::pass(&p, &acct).await.unwrap();
+    assert_eq!(session_of(&p).unwrap().access_token, "node-again");
+    let newer = format!("{}-fedcba9876543210", now + 60);
+    node.write_shared(
+        "tidal-full",
+        &vault_form::sign_in_for(
+            "tidal-full",
+            TIDAL_FULL.carry,
+            true,
+            &travels("node-new-sign-in", "45", now + 3600),
+            None,
+            Some("device-client".into()),
+            &newer,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(phone::vault::renew_tidal(&p, &acct).await.unwrap());
+    assert_eq!(session_of(&p).unwrap().access_token, "node-new-sign-in");
+    assert_eq!(
+        pm_sources::SessionStore::get(p.store().as_ref(), "vault.lineage.tidal-full").as_deref(),
+        Some(newer.as_str()),
+        "the id of the sign-in it took"
+    );
+    assert!(node.remove_if("tidal-full", &|_| true).await.unwrap());
+    let r = phone::vault::pass(&p, &acct).await.unwrap();
+    assert_eq!(r.dropped, ["tidal-full"], "signed out on the node: {r:?}");
+    assert!(r.pushed.is_empty(), "never written back: {r:?}");
+    assert!(session_of(&p).is_none());
+    assert!(node.read("tidal-full").await.unwrap().is_none());
 }
 
 #[tokio::test]

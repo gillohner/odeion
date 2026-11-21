@@ -5,6 +5,7 @@
 
 use pm_sources::qobuz::{App, AppCache};
 use pm_sources::{SessionStore, SourceError};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -55,6 +56,35 @@ impl FileStore {
         if let Some(f) = self.changed.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             f(key);
         }
+    }
+
+    /// Runs `f` on a draft of the values, under the store's lock: no other change lands between
+    /// what it reads and what it writes. What it changed is saved (one write) when it returns
+    /// `Ok(true)`; with `Ok(false)` or an error nothing changes.
+    pub fn change_if(&self, f: impl FnOnce(&Draft) -> Result<bool, String>) -> Result<bool, String> {
+        let changed: Vec<String> = {
+            let mut v = self.values.lock().unwrap_or_else(|e| e.into_inner());
+            let d = Draft(RefCell::new(v.clone()));
+            if !f(&d)? {
+                return Ok(false);
+            }
+            let new = d.0.into_inner();
+            let changed = v
+                .keys()
+                .chain(new.keys())
+                .filter(|k| v.get(*k) != new.get(*k))
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            self.save(&new).map_err(|e| e.to_string())?;
+            *v = new;
+            changed
+        };
+        for k in changed {
+            self.tell(&k);
+        }
+        Ok(true)
     }
 
     /// Sets (or with `None` removes) a key.
@@ -140,6 +170,37 @@ impl pm_sources::vault_form::Settings for FileStore {
     }
     fn delete(&self, key: &str) -> Result<(), String> {
         self.put(key, None).map_err(|e| e.to_string())
+    }
+}
+
+/// The values as [`FileStore::change_if`] sees them, read and written like the store.
+pub struct Draft(RefCell<BTreeMap<String, String>>);
+
+impl Draft {
+    pub fn get(&self, key: &str) -> Option<String> {
+        self.0.borrow().get(key).cloned()
+    }
+    /// Sets (or with `None` removes) a key.
+    pub fn put(&self, key: &str, value: Option<&str>) {
+        let mut v = self.0.borrow_mut();
+        match value {
+            Some(x) => v.insert(key.to_string(), x.to_string()),
+            None => v.remove(key),
+        };
+    }
+}
+
+impl pm_sources::vault_form::Settings for Draft {
+    fn get(&self, key: &str) -> Result<Option<String>, String> {
+        Ok(Draft::get(self, key))
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), String> {
+        self.put(key, Some(value));
+        Ok(())
+    }
+    fn delete(&self, key: &str) -> Result<(), String> {
+        self.put(key, None);
+        Ok(())
     }
 }
 

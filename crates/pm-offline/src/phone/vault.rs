@@ -19,6 +19,7 @@
 //! records.
 
 use super::account::Account;
+use super::store::FileStore;
 use super::Phone;
 use pm_appdata::vault::SignIn;
 use pm_pubky::vault::{RefreshFailed, Refreshed, Vault, VaultStoreError};
@@ -54,6 +55,32 @@ fn lineage_here(phone: &Phone, service: &str) -> Option<String> {
 
 fn set_lineage(phone: &Phone, service: &str, lineage: Option<&str>) {
     let _ = phone.store.put(&lineage_key(service), lineage);
+}
+
+/// Sets what the phone holds for `form` (`travels`, `None`: only the id) and the id of that
+/// sign-in, in one step and only when the phone still holds what it held at `from` (its
+/// `vault_form::hash`; `None`: nothing): a sign-in or sign-out made on the phone while the vault
+/// was being read wins. `Ok(false)`: it did, nothing changed.
+fn apply_if_still(
+    store: &FileStore,
+    form: &Form,
+    from: Option<&str>,
+    travels: Option<&Map<String, Value>>,
+    lineage: Option<&str>,
+) -> Result<bool, VaultStoreError> {
+    store
+        .change_if(|d| {
+            let now = vault_form::carried(form.carry, d)?.map(|m| vault_form::hash(&m));
+            if now.as_deref() != from {
+                return Ok(false);
+            }
+            if let Some(t) = travels {
+                vault_form::apply(form.carry, t, d)?;
+            }
+            d.put(&lineage_key(form.service), lineage);
+            Ok(true)
+        })
+        .map_err(local)
 }
 
 /// A sign-in was just made on the phone: it gets a new id (a renewal keeps it), dated now, so the
@@ -337,6 +364,20 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
             Do::Nothing => {}
             Do::InStep => {
                 let t = theirs.as_ref().expect("in step with a copy");
+                // The id of the sign-in both hold is the phone's too
+                if t.lineage.is_some()
+                    && here != t.lineage
+                    && !apply_if_still(
+                        &phone.store,
+                        form,
+                        mine_hash.as_deref(),
+                        None,
+                        t.lineage.as_deref(),
+                    )?
+                {
+                    report.skipped.push(format!("{svc}: changed meanwhile"));
+                    continue;
+                }
                 record.services.insert(
                     svc.into(),
                     Synced {
@@ -352,9 +393,18 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
             Do::Pull => {
                 let t = theirs.as_ref().expect("a copy to take");
                 let travels = vault_form::node_settings(t.sign_in).expect("a node's copy");
-                vault_form::apply(form.carry, &travels, phone.store.as_ref()).map_err(local)?;
+                let lineage = vault_form::node_lineage(t.sign_in);
+                if !apply_if_still(
+                    &phone.store,
+                    form,
+                    mine_hash.as_deref(),
+                    Some(&travels),
+                    lineage.as_deref(),
+                )? {
+                    report.skipped.push(format!("{svc}: changed meanwhile"));
+                    continue;
+                }
                 after_pull(phone, form);
-                set_lineage(phone, svc, vault_form::node_lineage(t.sign_in).as_deref());
                 // As the phone keeps it now (written back, it may read differently from the copy)
                 let kept = vault_form::carried(form.carry, phone.store.as_ref())
                     .map_err(local)?
@@ -422,8 +472,10 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                 }
             }
             Do::DropHere => {
-                vault_form::apply(form.carry, &Map::new(), phone.store.as_ref()).map_err(local)?;
-                set_lineage(phone, svc, None);
+                if !apply_if_still(&phone.store, form, mine_hash.as_deref(), Some(&Map::new()), None)? {
+                    report.skipped.push(format!("{svc}: changed meanwhile"));
+                    continue;
+                }
                 record.services.remove(svc);
                 report.dropped.push(svc);
             }
@@ -517,7 +569,18 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     let Some(travels) = vault_form::node_settings(si) else {
         return Ok(false);
     };
-    vault_form::apply(TIDAL_FULL.carry, &travels, phone.store.as_ref()).map_err(local)?;
+    // Taken only if the phone still holds the session it started from (a sign-out or a new
+    // sign-in here meanwhile wins), with the id of the sign-in it takes
+    let lineage = vault_form::node_lineage(si);
+    if !apply_if_still(
+        &phone.store,
+        &TIDAL_FULL,
+        Some(&vault_form::hash(&mine)),
+        Some(&travels),
+        lineage.as_deref(),
+    )? {
+        return Ok(false);
+    }
     let kept = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref())
         .map_err(local)?
         .map(|m| vault_form::hash(&m))
@@ -548,6 +611,66 @@ pub fn tidal_due(phone: &Phone) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_the_vault_gives_waits_for_nothing_changed_here_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let session = |token: &str| {
+            let mut t = Map::new();
+            t.insert(
+                "tidal.unofficial".into(),
+                serde_json::json!({"session": {"access_token": token, "expires_at": 1, "country": "CH"}}),
+            );
+            t
+        };
+        let held = |store: &FileStore| {
+            vault_form::carried(TIDAL_FULL.carry, store)
+                .unwrap()
+                .map(|m| vault_form::hash(&m))
+        };
+        vault_form::apply(TIDAL_FULL.carry, &session("a"), &store).unwrap();
+        let from = held(&store);
+        // Signed in anew on the phone while the vault was read: the vault's copy isn't taken
+        vault_form::apply(TIDAL_FULL.carry, &session("here"), &store).unwrap();
+        store.put(&lineage_key("tidal-full"), Some("2-new")).unwrap();
+        let took = apply_if_still(
+            &store,
+            &TIDAL_FULL,
+            from.as_deref(),
+            Some(&session("vault")),
+            Some("1-old"),
+        )
+        .unwrap();
+        assert!(!took);
+        assert!(SessionStore::get(&store, "tidal.unofficial")
+            .unwrap()
+            .contains("here"));
+        assert_eq!(
+            SessionStore::get(&store, &lineage_key("tidal-full")).as_deref(),
+            Some("2-new")
+        );
+        // Signed out here meanwhile: nothing comes back
+        vault_form::apply(TIDAL_FULL.carry, &Map::new(), &store).unwrap();
+        assert!(!apply_if_still(
+            &store,
+            &TIDAL_FULL,
+            from.as_deref(),
+            Some(&session("vault")),
+            None
+        )
+        .unwrap());
+        assert_eq!(held(&store), None);
+        // Nothing changed: taken, with its id, in one step
+        assert!(apply_if_still(&store, &TIDAL_FULL, None, Some(&session("vault")), Some("1-old")).unwrap());
+        assert!(SessionStore::get(&store, "tidal.unofficial")
+            .unwrap()
+            .contains("vault"));
+        assert_eq!(
+            SessionStore::get(&store, &lineage_key("tidal-full")).as_deref(),
+            Some("1-old")
+        );
+    }
 
     fn seen(mine: &str, theirs: &str, lineage: &str) -> Synced {
         Synced {
