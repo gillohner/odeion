@@ -35,7 +35,10 @@ pub enum Pending {
         duration_ms: Option<u64>,
         at: i64,
     },
-    Prefs,
+    /// A source's streaming quality changed here.
+    Quality {
+        source: String,
+    },
 }
 
 /// What the phone keeps of the person's data.
@@ -229,36 +232,37 @@ async fn write(acct: &Account, p: &Phone, op: &Pending) -> Result<(), String> {
                 .await
                 .map_err(|e| e.to_string())
         }
-        Pending::Prefs => write_prefs(acct, p).await,
+        Pending::Quality { source } => write_prefs(acct, p, source).await,
     }
 }
 
-/// The streaming quality the phone uses, in prefs.json's `quality` (by source id).
-fn qualities(p: &Phone) -> BTreeMap<String, String> {
-    let mut q = BTreeMap::new();
-    let t = pm_sources::tidal::full::load(p.store.as_ref()).quality;
-    if !t.is_empty() {
-        q.insert("tidal".to_string(), t);
-    }
-    let qb = super::qobuz::state(p).quality;
-    if !qb.is_empty() {
-        q.insert("qobuz".to_string(), qb);
-    }
-    q
+/// The streaming quality the phone uses for a source.
+fn quality_of(p: &Phone, source: &str) -> Option<String> {
+    let q = match source {
+        "tidal" => pm_sources::tidal::full::load(p.store.as_ref()).quality,
+        "qobuz" => super::qobuz::state(p).quality,
+        _ => return None,
+    };
+    (!q.is_empty()).then_some(q)
 }
 
-/// prefs.json with the phone's qualities in it (other members as they are), newer than what is there.
-async fn write_prefs(acct: &Account, p: &Phone) -> Result<(), String> {
+/// prefs.json with the phone's quality for `source` in it (every other member as it is), newer
+/// than what is there.
+async fn write_prefs(acct: &Account, p: &Phone, source: &str) -> Result<(), String> {
     let mut prefs = acct
         .hs
         .read_prefs(&acct.session)
         .await
         .map_err(|e| e.to_string())?
+        .filter(Value::is_object)
         .unwrap_or_else(|| json!({ "version": 1 }));
     let now = (pm_pubky::ids::now_micros() / 1000) as u64;
-    let at = prefs["updated_at"].as_u64().unwrap_or(0).max(now);
-    for (k, v) in qualities(p) {
-        prefs["quality"][k] = Value::String(v);
+    let at = (prefs["updated_at"].as_u64().unwrap_or(0) + 1).max(now);
+    if !prefs["quality"].is_object() {
+        prefs["quality"] = json!({});
+    }
+    if let Some(q) = quality_of(p, source) {
+        prefs["quality"][source] = Value::String(q);
     }
     prefs["updated_at"] = json!(at);
     acct.hs
@@ -300,11 +304,14 @@ async fn take_prefs(acct: &Account, p: &Phone) -> Result<bool, String> {
     Ok(true)
 }
 
-/// A quality changed on the phone: prefs.json gets it at the next sync.
-pub(crate) fn prefs_changed(p: &Phone) {
+/// A source's quality changed on the phone: prefs.json gets it at the next sync.
+pub(crate) fn prefs_changed(p: &Phone, source: &str) {
+    let op = Pending::Quality {
+        source: source.to_string(),
+    };
     change(p, |l| {
-        if !l.pending.contains(&Pending::Prefs) {
-            l.pending.push(Pending::Prefs);
+        if !l.pending.contains(&op) {
+            l.pending.push(op.clone());
         }
     });
     p.sync_soon();
@@ -394,7 +401,9 @@ mod tests {
                     duration_ms: Some(1000),
                     at: 6,
                 },
-                Pending::Prefs,
+                Pending::Quality {
+                    source: "tidal".into(),
+                },
             ],
             prefs_at: 3,
         };
