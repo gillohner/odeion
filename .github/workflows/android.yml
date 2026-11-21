@@ -13,6 +13,11 @@ name: android
 #   that the .aab is built without the updater.
 # - background playback (tools/android-background-probe.py): the phone's own zone and the in-app
 #   player, each sent to the background.
+# - phone mode (tools/android-phone-mode.py): an APK with the `phone-mode-fixture` feature opens
+#   phone mode with no node, searches a stand-in TIDAL on the runner in its own web UI and plays
+#   the song through the app's own player in real time (API 35).
+# - sources-arm64: pm-sources (TIDAL and Qobuz, shared by the node and phone mode) builds and links
+#   for aarch64-linux-android.
 # On a pull request each check runs only when what it covers changed (the `changes` job), on one
 # Android version (API 35). On main, every night and for a release tag (release.yml) each runs on
 # all its versions: 30 (the oldest the app supports), 35 and Android 17 (37.0; phone-as-zone on 30
@@ -88,6 +93,7 @@ jobs:
       update: ${{ steps.pick.outputs.update }}
       background: ${{ steps.pick.outputs.background }}
       sources: ${{ steps.pick.outputs.sources }}
+      phone: ${{ steps.pick.outputs.phone }}
       node: ${{ steps.pick.outputs.node }}
       zone_matrix: ${{ steps.pick.outputs.zone_matrix }}
       ring_matrix: ${{ steps.pick.outputs.ring_matrix }}
@@ -102,6 +108,7 @@ jobs:
         run: |
           python3 -I tools/android-endpoint-test.py
           python3 -I tools/android-native-pages-test.py
+          python3 -I tools/android-phone-mode.py --self-test
       - id: pick
         env:
           EVENT: ${{ github.event_name }}
@@ -129,6 +136,7 @@ jobs:
           update=$(covers 'crates/pm-desktop/|tools/android-update-probe\.py$|tools/release/(android-patch\.py|android/|updater-manifest\.py|aab-check\.py|android-sign\.sh)|\.github/workflows/release\.yml$')
           background=$(covers 'crates/(pm-desktop|pm-app-player|pm-audio)/|tools/release/android/|tools/release/android-patch\.py$|tools/android-background-probe\.py$|tools/android-endpoint\.py$')
           sources=$(covers 'crates/pm-sources/|Cargo\.(toml|lock)$')
+          phone=$(covers 'crates/(pm-desktop|pm-offline|pm-sources|pm-app-player|pm-audio)/|crates/pm-api/static/|tools/android-phone-mode\.py$|tools/release/android-patch\.py$|tools/release/android/')
           node=false
           if [ "$zone" = true ] || [ "$background" = true ]; then node=true; fi
           one='{"include":[{"api":"35","target":"google_apis"}]}'
@@ -142,7 +150,7 @@ jobs:
           zone_full='{"include":[{"api":"30","target":"google_apis"},{"api":"35","target":"google_apis"}]}'
           if [ "$full" = true ]; then zm=$zone_full; rm=$three; um=$two; bm=$three; else zm=$one; rm=$one; um=$one; bm=$one; fi
           {
-            echo "zone=$zone"; echo "ring=$ring"; echo "update=$update"; echo "background=$background"; echo "node=$node"; echo "sources=$sources"
+            echo "zone=$zone"; echo "ring=$ring"; echo "update=$update"; echo "background=$background"; echo "node=$node"; echo "sources=$sources"; echo "phone=$phone"
             echo "zone_matrix=$zm"; echo "ring_matrix=$rm"; echo "update_matrix=$um"; echo "background_matrix=$bm"
           } | tee -a "$GITHUB_OUTPUT"
           echo "$(printf '%s\n' "$files" | grep -c . || true) files changed; full matrix: $full"
@@ -179,13 +187,14 @@ jobs:
   # run's throwaway key. Only what the selected checks need is built.
   apk:
     needs: changes
-    if: needs.changes.outputs.zone == 'true' || needs.changes.outputs.ring == 'true' || needs.changes.outputs.update == 'true' || needs.changes.outputs.background == 'true'
+    if: needs.changes.outputs.zone == 'true' || needs.changes.outputs.ring == 'true' || needs.changes.outputs.update == 'true' || needs.changes.outputs.background == 'true' || needs.changes.outputs.phone == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       PLAIN: ${{ needs.changes.outputs.zone == 'true' || needs.changes.outputs.background == 'true' }}
       RING: ${{ needs.changes.outputs.ring }}
       UPDATE: ${{ needs.changes.outputs.update }}
+      PHONE: ${{ needs.changes.outputs.phone }}
       # A fresh Gradle per build: each build's own environment (the update feed, the probe's CA)
       # reaches the Rust build, never a daemon's from the build before
       # Downloads time out and retry: run 42569853883 lost the build to one 504 from Maven Central
@@ -277,7 +286,7 @@ jobs:
           test -n "$apk" || { find crates/pm-desktop/gen/android/app/build/outputs -type f; exit 1; }
           echo "$apk"
           SH
-          mkdir -p out/plain out/ring out/update
+          mkdir -p out/plain out/ring out/update out/phone
       # A CA and a localhost certificate for this run only: the fixture homeserver's ICANN endpoint
       # (the ring-transport-probe build compiles the CA in; the other builds do not read it).
       - name: fixture certificate
@@ -305,6 +314,15 @@ jobs:
             unzip -lv out/plain/app.apk | sort -k1 -n -r | sed -n 1,8p
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      # Phone mode with no node: phone mode chosen and a TIDAL session seeded, TIDAL being the
+      # runner's stand-in (tools/android-phone-mode.py), through adb reverse on the emulator
+      - name: the APK with the phone mode fixture (x86_64)
+        if: env.PHONE == 'true'
+        env:
+          ODEION_PHONE_FIXTURE_TIDAL: http://127.0.0.1:18490
+        run: |
+          (cd crates/pm-desktop && bash "$RUNNER_TEMP/tauri.sh" --ci --apk --target x86_64 --features phone-mode-fixture)
+          bash "$RUNNER_TEMP/sign.sh" "$(bash "$RUNNER_TEMP/built.sh")" out/phone/app.apk
       - name: the APK with the Ring transport probe (x86_64)
         if: env.RING == 'true'
         run: |
@@ -356,6 +374,12 @@ jobs:
         with:
           name: apk-update
           path: out/update/
+          retention-days: 3
+      - if: env.PHONE == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-phone
+          path: out/phone/
           retention-days: 3
 
   # The node the phone plays from (phone-as-zone, background playback), next to the APK build
@@ -580,4 +604,48 @@ jobs:
         with:
           name: background-api${{ matrix.api }}-${{ matrix.target }}
           path: /tmp/bg
+          retention-days: 7
+
+  # Phone mode (tools/android-phone-mode.py): the app with no node opens phone mode by itself,
+  # searches the stand-in TIDAL in its own web UI and plays the song through the app's own player
+  # in real time. No node job: there is none.
+  phone-mode:
+    needs: [changes, apk]
+    if: needs.changes.outputs.phone == 'true'
+    name: phone mode (API 35, google_apis)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk-phone
+          path: probe
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: phone mode plays a TIDAL song with no node
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          ram-size: 6144M
+          disk-size: 8192M
+          cores: 4
+          emulator-boot-timeout: 1500
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
+          disable-animations: true
+          script: python3 -I tools/android-phone-mode.py probe/app.apk /tmp/pm
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: phone-mode-api35
+          path: |
+            /tmp/pm/*.png
+            /tmp/pm/*.txt
           retention-days: 7
