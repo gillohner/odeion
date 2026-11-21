@@ -797,6 +797,7 @@ jobs:
           ui-row-cover-mono.js row-cover-mono-shots
           ui-menu-keys.js menu-keys-shots
           ui-fixture-item-pages.js fixture-item-pages-shots
+          ui-search-library-change.js search-library-change-shots
           LIST
           for p in $pin; do
             case "$seen" in *" ${p%=*} "*) ;; *) echo "::error::pinned page ${p%=*} is not in the list"; exit 1 ;; esac

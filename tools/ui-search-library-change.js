@@ -1,7 +1,10 @@
 // A search kept for 5 minutes must not keep a playlist's old count once the library changed:
 // after a playlist is made or edited in the app, or the node says its library changed, the same
 // search typed again asks the node again (the new count); the search on screen is never emptied,
-// asked again or cut off by it, even while its answer is still on its way.
+// asked again or cut off by it, even while its answer is still on its way. The library changing
+// again while it is asked again asks once more; a hung ask is given up (old results kept, still
+// stale); an unchanged answer leaves the results as drawn; a search that ended in an error is asked
+// for its library answer only.
 // Real UI in Chromium, isolated responses (no node or external services).
 //   node tools/ui-search-library-change.js [repo] [screenshot directory]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -21,19 +24,24 @@ async function until(page, predicate, label, arg) {
   throw new Error('Timed out: ' + label);
 }
 
-async function setup(browser, width) {
+async function setup(browser, width, opts = {}) {
   const run = await fx.create(browser, width, { mobile: width < 600 });
-  const { context } = run;
-  // The playlist's count as the node would say it now (bumped by a write or by the test)
-  const lib = { count: 2, asked: [], hold: null };
+  const { context, page } = run;
+  if (opts.clock) await page.clock.install(); // (the hung case moves the clock on)
+  // The playlist's count as the node would say it now (bumped by a write or by the test);
+  // sources: the sources the node names (one that never answers ends the search in an error)
+  const lib = { count: 2, asked: [], hold: null, sources: 'library', noLibrary: 0 };
   await context.route(/\/v1\/search\?/, async (route) => {
     const url = new URL(route.request().url());
     lib.asked.push({ q: url.searchParams.get('q'), scope: url.searchParams.get('in') });
     const n = lib.count;
     if (lib.hold) await lib.hold;
+    // (noLibrary: that many asks end before the library answers)
+    if (lib.noLibrary > 0) { lib.noLibrary -= 1; return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': lib.sources }, body: '' }).catch(() => {}); }
     const hit = { kind: 'playlist', id: 'c1', title: 'Road songs', subtitle: `${n} songs · your playlist`, uri: 'playlist:c1', keys: ['playlist:c1'] };
     const song = { kind: 'song', id: 'lib-1', title: fx.track.title, subtitle: 'Sefa, Dr. Peacock', track_id: 1, uri: 'track:1', keys: ['track:1'] };
-    return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': 'library' }, body: JSON.stringify({ source: 'library', status: 'ok', hits: [hit, song], counts: [] }) + '\n' });
+    // (.catch: an ask the app gave up on is gone by then)
+    return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': lib.sources }, body: JSON.stringify({ source: 'library', status: 'ok', hits: [hit, song], counts: [] }) + '\n' }).catch(() => {});
   });
   let socket = null;
   await context.routeWebSocket(/\/v1\/events/, (ws) => {
@@ -166,6 +174,134 @@ async function redrawn(browser, width) {
   } finally { await context.close(); }
 }
 
+const countShown = (page, n) => until(page, (k) => new RegExp(`${k} songs · your playlist`).test((document.querySelector('#sresults') || {}).innerText || ''), `${n} songs drawn`, n);
+// Open the search, leave it for a result, change the library, and come Back while the node's
+// library answer is held: { release } lets that answer through
+async function backWhileHeld(page, lib, changed, count) {
+  await fx.go(page, '/search?q=road');
+  await countShown(page, 2);
+  await page.locator('#sresults', { hasText: 'Road songs' }).getByText('Road songs').first().click();
+  await until(page, () => history.state && history.state.v !== 'search', 'left the search');
+  lib.count = count; changed();
+  let release; lib.hold = new Promise((r) => { release = r; });
+  await page.goBack();
+  await until(page, () => history.state && history.state.v === 'search' && !!document.querySelector('#sresults'), 'back on the search');
+  for (const end = Date.now() + 7000; lib.asked.length < 2; await sleep(50)) if (Date.now() > end) throw new Error('Timed out: asked again after Back');
+  return { release: () => { release(); lib.hold = null; } };
+}
+
+// The library changes again while its search is asked again, and the search is opened again before
+// that answer is in: the answer that lands may be older than the change, so it is asked once more
+// (on screen: right away) and the newest count is drawn, not the one in between. Only once: a change
+// during that ask too (a long scan) leaves it stale until it is opened again
+async function changedWhileAsked(browser, width) {
+  const { page, context, state, lib, changed } = await setup(browser, width);
+  try {
+    const held = await backWhileHeld(page, lib, changed, 5); // (that ask says 5)
+    lib.count = 6; changed();
+    await nav(page, 'home');
+    await typeAgain(page, 'road');
+    await sleep(300);
+    assert.equal(lib.asked.length, 2, 'not asked twice at once');
+    held.release();
+    let release2; lib.hold = new Promise((r) => { release2 = r; });
+    for (const end = Date.now() + 7000; lib.asked.length < 3; await sleep(50)) if (Date.now() > end) throw new Error('Timed out: asked once more');
+    assert.equal(lib.asked[2].scope, 'library');
+    lib.count = 9; changed();
+    release2(); lib.hold = null;
+    await countShown(page, 6);
+    await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone');
+    await sleep(400);
+    assert.equal(lib.asked.length, 3, 'asked once more after the change during the ask, not again and again');
+    // ... still stale: opened again it asks (the newest count), and no more after that
+    await nav(page, 'home');
+    await typeAgain(page, 'road');
+    await countShown(page, 9);
+    assert.equal(lib.asked.length, 4);
+    await nav(page, 'home');
+    await typeAgain(page, 'road');
+    await countShown(page, 9);
+    await sleep(300);
+    assert.equal(lib.asked.length, 4, 'the newest answer is kept');
+    await page.screenshot({ path: path.join(shots, `again-${width}-after.png`) });
+    assert.deepEqual(state.errors, []);
+  } finally { await context.close(); }
+}
+
+// The node never answers the ask again: after 15 s it is given up, the old results stay (no
+// progress line left on), and the search, still stale, asks again when opened again
+async function hung(browser, width) {
+  const { page, context, state, lib, changed } = await setup(browser, width, { clock: true });
+  try {
+    const held = await backWhileHeld(page, lib, changed, 7);
+    assert.equal(await page.evaluate(() => document.querySelector('#sprog').hidden), false, 'progress line while asked');
+    await page.clock.fastForward(16000);
+    await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone after the hung ask is given up');
+    assert.match(await shown(page), /2 songs · your playlist/, 'the old results stay');
+    await page.screenshot({ path: path.join(shots, `hung-${width}-given-up.png`) });
+    held.release();
+    await nav(page, 'home');
+    await typeAgain(page, 'road');
+    await countShown(page, 7);
+    assert.equal(lib.asked.length, 3, 'still stale: asked again when opened again');
+    assert.deepEqual(state.errors, []);
+  } finally { await context.close(); }
+}
+
+// The library answer asked again is the same as before: the results are not drawn again
+async function unchanged(browser, width) {
+  const { page, context, state, lib, changed } = await setup(browser, width);
+  try {
+    const held = await backWhileHeld(page, lib, changed, 2);
+    await page.evaluate(() => { document.querySelector('#sresults .srow').pmMark = 1; });
+    held.release();
+    await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone');
+    assert.equal(lib.asked.length, 2);
+    assert.equal(await page.evaluate(() => (document.querySelector('#sresults .srow') || {}).pmMark), 1, 'the same answer leaves the rows as drawn');
+    assert.deepEqual(state.errors, []);
+  } finally { await context.close(); }
+}
+
+// A search that ended in an error ("Search couldn't finish", a service never answered) and went
+// stale is asked for its library answer only when opened again (no automatic full search); its
+// Retry stays
+async function errored(browser, width) {
+  const { page, context, state, lib, changed } = await setup(browser, width);
+  try {
+    lib.sources = 'library,tidal';
+    await fx.go(page, '/search?q=road');
+    await countShown(page, 2);
+    await until(page, () => !!document.querySelector('#sfailure [data-sretry]'), 'search could not finish');
+    lib.count = 8; changed();
+    await nav(page, 'home');
+    await typeAgain(page, 'road');
+    await countShown(page, 8);
+    assert.equal(lib.asked.length, 2);
+    assert.equal(lib.asked[1].scope, 'library', 'only the library is asked again');
+    assert.ok(await page.evaluate(() => !!document.querySelector('#sfailure [data-sretry]')), 'Retry stays');
+    assert.deepEqual(state.errors, []);
+  } finally { await context.close(); }
+}
+
+// A search that could not finish because the library answer was the one missing: the library
+// answer asked again fills it in, and "Search couldn't finish" goes
+async function erroredLibrary(browser, width) {
+  const { page, context, state, lib, changed } = await setup(browser, width);
+  try {
+    lib.noLibrary = 1;
+    await fx.go(page, '/search?q=road');
+    await until(page, () => !!document.querySelector('#sfailure [data-sretry]'), 'search could not finish');
+    lib.count = 3; changed();
+    await nav(page, 'home');
+    await typeAgain(page, 'road');
+    await countShown(page, 3);
+    assert.equal(lib.asked.length, 2);
+    assert.equal(lib.asked[1].scope, 'library');
+    await until(page, () => !document.querySelector('#sfailure'), '"Search couldn\'t finish" gone');
+    assert.deepEqual(state.errors, []);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -174,7 +310,12 @@ async function redrawn(browser, width) {
       await nodeEvent(browser, width);
       await redrawn(browser, width);
       await back(browser, width);
-      console.log(`ok ${width}px: a playlist write or library change makes the same search ask again; the one on screen stays`);
+      await changedWhileAsked(browser, width);
+      await unchanged(browser, width);
+      await errored(browser, width);
+      await erroredLibrary(browser, width);
+      if (width === 360) await hung(browser, width);
+      console.log(`ok ${width}px: a playlist write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing)`);
     }
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });
