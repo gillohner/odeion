@@ -4018,8 +4018,11 @@
     const tid = it.track_id ?? trackIdOf(it);
     const known = tid != null && state.trackCache.get('track:' + tid);
     const credits = Array.isArray(it.artists) ? it.artists : known && known.artists;
-    if (Array.isArray(credits) && credits.length) return credits.filter((a) => a && a.name).map((a) => ({ name: a.name, id: a.id != null && /^\d+$/.test(String(a.id)) ? 'lib-' + a.id : null, join: a.join_phrase ?? a.joinphrase ?? ', ' }));
-    return it.artist ? [{ name: it.artist, id: it.artist_id && !/[,;&/]/.test(it.artist) ? it.artist_id : null, join: '' }] : [];
+    // A phone without a node has no library artist pages: its songs' artists are a search there
+    const libPages = !phoneMode() || can('library');
+    const libId = (id) => libPages || !/^(lib-)?\d+$/.test(String(id));
+    if (Array.isArray(credits) && credits.length) return credits.filter((a) => a && a.name).map((a) => ({ name: a.name, id: a.id != null && /^\d+$/.test(String(a.id)) && libPages ? 'lib-' + a.id : null, join: a.join_phrase ?? a.joinphrase ?? ', ' }));
+    return it.artist ? [{ name: it.artist, id: it.artist_id && !/[,;&/]/.test(it.artist) && libId(it.artist_id) ? it.artist_id : null, join: '' }] : [];
   };
   // A song's ⋯ on a phone, where its row's names take no taps or Tab (rowLinkTab): one Go to per
   // credited artist when there are two or more ("Go to Sefa", "Go to Dr. Peacock"); else null and

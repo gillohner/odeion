@@ -37,6 +37,9 @@ const run = async (browser, w) => {
     if (v === '/sources') return json([]);
     if (v === '/play-order') return json({ order: [], services: [] });
     if (v === '/offline') { r.offline++; return json(LIST); }
+    // A search finds the phone's song (a library hit with its track id)
+    if (v === '/search') return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': 'library' },
+      body: JSON.stringify({ source: 'library', status: 'ok', ms: 0, counts: [], hits: [{ kind: 'song', id: 'lib-1', title: 'Pocket Song', subtitle: 'Phone Band', track_id: 1, album: 'Phone Album', duration_ms: 61000 }] }) + '\n' });
     // Bookmarks by the song's canonical URL, as the phone keeps them
     if (v === '/favourites' && req.method() === 'GET') return json({ tracks: [], albums: [], artists: [], posts: [], other: [...r.favs], uris: [...r.favs] });
     if (v === '/favourites' && req.method() === 'PUT') { r.favs.add(SONG.canonical.url); return json({ uri: SONG.canonical.url, favourite: true, pending: true }); }
@@ -107,6 +110,13 @@ const shown = (page, sel) => page.evaluate((s) => { const el = document.querySel
     const menu = await p.evaluate(() => [...document.querySelectorAll('[role="menu"] [role="menuitem"], .menu button, .sheet button')].map((b) => b.innerText.trim()).filter(Boolean));
     check(menu.length > 0 && !menu.some((t) => /^Go to artist/.test(t)) && menu.some((t) => /Search .Phone Band/.test(t)), `${at}: the ⋯ menu searches for the artist instead of an artist page (${menu.join(' | ')})`);
     await p.keyboard.press('Escape'); await sleep(300);
+    // Found by a search: its artist is a search there, not an artist page the phone doesn't have
+    await p.fill('#search', 'pocket'); await p.press('#search', 'Enter');
+    await p.waitForSelector('#sresults [data-skind="song"] .srow', { timeout: 5000 }).catch(() => {});
+    const credits = await p.evaluate(() => [...document.querySelectorAll('#sresults [data-artist-credit]')].map((a) => [a.dataset.artistCredit, a.dataset.creditId || '']));
+    check(credits.length > 0 && credits.every(([, id]) => !id), `${at}: a search hit's artist link is a search (${JSON.stringify(credits)})`);
+    if (w < 600) await p.click('[data-bnav="library"]').catch(() => {}); else await p.click('.nav-item.nav-offline').catch(() => {});
+    await p.waitForSelector('#main .track', { timeout: 5000 }).catch(() => {});
     // The heart of a phone song (rows show it from tablet widths; phones use the ⋯ menu): on once
     // bookmarked, also after the list is drawn again, and off again
     const heart = '#main .track [data-act="fav"]';
