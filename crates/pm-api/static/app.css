@@ -2207,6 +2207,14 @@ body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.o
 .dl-note { margin-top: 4px; }
 body.offline [data-bnav="home"] { display: none; }
 body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
+/* Phone mode (the app's own backend, no node): only what the phone lists (app.js PHONE_CAPS; a
+   body.no-<capability> class for each one it doesn't), never a greyed-out teaser */
+body.phone .nav-label, body.phone .nav-item:is([data-view="home"], [data-view="library"], [data-view="radio"], [data-view="zones"]),
+body.phone :is([data-bnav="home"], [data-bnav="zones"], #zonebtn, #jobchip, #upstreams, #npzone, #izone),
+body.no-search :is(.topbar .search, [data-bnav="search"]), body.no-sources .nav-item[data-view="sources"],
+body.no-library :is(.nav-item:is([data-view="albums"], [data-view="artists"], [data-view="genres"], [data-view="tracks"]), [data-bnav="library"]),
+body.no-bookmarks :is(.nav-item[data-view="favourites"], #ifav, #npheart, [data-sfav], .track [data-act="fav"]),
+body.no-collections :is(.nav-item[data-view="playlists"], .selbar [data-sel="playlist"]), body.no-tags .selbar [data-sel="tag"] { display: none; }
 /* The source line on item pages (STEWARD-UX-PLAYER-SOURCES §1): small, one line, no pills */
 .srcline { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 8px; font-size: var(--fs-sm); color: var(--muted); min-width: 0; }
 .srcline .src, .srcline .srcrest { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
