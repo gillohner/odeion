@@ -815,20 +815,23 @@
       toast(v.undo ? 'Back to the file’s tags' : 'Saved on this node'); onLibraryChanged(); if (state.view === 'library') render();
     } catch (e) { toast(e.message, 'error'); }
   };
-  const removeFromLibrary = async (id, title) => {
+  // (anchor: the ⋯ it was chosen from; on a search result, the focus goes on to the next result's ⋯
+  // once the song leaves the list, else to the search box, not to the page's top)
+  const removeFromLibrary = async (id, title, anchor) => {
     const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true }] });
     if (!ok) return;
     try {
       await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library');
-      // (the kept searches' library answers lose the song now: the search on screen is drawn again
-      // from its kept answer, not asked again, so it would list the song until started again; a
-      // service's copy of it stays, without the library's id, so its ⋯ no longer offers Remove)
-      const gone = (h) => h.kind === 'song' && h.track_id != null && Number(h.track_id) === Number(id);
-      for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) {
-        if (!a || !Array.isArray(a.hits) || !a.hits.some(gone)) continue;
-        r.answers[src] = { ...a, hits: src === 'library' ? a.hits.filter((h) => !gone(h)) : a.hits.map((h) => (gone(h) ? { ...h, track_id: null, id: h.id === `lib-${id}` && h.page ? idOf(h.page) : h.id } : h)) };
-      }
-      onLibraryChanged(); render();
+      // (the kept searches' answers lose the song now: the search on screen is drawn again from its
+      // kept answer, not asked again, so it would list the song until started again; withoutTrack)
+      removedTracks.push(Number(id));
+      for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) r.answers[src] = withoutTrack(a, src, id);
+      const at = anchor ? $$('#sresults [data-smore]').indexOf(anchor) : -1;
+      const focused = at >= 0 && document.activeElement === anchor;
+      onLibraryChanged();
+      // (waited for only then: another page's redraw can take long, or never end when left meanwhile)
+      const drawn = render();
+      if (focused) { await drawn; if ((!document.activeElement || document.activeElement === document.body) && state.view === 'search') ($$('#sresults [data-smore]')[at] || search).focus(); }
     } catch (e) { toast(e.message, 'error'); }
   };
   const editAlbumTags = async (albumId, title, artist) => {
@@ -5395,6 +5398,18 @@
   libWrote = forgetLibrarySearches;
   const SEARCH_REFRESH_MS = 15000;
   // (an answer the same but for the time it took)
+  // Songs removed from the library this session, in order (removeFromLibrary): an answer asked before
+  // a removal and landing after it drops them (refreshSearch)
+  const removedTracks = [];
+  // An answer without library song id: the library's copy goes; a service's copy stays, without the
+  // library's id (no Remove or Edit tags on it, its page not the removed song's)
+  const withoutTrack = (a, src, id) => {
+    const gone = (h) => h.kind === 'song' && h.track_id != null && Number(h.track_id) === Number(id);
+    if (!a || !Array.isArray(a.hits) || !a.hits.some(gone)) return a;
+    // (a copy with no page: its uri's page when it names one, else no song page)
+    const pageId = (h) => { if (h.page) return idOf(h.page); const k = npPageId(h.uri); return k && !k.startsWith('lib-') ? k : null; };
+    return { ...a, hits: src === 'library' ? a.hits.filter((h) => !gone(h)) : a.hits.map((h) => (gone(h) ? { ...h, track_id: null, id: h.id === `lib-${id}` ? pageId(h) : h.id } : h)) };
+  };
   const sameAnswer = (a, b) => !!a && !!b && JSON.stringify({ ...a, ms: 0 }) === JSON.stringify({ ...b, ms: 0 });
   const refreshSearch = (run, again) => {
     if (run.refreshing) return; // (stays stale: asked once more when that answer is in)
@@ -5402,15 +5417,19 @@
     (async () => {
       let ok = false; let same = false;
       const ctrl = new AbortController(); const cut = setTimeout(() => ctrl.abort(), SEARCH_REFRESH_MS);
+      const since = removedTracks.length; // (songs removed while it is asked: its answer may be older)
       try {
         let fresh = null;
         await readSearch(run.q, 'library', ctrl.signal, () => {}, (a) => { if (a.source === 'library') fresh = a; });
         if (!fresh || fresh.status !== 'ok') throw new Error('Library answer missing');
         ok = true;
         if (searchRuns.get(searchKey(run.q, run.scope)) !== run) return; // (replaced meanwhile: Retry)
+        for (const id of removedTracks.slice(since)) fresh = withoutTrack(fresh, 'library', id);
         same = sameAnswer(run.answers.library, fresh);
         run.answers = { ...run.answers, library: fresh };
-        if (run.error && run.sources.every((src) => run.answers[src])) run.error = false; // (it was the one missing)
+        // (it was the one missing, or the stream broke after every source answered: the banner goes,
+        // so the page is drawn again even when the answer is the same)
+        if (run.error && run.sources.every((src) => run.answers[src])) { run.error = false; same = false; }
       } catch { run.stale = true; } finally {
         clearTimeout(cut); run.refreshing = false;
         if (ok && run.stale && !again && currentSearch(run)) refreshSearch(run, true);
@@ -5424,7 +5443,9 @@
     const onScreen = keepShown && old === shownSearch && state.view === 'search' && !!$('#sresults');
     if (old && (old.pending || Date.now() - old.startedAt < SEARCH_TTL)) {
       if (!old.stale || onScreen || old.pending) return old;
-      refreshSearch(old); return old;
+      // (one that failed before the node named its sources, the node offline, has no answer to keep:
+      // it is searched afresh)
+      if (!old.error || old.sources.includes('library')) { refreshSearch(old); return old; }
     }
     for (const r of searchRuns.values()) if (r.pending && r !== old) { try { r.ctrl.abort(); } catch { /* */ } r.pending = false; }
     const run = { q, scope, sources: [], answers: {}, startedAt: Date.now(), firstAt: null, doneAt: null, ctrl: new AbortController(), pending: true, slow: new Set() };
@@ -6719,7 +6740,7 @@
       ...(o.alsoHere && o.alsoHere.length ? [{ label: 'Also on…', icon: 'compass', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl.isConnected ? anchorEl : ($('#imore') || anchorEl), [{ title: 'Also on' }, ...o.alsoHere.map((x) => ({ label: x.label, svc: x.svc, run: () => o.switchTo(x.k) }))]); }, 0); } }] : []),
       ...(o.extra || []),
       // The owner's library: edit tags on the node, take a song out (Your library › Node library)
-      ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title) }] : []),
+      ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title, anchorEl) }] : []),
       ...(isOwner() && /^\/album\/lib-\d+$/.test(o.path || '') ? [{ label: 'Rename album…', icon: 'disc', run: () => editAlbumTags(Number(o.path.split('-').pop()), o.title) }] : []),
       // A library song's or album's match corrected: the Confirm matches view for its songs
       ...(isOwner() && trackIds.length && /^\/(song|album)\//.test(o.path || '') ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: trackIds.slice(0, 500) }) }] : []),
@@ -9846,8 +9867,9 @@
               .then((p) => {
                 // A failed ask (network, 5xx) keeps what was kept and shows it: the tags drawn from it stay as they
                 // are (the area doesn't collapse to an error under a thumb, and the next redraw stands it in), or
-                // a newer one kept meanwhile (another redraw's ask) is drawn instead
-                if (p.state === 'error') { const k = at.get(pubKey(g)); if (k && k.p) p = { ...k.p, kept: true }; else if (was.kept) return; } else {
+                // a newer one kept meanwhile (another redraw's ask) is drawn instead; a newer "no identity" kept
+                // meanwhile (p null) draws as that answer, nothing, not the older tags shown
+                if (p.state === 'error') { const k = at.get(pubKey(g)); if (k && k.p) p = { ...k.p, kept: true }; else if (k) p = { state: 'none', tags: [], faces: {}, unknown: true }; else if (was.kept) return; } else {
                   // Kept for this page's next redraw: an answer ("no identity" drops it), when newer than the one kept
                   const had = at.get(pubKey(g));
                   if (!had || had.ask < ask) at.set(pubKey(g), { ask, p: p.state === 'ok' || (p.state === 'none' && !p.unknown) ? p : null });
