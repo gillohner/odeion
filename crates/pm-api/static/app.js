@@ -6031,10 +6031,11 @@
   // Pubky's last tags answers for the item page on screen, per group: the page drawn again (a rating
   // saved, a bookmark) shows them while it asks again, so the stars under them don't jump for a round
   // trip. A tag edit forgets them (an earlier answer would show a removed tag again).
-  // (a new map: an answer still on its way from before the edit lands in the old one). Two quick
-  // redraws each ask; only the newest ask's answer is kept (asked: per group, the last ask's number),
-  // so an older answer landing late doesn't stand in on the next redraw
-  let heroPub = { page: null, by: new Map(), asked: new Map() };
+  // (a new map: an answer still on its way from before the edit lands in the old one). Quick redraws
+  // each ask; each kept answer has its ask's number, and one that lands is kept only when it is newer
+  // than the one kept (an older answer landing late doesn't stand in on the next redraw, a newer one
+  // landing before the newest ask's does). A failed ask (network, 5xx) changes nothing kept.
+  let heroPub = { page: null, by: new Map() };
   let heroPubAsk = 0;
   function forgetHeroPub() { heroPub.by = new Map(); }
   const openHeroAdd = async (box, ht, b, focus = true) => {
@@ -9587,10 +9588,12 @@
           const shownSong = !!songRef && !songOwn.needsMatch;
           const songUri = localRef ? songOwn.uri : songRef && songRef.uri;
           // Drawn again: the last answers this page had stand in until the new ones come (pubKey)
-          if (!again || heroPub.page !== pageKey) heroPub = { page: pageKey, by: new Map(), asked: new Map() };
+          if (!again || heroPub.page !== pageKey) heroPub = { page: pageKey, by: new Map() };
           const kept = heroPub.by;
           const pubKey = (g) => `${g.scope}|${refQs(g.ref)}`;
-          const pubFrom = (uri, scope, ref) => (uri && pg.on_pubky && pg.on_pubky.uri === uri ? { state: 'ok', tags: pg.on_pubky.tags || [], faces: pg.on_pubky.faces || {} } : kept.has(pubKey({ scope, ref })) ? { ...kept.get(pubKey({ scope, ref })), kept: true } : { state: 'loading', tags: [], faces: {} });
+          // (kept: { ask, p }; p null when the newest answer said "no identity")
+          const keptOf = (scope, ref) => { const k = kept.get(pubKey({ scope, ref })); return k && k.p; };
+          const pubFrom = (uri, scope, ref) => (uri && pg.on_pubky && pg.on_pubky.uri === uri ? { state: 'ok', tags: pg.on_pubky.tags || [], faces: pg.on_pubky.faces || {} } : keptOf(scope, ref) ? { ...keptOf(scope, ref), kept: true } : { state: 'loading', tags: [], faces: {} });
           const linkName = pg.source || 'source';
           const tagGroups = [
             ...(shownSong ? [{ scope: 'song', name: `On this ${kind}`, ref: songRef, own: songOwn.tags, pub: pubFrom(songUri, 'song', songRef) }] : []),
@@ -9782,14 +9785,19 @@
           drawHeroTags(ht);
           for (const g of tagGroups) {
             if (g.pub.state !== 'loading' && !g.pub.kept) continue;
-            const was = g.pub; const at = heroPub.by; const asked = heroPub.asked; const ask = ++heroPubAsk; asked.set(pubKey(g), ask);
+            const was = g.pub; const at = heroPub.by; const ask = ++heroPubAsk;
             api('GET', `/discover/uri?${refQs(g.ref)}`).then((r) => ({ state: 'ok', tags: r.tags || [], faces: r.faces || {} }))
               // No contact for Pubky (412) or no identity (422): nothing to show, not a failure
               .catch((e) => ({ state: [404, 412, 422].includes(e.status) ? 'none' : 'error', tags: [], faces: {}, unknown: e.status === 422 }))
               .then((p) => {
-                // Kept for this page's next redraw: an answer (not a failure, nor "no identity", which drops the group)
-                // (only the newest ask's: an older one landing late would replace it)
-                if (asked.get(pubKey(g)) === ask) { if (p.state === 'ok' || (p.state === 'none' && !p.unknown)) at.set(pubKey(g), p); else at.delete(pubKey(g)); }
+                // A failed ask (network, 5xx) keeps what was kept and shows it: the tags drawn from it stay as they
+                // are (the area doesn't collapse to an error under a thumb, and the next redraw stands it in), or
+                // a newer one kept meanwhile (another redraw's ask) is drawn instead
+                if (p.state === 'error') { const k = at.get(pubKey(g)); if (k && k.p) p = { ...k.p, kept: true }; else if (was.kept) return; } else {
+                  // Kept for this page's next redraw: an answer ("no identity" drops it), when newer than the one kept
+                  const had = at.get(pubKey(g));
+                  if (!had || had.ask < ask) at.set(pubKey(g), { ask, p: p.state === 'ok' || (p.state === 'none' && !p.unknown) ? p : null });
+                }
                 g.pub = p;
                 // The same as the kept one already drawn: nothing to draw again
                 if (was.kept && JSON.stringify([was.state, was.tags, was.faces, !!was.unknown]) === JSON.stringify([p.state, p.tags, p.faces, !!p.unknown])) return;
