@@ -1,0 +1,31 @@
+[package]
+name = "pm-sources"
+description = "TIDAL and Qobuz for Odeion, shared by the node and the app's phone mode: sign-in steps, catalogue calls, stream URLs and readers, behind small stores each side implements"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pm-model = { workspace = true }
+base64 = "0.22"
+md-5 = "0.10"
+quick-xml = "0.42" # DASH manifests (TIDAL full tracks)
+rand = "0.8"
+reqwest = { workspace = true, features = ["blocking", "query"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[features]
+# Test points (mock API bases, a moved discovery clock) for this crate's and the node's tests;
+# never in a release build
+test-hooks = []
+
+[dev-dependencies]
+axum = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
