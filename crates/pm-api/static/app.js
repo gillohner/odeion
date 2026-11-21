@@ -377,6 +377,7 @@
   const inFlight = new Map();
   // A listing of someone's shared playlists that may miss some (x-partial)
   const SHARED_PARTIAL = "Some of their posts couldn't be read, so this list may miss some.";
+  let libWrote = () => {}; // (the search's, below: forgetLibrarySearches)
   const api = (method, path, body, opts = {}) => {
     // Usage insights (usage.js) count only requests a press or a page the person opened made
     if (opts.usage === undefined) opts = { ...opts, usage: inHandler > 0 || pressing > 0 || !!opts.navRead };
@@ -384,6 +385,9 @@
     // A tag written anywhere: an item page's kept Pubky tags are out of date (again once it lands: an
     // answer asked for while it was on its way may not have it yet)
     const tagWrite = path.split('?')[0] === '/tags'; if (tagWrite) forgetHeroPub();
+    // A playlist written (made, changed, deleted) or music imported: the kept searches holding the
+    // library's answers are out of date once it is answered (libWrote, forgetLibrarySearches)
+    const libWrite = (/^\/playlists(\/|$)/.test(path) && !/\/play(\?|$)/.test(path)) || /\/imports?(\?|$)/.test(path) || /^\/shared\/[^/]+\/playlists\/[^/]+\/copy$/.test(path);
     // The body as it is now (a queued change sends what was asked, even if the object changes meanwhile)
     let sent; let snap; try { sent = body === undefined ? '' : JSON.stringify(body); snap = sent ? JSON.parse(sent) : body; } catch { return apiSend(method, path, body, opts); }
     // One line per resource (its path without the query: PUT /favourites and DELETE /favourites?… too)
@@ -403,7 +407,7 @@
     inFlight.set(line, entry);
     // (kept on its line until it and every earlier one there have settled, even when it was cut while
     // waiting: a later one still goes after the earlier ones; a failed one isn't handed to a new ask)
-    const done = () => { entry.ask = null; if (tagWrite) forgetHeroPub(); }; entry.p.then(done, done);
+    const done = () => { entry.ask = null; if (tagWrite) forgetHeroPub(); if (libWrite) libWrote(); }; entry.p.then(done, done);
     entry.settled.then(() => { if (inFlight.get(line) === entry) inFlight.delete(line); });
     return entry.p;
   };
@@ -609,7 +613,7 @@
       const j = await (async () => {
         const r = await fetch('/v1/playlists/import/file?file=' + encodeURIComponent(f.name), { method: 'POST', signal: ac.signal, headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
         const b = await r.json().catch(() => ({})); if (!r.ok || !b.id) throw new Error(b.error || `The node answered ${r.status}`);
-        return b;
+        libWrote(); return b;
       })().catch((e) => { throw ac.signal.aborted ? new Error('The node stopped answering, so the playlist may not be in. Playlists shows whether it is.') : e; });
       const said = `Imported “${j.name}”: ${j.imported} of ${j.parsed} matched${j.kept ? ` · ${countOf(j.kept, 'kept as links')}` : ''}${(j.unresolved || []).length ? ` · not matched: ${j.unresolved.slice(0, 4).map((d) => d.title).join(', ')}` : ''}`;
       api('GET', '/playlists').then((l) => { state.playlists = l; }, () => {});
@@ -689,6 +693,7 @@
             try {
               const res = await fetch(`/v1/import/roon?file=${encodeURIComponent(f.name)}&${opts}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
               const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
+              if (!dry) libWrote();
               const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
               const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}${r.playlist.kept ? ` and ${countOf(r.playlist.kept, 'links')} to match by hand` : ''}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
               const row = `<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${fmtCount(r.matched)} of ${fmtCount(r.rows)} matched this library${did ? ' · ' + esc(did) : ''}</p>`
@@ -5328,10 +5333,54 @@
   const SEARCH_TTL = 5 * 60 * 1000;
   // One run per term and scope, whatever its case; a pasted link keeps its case (ids in paths differ by it)
   const searchKey = (q, scope) => `${/^https?:\/\//i.test(q || '') ? q : (q || '').toLowerCase()}|${scope}`;
-  const startSearch = (q, scope) => {
+  // One search's answers as they stream in (NDJSON, one line per source; x-pm-sources names them)
+  const readSearch = async (q, scope, signal, onSources, onAnswer) => {
+    const r = await fetch(`/v1/search?${new URLSearchParams({ q, in: scope })}`, { headers: state.token ? { authorization: 'Bearer ' + state.token } : {}, signal });
+    if (!r.ok) throw new Error('Search request failed');
+    onSources((r.headers.get('x-pm-sources') || '').split(',').filter(Boolean));
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    const accept = (line) => { if (line.trim()) onAnswer(JSON.parse(line)); };
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        accept(line);
+      }
+    }
+    accept(buf + dec.decode());
+  };
+  // The library changed (a playlist edited, music imported, the node's library_changed): a kept
+  // search holding its answers is stale, so the same search started again (typed, Back to it, its
+  // scope pressed) asks the node again for its library answer only (a playlist's new count; the
+  // services' answers stay as they were). The old results stay drawn, under the progress line, until
+  // the new library answer is in, then it takes the old one's place (no empty page, Back keeps the
+  // scroll); a failed ask keeps the old one. The one on screen is not asked again by its page being drawn again
+  // (keepShown), and one still on its way is neither cut off nor asked again.
+  let shownSearch = null; // (the run whose results #sresults shows, renderSearchBody)
+  const forgetLibrarySearches = () => { for (const r of searchRuns.values()) if (['everywhere', 'library'].includes(r.scope) || r.sources.includes('library')) r.stale = true; };
+  libWrote = forgetLibrarySearches;
+  const refreshSearch = (run) => {
+    run.stale = false; if (run.refreshing || !run.sources.includes('library')) return; run.refreshing = true;
+    (async () => {
+      try {
+        let fresh = null;
+        await readSearch(run.q, 'library', undefined, () => {}, (a) => { if (a.source === 'library') fresh = a; });
+        if (!fresh || fresh.status !== 'ok') throw new Error('Library answer missing');
+        if (searchRuns.get(searchKey(run.q, run.scope)) !== run) return; // (replaced meanwhile: Retry)
+        run.answers = { ...run.answers, library: fresh };
+      } catch { run.stale = true; } finally { run.refreshing = false; searchChanged(run); }
+    })();
+  };
+  const startSearch = (q, scope, keepShown) => {
     const key = searchKey(q, scope);
     const old = searchRuns.get(key);
-    if (old && (old.pending || Date.now() - old.startedAt < SEARCH_TTL)) return old;
+    const onScreen = keepShown && old === shownSearch && state.view === 'search' && !!$('#sresults');
+    if (old && (old.pending || Date.now() - old.startedAt < SEARCH_TTL)) {
+      if (!old.stale || onScreen || old.pending) return old;
+      if (!old.error) { refreshSearch(old); return old; }
+    }
     for (const r of searchRuns.values()) if (r.pending && r !== old) { try { r.ctrl.abort(); } catch { /* */ } r.pending = false; }
     const run = { q, scope, sources: [], answers: {}, startedAt: Date.now(), firstAt: null, doneAt: null, ctrl: new AbortController(), pending: true, slow: new Set() };
     searchRuns.set(key, run);
@@ -5340,28 +5389,15 @@
     if (word && word.length <= 20) api('GET', `/search/tags?prefix=${encodeURIComponent(word)}`).then((t) => { run.tags = t; searchChanged(run); }).catch(() => {});
     (async () => {
       try {
-        const r = await fetch(`/v1/search?${new URLSearchParams({ q, in: scope })}`, { headers: state.token ? { authorization: 'Bearer ' + state.token } : {}, signal: run.ctrl.signal });
-        if (!r.ok) throw new Error('Search request failed');
-        run.sources = (r.headers.get('x-pm-sources') || '').split(',').filter(Boolean);
-        searchChanged(run);
-        setTimeout(() => { if (!run.pending) return; for (const src of run.sources) if (!run.answers[src]) run.slow.add(src); searchChanged(run); }, 5000);
-        const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
-        const accept = (line) => {
-          if (!line.trim()) return;
-          const a = JSON.parse(line); run.answers[a.source] = a; run.slow.delete(a.source);
+        await readSearch(q, scope, run.ctrl.signal, (srcs) => {
+          run.sources = srcs;
+          searchChanged(run);
+          setTimeout(() => { if (!run.pending) return; for (const src of run.sources) if (!run.answers[src]) run.slow.add(src); searchChanged(run); }, 5000);
+        }, (a) => {
+          run.answers[a.source] = a; run.slow.delete(a.source);
           if (!run.firstAt) run.firstAt = Date.now();
           searchChanged(run);
-        };
-        for (;;) {
-          const { value, done } = await reader.read(); if (done) break;
-          buf += dec.decode(value, { stream: true });
-          let nl;
-          while ((nl = buf.indexOf('\n')) >= 0) {
-            const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-            accept(line);
-          }
-        }
-        accept(buf + dec.decode());
+        });
         if (run.sources.some((src) => !run.answers[src])) throw new Error('Search response incomplete');
       } catch (e) { if (e.name !== 'AbortError') run.error = true; }
       run.pending = false; run.doneAt = Date.now();
@@ -5377,7 +5413,7 @@
   const searchChanged = (run) => {
     if (!currentSearch(run)) return;
     const prog = $('#sprog'); const total = Math.max(run.sources.length, 1); const got = Object.keys(run.answers).length;
-    if (prog) { prog.hidden = !run.pending; prog.firstElementChild.style.width = `${Math.max(8, (got / total) * 100)}%`; }
+    if (prog) { prog.hidden = !run.pending && !run.refreshing; prog.firstElementChild.style.width = `${Math.max(8, (got / total) * 100)}%`; }
     renderSearchBody(run);
   };
   // Keyboard on the search box (TASK-pinakes-social-ux A1): ↑/↓ walk the results across the
@@ -7128,6 +7164,7 @@
   const renderSearchBody = (run) => {
     if (!currentSearch(run)) return;
     const chips = $('#scopechips'); const box = $('#sresults'); if (!chips || !box) return;
+    shownSearch = run;
     const retryFocus = $('[data-sretry]:focus, [data-scontact]:focus', box);
     const scope = run.scope;
     if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(displayedSearch()); }).catch(() => { state.sourcesLoading = false; }); }
@@ -8541,7 +8578,7 @@
           }
           const scope = a.in || 'everywhere'; state.searchScope = scope;
           if (search.value.trim() !== a.q) search.value = a.q;
-          const run = startSearch(a.q, scope);
+          const run = startSearch(a.q, scope, true);
           main.innerHTML = `<div class="page-head shead"><h2>Results for “${esc(a.q)}”</h2></div><div class="sbar" id="sbar"><div class="scopechips" id="scopechips"></div></div><div id="sresults"></div><div id="sresults-said" class="sr-only" aria-live="polite"></div>`;
           search.setAttribute('aria-controls', 'sresults'); search.setAttribute('aria-expanded', 'true');
           searchChanged(run);
@@ -10891,7 +10928,7 @@
   // GET /info that turns "no songs" into "songs" or back draws the one on screen again
   const songsChanged = () => { const e = $('#main .empty[data-songs]'); if (e && ['favourites', 'queue'].includes(state.view) && e.dataset.songs !== String(hasSongs())) render(); };
   const onLibraryChanged = () => {
-    forgetAlbums();
+    forgetAlbums(); forgetLibrarySearches();
     // (a playlist change cut after 30 s: the node changed something, so the next read ends its hold, plHolds)
     plHolds.forEach((h) => { if (h.cut) { h.cut = false; h.after = Math.min(h.after, plDraws + 1); } });
     // (the redraw below comes before the new song count, songsChanged)

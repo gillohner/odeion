@@ -988,6 +988,11 @@ async fn restore_locked(
                     let st = s.clone();
                     tokio::spawn(async move {
                         if let Ok(r) = sync.sync(&st.library).await {
+                            // (playlists pulled from the homeserver: search's kept library answers
+                            // and the open pages are out of date, as after the other syncs)
+                            if r.pulled > 0 {
+                                st.notify_library();
+                            }
                             sync.carry_on(&st, &r);
                         }
                     });
