@@ -98,6 +98,9 @@ pub struct Upload {
     pub error: Option<String>,
     #[serde(skip)]
     part: PathBuf,
+    /// A part is being written now: another one waits for it (409).
+    #[serde(skip)]
+    writing: bool,
 }
 
 /// The phone's songs and its uploads.
@@ -155,9 +158,11 @@ impl Songs {
     /// A whole uploaded file: named by its hash, its tags read, listed. The same file twice is
     /// one song.
     pub fn store(&self, part: &FsPath, name: &str) -> Result<Song, String> {
-        let bytes = std::fs::read(part).map_err(|e| e.to_string())?;
-        let hash = blake3::hash(&bytes).to_hex().to_string();
-        drop(bytes);
+        // Hashed as it is read (a song may be large)
+        let mut hasher = blake3::Hasher::new();
+        let mut f = std::fs::File::open(part).map_err(|e| e.to_string())?;
+        std::io::copy(&mut f, &mut hasher).map_err(|e| e.to_string())?;
+        let hash = hasher.finalize().to_hex().to_string();
         let safe = pm_appdata::files::safe_file_name(FsPath::new(name));
         let file = pm_appdata::files::remote_name_for(&hash, &safe);
         if let Some(s) = self.list().into_iter().find(|s| s.file == file) {
@@ -284,6 +289,7 @@ pub(crate) async fn start(State(p): State<Arc<Phone>>, Json(b): Json<NewUpload>)
             state: "receiving".into(),
             error: None,
             part,
+            writing: false,
         },
     );
     Json(json!({ "id": id, "offset": 0, "chunk_size": CHUNK, "already": false })).into_response()
@@ -314,7 +320,7 @@ pub(crate) async fn put_part(
         let Some(u) = ups.get(&id) else {
             return err(StatusCode::NOT_FOUND, "no such upload");
         };
-        if u.state != "receiving" || at.offset != u.offset {
+        if u.state != "receiving" || u.writing || at.offset != u.offset {
             return (
                 StatusCode::CONFLICT,
                 Json(json!({"offset": u.offset, "state": u.state})),
@@ -324,16 +330,42 @@ pub(crate) async fn put_part(
         if body.len() as u64 > CHUNK || u.offset + body.len() as u64 > u.size {
             return err(StatusCode::BAD_REQUEST, "that part doesn't fit the file");
         }
-        (u.part.clone(), u.name.clone(), u.size, u.offset)
+        let taken = (u.part.clone(), u.name.clone(), u.size, u.offset);
+        drop(ups);
+        if let Some(u) = p
+            .songs
+            .uploads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&id)
+        {
+            u.writing = true;
+        }
+        taken
     };
+    // From the acknowledged offset: what a failed write left after it is cut off first
     let appended = {
-        use std::io::Write;
+        use std::io::{Seek, Write};
         std::fs::OpenOptions::new()
-            .append(true)
+            .write(true)
             .open(&part)
-            .and_then(|mut f| f.write_all(&body))
+            .and_then(|mut f| {
+                f.set_len(offset)?;
+                f.seek(std::io::SeekFrom::Start(offset))?;
+                f.write_all(&body)?;
+                f.sync_data()
+            })
     };
     if let Err(e) = appended {
+        if let Some(u) = p
+            .songs
+            .uploads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&id)
+        {
+            u.writing = false;
+        }
         return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
     let now = offset + body.len() as u64;
@@ -342,6 +374,7 @@ pub(crate) async fn put_part(
         let mut ups = p.songs.uploads.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(u) = ups.get_mut(&id) {
             u.offset = now;
+            u.writing = false;
             if done {
                 u.state = "storing".into();
             }
@@ -351,9 +384,18 @@ pub(crate) async fn put_part(
         return Json(json!({"offset": now, "state": "receiving"})).into_response();
     }
     let p2 = p.clone();
-    let stored = tokio::task::spawn_blocking(move || p2.songs.store(&part, &name))
-        .await
-        .unwrap_or_else(|_| Err("storing stopped".into()));
+    let stored = tokio::task::spawn_blocking(move || {
+        // Whole: exactly the size the upload said
+        match std::fs::metadata(&part).map(|m| m.len()) {
+            Ok(n) if n == size => p2.songs.store(&part, &name),
+            _ => {
+                let _ = std::fs::remove_file(&part);
+                Err("the file arrived incomplete: add it again".into())
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err("storing stopped".into()));
     let mut ups = p.songs.uploads.lock().unwrap_or_else(|e| e.into_inner());
     let u = ups.get_mut(&id).expect("this upload");
     match stored {

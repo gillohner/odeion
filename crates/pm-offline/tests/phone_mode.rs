@@ -537,3 +537,55 @@ async fn a_song_added_from_the_phone_is_kept_listed_found_and_played() {
         .unwrap();
     assert_eq!(r.status(), 400);
 }
+
+#[tokio::test]
+async fn a_song_sent_in_parts_is_whole_on_the_phone() {
+    let f = Fixture::new().await;
+    let flac = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+    ))
+    .unwrap();
+    let r: Value = f
+        .http
+        .post(format!("{}/v1/library/uploads", f.base))
+        .bearer_auth(f.phone.key())
+        .json(&json!({"name": "Parts.flac", "size": flac.len()}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = r["id"].as_str().unwrap().to_string();
+    let (a, b) = flac.split_at(20_000);
+    let put = |offset: usize, body: Vec<u8>| {
+        let (f, id) = (&f, id.clone());
+        async move {
+            f.http
+                .put(format!("{}/v1/library/uploads/{id}?offset={offset}", f.base))
+                .bearer_auth(f.phone.key())
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let first: Value = put(0, a.to_vec()).await.json().await.unwrap();
+    assert_eq!(
+        (first["offset"].as_u64(), first["state"].as_str()),
+        (Some(20_000), Some("receiving"))
+    );
+    // The same part again (a retry after a lost answer) is refused with where the upload is
+    assert_eq!(put(0, a.to_vec()).await.status(), 409);
+    let done: Value = put(20_000, b.to_vec()).await.json().await.unwrap();
+    assert_eq!(done["state"], "stored", "{done}");
+    let (_, list) = f.json("/v1/offline").await;
+    let id = list["tracks"][0]["id"].as_i64().unwrap();
+    let whole = f
+        .get(&format!("/v1/library/tracks/{id}/file"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(whole.bytes().await.unwrap().len(), flac.len());
+}
