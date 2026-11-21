@@ -218,6 +218,12 @@ impl StreamingService for Qobuz {
     }
 
     async fn item(&self, s: &NodeState, id: &str) -> Result<SourceItem, ApiError> {
+        // A bad id is said before anything about the sign-in (as before the move)
+        if let Some(aid) = id.strip_prefix("album:") {
+            album_id(aid)?;
+        } else if let Some(tid) = id.strip_prefix("track:") {
+            numeric(tid)?;
+        }
         let (app, sess) = ready(s, &crate::accounts::asking())?;
         pm_sources::qobuz::item(&s.http_client(), &app, &sess.token, id)
             .await
@@ -225,6 +231,7 @@ impl StreamingService for Qobuz {
     }
 
     async fn artist(&self, s: &NodeState, id: &str) -> Result<SourceArtist, ApiError> {
+        numeric(id.strip_prefix("artist:").unwrap_or(id))?;
         let (app, sess) = ready(s, &crate::accounts::asking())?;
         pm_sources::qobuz::artist(&s.http_client(), &app, &sess.token, id)
             .await

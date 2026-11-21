@@ -478,13 +478,13 @@ impl Discovery {
 static DISCOVERY: std::sync::Mutex<Discovery> = std::sync::Mutex::new(Discovery::NONE);
 
 /// After a look that found candidates or saw a changed web player, the next waits this long.
-const DISCOVERY_EVERY: Duration = Duration::from_secs(5 * 60);
+pub const DISCOVERY_EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// After a look that could not reach Qobuz, or was cut off, the next waits only this long.
-const RETRY_AFTER: Duration = Duration::from_secs(60);
+pub const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// Found candidates are offered this long after their look started, never longer.
-const CANDIDATES_FOR: Duration = Duration::from_secs(10 * 60);
+pub const CANDIDATES_FOR: Duration = Duration::from_secs(10 * 60);
 
 /// A sign-in, and a stream's app refresh, end within this.
 pub const DEADLINE: Duration = Duration::from_secs(60);
