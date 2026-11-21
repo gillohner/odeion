@@ -5459,7 +5459,10 @@
 
   // Whether the focused element got its focus from a click on it (not from the keyboard or the page)
   let pointerDown = { at: 0, target: null }, focusByPointer = false;
-  document.addEventListener('pointerdown', (e) => { pointerDown = { at: performance.now(), target: e.target }; }, true);
+  // (and whether the last thing used was a key, not a mouse or a finger: a ⋯ menu then takes the focus)
+  let keyedLast = false;
+  document.addEventListener('pointerdown', (e) => { pointerDown = { at: performance.now(), target: e.target }; keyedLast = false; }, true);
+  document.addEventListener('keydown', () => { keyedLast = true; }, true);
   document.addEventListener('focusin', (e) => { const t = pointerDown.target; focusByPointer = !!t && performance.now() - pointerDown.at < 1000 && (e.target === t || (e.target.contains && e.target.contains(t))); }, true);
   // A song row's artist line cut with "…" (its artists, and under 900 px its album): the browser leaves a
   // focused link where it is once ~32 px of it shows, so a second artist took focus with most of its
@@ -6125,7 +6128,23 @@
     document.addEventListener('touchend', end, { passive: true });
     document.addEventListener('touchcancel', () => { if (sw) { clearTimeout(sw.timer); if (sw.on) reset(sw.row); sw = null; } }, { passive: true });
   }
-  const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
+  // The keyboard in a ⋯ menu: opened with Enter or Space, the menu takes the focus; ↑ ↓ Home End move
+  // through its items (← → skip no song there), Esc and Tab close it, and the focus goes back to its
+  // ⋯ (Tab then goes on from there), after an item too, so a page drawn again keeps it on the row.
+  // Before, the focus stayed on the ⋯ and no item could be reached without a mouse; after one it
+  // fell to the page. A mouse or a finger leaves the focus as it was.
+  let menuAnchor = null;
+  // (only after a key: a clicked item keeps the focus where the mouse left it)
+  const menuBack = () => { const a = menuAnchor; if (keyedLast && a && a.isConnected && menuEl.contains(document.activeElement)) a.focus({ preventScroll: true }); };
+  menuEl.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.stopPropagation(); return; }
+    if (e.key === 'Tab') { closeMenu(); return; }
+    const items = $$('.pop-item:not([disabled])', menuEl); const i = items.indexOf(document.activeElement); const n = items.length;
+    const to = !n ? null : e.key === 'ArrowDown' ? (i + 1) % n : e.key === 'ArrowUp' ? (i <= 0 ? n - 1 : i - 1) : e.key === 'Home' ? 0 : e.key === 'End' ? n - 1 : null;
+    if (to == null || e.altKey || e.ctrlKey || e.metaKey) return;
+    e.preventDefault(); e.stopPropagation(); items[to].focus({ preventScroll: true });
+  });
+  const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuBack(); menuEl.hidden = true; if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
   // Phones: a sheet closes with a swipe down while its list is at the top (it follows the finger;
   // a short pull springs back). A swipe that starts sideways or scrolls the list is left alone.
@@ -6171,10 +6190,15 @@
         return;
       }
     }
+    // (a key used last, with the focus on the ⋯, the row it is in (the context menu key), nowhere, or
+    // in the menu before (a sub-menu): not a mouse's click that left a menu item focused)
+    const fa = document.activeElement;
+    const keyed = keyedLast && (!fa || fa === document.body || fa === anchor || menuEl.contains(fa) || (fa.contains && fa.contains(anchor)));
+    menuAnchor = anchor;
     menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.face ? face(it.face) : it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
     // The item runs first: a page it opens replaces the transient entry; otherwise it is popped. The menu
     // closes at once, so the control that opened it (its ⋯) shows the progress until the item is done.
-    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuEl.hidden = true; Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
+    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuBack(); menuEl.hidden = true; Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
     menuEl.hidden = false; pushTransient();
     const r = anchor.getBoundingClientRect(); const mw = 280;
     menuEl.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
@@ -6183,6 +6207,7 @@
     // Phones: a sheet from the bottom, not a dropdown that runs off the screen (UX review #3)
     menuEl.classList.toggle('sheet', shellMode() === 'phone');
     if (menuEl.classList.contains('sheet')) { menuEl.style.left = '0px'; menuEl.style.right = '0px'; menuEl.style.top = 'auto'; menuEl.style.bottom = '0px'; menuEl.style.width = 'auto'; }
+    if (keyed) { const first = $('.pop-item:not([disabled])', menuEl); if (first) first.focus({ preventScroll: true }); }
     // A click outside only closes the menu (it does not also press what is under it).
     setTimeout(() => { const outside = (e) => { if (menuEl.hidden) { document.removeEventListener('click', outside, true); return; } if (!menuEl.contains(e.target)) { e.stopPropagation(); e.preventDefault(); document.removeEventListener('click', outside, true); closeMenu(); } }; document.addEventListener('click', outside, true); }, 0);
   };
