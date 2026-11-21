@@ -394,6 +394,8 @@ async fn signin_out(
 
 /// How often phone mode syncs with the vault while the app runs.
 const SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// The most a vault pass may take.
+const PASS_FOR: std::time::Duration = std::time::Duration::from_secs(120);
 /// How long it waits before trying the homeserver again.
 const RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -450,10 +452,13 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
         };
         if full {
             next_full = tokio::time::Instant::now() + SYNC_EVERY;
-            match vault::pass(&p, &acct).await {
-                Ok(r) if r != vault::Report::default() => tracing::info!(?r, "phone mode: vault synced"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("phone mode: vault: {e}"),
+            // Within a limit: a dead connection (a network switch) never holds the vault, and
+            // with it TIDAL's renewal, until the app restarts
+            match tokio::time::timeout(PASS_FOR, vault::pass(&p, &acct)).await {
+                Ok(Ok(r)) if r != vault::Report::default() => tracing::info!(?r, "phone mode: vault synced"),
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!("phone mode: vault: {e}"),
+                Err(_) => tracing::warn!("phone mode: the vault sync took too long; next time"),
             }
         }
         let r = if full {

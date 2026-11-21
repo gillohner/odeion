@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 
 /// The sign-ins phone mode carries.
 pub const FORMS: [&Form; 2] = [&TIDAL_FULL, &QOBUZ];
+/// How long a renewal waits for a vault pass running.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// The phone's name in the device list (Settings › Accounts on a node shows it).
 pub const DEVICE_NAME: &str = "Odeion on this phone";
 
@@ -541,7 +543,11 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
 /// vault has no copy of TIDAL in step with the phone's (the phone then renews on its own and the
 /// next sync writes it).
 pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Result<bool, VaultStoreError> {
-    let _one = phone.vault_lock.lock().await;
+    // Behind a pass at most a while (a stalled pass ends by its own limit): then the phone keeps
+    // its session for now
+    let Ok(_one) = tokio::time::timeout(LOCK_WAIT, phone.vault_lock.lock()).await else {
+        return Ok(false);
+    };
     let svc = TIDAL_FULL.service;
     let path = record_path(phone);
     let Some(mine) = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref()).map_err(local)? else {
