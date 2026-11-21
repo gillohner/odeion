@@ -930,18 +930,6 @@ async fn search_finds_new_and_renamed_songs_right_after_a_scan_or_an_edit() {
     assert_eq!(st, StatusCode::NO_CONTENT);
     assert_eq!(songs_found(&app, "one").await, (false, none.clone()));
     assert_eq!(songs_found(&app, "one").await, (true, none));
-    // Put back: found again at once
-    let (_, h) = call(&app, OWNER, "GET", "/v1/library/hidden", None).await;
-    let path = h[0]["path"].as_str().unwrap().to_string();
-    let (st, r) = call(
-        &app,
-        OWNER,
-        "POST",
-        "/v1/library/hidden/restore",
-        Some(json!({"path": path})),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{r}");
-    assert_eq!(songs_found(&app, "one").await.1, vec!["One".to_string()]);
-    scanned(&s).await;
+    // Put back: lib.rs a_song_put_back_is_found_by_search_at_once_without_a_scan (it holds the
+    // scan slot, so restore's own scan can't drop the kept answer first)
 }

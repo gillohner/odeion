@@ -27269,4 +27269,71 @@ exec sleep 300
             StatusCode::BAD_GATEWAY
         );
     }
+
+    /// A song put back into the library is found by search at once: restore drops search's kept
+    /// answer itself. The scan slot is held meanwhile, so restore only queues its folder's scan
+    /// and no scan's end can drop that answer instead.
+    #[tokio::test]
+    async fn a_song_put_back_is_found_by_search_at_once_without_a_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("music")).unwrap();
+        write_wav(&dir.path().join("music/one.wav"), 4410);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, _) = call(&app, "POST", "/v1/library/scan", Some(serde_json::json!({}))).await;
+        assert_eq!(st, StatusCode::OK);
+        for _ in 0..500 {
+            if !s.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!s.is_scanning());
+        let found = |app: Router| async move {
+            let (st, a) = call(&app, "GET", "/v1/search?q=one&in=library", None).await;
+            assert_eq!(st, StatusCode::OK, "{a}");
+            let titles: Vec<String> = a["hits"]
+                .as_array()
+                .unwrap_or_else(|| panic!("no hits in {a}"))
+                .iter()
+                .filter(|h| h["kind"] == "song")
+                .map(|h| h["title"].as_str().unwrap_or_default().to_string())
+                .collect();
+            (a["cached"].as_bool().unwrap_or(false), titles)
+        };
+        let one = vec!["One".to_string()];
+        assert_eq!(found(app.clone()).await, (false, one.clone()));
+        let (_, t) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
+        let id = t["tracks"][0]["id"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("no song in {t}"));
+        let (st, _) = call(&app, "DELETE", &format!("/v1/library/tracks/{id}"), None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        // Taken out, and asked again: the kept answer without it
+        assert_eq!(found(app.clone()).await, (false, Vec::new()));
+        assert_eq!(found(app.clone()).await, (true, Vec::new()));
+        let (_, h) = call(&app, "GET", "/v1/library/hidden", None).await;
+        let path = h[0]["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("nothing hidden: {h}"))
+            .to_string();
+        // No scan can run or end while the slot is held
+        let slot = s.scan_slot().expect("no scan running");
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/library/hidden/restore",
+            Some(serde_json::json!({ "path": path })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(
+            (r["scan_started"].as_bool(), r["scan_queued"].as_bool()),
+            (Some(false), Some(true)),
+            "{r}"
+        );
+        // Put back: a fresh library answer that finds it
+        assert_eq!(found(app.clone()).await, (false, one));
+        drop(slot);
+    }
 }
