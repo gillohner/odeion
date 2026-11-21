@@ -4,7 +4,9 @@
 // asked again or cut off by it, even while its answer is still on its way. The library changing
 // again while it is asked again asks once more; a hung ask is given up (old results kept, still
 // stale); an unchanged answer leaves the results as drawn; a search that ended in an error is asked
-// for its library answer only.
+// for its library answer only (its error goes when that answer was the one missing or every source
+// had answered), unless it failed before the node named any source (a full search); a song removed
+// during that ask is not listed again by an answer read before the removal.
 // Real UI in Chromium, isolated responses (no node or external services).
 //   node tools/ui-search-library-change.js [repo] [screenshot directory]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -30,18 +32,23 @@ async function setup(browser, width, opts = {}) {
   if (opts.clock) await page.clock.install(); // (the hung case moves the clock on)
   // The playlist's count as the node would say it now (bumped by a write or by the test);
   // sources: the sources the node names (one that never answers ends the search in an error)
-  const lib = { count: 2, asked: [], hold: null, sources: 'library', noLibrary: 0 };
+  // (songGone: the song is out of the library, read when the ask comes in, before any hold)
+  const lib = { count: 2, asked: [], hold: null, sources: 'library', noLibrary: 0, breakAfter: 0, offline: 0, songGone: false };
   await context.route(/\/v1\/search\?/, async (route) => {
     const url = new URL(route.request().url());
     lib.asked.push({ q: url.searchParams.get('q'), scope: url.searchParams.get('in') });
-    const n = lib.count;
+    const n = lib.count; const withSong = !lib.songGone;
     if (lib.hold) await lib.hold;
+    // (offline: that many asks never reach the node, before it names any source)
+    if (lib.offline > 0) { lib.offline -= 1; return route.abort('internetdisconnected').catch(() => {}); }
     // (noLibrary: that many asks end before the library answers)
     if (lib.noLibrary > 0) { lib.noLibrary -= 1; return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': lib.sources }, body: '' }).catch(() => {}); }
     const hit = { kind: 'playlist', id: 'c1', title: 'Road songs', subtitle: `${n} songs · your playlist`, uri: 'playlist:c1', keys: ['playlist:c1'] };
     const song = { kind: 'song', id: 'lib-1', title: fx.track.title, subtitle: 'Sefa, Dr. Peacock', track_id: 1, uri: 'track:1', keys: ['track:1'] };
+    // (breakAfter: that many asks' streams break after every source answered: a cut-off line)
+    let broken = ''; if (lib.breakAfter > 0) { lib.breakAfter -= 1; broken = '{"source":"lib'; }
     // (.catch: an ask the app gave up on is gone by then)
-    return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': lib.sources }, body: JSON.stringify({ source: 'library', status: 'ok', hits: [hit, song], counts: [] }) + '\n' }).catch(() => {});
+    return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': lib.sources }, body: JSON.stringify({ source: 'library', status: 'ok', hits: withSong ? [hit, song] : [hit], counts: [] }) + '\n' + broken }).catch(() => {});
   });
   let socket = null;
   await context.routeWebSocket(/\/v1\/events/, (ws) => {
@@ -302,6 +309,80 @@ async function erroredLibrary(browser, width) {
   } finally { await context.close(); }
 }
 
+// The stream broke after every source had answered ("Search couldn't finish"), and the library
+// answer asked again is the same as before: nothing to redraw in the list, but the error banner goes
+async function erroredAfterAll(browser, width) {
+  const { page, context, state, lib, changed } = await setup(browser, width);
+  try {
+    lib.breakAfter = 1;
+    await fx.go(page, '/search?q=road');
+    await countShown(page, 2);
+    await until(page, () => !!document.querySelector('#sfailure [data-sretry]'), 'search could not finish');
+    changed(); // (the count stays 2: the same answer comes back)
+    await nav(page, 'home');
+    await typeAgain(page, 'road');
+    for (const end = Date.now() + 7000; lib.asked.length < 2; await sleep(50)) if (Date.now() > end) throw new Error('Timed out: asked again');
+    assert.equal(lib.asked[1].scope, 'library', 'only the library is asked again');
+    await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone');
+    await until(page, () => !document.querySelector('#sfailure'), '"Search couldn\'t finish" gone after the same answer');
+    await countShown(page, 2);
+    assert.equal(lib.asked.length, 2);
+    await page.screenshot({ path: path.join(shots, `broken-${width}-after.png`) });
+    assert.deepEqual(state.errors, []);
+  } finally { await context.close(); }
+}
+
+// The node was offline: the search failed before the node named any source. After the library
+// changes, opening it again is a full search (not the error and Retry from before)
+async function offlineFirst(browser, width) {
+  const { page, context, state, lib, changed } = await setup(browser, width);
+  try {
+    lib.offline = 1;
+    await fx.go(page, '/search?q=road');
+    await until(page, () => !!document.querySelector('#sfailure [data-sretry]'), 'search could not finish');
+    changed();
+    await nav(page, 'home');
+    await typeAgain(page, 'road');
+    await countShown(page, 2);
+    assert.equal(lib.asked.length, 2);
+    assert.equal(lib.asked[1].scope, 'everywhere', 'a full search, not the library alone');
+    await until(page, () => !document.querySelector('#sfailure'), '"Search couldn\'t finish" gone');
+    await page.screenshot({ path: path.join(shots, `offline-${width}-after.png`) });
+    assert.deepEqual(state.errors, []);
+  } finally { await context.close(); }
+}
+
+// A song removed from its row while the search's library answer is asked again (read before the
+// removal): that answer, landing after it, doesn't list the song again
+const songListed = (page) => page.evaluate((t) => [...document.querySelectorAll('#sresults .srow')].some((r) => r.innerText.includes(t)), fx.track.title);
+async function removedWhileAsked(browser, width) {
+  const { page, context, state, lib, changed } = await setup(browser, width);
+  try {
+    const held = await backWhileHeld(page, lib, changed, 4); // (that ask still has the song)
+    assert.ok(await songListed(page), 'the song is listed');
+    const row = page.locator('#sresults .srow', { hasText: fx.track.title }).first();
+    await row.locator('[data-smore]').click({ force: true });
+    await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from library' }).click();
+    await page.locator('dialog[open] button', { hasText: /^Remove$/ }).click();
+    await until(page, () => /Removed from the library/.test(document.body.innerText), 'removed');
+    lib.songGone = true;
+    await until(page, (t) => ![...document.querySelectorAll('#sresults .srow')].some((r) => r.innerText.includes(t)), 'the song leaves the results', fx.track.title);
+    // The answer read before the removal lands; the one asked after it (the library changed during
+    // the ask) is held, so only the older answer is drawn meanwhile
+    held.release();
+    let release2; lib.hold = new Promise((r) => { release2 = r; });
+    await countShown(page, 4);
+    for (const end = Date.now() + 7000; lib.asked.length < 3; await sleep(50)) if (Date.now() > end) throw new Error('Timed out: asked once more');
+    await sleep(200);
+    assert.ok(!(await songListed(page)), 'the answer read before the removal does not list the removed song again');
+    await page.screenshot({ path: path.join(shots, `removed-${width}-landed.png`) });
+    release2(); lib.hold = null;
+    await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone');
+    assert.ok(!(await songListed(page)), 'nor the one after it');
+    assert.deepEqual(state.errors, []);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -314,8 +395,11 @@ async function erroredLibrary(browser, width) {
       await unchanged(browser, width);
       await errored(browser, width);
       await erroredLibrary(browser, width);
+      await erroredAfterAll(browser, width);
+      await offlineFirst(browser, width);
+      await removedWhileAsked(browser, width);
       if (width === 360) await hung(browser, width);
-      console.log(`ok ${width}px: a playlist write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing)`);
+      console.log(`ok ${width}px: a playlist write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing, or when the stream broke after every answer); an offline one starts afresh; a song removed during the ask stays out`);
     }
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -616,12 +616,12 @@ jobs:
           # The pages that took a minute or more on CI, as page=runner, spread so each runner has about
           # the same total (runner 2 also runs the identify check, ~2 min); each must be in the list below
           pin='
-            ui-library-count-redraw.js=1 ui-item-redraw.js=1 ui-native-player.js=1
+            ui-library-count-redraw.js=1 ui-item-redraw.js=1 ui-menu-keys.js=1
             ui-usb-dac.js=2 ui-phone-action-rows.js=2 ui-browser-midsong.js=2 ui-srow-click.js=2
             ui-row-click.js=3 ui-phone-libnav-focus.js=3 ui-select-bar-focus.js=3 ui-empty-queue.js=3
-            ui-sticky-focus.js=4 ui-browser-keys.js=4 ui-similar-tiles.js=4 ui-phone-simplify.js=4
+            ui-sticky-focus.js=4 ui-browser-keys.js=4 ui-similar-tiles.js=4 ui-phone-simplify.js=4 ui-queue-row-menu.js=4
             ui-browser-place.js=5 ui-review-fixes.js=5 ui-search-shared-link.js=5
-            ui-motion.js=6 ui-shuffle-repeat.js=6 ui-move-toast.js=6
+            ui-motion.js=6 ui-shuffle-repeat.js=6 ui-move-toast.js=6 ui-native-player.js=6
           '
           pin=" $(echo $pin) "
           n=0
@@ -721,6 +721,7 @@ jobs:
           ui-song-links.js song-links-shots
           ui-phone-song-rows.js phone-song-rows-shots
           ui-playlist-remove-window.js playlist-remove-window-shots
+          ui-playlist-menu-remove-focus.js playlist-menu-remove-focus-shots
           ui-item-links.js item-links-shots
           ui-item-source-line.js item-source-line-shots
           ui-phone-hero-reach.js phone-hero-reach-shots
@@ -795,6 +796,7 @@ jobs:
           ui-pubky-hang.js pubky-hang-shots
           ui-item-radio-zone.js item-radio-zone-shots
           ui-artist-top-songs.js artist-top-songs-shots
+          ui-pop-keys.js pop-keys-shots
           ui-row-cover-mono.js row-cover-mono-shots
           ui-menu-keys.js menu-keys-shots
           ui-fixture-item-pages.js fixture-item-pages-shots

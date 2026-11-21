@@ -815,20 +815,23 @@
       toast(v.undo ? 'Back to the file’s tags' : 'Saved on this node'); onLibraryChanged(); if (state.view === 'library') render();
     } catch (e) { toast(e.message, 'error'); }
   };
-  const removeFromLibrary = async (id, title) => {
+  // (anchor: the ⋯ it was chosen from; on a search result, the focus goes on to the next result's ⋯
+  // once the song leaves the list, else to the search box, not to the page's top)
+  const removeFromLibrary = async (id, title, anchor) => {
     const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true }] });
     if (!ok) return;
     try {
       await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library');
-      // (the kept searches' library answers lose the song now: the search on screen is drawn again
-      // from its kept answer, not asked again, so it would list the song until started again; a
-      // service's copy of it stays, without the library's id, so its ⋯ no longer offers Remove)
-      const gone = (h) => h.kind === 'song' && h.track_id != null && Number(h.track_id) === Number(id);
-      for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) {
-        if (!a || !Array.isArray(a.hits) || !a.hits.some(gone)) continue;
-        r.answers[src] = { ...a, hits: src === 'library' ? a.hits.filter((h) => !gone(h)) : a.hits.map((h) => (gone(h) ? { ...h, track_id: null, id: h.id === `lib-${id}` && h.page ? idOf(h.page) : h.id } : h)) };
-      }
-      onLibraryChanged(); render();
+      // (the kept searches' answers lose the song now: the search on screen is drawn again from its
+      // kept answer, not asked again, so it would list the song until started again; withoutTrack)
+      removedTracks.push(Number(id));
+      for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) r.answers[src] = withoutTrack(a, src, id);
+      const at = anchor ? $$('#sresults [data-smore]').indexOf(anchor) : -1;
+      const focused = at >= 0 && document.activeElement === anchor;
+      onLibraryChanged();
+      // (waited for only then: another page's redraw can take long, or never end when left meanwhile)
+      const drawn = render();
+      if (focused) { await drawn; if ((!document.activeElement || document.activeElement === document.body) && state.view === 'search') ($$('#sresults [data-smore]')[at] || search).focus(); }
     } catch (e) { toast(e.message, 'error'); }
   };
   const editAlbumTags = async (albumId, title, artist) => {
@@ -1395,7 +1398,8 @@
       : (jobDone(p) ? (jobStopped(p) ? 'Copy stopped' : 'Copied to your homeserver') : 'Copying to your homeserver'));
   const jobPct = (p) => (p.bytes_total ? Math.min(100, Math.round((100 * p.bytes_done) / p.bytes_total)) : (jobDone(p) ? 100 : 0));
   const jobPop = () => $('#jobpop');
-  const closeJobPop = (fromBack) => { const jp = jobPop(); if (!jp || jp.hidden) return; jp.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); };
+  // (the focus in it, or on nothing, goes back to the chip, as the other panels give it to their button)
+  const closeJobPop = (fromBack) => { const jp = jobPop(); if (!jp || jp.hidden) return; const inside = jp.contains(document.activeElement) || document.activeElement === document.body; jp.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); const c = $('#jobchip'); if (inside && c && c.getClientRects().length) c.focus({ preventScroll: true }); };
   const hideJobChip = () => { const c = $('#jobchip'); if (c) c.hidden = true; };
   // An error line, as the node sends it: text, or {path, reason}
   const jobErr = (e) => (typeof e === 'string' ? esc(e) : `<span class="jeprob">${esc(e.reason || '')}</span> <span class="muted">${esc(e.path || '')}</span>`);
@@ -4780,7 +4784,8 @@
       ...(isBrowser() ? [] : [{ label: 'DSP', note: 'Equaliser, crossfeed, room correction', icon: 'settings', run: () => { state.dspOpen = state.zone; setView('settings', 'playback'); } }]),
       ...(songPage ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: songPage }) }] : []),
     ]); };
-    bindNpLinks(overlay, it, () => toggleNowPlaying());
+    // (the page opened replaces the one the focus came from: it goes to the mini player, as in setView)
+    bindNpLinks(overlay, it, () => { npReturn = null; toggleNowPlaying(); });
     $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => { transport({ action: 'play', index: Number(b.dataset.npqi) }); setTimeout(renderNowPlaying, 500); });
     const qf = $('#npqfull'); if (qf) qf.onclick = () => setView('queue');
     overlay.dataset.sheet = sheet || ''; overlay.dataset.npuri = it.uri || ''; overlay.dataset.layout = `${shellMode()}-${npCompact()}`;
@@ -5241,7 +5246,9 @@
     markTabs();
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || ((v === 'artist' || v === 'releases') && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
-    if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
+    // (the page takes Now playing's history entry. What had the focus when it opened is on the page this
+    // one replaces: the focus goes to the mini player, not to a row about to go, which left it nowhere)
+    if (!overlay.hidden) { npReturn = null; toggleNowPlaying(false, true); }
     // (a page opened is drawn from the start: redrawing, keepPlace)
     const top = later ? {} : null; if (top) topLater = top; else { mainTo(0); if (state.placeHold) state.placeHold(); }
     state.drawnPage = null; endSelect(); // (opening a page, the same one too, ends Select)
@@ -5391,6 +5398,18 @@
   libWrote = forgetLibrarySearches;
   const SEARCH_REFRESH_MS = 15000;
   // (an answer the same but for the time it took)
+  // Songs removed from the library this session, in order (removeFromLibrary): an answer asked before
+  // a removal and landing after it drops them (refreshSearch)
+  const removedTracks = [];
+  // An answer without library song id: the library's copy goes; a service's copy stays, without the
+  // library's id (no Remove or Edit tags on it, its page not the removed song's)
+  const withoutTrack = (a, src, id) => {
+    const gone = (h) => h.kind === 'song' && h.track_id != null && Number(h.track_id) === Number(id);
+    if (!a || !Array.isArray(a.hits) || !a.hits.some(gone)) return a;
+    // (a copy with no page: its uri's page when it names one, else no song page)
+    const pageId = (h) => { if (h.page) return idOf(h.page); const k = npPageId(h.uri); return k && !k.startsWith('lib-') ? k : null; };
+    return { ...a, hits: src === 'library' ? a.hits.filter((h) => !gone(h)) : a.hits.map((h) => (gone(h) ? { ...h, track_id: null, id: h.id === `lib-${id}` ? pageId(h) : h.id } : h)) };
+  };
   const sameAnswer = (a, b) => !!a && !!b && JSON.stringify({ ...a, ms: 0 }) === JSON.stringify({ ...b, ms: 0 });
   const refreshSearch = (run, again) => {
     if (run.refreshing) return; // (stays stale: asked once more when that answer is in)
@@ -5398,15 +5417,19 @@
     (async () => {
       let ok = false; let same = false;
       const ctrl = new AbortController(); const cut = setTimeout(() => ctrl.abort(), SEARCH_REFRESH_MS);
+      const since = removedTracks.length; // (songs removed while it is asked: its answer may be older)
       try {
         let fresh = null;
         await readSearch(run.q, 'library', ctrl.signal, () => {}, (a) => { if (a.source === 'library') fresh = a; });
         if (!fresh || fresh.status !== 'ok') throw new Error('Library answer missing');
         ok = true;
         if (searchRuns.get(searchKey(run.q, run.scope)) !== run) return; // (replaced meanwhile: Retry)
+        for (const id of removedTracks.slice(since)) fresh = withoutTrack(fresh, 'library', id);
         same = sameAnswer(run.answers.library, fresh);
         run.answers = { ...run.answers, library: fresh };
-        if (run.error && run.sources.every((src) => run.answers[src])) run.error = false; // (it was the one missing)
+        // (it was the one missing, or the stream broke after every source answered: the banner goes,
+        // so the page is drawn again even when the answer is the same)
+        if (run.error && run.sources.every((src) => run.answers[src])) { run.error = false; same = false; }
       } catch { run.stale = true; } finally {
         clearTimeout(cut); run.refreshing = false;
         if (ok && run.stale && !again && currentSearch(run)) refreshSearch(run, true);
@@ -5420,7 +5443,9 @@
     const onScreen = keepShown && old === shownSearch && state.view === 'search' && !!$('#sresults');
     if (old && (old.pending || Date.now() - old.startedAt < SEARCH_TTL)) {
       if (!old.stale || onScreen || old.pending) return old;
-      refreshSearch(old); return old;
+      // (one that failed before the node named its sources, the node offline, has no answer to keep:
+      // it is searched afresh)
+      if (!old.error || old.sources.includes('library')) { refreshSearch(old); return old; }
     }
     for (const r of searchRuns.values()) if (r.pending && r !== old) { try { r.ctrl.abort(); } catch { /* */ } r.pending = false; }
     const run = { q, scope, sources: [], answers: {}, startedAt: Date.now(), firstAt: null, doneAt: null, ctrl: new AbortController(), pending: true, slow: new Set() };
@@ -5593,8 +5618,8 @@
     if (e.key === 'Escape') {
       if (document.querySelector('dialog[open]')) return; // (it closes itself, and only itself)
       if (e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut('escape');
-      const pops = !qPanel.hidden || !$('#zonepop').hidden || !menuEl.hidden || !volPop().hidden;
-      if (pops) { closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
+      const pops = !qPanel.hidden || !$('#zonepop').hidden || !menuEl.hidden || !volPop().hidden || !jobPop().hidden;
+      if (pops) { closePop(); closeMenu(); closeQPanel(); closeVolPop(); closeJobPop(); return; }
       if (npSheetTr.open()) { closeNpSheet(); return; }
       if (!overlay.hidden) toggleNowPlaying();
       return;
@@ -5621,10 +5646,14 @@
       return;
     }
     { const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' ? 'next' : e.key === 'ArrowLeft' ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
-    // An open ⋯ menu closes before Search, Now playing or Help: it stayed open over or behind them.
+    // An open ⋯ menu, zone picker, Sound panel or volume closes before Search, Now playing or Help: it
+    // stayed open (with its grey scrim) over or behind them.
     // (Now playing and Help take over its history entry, so Back then closes them; Search has none)
-    if ((e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') && !menuEl.hidden) closeMenu(e.key !== '/');
+    if (e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') { const keep = e.key !== '/'; closeMenu(keep); closePop(keep); closeQPanel(keep); closeVolPop(keep); }
     // (the search field is under an open Now playing, out of reach there: it closes first)
+    // The copy's popup closes too, before Search, Now playing and Help, as the panels above do. (So over
+    // Now playing, Help is a layer of its own: Back closes Help, and Now playing stays)
+    if (e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') closeJobPop(e.key !== '/');
     if (e.key === '/') { e.preventDefault(); if (!overlay.hidden) toggleNowPlaying(false); search.focus(); search.select(); return; }
     // (Space is a press of its own: it spins no Play clicked just before)
     if (e.code === 'Space') { e.preventDefault(); state.startAnchor = null; transport({ action: 'toggle' }); }
@@ -6711,7 +6740,7 @@
       ...(o.alsoHere && o.alsoHere.length ? [{ label: 'Also on…', icon: 'compass', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl.isConnected ? anchorEl : ($('#imore') || anchorEl), [{ title: 'Also on' }, ...o.alsoHere.map((x) => ({ label: x.label, svc: x.svc, run: () => o.switchTo(x.k) }))]); }, 0); } }] : []),
       ...(o.extra || []),
       // The owner's library: edit tags on the node, take a song out (Your library › Node library)
-      ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title) }] : []),
+      ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title, anchorEl) }] : []),
       ...(isOwner() && /^\/album\/lib-\d+$/.test(o.path || '') ? [{ label: 'Rename album…', icon: 'disc', run: () => editAlbumTags(Number(o.path.split('-').pop()), o.title) }] : []),
       // A library song's or album's match corrected: the Confirm matches view for its songs
       ...(isOwner() && trackIds.length && /^\/(song|album)\//.test(o.path || '') ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: trackIds.slice(0, 500) }) }] : []),
@@ -6840,7 +6869,7 @@
   const plKeysOf = (box) => (plShown && (box === 'pllocal' ? plShown.local : plShown.uris)) || [];
   const plSongFocus = (box, keys, k, kind, alt) => (k >= 0 && k < keys.length ? { box, song: keys[k], copy: keys.slice(0, k).filter((u) => u === keys[k]).length, kind, alt } : null);
   // (a song's × from the keyboard: the focus goes on to the song after it, else the one before)
-  const plNextFocus = (box, keys, k, kind) => { const rest = keys.filter((_, i) => i !== k); return plSongFocus(box, rest, k < rest.length ? k : k - 1, kind); };
+  const plNextFocus = (box, keys, k, kind, alt) => { const rest = keys.filter((_, i) => i !== k); return plSongFocus(box, rest, k < rest.length ? k : k - 1, kind, alt); };
   const plFocusOf = (a) => {
     const box = a && a.closest ? a.closest('#plsongs, #pllocal') : null; if (!box) return null;
     const row = a.closest('[data-srow]');
@@ -9049,7 +9078,10 @@
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
             ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-rm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); return plWrite(plId, async (signal) => { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`, undefined, { signal }); state.plPf = null; }, document.activeElement === b ? plNextFocus('plsongs', d.playlist.items.map((it) => it.uri), Number(b.dataset.rm), 'button[data-rm]') : null); });
+          // (Remove chosen from the keyboard in the row's ⋯ menu, as phones offer it: the menu gave the
+          // focus back to that ⋯, so it goes on to the next song's ⋯, a card's if that one is a card)
+          const viaMenu = (b) => { const fa = document.activeElement; const row = b.closest('[data-srow]'); return keyedLast && fa && row && row.contains(fa) && fa.matches('button[data-smore], button[data-cmore]'); };
+          $$('[data-rm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const keys = d.playlist.items.map((it) => it.uri); const k = Number(b.dataset.rm); const next = document.activeElement === b ? plNextFocus('plsongs', keys, k, 'button[data-rm]') : viaMenu(b) ? plNextFocus('plsongs', keys, k, 'button[data-smore]', 'button[data-cmore]') : null; return plWrite(plId, async (signal) => { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`, undefined, { signal }); state.plPf = null; }, next); });
           // (pressed from the keyboard, the focus follows the song to its new place, so a second
           // press moves it on rather than moving the song that took its place back; not when the
           // focus went elsewhere while the move was saved; the list that ends the hold takes it there, heldFocus)
@@ -9498,7 +9530,7 @@
           const playFrom = (i, replace = true) => playSourceItems(qitems.slice(i), replace, 'end', replace ? { shuffle: false } : {}); // (Play: in order, shuffle off)
           const canHeart = !!(await (async () => { try { await api('GET', '/favourites?uri=' + encodeURIComponent(it.url)); return true; } catch { return false; } })());
           main.innerHTML = backBtn('sources', srcName) + `<div class="artist-hero"><div class="portrait" style="border-radius:12px;background:hsl(${hue(it.title)} 35% 28%)">${it.image ? `<img src="${esc(it.image)}" alt="" data-err="remove">` : esc(initials(it.title))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, countOf(it.tracks.length, 'songs')].filter(Boolean).join(' · '))} · <a href="${esc(webUrl(it.url))}" target="_blank" rel="noopener">open</a>${it.licence ? (/^https?:/.test(it.licence) ? ` · <a href="${esc(webUrl(it.licence))}" target="_blank" rel="noopener">licence</a>` : ` · ${esc(it.licence)}`) : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to playlist">${icon('playlist')} Playlist</button>${it.library_album_id ? `<button class="btn ghost" id="ainlib" title="You already have this album">${icon('disc')} In your library</button>` : ''}${canHeart ? `<button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart" aria-pressed="${state.favUris.has(it.url)}">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Favourited' : 'Favourite'}</button>` : ''}</div></div>${it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : ''}</div></div>`
-            + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button></div></div>`; }).join('')}</div>`;
+            + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div class="fmt-col"><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button></div></div>`; }).join('')}</div>`;
           $('#aplay').onclick = () => playFrom(0, true); $('#aadd').onclick = () => playFrom(0, false);
           $('#amore').onclick = (e) => { e.stopPropagation(); uriMenu($('#amore'), it.tracks.map((t) => t.url), it.title); };
           const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { if (await setFavourite({ uri: it.url }, !on)) render(); } catch (er) { toast(er.message, 'error'); } };
@@ -9835,8 +9867,9 @@
               .then((p) => {
                 // A failed ask (network, 5xx) keeps what was kept and shows it: the tags drawn from it stay as they
                 // are (the area doesn't collapse to an error under a thumb, and the next redraw stands it in), or
-                // a newer one kept meanwhile (another redraw's ask) is drawn instead
-                if (p.state === 'error') { const k = at.get(pubKey(g)); if (k && k.p) p = { ...k.p, kept: true }; else if (was.kept) return; } else {
+                // a newer one kept meanwhile (another redraw's ask) is drawn instead; a newer "no identity" kept
+                // meanwhile (p null) draws as that answer, nothing, not the older tags shown
+                if (p.state === 'error') { const k = at.get(pubKey(g)); if (k && k.p) p = { ...k.p, kept: true }; else if (k) p = { state: 'none', tags: [], faces: {}, unknown: true }; else if (was.kept) return; } else {
                   // Kept for this page's next redraw: an answer ("no identity" drops it), when newer than the one kept
                   const had = at.get(pubKey(g));
                   if (!had || had.ask < ask) at.set(pubKey(g), { ask, p: p.state === 'ok' || (p.state === 'none' && !p.unknown) ? p : null });

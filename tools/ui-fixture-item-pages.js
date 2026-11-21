@@ -73,6 +73,8 @@ async function run(browser, width) {
       const got = await ask(`/v1/item/${kind}/${id}`);
       check(got.status === 404 && got.body && got.body.error === `no ${word} ${id}`, `${at} /v1/item/${kind}/${id} is a 404 "no ${word} …" (${JSON.stringify(got)})`);
     }
+    // A kind that is no song, album or artist is a 400, as the node answers (not a 404, not a page)
+    { const got = await ask('/v1/item/playlist/x'); check(got.status === 400 && got.body && got.body.error === 'kind is song, album or artist', `${at} /v1/item/playlist/x is a 400 "kind is song, album or artist" (${JSON.stringify(got)})`); }
     await fx.go(page, '/album/deezer-1007320461');
     await page.locator('#main .notice, #main h1').first().waitFor({ timeout: 5000 }).catch(() => {});
     check(await text(page, '#main h1') !== 'Journey' && /no album deezer-1007320461/.test(await page.locator('#main').innerText()), `${at} a catalogue album isn't drawn as a library album (${(await page.locator('#main').innerText()).slice(0, 60)})`);

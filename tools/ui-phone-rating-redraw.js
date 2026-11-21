@@ -11,7 +11,8 @@
 // Pubky's answer after a save fails (500): the tags drawn stay as they are (no "didn't load", no skeleton,
 // the stars and Add notes don't move), and the next redraw still stands them in. A third redraw that
 // starts before the second ask's answer lands stands in the first ask's (newer) answer, not an older one.
-// When the newest ask fails and an older redraw's answer was kept meanwhile, that newer kept answer is shown.
+// When the newest ask fails and an older redraw's answer was kept meanwhile, that newer kept answer is shown;
+// when that kept answer was "no identity" (422), no Pubky tags are shown (not the older ones).
 // Real candidate assets, isolated responses: node tools/ui-phone-rating-redraw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -200,6 +201,24 @@ const press = async (page, v) => { const b = await page.evaluate((x) => { const 
     await until(() => s.landed.length > l5 + 1, 4000); await sleep(300);
     const shownNow = await tagsNow();
     check(s.landed[l5 + 1] === 'failed' && shownNow.includes('fourth') && !(await page.evaluate(() => /didn.t load/.test(document.querySelector('#htags')?.textContent || ''))), `${at}: a failed answer shows a newer one kept meanwhile (${s.landed.slice(l5).map((t) => (Array.isArray(t) ? t.join('/') : t)).join('; ')} -> ${shownNow.join(', ')})`);
+    s.fails = []; s.lags = [];
+    await sleep(2500); await settled(page);
+    // The same with the first's answer "no identity" (422): the failed one on screen draws that answer,
+    // no Pubky tags, not the older tags it stood in. The second ask must go out before the 422 lands:
+    // otherwise its redraw starts with nothing kept and draws "didn't load", which shows no tags either
+    const a6 = s.asked; const l6 = s.landed.length;
+    s.lags = [1000, 1800]; s.fails = [422, 500];
+    await press(page, 4);
+    await until(() => s.asked > a6);
+    await until(() => s.review && s.review.rating === 4);
+    await press(page, 2);
+    await until(() => s.asked > a6 + 1);
+    const secondFirst = s.landed.length === l6;
+    await until(() => s.landed.length > l6 + 1, 4000); await sleep(300);
+    const shown422 = await tagsNow();
+    const box422 = await page.evaluate(() => ({ err: /didn.t load/.test(document.querySelector('#htags')?.textContent || ''), skel: !!document.querySelector('#htags .tag-skel') }));
+    check(secondFirst && s.landed.length === l6 + 2 && s.landed[l6] === 'failed' && s.landed[l6 + 1] === 'failed' && !box422.err && !box422.skel && !shown422.some((t) => old7.some(([l]) => l === t)), `${at}: a failed answer after a newer "no identity" shows no Pubky tags, not the older ones (second ask out before the 422 landed: ${secondFirst}; ${shown422.join(', ') || 'none'}; didn't load: ${box422.err}; skeleton: ${box422.skel})`);
+    if (width === 360 && !android) await page.screenshot({ path: path.join(SHOTS, 'failed-after-no-identity-360.png') });
     s.fails = []; s.lags = [];
     s.pub[7] = old7;
     // Another album: never this one's tags

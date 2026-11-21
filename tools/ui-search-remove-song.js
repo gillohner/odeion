@@ -1,7 +1,9 @@
 // Remove from library on a search result: the song leaves the results at once. Before, the search
 // page was drawn again from its kept answer (it isn't asked again while on screen), so the removed
 // song stayed listed until the search was started again. The other results stay where they are,
-// the page isn't asked again or emptied, and a removal that fails leaves the song listed.
+// the page isn't asked again or emptied, and a removal that fails leaves the song listed. A service's
+// copy stays without the library's id (also when it has no page), and Remove chosen with the keyboard
+// leaves the focus on the next result's ⋯ (the search box after the last one).
 // Real UI in Chromium, isolated responses (no node or external services).
 //   node tools/ui-search-remove-song.js [repo] [screenshot directory]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -26,7 +28,8 @@ const song = (id, title) => ({ kind: 'song', id: `lib-${id}`, title, subtitle: '
 // Spotify's copy of song 1: the node marks it with the library's id while the library has it
 // (search.rs service(): track_id, id lib-<n>), and not once it's gone
 const SPOTIFY = 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC';
-const spotifyHit = (inLibrary) => ({ kind: 'song', id: inLibrary ? 'lib-1' : 'spotify-4uLU6hMCjMI75M1A2tKUQC', title: fx.track.title, subtitle: 'Sefa, Dr. Peacock', page: SPOTIFY, uri: 'spotify:track:4uLU6hMCjMI75M1A2tKUQC', track_id: inLibrary ? 1 : null, keys: [`isrc:${ISRC}`] });
+// (noPage: a copy the node gives no page for)
+const spotifyHit = (inLibrary, noPage) => ({ kind: 'song', id: inLibrary ? 'lib-1' : 'spotify-4uLU6hMCjMI75M1A2tKUQC', title: fx.track.title, subtitle: 'Sefa, Dr. Peacock', page: noPage ? '' : SPOTIFY, uri: 'spotify:track:4uLU6hMCjMI75M1A2tKUQC', track_id: inLibrary ? 1 : null, keys: [`isrc:${ISRC}`] });
 
 async function setup(browser, width, opts = {}) {
   const run = await fx.create(browser, width, { mobile: width < 600 });
@@ -39,7 +42,7 @@ async function setup(browser, width, opts = {}) {
     lib.asked.push({ q: url.searchParams.get('q'), scope: url.searchParams.get('in') });
     const hits = [song(1, fx.track.title), song(2, OTHER)].filter((h) => !lib.removed.has(h.track_id));
     const lines = [{ source: 'library', status: 'ok', hits, counts: [] }];
-    if (opts.service) lines.push({ source: 'spotify', status: 'ok', hits: [spotifyHit(!lib.removed.has(1))], counts: [] });
+    if (opts.service) lines.push({ source: 'spotify', status: 'ok', hits: [spotifyHit(!lib.removed.has(1), opts.noPage)], counts: [] });
     return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': opts.service ? 'library,spotify' : 'library' }, body: lines.map((l) => JSON.stringify(l)).join('\n') + '\n' });
   });
   await context.route(/\/v1\/library\/tracks\/\d+$/, async (route) => {
@@ -102,8 +105,8 @@ async function menuItems(page) {
   await until(page, () => document.querySelectorAll('.popover.menu:not([hidden]) .pop-item').length > 0, 'menu open');
   return page.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.innerText.trim()));
 }
-async function service(browser, width) {
-  const { page, context, state, lib } = await setup(browser, width, { service: true });
+async function service(browser, width, noPage) {
+  const { page, context, state, lib } = await setup(browser, width, { service: true, noPage });
   try {
     await fx.go(page, '/search?q=journey');
     await until(page, (t) => [...document.querySelectorAll('#sresults .srow')].some((r) => r.innerText.includes(t)), 'results drawn', OTHER);
@@ -120,11 +123,53 @@ async function service(browser, width) {
     assert.equal(lib.asked.length, 1, `${width}: not asked again`);
     const hrefs = await row().evaluate((r) => [...r.querySelectorAll('a[href]')].map((a) => a.getAttribute('href')));
     assert.ok(!hrefs.some((h) => /lib-1\b/.test(h)), `${width}: Spotify's copy doesn't link to the removed song (${hrefs.join(' ')})`);
+    // (with no page of its own, nor to a song page made up from its spotify: uri)
+    if (noPage) assert.ok(!hrefs.some((h) => /^\/song\//.test(h)), `${width}: a copy with no page has no song link (${hrefs.join(' ')})`);
     await row().locator('[data-smore]').click({ force: true });
     const items = await menuItems(page);
     assert.ok(items.length && !items.includes('Remove from library') && !items.includes('Edit tags…'), `${width}: Spotify's copy no longer offers Remove or Edit tags (${items.join(' · ')})`);
     await page.keyboard.press('Escape');
-    await page.screenshot({ path: path.join(shots, `service-${width}-after.png`) });
+    await page.screenshot({ path: path.join(shots, `service-${width}${noPage ? '-nopage' : ''}-after.png`) });
+    assert.deepEqual(state.errors, []);
+  } finally { await context.close(); }
+}
+
+// Remove chosen with the keyboard: once the song leaves the list, the focus is on the next result's
+// ⋯ (not dropped to the page's top); removing the last result puts it in the search box
+const focusOn = (page) => page.evaluate(() => { const a = document.activeElement; if (!a || a === document.body) return 'body'; if (a.id === 'search') return 'search'; const r = a.closest('.srow'); return a.matches('[data-smore]') && r ? 'more:' + r.innerText.replace(/\s+/g, ' ') : a.tagName; });
+async function removeByKeys(page, title) {
+  const more = page.locator('#sresults .srow', { hasText: title }).first().locator('[data-smore]');
+  await more.focus();
+  await page.keyboard.press('Enter');
+  await until(page, () => !!document.querySelector('.popover.menu:not([hidden]) .pop-item'), 'menu open');
+  for (let k = 0; k < 30; k += 1) {
+    if (await page.evaluate(() => /Remove from library/.test((document.activeElement || {}).innerText || ''))) break;
+    await page.keyboard.press('ArrowDown');
+  }
+  assert.match(await page.evaluate(() => (document.activeElement || {}).innerText || ''), /Remove from library/, 'Remove reached with the arrow keys');
+  await page.keyboard.press('Enter');
+  await until(page, () => !!document.querySelector('dialog[open]'), 'dialog open');
+  await until(page, () => /^Remove$/.test(((document.activeElement || {}).innerText || '').trim()), 'Remove in focus');
+  await page.keyboard.press('Enter');
+}
+async function keyboard(browser, width) {
+  const { page, context, state, lib } = await setup(browser, width);
+  try {
+    await fx.go(page, '/search?q=journey');
+    await until(page, (t) => [...document.querySelectorAll('#sresults .srow')].some((r) => r.innerText.includes(t)), 'results drawn', OTHER);
+    await removeByKeys(page, fx.track.title);
+    await until(page, () => /Removed from the library/.test(document.body.innerText), 'removed');
+    await until(page, (t) => ![...document.querySelectorAll('#sresults .srow')].some((r) => r.innerText.includes(t)), 'song gone', fx.track.title);
+    await sleep(300);
+    assert.deepEqual(lib.deletes, [1]);
+    const next = await focusOn(page);
+    assert.ok(next.startsWith('more:') && next.includes(OTHER), `${width}: the focus is on the next result's ⋯ (${next})`);
+    await page.screenshot({ path: path.join(shots, `keyboard-${width}-after.png`) });
+    await removeByKeys(page, OTHER);
+    await until(page, () => !document.querySelector('#sresults [data-skind="song"] .srow'), 'last song gone');
+    assert.deepEqual(lib.deletes, [1, 2]);
+    await sleep(300);
+    assert.equal(await focusOn(page), 'search', `${width}: the last result removed, the focus is in the search box`);
     assert.deepEqual(state.errors, []);
   } finally { await context.close(); }
 }
@@ -155,7 +200,9 @@ async function failed(browser, width) {
       await removed(browser, width, android);
       await failed(browser, width);
       if (!android) await service(browser, width);
-      console.log(`ok ${width}px${android ? ' (Android app)' : ''}: Remove from library on a search result takes the song out of the results (a Spotify copy stays, not as the library's); a failed one leaves it`);
+      if (!android) await service(browser, width, true);
+      if (!android) await keyboard(browser, width);
+      console.log(`ok ${width}px${android ? ' (Android app)' : ''}: Remove from library on a search result takes the song out of the results (a Spotify copy stays, not as the library's, with or without a page); the keyboard focus goes on to the next result; a failed one leaves it`);
     }
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });
