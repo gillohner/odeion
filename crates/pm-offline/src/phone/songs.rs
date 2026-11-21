@@ -85,6 +85,8 @@ impl Song {
             "track_no": self.track_no,
             "disc_no": self.disc_no,
             "file": {"container": self.container, "format": self.format},
+            // What a Bookmark of it points at (the page's heart reads it)
+            "canonical": self.canonical.as_ref().map(|u| json!({ "url": u })),
         })
     }
 }
@@ -350,6 +352,24 @@ pub(crate) async fn put_part(
         }
         (u.part.clone(), u.name.clone(), u.size, u.offset)
     };
+    // The write and what follows run on their own task: a request dropped meanwhile (a reload)
+    // leaves the upload as the write left it, never claimed for good
+    match tokio::spawn(write_part(p, id, part, name, size, offset, body)).await {
+        Ok(r) => r,
+        Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "the part stopped"),
+    }
+}
+
+/// Writes a claimed part at `offset` and moves the upload on (the last part stores the song).
+async fn write_part(
+    p: Arc<Phone>,
+    id: String,
+    part: PathBuf,
+    name: String,
+    size: u64,
+    offset: u64,
+    body: Bytes,
+) -> Response {
     // From the acknowledged offset: what a failed write left after it is cut off first
     // (off the runtime that also streams the music)
     let at = part.clone();
@@ -515,6 +535,54 @@ fn favourite_ids(songs: &[Song], bookmarks: &std::collections::BTreeMap<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_dropped_request_never_leaves_its_part_claimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Phone::open(super::super::Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        let r = start(
+            State(p.clone()),
+            Json(NewUpload {
+                name: "a.flac".into(),
+                size: 8,
+            }),
+        )
+        .await;
+        let v: Value =
+            serde_json::from_slice(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        // The page reloads while the first part is written: its request is dropped
+        let put = |offset: u64, b: &'static [u8]| {
+            put_part(
+                State(p.clone()),
+                Path(id.clone()),
+                Query(At { offset }),
+                Bytes::from_static(b),
+            )
+        };
+        let _ = tokio::time::timeout(Duration::ZERO, put(0, b"fLaC")).await;
+        // The write still ends, and the upload goes on from there
+        let mut at = None;
+        for _ in 0..100 {
+            let u = p.songs.uploads.lock().unwrap().get(&id).cloned().unwrap();
+            if !u.writing {
+                at = Some(u.offset);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(at, Some(4), "the part was written and the upload released");
+        let r = put(4, b"data").await;
+        assert_eq!(r.status(), StatusCode::OK);
+    }
 
     #[test]
     fn one_part_at_a_time() {
