@@ -338,7 +338,33 @@ async fn bookmarks_listens_and_prefs_reach_the_homeserver_as_a_node_reads_them()
     // The node reads the Bookmark as its own
     let marks = hs.read_v1_bookmarks(&sessions[0]).await.unwrap();
     assert!(marks.iter().any(|(_, u, _)| *u == url), "{marks:?}");
-    // (the listen was the second write: the homeserver took the music post at its v1 path)
+    // The listen is a private music v1 post (the node's default)
+    assert_eq!(posts(&sessions[0], "/priv/music/v1/posts/").await, 1);
+    // The person keeps their listens public (on their node): the next one goes under /pub/
+    let mut copy = hs
+        .read_node_settings(&sessions[0])
+        .await
+        .unwrap()
+        .unwrap_or_else(|| json!({"version": 1, "settings": {}}));
+    copy["settings"]["listens.history"] = json!("public");
+    hs.write_node_settings(&sessions[0], &copy).await.unwrap();
+    let play = || {
+        http.post(format!("{base}/v1/library/history"))
+            .bearer_auth(p.key())
+            .json(&json!({"uri": "tidal:track:13", "duration_ms": 61000}))
+            .send()
+    };
+    assert_eq!(play().await.unwrap().status(), 200);
+    phone::data::sync(&p, &acct).await;
+    assert_eq!(posts(&sessions[0], "/pub/music/v1/posts/").await, 1);
+    // No listen history: nothing written
+    copy["settings"]["listens.history"] = json!("off");
+    hs.write_node_settings(&sessions[0], &copy).await.unwrap();
+    assert_eq!(play().await.unwrap().status(), 200);
+    let r = phone::data::sync(&p, &acct).await;
+    assert_eq!(r.left, 0, "{r:?}");
+    assert_eq!(posts(&sessions[0], "/priv/music/v1/posts/").await, 1);
+    assert_eq!(posts(&sessions[0], "/pub/music/v1/posts/").await, 1);
     // Removing the Bookmark on the phone removes it there
     let r = http
         .delete(format!("{base}/v1/favourites?uri={}", urlencode(&url)))
@@ -363,6 +389,22 @@ async fn bookmarks_listens_and_prefs_reach_the_homeserver_as_a_node_reads_them()
     let prefs = hs.read_prefs(&sessions[0]).await.unwrap().unwrap();
     assert_eq!(prefs["quality"]["tidal"], "max");
     assert_eq!(prefs["home_layout"]["x"], 1);
+}
+
+/// How many objects the person has in `dir` (none when it was never written).
+async fn posts(s: &pubky::PubkySession, dir: &str) -> usize {
+    match s
+        .storage()
+        .list(dir)
+        .unwrap()
+        .limit(100)
+        .shallow(true)
+        .send()
+        .await
+    {
+        Ok(l) => l.len(),
+        Err(_) => 0,
+    }
 }
 
 fn urlencode(s: &str) -> String {

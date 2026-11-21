@@ -450,7 +450,9 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                     .write_shared_if(svc, &s, Some(marker), &|cur| cur.map(hash_of) == expect)
                     .await?;
                 if written.is_some() {
-                    set_lineage(phone, svc, Some(&lineage));
+                    // The id with the copy, unless the phone's sign-in changed during the write: its
+                    // own new id stays, and the next pass (what was written is recorded) writes it
+                    apply_if_still(&phone.store, form, mine_hash.as_deref(), None, Some(&lineage))?;
                     record.services.insert(
                         svc.into(),
                         Synced {

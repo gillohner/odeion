@@ -109,8 +109,8 @@ pub(crate) fn item_page(kind: &str, id: &str, svc: &str, skind: &str, sid: &str,
     json!({
         "kind": kind,
         "id": id,
-        "uri": it.url,
-        "target": { "uri": it.url },
+        "uri": canonical_link(&it.url),
+        "target": { "uri": canonical_link(&it.url) },
         "title": it.title,
         "artist": it.creator.as_ref().map(|name| json!({ "name": name })),
         "year": it.year,
@@ -151,8 +151,8 @@ pub(crate) fn artist_page(id: &str, svc: &str, a: &SourceArtist) -> Value {
     json!({
         "kind": "artist",
         "id": id,
-        "uri": a.url,
-        "target": { "uri": a.url },
+        "uri": canonical_link(&a.url),
+        "target": { "uri": canonical_link(&a.url) },
         "title": a.name,
         "image": a.image,
         "source": label(svc),
@@ -237,6 +237,14 @@ pub(crate) async fn source_artist(
         Ok(a) => Json(a).into_response(),
         Err(e) => source_err(e),
     }
+}
+
+/// A service page's link as a Bookmark keeps it (the canonical form, `https://tidal.com/album/1`
+/// for `https://tidal.com/browse/album/1`), so the page knows when it is bookmarked.
+fn canonical_link(url: &str) -> String {
+    pm_model::MusicUri::parse(url)
+        .map(|u| u.to_url())
+        .unwrap_or_else(|_| url.to_string())
 }
 
 #[cfg(test)]

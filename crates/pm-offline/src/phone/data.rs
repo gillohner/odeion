@@ -194,8 +194,39 @@ fn owner(acct: &Account) -> Result<v1::PubkyId, String> {
     v1::PubkyId::try_from(z32).map_err(|e| format!("{e:?}"))
 }
 
-/// Makes one pending write on the homeserver.
-async fn write(acct: &Account, p: &Phone, op: &Pending) -> Result<(), String> {
+/// Where the person keeps their listens (`listens.history`, set on a node and kept in its
+/// settings copy, `/priv/pubky.music/settings.json`): the node's rule, private by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum History {
+    Off,
+    Private,
+    Public,
+}
+
+/// The setting as the settings copy has it.
+pub fn history_of(settings: Option<&Value>) -> History {
+    let v = settings
+        .and_then(|s| s.get("settings"))
+        .and_then(|s| s.get("listens.history"))
+        .and_then(Value::as_str);
+    match v {
+        Some("off") => History::Off,
+        Some("public") => History::Public,
+        _ => History::Private,
+    }
+}
+
+async fn read_history(acct: &Account) -> Result<History, String> {
+    let s = acct
+        .hs
+        .read_node_settings(&acct.session)
+        .await
+        .map_err(|e| format!("the listen history setting: {e}"))?;
+    Ok(history_of(s.as_ref()))
+}
+
+/// Makes one pending write on the homeserver (`history`: where listens go).
+async fn write(acct: &Account, p: &Phone, op: &Pending, history: History) -> Result<(), String> {
     match op {
         Pending::Bookmark { url, on: true, at } => {
             let (bm, path) = v1::bookmark_of(url, *at)?;
@@ -217,6 +248,12 @@ async fn write(acct: &Account, p: &Phone, op: &Pending) -> Result<(), String> {
             duration_ms,
             at,
         } => {
+            let root = match history {
+                // The person keeps no listen history
+                History::Off => return Ok(()),
+                History::Private => v1::Root::Priv,
+                History::Public => v1::Root::Pub,
+            };
             let uri = pm_model::MusicUri::parse(url).map_err(|e| e.to_string())?;
             let source = match service {
                 Some(name) => pm_pubky::ActivitySource::Service { name: name.clone() },
@@ -226,7 +263,7 @@ async fn write(acct: &Account, p: &Phone, op: &Pending) -> Result<(), String> {
             a.played_at = *at;
             let post = v1::to_v1(&pm_pubky::MusicContent::Activity(a)).map_err(|e| format!("{e:?}"))?;
             let id = pm_pubky::ids::timestamp_id(*at);
-            let path = post.version_path(&id, None, v1::Root::Priv, &owner(acct)?)?;
+            let path = post.version_path(&id, None, root, &owner(acct)?)?;
             acct.hs
                 .write_object(&acct.session, &path, &post.to_json())
                 .await
@@ -336,10 +373,21 @@ pub struct Report {
 /// Bookmarks as the homeserver has them (with what is still pending on top), then prefs.json.
 pub async fn sync(p: &Phone, acct: &Account) -> Report {
     let mut r = Report::default();
+    // Read once a pass, when a listen waits
+    let mut history = None;
     loop {
         let next = load(p).pending.first().cloned();
         let Some(op) = next else { break };
-        match write(acct, p, &op).await {
+        if matches!(op, Pending::Listen { .. }) && history.is_none() {
+            match read_history(acct).await {
+                Ok(h) => history = Some(h),
+                Err(e) => {
+                    tracing::warn!("phone mode: a write waits for the homeserver: {e}");
+                    break;
+                }
+            }
+        }
+        match write(acct, p, &op, history.unwrap_or(History::Private)).await {
             Ok(()) => {
                 change(p, |l| {
                     if l.pending.first() == Some(&op) {
@@ -381,6 +429,17 @@ pub async fn sync(p: &Phone, acct: &Account) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listens_go_where_the_person_keeps_them() {
+        let with = |v: &str| json!({"version": 1, "settings": {"listens.history": v}});
+        assert_eq!(history_of(Some(&with("off"))), History::Off);
+        assert_eq!(history_of(Some(&with("public"))), History::Public);
+        assert_eq!(history_of(Some(&with("private"))), History::Private);
+        // No setting, or no settings copy: private, as on a node
+        assert_eq!(history_of(Some(&json!({"settings": {}}))), History::Private);
+        assert_eq!(history_of(None), History::Private);
+    }
 
     #[test]
     fn songs_are_kept_by_their_canonical_link() {

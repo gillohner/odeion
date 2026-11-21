@@ -1540,7 +1540,7 @@ pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.mu
 /// `crates/pm-appdata/VAULT.md` requires), the shared preferences, the files folder, the node's
 /// record (read only: whether the homeserver is a node's own), and the social and music posts
 /// (Collections, Bookmarks, listens, reviews). Never `/priv/pubky.music/` as a whole.
-pub const PHONE_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/prefs.json:rw,/priv/pubky.music/files/:rw,/priv/pubky.music/node.json:r,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
+pub const PHONE_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/prefs.json:rw,/priv/pubky.music/files/:rw,/priv/pubky.music/node.json:r,/priv/pubky.music/settings.json:r,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
 
 /// The capabilities in `wanted` (a list like [`LOGIN_CAPABILITIES`]) that `granted` does not
 /// cover. A granted `scope:actions` covers a wanted one when its scope is the same folder or a

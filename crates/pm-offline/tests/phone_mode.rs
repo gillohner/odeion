@@ -308,6 +308,23 @@ async fn an_album_page_plays_from_tidal_and_its_song_streams_with_ranges() {
     // An id that isn't TIDAL's is refused before anything is asked
     let (st, _) = f.json("/v1/sources/tidal/stream/2..%2F3").await;
     assert_eq!(st, 400);
+    // Bookmarked from its page, the page knows it is (the same link as the Bookmark's)
+    let r = f
+        .http
+        .put(format!("{}/v1/favourites", f.base))
+        .bearer_auth(f.phone.key())
+        .json(&json!({ "uri": pg["uri"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let (_, favs) = f.json("/v1/favourites").await;
+    assert!(
+        favs["uris"].as_array().unwrap().contains(&pg["uri"]),
+        "{} in {favs}",
+        pg["uri"]
+    );
+    assert_eq!(pg["target"]["uri"], pg["uri"]);
 }
 
 #[tokio::test]
