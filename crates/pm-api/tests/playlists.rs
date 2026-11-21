@@ -1949,3 +1949,78 @@ async fn album_cover_falls_back_to_itunes_on_an_exact_match() {
         "itunes"
     );
 }
+
+/// Search keeps each source's answer 5 minutes; a playlist edit drops the library's, so the next
+/// search already says the playlist's new count (it said the old one until the answer ran out).
+#[tokio::test]
+async fn search_says_a_playlists_new_count_right_after_an_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lib.sqlite");
+    let outputs = OutputRegistry::new();
+    outputs.register(Arc::new(NullOutput::new()));
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: None,
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        outputs,
+    );
+    let app = router(s.clone());
+    let (st, pl) = call(
+        &app,
+        "POST",
+        "/v1/playlists",
+        Some(serde_json::json!({
+            "name": "Late night",
+            "uris": [
+                format!("https://musicbrainz.org/recording/{MB}"),
+                format!("https://musicbrainz.org/recording/{MB2}"),
+            ],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{pl}");
+    let id = pl["summary"]["id"].as_str().unwrap().to_string();
+    let found = |a: &serde_json::Value| -> (bool, Option<String>) {
+        let hit = a["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["kind"] == "playlist" && h["id"] == id.as_str())
+            .cloned()
+            .unwrap_or_else(|| panic!("no playlist hit in {a}"));
+        (
+            a["cached"].as_bool().unwrap_or(false),
+            hit["subtitle"].as_str().map(str::to_string),
+        )
+    };
+    let (st, a) = call(&app, "GET", "/v1/search?q=late%20night&in=library", None).await;
+    assert_eq!(st, StatusCode::OK, "{a}");
+    assert_eq!(found(&a), (false, Some("2 songs · your playlist".into())));
+    // Asked again unchanged: the kept answer
+    let (_, a) = call(&app, "GET", "/v1/search?q=late%20night&in=library", None).await;
+    assert_eq!(found(&a), (true, Some("2 songs · your playlist".into())));
+    // One link removed: searched again at once, the playlist has its new count
+    let (st, r) = call(&app, "DELETE", &format!("/v1/playlists/{id}/items/0"), None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let (_, a) = call(&app, "GET", "/v1/search?q=late%20night&in=library", None).await;
+    assert_eq!(found(&a), (false, Some("1 song · your playlist".into())));
+}

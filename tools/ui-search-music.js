@@ -6,6 +6,7 @@
 //   * an ISRC: the exact hit is the Top result, with "Also on …", and the page doesn't say "No exact
 //     match"; a pasted Spotify page opens its item page, as before, without a search;
 //   * concerts near the node come as the Concerts section;
+//   * your playlists' counts with the thousands separator ("1,200 songs"), as the Playlists page;
 //   * one /v1/search request per search, and nothing wider than the screen.
 //   node tools/ui-search-music.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -36,6 +37,11 @@ const ANSWERS = {
     { source: 'pubky', status: 'ok', ms: 50, hits: [hit('artist', 'Kind Artist', 'Spotify', 21, 'Spotify'), hit('album', 'Kind Album', 'Someone', 22, 'Deezer'), hit('song', 'Kind Song', 'Someone', 23, 'TIDAL'), hit('podcast', 'Kind Podcast', 'Podcast', 24, 'Apple Podcasts'), hit('concert', 'Kind Concert', '2026-12-09', 25, 'Songkick')] },
     { source: 'people', status: 'ok', ms: 30, hits: [{ kind: 'person', title: 'Kind Person', id: 'person-1', keys: [] }] },
     { source: 'posts', status: 'ok', ms: 30, hits: [{ kind: 'post', title: 'Kind post about music', subtitle: 'someone', id: 'post-1', page: 'https://pubky.app/post/a/1', keys: [] }] },
+  ],
+  // Your playlists' counts as the Playlists page writes them (1,200 songs); a Pubky hit's words stay
+  'big mixes': [
+    { source: 'library', status: 'ok', ms: 2, hits: [{ kind: 'playlist', title: 'Road trip', subtitle: '1200 songs · your playlist', id: 'c1', keys: [] }, { kind: 'playlist', title: 'Kitchen', subtitle: '25000 items · your playlist', id: 'c2', keys: [] }, { kind: 'playlist', title: 'Small one', subtitle: '12 songs · your playlist', id: 'c3', keys: [] }] },
+    { source: 'pubky', status: 'ok', ms: 40, hits: [hit('playlist', 'Their list', '3400 plays', 31, 'Spotify')] },
   ],
   lol: [
     { source: 'library', status: 'ok', ms: 2, hits: [] },
@@ -111,6 +117,16 @@ const openFilters = async (page) => { if (await page.$('[data-sfilters][aria-exp
       check(r.kindChips.length === 8 && ['Artists', 'Albums', 'Songs', 'Playlists', 'People', 'Posts', 'Podcasts', 'Concerts'].every((l) => r.kindChips.some((c) => c.startsWith(l))), `${w} every kind: the Kind filter lists all eight (${r.kindChips.join(' | ')})`);
       check(r.wide <= 0, `${w} every kind: nothing wider than the screen (${r.wide})`);
       await page.screenshot({ path: path.join(SHOTS, `every-kind-${w}.png`) });
+      await context.close();
+    }
+    // ---- your playlists' counts with the thousands separator, as on the Playlists page ----
+    {
+      const { page, context, state } = await open(browser, w, 'big mixes');
+      const got = await page.evaluate(() => ({ subs: [...document.querySelectorAll('[data-skind="playlist"] .list-row .sub')].map((x) => x.textContent.trim()), k1: (1200).toLocaleString(), k25: (25000).toLocaleString() }));
+      const want = [`${got.k1} songs · your playlist`, `${got.k25} items · your playlist`, '12 songs · your playlist', '3400 plays'];
+      check(got.k1 !== '1200' && want.every((x) => got.subs.includes(x)), `${w} big mixes: your playlists say "${got.k1} songs" as the Playlists page does; a Pubky hit's words stay (${got.subs.join(' | ')})`);
+      check(!state.errors.length, `${w} big mixes: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
+      await page.screenshot({ path: path.join(SHOTS, `playlist-counts-${w}.png`) });
       await context.close();
     }
     // ---- a short query ----

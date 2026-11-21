@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-21
+
+- **Search shows a playlist's new size right after you change it.** After you added to, removed from, renamed, deleted or imported a playlist, searching for it could still show the old count (or the old playlist) for up to 5 minutes. Search now forgets what it kept from your library whenever a playlist is made, changed, deleted or imported, so the next search shows the playlist as it is now.
+- **Search writes big playlist counts the way the Playlists page does.** A playlist with 1200 songs read "1200 songs · your playlist" in search but "1,200 songs" on the Playlists page; search now writes "1,200 songs" too.
+
 ### 2026-11-20
 
 - **Going back from a pasted post link no longer undoes what you did next.** After pasting a link to a post that isn't a playlist over a search, the app steps back to that search. If that step was slow and you opened another page or pressed Back yourself meanwhile, the late step then pulled you off the page you chose. Now what you chose stays. If the step came only after your typing had already been searched, it no longer jumped you to another page or left a second copy of the same search for Forward. A Back you press right after is yours, to the search you had before. On a computer, emptying the box there always shows the page you opened Search from, never a page still loading.

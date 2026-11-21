@@ -299,6 +299,9 @@ pub struct NodeState {
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
     /// `/v1/search`'s answers, cached a few minutes per query and source (search.rs).
     pub(crate) search_answers: crate::search::AnswerCache,
+    /// Bumped each time the cached library answers are dropped (search.rs
+    /// `forget_library_answers`), so a library answer made meanwhile isn't kept.
+    pub(crate) search_library_epoch: std::sync::atomic::AtomicU64,
     /// The services whose app node.toml or the environment sets, recorded before the admin's own
     /// apps are applied (apps.rs `from_config`).
     pub(crate) apps_from_config: std::sync::OnceLock<Vec<&'static str>>,
@@ -575,6 +578,7 @@ impl NodeState {
             pinakes_reader: Default::default(),
             presence: Default::default(),
             search_answers: Default::default(),
+            search_library_epoch: Default::default(),
             apps_from_config: Default::default(),
             tidal,
             http: Mutex::new(None),
@@ -2335,8 +2339,12 @@ impl NodeState {
         self.sync.lock().expect("sync lock").clone()
     }
 
-    /// Tell event listeners that library-side data (tracks, playlists) changed.
+    /// Tell event listeners that library-side data (tracks, playlists) changed. Search's cached
+    /// library answers go too: every playlist write and import ends here, and an answer kept for
+    /// 5 minutes would still show a playlist's old count. (A scan's end and tag or match edits
+    /// send `LibraryChanged` themselves and keep them.)
     pub fn notify_library(&self) {
+        crate::search::forget_library_answers(self);
         let _ = self.events.send(ApiEvent::LibraryChanged);
     }
 
