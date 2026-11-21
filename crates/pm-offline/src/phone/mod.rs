@@ -205,14 +205,32 @@ pub fn router(phone: Arc<Phone>) -> Router {
         .with_state(phone)
 }
 
+/// Where the port phone mode last served on is kept (in the person's folder).
+const PORT_FILE: &str = "port";
+
 /// Serve on `127.0.0.1` (a free port). Returns the address and the server's task. Only requests
 /// for this server by its own name are answered (403 otherwise), and `/v1` only with the key.
 pub async fn serve(
     phone: Arc<Phone>,
 ) -> std::io::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    // The port this person's phone mode had before, so the page keeps its origin (and with it what
+    // it keeps in the browser: the queue, the theme, the layout); another if that one is taken
+    let saved = phone.dir.join(PORT_FILE);
+    let before = std::fs::read_to_string(&saved)
+        .ok()
+        .and_then(|p| p.trim().parse::<u16>().ok());
+    let listener = match before {
+        Some(p) if p != 0 => match tokio::net::TcpListener::bind(("127.0.0.1", p)).await {
+            Ok(l) => l,
+            Err(_) => tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?,
+        },
+        _ => tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?,
+    };
     let addr = listener.local_addr()?;
     let port = addr.port();
+    if before != Some(port) {
+        let _ = std::fs::write(&saved, port.to_string());
+    }
     let key = phone.key.clone();
     let app = router(phone).layer(axum::middleware::from_fn(move |req: Request, next: Next| {
         let key = key.clone();

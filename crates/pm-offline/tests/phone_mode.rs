@@ -179,6 +179,27 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn phone_mode_comes_back_on_the_same_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let open = || {
+        phone::Phone::open(Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap()
+    };
+    let (first, task) = phone::serve(open()).await.unwrap();
+    task.abort();
+    let _ = task.await;
+    // The next start: the same origin, so what the page keeps in the browser is still there
+    let (again, _task) = phone::serve(open()).await.unwrap();
+    assert_eq!(again.port(), first.port());
+}
+
+#[tokio::test]
 async fn the_backend_answers_only_its_own_page_and_only_with_its_key() {
     let f = Fixture::new().await;
     // The page itself loads without the key (the app puts the key in its storage)
