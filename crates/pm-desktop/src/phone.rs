@@ -26,8 +26,9 @@ pub struct Saved {
     pub pubky: String,
 }
 
-/// The running backend: its origin and key.
+/// The running backend: whose it is, its origin and key.
 struct Running {
+    pubky: String,
     origin: String,
     key: String,
     task: tokio::task::JoinHandle<()>,
@@ -54,12 +55,11 @@ fn person_dir(base: &std::path::Path, pubky: &str) -> Result<PathBuf, String> {
     Ok(base.join("phone").join(pubky))
 }
 
-/// Where TIDAL tracks are cached while they play: the app's cache folder (the system may empty it).
-fn cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_cache_dir()
-        .map(|d| d.join("phone-streams"))
-        .map_err(|e| e.to_string())
+/// Where one person's TIDAL tracks are cached while they play: the app's cache folder (the
+/// system may empty it).
+fn cache_dir(app: &AppHandle, pubky: &str) -> Result<PathBuf, String> {
+    let base = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    Ok(person_dir(&base, pubky)?.with_file_name(format!("{pubky}-streams")))
 }
 
 pub fn load_saved(path: &std::path::Path) -> Option<Saved> {
@@ -218,12 +218,24 @@ pub async fn open_phone(app: AppHandle, state: State<'_, AppState>) -> Result<()
 
 /// Starts the backend once and shows its page.
 async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<(), String> {
-    let origin = match origin() {
+    // The running backend is this person's and still serves; else a new one (the old one ends)
+    let running = {
+        let mut r = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        if r.as_ref()
+            .is_some_and(|r| r.pubky != saved.pubky || r.task.is_finished())
+        {
+            if let Some(old) = r.take() {
+                old.task.abort();
+            }
+        }
+        r.as_ref().map(|r| r.origin.clone())
+    };
+    let origin = match running {
         Some(o) => o,
         None => {
             let phone = pm_offline::phone::Phone::open(pm_offline::phone::Config {
                 dir: dir(app, &saved.pubky)?,
-                cache: cache_dir(app)?,
+                cache: cache_dir(app, &saved.pubky)?,
                 version: env!("CARGO_PKG_VERSION").into(),
                 pubky: Some(saved.pubky.clone()),
                 tidal: tidal_conf(),
@@ -235,6 +247,7 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<(), St
                 .map_err(|e| format!("Phone mode can't start: {e}"))?;
             let origin = format!("http://127.0.0.1:{}", addr.port());
             *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Running {
+                pubky: saved.pubky.clone(),
                 origin: origin.clone(),
                 key,
                 task,

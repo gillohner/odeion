@@ -121,5 +121,18 @@ mod tests {
             );
         }
         assert_eq!(file("/sw.js").status(), StatusCode::NOT_FOUND);
+        // And every file the page loads is here (a new one would get the page instead)
+        for attr in ["src=\"/", "href=\"/"] {
+            for rest in index.split(attr).skip(1) {
+                let name = rest.split('"').next().unwrap_or_default();
+                if name.is_empty() || name == "sw.js" {
+                    continue;
+                }
+                assert!(
+                    FILES.iter().any(|(n, _, _)| *n == name),
+                    "index.html loads /{name}, which phone mode doesn't serve"
+                );
+            }
+        }
     }
 }

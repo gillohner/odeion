@@ -20,6 +20,8 @@ use std::sync::{Arc, OnceLock};
 const MAX_BYTES: u64 = 300 * 1024 * 1024;
 /// How many tracks the cache keeps (the one playing and the next).
 const KEEP: usize = 3;
+/// A fetch nobody reads any more (the person moved on) stops after this.
+const UNREAD_FOR: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The blocking client the full-track readers use (built once, off the async runtime).
 pub(crate) fn blocking_client() -> &'static reqwest::blocking::Client {
@@ -107,7 +109,9 @@ impl Streams {
     fn fetch(
         &self,
         id: &str,
-        start: impl FnOnce(tokio::sync::watch::Sender<Fetch>) + Send + 'static,
+        start: impl FnOnce(Arc<tokio::sync::watch::Sender<Fetch>>, Arc<std::sync::atomic::AtomicBool>)
+            + Send
+            + 'static,
     ) -> tokio::sync::watch::Receiver<Fetch> {
         let mut f = self.fetches.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(rx) = f.get(id) {
@@ -116,8 +120,28 @@ impl Streams {
             }
         }
         let (tx, rx) = tokio::sync::watch::channel(Fetch::Running(PathBuf::new(), 0, "audio/flac"));
+        let tx = Arc::new(tx);
         f.insert(id.to_string(), rx.clone());
-        tokio::task::spawn_blocking(move || start(tx));
+        // Nobody reading it for UNREAD_FOR (only the map's receiver left): the fetch stops at its
+        // next chunk
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (watch_tx, watch_stop) = (tx.clone(), stop.clone());
+        tokio::spawn(async move {
+            let mut alone = None::<tokio::time::Instant>;
+            loop {
+                if matches!(&*watch_tx.borrow(), Fetch::Done(_) | Fetch::Failed(..)) {
+                    return;
+                }
+                if watch_tx.receiver_count() > 1 {
+                    alone = None;
+                } else if alone.get_or_insert_with(tokio::time::Instant::now).elapsed() >= UNREAD_FOR {
+                    watch_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        });
+        tokio::task::spawn_blocking(move || start(tx, stop));
         rx
     }
 }
@@ -140,6 +164,7 @@ fn write_track(
     ext: &str,
     reader: &mut dyn Read,
     progress: &dyn Fn(&FsPath, u64),
+    keep_on: &dyn Fn() -> bool,
 ) -> Result<PathBuf, String> {
     use std::io::Write;
     let part = dir.join(part_name(name));
@@ -152,6 +177,9 @@ fn write_track(
         e
     };
     loop {
+        if !keep_on() {
+            return Err(fail("nobody plays it any more".into()));
+        }
         let k = match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(k) => k,
@@ -179,41 +207,38 @@ fn numeric(id: &str) -> bool {
 
 /// The track as it is written: from the start, each part as soon as it is in the file, to the end
 /// (no length, no ranges: this play can't seek; the next one, from the whole file, can).
-fn following(rx: tokio::sync::watch::Receiver<Fetch>, path: PathBuf, mime: &'static str) -> Response {
-    let body = futures_util::stream::unfold(
-        (None::<tokio::fs::File>, rx, path, false),
-        |(file, mut rx, path, ended)| async move {
-            use tokio::io::AsyncReadExt;
-            if ended {
-                return None;
+fn following(rx: tokio::sync::watch::Receiver<Fetch>, file: tokio::fs::File, mime: &'static str) -> Response {
+    let body = futures_util::stream::unfold((Some(file), rx, false), |(file, mut rx, ended)| async move {
+        use tokio::io::AsyncReadExt;
+        if ended {
+            return None;
+        }
+        let mut file = file?;
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let k = file.read(&mut buf).await.ok()?;
+            if k > 0 {
+                buf.truncate(k);
+                return Some((Ok::<_, std::io::Error>(buf), (Some(file), rx, false)));
             }
-            let mut file = match file {
-                Some(f) => f,
-                None => tokio::fs::File::open(&path).await.ok()?,
-            };
-            let mut buf = vec![0u8; 256 * 1024];
-            loop {
-                let k = file.read(&mut buf).await.ok()?;
-                if k > 0 {
-                    buf.truncate(k);
-                    return Some((Ok::<_, std::io::Error>(buf), (Some(file), rx, path, false)));
+            // At the end of what is written: the track's end, or wait for more
+            let state = rx.borrow_and_update().clone();
+            match state {
+                Fetch::Done(_) => {
+                    // Every byte was written before Done: what is left of the (same, renamed)
+                    // file is the rest
+                    let mut rest = Vec::new();
+                    file.read_to_end(&mut rest).await.ok()?;
+                    return (!rest.is_empty()).then(|| (Ok(rest), (None, rx, true)));
                 }
-                // At the end of what is written: the track's end, or wait for more
-                let state = rx.borrow_and_update().clone();
-                match state {
-                    Fetch::Done(_) => {
-                        // Every byte was written before Done: what is left of the (same, renamed)
-                        // file is the rest
-                        let mut rest = Vec::new();
-                        file.read_to_end(&mut rest).await.ok()?;
-                        return (!rest.is_empty()).then(|| (Ok(rest), (None, rx, path, true)));
-                    }
-                    Fetch::Failed(..) => return None,
-                    Fetch::Running(..) => rx.changed().await.ok()?,
+                // The song must not just end: the player says it broke off
+                Fetch::Failed(_, m) => {
+                    return Some((Err(std::io::Error::other(m)), (None, rx, true)));
                 }
+                Fetch::Running(..) => rx.changed().await.ok()?,
             }
-        },
-    );
+        }
+    });
     let mut r = Response::new(Body::from_stream(body));
     r.headers_mut()
         .insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static(mime));
@@ -230,13 +255,20 @@ pub(crate) async fn tidal(
     if !numeric(&id) {
         return err(StatusCode::BAD_REQUEST, "bad TIDAL track id");
     }
+    // A cached track plays only while the person is signed in to TIDAL here
+    if !tidal::streams(&p) {
+        return err(
+            StatusCode::PRECONDITION_FAILED,
+            "Sign in to TIDAL first (Settings › Streaming services)",
+        );
+    }
     let name = format!("tidal-{id}");
     if let Some(f) = p.streams.kept(&name) {
         return crate::server::send_file(&f, &headers).await;
     }
     let p2 = p.clone();
     let id2 = id.clone();
-    let mut rx = p.streams.fetch(&id, move |tx| {
+    let mut rx = p.streams.fetch(&id, move |tx, stop| {
         let r = pm_sources::tidal::full::open(p2.store.as_ref(), blocking_client(), &tidal::endpoints(&p2), &id2);
         pm_sources::tidal::full::record(p2.store.as_ref(), &r);
         let end = match r {
@@ -249,7 +281,8 @@ pub(crate) async fn tidal(
                 let progress = |part: &FsPath, n: u64| {
                     let _ = tx.send(Fetch::Running(part.to_path_buf(), n, mime));
                 };
-                match write_track(&p2.streams.dir, &name, ext, &mut full.reader, &progress) {
+                let keep_on = || !stop.load(std::sync::atomic::Ordering::Relaxed);
+                match write_track(&p2.streams.dir, &name, ext, &mut full.reader, &progress, &keep_on) {
                     Ok(path) => {
                         tracing::info!(track = %id2, bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0), "phone mode: TIDAL full track fetched");
                         p2.streams.trim();
@@ -285,7 +318,10 @@ pub(crate) async fn tidal(
                     .get(header::RANGE)
                     .is_none_or(|r| r.as_bytes() == b"bytes=0-")
                 {
-                    return following(rx, part, mime);
+                    // (renamed meanwhile when whole: the next look sees Done)
+                    if let Ok(f) = tokio::fs::File::open(&part).await {
+                        return following(rx, f, mime);
+                    }
                 }
             }
             Fetch::Running(..) => {}
@@ -356,14 +392,17 @@ mod tests {
         let s = Streams::open(dir.path()).unwrap();
         for i in 0..5 {
             let mut r: &[u8] = b"fLaC....";
-            write_track(&s.dir, &format!("tidal-{i}"), "flac", &mut r, &|_, _| {}).unwrap();
+            write_track(&s.dir, &format!("tidal-{i}"), "flac", &mut r, &|_, _| {}, &|| {
+                true
+            })
+            .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(20));
             s.trim();
         }
         assert!(s.kept("tidal-4").is_some() && s.kept("tidal-2").is_some());
         assert!(s.kept("tidal-0").is_none() && s.kept("tidal-1").is_none());
         let mut empty: &[u8] = b"";
-        assert!(write_track(&s.dir, "tidal-9", "flac", &mut empty, &|_, _| {}).is_err());
+        assert!(write_track(&s.dir, "tidal-9", "flac", &mut empty, &|_, _| {}, &|| true).is_err());
         assert!(s.kept("tidal-9").is_none(), "nothing half-written is served");
         // A new start begins empty
         let again = Streams::open(dir.path()).unwrap();
