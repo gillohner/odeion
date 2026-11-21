@@ -266,10 +266,18 @@ pub(crate) async fn tidal(
     if let Some(f) = p.streams.kept(&name) {
         return crate::server::send_file(&f, &headers).await;
     }
+    // The session as phone mode keeps it fresh (renewed under the vault's lock where the vault
+    // has it, never beside a renewal running there): the stream itself never renews
+    let sess = match tidal::session(&p).await {
+        Ok(s) => s,
+        Err(e) => return super::source_err(e),
+    };
+    let quality = pm_sources::tidal::full::quality_of(&pm_sources::tidal::full::load(p.store.as_ref()));
     let p2 = p.clone();
     let id2 = id.clone();
     let mut rx = p.streams.fetch(&id, move |tx, stop| {
-        let r = pm_sources::tidal::full::open(p2.store.as_ref(), blocking_client(), &tidal::endpoints(&p2), &id2);
+        let r = pm_sources::tidal::full::open_as(blocking_client(), &tidal::endpoints(&p2), &sess, quality, &id2)
+            .map(Some);
         pm_sources::tidal::full::record(p2.store.as_ref(), &r);
         let end = match r {
             Ok(Some(mut full)) => {

@@ -37,6 +37,9 @@ pub(crate) fn endpoints(p: &Phone) -> Endpoints<'_> {
     }
 }
 
+/// How long a song waits, past the first 8 s, for a renewal of an expired session.
+const RENEWAL_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The person's session when TIDAL can answer for them (renewed first when it is about to run
 /// out), else why not.
 pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
@@ -62,7 +65,16 @@ pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError
                             tracing::warn!("phone mode: TIDAL renewal in the vault takes long; the current session plays");
                             return Ok(s);
                         }
-                        _ => Some(renewal.await),
+                        // Expired: the song waits for the renewal, within a limit
+                        _ => match tokio::time::timeout(RENEWAL_WAIT, renewal).await {
+                            Ok(r) => Some(r),
+                            Err(_) => {
+                                return Err(SourceError::new(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "TIDAL: the sign-in is being renewed; try again in a moment",
+                                ))
+                            }
+                        },
                     }
                 }
             };

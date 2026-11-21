@@ -788,12 +788,7 @@ pub fn token(
     let Some(sess) = st.session.clone() else {
         return Ok(None);
     };
-    let quality = if st.quality == "high" {
-        "LOSSLESS"
-    } else {
-        "HI_RES_LOSSLESS"
-    }
-    .to_string();
+    let quality = quality_of(&st).to_string();
     if sess.expires_at - now() > 60 {
         return Ok(Some((sess, quality)));
     }
@@ -893,10 +888,33 @@ pub fn open(
     ep: &Endpoints<'_>,
     id: &str,
 ) -> Result<Option<FullStream>, FullError> {
-    let v1 = ep.v1_base.trim_end_matches('/');
     let Some((sess, quality)) = token(store, client, ep)? else {
         return Ok(None);
     };
+    open_as(client, ep, &sess, &quality, id).map(Some)
+}
+
+/// The quality TIDAL is asked for, by the mode's setting (`high`: CD quality; else the best).
+pub fn quality_of(st: &ModeState) -> &'static str {
+    if st.quality == "high" {
+        "LOSSLESS"
+    } else {
+        "HI_RES_LOSSLESS"
+    }
+}
+
+/// [`open`] with `sess` as it is (the caller renewed it, or keeps it while another device renews
+/// it): never renews.
+pub fn open_as(
+    client: &'static reqwest::blocking::Client,
+    ep: &Endpoints<'_>,
+    sess: &Session,
+    quality: &str,
+    id: &str,
+) -> Result<FullStream, FullError> {
+    let v1 = ep.v1_base.trim_end_matches('/');
+    let quality = quality.to_string();
+    let sess = sess.clone();
     let v = playback_info(client, v1, &sess, id, &quality)?;
     let (mut answer, mut media) = read_answer(&v, &quality)?;
     let mut first = None;
@@ -940,7 +958,7 @@ pub fn open(
         Media::File(_, ext, mime) => (ext, mime, None),
         Media::Segments(segs) => ("m4a", "audio/mp4", Some(segs)),
     };
-    Ok(Some(FullStream {
+    Ok(FullStream {
         reader,
         segments,
         ext,
@@ -950,7 +968,7 @@ pub fn open(
         imported: sess.from.is_some(),
         browser: ep.browser.is_some(),
         answer,
-    }))
+    })
 }
 
 /// Record how the mode did: a failure of the mode itself switches it off (the page says why;
