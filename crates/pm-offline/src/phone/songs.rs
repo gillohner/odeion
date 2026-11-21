@@ -1,0 +1,461 @@
+//! Songs added to the phone: picked in the page (the system's file picker), sent to this backend
+//! with the node's own upload routes (`/v1/library/uploads`, resumable 4 MiB parts) and kept in the
+//! app's own storage (`phone/<pubky>/music/`), named as a node names song files on the homeserver
+//! (`<BLAKE3 16 hex>-<name>`, `pm_appdata::files`). Tags are read with pm-library's reader; the
+//! songs are listed as the offline page lists what a device keeps (`/v1/offline`), and play from
+//! `/v1/library/tracks/{id}/file`.
+
+use super::{err, Phone};
+use axum::body::Bytes;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path as FsPath, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// One part of an upload (the page's chunk size).
+pub const CHUNK: u64 = 4 * 1024 * 1024;
+/// The largest song taken.
+const MAX_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+/// What an upload always leaves free on the phone.
+const KEEP_FREE: u64 = 200 * 1024 * 1024;
+
+/// One song on the phone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Song {
+    pub id: i64,
+    /// Its file in `music/` (`<hash>-<name>`).
+    pub file: String,
+    pub title: String,
+    #[serde(default)]
+    pub artists: Vec<String>,
+    #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
+    pub album_artist: Option<String>,
+    #[serde(default)]
+    pub year: Option<i32>,
+    #[serde(default)]
+    pub track_no: Option<u32>,
+    #[serde(default)]
+    pub disc_no: Option<u32>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    pub container: String,
+    pub format: pm_model::AudioFormat,
+    pub bytes: u64,
+    /// Its album's cover in `music/covers/`, when the file had one.
+    #[serde(default)]
+    pub cover: Option<String>,
+}
+
+/// A stable id from text (albums and artists), positive and within JavaScript's integers.
+fn id_of(text: &str) -> i64 {
+    let h = blake3::hash(text.to_lowercase().as_bytes());
+    (u64::from_le_bytes(h.as_bytes()[..8].try_into().expect("8 bytes")) >> 12) as i64
+}
+
+impl Song {
+    pub fn album_id(&self) -> Option<i64> {
+        let album = self.album.as_ref()?;
+        let by = self
+            .album_artist
+            .clone()
+            .or_else(|| self.artists.first().cloned())
+            .unwrap_or_default();
+        Some(id_of(&format!("{by}\u{0}{album}")))
+    }
+
+    /// The song as the node's library answers it (what the page's rows read).
+    pub fn track(&self) -> Value {
+        json!({
+            "id": self.id,
+            "title": self.title,
+            "artists": self.artists.iter().map(|a| json!({"id": id_of(a), "name": a})).collect::<Vec<_>>(),
+            "album": self.album.as_ref().map(|t| json!({"id": self.album_id(), "title": t, "year": self.year})),
+            "duration_ms": self.duration_ms,
+            "track_no": self.track_no,
+            "disc_no": self.disc_no,
+            "file": {"container": self.container, "format": self.format},
+        })
+    }
+}
+
+/// An upload on its way.
+#[derive(Debug, Clone, Serialize)]
+pub struct Upload {
+    pub id: String,
+    pub name: String,
+    pub size: u64,
+    pub offset: u64,
+    /// `receiving`, `storing`, `stored`, `failed`.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip)]
+    part: PathBuf,
+}
+
+/// The phone's songs and its uploads.
+pub struct Songs {
+    dir: PathBuf,
+    index: Mutex<Vec<Song>>,
+    uploads: Mutex<HashMap<String, Upload>>,
+}
+
+impl Songs {
+    pub fn open(dir: &FsPath) -> std::io::Result<Self> {
+        let dir = dir.join("music");
+        std::fs::create_dir_all(dir.join("covers"))?;
+        // Parts of uploads cut off by a restart start again
+        for e in std::fs::read_dir(&dir)?.flatten() {
+            if e.path().extension().is_some_and(|x| x == "part") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        let index = std::fs::read(dir.join("songs.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        Ok(Self {
+            dir,
+            index: Mutex::new(index),
+            uploads: Mutex::default(),
+        })
+    }
+
+    pub fn list(&self) -> Vec<Song> {
+        self.index.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn get(&self, id: i64) -> Option<Song> {
+        self.list().into_iter().find(|s| s.id == id)
+    }
+
+    pub fn path_of(&self, s: &Song) -> PathBuf {
+        self.dir.join(&s.file)
+    }
+
+    fn save(&self, list: &[Song]) {
+        let p = self.dir.join("songs.json");
+        let tmp = p.with_extension("json.tmp");
+        let ok = serde_json::to_vec(list)
+            .ok()
+            .and_then(|b| std::fs::write(&tmp, b).ok())
+            .and_then(|_| std::fs::rename(&tmp, &p).ok());
+        if ok.is_none() {
+            tracing::warn!("phone mode: the songs list could not be saved");
+        }
+    }
+
+    /// A whole uploaded file: named by its hash, its tags read, listed. The same file twice is
+    /// one song.
+    pub fn store(&self, part: &FsPath, name: &str) -> Result<Song, String> {
+        let bytes = std::fs::read(part).map_err(|e| e.to_string())?;
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        drop(bytes);
+        let safe = pm_appdata::files::safe_file_name(FsPath::new(name));
+        let file = pm_appdata::files::remote_name_for(&hash, &safe);
+        if let Some(s) = self.list().into_iter().find(|s| s.file == file) {
+            let _ = std::fs::remove_file(part);
+            return Ok(s);
+        }
+        let path = self.dir.join(&file);
+        std::fs::rename(part, &path).map_err(|e| e.to_string())?;
+        let (probe, tags) = match pm_library::tags::probe_and_read(&path) {
+            Ok(x) => x,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                return Err(format!("not a song this phone can play: {e}"));
+            }
+        };
+        let mut index = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        let id = index.iter().map(|s| s.id).max().unwrap_or(0) + 1;
+        let stem = FsPath::new(name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Song".into());
+        let mut song = Song {
+            id,
+            file,
+            title: tags
+                .title
+                .clone()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or(stem),
+            artists: tags.artists.clone(),
+            album: tags.album.clone(),
+            album_artist: tags.album_artist.clone(),
+            year: tags.year,
+            track_no: tags.track_no,
+            disc_no: tags.disc_no,
+            duration_ms: probe.duration_ms,
+            container: probe.container.clone(),
+            format: probe.format,
+            bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+            cover: None,
+        };
+        if let (Some(pic), Some(aid)) = (&tags.picture, song.album_id()) {
+            let cover = format!("{aid}.{}", pic.extension());
+            if std::fs::write(self.dir.join("covers").join(&cover), &pic.data).is_ok() {
+                song.cover = Some(cover);
+            }
+        }
+        index.push(song.clone());
+        self.save(&index);
+        Ok(song)
+    }
+
+    /// The cover of an album, when one of its songs had one.
+    pub fn cover(&self, album: i64) -> Option<PathBuf> {
+        self.list()
+            .into_iter()
+            .filter(|s| s.album_id() == Some(album))
+            .find_map(|s| s.cover)
+            .map(|c| self.dir.join("covers").join(c))
+            .filter(|p| p.is_file())
+    }
+
+    /// Songs whose title, artist or album has every word of `q`.
+    pub fn find(&self, q: &str, limit: usize) -> Vec<Song> {
+        let words: Vec<String> = q.split_whitespace().map(str::to_lowercase).collect();
+        if words.is_empty() {
+            return Vec::new();
+        }
+        self.list()
+            .into_iter()
+            .filter(|s| {
+                let text = format!(
+                    "{} {} {}",
+                    s.title,
+                    s.artists.join(" "),
+                    s.album.clone().unwrap_or_default()
+                )
+                .to_lowercase();
+                words.iter().all(|w| text.contains(w))
+            })
+            .take(limit)
+            .collect()
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct NewUpload {
+    name: String,
+    size: u64,
+}
+
+/// `POST /v1/library/uploads {name, size}`: an upload starts (the node's shape).
+pub(crate) async fn start(State(p): State<Arc<Phone>>, Json(b): Json<NewUpload>) -> Response {
+    let name = pm_appdata::files::safe_file_name(FsPath::new(&b.name));
+    if name.is_empty() || !pm_library::tags::is_supported(FsPath::new(&name)) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!("{}: not a kind of music file this phone plays", b.name),
+        );
+    }
+    if b.size == 0 || b.size > MAX_SIZE {
+        return err(StatusCode::BAD_REQUEST, "that file's size can't be a song");
+    }
+    if crate::sync::free_bytes(&p.songs.dir).is_some_and(|free| free < b.size + KEEP_FREE) {
+        return err(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "Not enough space on this phone for that song",
+        );
+    }
+    let mut raw = [0u8; 12];
+    let _ = getrandom::fill(&mut raw);
+    let id: String = raw.iter().map(|x| format!("{x:02x}")).collect();
+    let part = p.songs.dir.join(format!("{id}.part"));
+    if let Err(e) = std::fs::File::create(&part) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+    p.songs.uploads.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        id.clone(),
+        Upload {
+            id: id.clone(),
+            name: b.name,
+            size: b.size,
+            offset: 0,
+            state: "receiving".into(),
+            error: None,
+            part,
+        },
+    );
+    Json(json!({ "id": id, "offset": 0, "chunk_size": CHUNK, "already": false })).into_response()
+}
+
+/// `GET /v1/library/uploads/{id}`.
+pub(crate) async fn get(State(p): State<Arc<Phone>>, Path(id): Path<String>) -> Response {
+    match p.songs.uploads.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+        Some(u) => Json(u.clone()).into_response(),
+        None => err(StatusCode::NOT_FOUND, "no such upload"),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct At {
+    offset: u64,
+}
+
+/// `PUT /v1/library/uploads/{id}?offset=`: the next part; the last one stores the song.
+pub(crate) async fn put_part(
+    State(p): State<Arc<Phone>>,
+    Path(id): Path<String>,
+    Query(at): Query<At>,
+    body: Bytes,
+) -> Response {
+    let (part, name, size, offset) = {
+        let ups = p.songs.uploads.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(u) = ups.get(&id) else {
+            return err(StatusCode::NOT_FOUND, "no such upload");
+        };
+        if u.state != "receiving" || at.offset != u.offset {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"offset": u.offset, "state": u.state})),
+            )
+                .into_response();
+        }
+        if body.len() as u64 > CHUNK || u.offset + body.len() as u64 > u.size {
+            return err(StatusCode::BAD_REQUEST, "that part doesn't fit the file");
+        }
+        (u.part.clone(), u.name.clone(), u.size, u.offset)
+    };
+    let appended = {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&part)
+            .and_then(|mut f| f.write_all(&body))
+    };
+    if let Err(e) = appended {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+    let now = offset + body.len() as u64;
+    let done = now == size;
+    {
+        let mut ups = p.songs.uploads.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(u) = ups.get_mut(&id) {
+            u.offset = now;
+            if done {
+                u.state = "storing".into();
+            }
+        }
+    }
+    if !done {
+        return Json(json!({"offset": now, "state": "receiving"})).into_response();
+    }
+    let p2 = p.clone();
+    let stored = tokio::task::spawn_blocking(move || p2.songs.store(&part, &name))
+        .await
+        .unwrap_or_else(|_| Err("storing stopped".into()));
+    let mut ups = p.songs.uploads.lock().unwrap_or_else(|e| e.into_inner());
+    let u = ups.get_mut(&id).expect("this upload");
+    match stored {
+        Ok(s) => {
+            tracing::info!(song = s.id, "phone mode: a song added");
+            u.state = "stored".into();
+        }
+        Err(e) => {
+            u.state = "failed".into();
+            u.error = Some(e);
+        }
+    }
+    Json(json!({"offset": now, "state": u.state, "error": u.error})).into_response()
+}
+
+/// A song's place on its album: disc, number, id.
+type SongAt = (u32, u32, i64);
+
+/// `GET /v1/offline`: the phone's songs as the offline page lists what a device keeps.
+pub(crate) async fn listing(State(p): State<Arc<Phone>>) -> Json<Value> {
+    let songs = p.songs.list();
+    let mut albums: BTreeMap<i64, (Value, Vec<SongAt>)> = BTreeMap::new();
+    for s in &songs {
+        if let Some(aid) = s.album_id() {
+            let a = albums.entry(aid).or_insert_with(|| {
+                (
+                    json!({"id": aid, "title": s.album, "year": s.year,
+                           "artist": s.album_artist.clone().or_else(|| s.artists.first().cloned())}),
+                    Vec::new(),
+                )
+            });
+            a.1.push((s.disc_no.unwrap_or(1), s.track_no.unwrap_or(0), s.id));
+        }
+    }
+    let covered: BTreeSet<i64> = songs
+        .iter()
+        .filter(|s| s.cover.is_some())
+        .filter_map(Song::album_id)
+        .collect();
+    let mut albums: Vec<Value> = albums
+        .into_iter()
+        .map(|(aid, (mut a, mut ids))| {
+            ids.sort();
+            a["track_ids"] = json!(ids.iter().map(|x| x.2).collect::<Vec<_>>());
+            a["cover"] = json!(covered.contains(&aid));
+            a
+        })
+        .collect();
+    albums.sort_by_key(|a| a["title"].as_str().unwrap_or_default().to_lowercase());
+    let bytes: u64 = songs.iter().map(|s| s.bytes).sum();
+    let tracks: Vec<Value> = songs
+        .iter()
+        .map(|s| {
+            let mut t = s.track();
+            t["offline"] = json!({"bytes": s.bytes, "format": "original"});
+            t
+        })
+        .collect();
+    Json(json!({
+        "offline": false,
+        "device_id": Value::Null,
+        "synced_at": Value::Null,
+        "bytes": bytes,
+        "queued": 0,
+        "tracks": tracks,
+        "albums": albums,
+        "playlists": [],
+        "favourites": {"track_ids": []},
+    }))
+}
+
+/// `GET /v1/library/tracks/{id}`.
+pub(crate) async fn track(State(p): State<Arc<Phone>>, Path(id): Path<i64>) -> Response {
+    match p.songs.get(id) {
+        Some(s) => Json(s.track()).into_response(),
+        None => err(StatusCode::NOT_FOUND, "not on this phone"),
+    }
+}
+
+/// `GET /v1/library/tracks/{id}/file`: the song, with ranges.
+pub(crate) async fn file(State(p): State<Arc<Phone>>, Path(id): Path<i64>, headers: HeaderMap) -> Response {
+    match p.songs.get(id) {
+        Some(s) => crate::server::send_file(&p.songs.path_of(&s), &headers).await,
+        None => err(StatusCode::NOT_FOUND, "not on this phone"),
+    }
+}
+
+/// `GET /v1/library/albums/{id}/cover`.
+pub(crate) async fn cover(State(p): State<Arc<Phone>>, Path(id): Path<i64>, headers: HeaderMap) -> Response {
+    match p.songs.cover(id) {
+        Some(c) => crate::server::send_file(&c, &headers).await,
+        None => err(StatusCode::NOT_FOUND, "no cover on this phone"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_are_stable_and_safe_for_the_page() {
+        assert_eq!(id_of("Band"), id_of("band"));
+        assert!(id_of("x") > 0 && id_of("x") < (1i64 << 53));
+    }
+}

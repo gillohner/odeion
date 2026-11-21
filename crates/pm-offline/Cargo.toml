@@ -16,6 +16,9 @@ pm-sources = { workspace = true }
 pm-appdata = { workspace = true }
 pm-pubky = { workspace = true }
 pm-model = { workspace = true }
+# Songs added to the phone: their tags, read as the node reads them (src/phone/songs.rs)
+pm-library = { workspace = true }
+blake3 = { workspace = true }
 sha2 = "0.10"
 url = { workspace = true }
 getrandom = "0.3"

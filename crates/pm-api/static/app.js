@@ -501,6 +501,7 @@
       drawUploads();
     }
     up.running = false; drawUploads();
+    if (phoneMode() && state.view === 'downloads') render();
     const t = upTotals(); toast(t.failed ? `${countOf(t.done, 'files')} added, ${fmtCount(t.failed)} failed` : `${countOf(t.done, 'files')} added to your library`, t.failed ? 'error' : undefined);
   };
   const addUploads = (files) => {
@@ -1754,7 +1755,6 @@
     return Promise.resolve().then(() => f(cmd, {})).then(() => { if (!keep) done(); return true; }, (e) => { done(); toast(String((e && e.message) || e || 'That didn’t work; try again.'), 'error'); return false; });
   };
   // Add songs (phone mode): the app picks them; the library page shows them after
-  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-phoneadd]'); if (!b) return; e.preventDefault(); phoneCmd(b, 'phone_add_songs').then((ok) => { if (ok) { forgetAlbums(); render(); } }); });
   const nativeOk = () => !!(window.pmDesktop && window.pmDesktop.nativePlayer && tauriInvoke());
   const nat = (() => {
     const ev = new EventTarget(); const fire = (t, detail) => ev.dispatchEvent(new CustomEvent(t, { detail }));
@@ -2095,8 +2095,8 @@
   // capabilities and can do everything; a name the phone doesn't list (zones, home, pubky…) is off
   const phoneMode = () => !!(state.info && state.info.mode === 'phone');
   const can = (cap) => !state.info || !Array.isArray(state.info.capabilities) || state.info.capabilities.includes(cap);
-  const PHONE_CAPS = ['search', 'items', 'sources', 'library', 'bookmarks', 'collections', 'listens', 'reviews', 'tags', 'add-songs'];
-  const PHONE_VIEWS = { search: ['search'], items: ['item', 'releases', 'source-item', 'source-artist'], sources: ['sources'], library: ['albums', 'artists', 'tracks', 'genres', 'genre'], bookmarks: ['favourites'], collections: ['playlists', 'playlist'] };
+  const PHONE_CAPS = ['search', 'items', 'sources', 'library', 'songs', 'bookmarks', 'collections', 'listens', 'reviews', 'tags', 'add-songs'];
+  const PHONE_VIEWS = { search: ['search'], items: ['item', 'releases', 'source-item', 'source-artist'], sources: ['sources'], library: ['albums', 'artists', 'tracks', 'genres', 'genre'], songs: ['downloads'], bookmarks: ['favourites'], collections: ['playlists', 'playlist'] };
   const phoneView = (v) => v === 'queue' || v === 'settings' || Object.entries(PHONE_VIEWS).some(([c, vs]) => can(c) && vs.includes(v));
   const phoneHome = () => (can('search') ? 'search' : can('library') ? 'tracks' : 'settings');
   const LISTENER_VIEWS_OFF = new Set(['home', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
@@ -3817,7 +3817,7 @@
   // the Android app: its WebView doesn't open the keyboard for a focus set by script, so the field
   // showed focused with no keyboard (owner's recording); there a tap on the field opens it.
   const libHome = () => state.lastLib || (phoneMode() ? 'tracks' : 'library');
-  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); if (appPlatform() !== 'android') search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? libHome() : k); });
+  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); if (appPlatform() !== 'android') search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (phoneMode() && !can('library') && can('songs') ? 'downloads' : libHome()) : k); });
   // The account menu: who you are here, Settings and Log out (on every shell). A node that needs
   // no token has nothing to log out of.
   $('#me').onclick = async () => {
@@ -7458,7 +7458,7 @@
   // Songs' and Albums' heads carry the owner's Add music; on a page whose empty state has the same
   // button (no music at all) the head leaves it out (one Add music on the page). Albums with songs but
   // no album tags keeps it: its empty state offers Open Songs
-  const headAddMusic = (n) => (phoneMode() ? (can('add-songs') ? `<button class="btn iconic" data-phoneadd aria-label="Add songs">${icon('plus')}<span class="btn-label">Add songs</span></button>` : '') : isOwner() && n ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '');
+  const headAddMusic = (n) => (phoneMode() ? '' : isOwner() && n ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '');
   const noMusicYet = (what) => (phoneMode() ? [`${what} show up here once you add songs to this phone${can('add-songs') ? ' with Add songs' : ''}.`] : isOwner() ? ['Add the folder with your music, or upload files from this device.', { view: 'add-music', label: 'Add music' }] : [`${what} show up here once the node’s owner adds music.`]);
   const LAYOUTS = [['auto', 'Automatic', 'Phone under 600 px wide, desktop from there (tablets too)'], ['phone', 'Phone', 'Tabs and a mini player, at any width'], ['desktop', 'Desktop', 'The sidebar and the full player bar, also in windows from 480 px']];
   const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
@@ -10391,15 +10391,24 @@
         }
         case 'downloads': {
           // What this device keeps (STEWARD-DOWNLOADS.md): offline, from the app's local server
-          if (!isOffline() && appDl()) { await drawStorage(main); break; }
-          if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Odeion app on your phone or laptop: keep an album or a playlist there with its ⋯ menu, and it plays without the node.</p><p><a class="btn" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/desktop-app.md" target="_blank" rel="noopener">' + icon('external') + ' Get the app</a></p>'; drawJobs(); break; }
+          // Phone mode: the songs added to this phone (its own backend lists them like the offline page)
+          const phoneSongs = phoneMode() && can('songs');
+          if (!isOffline() && !phoneSongs && appDl()) { await drawStorage(main); break; }
+          if (!isOffline() && !phoneSongs) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Odeion app on your phone or laptop: keep an album or a playlist there with its ⋯ menu, and it plays without the node.</p><p><a class="btn" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/desktop-app.md" target="_blank" rel="noopener">' + icon('external') + ' Get the app</a></p>'; drawJobs(); break; }
           let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (state.view !== 'downloads') return;
           const byId = new Map(d.tracks.map((t) => [t.id, t]));
           const songsOf = (ids) => ids.map((i) => byId.get(i)).filter(Boolean);
           const facts = [d.synced_at ? `Last synced ${ago(d.synced_at)}` : '', fileSize(d.bytes), d.queued ? `${countOf(d.queued, 'plays and hearts')} to send when your node is back` : ''].filter(Boolean).join(' · ');
-          const head = pageHead('Downloads', d.tracks.length || null) + `<p class="muted small dl-note" role="status">Offline: playing what this device keeps. ${esc(facts)}</p>`;
-          if (!d.tracks.length) { main.innerHTML = head + '<div class="empty">' + icon('download') + '<h3>Nothing on this device yet</h3><p>When your node is back, keep albums and playlists here to play them without it.</p></div>'; break; }
+          const phoneAdd = phoneSongs && can('add-songs') ? `<div class="actions"><input type="file" id="phoneaddin" multiple accept="audio/*,.flac,.m4a,.mp3,.ogg,.opus,.wav,.aif,.aiff" hidden><button class="btn iconic" id="phoneadd" aria-label="Add songs">${icon('plus')}<span class="btn-label">Add songs</span></button></div><div id="upbox"></div>` : '';
+          const head = phoneSongs
+            ? pageHead('My songs', d.tracks.length || null) + `<p class="muted small dl-note" role="status">Songs you added to this phone. ${esc(fileSize(d.bytes))}</p>` + phoneAdd
+            : pageHead('Downloads', d.tracks.length || null) + `<p class="muted small dl-note" role="status">Offline: playing what this device keeps. ${esc(facts)}</p>`;
+          const bindAdd = () => { const b = $('#phoneadd', main); const inp = $('#phoneaddin', main); if (b && inp) { b.onclick = () => inp.click(); inp.onchange = () => { if (inp.files && inp.files.length) addUploads(inp.files); inp.value = ''; }; } drawUploads(); };
+          const nothing = phoneSongs
+            ? '<div class="empty">' + icon('disc') + '<h3>No songs on this phone yet</h3><p>Add songs from your phone’s files: they are copied into Odeion and play here, with no node.</p></div>'
+            : '<div class="empty">' + icon('download') + '<h3>Nothing on this device yet</h3><p>When your node is back, keep albums and playlists here to play them without it.</p></div>';
+          if (!d.tracks.length) { main.innerHTML = head + nothing; bindAdd(); break; }
           // (its lists are render's own: the rows are bound to them after the switch)
           const albumOpen = d.albums.find((a) => a.id === state.dlAlbum);
           const albumTile = (a) => `<button class="tile" data-dlalbum="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true)}<div class="t">${esc(a.title)}</div><div class="a">${countOf(a.track_ids.length, 'songs')}</div>${coverFrom('library')}</button>`;
@@ -10420,6 +10429,7 @@
           const dc = $('[data-dlclose]', main); if (dc) dc.onclick = () => { state.dlAlbum = null; render(); };
           $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = lists[k]; if (ts && ts.length) playTracks(ts, true, 'end', { shuffle: k === 'all' }); });
           $$('[data-dlpl]', main).forEach((b) => b.onclick = () => playTracks(songsOf(pls[Number(b.dataset.dlpl)].track_ids), true, 'end', { shuffle: false }));
+          bindAdd();
           break;
         }
         case 'settings': {
@@ -11238,6 +11248,8 @@
       if (phoneMode()) {
         // The app's own backend, no node: what it lists only (PHONE_CAPS); no zones, no events
         for (const c of PHONE_CAPS) document.body.classList.toggle(`no-${c}`, !can(c));
+        // The on-device list is the phone's own songs here
+        $$('.nav-offline span').forEach((x) => { x.textContent = 'My songs'; });
         setConn(true, state.info.name || 'This phone');
         search.placeholder = 'Search your music services'; search.setAttribute('aria-label', search.placeholder);
         try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }

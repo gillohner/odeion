@@ -13,6 +13,7 @@ pub mod data;
 pub mod item;
 pub mod qobuz;
 pub mod search;
+pub mod songs;
 pub mod store;
 pub mod stream;
 pub mod tidal;
@@ -31,7 +32,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// What phone mode can do in this version (`GET /v1/info` `capabilities`).
-pub const CAPABILITIES: &[&str] = &["search", "items", "sources", "bookmarks", "listens"];
+pub const CAPABILITIES: &[&str] = &[
+    "search",
+    "items",
+    "sources",
+    "bookmarks",
+    "listens",
+    "songs",
+    "add-songs",
+];
 
 pub(crate) fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
@@ -91,6 +100,8 @@ pub struct Phone {
     version: String,
     pubky: Option<String>,
     pub(crate) streams: stream::Streams,
+    /// Songs added to the phone.
+    pub(crate) songs: songs::Songs,
     /// The person's Pubky account, once its session is restored.
     account: tokio::sync::RwLock<Option<Arc<account::Account>>>,
     /// Asks the vault sync to run now (a sign-in made or ended here).
@@ -110,6 +121,7 @@ impl Phone {
     pub fn open(c: Config) -> std::io::Result<Arc<Self>> {
         let store = Arc::new(store::FileStore::open(&c.dir)?);
         let streams = stream::Streams::open(&c.cache)?;
+        let songs = songs::Songs::open(&c.dir)?;
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
@@ -124,6 +136,7 @@ impl Phone {
             version: c.version,
             pubky: c.pubky,
             streams,
+            songs,
             account: Default::default(),
             sync_now: Default::default(),
             data_lock: Default::default(),
@@ -200,6 +213,19 @@ pub fn router(phone: Arc<Phone>) -> Router {
             get(data::bookmarks).put(data::add).delete(data::remove),
         )
         .route("/v1/library/history", post(data::played))
+        .route("/v1/offline", get(songs::listing))
+        .route("/v1/library/uploads", post(songs::start))
+        .route(
+            "/v1/library/uploads/{id}",
+            get(songs::get)
+                .put(songs::put_part)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    songs::CHUNK as usize + 64 * 1024,
+                )),
+        )
+        .route("/v1/library/tracks/{id}", get(songs::track))
+        .route("/v1/library/tracks/{id}/file", get(songs::file))
+        .route("/v1/library/albums/{id}/cover", get(songs::cover))
         .route("/v1/item/{kind}/{id}", get(item::item))
         .route("/v1/item/{kind}/{id}/extras", get(item::extras))
         .route("/v1/sources/{source}/items/{id}", get(item::source_item))
