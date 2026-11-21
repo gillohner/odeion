@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
-use pm_sources::search::{hit_of, SourceAnswer};
+use pm_sources::search::{hit_of, SearchHit, SourceAnswer};
 use pm_sources::types::SourceHit;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -28,11 +28,16 @@ pub(crate) struct Params {
 
 /// The phone's sources that answer a search in `scope` now.
 pub(crate) fn sources_for(p: &Phone, scope: &str) -> Vec<&'static str> {
-    [("tidal", tidal::streams(p)), ("qobuz", qobuz::streams(p))]
-        .into_iter()
-        .filter(|(id, on)| *on && (scope == "everywhere" || scope == *id))
-        .map(|(id, _)| id)
-        .collect()
+    let songs = !p.songs.list().is_empty();
+    [
+        ("library", songs),
+        ("tidal", tidal::streams(p)),
+        ("qobuz", qobuz::streams(p)),
+    ]
+    .into_iter()
+    .filter(|(id, on)| *on && (scope == "everywhere" || scope == *id))
+    .map(|(id, _)| id)
+    .collect()
 }
 
 async fn one(p: &Arc<Phone>, source: &str, q: &str, limit: u32) -> Result<Vec<SourceHit>, String> {
@@ -54,8 +59,42 @@ async fn one(p: &Arc<Phone>, source: &str, q: &str, limit: u32) -> Result<Vec<So
 }
 
 /// One source's line.
+/// The phone's own songs as library hits (they play from the phone: `track_id`).
+fn library(p: &Phone, q: &str, limit: u32) -> Vec<SearchHit> {
+    p.songs
+        .find(q, limit as usize)
+        .into_iter()
+        .map(|s| SearchHit {
+            kind: "song".into(),
+            title: s.title.clone(),
+            subtitle: (!s.artists.is_empty()).then(|| s.artists.join(", ")),
+            image: s
+                .album_id()
+                .filter(|_| s.cover.is_some())
+                .map(|a| format!("/v1/library/albums/{a}/cover")),
+            id: format!("lib-{}", s.id),
+            track_id: Some(s.id),
+            album: s.album.clone(),
+            duration_ms: s.duration_ms,
+            year: s.year,
+            ..Default::default()
+        })
+        .collect()
+}
+
 async fn answer(p: Arc<Phone>, source: &'static str, q: String, limit: u32) -> SourceAnswer {
     let started = Instant::now();
+    if source == "library" {
+        return SourceAnswer {
+            source: source.into(),
+            status: "ok".into(),
+            ms: 0,
+            error: None,
+            hits: library(&p, &q, limit),
+            counts: Vec::new(),
+            cached: false,
+        };
+    }
     let r = tokio::time::timeout(SOURCE_TIMEOUT, one(&p, source, &q, limit)).await;
     let ms = started.elapsed().as_millis() as u64;
     let (status, error, hits) = match r {
