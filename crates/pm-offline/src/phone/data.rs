@@ -288,15 +288,22 @@ async fn take_prefs(acct: &Account, p: &Phone) -> Result<bool, String> {
     if at <= load(p).prefs_at {
         return Ok(false);
     }
+    // A quality changed here and not written yet stays
+    let waiting = |source: &str| {
+        load(p)
+            .pending
+            .iter()
+            .any(|op| matches!(op, Pending::Quality { source: s } if s == source))
+    };
     if let Some(q) = prefs["quality"]["tidal"]
         .as_str()
-        .filter(|q| ["max", "high"].contains(q))
+        .filter(|q| ["max", "high"].contains(q) && !waiting("tidal"))
     {
         pm_sources::tidal::full::update(p.store.as_ref(), |st| st.quality = q.into());
     }
     if let Some(q) = prefs["quality"]["qobuz"]
         .as_str()
-        .filter(|q| ["max", "cd", "mp3"].contains(q))
+        .filter(|q| ["max", "cd", "mp3"].contains(q) && !waiting("qobuz"))
     {
         super::qobuz::update(p, |st| st.quality = q.into());
     }

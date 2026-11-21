@@ -72,6 +72,9 @@ pub struct Synced {
     pub mine: String,
     /// The hash of the vault's copy (`hash_of`).
     pub theirs: String,
+    /// The id of the sign-in both held (a renewal keeps it; a new sign-in changes it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<String>,
 }
 
 /// The phone's record of the last sync.
@@ -109,6 +112,8 @@ fn save_record(path: &Path, r: &Record) {
 /// The vault's copy of a service, as the sync rules see it.
 pub struct Theirs<'a> {
     pub hash: String,
+    /// Its sign-in's id (`node.lineage`).
+    pub lineage: Option<String>,
     /// A node's copy made with an app this phone renews with: its settings travel to the phone.
     pub usable: bool,
     pub sign_in: &'a SignIn,
@@ -133,12 +138,22 @@ pub enum Do {
     Forget,
 }
 
-/// The sync rules for one service. `seen`: what both held at the last sync; `mine`: the hash of
-/// what travels here; `theirs`: the vault's copy; `predates`: the phone's copy was made before the
-/// last sign-out everywhere and isn't the one synced since. A change on one side since the last
-/// sync goes to the other; both changed, the vault's usable copy wins (another device's newer
-/// sign-in); a copy the phone can't use is never taken, only written over by a sign-in here.
-pub fn decide(seen: Option<&Synced>, mine: Option<&str>, theirs: Option<&Theirs<'_>>, predates: bool) -> Do {
+/// The sync rules for one service, the node's (`vault_cache::decide`) for one device. `seen`: what
+/// both held at the last sync; `mine`: the hash of what travels here, with `here`, the id of its
+/// sign-in; `theirs`: the vault's copy; `predates`: the phone's copy was made before the last
+/// sign-out everywhere and isn't the one synced since.
+///
+/// A renewal (the same sign-in id) is not a new sign-in: a sign-out on either side stays one even
+/// when the other side renewed meanwhile. A new sign-in goes out, also over a renewal there; a new
+/// sign-in there is taken when the phone can use it. A copy the phone can't use is never taken,
+/// and written over only by a sign-in made here.
+pub fn decide(
+    seen: Option<&Synced>,
+    mine: Option<&str>,
+    here: Option<&str>,
+    theirs: Option<&Theirs<'_>>,
+    predates: bool,
+) -> Do {
     let pull_or = |t: &Theirs<'_>, otherwise: Do| if t.usable { Do::Pull } else { otherwise };
     if mine.is_some() && predates {
         // Never back into the vault: the vault's own copy, or out
@@ -147,6 +162,9 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&str>, theirs: Option<&Theirs<
             _ => Do::DropHere,
         };
     }
+    // A sign-in made here (or there) since the last sync: another id than the one both held
+    let new_here = |s: &Synced| here.is_some() && here != s.lineage.as_deref();
+    let new_there = |s: &Synced, t: &Theirs<'_>| t.lineage != s.lineage;
     match (mine, theirs) {
         (None, None) => {
             if seen.is_some() {
@@ -155,21 +173,28 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&str>, theirs: Option<&Theirs<
                 Do::Nothing
             }
         }
-        (Some(m), None) => match seen {
-            Some(s) if s.mine == m => Do::DropHere,
+        (Some(_), None) => match seen {
+            // Gone from the vault: signed out elsewhere, even if renewed here since
+            Some(s) if !new_here(s) => Do::DropHere,
             _ => Do::Push,
         },
         (None, Some(t)) => match seen {
-            Some(s) if s.theirs == t.hash => Do::Remove,
+            // Signed out here: out of the vault too, even if renewed there since
+            Some(s) if !new_there(s, t) => Do::Remove,
             _ => pull_or(t, Do::Nothing),
         },
         (Some(m), Some(t)) => match seen {
-            None => pull_or(t, Do::Push),
+            None if m == t.hash => Do::InStep,
+            // First contact: a sign-in made here goes out; else the vault's, where usable
+            None if here.is_some() && here != t.lineage.as_deref() => Do::Push,
+            None => pull_or(t, Do::Nothing),
             Some(s) => match (m != s.mine, t.hash != s.theirs) {
                 (false, false) => Do::InStep,
-                (true, false) => Do::Push,
+                (true, false) if t.usable || new_here(s) => Do::Push,
+                (true, false) => Do::Nothing,
                 (false, true) => pull_or(t, Do::Nothing),
-                (true, true) => pull_or(t, Do::Push),
+                (true, true) if new_here(s) => Do::Push,
+                (true, true) => pull_or(t, Do::Nothing),
             },
         },
     }
@@ -290,6 +315,7 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
         };
         let theirs = opened.as_ref().map(|o| Theirs {
             hash: hash_of(&o.sign_in),
+            lineage: vault_form::node_lineage(&o.sign_in),
             usable: usable(phone, form, &o.sign_in),
             sign_in: &o.sign_in,
         });
@@ -301,7 +327,13 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
             seen.is_some_and(|s| Some(&s.mine) == mine_hash.as_ref()) && record.marker == marker;
         let predates = marker.is_some_and(|m| here.as_deref().map(vault_form::lineage_at).unwrap_or(0) <= m)
             && !synced_since;
-        match decide(seen, mine_hash.as_deref(), theirs.as_ref(), predates) {
+        match decide(
+            seen,
+            mine_hash.as_deref(),
+            here.as_deref(),
+            theirs.as_ref(),
+            predates,
+        ) {
             Do::Nothing => {}
             Do::InStep => {
                 let t = theirs.as_ref().expect("in step with a copy");
@@ -310,6 +342,7 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                     Synced {
                         mine: mine_hash.clone().unwrap_or_default(),
                         theirs: t.hash.clone(),
+                        lineage: t.lineage.clone(),
                     },
                 );
             }
@@ -332,6 +365,7 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                     Synced {
                         mine: kept,
                         theirs: t.hash.clone(),
+                        lineage: t.lineage.clone(),
                     },
                 );
                 report.pulled.push(svc);
@@ -372,6 +406,7 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                         Synced {
                             mine: vault_form::hash(travels),
                             theirs: hash_of(&s),
+                            lineage: Some(lineage.clone()),
                         },
                     );
                     report.pushed.push(svc);
@@ -422,6 +457,11 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     let p = phone.clone();
     let r = vault
         .refresh(svc, false, |si: SignIn| async move {
+            if !usable(&p, &TIDAL_FULL, &si) {
+                return Err(RefreshFailed(
+                    "the vault's TIDAL sign-in was made with another app".into(),
+                ));
+            }
             let travels = vault_form::node_settings(&si).ok_or_else(|| {
                 RefreshFailed("the vault's TIDAL sign-in isn't one this phone can renew".into())
             })?;
@@ -470,6 +510,10 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         })
         .await?;
     let si = r.sign_in();
+    // One renewed by another device with another app is not taken here
+    if !usable(phone, &TIDAL_FULL, si) {
+        return Ok(false);
+    }
     let Some(travels) = vault_form::node_settings(si) else {
         return Ok(false);
     };
@@ -484,6 +528,7 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         Synced {
             mine: kept,
             theirs: hash_of(si),
+            lineage: vault_form::node_lineage(si),
         },
     );
     save_record(&path, &record);
@@ -504,85 +549,117 @@ pub fn tidal_due(phone: &Phone) -> bool {
 mod tests {
     use super::*;
 
-    fn seen(mine: &str, theirs: &str) -> Synced {
+    fn seen(mine: &str, theirs: &str, lineage: &str) -> Synced {
         Synced {
             mine: mine.into(),
             theirs: theirs.into(),
+            lineage: Some(lineage.into()),
         }
     }
 
     #[test]
     fn the_sync_rules() {
         let si: SignIn = serde_json::from_value(serde_json::json!({ "service": "tidal-full" })).unwrap();
-        let t = |h: &str, usable| Theirs {
+        let t = |h: &str, lineage: &str, usable| Theirs {
             hash: h.into(),
+            lineage: Some(lineage.into()),
             usable,
             sign_in: &si,
         };
+        let s = seen("a", "x", "L1");
         // Nothing anywhere
-        assert_eq!(decide(None, None, None, false), Do::Nothing);
-        assert_eq!(decide(Some(&seen("a", "a")), None, None, false), Do::Forget);
-        // A sign-in made here goes out; one gone from the vault since the last sync goes here too
-        assert_eq!(decide(None, Some("a"), None, false), Do::Push);
-        assert_eq!(
-            decide(Some(&seen("a", "a")), Some("a"), None, false),
-            Do::DropHere
-        );
-        assert_eq!(
-            decide(Some(&seen("a", "a")), Some("b"), None, false),
-            Do::Push,
-            "a new sign-in here after the removal"
-        );
+        assert_eq!(decide(None, None, None, None, false), Do::Nothing);
+        assert_eq!(decide(Some(&s), None, None, None, false), Do::Forget);
+        // A sign-in made here goes out
+        assert_eq!(decide(None, Some("a"), Some("L1"), None, false), Do::Push);
+        // Gone from the vault: signed out elsewhere, also when renewed here since
+        assert_eq!(decide(Some(&s), Some("a"), Some("L1"), None, false), Do::DropHere);
+        assert_eq!(decide(Some(&s), Some("b"), Some("L1"), None, false), Do::DropHere);
+        // ... but a new sign-in here after it goes out
+        assert_eq!(decide(Some(&s), Some("b"), Some("L2"), None, false), Do::Push);
         // A usable copy is taken; one the phone can't use never is
-        assert_eq!(decide(None, None, Some(&t("a", true)), false), Do::Pull);
-        assert_eq!(decide(None, None, Some(&t("a", false)), false), Do::Nothing);
-        // Signed out here since the last sync: out of the vault too
         assert_eq!(
-            decide(Some(&seen("a", "x")), None, Some(&t("x", true)), false),
+            decide(None, None, None, Some(&t("x", "L1", true)), false),
+            Do::Pull
+        );
+        assert_eq!(
+            decide(None, None, None, Some(&t("x", "L1", false)), false),
+            Do::Nothing
+        );
+        // Signed out here: out of the vault too, also when renewed there since
+        assert_eq!(
+            decide(Some(&s), None, None, Some(&t("x", "L1", true)), false),
             Do::Remove
         );
         assert_eq!(
-            decide(Some(&seen("a", "x")), None, Some(&t("y", true)), false),
-            Do::Pull,
-            "a newer sign-in elsewhere"
+            decide(Some(&s), None, None, Some(&t("y", "L1", true)), false),
+            Do::Remove
         );
-        // Each side compared with what it was: the phone's copy may read differently from the vault's
+        // ... but a new sign-in there is taken
         assert_eq!(
-            decide(Some(&seen("a", "x")), Some("a"), Some(&t("x", true)), false),
+            decide(Some(&s), None, None, Some(&t("y", "L2", true)), false),
+            Do::Pull
+        );
+        // Each side compared with what it was (the phone's copy may read differently)
+        assert_eq!(
+            decide(Some(&s), Some("a"), Some("L1"), Some(&t("x", "L1", true)), false),
             Do::InStep
         );
         assert_eq!(
-            decide(Some(&seen("a", "x")), Some("a"), Some(&t("y", true)), false),
+            decide(Some(&s), Some("a"), Some("L1"), Some(&t("y", "L1", true)), false),
             Do::Pull
         );
         assert_eq!(
-            decide(Some(&seen("a", "x")), Some("b"), Some(&t("x", true)), false),
+            decide(Some(&s), Some("b"), Some("L1"), Some(&t("x", "L1", true)), false),
             Do::Push
         );
+        // A renewal here doesn't write over a copy the phone can't use; a new sign-in does
         assert_eq!(
-            decide(Some(&seen("a", "x")), Some("a"), Some(&t("y", false)), false),
+            decide(Some(&s), Some("b"), Some("L1"), Some(&t("x", "L1", false)), false),
             Do::Nothing
         );
-        // Both changed: the vault's usable copy wins; one the phone can't use is written over
         assert_eq!(
-            decide(Some(&seen("a", "x")), Some("b"), Some(&t("y", true)), false),
-            Do::Pull
-        );
-        assert_eq!(
-            decide(Some(&seen("a", "x")), Some("b"), Some(&t("y", false)), false),
+            decide(Some(&s), Some("b"), Some("L2"), Some(&t("x", "L1", false)), false),
             Do::Push
         );
-        // First contact with two copies
-        assert_eq!(decide(None, Some("b"), Some(&t("c", true)), false), Do::Pull);
-        assert_eq!(decide(None, Some("b"), Some(&t("c", false)), false), Do::Push);
-        // Made before a sign-out everywhere: never back into the vault
-        assert_eq!(decide(None, Some("b"), None, true), Do::DropHere);
+        // Both changed: a new sign-in here wins; a renewal on both sides takes the vault's
         assert_eq!(
-            decide(Some(&seen("a", "x")), Some("b"), Some(&t("x", true)), true),
+            decide(Some(&s), Some("b"), Some("L2"), Some(&t("y", "L1", true)), false),
+            Do::Push
+        );
+        assert_eq!(
+            decide(Some(&s), Some("b"), Some("L1"), Some(&t("y", "L1", true)), false),
             Do::Pull
         );
         assert_eq!(
-            decide(Some(&seen("a", "x")), Some("b"), Some(&t("x", false)), true),
+            decide(Some(&s), Some("b"), Some("L1"), Some(&t("y", "L1", false)), false),
+            Do::Nothing
+        );
+        // First contact
+        assert_eq!(
+            decide(None, Some("x"), None, Some(&t("x", "L1", true)), false),
+            Do::InStep
+        );
+        assert_eq!(
+            decide(None, Some("b"), Some("L2"), Some(&t("c", "L1", true)), false),
+            Do::Push
+        );
+        assert_eq!(
+            decide(None, Some("b"), None, Some(&t("c", "L1", true)), false),
+            Do::Pull
+        );
+        assert_eq!(
+            decide(None, Some("b"), None, Some(&t("c", "L1", false)), false),
+            Do::Nothing
+        );
+        // Made before a sign-out everywhere: never back into the vault
+        assert_eq!(decide(None, Some("b"), Some("L0"), None, true), Do::DropHere);
+        assert_eq!(
+            decide(Some(&s), Some("b"), Some("L0"), Some(&t("x", "L1", true)), true),
+            Do::Pull
+        );
+        assert_eq!(
+            decide(Some(&s), Some("b"), Some("L0"), Some(&t("x", "L1", false)), true),
             Do::DropHere
         );
     }

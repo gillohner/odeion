@@ -5072,6 +5072,9 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "libc",
+ "pm-appdata",
+ "pm-model",
+ "pm-pubky",
  "pm-sources",
  "reqwest",
  "serde",
@@ -5140,7 +5143,9 @@ name = "pm-sources"
 version = "0.2.4"
 dependencies = [
  "base64 0.22.1",
+ "blake3",
  "md-5",
+ "pm-appdata",
  "pm-model",
  "quick-xml",
  "rand 0.8.8",

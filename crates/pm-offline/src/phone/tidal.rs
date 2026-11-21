@@ -44,16 +44,17 @@ pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError
     // never renew it at the same time); otherwise, or offline, here (the next sync writes it)
     if super::vault::tidal_due(p) {
         if let Some(acct) = p.account().await {
-            // A slow homeserver doesn't hold up the song: the phone then renews on its own
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                super::vault::renew_tidal(p, &acct),
-            )
-            .await
-            {
-                Ok(Err(e)) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}"),
-                Err(_) => tracing::warn!("phone mode: TIDAL renewal in the vault took too long"),
-                Ok(Ok(_)) => {}
+            // The renewal runs to its end (its new tokens are never dropped); a slow homeserver
+            // only stops the song waiting for it (the phone then uses what it has)
+            let p2 = p.clone();
+            let renewal = tokio::spawn(async move { super::vault::renew_tidal(&p2, &acct).await });
+            match tokio::time::timeout(std::time::Duration::from_secs(8), renewal).await {
+                Ok(Ok(Err(e))) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}"),
+                Ok(Err(_)) => tracing::warn!("phone mode: TIDAL renewal in the vault stopped"),
+                Err(_) => {
+                    tracing::warn!("phone mode: TIDAL renewal in the vault takes long; going on meanwhile")
+                }
+                Ok(Ok(Ok(_))) => {}
             }
         }
     }
