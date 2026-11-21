@@ -381,3 +381,30 @@ async fn a_slow_track_starts_before_it_is_whole_and_is_fetched_once() {
     assert_eq!(r.status(), 206);
     assert_eq!(&r.bytes().await.unwrap()[..], b"fLaC");
 }
+
+#[tokio::test]
+async fn a_fetch_nobody_plays_any_more_stops_and_leaves_nothing() {
+    let f = Fixture::new().await;
+    f.phone
+        .streams()
+        .set_whole_within(std::time::Duration::from_millis(200));
+    let r = f.get("/v1/sources/tidal/stream/3").send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    // The person moved on: the answer is dropped half-way
+    drop(r);
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    f.tidal.rest.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let left: Vec<String> = std::fs::read_dir(f._dir.path().join("streams"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(left.is_empty(), "nothing kept or half-written: {left:?}");
+    // Asked again, it is fetched anew
+    let again = f.get("/v1/sources/tidal/stream/3").send().await.unwrap();
+    assert_eq!(again.status(), 200);
+    f.tidal.rest.notify_one();
+    assert_eq!(&again.bytes().await.unwrap()[..], AUDIO);
+    assert_eq!(f.tidal.playback.load(Ordering::SeqCst), 2);
+}
