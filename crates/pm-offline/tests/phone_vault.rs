@@ -202,6 +202,7 @@ async fn the_phone_and_a_node_share_tidal_through_the_vault() {
             ..Default::default()
         })
     });
+    phone::vault::signed_in(&p, "tidal-full");
     let r = phone::vault::pass(&p, &acct).await.unwrap();
     assert_eq!(r.pushed, ["tidal-full"], "{r:?}");
     let seen = node.read("tidal-full").await.unwrap().expect("the node reads it");

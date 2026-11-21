@@ -396,7 +396,16 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
                     *p.account.write().await = Some(a.clone());
                     a
                 }
-                Ok(None) => return,
+                // No session (yet): wait to be told (set_account) or try again later
+                Ok(None) => {
+                    let now = p.sync_now.clone();
+                    drop(p);
+                    tokio::select! {
+                        _ = now.notified() => {}
+                        _ = tokio::time::sleep(SYNC_EVERY) => {}
+                    }
+                    continue;
+                }
                 Err(e) => {
                     tracing::warn!("phone mode: Pubky not reachable now: {e}");
                     drop(p);

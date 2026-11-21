@@ -44,8 +44,16 @@ pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError
     // never renew it at the same time); otherwise, or offline, here (the next sync writes it)
     if super::vault::tidal_due(p) {
         if let Some(acct) = p.account().await {
-            if let Err(e) = super::vault::renew_tidal(p, &acct).await {
-                tracing::warn!("phone mode: TIDAL renewal in the vault: {e}");
+            // A slow homeserver doesn't hold up the song: the phone then renews on its own
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                super::vault::renew_tidal(p, &acct),
+            )
+            .await
+            {
+                Ok(Err(e)) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}"),
+                Err(_) => tracing::warn!("phone mode: TIDAL renewal in the vault took too long"),
+                Ok(Ok(_)) => {}
             }
         }
     }
@@ -223,7 +231,7 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
         }
     });
     if u.quality.is_some() {
-        super::data::prefs_changed(&p);
+        super::data::prefs_changed(&p, "tidal");
     }
     Json(view(&p)).into_response()
 }
@@ -271,6 +279,7 @@ async fn wait_for_approval(p: Arc<Phone>, c: full::Client, pending: full::Pendin
             true
         });
         if kept {
+            super::vault::signed_in(&p, pm_sources::vault_form::TIDAL_FULL.service);
             tracing::info!("phone mode: signed in to TIDAL (code sign-in)");
         }
         return;
@@ -361,6 +370,7 @@ pub(crate) async fn finish_browser(State(p): State<Arc<Phone>>, Json(b): Json<Fi
             "The sign-in changed meanwhile (signed out or started again here). Press Sign in with TIDAL to start again.",
         );
     }
+    super::vault::signed_in(&p, pm_sources::vault_form::TIDAL_FULL.service);
     tracing::info!("phone mode: signed in to TIDAL (Sign in with TIDAL)");
     Json(view(&p)).into_response()
 }
