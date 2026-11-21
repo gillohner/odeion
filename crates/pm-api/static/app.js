@@ -6031,8 +6031,11 @@
   // Pubky's last tags answers for the item page on screen, per group: the page drawn again (a rating
   // saved, a bookmark) shows them while it asks again, so the stars under them don't jump for a round
   // trip. A tag edit forgets them (an earlier answer would show a removed tag again).
-  // (a new map: an answer still on its way from before the edit lands in the old one)
-  let heroPub = { page: null, by: new Map() };
+  // (a new map: an answer still on its way from before the edit lands in the old one). Two quick
+  // redraws each ask; only the newest ask's answer is kept (asked: per group, the last ask's number),
+  // so an older answer landing late doesn't stand in on the next redraw
+  let heroPub = { page: null, by: new Map(), asked: new Map() };
+  let heroPubAsk = 0;
   function forgetHeroPub() { heroPub.by = new Map(); }
   const openHeroAdd = async (box, ht, b, focus = true) => {
     const g = ht.groups.find((x) => x.scope === b.dataset.htagPlus); if (!g) return;
@@ -9584,7 +9587,7 @@
           const shownSong = !!songRef && !songOwn.needsMatch;
           const songUri = localRef ? songOwn.uri : songRef && songRef.uri;
           // Drawn again: the last answers this page had stand in until the new ones come (pubKey)
-          if (!again || heroPub.page !== pageKey) heroPub = { page: pageKey, by: new Map() };
+          if (!again || heroPub.page !== pageKey) heroPub = { page: pageKey, by: new Map(), asked: new Map() };
           const kept = heroPub.by;
           const pubKey = (g) => `${g.scope}|${refQs(g.ref)}`;
           const pubFrom = (uri, scope, ref) => (uri && pg.on_pubky && pg.on_pubky.uri === uri ? { state: 'ok', tags: pg.on_pubky.tags || [], faces: pg.on_pubky.faces || {} } : kept.has(pubKey({ scope, ref })) ? { ...kept.get(pubKey({ scope, ref })), kept: true } : { state: 'loading', tags: [], faces: {} });
@@ -9779,13 +9782,14 @@
           drawHeroTags(ht);
           for (const g of tagGroups) {
             if (g.pub.state !== 'loading' && !g.pub.kept) continue;
-            const was = g.pub; const at = heroPub.by;
+            const was = g.pub; const at = heroPub.by; const asked = heroPub.asked; const ask = ++heroPubAsk; asked.set(pubKey(g), ask);
             api('GET', `/discover/uri?${refQs(g.ref)}`).then((r) => ({ state: 'ok', tags: r.tags || [], faces: r.faces || {} }))
               // No contact for Pubky (412) or no identity (422): nothing to show, not a failure
               .catch((e) => ({ state: [404, 412, 422].includes(e.status) ? 'none' : 'error', tags: [], faces: {}, unknown: e.status === 422 }))
               .then((p) => {
                 // Kept for this page's next redraw: an answer (not a failure, nor "no identity", which drops the group)
-                if (p.state === 'ok' || (p.state === 'none' && !p.unknown)) at.set(pubKey(g), p); else at.delete(pubKey(g));
+                // (only the newest ask's: an older one landing late would replace it)
+                if (asked.get(pubKey(g)) === ask) { if (p.state === 'ok' || (p.state === 'none' && !p.unknown)) at.set(pubKey(g), p); else at.delete(pubKey(g)); }
                 g.pub = p;
                 // The same as the kept one already drawn: nothing to draw again
                 if (was.kept && JSON.stringify([was.state, was.tags, was.faces, !!was.unknown]) === JSON.stringify([p.state, p.tags, p.faces, !!p.unknown])) return;
