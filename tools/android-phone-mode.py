@@ -230,6 +230,25 @@ def labelled(text):
     return pred
 
 
+def keyboard_shown():
+    out = adb("shell", "dumpsys", "input_method")
+    return "mInputShown=true" in out or "mIsInputViewShown=true" in out
+
+
+def into_view(pred, what, tries=8):
+    """Brings the node `pred` finds on screen: the keyboard closed (BACK closes only the keyboard
+    while it is shown), then the page scrolled up until the node has bounds (off screen it has none)."""
+    if keyboard_shown():
+        adb("shell", "input", "keyevent", "4")
+        time.sleep(1)
+    for _ in range(tries):
+        n = until(what, lambda: find(pred), timeout=60)
+        if center(n) != (0, 0):
+            return
+        adb("shell", "input", "swipe", "160", "420", "160", "180", "400")
+        time.sleep(1)
+
+
 def tap(pred, what, timeout=90):
     def steady():
         a = find(pred)
@@ -287,6 +306,8 @@ def run():
         adb("shell", "input", "text", "Fixture")
         adb("shell", "input", "keyevent", "66")
         mark = len(logcat())
+        # The results may be under the keyboard, or below the top result on a small screen
+        into_view(labelled(TITLE), f"the song “{TITLE}” in the results")
         tap(labelled(TITLE), f"the song “{TITLE}”")
         shot("2-search")
 
