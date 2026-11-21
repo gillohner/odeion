@@ -11,7 +11,11 @@
 // /, N and ? from a ⋯ (a song's, Now playing's and its Sleep timer's) close it first; after Back no
 // menu's history entry is left and the page is the one the person was on. N then Back (or Esc) puts
 // the focus back on the ⋯ it had, not on the mini player; Help opened over Now playing closes alone
-// on Back, Now playing stays. Phones (412/360 px, the ⋯ sheet) the same.
+// on Back, Now playing stays. Phones (412/360 px, the ⋯ sheet) the same. So does Help opened over Now
+// playing with the zone picker, the Sound panel, the volume or the copy's popup open there: the panel
+// closes first, and Back closes Help alone (before, Help, the panel and Now playing went together).
+// The copy's popup closes on Esc, /, N and ? as the others do. A page opened from a Now playing link by
+// keyboard leaves the focus on the mini player, not nowhere (it was on the row the page replaced).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-menu-keys.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -292,10 +296,92 @@ async function lists(browser, width) {
   }
 }
 
+// Desktop and tablet: Help over Now playing with a panel open there; the copy's popup on Esc, /, N
+// and ?; a Now playing link opened by keyboard
+async function npPanels(browser, width) {
+  const job = { current: { id: 'j1', kind: 'copy', state: 'running', total: 25, done: 3, failed: 0, skipped: 0, bytes_total: 750e6, bytes_done: 90e6, errors: [], errors_count: 0, current_folder: '/music', speed_bps: 2.4e6, eta_s: 600 }, queued: [], last: null };
+  const { context, page, state } = await fx.create(browser, width, { fixtures: { ...fixtures, '/pubky/files/jobs': { body: job } }, tracks, collections: [fx.summary], touch: width < 1025 });
+  await context.addInitScript(([q, a]) => { try { localStorage.setItem('pm.browserQueue', q); localStorage.setItem('pm.browserAt', a); } catch { /* about:blank, past the first page */ } }, [JSON.stringify(saved), JSON.stringify({ index: 0, id: saved[0].id, pos: 0 })]);
+  const label = `${width} ${width < 1024 ? 'Tablet' : 'Desktop'}`;
+  const vis = (sel) => page.locator(sel).isVisible();
+  const at = async () => `${new URL(page.url()).pathname}${await transient(page) ? ' +entry' : ''}`;
+  const onQueue = async () => new URL(page.url()).pathname === '/queue' && !await transient(page);
+  const scrim = () => vis('#scrim');
+  // (after a failed check: back on the Queue with nothing open)
+  const reset = async () => {
+    for (let k = 0; k < 4 && (await helpOpen(page) || await scrim() || await npShown(page)); k++) { await page.keyboard.press('Escape'); await page.waitForTimeout(300); }
+    if (!await onQueue()) { await fx.go(page, '/queue'); await page.locator('.list.queue .list-row').nth(2).waitFor(); await page.waitForTimeout(300); }
+  };
+  const openNp = async () => { if (!await npShown(page)) { await page.keyboard.press('n'); await page.locator('#nowplaying').waitFor({ timeout: 3000 }).catch(() => {}); await page.waitForTimeout(300); } return npShown(page); };
+  // (opened by a click, the key pressed on the button that opened it: the volume's slider owns the keys)
+  const openPanel = async (btn, pop) => { await page.locator(btn).click(); await page.locator(pop).waitFor({ timeout: 3000 }).catch(() => {}); await page.locator(btn).focus(); return vis(pop); };
+  try {
+    await fx.go(page, '/queue');
+    await page.locator('.list.queue .list-row').nth(2).waitFor();
+    await page.locator('#jobchip').waitFor({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(300);
+    check(await vis('#jobchip'), `${label}: the copy's chip shows the running copy`);
+    const PANELS = [['zone picker', '#zonebtn', '#zonepop'], ['Sound panel', '#quality', '#qpanel'], ['volume', '#volbtn', '#volpop'], ["copy's popup", '#jobchip', '#jobpop']];
+    for (const [name, btn, pop] of PANELS) {
+      await reset();
+      const np = await openNp();
+      // ? over Now playing: the panel closes, Help is a layer of its own; Back closes Help, then Now playing
+      const was = np && await vis(btn) && await openPanel(btn, pop);
+      await page.keyboard.press('?'); await page.waitForTimeout(500);
+      check(was && !await vis(pop) && !await scrim() && await helpOpen(page) && await npShown(page), `${label} ${name} over Now playing: ? closes it and opens the list of shortcuts over Now playing`);
+      if (btn === '#jobchip') await page.screenshot({ path: path.join(shots, `np-job-help-${width}.png`) });
+      await page.goBack(); await page.waitForTimeout(600);
+      check(!await helpOpen(page) && await npShown(page) && !await vis(pop) && new URL(page.url()).pathname === '/queue' && await transient(page), `${label} ${name} over Now playing: Back closes only the list of shortcuts, Now playing stays (${await npShown(page)}, ${await at()})`);
+      await page.goBack(); await page.waitForTimeout(600);
+      check(!await npShown(page) && await onQueue(), `${label} ${name} over Now playing: Back again closes Now playing, on the Queue, no entry left (${await at()})`);
+    }
+    // Esc with the copy's popup over Now playing closes only the popup, the focus back on its chip
+    await reset();
+    { const was = await openNp() && await openPanel('#jobchip', '#jobpop');
+      await page.locator('#jobpop button').first().focus();
+      await page.keyboard.press('Escape'); await page.waitForTimeout(500);
+      const f = await page.evaluate(() => document.activeElement && document.activeElement.id);
+      check(was && !await vis('#jobpop') && !await scrim() && await npShown(page) && f === 'jobchip', `${label} copy's popup over Now playing: Esc closes only it, Now playing stays, the focus on its chip (${f}, ${await at()})`); }
+    // The copy's popup over the Queue: Esc closes it alone; /, N and ? close it first
+    for (const key of ['Escape', '/', 'n', '?']) {
+      await reset();
+      const was = await openPanel('#jobchip', '#jobpop');
+      await page.keyboard.press(key); await page.waitForTimeout(500);
+      const then = key === 'Escape' ? !await npShown(page) && !await helpOpen(page) : key === '/' ? await page.evaluate(() => document.activeElement && document.activeElement.id === 'search') : key === 'n' ? await npShown(page) : await helpOpen(page);
+      const f = await page.evaluate(() => document.activeElement && document.activeElement.id);
+      check(was && !await vis('#jobpop') && !await scrim() && then && (key === 'n' || key === '?' ? await transient(page) : !await transient(page)) && (key !== 'Escape' || f === 'jobchip'), `${label} copy's popup: ${key} closes it${key === 'Escape' ? ', the focus on its chip' : ' and the shortcut runs'} (${f}, ${await at()})`);
+      if (key === 'n' || key === '?') { await page.goBack(); await page.waitForTimeout(600); check(!await npShown(page) && !await helpOpen(page) && await onQueue(), `${label} copy's popup: ${key}, then Back closes it, on the Queue, no entry left (${await at()})`); }
+      if (key === '/') { await page.keyboard.press('Escape'); await page.waitForTimeout(300); }
+    }
+    // A page opened from a Now playing link by keyboard: the focus on the mini player, not on nothing
+    await reset();
+    await page.locator('.list.queue .list-row').nth(2).locator('[data-qmore]').focus();
+    await openNp();
+    const link = page.locator('#nowplaying [data-np-album]').first();
+    const had = await link.count();
+    if (had) { await link.focus(); await page.keyboard.press('Enter'); }
+    await page.waitForFunction(() => /^\/album\//.test(location.pathname), null, { timeout: 3000 }).catch(() => {}); await page.waitForTimeout(500);
+    const focus = await page.evaluate(() => { const a = document.activeElement; return !a || a === document.body ? 'body' : a.closest('#np') ? 'mini player' : a.id || a.tagName; });
+    check(had && !await npShown(page) && /^\/album\//.test(new URL(page.url()).pathname) && focus === 'mini player', `${label}: the album opened from Now playing by keyboard, the focus on the mini player (${focus}, ${await at()})`);
+    // (the same from Now playing's ⋯ › Go to song page: the page opens through setView, Now playing open)
+    await reset();
+    await page.locator('.list.queue .list-row').nth(2).locator('[data-qmore]').focus();
+    await openNp();
+    await page.locator('#npmore').focus(); await page.keyboard.press('Enter'); const menu = await shown(page);
+    for (let k = 0; k < 12 && !(await where(page)).includes('Go to song page'); k++) await page.keyboard.press('ArrowDown');
+    const item = (await where(page)).includes('Go to song page');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => /^\/song\//.test(location.pathname), null, { timeout: 3000 }).catch(() => {}); await page.waitForTimeout(500);
+    const focus2 = await page.evaluate(() => { const a = document.activeElement; return !a || a === document.body ? 'body' : a.closest('#np') ? 'mini player' : a.id || a.tagName; });
+    check(menu && item && !await npShown(page) && /^\/song\//.test(new URL(page.url()).pathname) && focus2 === 'mini player', `${label}: Now playing ⋯ › Go to song page by keyboard, the focus on the mini player (${focus2}, ${await at()})`);
+    check(state.errors.length === 0, `${label}: no page errors ${state.errors.join('; ')}`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
-    for (const w of [1280, 1024, 768]) { await queue(browser, w); await lists(browser, w); await nowPlaying(browser, w); }
+    for (const w of [1280, 1024, 768]) { await queue(browser, w); await lists(browser, w); await nowPlaying(browser, w); await npPanels(browser, w); }
     for (const w of [412, 360]) await nowPlaying(browser, w);
   } finally { await browser.close(); }
   console.log(`${ok} ok, ${fail} failed`);
