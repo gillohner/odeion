@@ -12,7 +12,6 @@
 
 use crate::accounts::{Caller, Role};
 use crate::state::NodeState;
-use crate::types::ApiEvent;
 use crate::{ApiError, ApiResult};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -212,7 +211,7 @@ pub(crate) async fn edit_track(
         lib.edit_track(TrackId(id), &body)?
     };
     let t = t.ok_or_else(|| ApiError::not_found("no such song"))?;
-    let _ = s.events.send(ApiEvent::LibraryChanged);
+    s.notify_library();
     Ok(Json(t))
 }
 
@@ -229,7 +228,7 @@ pub(crate) async fn undo_edit(
         .expect("library poisoned")
         .undo_edit(TrackId(id))?;
     let t = t.ok_or_else(|| ApiError::not_found("no such song"))?;
-    let _ = s.events.send(ApiEvent::LibraryChanged);
+    s.notify_library();
     Ok(Json(t))
 }
 
@@ -313,7 +312,7 @@ pub(crate) async fn edit_album(
             ))
         }
     }
-    let _ = s.events.send(ApiEvent::LibraryChanged);
+    s.notify_library();
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
@@ -332,7 +331,7 @@ pub(crate) async fn hide_track(
     {
         return Err(ApiError::not_found("no such song"));
     }
-    let _ = s.events.send(ApiEvent::LibraryChanged);
+    s.notify_library();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -371,6 +370,8 @@ pub(crate) async fn restore(
     if !s.library.lock().expect("library poisoned").unhide(&body.path)? {
         return Err(ApiError::not_found("That file was not taken out of the library"));
     }
+    // Back in lists and search at once, also when no scan below runs
+    s.notify_library();
     // Stored paths are the scanner's (resolved); a folder may be given through a link
     let file = std::path::Path::new(&body.path);
     let folder = s

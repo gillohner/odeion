@@ -2262,6 +2262,9 @@ impl NodeState {
     }
 
     pub(crate) fn end_scan(&self) {
+        // Search's kept library answers go before the scan reads as done: one asked right after
+        // it already finds the new songs
+        crate::search::forget_library_answers(self);
         *self.scanning.lock().expect("scan flag poisoned") = false;
         let _ = self.events.send(ApiEvent::LibraryChanged);
     }
@@ -2340,9 +2343,9 @@ impl NodeState {
     }
 
     /// Tell event listeners that library-side data (tracks, playlists) changed. Search's cached
-    /// library answers go too: every playlist write and import ends here, and an answer kept for
-    /// 5 minutes would still show a playlist's old count. (A scan's end and tag or match edits
-    /// send `LibraryChanged` themselves and keep them.)
+    /// library answers go too: every playlist write and import, a song's edit or undo, a song
+    /// taken out or put back and an identify fix end here (a scan's end drops them itself), and an
+    /// answer kept for 5 minutes would still show a playlist's old count or a song's old title.
     pub fn notify_library(&self) {
         crate::search::forget_library_answers(self);
         let _ = self.events.send(ApiEvent::LibraryChanged);

@@ -604,7 +604,7 @@ fn launch(s: &Arc<NodeState>, opts: RunOptions) -> bool {
             p.clone()
         };
         remember_run(&st, &ended);
-        let _ = st.events.send(crate::types::ApiEvent::LibraryChanged);
+        st.notify_library();
     });
     true
 }
@@ -727,7 +727,7 @@ pub(crate) async fn run_after_scan(s: &Arc<NodeState>, poll: std::time::Duration
                 match auto_settle_pass(s).await {
                     Ok(r) if r.settled > 0 => {
                         tracing::info!(settled = r.settled, by = ?r.by_rule, "identify: unsure songs settled automatically after a scan");
-                        let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+                        s.notify_library();
                     }
                     Ok(_) => {}
                     Err(e) => tracing::warn!("identify: settling after a scan: {}", e.message),
@@ -2513,7 +2513,7 @@ pub(crate) async fn accept(
         let st = s.clone();
         let _ = tokio::task::spawn_blocking(move || write_found_ids(&st, Some(&[track]))).await;
     }
-    let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+    s.notify_library();
     Ok(Json(t))
 }
 
@@ -3023,7 +3023,7 @@ pub(crate) async fn set_match(
         after_scan(&s, 0);
     }
     let out = out?;
-    let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+    s.notify_library();
     Ok(Json(out))
 }
 
@@ -3315,7 +3315,7 @@ pub(crate) async fn skip(
     let ids = skip_targets(&body, paths)?;
     let n = write_waiting(&s, |lib| lib.skip_review(&ids)).await?;
     let counts = s.library.lock().expect("library poisoned").identity_counts()?;
-    let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+    s.notify_library();
     Ok(Json(serde_json::json!({"skipped": n, "counts": counts})))
 }
 
@@ -3336,7 +3336,7 @@ pub(crate) async fn unskip(
     let ids = skip_targets(&body, paths)?;
     let n = write_waiting(&s, |lib| lib.unskip_review(&ids)).await?;
     let counts = s.library.lock().expect("library poisoned").identity_counts()?;
-    let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+    s.notify_library();
     Ok(Json(serde_json::json!({"restored": n, "counts": counts})))
 }
 
@@ -3384,7 +3384,7 @@ pub(crate) async fn confirm(
             } else {
                 None
             };
-            let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+            s.notify_library();
             let mut out = serde_json::json!({"confirmed": tracks, "count": tracks.len()});
             if let Some(f) = files {
                 out["files"] = f;

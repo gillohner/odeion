@@ -846,3 +846,90 @@ async fn the_owner_edits_and_removes_songs_without_touching_files() {
     }
     assert_eq!(back, 1);
 }
+
+/// The library's songs a search finds, and whether the answer was the one search kept.
+async fn songs_found(app: &axum::Router, q: &str) -> (bool, Vec<String>) {
+    let (st, a) = call(app, OWNER, "GET", &format!("/v1/search?q={q}&in=library"), None).await;
+    assert_eq!(st, StatusCode::OK, "{a}");
+    let titles = a["hits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no hits in {a}"))
+        .iter()
+        .filter(|h| h["kind"] == "song")
+        .map(|h| h["title"].as_str().unwrap_or_default().to_string())
+        .collect();
+    (a["cached"].as_bool().unwrap_or(false), titles)
+}
+
+/// Search keeps the library's answer 5 minutes. A scan that adds songs, a song's edit, its undo
+/// and a song taken out drop it, so the same search asked right after already finds what the
+/// library holds now (it found nothing new, or the old title, until the answer ran out).
+#[tokio::test]
+async fn search_finds_new_and_renamed_songs_right_after_a_scan_or_an_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_wav(&music.join("one.wav"));
+    let s = node(dir.path(), vec![music.clone()], just_null());
+    s.scan_config_folders();
+    scanned(&s).await;
+    let app = router(s.clone());
+    let none: Vec<String> = Vec::new();
+    // Nothing called "two" yet, and asked again: the kept answer
+    assert_eq!(songs_found(&app, "two").await, (false, none.clone()));
+    assert_eq!(songs_found(&app, "two").await, (true, none.clone()));
+    // A scan adds two.wav: the same search finds it at once
+    write_wav(&music.join("two.wav"));
+    assert!(s.start_scan(vec![music.clone()]).unwrap());
+    let sc = scanned(&s).await;
+    assert_eq!(sc.added, 1, "{sc:?}");
+    assert_eq!(songs_found(&app, "two").await, (false, vec!["Two".to_string()]));
+    // A song renamed: found by its new title right away
+    let (_, t) = call(&app, OWNER, "GET", "/v1/library/tracks?limit=10", None).await;
+    let id = t["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["title"] == "One")
+        .unwrap_or_else(|| panic!("no One in {t}"))["id"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(songs_found(&app, "morning").await, (false, none.clone()));
+    assert_eq!(songs_found(&app, "morning").await, (true, none.clone()));
+    let (st, t) = call(
+        &app,
+        OWNER,
+        "PUT",
+        &format!("/v1/library/tracks/{id}/edit"),
+        Some(json!({"title": "Morning"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(
+        songs_found(&app, "morning").await,
+        (false, vec!["Morning".to_string()])
+    );
+    assert_eq!(
+        songs_found(&app, "morning").await,
+        (true, vec!["Morning".to_string()])
+    );
+    // Undone: the new title finds nothing again
+    let (st, t) = call(
+        &app,
+        OWNER,
+        "DELETE",
+        &format!("/v1/library/tracks/{id}/edit"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    assert_eq!(songs_found(&app, "morning").await, (false, none.clone()));
+    // A song taken out of the library: no longer found
+    assert_eq!(songs_found(&app, "one").await.1, vec!["One".to_string()]);
+    let (st, _) = call(&app, OWNER, "DELETE", &format!("/v1/library/tracks/{id}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert_eq!(songs_found(&app, "one").await, (false, none.clone()));
+    assert_eq!(songs_found(&app, "one").await, (true, none));
+    // Put back: lib.rs a_song_put_back_is_found_by_search_at_once_without_a_scan (it holds the
+    // scan slot, so restore's own scan can't drop the kept answer first)
+}
