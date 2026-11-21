@@ -3884,6 +3884,7 @@
   // other way pops it too, and opening a page from inside one replaces it (setView).
   const transients = []; // { open: () => bool, close: (fromBack) => void }
   let popHandled = false; let selfPop = false; let popPending = null; let popResolve = null;
+  let popWasSelf = false; // (the pop just handled was the app's own, closing a menu: popTransient)
   // A layer over another (a phone's Now playing sheet) gets an entry of its own when it opens, on top of
   // the one under it. An entry pushed by back's own handler (no tap since) would make the WebView's
   // back skip the page's entry and leave the page: on Android to the app's connect page, which
@@ -3903,7 +3904,7 @@
     history.go(!layer && s.layer ? -2 : -1);
   };
   window.addEventListener('popstate', () => {
-    if (selfPop) { selfPop = false; popHandled = true; if (popResolve) { popResolve(); popResolve = null; } popPending = null; return; }
+    if (selfPop) { selfPop = false; popHandled = true; popWasSelf = true; if (popResolve) { popResolve(); popResolve = null; } popPending = null; return; }
     const open = transients.filter((t) => t.open()); if (!open.length) return;
     // A layer over another (a phone's Now playing sheet) closes alone: the next back closes what is under it
     const top = open[open.length - 1];
@@ -5167,6 +5168,7 @@
     cancelArtistReads(); // the page being left reads no more credits
     // (a page opened while a post's Back to the search under it is landing: that page stays, nothing decides there)
     if (searchOver && how !== 'pop') { searchOver = null; overDone(); }
+    if (how !== 'pop') overUndo = null; // (an undo's Forward still to land goes nowhere now: no later pop is a step of it)
     { const t = toItem(v, arg); if (t) { v = 'item'; arg = t; } }
     if (v === 'discover') { if (arg && arg.tag) { v = 'tag'; arg = arg.tag; } else { v = 'home'; arg = undefined; } }
     // A section of its own starts with an empty search box (second review: "queen" stayed after leaving Search)
@@ -5224,7 +5226,9 @@
   // (the app's own Back asked for it, not landed yet: { at, done }; done: the person went elsewhere or
   // Back themselves meanwhile, or the box decided in the post's entry. Landing then, it is undone (Forward
   // again, as far as it went, nothing redrawn): what shows stays, no entry decides twice. 5 s after it was
-  // asked, or once the app goes Back for anything else, a Back is never taken for it. Where the person's
+  // asked (a done one, where the person's own Back is told from it: a minute), or once the app goes Back for
+  // anything else, a Back is never taken for it. leaveSearch's, given up on by its timer: { at, done, left:
+  // { depth, v } of the entry it drew that page in }. Where the person's
   // own Back can't be told from it (no Navigation API) it is forgotten instead: never undone)
   let overBack = null; let overUndo = null;
   // (the Back or Forward coming is the person's own, the browser's or the system's, not a history.back()
@@ -5250,9 +5254,22 @@
     const byPerson = popByPerson; popByPerson = false;
     // (a Forward undoing the app's late Back: nothing to show, whatever entry it lands on; one at a time, as
     // Chromium refuses a go(2) onto an entry pushed while that Back was on its way)
-    // (only a pop one entry up from the last step, within 1 s: any other is the person's)
-    if (overUndo) { const u = overUndo; overUndo = null; const d = (e.state && e.state.depth) || 0; if (Date.now() - u.at < 1000 && d === u.from + 1) { popHandled = false; navDepth = d; if (u.steps > 1) { overUndo = { at: Date.now(), steps: u.steps - 1, from: d }; history.forward(); } return; } }
-    if (overBack && (Date.now() - overBack.at >= 5000 || (popHandled && !byPerson))) overBack = null; // (spent closing a menu)
+    // (only a pop one entry up from the last step, within 1 s, or the app's own within a minute: any other is the person's)
+    // (the app's own Forward, told from the person's, landing later than that, as in a paused WebView: still a step)
+    const wasSelf = popWasSelf; popWasSelf = false;
+    if (overUndo) { const u = overUndo; overUndo = null; const d = (e.state && e.state.depth) || 0; const late = Date.now() - u.at; if ((late < 1000 || (!byPerson && late < 60000)) && d === u.from + 1) { popHandled = false; navDepth = d; if (u.steps > 1) { overUndo = { at: Date.now(), steps: u.steps - 1, from: d }; history.forward(); } return; } }
+    // (a done one is kept until its own Back lands, where the Navigation API tells it from the person's: a minute at most)
+    if (overBack && Date.now() - overBack.at >= (popWho && overBack.done ? 60000 : 5000)) overBack = null;
+    // (that Back, landing while a menu is open on the page opened meanwhile, only closed the menu: undone all the
+    // same, back to that page, its entry and depth; not yet done, it was spent closing a menu on the post's page)
+    if (overBack && popHandled && !byPerson && !wasSelf) {
+      const d = (e.state && e.state.depth) || 0; const now = history.state;
+      if (overBack.done && navDepth > d && !(now && now.transient) && !(overBack.left && overBack.left.depth === navDepth)) {
+        overBack = null; popHandled = false; overUndo = { at: Date.now(), steps: navDepth - d, from: d }; history.forward(); return;
+      }
+      if (overBack.left && overBack.left.depth === navDepth && !(now && now.transient)) navDepth = d; // (leaveSearch's, onto the page its copy shows)
+      overBack = null;
+    }
     if (popHandled) { popHandled = false; return; } // back only closed a menu or dialog
     if (e.state && e.state.transient) return; // forward onto a closed menu's entry: nothing to show
     const st = e.state || routeFromPath() || { v: 'home' };
@@ -5260,7 +5277,10 @@
     // (the app's own Back for a post's search landing: once the person went elsewhere or the box decided,
     // undone, back to the entry it left: a page opened before it landed leaves it 2 entries down)
     const appBack = !byPerson && overBack; if (appBack) overBack = null;
-    if (appBack && appBack.done && was > navDepth) { overUndo = { at: Date.now(), steps: was - navDepth, from: navDepth }; navDepth = was; history.forward(); return; }
+    // (the Back leaveSearch's timer gave up on, landing at last where it was going while that page's copy still
+    // shows: the Back it was, nothing to draw again; a page opened meanwhile, it is undone)
+    if (appBack && appBack.left && appBack.left.depth === was) { if (state.view === appBack.left.v) return; }
+    else if (appBack && appBack.done && was > navDepth) { overUndo = { at: Date.now(), steps: was - navDepth, from: navDepth }; navDepth = was; history.forward(); return; }
     // (Back from a post that is no playlist onto the search it was pasted over: that entry takes the post's search)
     // (the box edited before that Back landed: what is in it now takes that entry, never the old query put back over it;
     // a link or key typed there opens its page in that entry too. The person's own Back there does as the app's
@@ -5279,7 +5299,7 @@
     if (st.scroll && gen === navGen) mainTo(st.scroll);
   });
   // The back arrow: one step back when there is in-app history, else the parent page.
-  const goBack = (fallback) => { if (navDepth > 0) { overBack = null; history.back(); } else if (fallback && fallback.startsWith('item:')) { const [, kind, ...id] = fallback.split(':'); setView('item', { kind, id: id.join(':') }); } else setView(fallback || 'home'); };
+  const goBack = (fallback) => { if (navDepth > 0) { overBack = null; overUndo = null; history.back(); } else if (fallback && fallback.startsWith('item:')) { const [, kind, ...id] = fallback.split(':'); setView('item', { kind, id: id.join(':') }); } else setView(fallback || 'home'); };
   $$('.nav-item').forEach((b) => b.onclick = () => setView(b.dataset.view));
   // Back from TIDAL's or Spotify's sign-in page (its callback sends the browser to /?tidal=… or
   // /?spotify=…): once the first page is drawn (connect), the place the sign-in was started opens,
@@ -5423,10 +5443,10 @@
     if (cur && cur === searchLeft) return;
     const from = cur && typeof cur.fromPath === 'string' ? cur.fromPath.split('?')[0] : '';
     if (from && from !== '/search' && navDepth > 0 && cur.v === 'search' && !cur.transient && shellMode() !== 'phone') {
-      searchLeft = cur; overBack = null; history.back();
+      searchLeft = cur; overBack = null; overUndo = null; history.back();
       // (over a post's page still drawn as its loading skeleton: that Back not landed in 1.5 s, the page
       // Search was opened from is drawn in this entry, never the skeleton left)
-      if (over) { const drawn = state.viewArg; setTimeout(() => { if (state.view !== 'shared' || state.viewArg !== drawn || history.state !== cur) return; searchLeft = null; try { history.replaceState(cur, '', cur.fromPath); } catch { /* sandboxed */ } const r = routeFromPath() || { v: 'home' }; setView(r.v, r.arg, 'replace'); }, 1500); }
+      if (over) { const drawn = state.viewArg; setTimeout(() => { if (state.view !== 'shared' || state.viewArg !== drawn || history.state !== cur) return; searchLeft = null; try { history.replaceState(cur, '', cur.fromPath); } catch { /* sandboxed */ } const r = routeFromPath() || { v: 'home' }; setView(r.v, r.arg, 'replace'); if (popWho && !overBack) overBack = { at: Date.now(), done: true, left: { depth: cur.depth || 0, v: r.v } }; }, 1500); }
     }
     else setView('home');
   };

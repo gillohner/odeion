@@ -12,7 +12,10 @@
 // takes its search in its own entry. A Back landing after the box decided, or after the person opened
 // another page or went Back themselves meanwhile, is undone (what shows stays); the person's own Back is
 // theirs; a Back onto another search entry is that search; an emptied box's Back that never lands
-// (desktop) still draws the page Search was opened from.
+// (desktop) still draws the page Search was opened from. A late Back that only closes a menu on the page
+// opened meanwhile, or lands 5 s or more late, is undone too; the undo's own Forward landing late is still
+// a step of it, and the person's Forward during it ends on their page; desktop's emptied-box Back landing
+// after its 1.5 s timer drew the page is that Back (nothing drawn again), or undone over a page opened since.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-search-shared-link.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -35,7 +38,7 @@ const NOTPL = '0035WKVKQDHSN'; const GONE = '0035WKVKQDHSP'; const SLOW = '0035W
 // (another post that is no playlist, pasted over a search with a query; a homeserver that doesn't answer)
 const OVER = '0035WKVKQDHSR'; const DOWN = '0035WKVKQDHSS';
 // (one more, the box edited while its Back to the search under it lands)
-const EDITS = ['0035WKVKQDHST', '0035WKVKQDHSV', '0035WKVKQDHSW', '0035WKVKQDHSX', '0035WKVKQDHSY', '0035WKVKQDHSZ', '0035WKVKQDHT0', '0035WKVKQDHT1', '0035WKVKQDHT2', '0035WKVKQDHT3', '0035WKVKQDHT4', '0035WKVKQDHT5', '0035WKVKQDHT6', '0035WKVKQDHT7', '0035WKVKQDHT8', '0035WKVKQDHT9', '0035WKVKQDHTA', '0035WKVKQDHTB', '0035WKVKQDHTC'];
+const EDITS = ['0035WKVKQDHST', '0035WKVKQDHSV', '0035WKVKQDHSW', '0035WKVKQDHSX', '0035WKVKQDHSY', '0035WKVKQDHSZ', '0035WKVKQDHT0', '0035WKVKQDHT1', '0035WKVKQDHT2', '0035WKVKQDHT3', '0035WKVKQDHT4', '0035WKVKQDHT5', '0035WKVKQDHT6', '0035WKVKQDHT7', '0035WKVKQDHT8', '0035WKVKQDHT9', '0035WKVKQDHTA', '0035WKVKQDHTB', '0035WKVKQDHTC', '0035WKVKQDHTD', '0035WKVKQDHTE', '0035WKVKQDHTF', '0035WKVKQDHTG', '0035WKVKQDHTH', '0035WKVKQDHTJ'];
 const NOTPL_LINK = `pubky://${KEY}/pub/social/v1/posts/${NOTPL}`;
 const fixtures = {
   [`/shared/${KEY}/playlists/${ID}`]: { body: shared }, [`/shared/${KEY}/playlists`]: { body: [] },
@@ -272,14 +275,16 @@ async function run(browser, width, { phone, android }) {
     for (const [i, c] of cases.entries()) await over(i, c);
     // (what the person does the moment the page asks for its Back: t typed; ms: when that Back lands, null
     // never; drop: the app's next Back never lands; fake: a search entry of another depth under it; open:
-    // Albums opened the moment after, that Back still on its way)
-    const arm = (o) => page.evaluate(({ t, ms, drop, fake, open }) => {
+    // Albums opened the moment after, that Back still on its way; go: that late Back lands this many entries
+    // down, where it was going when asked (a menu's entry was pushed over the page opened meanwhile); late2:
+    // the app's next Back (desktop, the emptied box's, where Search was opened from) lands this many ms later)
+    const arm = (o) => page.evaluate(({ t, ms, drop, fake, open, go, late2 }) => {
       const real = history.back;
       history.back = function () {
-        history.back = drop ? function () { history.back = real; return undefined; } : real;
+        history.back = drop ? function () { history.back = real; return undefined; } : late2 ? function () { history.back = real; setTimeout(() => real.call(history), late2); return undefined; } : real;
         if (t !== undefined) { const s = document.getElementById('search'); s.value = t; s.dispatchEvent(new Event('input', { bubbles: true })); }
         if (fake) { const st = history.state; history.pushState({ v: 'search', arg: { q: 'Zed' }, depth: 42 }, '', '/search?q=Zed'); history.pushState(st, '', location.pathname + location.search); }
-        if (ms === null) return undefined; if (ms) { setTimeout(() => real.call(history), ms); return undefined; }
+        if (ms === null) return undefined; if (ms) { setTimeout(() => (go ? history.go(go) : real.call(history)), ms); return undefined; }
         const r = real.call(history); if (open) document.querySelector('.nav-item[data-view="albums"]').click(); return r;
       };
     }, o);
@@ -311,6 +316,90 @@ async function run(browser, width, { phone, android }) {
       await sleep(1200);
       check(at() === '/albums' && await depth() === d0 + 2 && await page.evaluate(() => history.state && history.state.v) === 'albums', `${tag}: and its own entry shown with it (at ${at()}, depth ${d0} → ${await depth()})`);
       check(await page.locator('.nav-item.on[data-view="albums"]').count() === 1 && searched(state) === n, `${tag}: Albums drawn, nothing searched (${searched(state) - n})`);
+    }
+    // (the app's Forwards undoing it: k, the call (1st, 2nd) to change; ms: it lands that much later; drop: it never
+    // lands, window.__fwdDropped then says so)
+    const armForward = (o) => page.evaluate(({ k, ms, drop }) => {
+      const real = history.forward; let n = 0; window.__fwdDropped = false;
+      history.forward = function () {
+        n++; if (n !== k) return real.call(history);
+        history.forward = real; if (drop) { window.__fwdDropped = true; return undefined; }
+        setTimeout(() => real.call(history), ms); return undefined;
+      };
+    }, o);
+    const albumsDrawn = () => page.locator('.nav-item.on[data-view="albums"]').count().then((c) => c === 1);
+    // The person's Forward pressed during that two-step undo, the app's second Forward dropped: the person's
+    // takes its place, it ends on the page they opened (Albums), drawn, its own entry
+    {
+      const d0 = await overNight(); const n = searched(state);
+      await armForward({ k: 2, drop: true });
+      await arm({ open: true });
+      await paste(page, postLink(19)); await asked(19);
+      check(await until(() => page.evaluate(() => window.__fwdDropped)), `${tag}: two-step undo: its second Forward asked for (dropped)`);
+      await page.goForward();
+      check(await until(() => at() === '/albums' && depth().then((x) => x === d0 + 2)), `${tag}: the person's Forward during the two-step undo: on Albums (at ${at()}, depth ${d0} → ${await depth()})`);
+      await sleep(1200);
+      check(at() === '/albums' && await depth() === d0 + 2 && await page.evaluate(() => history.state && history.state.v) === 'albums' && await albumsDrawn() && searched(state) === n, `${tag}: and stays, Albums drawn in its own entry, nothing searched (at ${at()}, searched ${searched(state) - n})`);
+    }
+    // The app's first Forward of that undo landing 1.5 s late (a paused WebView): still a step of the undo, the
+    // post's page never drawn; it ends on Albums
+    {
+      const d0 = await overNight(); const n = searched(state);
+      await armForward({ k: 1, ms: 1500 });
+      await arm({ open: true });
+      await paste(page, postLink(20)); await asked(20);
+      await sleep(2600);
+      check(at() === '/albums' && await depth() === d0 + 2 && await albumsDrawn(), `${tag}: the undo's Forward landing 1.5 s late: on Albums, drawn (at ${at()}, depth ${d0} → ${await depth()})`);
+      check(searched(state) === n && !(await page.locator('#main .notice').count()), `${tag}: the post's page not drawn on the way, nothing searched (${searched(state) - n})`);
+    }
+    // Another page opened while that Back is landing, and a menu opened on it: the late Back (where it was going,
+    // the search under the post) only closes the menu: undone all the same, back on that page, in its entry
+    {
+      const d0 = await overNight(); const n = searched(state);
+      await arm({ t: 'Sefa', ms: 1500, go: -3 });
+      await paste(page, postLink(21)); await asked(21); await sleep(300);
+      await page.evaluate(() => document.querySelector('.nav-item[data-view="albums"]').click());
+      check(await until(() => where(page) === '/albums'), `${tag}: a page opened during Back, then its menu (at ${at()})`);
+      await page.locator('#me').click();
+      check(await until(() => page.evaluate(() => !!(history.state && history.state.transient))), `${tag}: the menu has its own entry`);
+      await sleep(2300);
+      check(at() === '/albums' && await depth() === d0 + 2 && await page.evaluate(() => history.state && !history.state.transient && history.state.v) === 'albums', `${tag}: the late Back closing that menu is undone: on Albums, its entry (at ${at()}, depth ${d0} → ${await depth()}, ${await page.evaluate(() => JSON.stringify(history.state && { v: history.state.v, t: history.state.transient }))})`);
+      check(await albumsDrawn() && searched(state) === n, `${tag}: Albums drawn, nothing searched (${searched(state) - n})`);
+      await page.goBack();
+      check(await until(async () => where(page) === `/shared/${KEY}/${EDITS[21]}`), `${tag}: Back from it: the post's page (at ${at()})`);
+    }
+    // The same, the late Back landing after 5 s: still undone (where the Navigation API tells it from the
+    // person's), it doesn't pull the person off the page they opened
+    {
+      const d0 = await overNight(); const n = searched(state);
+      await arm({ t: 'Sefa', ms: 5500 });
+      await paste(page, postLink(22)); await asked(22); await sleep(300);
+      await page.evaluate(() => document.querySelector('.nav-item[data-view="albums"]').click());
+      check(await until(() => where(page) === '/albums'), `${tag}: a page opened during a Back that lands after 5.5 s (at ${at()})`);
+      await sleep(6400);
+      check(at() === '/albums' && await depth() === d0 + 2 && await albumsDrawn() && searched(state) === n, `${tag}: and stays, that Back undone (at ${at()}, depth ${d0} → ${await depth()}, searched ${searched(state) - n})`);
+    }
+    // Desktop, the box emptied during that Back, its own Back (where Search was opened from) held 2.5 s: the
+    // 1.5 s timer draws Songs in the search's entry; the Back landing then is the Back it was (Songs, nothing
+    // drawn again); a page opened meanwhile stays (that Back undone)
+    if (!phone) {
+      const d0 = await overNight();
+      await arm({ t: '', late2: 2500 });
+      await paste(page, postLink(23)); await asked(23);
+      check(await until(() => at() === '/tracks' && depth().then((x) => x === d0), 3000), `${tag}: emptied, its Back held 2.5 s: Songs drawn in the search's entry (at ${at()}, depth ${d0} → ${await depth()})`);
+      await until(async () => (await page.locator('.tracks .track').count()) > 0);
+      await page.evaluate(() => { const t = document.querySelector('.tracks .track'); if (t) t.dataset.mark = '1'; });
+      check(await until(() => depth().then((x) => x === d0 - 1), 2500), `${tag}: that Back lands, one entry down (depth ${d0} → ${await depth()})`);
+      await sleep(600);
+      check(at() === '/tracks' && await page.locator('.tracks .track[data-mark="1"]').count() === 1, `${tag}: Songs as drawn, not drawn again (at ${at()})`);
+      const d1 = await overNight(); const n = searched(state);
+      await arm({ t: '', late2: 2500 });
+      await paste(page, postLink(24)); await asked(24);
+      check(await until(() => at() === '/tracks', 3000), `${tag}: emptied, Back held: Songs drawn (at ${at()})`);
+      await page.evaluate(() => document.querySelector('.nav-item[data-view="albums"]').click());
+      check(await until(() => where(page) === '/albums'), `${tag}: then Albums opened before that Back lands (at ${at()})`);
+      await sleep(2200);
+      check(at() === '/albums' && await depth() === d1 + 1 && await albumsDrawn() && searched(state) === n, `${tag}: and stays: that Back undone (at ${at()}, depth ${d1} → ${await depth()})`);
     }
     // No Back came and a playlist link was typed: the playlist shows in the post's entry; its own ‹ Back
     // pressed at once goes back to the search under it (not taken for the app's Back and undone)
