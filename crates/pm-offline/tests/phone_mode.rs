@@ -589,3 +589,136 @@ async fn a_song_sent_in_parts_is_whole_on_the_phone() {
         .unwrap();
     assert_eq!(whole.bytes().await.unwrap().len(), flac.len());
 }
+
+/// The mono FLAC fixture with these Vorbis comments in it.
+fn tagged_flac(comments: &[&str]) -> Vec<u8> {
+    let src = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+    ))
+    .unwrap();
+    let mut body = Vec::new();
+    let vendor = b"phone mode test";
+    body.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+    body.extend_from_slice(vendor);
+    body.extend_from_slice(&(comments.len() as u32).to_le_bytes());
+    for c in comments {
+        body.extend_from_slice(&(c.len() as u32).to_le_bytes());
+        body.extend_from_slice(c.as_bytes());
+    }
+    // The blocks as they are, the comment block replaced
+    let mut out = src[..4].to_vec();
+    let mut i = 4;
+    loop {
+        let h = src[i];
+        let last = h & 0x80 != 0;
+        let len = u32::from_be_bytes([0, src[i + 1], src[i + 2], src[i + 3]]) as usize;
+        if h & 0x7f == 4 {
+            out.push((if last { 0x80 } else { 0 }) | 4);
+            out.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+            out.extend_from_slice(&body);
+        } else {
+            out.extend_from_slice(&src[i..i + 4 + len]);
+        }
+        i += 4 + len;
+        if last {
+            break;
+        }
+    }
+    out.extend_from_slice(&src[i..]);
+    out
+}
+
+#[tokio::test]
+async fn a_phone_song_is_bookmarked_and_listened_by_its_canonical_url() {
+    let f = Fixture::new().await;
+    let add = |name: &'static str, bytes: Vec<u8>| {
+        let f = &f;
+        async move {
+            let r: Value = f
+                .http
+                .post(format!("{}/v1/library/uploads", f.base))
+                .bearer_auth(f.phone.key())
+                .json(&json!({"name": name, "size": bytes.len()}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let id = r["id"].as_str().unwrap().to_string();
+            let done: Value = f
+                .http
+                .put(format!("{}/v1/library/uploads/{id}?offset=0", f.base))
+                .bearer_auth(f.phone.key())
+                .body(bytes)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(done["state"], "stored", "{done}");
+        }
+    };
+    const MBID: &str = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+    add(
+        "tagged.flac",
+        tagged_flac(&["TITLE=Tagged Song", &format!("MUSICBRAINZ_TRACKID={MBID}")]),
+    )
+    .await;
+    add("plain.flac", tagged_flac(&["TITLE=Plain Song"])).await;
+    let (_, list) = f.json("/v1/offline").await;
+    let id_of = |t: &str| {
+        list["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["title"] == t)
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (tagged, plain) = (id_of("Tagged Song"), id_of("Plain Song"));
+    let put = |track: i64| {
+        f.http
+            .put(format!("{}/v1/favourites", f.base))
+            .bearer_auth(f.phone.key())
+            .json(&json!({ "track_id": track }))
+            .send()
+    };
+    // A song with a recording MBID is bookmarked by its MusicBrainz URL, as a node would
+    let r = put(tagged).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    let url = format!("https://musicbrainz.org/recording/{MBID}");
+    assert_eq!(v["uri"], url, "{v}");
+    let (_, list) = f.json("/v1/offline").await;
+    assert_eq!(list["favourites"]["track_ids"], json!([tagged]), "{list}");
+    // One without says why it can't be
+    let r = put(plain).await.unwrap();
+    assert_eq!(r.status(), 422);
+    assert!(r.text().await.unwrap().contains("Plain Song"));
+    // Playing them: a listen of the tagged one only, and no error for the other
+    for track in [tagged, plain] {
+        let r = f
+            .http
+            .post(format!("{}/v1/library/history", f.base))
+            .bearer_auth(f.phone.key())
+            .json(&json!({ "track_id": track }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+    let data: Value =
+        serde_json::from_slice(&std::fs::read(f._dir.path().join("data.json")).unwrap()).unwrap();
+    let listens: Vec<&Value> = data["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["op"] == "listen")
+        .collect();
+    assert_eq!(listens.len(), 1, "{data}");
+    assert!(listens[0].to_string().contains(&url), "{data}");
+}

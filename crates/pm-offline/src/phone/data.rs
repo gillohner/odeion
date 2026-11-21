@@ -105,9 +105,22 @@ pub(crate) struct Item {
     track_id: Option<i64>,
 }
 
-fn uri_of(it: &Item) -> Result<String, SourceError> {
-    if it.track_id.is_some() {
-        return Err(SourceError::not_found("Songs of a node's library need that node"));
+fn uri_of(p: &Phone, it: &Item) -> Result<String, SourceError> {
+    if let Some(id) = it.track_id {
+        // A song added to the phone: its canonical URL, from its tags as on a node
+        let s = p
+            .songs
+            .get(id)
+            .ok_or_else(|| SourceError::not_found(format!("song {id}")))?;
+        return s.canonical.ok_or_else(|| {
+            SourceError::new(
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "“{}” has no MusicBrainz id or ISRC in its tags, so it can't be saved outside this phone",
+                    s.title
+                ),
+            )
+        });
     }
     it.uri
         .clone()
@@ -125,7 +138,7 @@ pub(crate) async fn bookmarks(State(p): State<Arc<Phone>>) -> Json<Value> {
 }
 
 async fn bookmark(p: &Arc<Phone>, it: &Item, on: bool) -> Response {
-    let uri = match uri_of(it).and_then(|u| canonical(&u)) {
+    let uri = match uri_of(p, it).and_then(|u| canonical(&u)) {
         Ok(u) => u,
         Err(e) => return super::source_err(e),
     };
@@ -171,8 +184,12 @@ pub(crate) async fn played(State(p): State<Arc<Phone>>, Json(b): Json<Played>) -
         uri: b.uri,
         track_id: b.track_id,
     };
-    let uri = match uri_of(&it).and_then(|u| canonical(&u)) {
+    let uri = match uri_of(&p, &it).and_then(|u| canonical(&u)) {
         Ok(u) => u,
+        // A song of the phone's own with nothing to point at: no listen to keep
+        Err(e) if it.track_id.is_some() && e.status == axum::http::StatusCode::UNPROCESSABLE_ENTITY => {
+            return Json(json!({ "plays": [] })).into_response()
+        }
         Err(e) => return super::source_err(e),
     };
     let service = match &uri {

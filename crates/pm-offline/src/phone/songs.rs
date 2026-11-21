@@ -51,6 +51,10 @@ pub struct Song {
     /// Its album's cover in `music/covers/`, when the file had one.
     #[serde(default)]
     pub cover: Option<String>,
+    /// The song's canonical URL from its tags (recording MBID, else ISRC), as the node assigns one:
+    /// what a bookmark or a listen of it points at.
+    #[serde(default)]
+    pub canonical: Option<String>,
 }
 
 /// A stable id from text (albums and artists), positive and within JavaScript's integers.
@@ -203,6 +207,7 @@ impl Songs {
             format: probe.format,
             bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
             cover: None,
+            canonical: pm_library::canonical::assign(&tags).map(|(u, _)| u.to_url()),
         };
         if let (Some(pic), Some(aid)) = (&tags.picture, song.album_id()) {
             let cover = format!("{aid}.{}", pic.extension());
@@ -308,6 +313,26 @@ pub(crate) struct At {
     offset: u64,
 }
 
+/// Takes the next part of `u` for writing, in the same step as the checks (the caller holds the
+/// uploads' lock): a part at another offset, or while one is being written, is refused (409 with
+/// where the upload is), as is one that doesn't fit the file. `None`: taken.
+fn claim(u: &mut Upload, offset: u64, len: u64) -> Option<Response> {
+    if u.state != "receiving" || u.writing || offset != u.offset {
+        return Some(
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"offset": u.offset, "state": u.state})),
+            )
+                .into_response(),
+        );
+    }
+    if len > CHUNK || u.offset + len > u.size {
+        return Some(err(StatusCode::BAD_REQUEST, "that part doesn't fit the file"));
+    }
+    u.writing = true;
+    None
+}
+
 /// `PUT /v1/library/uploads/{id}?offset=`: the next part; the last one stores the song.
 pub(crate) async fn put_part(
     State(p): State<Arc<Phone>>,
@@ -316,46 +341,33 @@ pub(crate) async fn put_part(
     body: Bytes,
 ) -> Response {
     let (part, name, size, offset) = {
-        let ups = p.songs.uploads.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(u) = ups.get(&id) else {
+        let mut ups = p.songs.uploads.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(u) = ups.get_mut(&id) else {
             return err(StatusCode::NOT_FOUND, "no such upload");
         };
-        if u.state != "receiving" || u.writing || at.offset != u.offset {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"offset": u.offset, "state": u.state})),
-            )
-                .into_response();
+        if let Some(refused) = claim(u, at.offset, body.len() as u64) {
+            return refused;
         }
-        if body.len() as u64 > CHUNK || u.offset + body.len() as u64 > u.size {
-            return err(StatusCode::BAD_REQUEST, "that part doesn't fit the file");
-        }
-        let taken = (u.part.clone(), u.name.clone(), u.size, u.offset);
-        drop(ups);
-        if let Some(u) = p
-            .songs
-            .uploads
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_mut(&id)
-        {
-            u.writing = true;
-        }
-        taken
+        (u.part.clone(), u.name.clone(), u.size, u.offset)
     };
     // From the acknowledged offset: what a failed write left after it is cut off first
-    let appended = {
+    // (off the runtime that also streams the music)
+    let at = part.clone();
+    let len = body.len() as u64;
+    let appended = tokio::task::spawn_blocking(move || {
         use std::io::{Seek, Write};
         std::fs::OpenOptions::new()
             .write(true)
-            .open(&part)
+            .open(&at)
             .and_then(|mut f| {
                 f.set_len(offset)?;
                 f.seek(std::io::SeekFrom::Start(offset))?;
                 f.write_all(&body)?;
                 f.sync_data()
             })
-    };
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
     if let Err(e) = appended {
         if let Some(u) = p
             .songs
@@ -368,7 +380,7 @@ pub(crate) async fn put_part(
         }
         return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
-    let now = offset + body.len() as u64;
+    let now = offset + len;
     let done = now == size;
     {
         let mut ups = p.songs.uploads.lock().unwrap_or_else(|e| e.into_inner());
@@ -463,7 +475,7 @@ pub(crate) async fn listing(State(p): State<Arc<Phone>>) -> Json<Value> {
         "tracks": tracks,
         "albums": albums,
         "playlists": [],
-        "favourites": {"track_ids": []},
+        "favourites": {"track_ids": favourite_ids(&songs, &super::data::load(&p).bookmarks)},
     }))
 }
 
@@ -491,9 +503,44 @@ pub(crate) async fn cover(State(p): State<Arc<Phone>>, Path(id): Path<i64>, head
     }
 }
 
+/// The ids of the songs whose canonical URL is bookmarked.
+fn favourite_ids(songs: &[Song], bookmarks: &std::collections::BTreeMap<String, i64>) -> Vec<i64> {
+    songs
+        .iter()
+        .filter(|s| s.canonical.as_ref().is_some_and(|c| bookmarks.contains_key(c)))
+        .map(|s| s.id)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_part_at_a_time() {
+        let mut u = Upload {
+            id: "u".into(),
+            name: "a.flac".into(),
+            size: 10,
+            offset: 0,
+            state: "receiving".into(),
+            error: None,
+            part: PathBuf::new(),
+            writing: false,
+        };
+        assert!(claim(&mut u, 0, 4).is_none());
+        // The same part again while the first is being written (a page that resumed): refused
+        let again = claim(&mut u, 0, 4).unwrap();
+        assert_eq!(again.status(), StatusCode::CONFLICT);
+        // Written: the next part is taken
+        u.writing = false;
+        u.offset = 4;
+        assert!(claim(&mut u, 4, 6).is_none());
+        u.writing = false;
+        // Too long for the file, or at another offset
+        assert_eq!(claim(&mut u, 4, 7).unwrap().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(claim(&mut u, 3, 1).unwrap().status(), StatusCode::CONFLICT);
+    }
 
     #[test]
     fn ids_are_stable_and_safe_for_the_page() {

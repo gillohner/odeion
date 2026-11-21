@@ -10448,7 +10448,7 @@
           let html = head;
           if (albumOpen) {
             lists.album = songsOf(albumOpen.track_ids);
-            html += `<section class="section"><div class="section-head"><h3>${esc(albumOpen.title)}</h3><div class="actions"><button class="btn sm primary" data-dlplay="album">${icon('play')} Play</button><button class="btn sm ghost" data-dlclose>All downloads</button></div></div>${trackRows(lists.album, { showAlbum: false, numbers: 'track', key: 'album' })}</section>`;
+            html += `<section class="section"><div class="section-head"><h3>${esc(albumOpen.title)}</h3><div class="actions"><button class="btn sm primary" data-dlplay="album">${icon('play')} Play</button><button class="btn sm ghost" data-dlclose>${phoneMode() ? 'All my songs' : 'All downloads'}</button></div></div>${trackRows(lists.album, { showAlbum: false, numbers: 'track', key: 'album' })}</section>`;
           }
           if (d.albums.length) html += `<section class="section"><div class="section-head"><h3>Albums <span class="muted small">${d.albums.length}</span></h3></div><div class="grid">${d.albums.map(albumTile).join('')}</div></section>`;
           const pls = d.playlists.filter((p) => p.track_ids.length);

@@ -2,7 +2,7 @@
 // backend lists the songs added to it (/v1/offline, the offline page's shape) and takes new ones
 // through the node's upload routes (/v1/library/uploads). At 360 and 1280 px:
 //   * the Library tab (phone) or the sidebar's My songs opens "My songs", with the phone's song and
-//     an "Add songs" button; nothing says Downloads;
+//     an "Add songs" button; nothing says Downloads, also with an album open;
 //   * files picked in the system's picker (the page's file input) go up with the node's upload
 //     protocol (POST, then PUT from offset 0), each once, and the list is read again after;
 //   * Shuffle plays the phone's file (/v1/library/tracks/<id>/file).
@@ -72,6 +72,13 @@ const shown = (page, sel) => page.evaluate((s) => { const el = document.querySel
     check(!/Downloads|Offline:/.test(main), `${at}: nothing says Downloads or Offline`);
     check(await shown(p, '#phoneadd'), `${at}: "Add songs" is there`);
     await p.screenshot({ path: path.join(SHOTS, `my-songs-${w}.png`) });
+    // An album of the phone's songs: its way back says My songs too
+    await p.click('[data-dlalbum="9"]').catch(() => {});
+    await p.waitForSelector('[data-dlclose]', { timeout: 3000 }).catch(() => {});
+    const back = (await p.locator('[data-dlclose]').innerText().catch(() => '')).trim();
+    check(back === 'All my songs', `${at}: an open album's way back says All my songs (${back})`);
+    await p.click('[data-dlclose]').catch(() => {});
+    await p.waitForSelector('#phoneadd', { timeout: 3000 }).catch(() => {});
     // Picked in the system's picker: sent with the node's upload protocol, once
     const before = r.offline;
     await p.setInputFiles('#phoneaddin', { name: 'New Song.flac', mimeType: 'audio/flac', buffer: Buffer.from('fLaCdata') });
