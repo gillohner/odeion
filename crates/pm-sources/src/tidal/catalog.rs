@@ -13,6 +13,8 @@ use serde_json::Value;
 
 /// How many songs of an album are read (TIDAL's page limit is 100).
 const ALBUM_TRACKS: usize = 100;
+/// At most this many pages of an album's tracks are read (1,000 tracks).
+const ALBUM_PAGES: usize = 10;
 /// How many of an artist's releases are read (one page each of albums and of EPs and singles).
 const ARTIST_RELEASES: usize = 50;
 
@@ -251,15 +253,29 @@ pub async fn item(
     if let Some(aid) = id.strip_prefix("album:") {
         let aid = numeric(aid)?;
         let a = get(http, v1_base, sess, &format!("/albums/{aid}"), &[]).await?;
-        let t = get(
-            http,
-            v1_base,
-            sess,
-            &format!("/albums/{aid}/tracks"),
-            &[("limit", ALBUM_TRACKS.to_string()), ("offset", "0".into())],
-        )
-        .await?;
-        return Ok(album_item(id, aid, &a, &t));
+        // Every page of its tracks (TIDAL gives 100 at a time), up to ALBUM_PAGES
+        let mut tracks: Vec<Value> = Vec::new();
+        for _ in 0..ALBUM_PAGES {
+            let t = get(
+                http,
+                v1_base,
+                sess,
+                &format!("/albums/{aid}/tracks"),
+                &[
+                    ("limit", ALBUM_TRACKS.to_string()),
+                    ("offset", tracks.len().to_string()),
+                ],
+            )
+            .await?;
+            let page = t["items"].as_array().cloned().unwrap_or_default();
+            let total = t["totalNumberOfItems"].as_u64().unwrap_or(0) as usize;
+            let empty = page.is_empty();
+            tracks.extend(page);
+            if empty || tracks.len() >= total {
+                break;
+            }
+        }
+        return Ok(album_item(id, aid, &a, &serde_json::json!({ "items": tracks })));
     }
     if let Some(tid) = id.strip_prefix("track:") {
         let tid = numeric(tid)?;
@@ -365,11 +381,13 @@ pub fn artist_releases(
     let mut arrived = 0u64;
     for page in std::iter::once(albums).chain(singles) {
         let items = page["items"].as_array().cloned().unwrap_or_default();
-        arrived += items.len() as u64;
         listed += page["totalNumberOfItems"].as_u64().unwrap_or(items.len() as u64);
+        // Only rows that make a release count as arrived: a row TIDAL sent malformed is missing
         out.extend(items.iter().filter_map(|x| {
+            let hit = album_hit(x)?;
+            arrived += 1;
             Some(ArtistRelease {
-                hit: album_hit(x)?,
+                hit,
                 release: crate::releases::tidal(x),
             })
         }));
@@ -392,6 +410,49 @@ pub fn artist_releases(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn an_album_of_more_than_a_page_has_all_its_tracks() {
+        let app = axum::Router::new()
+            .route(
+                "/v1/albums/7",
+                axum::routing::get(|| async { axum::Json(json!({"id": 7, "title": "Long", "artists": [{"name": "A"}]})) }),
+            )
+            .route(
+                "/v1/albums/7/tracks",
+                axum::routing::get(
+                    |q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                        let from: u64 = q.0["offset"].parse().unwrap();
+                        let items: Vec<_> = (from..(from + 100).min(150))
+                            .map(|n| json!({"id": n + 1, "title": format!("T{}", n + 1), "trackNumber": n + 1}))
+                            .collect();
+                        axum::Json(json!({"items": items, "totalNumberOfItems": 150}))
+                    },
+                ),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let sess = Session {
+            access_token: "t".into(),
+            country: "CH".into(),
+            ..Default::default()
+        };
+        let it = item(&reqwest::Client::new(), &base, &sess, "album:7")
+            .await
+            .unwrap();
+        assert_eq!(it.tracks.len(), 150);
+        assert_eq!(it.tracks[149].title, "T150");
+    }
+
+    #[test]
+    fn a_malformed_release_makes_the_list_incomplete() {
+        let albums =
+            json!({"items": [{"id": 1, "title": "Good"}, {"title": "no id"}], "totalNumberOfItems": 2});
+        let (out, c) = artist_releases(&albums, None, None);
+        assert_eq!(out.len(), 1);
+        assert!(c.truncated && !c.complete, "{c:?}");
+    }
 
     #[test]
     fn search_puts_the_named_artist_first_and_drops_what_tidal_wont_stream() {
