@@ -82,6 +82,27 @@ async function queue(browser, width) {
     await page.keyboard.press('Tab'); await page.waitForTimeout(200);
     const next = await where(page);
     check(!await menuOpen(page) && next !== 'body' && !next.startsWith('menu:') && next !== 'qmore@Song 2' && /@Song 3$/.test(next), `${width} Queue: Tab closes it and goes on from the ⋯ to the next row's control (${next})`);
+    // /, N and ? from inside the menu still run (Search, Now playing, Help), and the menu closes
+    // first: before, it stayed open over or behind them. Back then closes Now playing (it took the
+    // menu's history entry over), with the Queue still there under it
+    await page.keyboard.press('Escape'); await page.waitForTimeout(200);
+    const fromMenu = async (key) => { await more(1).focus(); await page.keyboard.press('Enter'); await shown(page); const inMenu = (await where(page)).startsWith('menu:'); await page.keyboard.press(key); await page.waitForTimeout(400); return inMenu; };
+    let inMenu = await fromMenu('/');
+    check(inMenu && !await menuOpen(page) && await page.evaluate(() => document.activeElement && document.activeElement.id === 'search' && !(history.state && history.state.transient)), `${width} Queue: / in the menu closes it and goes to the search field, no menu entry left in the history (${await where(page)})`);
+    await page.screenshot({ path: path.join(shots, `queue-menu-search-${width}.png`) });
+    inMenu = await fromMenu('n');
+    check(inMenu && !await menuOpen(page) && await page.locator('#nowplaying').isVisible(), `${width} Queue: N in the menu closes it and opens Now playing`);
+    await page.goBack(); await page.waitForTimeout(500);
+    check(!await page.locator('#nowplaying').isVisible() && !await menuOpen(page) && new URL(page.url()).pathname === '/queue' && await page.locator('.list.queue .list-row').count() === 3, `${width} Queue: then Back closes Now playing and stays on the Queue (${new URL(page.url()).pathname})`);
+    const help = () => page.evaluate(() => [...document.querySelectorAll('dialog[open]')].some((d) => /Keyboard shortcuts/.test(d.textContent)));
+    inMenu = await fromMenu('?');
+    check(inMenu && !await menuOpen(page) && await help(), `${width} Queue: ? in the menu closes it and opens the list of shortcuts`);
+    await page.goBack(); await page.waitForTimeout(500);
+    check(!await help() && new URL(page.url()).pathname === '/queue' && await page.locator('.list.queue .list-row').count() === 3, `${width} Queue: Back closes it and stays on the Queue (${new URL(page.url()).pathname})`);
+    inMenu = await fromMenu('?');
+    check(inMenu && !await menuOpen(page) && await help(), `${width} Queue: ? in the menu again: the list of shortcuts`);
+    await page.keyboard.press('Escape'); await page.waitForTimeout(400);
+    check(await page.locator('dialog[open]').count() === 0 && new URL(page.url()).pathname === '/queue' && await page.evaluate(() => !(history.state && history.state.transient)), `${width} Queue: Esc closes it, the Queue still there, no menu entry left in the history`);
     // Enter on Add to queue: run, the page drawn again, the focus on Song 2's ⋯
     await page.keyboard.press('Escape'); await page.waitForTimeout(200);
     await more(1).focus(); await page.keyboard.press('Enter'); await shown(page);
@@ -91,7 +112,10 @@ async function queue(browser, width) {
     await page.waitForTimeout(400);
     const n = await page.locator('.list.queue .list-row').count();
     check(n === 4, `${width} Queue: Add to queue picked with Enter added the song (${n} rows)`);
-    check(await where(page) === 'qmore@Song 2', `${width} Queue: after it the focus is on Song 2's ⋯ again, not the page (${await where(page)})`);
+    // (two Song 2 rows now, the 2nd and the added 4th: the focus is on the exact ⋯ that opened the
+    // menu, not the other Song 2's)
+    const on = (k) => more(k).evaluate((b) => b === document.activeElement, null, { timeout: 3000 }).catch(() => false);
+    check(await on(1) && !await on(3), `${width} Queue: after it the focus is on the same row's ⋯ again (Song 2, 2nd row), not the added Song 2's nor the page (${await where(page)}, 2nd row: ${await on(1)}, 4th: ${await on(3)})`);
     await page.screenshot({ path: path.join(shots, `queue-after-add-${width}.png`) });
     // A mouse: a click on the ⋯ leaves the focus out of the menu; after a clicked item, Space plays
     // or pauses and opens no menu
