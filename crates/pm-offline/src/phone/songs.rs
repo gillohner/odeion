@@ -154,7 +154,13 @@ impl Songs {
         let tmp = p.with_extension("json.tmp");
         let ok = serde_json::to_vec(list)
             .ok()
-            .and_then(|b| std::fs::write(&tmp, b).ok())
+            .and_then(|b| {
+                use std::io::Write;
+                // On the disk before it replaces the list (a power cut never leaves it empty)
+                let mut f = std::fs::File::create(&tmp).ok()?;
+                f.write_all(&b).ok()?;
+                f.sync_all().ok()
+            })
             .and_then(|_| std::fs::rename(&tmp, &p).ok());
         if ok.is_none() {
             tracing::warn!("phone mode: the songs list could not be saved");

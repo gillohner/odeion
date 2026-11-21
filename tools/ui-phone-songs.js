@@ -99,6 +99,9 @@ const shown = (page, sel) => page.evaluate((s) => { const el = document.querySel
     await sleep(800);
     const plays = await p.evaluate(() => window.__audioPlays);
     check(plays.some((u) => /\/v1\/library\/tracks\/1\/file/.test(u)), `${at}: Shuffle plays the phone's file (${plays.join(', ')})`);
+    // Its links stay on the phone: no artist page, no Match, the album opens the phone's album page
+    const links = await p.evaluate(() => { const row = document.querySelector('#main .track'); return row ? { artist: !!row.querySelector('.by [data-artist-credit]'), match: !!row.querySelector('[data-act="identify"]'), by: (row.querySelector('.by') || {}).innerText || '' } : null; });
+    check(links && !links.artist && !links.match && /Phone Band/.test(links.by), `${at}: a phone song names its artist without a link, and has no Match (${JSON.stringify(links)})`);
     // The heart of a phone song (rows show it from tablet widths; phones use the ⋯ menu): on once
     // bookmarked, also after the list is drawn again, and off again
     const heart = '#main .track [data-act="fav"]';

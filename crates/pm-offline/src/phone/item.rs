@@ -175,6 +175,9 @@ pub(crate) async fn item(State(p): State<Arc<Phone>>, Path((kind, id)): Path<(St
     if !matches!(kind.as_str(), "song" | "album" | "artist") {
         return err(StatusCode::BAD_REQUEST, "kind is song, album or artist");
     }
+    if let Some(page) = own_page(&p, &kind, &id) {
+        return Json(page).into_response();
+    }
     let Some((svc, skind, sid)) = service_item(&kind, &id) else {
         return err(
             StatusCode::NOT_FOUND,
@@ -194,6 +197,83 @@ pub(crate) async fn item(State(p): State<Arc<Phone>>, Path((kind, id)): Path<(St
         Ok(v) => Json(v).into_response(),
         Err(e) => source_err(e),
     }
+}
+
+/// A page of the phone's own songs: `song/lib-<n>` (or the song's canonical id, `mb-…` /
+/// `isrc-…`, which the page links when it has one) and `album/lib-<album>`. Its songs play from
+/// the phone (`track_id`).
+fn own_page(p: &Phone, kind: &str, id: &str) -> Option<Value> {
+    let all = p.songs.list();
+    let (title, artist, year, album, mut songs) = match kind {
+        "song" => {
+            let s = all.into_iter().find(|s| {
+                id == format!("lib-{}", s.id) || s.canonical.as_deref().map(page_id).as_deref() == Some(id)
+            })?;
+            (
+                s.title.clone(),
+                s.artists.first().cloned(),
+                s.year,
+                s.album_id(),
+                vec![s],
+            )
+        }
+        "album" => {
+            let aid: i64 = id.strip_prefix("lib-")?.parse().ok()?;
+            let songs: Vec<_> = all.into_iter().filter(|s| s.album_id() == Some(aid)).collect();
+            let first = songs.first()?;
+            (
+                first.album.clone()?,
+                first
+                    .album_artist
+                    .clone()
+                    .or_else(|| first.artists.first().cloned()),
+                first.year,
+                Some(aid),
+                songs,
+            )
+        }
+        _ => return None,
+    };
+    songs.sort_by_key(|s| (s.disc_no.unwrap_or(1), s.track_no.unwrap_or(0), s.id));
+    let image = album
+        .filter(|a| p.songs.cover(*a).is_some())
+        .map(|a| format!("/v1/library/albums/{a}/cover"));
+    let total: u64 = songs.iter().filter_map(|s| s.duration_ms).sum();
+    let rows: Vec<Value> = songs
+        .iter()
+        .map(|s| {
+            json!({
+                "no": s.track_no,
+                "title": s.title,
+                "artist": s.artists.first(),
+                "duration_ms": s.duration_ms,
+                "track_id": s.id,
+                "id": format!("lib-{}", s.id),
+                "image": image,
+                "album": s.album,
+            })
+        })
+        .collect();
+    let uri = (kind == "song").then(|| songs[0].canonical.clone()).flatten();
+    Some(json!({
+        "kind": kind,
+        "id": id,
+        "uri": uri,
+        "target": { "uri": uri },
+        "title": title,
+        "artist": artist.map(|name| json!({ "name": name })),
+        "year": year,
+        "image": image,
+        "source": "This phone",
+        "songs": rows,
+        "total_ms": total,
+        "albums": [],
+        "versions": [],
+        "also_on": [],
+        "open_on": [],
+        "about": [],
+        "section": "home",
+    }))
 }
 
 /// `GET /v1/item/{kind}/{id}/extras`: nothing more on a phone (no library, no Pinakes).

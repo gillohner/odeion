@@ -680,6 +680,18 @@ async fn a_phone_song_is_bookmarked_and_listened_by_its_canonical_url() {
             .unwrap()
     };
     let (tagged, plain) = (id_of("Tagged Song"), id_of("Plain Song"));
+    // Their pages come from the phone: by the phone's id, or the song's canonical one
+    for page in [
+        format!("/v1/item/song/lib-{tagged}"),
+        format!("/v1/item/song/mb-{MBID}"),
+    ] {
+        let (st, pg) = f.json(&page).await;
+        assert_eq!(st, 200, "{page}: {pg}");
+        assert_eq!(pg["title"], "Tagged Song");
+        assert_eq!(pg["songs"][0]["track_id"], tagged, "it plays from the phone");
+    }
+    let (st, _) = f.json("/v1/item/song/lib-999").await;
+    assert_eq!(st, 404);
     let put = |track: i64| {
         f.http
             .put(format!("{}/v1/favourites", f.base))
