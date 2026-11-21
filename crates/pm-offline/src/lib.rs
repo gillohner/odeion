@@ -11,8 +11,11 @@
 //! - [`downloads`]: what the device keeps, for the app's storage screen and its marks.
 //! - [`server`]: with the node out of reach, a server on `127.0.0.1` that serves the web UI in
 //!   its offline mode from the store.
+//! - [`phone`]: phone mode, the app without a node: the web UI the app carries and the node's
+//!   `/v1` routes for search, item pages, TIDAL and Qobuz sign-in and streams, on `127.0.0.1`.
 
 pub mod downloads;
+pub mod phone;
 pub mod server;
 pub mod store;
 pub mod sync;

@@ -658,6 +658,7 @@ jobs:
           ui-versions.js versions-shots
           ui-similar-tiles.js similar-shots
           ui-connect-ring.js connect-ring-shots
+          ui-connect-phone.js connect-phone-shots
           ui-tap-highlight.js tap-highlight-shots
           ui-here-name.js here-name-shots
           ui-android-first.js android-first-shots
@@ -677,6 +678,7 @@ jobs:
           ui-native-player.js native-player-shots
           ui-app-downloads.js app-downloads-shots
           ui-offline-play.js offline-play-shots
+          ui-phone-mode.js phone-mode-shots
           ui-downloads-rows.js downloads-rows-shots
           ui-android-media.js android-media-shots
           ui-phone-library-targets.js phone-library-targets-shots
