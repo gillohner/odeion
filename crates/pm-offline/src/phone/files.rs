@@ -197,6 +197,16 @@ pub fn start(p: &Arc<Phone>, acct: &Arc<Account>) {
     });
 }
 
+/// A copy pass soon (a song added, the setting changed), with no vault or data sync.
+pub(crate) fn copy_soon(p: &Arc<Phone>) {
+    let p = p.clone();
+    tokio::spawn(async move {
+        if let Some(a) = p.account().await {
+            start(&p, &a);
+        }
+    });
+}
+
 /// Where songs are copied to: the person's homeserver ([`Account`]), or a stand-in in tests.
 pub trait Remote: Sync {
     /// The names of the files there (complete, or an error).
@@ -224,10 +234,10 @@ impl Remote for Account {
         self.hs.upload_private_file(&self.session, path, local).await
     }
     async fn size(&self, path: &str) -> Result<Option<u64>, HomeserverError> {
-        Ok(within(self.hs.stat_private(&self.session, path)).await?.flatten())
+        Ok(self.hs.stat_private(&self.session, path).await?.flatten())
     }
     async fn delete(&self, path: &str) -> Result<(), HomeserverError> {
-        within(self.hs.delete_private(&self.session, path)).await
+        self.hs.delete_private(&self.session, path).await
     }
 }
 
@@ -251,6 +261,12 @@ fn next_wait(last: Option<Duration>) -> Duration {
 /// [`copy`] with `remote`, holding phone mode only between uploads: leaving it, or turning the
 /// setting off, ends the pass before the next song.
 pub async fn copy_while(weak: &Weak<Phone>, remote: &impl Remote) -> Report {
+    copy_within(weak, remote, pm_pubky::homeserver::OBJECT_TIMEOUT).await
+}
+
+/// [`copy_while`], each size and removal on the homeserver within `limit`: a call that stalls
+/// never holds the copier.
+async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) -> Report {
     let mut r = Report::default();
     let Some(p) = weak.upgrade() else { return r };
     if !on(&p) {
@@ -321,16 +337,19 @@ pub async fn copy_while(weak: &Weak<Phone>, remote: &impl Remote) -> Report {
         // There already, whole (a copy cut short by a failure or a kill is not): copied. A short
         // one under the phone's own name is replaced
         let mut whole = false;
+        // A file under the phone's own name whose size isn't known stays if the upload fails
+        let mut keep_ours = false;
         for name in there.get(&h).into_iter().flatten() {
             let at = format!("{}{name}", pm_appdata::files::FILES_DIR);
-            match remote.size(&at).await {
+            match within_for(limit, remote.size(&at)).await {
                 Ok(Some(n)) if n == s.bytes => {
                     whole = true;
                     break;
                 }
                 Ok(Some(_)) if at == path => {
-                    let _ = remote.delete(&at).await;
+                    let _ = within_for(limit, remote.delete(&at)).await;
                 }
+                _ if at == path => keep_ours = true,
                 _ => {}
             }
         }
@@ -343,9 +362,9 @@ pub async fn copy_while(weak: &Weak<Phone>, remote: &impl Remote) -> Report {
             continue;
         }
         let sent = tokio::time::timeout(upload_for(s.bytes), remote.upload(&path, &local)).await;
-        if !matches!(sent, Ok(Ok(()))) {
+        if !matches!(sent, Ok(Ok(()))) && !keep_ours {
             // Whatever part of it arrived goes (a later pass sends it whole)
-            let _ = remote.delete(&path).await;
+            let _ = within_for(limit, remote.delete(&path)).await;
         }
         let Some(p) = weak.upgrade() else { break };
         match sent {
@@ -397,17 +416,11 @@ pub(crate) async fn status(State(p): State<Arc<Phone>>) -> Json<Value> {
 fn view(p: &Phone) -> Value {
     let songs = p.songs.list();
     let copies = load_copies(p);
-    let there = p
-        .copier
-        .there
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .unwrap_or_default();
     let (mut uploaded, mut cant) = (0, 0);
     for s in &songs {
         match hash_of(&s.file) {
-            Some(h) if there.contains(h) || copies.copied.contains(h) => uploaded += 1,
+            // Only what a pass checked whole (a name found there may be a copy cut short)
+            Some(h) if copies.copied.contains(h) => uploaded += 1,
             Some(h) if copies.refused.contains_key(h) => cant += 1,
             _ if s.bytes > MAX_COPY => cant += 1,
             _ => {}
@@ -442,7 +455,7 @@ pub(crate) async fn choose(State(p): State<Arc<Phone>>, Json(c): Json<Choice>) -
         save_copies(&p, &copies);
     }
     *p.copier.retry.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    p.sync_soon();
+    copy_soon(&p);
     Json(view(&p)).into_response()
 }
 
@@ -464,6 +477,8 @@ mod tests {
         /// The size of each file there (what was uploaded, or set by a test).
         sizes: Mutex<HashMap<String, u64>>,
         deleted: Mutex<Vec<String>>,
+        /// Size and removal requests never answer.
+        stalls: bool,
     }
 
     impl Remote for Fake {
@@ -492,9 +507,15 @@ mod tests {
             }
         }
         async fn size(&self, path: &str) -> Result<Option<u64>, HomeserverError> {
+            if self.stalls {
+                std::future::pending::<()>().await;
+            }
             Ok(self.sizes.lock().unwrap().get(path).copied())
         }
         async fn delete(&self, path: &str) -> Result<(), HomeserverError> {
+            if self.stalls {
+                std::future::pending::<()>().await;
+            }
             self.deleted.lock().unwrap().push(path.to_string());
             self.sizes.lock().unwrap().remove(path);
             Ok(())
@@ -687,6 +708,34 @@ mod tests {
     async fn a_homeserver_that_never_answers_doesnt_hold_the_copier() {
         let never = std::future::pending::<Result<(), HomeserverError>>();
         assert!(within_for(Duration::from_millis(20), never).await.is_err());
+        // Its size never comes for a name already there: the pass goes on (and sends the song)
+        let (_d, p, songs) = phone(1);
+        let f = Fake {
+            names: vec![songs[0].file.clone()],
+            stalls: true,
+            ..Default::default()
+        };
+        let r = tokio::time::timeout(
+            Duration::from_secs(5),
+            copy_within(&Arc::downgrade(&p), &f, Duration::from_millis(20)),
+        )
+        .await
+        .expect("the pass ends");
+        assert_eq!(r.copied, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_upload_keeps_a_copy_it_couldnt_check() {
+        let (_d, p, songs) = phone(1);
+        // There under the phone's name, its size unknown; the upload fails
+        let f = Fake::listing(vec![songs[0].file.clone()]);
+        f.answers.lock().unwrap().push_back(0);
+        copy_while(&Arc::downgrade(&p), &f).await;
+        assert!(
+            f.deleted.lock().unwrap().is_empty(),
+            "{:?}",
+            f.deleted.lock().unwrap()
+        );
     }
 
     #[test]

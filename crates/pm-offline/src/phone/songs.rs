@@ -441,7 +441,7 @@ async fn write_part(
             tracing::info!(song = s.id, "phone mode: a song added");
             u.state = "stored".into();
             // To the homeserver too, when that is on
-            p.sync_soon();
+            super::files::copy_soon(&p);
         }
         Err(e) => {
             u.state = "failed".into();
