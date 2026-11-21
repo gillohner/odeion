@@ -8,6 +8,10 @@
 // shown again from an earlier answer (a tag edit asks Pubky afresh), not even one a rating's redraw
 // got while the removal was on its way, and another page never gets this page's tags. Two quick saves
 // whose answers land out of order: the next redraw stands in the newer answer, not the one that landed last.
+// Pubky's answer after a save fails (500): the tags drawn stay as they are (no "didn't load", no skeleton,
+// the stars and Add notes don't move), and the next redraw still stands them in. A third redraw that
+// starts before the second ask's answer lands stands in the first ask's (newer) answer, not an older one.
+// When the newest ask fails and an older redraw's answer was kept meanwhile, that newer kept answer is shown.
 // Real candidate assets, isolated responses: node tools/ui-phone-rating-redraw.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -36,7 +40,7 @@ const LAG = 700; // Pubky's answer, late enough for a frame-by-frame look
 async function open(browser, width, { android = false } = {}) {
   const { page, context } = await fx.create(browser, width, { mobile: width < 600, fixtures });
   if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
-  const s = { review: null, mine: [], pub: { 7: [['dreamy', 3], ['jazz', 2], ['live', 1], ['late night', 1]], 8: [['other page', 1]] }, asked: 0, delLag: 0, lags: [], landed: [] };
+  const s = { review: null, mine: [], pub: { 7: [['dreamy', 3], ['jazz', 2], ['live', 1], ['late night', 1]], 8: [['other page', 1]] }, asked: 0, delLag: 0, lags: [], fails: [], landed: [] };
   const album = (u) => Number(new URL(u).searchParams.get('album_id'));
   await page.route(/\/v1\/reviews(\?.*)?$/, async (r) => {
     const m = r.request().method(); await sleep(150);
@@ -51,7 +55,7 @@ async function open(browser, width, { android = false } = {}) {
     const id = album(u);
     return r.fulfill({ json: { tags: id === 7 ? s.mine.map((label) => ({ label, synced: true })) : [], uri: id === 7 ? RELEASE : OTHER } });
   });
-  await page.route(/\/v1\/discover\/uri(\?.*)?$/, async (r) => { const id = album(r.request().url()); s.asked++; const tags = s.pub[id] || []; await sleep(s.lags.length ? s.lags.shift() : LAG); s.landed.push(tags.map(([l]) => l)); return r.fulfill({ json: { tags, faces: {} } }); });
+  await page.route(/\/v1\/discover\/uri(\?.*)?$/, async (r) => { const id = album(r.request().url()); s.asked++; const tags = s.pub[id] || []; await sleep(s.lags.length ? s.lags.shift() : LAG); const fail = s.fails.shift(); if (fail) { s.landed.push('failed'); return r.fulfill({ status: fail, json: { error: 'upstream' } }); } s.landed.push(tags.map(([l]) => l)); return r.fulfill({ json: { tags, faces: {} } }); });
   return { page, context, s };
 }
 const settled = (page) => until(() => page.evaluate(() => !!document.querySelector('#htags .tagitem') && !document.querySelector('#htags .tag-skel') && !!document.querySelector('#stars')));
@@ -135,6 +139,68 @@ const press = async (page, v) => { const b = await page.evaluate((x) => { const 
     check(drawn.length > 20 && redrawn > 10 && !older, `${at}: the next redraw stands in the newer answer, not the one that landed last (${older} of ${drawn.length} frames without "fresh" or with a skeleton; ${redrawn} after the redraw)`);
     await sleep(900);
     check(await settled(page) && (await page.evaluate(() => [...document.querySelectorAll('#htags .tagitem')].map((t) => t.dataset.label))).includes('fresh'), `${at}: the tags are in after that redraw, still with "fresh"`);
+    // Pubky fails after a save (500): what was drawn stays, and the next redraw still stands it in
+    const tagsNow = () => page.evaluate(() => [...document.querySelectorAll('#htags .tagitem')].map((t) => t.dataset.label));
+    const want = await tagsNow();
+    const top1 = await page.evaluate(() => Math.round(document.querySelector('#stars').getBoundingClientRect().top));
+    s.fails = [500]; const a3 = s.asked; const l3 = s.landed.length;
+    await watch(page);
+    await press(page, 6);
+    await until(() => s.review && s.review.rating === 6);
+    await until(() => s.landed.length > l3, LAG + 3000); await sleep(300);
+    check(s.asked > a3 && s.landed[l3] === 'failed', `${at}: Pubky's answer after the save failed (500)`);
+    const ff = (await frames(page)).filter((x) => /Journey/.test(x.h1));
+    const off = ff.filter((x) => x.skel || x.tags.join() !== want.join()).length;
+    const jumped = ff.filter((x) => (x.star != null && Math.abs(x.star - top1) > 1) || x.notes !== ff[0].notes).length;
+    check(ff.length > 20 && !off, `${at}: after a failed answer the tags stay as drawn (${off} of ${ff.length} frames changed or with a skeleton)`);
+    check(!jumped, `${at}: after a failed answer the stars and Add notes don't move (${jumped} frames moved)`);
+    check(!(await page.evaluate(() => /didn.t load/.test(document.querySelector('#htags')?.textContent || ''))), `${at}: no "Pubky tags didn't load" over tags that are there`);
+    if (width === 360 && !android) await page.screenshot({ path: path.join(SHOTS, 'after-failed-answer-360.png') });
+    // The next redraw (its answer slow) stands in the kept tags, not a skeleton
+    s.lags = [1500];
+    await watch(page);
+    await press(page, 8);
+    await until(() => s.review && s.review.rating === 8); await sleep(600);
+    const fn = (await frames(page)).filter((x) => /Journey/.test(x.h1));
+    const lost = fn.filter((x) => x.skel || x.tags.join() !== want.join()).length;
+    check(fn.length > 20 && !lost, `${at}: the redraw after a failed answer still stands in the kept tags (${lost} of ${fn.length} frames without them or with a skeleton)`);
+    await sleep(1500); await settled(page);
+    // Three quick redraws: the first's answer (with "third") lands before the second's; the third redraw,
+    // drawn before the second's answer lands, stands in the first's, not the one kept from before
+    s.pub[7] = [...old7, ['fresh', 1], ['third', 1]];
+    s.lags = [1400, 3500]; const a4 = s.asked; const l4 = s.landed.length;
+    await press(page, 4);
+    await until(() => s.asked > a4);
+    s.pub[7] = [...old7, ['fresh', 1]];
+    await until(() => s.review && s.review.rating === 4);
+    await press(page, 2);
+    await until(() => s.asked > a4 + 1);
+    await until(() => s.landed.length > l4, 3000);
+    check(s.landed.length === l4 + 1 && s.landed[l4].includes('third'), `${at}: the first ask's answer landed before the second's (${s.landed.slice(l4).map((t) => t.join('/')).join('; ')})`);
+    await page.evaluate(() => { document.querySelector('#htags').dataset.pre = '1'; });
+    await watch(page);
+    s.lags = [3500];
+    await press(page, 6);
+    await until(() => s.review && s.review.rating === 6); await sleep(500);
+    const ft = (await frames(page)).filter((x) => /Journey/.test(x.h1) && !x.pre);
+    const no3 = ft.filter((x) => x.skel || !x.tags.includes('third')).length;
+    check(ft.length > 10 && !no3, `${at}: a third redraw stands in the first ask's answer that landed (${no3} of ${ft.length} frames without "third")`);
+    if (width === 360 && !android) await page.screenshot({ path: path.join(SHOTS, 'third-redraw-360.png') });
+    await sleep(4000); await settled(page);
+    // Two quick redraws: the first's answer (with "fourth") lands, the second's (the one on screen) fails:
+    // the screen shows the first's, kept meanwhile, not the older tags it stood in
+    s.pub[7] = [...old7, ['fresh', 1], ['fourth', 1]];
+    s.lags = [500, 1800]; s.fails = [0, 500]; const a5 = s.asked; const l5 = s.landed.length;
+    await press(page, 10);
+    await until(() => s.asked > a5);
+    s.pub[7] = [...old7, ['fresh', 1]];
+    await until(() => s.review && s.review.rating === 10);
+    await press(page, 8);
+    await until(() => s.asked > a5 + 1);
+    await until(() => s.landed.length > l5 + 1, 4000); await sleep(300);
+    const shownNow = await tagsNow();
+    check(s.landed[l5 + 1] === 'failed' && shownNow.includes('fourth') && !(await page.evaluate(() => /didn.t load/.test(document.querySelector('#htags')?.textContent || ''))), `${at}: a failed answer shows a newer one kept meanwhile (${s.landed.slice(l5).map((t) => (Array.isArray(t) ? t.join('/') : t)).join('; ')} -> ${shownNow.join(', ')})`);
+    s.fails = []; s.lags = [];
     s.pub[7] = old7;
     // Another album: never this one's tags
     await watch(page);
