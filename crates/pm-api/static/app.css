@@ -1694,6 +1694,9 @@ html[data-shell="phone"] .to-global { position: relative; }
 html[data-shell="phone"] #iglobal::before { content: ''; position: absolute; inset: -5px 0; }
 .tagged-by { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px; color: var(--accent-strong); }
 .hero .art.monogram { display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.88); font-size: var(--fs-art); font-weight: 700; letter-spacing: 0.02em; }
+.hero .art.monogram > img.loaded { background: var(--surface-3); }
+/* A round hero whose picture failed (removed) is the monogram: the same shadow as one that never had a picture */
+.hero .art.round.monogram:not(:has(> img)) { box-shadow: var(--shadow); }
 /* People on tags: faces of who tagged, stacked */
 .faces { display: inline-flex; align-items: center; gap: 4px; background: none; border: 0; padding: 2px 4px; cursor: pointer; color: var(--muted); font: inherit; border-radius: var(--r-pill); }
 .faces:hover { background: var(--surface-2); color: var(--fg); }
