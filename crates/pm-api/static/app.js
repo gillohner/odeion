@@ -6840,7 +6840,7 @@
   const plKeysOf = (box) => (plShown && (box === 'pllocal' ? plShown.local : plShown.uris)) || [];
   const plSongFocus = (box, keys, k, kind, alt) => (k >= 0 && k < keys.length ? { box, song: keys[k], copy: keys.slice(0, k).filter((u) => u === keys[k]).length, kind, alt } : null);
   // (a song's × from the keyboard: the focus goes on to the song after it, else the one before)
-  const plNextFocus = (box, keys, k, kind) => { const rest = keys.filter((_, i) => i !== k); return plSongFocus(box, rest, k < rest.length ? k : k - 1, kind); };
+  const plNextFocus = (box, keys, k, kind, alt) => { const rest = keys.filter((_, i) => i !== k); return plSongFocus(box, rest, k < rest.length ? k : k - 1, kind, alt); };
   const plFocusOf = (a) => {
     const box = a && a.closest ? a.closest('#plsongs, #pllocal') : null; if (!box) return null;
     const row = a.closest('[data-srow]');
@@ -9049,7 +9049,10 @@
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
             ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-rm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); return plWrite(plId, async (signal) => { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`, undefined, { signal }); state.plPf = null; }, document.activeElement === b ? plNextFocus('plsongs', d.playlist.items.map((it) => it.uri), Number(b.dataset.rm), 'button[data-rm]') : null); });
+          // (Remove chosen from the keyboard in the row's ⋯ menu, as phones offer it: the menu gave the
+          // focus back to that ⋯, so it goes on to the next song's ⋯, a card's if that one is a card)
+          const viaMenu = (b) => { const fa = document.activeElement; const row = b.closest('[data-srow]'); return keyedLast && fa && row && row.contains(fa) && fa.matches('button[data-smore], button[data-cmore]'); };
+          $$('[data-rm]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const keys = d.playlist.items.map((it) => it.uri); const k = Number(b.dataset.rm); const next = document.activeElement === b ? plNextFocus('plsongs', keys, k, 'button[data-rm]') : viaMenu(b) ? plNextFocus('plsongs', keys, k, 'button[data-smore]', 'button[data-cmore]') : null; return plWrite(plId, async (signal) => { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`, undefined, { signal }); state.plPf = null; }, next); });
           // (pressed from the keyboard, the focus follows the song to its new place, so a second
           // press moves it on rather than moving the song that took its place back; not when the
           // focus went elsewhere while the move was saved; the list that ends the hold takes it there, heldFocus)
