@@ -827,73 +827,6 @@ pub fn ask_file_url_blocking(
     Ok((status, resp.json().unwrap_or(Value::Null)))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn relay_content_type_matches_the_requested_format() {
-        assert_eq!(content_type_for(5), "audio/mpeg");
-        assert_eq!(content_type_for(6), "audio/flac");
-        assert_eq!(content_type_for(27), "audio/flac");
-    }
-
-    #[test]
-    fn the_file_url_request_is_signed_with_the_app_secret() {
-        let app = App {
-            id: "100000000".into(),
-            secret: "abc123".into(),
-            from: "settings".into(),
-            bundle_url: None,
-        };
-        let q = file_url_query(&app, "5966783", 27, 1_700_000_000);
-        let sig = &q.iter().find(|(k, _)| *k == "request_sig").unwrap().1;
-        let want = hex(&Md5::digest(
-            b"trackgetFileUrlformat_id27intentstreamtrack_id59667831700000000abc123",
-        ));
-        assert_eq!(sig, &want);
-        assert!(format!("{app:?}").contains("<set>") && !format!("{app:?}").contains("abc123"));
-    }
-
-    #[test]
-    fn session_debug_redacts_the_user_token() {
-        let session = Session {
-            token: "private-user-token".into(),
-            name: Some("Listener".into()),
-            ..Default::default()
-        };
-        let shown = format!("{session:?}");
-        assert!(shown.contains("<set>") && !shown.contains("private-user-token"));
-    }
-
-    #[test]
-    fn a_sample_is_refused_and_a_bad_signature_turns_the_mode_off() {
-        let ok = judge_file_url(
-            200,
-            &serde_json::json!({"url": "https://x/a.flac", "format_id": 27}),
-        );
-        assert_eq!(ok.unwrap(), "https://x/a.flac");
-        assert!(matches!(
-            judge_file_url(
-                200,
-                &serde_json::json!({"url": "https://x/a.mp3", "sample": true})
-            ),
-            Err(StreamError::Track(_))
-        ));
-        assert!(matches!(
-            judge_file_url(
-                400,
-                &serde_json::json!({"message": "Invalid Request Signature parameter (request_sig)"})
-            ),
-            Err(StreamError::Mode(_))
-        ));
-        assert!(matches!(
-            judge_file_url(404, &Value::Null),
-            Err(StreamError::Track(_))
-        ));
-    }
-}
-
 // ---- what the caller keeps -------------------------------------------------------------------
 
 pub fn upstream(e: impl std::fmt::Display) -> SourceError {
@@ -1288,5 +1221,87 @@ pub fn status(st: &ModeState) -> QobuzStatus {
         },
         health: st.health.clone(),
         warning: WARNING.into(),
+    }
+}
+
+/// App values for a session that came without them (taken from the vault on a device that never
+/// signed in to Qobuz itself): the kept ones, else the web player's candidates and the first secret
+/// that works with this session, kept in `cache`.
+pub async fn app_for_session(cache: &dyn AppCache, token: &str) -> Result<App, SourceError> {
+    if let Some(app) = app_of(cache) {
+        return Ok(app);
+    }
+    let client = auto::client()?;
+    let _guard = APP_LOCK.lock().await;
+    let found = candidates(&client, false).await?;
+    let app = select(&client, &found, token).await?;
+    cache.keep(&app)?;
+    Ok(app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_content_type_matches_the_requested_format() {
+        assert_eq!(content_type_for(5), "audio/mpeg");
+        assert_eq!(content_type_for(6), "audio/flac");
+        assert_eq!(content_type_for(27), "audio/flac");
+    }
+
+    #[test]
+    fn the_file_url_request_is_signed_with_the_app_secret() {
+        let app = App {
+            id: "100000000".into(),
+            secret: "abc123".into(),
+            from: "settings".into(),
+            bundle_url: None,
+        };
+        let q = file_url_query(&app, "5966783", 27, 1_700_000_000);
+        let sig = &q.iter().find(|(k, _)| *k == "request_sig").unwrap().1;
+        let want = hex(&Md5::digest(
+            b"trackgetFileUrlformat_id27intentstreamtrack_id59667831700000000abc123",
+        ));
+        assert_eq!(sig, &want);
+        assert!(format!("{app:?}").contains("<set>") && !format!("{app:?}").contains("abc123"));
+    }
+
+    #[test]
+    fn session_debug_redacts_the_user_token() {
+        let session = Session {
+            token: "private-user-token".into(),
+            name: Some("Listener".into()),
+            ..Default::default()
+        };
+        let shown = format!("{session:?}");
+        assert!(shown.contains("<set>") && !shown.contains("private-user-token"));
+    }
+
+    #[test]
+    fn a_sample_is_refused_and_a_bad_signature_turns_the_mode_off() {
+        let ok = judge_file_url(
+            200,
+            &serde_json::json!({"url": "https://x/a.flac", "format_id": 27}),
+        );
+        assert_eq!(ok.unwrap(), "https://x/a.flac");
+        assert!(matches!(
+            judge_file_url(
+                200,
+                &serde_json::json!({"url": "https://x/a.mp3", "sample": true})
+            ),
+            Err(StreamError::Track(_))
+        ));
+        assert!(matches!(
+            judge_file_url(
+                400,
+                &serde_json::json!({"message": "Invalid Request Signature parameter (request_sig)"})
+            ),
+            Err(StreamError::Mode(_))
+        ));
+        assert!(matches!(
+            judge_file_url(404, &Value::Null),
+            Err(StreamError::Track(_))
+        ));
     }
 }
