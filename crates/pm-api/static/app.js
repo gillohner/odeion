@@ -381,6 +381,9 @@
     // Usage insights (usage.js) count only requests a press or a page the person opened made
     if (opts.usage === undefined) opts = { ...opts, usage: inHandler > 0 || pressing > 0 || !!opts.navRead };
     if (method === 'GET') return apiSend(method, path, body, opts);
+    // A tag written anywhere: an item page's kept Pubky tags are out of date (again once it lands: an
+    // answer asked for while it was on its way may not have it yet)
+    const tagWrite = path.split('?')[0] === '/tags'; if (tagWrite) forgetHeroPub();
     // The body as it is now (a queued change sends what was asked, even if the object changes meanwhile)
     let sent; let snap; try { sent = body === undefined ? '' : JSON.stringify(body); snap = sent ? JSON.parse(sent) : body; } catch { return apiSend(method, path, body, opts); }
     // One line per resource (its path without the query: PUT /favourites and DELETE /favourites?… too)
@@ -400,7 +403,7 @@
     inFlight.set(line, entry);
     // (kept on its line until it and every earlier one there have settled, even when it was cut while
     // waiting: a later one still goes after the earlier ones; a failed one isn't handed to a new ask)
-    const done = () => { entry.ask = null; }; entry.p.then(done, done);
+    const done = () => { entry.ask = null; if (tagWrite) forgetHeroPub(); }; entry.p.then(done, done);
     entry.settled.then(() => { if (inFlight.get(line) === entry) inFlight.delete(line); });
     return entry.p;
   };
@@ -5933,6 +5936,12 @@
   // Half-typed tags, per page and group: they outlive the page being drawn again (a tag added in the other group,
   // Pubky's answer). One being sent is kept apart until it lands, so it is never offered twice
   const heroDrafts = new Map(); const heroSending = new Set(); let heroNow = null;
+  // Pubky's last tags answers for the item page on screen, per group: the page drawn again (a rating
+  // saved, a bookmark) shows them while it asks again, so the stars under them don't jump for a round
+  // trip. A tag edit forgets them (an earlier answer would show a removed tag again).
+  // (a new map: an answer still on its way from before the edit lands in the old one)
+  let heroPub = { page: null, by: new Map() };
+  function forgetHeroPub() { heroPub.by = new Map(); }
   const openHeroAdd = async (box, ht, b, focus = true) => {
     const g = ht.groups.find((x) => x.scope === b.dataset.htagPlus); if (!g) return;
     b.hidden = true;
@@ -9439,11 +9448,15 @@
           // Pubky), never the page's guess. The page's on_pubky stands in only when it is that URI.
           const shownSong = !!songRef && !songOwn.needsMatch;
           const songUri = localRef ? songOwn.uri : songRef && songRef.uri;
-          const pubFrom = (uri) => (uri && pg.on_pubky && pg.on_pubky.uri === uri ? { state: 'ok', tags: pg.on_pubky.tags || [], faces: pg.on_pubky.faces || {} } : { state: 'loading', tags: [], faces: {} });
+          // Drawn again: the last answers this page had stand in until the new ones come (pubKey)
+          if (!again || heroPub.page !== pageKey) heroPub = { page: pageKey, by: new Map() };
+          const kept = heroPub.by;
+          const pubKey = (g) => `${g.scope}|${refQs(g.ref)}`;
+          const pubFrom = (uri, scope, ref) => (uri && pg.on_pubky && pg.on_pubky.uri === uri ? { state: 'ok', tags: pg.on_pubky.tags || [], faces: pg.on_pubky.faces || {} } : kept.has(pubKey({ scope, ref })) ? { ...kept.get(pubKey({ scope, ref })), kept: true } : { state: 'loading', tags: [], faces: {} });
           const linkName = pg.source || 'source';
           const tagGroups = [
-            ...(shownSong ? [{ scope: 'song', name: `On this ${kind}`, ref: songRef, own: songOwn.tags, pub: pubFrom(songUri) }] : []),
-            ...(linkRef ? [{ scope: 'link', name: `On the ${linkName} link`, ref: linkRef, own: linkOwn.tags, pub: pubFrom(linkRef.uri) }] : []),
+            ...(shownSong ? [{ scope: 'song', name: `On this ${kind}`, ref: songRef, own: songOwn.tags, pub: pubFrom(songUri, 'song', songRef) }] : []),
+            ...(linkRef ? [{ scope: 'link', name: `On the ${linkName} link`, ref: linkRef, own: linkOwn.tags, pub: pubFrom(linkRef.uri, 'link', linkRef) }] : []),
           ];
           const htKey = `${kind}:${id}:${++heroTagsGen}`;
           const ht = { key: htKey, page: `${kind}:${id}`, kind, linkName, groups: tagGroups, canEdit: !isListener(), note: '', match: null, open: state.heroTagsOpen && state.heroTagsOpen.page === `${kind}:${id}` ? state.heroTagsOpen.set : new Set() };
@@ -9630,12 +9643,17 @@
           }).catch(() => { /* extras are a bonus */ });
           drawHeroTags(ht);
           for (const g of tagGroups) {
-            if (g.pub.state !== 'loading') continue;
+            if (g.pub.state !== 'loading' && !g.pub.kept) continue;
+            const was = g.pub; const at = heroPub.by;
             api('GET', `/discover/uri?${refQs(g.ref)}`).then((r) => ({ state: 'ok', tags: r.tags || [], faces: r.faces || {} }))
               // No contact for Pubky (412) or no identity (422): nothing to show, not a failure
               .catch((e) => ({ state: [404, 412, 422].includes(e.status) ? 'none' : 'error', tags: [], faces: {}, unknown: e.status === 422 }))
               .then((p) => {
+                // Kept for this page's next redraw: an answer (not a failure, nor "no identity", which drops the group)
+                if (p.state === 'ok' || (p.state === 'none' && !p.unknown)) at.set(pubKey(g), p); else at.delete(pubKey(g));
                 g.pub = p;
+                // The same as the kept one already drawn: nothing to draw again
+                if (was.kept && JSON.stringify([was.state, was.tags, was.faces, !!was.unknown]) === JSON.stringify([p.state, p.tags, p.faces, !!p.unknown])) return;
                 // A library item with no identity, seen without own tags (a listener, or GET /tags failed)
                 if (p.unknown && g.scope === 'song' && localRef && !g.own) { ht.groups = ht.groups.filter((x) => x !== g); unmatched(); }
                 drawHeroTags(ht);

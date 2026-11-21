@@ -707,6 +707,7 @@ jobs:
           ui-phone-queue-rows.js phone-queue-rows-shots
           ui-phone-item-hero-row.js phone-item-hero-row-shots
           ui-phone-rating-taps.js phone-rating-taps-shots
+          ui-phone-rating-redraw.js phone-rating-redraw-shots
           ui-phone-home-trending.js phone-home-trending-shots
           ui-search-scopes.js search-scopes-shots
           ui-phone-search-head.js phone-search-head-shots
