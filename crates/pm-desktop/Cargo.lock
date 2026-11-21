@@ -3634,6 +3634,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "mdns-sd"
 version = "0.21.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4993,6 +5003,7 @@ dependencies = [
  "pm-out-local",
  "pm-pubky",
  "pm-remote",
+ "pm-sources",
  "pm-stream",
  "pm-zones",
  "pubky 0.16.2",
@@ -5057,15 +5068,20 @@ name = "pm-offline"
 version = "0.2.4"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "futures-util",
  "getrandom 0.3.4",
  "libc",
+ "pm-sources",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -5117,6 +5133,24 @@ dependencies = [
  "iroh",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "pm-sources"
+version = "0.2.4"
+dependencies = [
+ "base64 0.22.1",
+ "md-5",
+ "pm-model",
+ "quick-xml",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -5857,6 +5891,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

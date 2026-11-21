@@ -1536,6 +1536,12 @@ pub struct LoginFlow {
 /// is named itself. A session from before, with the whole folder, still covers every part.
 pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/node.json:rw,/priv/pubky.music/settings.json:rw,/priv/pubky.music/prefs.json:rw,/priv/pubky.music/files/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
 
+/// What the app asks for in phone mode (no node): the sources vault (named on its own, as
+/// `crates/pm-appdata/VAULT.md` requires), the shared preferences, the files folder, the node's
+/// record (read only: whether the homeserver is a node's own), and the social and music posts
+/// (Collections, Bookmarks, listens, reviews). Never `/priv/pubky.music/` as a whole.
+pub const PHONE_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/prefs.json:rw,/priv/pubky.music/files/:rw,/priv/pubky.music/node.json:r,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
+
 /// The capabilities in `wanted` (a list like [`LOGIN_CAPABILITIES`]) that `granted` does not
 /// cover. A granted `scope:actions` covers a wanted one when its scope is the same folder or a
 /// parent of it and it has every wanted action.
