@@ -1395,7 +1395,8 @@
       : (jobDone(p) ? (jobStopped(p) ? 'Copy stopped' : 'Copied to your homeserver') : 'Copying to your homeserver'));
   const jobPct = (p) => (p.bytes_total ? Math.min(100, Math.round((100 * p.bytes_done) / p.bytes_total)) : (jobDone(p) ? 100 : 0));
   const jobPop = () => $('#jobpop');
-  const closeJobPop = (fromBack) => { const jp = jobPop(); if (!jp || jp.hidden) return; jp.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); };
+  // (the focus in it, or on nothing, goes back to the chip, as the other panels give it to their button)
+  const closeJobPop = (fromBack) => { const jp = jobPop(); if (!jp || jp.hidden) return; const inside = jp.contains(document.activeElement) || document.activeElement === document.body; jp.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); const c = $('#jobchip'); if (inside && c && c.getClientRects().length) c.focus({ preventScroll: true }); };
   const hideJobChip = () => { const c = $('#jobchip'); if (c) c.hidden = true; };
   // An error line, as the node sends it: text, or {path, reason}
   const jobErr = (e) => (typeof e === 'string' ? esc(e) : `<span class="jeprob">${esc(e.reason || '')}</span> <span class="muted">${esc(e.path || '')}</span>`);
@@ -4780,7 +4781,8 @@
       ...(isBrowser() ? [] : [{ label: 'DSP', note: 'Equaliser, crossfeed, room correction', icon: 'settings', run: () => { state.dspOpen = state.zone; setView('settings', 'playback'); } }]),
       ...(songPage ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: songPage }) }] : []),
     ]); };
-    bindNpLinks(overlay, it, () => toggleNowPlaying());
+    // (the page opened replaces the one the focus came from: it goes to the mini player, as in setView)
+    bindNpLinks(overlay, it, () => { npReturn = null; toggleNowPlaying(); });
     $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => { transport({ action: 'play', index: Number(b.dataset.npqi) }); setTimeout(renderNowPlaying, 500); });
     const qf = $('#npqfull'); if (qf) qf.onclick = () => setView('queue');
     overlay.dataset.sheet = sheet || ''; overlay.dataset.npuri = it.uri || ''; overlay.dataset.layout = `${shellMode()}-${npCompact()}`;
@@ -5241,7 +5243,9 @@
     markTabs();
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || ((v === 'artist' || v === 'releases') && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
-    if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
+    // (the page takes Now playing's history entry. What had the focus when it opened is on the page this
+    // one replaces: the focus goes to the mini player, not to a row about to go, which left it nowhere)
+    if (!overlay.hidden) { npReturn = null; toggleNowPlaying(false, true); }
     // (a page opened is drawn from the start: redrawing, keepPlace)
     const top = later ? {} : null; if (top) topLater = top; else { mainTo(0); if (state.placeHold) state.placeHold(); }
     state.drawnPage = null; endSelect(); // (opening a page, the same one too, ends Select)
@@ -5593,8 +5597,8 @@
     if (e.key === 'Escape') {
       if (document.querySelector('dialog[open]')) return; // (it closes itself, and only itself)
       if (e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut('escape');
-      const pops = !qPanel.hidden || !$('#zonepop').hidden || !menuEl.hidden || !volPop().hidden;
-      if (pops) { closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
+      const pops = !qPanel.hidden || !$('#zonepop').hidden || !menuEl.hidden || !volPop().hidden || !jobPop().hidden;
+      if (pops) { closePop(); closeMenu(); closeQPanel(); closeVolPop(); closeJobPop(); return; }
       if (npSheetTr.open()) { closeNpSheet(); return; }
       if (!overlay.hidden) toggleNowPlaying();
       return;
@@ -5621,10 +5625,14 @@
       return;
     }
     { const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' ? 'next' : e.key === 'ArrowLeft' ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
-    // An open ⋯ menu closes before Search, Now playing or Help: it stayed open over or behind them.
+    // An open ⋯ menu, zone picker, Sound panel or volume closes before Search, Now playing or Help: it
+    // stayed open (with its grey scrim) over or behind them.
     // (Now playing and Help take over its history entry, so Back then closes them; Search has none)
-    if ((e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') && !menuEl.hidden) closeMenu(e.key !== '/');
+    if (e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') { const keep = e.key !== '/'; closeMenu(keep); closePop(keep); closeQPanel(keep); closeVolPop(keep); }
     // (the search field is under an open Now playing, out of reach there: it closes first)
+    // The copy's popup closes too, before Search, Now playing and Help, as the panels above do. (So over
+    // Now playing, Help is a layer of its own: Back closes Help, and Now playing stays)
+    if (e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') closeJobPop(e.key !== '/');
     if (e.key === '/') { e.preventDefault(); if (!overlay.hidden) toggleNowPlaying(false); search.focus(); search.select(); return; }
     // (Space is a press of its own: it spins no Play clicked just before)
     if (e.code === 'Space') { e.preventDefault(); state.startAnchor = null; transport({ action: 'toggle' }); }
