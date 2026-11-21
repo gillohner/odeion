@@ -23,6 +23,7 @@ pub mod search;
 pub mod segmented;
 pub mod tidal;
 pub mod types;
+pub mod vault_form;
 
 pub use reqwest::StatusCode;
 
