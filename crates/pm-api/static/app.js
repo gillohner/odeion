@@ -815,7 +815,18 @@
   const removeFromLibrary = async (id, title) => {
     const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true }] });
     if (!ok) return;
-    try { await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library'); onLibraryChanged(); render(); } catch (e) { toast(e.message, 'error'); }
+    try {
+      await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library');
+      // (the kept searches' library answers lose the song now: the search on screen is drawn again
+      // from its kept answer, not asked again, so it would list the song until started again; a
+      // service's copy of it stays, without the library's id, so its ⋯ no longer offers Remove)
+      const gone = (h) => h.kind === 'song' && h.track_id != null && Number(h.track_id) === Number(id);
+      for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) {
+        if (!a || !Array.isArray(a.hits) || !a.hits.some(gone)) continue;
+        r.answers[src] = { ...a, hits: src === 'library' ? a.hits.filter((h) => !gone(h)) : a.hits.map((h) => (gone(h) ? { ...h, track_id: null, id: h.id === `lib-${id}` && h.page ? idOf(h.page) : h.id } : h)) };
+      }
+      onLibraryChanged(); render();
+    } catch (e) { toast(e.message, 'error'); }
   };
   const editAlbumTags = async (albumId, title, artist) => {
     const v = await choiceDialog({ title: 'Rename the album', text: 'Kept on this node; the files stay as they are.', field: { label: 'Album title', value: title || '' }, choices: [{ label: 'Save', value: 'save', primary: true }] });
