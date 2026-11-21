@@ -10,6 +10,7 @@
 
 pub mod account;
 pub mod data;
+pub mod files;
 pub mod item;
 pub mod qobuz;
 pub mod search;
@@ -40,6 +41,7 @@ pub const CAPABILITIES: &[&str] = &[
     "listens",
     "songs",
     "add-songs",
+    "homeserver-files",
 ];
 
 pub(crate) fn err(status: StatusCode, msg: &str) -> Response {
@@ -110,6 +112,8 @@ pub struct Phone {
     data_now: Arc<tokio::sync::Notify>,
     /// One vault step at a time.
     pub(crate) vault_lock: tokio::sync::Mutex<()>,
+    /// Whether the person's homeserver is the one installed with their node, as last known.
+    pub(crate) bundled_here: std::sync::Mutex<Option<bool>>,
     /// One change at a time to what the phone keeps of the person's data (`data.json`).
     pub(crate) data_lock: std::sync::Mutex<()>,
 }
@@ -146,6 +150,7 @@ impl Phone {
             data_now: Default::default(),
             vault_lock: Default::default(),
             data_lock: Default::default(),
+            bundled_here: Default::default(),
         }))
     }
 
@@ -157,6 +162,11 @@ impl Phone {
     /// Phone mode's folder on the phone.
     pub fn dir(&self) -> &std::path::Path {
         &self.dir
+    }
+
+    /// The songs added to the phone.
+    pub fn songs(&self) -> &songs::Songs {
+        &self.songs
     }
 
     /// The cache of TIDAL tracks.
@@ -225,6 +235,7 @@ pub fn router(phone: Arc<Phone>) -> Router {
         )
         .route("/v1/library/history", post(data::played))
         .route("/v1/offline", get(songs::listing))
+        .route("/v1/phone/storage", get(files::status).put(files::choose))
         .route("/v1/library/uploads", post(songs::start))
         .route(
             "/v1/library/uploads/{id}",
@@ -494,6 +505,12 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
         };
         if r != data::Report::default() {
             tracing::info!(?r, "phone mode: Pubky data synced");
+        }
+        if full {
+            let r = files::sync(&p, &acct).await;
+            if r != files::Report::default() {
+                tracing::info!(?r, "phone mode: songs copied to the homeserver");
+            }
         }
         let (now, data_now) = (p.sync_now.clone(), p.data_now.clone());
         drop(p);

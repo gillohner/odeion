@@ -427,3 +427,62 @@ async fn posts(s: &pubky::PubkySession, dir: &str) -> usize {
 fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
+
+#[tokio::test]
+async fn songs_added_on_the_phone_reach_the_homeserver_installed_with_the_node() {
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let sessions = person(&a).await;
+    let info = a.call(reqwest::Method::GET, "/info", None).await;
+    let hs_key = info["public_key"].as_str().unwrap().to_string();
+    let hs = signing_in();
+    // The node's record names the homeserver it runs (the person's own, here)
+    let record = pm_pubky::homeserver::NodeRecord {
+        name: "Living room".into(),
+        api_url: "http://192.168.1.10:7788".into(),
+        token: String::new(),
+        version: "0.0.0".into(),
+        updated_at: 1,
+        iroh: String::new(),
+        bundled_homeserver: Some(hs_key),
+    };
+    hs.publish_node_record(&sessions[0], &record).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let p = Phone::open(Config {
+        dir: dir.path().to_path_buf(),
+        cache: dir.path().join("streams"),
+        version: "test".into(),
+        pubky: None,
+        tidal: TidalConf::default(),
+    })
+    .unwrap();
+    let acct = Account::of(signing_in(), sessions[1].clone());
+    assert_eq!(phone::files::bundled_here(&acct).await, Some(true));
+    // A song added on the phone
+    let flac = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+    ))
+    .unwrap();
+    let part = dir.path().join("x.part");
+    std::fs::write(&part, &flac).unwrap();
+    let song = p.songs().store(&part, "Mono.flac").unwrap();
+    // On by default for the node's own homeserver: copied there under the node's name for it
+    let r = phone::files::sync(&p, &acct).await;
+    assert_eq!(r, phone::files::Report { copied: 1, left: 0 });
+    let names: Vec<String> = hs
+        .list_private_files(&sessions[0])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    assert!(names.contains(&song.file), "{names:?}");
+    // Nothing twice
+    assert_eq!(
+        phone::files::sync(&p, &acct).await,
+        phone::files::Report::default()
+    );
+}

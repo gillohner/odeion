@@ -2099,7 +2099,7 @@
   // capabilities and can do everything; a name the phone doesn't list (zones, home, pubky…) is off
   const phoneMode = () => !!(state.info && state.info.mode === 'phone');
   const can = (cap) => !state.info || !Array.isArray(state.info.capabilities) || state.info.capabilities.includes(cap);
-  const PHONE_CAPS = ['search', 'items', 'sources', 'library', 'songs', 'bookmarks', 'collections', 'listens', 'reviews', 'tags', 'add-songs'];
+  const PHONE_CAPS = ['search', 'items', 'sources', 'library', 'songs', 'bookmarks', 'collections', 'listens', 'reviews', 'tags', 'add-songs', 'homeserver-files'];
   const PHONE_VIEWS = { search: ['search'], items: ['item', 'releases', 'source-item', 'source-artist'], sources: ['sources'], library: ['albums', 'artists', 'tracks', 'genres', 'genre'], songs: ['downloads'], bookmarks: ['favourites'], collections: ['playlists', 'playlist'] };
   const phoneView = (v) => v === 'queue' || v === 'settings' || Object.entries(PHONE_VIEWS).some(([c, vs]) => can(c) && vs.includes(v));
   const phoneHome = () => (can('search') ? 'search' : can('library') ? 'tracks' : 'settings');
@@ -10499,6 +10499,7 @@
             main.innerHTML = pageHead('Settings', null)
               + group('This phone', row('Odeion is running on this phone without a node', 'It plays here, from your music services.', '')
                 + (pk ? row('Pubky account', keyHtml(pk), '') : '')
+                + (can('homeserver-files') ? '<div id="phonestore"></div>' : '')
                 + row('Your node', 'Connect to your Odeion node to play its music, on its zones too.', '<button class="btn primary" id="phoneleave">Connect to a node</button>'))
               + (svcs.length ? group('My streaming accounts', svcs.map((v) => `<details class="set-row svc-own" data-svc="${esc(v.id)}"><summary class="set-label"><span class="set-name">${esc(v.name)}</span><span class="set-help">${srcHealthy(v) ? 'Signed in.' : 'Not signed in. Sign in to play from it here.'}</span></summary><div class="svc-body"></div></details>`).join('')) : '')
               + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`));
@@ -10509,6 +10510,16 @@
               if (d.dataset.svc === 'qobuz') qobuzSetup(body); else signinChooser(tidalSigninCfg(body));
             }));
             $('#phoneleave').onclick = (e) => phoneCmd(e.currentTarget, 'phone_leave', true);
+            // Songs added here, also on the person's homeserver (on by default where it is their node's own)
+            const ps = $('#phonestore', main); if (ps) {
+              const draw = (st) => {
+                const why = st.bundled ? 'On by default: your homeserver is the one installed with your Odeion node, which finds them there.' : 'Your Odeion node finds them there too.';
+                const left = st.on && st.total > st.uploaded ? ` ${countOf(st.total - st.uploaded, 'songs')} still to copy.` : '';
+                ps.innerHTML = row('Keep added songs on my homeserver', `Copies the songs you add here to your Pubky homeserver (private). ${why}${left}`, `<input type="checkbox" class="switch" role="switch" id="psfiles" ${st.on ? 'checked' : ''} aria-label="Keep added songs on my homeserver">`);
+                const box = $('#psfiles', ps); box.onchange = async () => { box.disabled = true; try { draw(await api('PUT', '/phone/storage', { on: box.checked })); } catch (e) { box.checked = !box.checked; box.disabled = false; toast(e.message, 'error'); } };
+              };
+              api('GET', '/phone/storage').then((st) => { if (ps.isConnected) draw(st); }).catch(() => { ps.remove(); });
+            }
             break;
           }
           if (isListener()) {

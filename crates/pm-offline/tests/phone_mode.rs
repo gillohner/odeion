@@ -739,3 +739,38 @@ async fn a_phone_song_is_bookmarked_and_listened_by_its_canonical_url() {
     assert_eq!(listens.len(), 1, "{data}");
     assert!(listens[0].to_string().contains(&url), "{data}");
 }
+
+#[tokio::test]
+async fn keeping_songs_on_the_homeserver_is_off_by_default_and_a_choice() {
+    let f = Fixture::new().await;
+    let (_, st) = f.json("/v1/phone/storage").await;
+    assert_eq!(st["on"], false, "off without a node's own homeserver: {st}");
+    assert!(st["chosen"].is_null());
+    let put = |on: Value| {
+        let f = &f;
+        async move {
+            f.http
+                .put(format!("{}/v1/phone/storage", f.base))
+                .bearer_auth(f.phone.key())
+                .json(&json!({ "on": on }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let st = put(json!(true)).await;
+    assert_eq!(
+        (st["on"].clone(), st["chosen"].clone()),
+        (json!(true), json!(true))
+    );
+    let st = put(Value::Null).await;
+    assert_eq!(st["on"], false, "back to the default");
+    let (_, info) = f.json("/v1/info").await;
+    assert!(info["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("homeserver-files")));
+}

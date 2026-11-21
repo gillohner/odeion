@@ -1443,6 +1443,11 @@ pub struct NodeRecord {
     /// The node's iroh key when remote access is on (ADR 0013): dial it from anywhere.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub iroh: String,
+    /// The public key (z32) of the homeserver installed with this node (deploy/bundle), when it
+    /// runs one: the person's devices compare it with their own homeserver (phone mode keeps the
+    /// songs added on the phone there by default when it is the same).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundled_homeserver: Option<String>,
 }
 
 impl NodeHomeserver {

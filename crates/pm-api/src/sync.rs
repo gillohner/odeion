@@ -172,6 +172,7 @@ pub fn node_record(
     api_url: &str,
     version: &str,
     iroh: Option<&str>,
+    bundled_homeserver: Option<&str>,
 ) -> pm_pubky::homeserver::NodeRecord {
     pm_pubky::homeserver::NodeRecord {
         name: name.to_string(),
@@ -180,6 +181,7 @@ pub fn node_record(
         version: version.to_string(),
         updated_at: now_micros(),
         iroh: iroh.unwrap_or("").to_string(),
+        bundled_homeserver: bundled_homeserver.map(str::to_string),
     }
 }
 
@@ -301,9 +303,23 @@ impl PubkySync {
                 crate::access_token::note_published(s, &old.token)?;
             }
         }
+        // The homeserver installed with the node, when it runs one (its key, from its admin API)
+        let bundled = match s.bundled_homeserver() {
+            Some(_) => crate::bundled::admin(s, reqwest::Method::GET, "/info", None)
+                .await
+                .ok()
+                .and_then(|v| crate::bundled::status_from_info(&v).public_key),
+            None => None,
+        };
         self.current()?;
-        self.publish_node(&s.name, &s.public_url, &s.version, iroh.as_deref())
-            .await?;
+        self.publish_node(
+            &s.name,
+            &s.public_url,
+            &s.version,
+            iroh.as_deref(),
+            bundled.as_deref(),
+        )
+        .await?;
         // Also after a failure or a restart since the note was made
         crate::access_token::retire_published(s).await;
         Ok(())
@@ -317,8 +333,9 @@ impl PubkySync {
         api_url: &str,
         version: &str,
         iroh: Option<&str>,
+        bundled_homeserver: Option<&str>,
     ) -> Result<(), SyncError> {
-        let record = node_record(name, api_url, version, iroh);
+        let record = node_record(name, api_url, version, iroh, bundled_homeserver);
         Ok(self
             .homeserver
             .publish_node_record(&self.session, &record)
@@ -1676,9 +1693,29 @@ mod tests {
     /// homeserver stores has no token, even when the record value carries one (ADR 0008).
     #[test]
     fn the_node_record_holds_no_credential() {
-        let r = node_record("Living room", "http://192.168.1.10:7788", "0.3.0", Some("abc"));
+        let r = node_record(
+            "Living room",
+            "http://192.168.1.10:7788",
+            "0.3.0",
+            Some("abc"),
+            None,
+        );
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("token"), "{json}");
+        assert!(
+            !json.contains("bundled_homeserver"),
+            "only with a homeserver of its own: {json}"
+        );
+        let with = node_record(
+            "n",
+            "u",
+            "0",
+            None,
+            Some("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo"),
+        );
+        assert!(serde_json::to_string(&with)
+            .unwrap()
+            .contains("\"bundled_homeserver\":\"8pinx"));
         let fake = ["node", "api", "credential"].join("-");
         let mut old = r.clone();
         old.token = fake.clone();

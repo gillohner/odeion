@@ -440,6 +440,8 @@ async fn write_part(
         Ok(s) => {
             tracing::info!(song = s.id, "phone mode: a song added");
             u.state = "stored".into();
+            // To the homeserver too, when that is on
+            p.sync_soon();
         }
         Err(e) => {
             u.state = "failed".into();
