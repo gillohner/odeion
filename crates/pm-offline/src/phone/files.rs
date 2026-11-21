@@ -46,17 +46,39 @@ pub fn on(p: &Phone) -> bool {
 /// `bundled_homeserver` against the homeserver their Pubky names. `None`: no node record, or not
 /// known now.
 pub async fn bundled_here(acct: &Account) -> Option<bool> {
-    let record = acct.hs.read_node_record(&acct.session).await.ok()??;
+    let record = within(acct.hs.read_node_record(&acct.session)).await.ok()??;
     let Some(bundled) = record.bundled_homeserver else {
         return Some(false);
     };
-    let theirs = acct
-        .hs
-        .pubky()
-        .get_homeserver_of(&acct.session.public_key())
-        .await
-        .ok()??;
+    let theirs = tokio::time::timeout(
+        pm_pubky::homeserver::OBJECT_TIMEOUT,
+        acct.hs.pubky().get_homeserver_of(&acct.session.public_key()),
+    )
+    .await
+    .ok()?
+    .ok()??;
     Some(z32(&theirs.z32()) == z32(&bundled))
+}
+
+/// `f` within the time one homeserver object may take ([`OBJECT_TIMEOUT`]): a stalled connection
+/// never holds the copier.
+///
+/// [`OBJECT_TIMEOUT`]: pm_pubky::homeserver::OBJECT_TIMEOUT
+async fn within<T>(
+    f: impl std::future::Future<Output = Result<T, HomeserverError>>,
+) -> Result<T, HomeserverError> {
+    within_for(pm_pubky::homeserver::OBJECT_TIMEOUT, f).await
+}
+
+async fn within_for<T>(
+    limit: Duration,
+    f: impl std::future::Future<Output = Result<T, HomeserverError>>,
+) -> Result<T, HomeserverError> {
+    tokio::time::timeout(limit, f).await.unwrap_or_else(|_| {
+        Err(HomeserverError::Transport(
+            "the homeserver didn't answer in time".into(),
+        ))
+    })
 }
 
 /// What a copy pass did.
@@ -202,10 +224,10 @@ impl Remote for Account {
         self.hs.upload_private_file(&self.session, path, local).await
     }
     async fn size(&self, path: &str) -> Result<Option<u64>, HomeserverError> {
-        Ok(self.hs.stat_private(&self.session, path).await?.flatten())
+        Ok(within(self.hs.stat_private(&self.session, path)).await?.flatten())
     }
     async fn delete(&self, path: &str) -> Result<(), HomeserverError> {
-        self.hs.delete_private(&self.session, path).await
+        within(self.hs.delete_private(&self.session, path)).await
     }
 }
 
@@ -659,6 +681,12 @@ mod tests {
         let path = format!("{}{}", pm_appdata::files::FILES_DIR, songs[0].file);
         assert_eq!(*f.deleted.lock().unwrap(), [path]);
         assert!(load_copies(&p).copied.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_homeserver_that_never_answers_doesnt_hold_the_copier() {
+        let never = std::future::pending::<Result<(), HomeserverError>>();
+        assert!(within_for(Duration::from_millis(20), never).await.is_err());
     }
 
     #[test]
