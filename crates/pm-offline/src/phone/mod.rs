@@ -8,6 +8,8 @@
 //! key it made at start ([`Phone::key`]): the app hands that key to the page it opens, as it hands
 //! a node's token to the node's page. Other apps on the phone can reach `127.0.0.1` too.
 
+pub mod account;
+pub mod data;
 pub mod item;
 pub mod qobuz;
 pub mod search;
@@ -15,6 +17,7 @@ pub mod store;
 pub mod stream;
 pub mod tidal;
 pub mod ui;
+pub mod vault;
 
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -28,7 +31,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// What phone mode can do in this version (`GET /v1/info` `capabilities`).
-pub const CAPABILITIES: &[&str] = &["search", "items", "sources"];
+pub const CAPABILITIES: &[&str] = &["search", "items", "sources", "bookmarks", "listens"];
 
 pub(crate) fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
@@ -88,6 +91,12 @@ pub struct Phone {
     version: String,
     pubky: Option<String>,
     pub(crate) streams: stream::Streams,
+    /// The person's Pubky account, once its session is restored.
+    account: tokio::sync::RwLock<Option<Arc<account::Account>>>,
+    /// Asks the vault sync to run now (a sign-in made or ended here).
+    sync_now: Arc<tokio::sync::Notify>,
+    /// One change at a time to what the phone keeps of the person's data (`data.json`).
+    pub(crate) data_lock: std::sync::Mutex<()>,
 }
 
 /// 32 random bytes as hex.
@@ -115,6 +124,9 @@ impl Phone {
             version: c.version,
             pubky: c.pubky,
             streams,
+            account: Default::default(),
+            sync_now: Default::default(),
+            data_lock: Default::default(),
         }))
     }
 
@@ -131,6 +143,22 @@ impl Phone {
     /// The cache of TIDAL tracks.
     pub fn streams(&self) -> &stream::Streams {
         &self.streams
+    }
+
+    /// The person's Pubky account, when its session is restored.
+    pub async fn account(&self) -> Option<Arc<account::Account>> {
+        self.account.read().await.clone()
+    }
+
+    /// Use this account (the app's own sign-in, or a test's).
+    pub async fn set_account(&self, a: account::Account) {
+        *self.account.write().await = Some(Arc::new(a));
+        self.sync_now.notify_one();
+    }
+
+    /// Runs the vault sync now.
+    pub fn sync_soon(&self) {
+        self.sync_now.notify_one();
     }
 
     /// The streaming sign-ins kept on the phone.
@@ -167,6 +195,11 @@ pub fn router(phone: Arc<Phone>) -> Router {
         .route("/v1/play-order", get(play_order))
         .route("/v1/sources", get(sources))
         .route("/v1/search", get(search::search))
+        .route(
+            "/v1/favourites",
+            get(data::bookmarks).put(data::add).delete(data::remove),
+        )
+        .route("/v1/library/history", post(data::played))
         .route("/v1/item/{kind}/{id}", get(item::item))
         .route("/v1/item/{kind}/{id}/extras", get(item::extras))
         .route("/v1/sources/{source}/items/{id}", get(item::source_item))
@@ -214,6 +247,18 @@ pub async fn serve(
     let addr = listener.local_addr()?;
     let port = addr.port();
     let key = phone.key.clone();
+    let phone2 = phone.clone();
+    // A sign-in made or ended here goes to the vault at once
+    {
+        let weak = Arc::downgrade(&phone);
+        phone.store.on_change(move |key| {
+            if vault::FORMS.iter().any(|f| f.carry.iter().any(|c| c.key == key)) {
+                if let Some(p) = weak.upgrade() {
+                    p.sync_soon();
+                }
+            }
+        });
+    }
     let app = router(phone).layer(axum::middleware::from_fn(move |req: Request, next: Next| {
         let key = key.clone();
         async move {
@@ -227,6 +272,7 @@ pub async fn serve(
         }
     }));
     let task = tokio::spawn(async move {
+        tokio::spawn(sync_loop(Arc::downgrade(&phone2)));
         if let Err(e) = axum::serve(listener, app).await {
             tracing::warn!("phone mode server stopped: {e}");
         }
@@ -310,6 +356,62 @@ async fn signin_out(
             Json(qobuz::sign_in(&p)).into_response()
         }
         _ => err(StatusCode::NOT_FOUND, "phone mode has TIDAL and Qobuz"),
+    }
+}
+
+/// How often phone mode syncs with the vault while the app runs.
+const SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// How long it waits before trying the homeserver again.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The Pubky account restored, then a vault sync now and every [`SYNC_EVERY`], and whenever a
+/// sign-in changed here; until the phone backend is gone. Nothing without a session.
+async fn sync_loop(weak: std::sync::Weak<Phone>) {
+    loop {
+        let Some(p) = weak.upgrade() else { return };
+        let acct = match p.account().await {
+            Some(a) => a,
+            None => match account::Account::restore(&p.dir).await {
+                Ok(Some(a)) => {
+                    tracing::info!("phone mode: Pubky session restored");
+                    let a = Arc::new(a);
+                    *p.account.write().await = Some(a.clone());
+                    a
+                }
+                // No session (yet): wait to be told (set_account) or try again later
+                Ok(None) => {
+                    let now = p.sync_now.clone();
+                    drop(p);
+                    tokio::select! {
+                        _ = now.notified() => {}
+                        _ = tokio::time::sleep(SYNC_EVERY) => {}
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!("phone mode: Pubky not reachable now: {e}");
+                    drop(p);
+                    tokio::time::sleep(RETRY).await;
+                    continue;
+                }
+            },
+        };
+        match vault::pass(&p, &acct).await {
+            Ok(r) if r != vault::Report::default() => tracing::info!(?r, "phone mode: vault synced"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("phone mode: vault: {e}"),
+        }
+        let r = data::sync(&p, &acct).await;
+        if r != data::Report::default() {
+            tracing::info!(?r, "phone mode: Pubky data synced");
+        }
+        let now = p.sync_now.clone();
+        drop(p);
+        drop(acct);
+        tokio::select! {
+            _ = now.notified() => {}
+            _ = tokio::time::sleep(SYNC_EVERY) => {}
+        }
     }
 }
 

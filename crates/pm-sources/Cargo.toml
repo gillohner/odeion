@@ -8,6 +8,9 @@ license.workspace = true
 
 [dependencies]
 pm-model = { workspace = true }
+# The vault's sign-in type (vault_form)
+pm-appdata = { workspace = true }
+blake3 = { workspace = true }
 base64 = "0.22"
 md-5 = "0.10"
 quick-xml = "0.42" # DASH manifests (TIDAL full tracks)

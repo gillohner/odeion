@@ -781,7 +781,6 @@ pub fn token(
     client: &reqwest::blocking::Client,
     ep: &Endpoints<'_>,
 ) -> Result<Option<(Session, String)>, FullError> {
-    let auth = ep.auth_base.trim_end_matches('/');
     let st = load(store);
     if !st.enabled {
         return Ok(None);
@@ -798,6 +797,39 @@ pub fn token(
     if sess.expires_at - now() > 60 {
         return Ok(Some((sess, quality)));
     }
+    let fresh = renew(client, ep, &sess)?;
+    // Only over the session this renewal started from (the vault may have changed it
+    // meanwhile); otherwise the session there now is the one to use
+    let mut there_now = None;
+    let kept = update_if(store, |st| {
+        if st
+            .session
+            .as_ref()
+            .is_some_and(|c| c.access_token == sess.access_token)
+        {
+            st.session = Some(fresh.clone());
+            true
+        } else {
+            there_now = Some(st.session.clone());
+            false
+        }
+    });
+    if !kept {
+        tracing::info!("a renewed TIDAL full-tracks session was dropped: the sign-in changed meanwhile");
+        return Ok(there_now.flatten().map(|c| (c, quality)));
+    }
+    Ok(Some((fresh, quality)))
+}
+
+/// Renews `sess` at TIDAL with the client that made it (python-tidal's `token_refresh`: the PKCE
+/// pair for a browser sign-in, no scope; the device client with the scope for a code sign-in).
+/// Only the HTTP step: where the new session is kept is the caller's.
+pub fn renew(
+    client: &reqwest::blocking::Client,
+    ep: &Endpoints<'_>,
+    sess: &Session,
+) -> Result<Session, FullError> {
+    let auth = ep.auth_base.trim_end_matches('/');
     let Some(refresh) = sess.refresh_token.clone() else {
         return Err(FullError::Mode("the session ran out: sign in again".into()));
     };
@@ -849,29 +881,7 @@ pub fn token(
                 .unwrap_or("")
         )));
     }
-    let fresh =
-        session_from(&v, Some(&sess)).ok_or_else(|| FullError::Mode("renewal without a token".into()))?;
-    // Only over the session this renewal started from (the vault may have changed it
-    // meanwhile); otherwise the session there now is the one to use
-    let mut there_now = None;
-    let kept = update_if(store, |st| {
-        if st
-            .session
-            .as_ref()
-            .is_some_and(|c| c.access_token == sess.access_token)
-        {
-            st.session = Some(fresh.clone());
-            true
-        } else {
-            there_now = Some(st.session.clone());
-            false
-        }
-    });
-    if !kept {
-        tracing::info!("a renewed TIDAL full-tracks session was dropped: the sign-in changed meanwhile");
-        return Ok(there_now.flatten().map(|c| (c, quality)));
-    }
-    Ok(Some((fresh, quality)))
+    session_from(&v, Some(sess)).ok_or_else(|| FullError::Mode("renewal without a token".into()))
 }
 
 /// Open the full track through the private playback endpoint. `Ok(None)`: the mode is off or

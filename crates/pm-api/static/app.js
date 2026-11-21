@@ -2846,6 +2846,8 @@
     });
     // A song moved in from a zone was counted there already
     if (it.track_id != null && !it.moved && can('listens')) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
+    // Phone mode: a streaming song is a listen too (the phone writes it to the person's homeserver)
+    else if (phoneMode() && it.uri && !it.moved && can('listens')) api('POST', '/library/history', { uri: it.uri, duration_ms: it.duration_ms || undefined, zone: 'browser' }).catch(() => {});
     it.moved = false;
     mediaSessionUpdate(it);
     renderBar();

@@ -183,10 +183,13 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
                 st.health = None;
             }
         }
-        if let Some(q) = u.quality {
+        if let Some(q) = u.quality.clone() {
             st.quality = q;
         }
     });
+    if u.quality.is_some() {
+        super::data::prefs_changed(&p, "qobuz");
+    }
     Json(view(&p)).into_response()
 }
 
@@ -212,6 +215,7 @@ pub(crate) async fn login(State(p): State<Arc<Phone>>, Json(l): Json<qobuz::Logi
         st.enabled = true;
         st.health = None;
     });
+    super::vault::signed_in(&p, pm_sources::vault_form::QOBUZ.service);
     tracing::info!("phone mode: signed in to Qobuz");
     Json(view(&p)).into_response()
 }
