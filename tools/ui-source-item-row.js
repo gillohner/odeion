@@ -5,7 +5,8 @@
 // title (and on an empty spot of the row) plays from that song, the row shows a pointer, the row's
 // own buttons keep their job (+ only adds, ▶ plays once), the second click of a double click
 // doesn't start the song again (a node zone gets one queue load), a drag that selects the title
-// doesn't play, and a phone tap on the row plays. 1280/1024/768 px, a 768 px touch tablet, 360 px phone.
+// doesn't play, a phone tap on the row plays, and on a touch screen or a phone the row keeps its + (it has
+// no ⋯ to hold it) on one line. 1280/1024/768 px, a 768 px touch tablet, 360/412 px phones.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-source-item-row.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -71,6 +72,29 @@ async function browserRun(browser, width, opts = {}) {
     const q = await queueTitles(page, 'Second,Third');
     check(q && q.join() === 'Second,Third', `${tag}: the queue is the album from song 2 on (${JSON.stringify(q)})`);
     if (width === 1280 && !opts.touch) await page.screenshot({ path: path.join(SHOTS, `played-${width}.png`) });
+
+    if (opts.mobile || opts.touch) {
+      // A touch screen / phone hides a song row's buttons other than its ⋯ (they are in it). These rows have
+      // no ⋯, only +, so they keep it: before, a phone had no way to queue one of the album's songs, the
+      // format's empty cell kept its column and the + wrapped to a second, empty grid line under the row
+      const rows = await page.evaluate(() => [...document.querySelectorAll('#main .src-tracks > .track')].map((r) => {
+        const b = r.querySelector('[data-aadd1]'), bb = b.getBoundingClientRect(), rb = r.getBoundingClientRect();
+        const shown = [...r.children].filter((c) => getComputedStyle(c).display !== 'none');
+        return { add: getComputedStyle(b).display !== 'none' && Math.round(bb.width) >= 40 && Math.round(bb.height) >= 40 && bb.left >= rb.left && bb.right <= rb.right + 0.5 && bb.top >= rb.top - 0.5 && bb.bottom <= rb.bottom + 0.5,
+          lines: getComputedStyle(r).gridTemplateRows.split(' ').length, empty: shown.filter((c) => !c.innerText.trim() && ![...c.querySelectorAll('button')].some((x) => x.getClientRects().length)).length };
+      }));
+      check(rows.length === 3 && rows.every((r) => r.add), `${tag}: every song row shows its + (Add to queue), a 40 px tap inside the row ${JSON.stringify(rows.map((r) => r.add))}`);
+      check(rows.every((r) => r.lines === 1 && r.empty === 0), `${tag}: each row is one line with no empty cell ${JSON.stringify(rows.map((r) => [r.lines, r.empty]))}`);
+      const add = row(page, 0).locator('[data-aadd1]');
+      if (await add.isVisible()) {
+        await add.tap();
+        const q2 = await queueTitles(page, 'Second,Third,First');
+        check(q2 && q2.join() === 'Second,Third,First', `${tag}: a tap on song 1's + adds it to the end of the queue (${JSON.stringify(q2)})`);
+        await page.waitForTimeout(150);
+        check(/Second/.test(await onBar(page)), `${tag}: and doesn't play it ("${await onBar(page)}")`);
+      } else check(false, `${tag}: a tap on song 1's + adds it to the queue (no + to tap)`);
+      if (width < 600) await page.screenshot({ path: path.join(SHOTS, `phone-${width}.png`) });
+    }
 
     if (!opts.mobile && !opts.touch) {
       // An empty spot of the third row (between the title and the format) plays from song 3
@@ -153,7 +177,7 @@ async function nodeRun(browser, width) {
   try {
     for (const w of [1280, 1024, 768]) await browserRun(browser, w);
     await browserRun(browser, 768, { touch: true });
-    await browserRun(browser, 360, { mobile: true });
+    for (const w of [360, 412]) await browserRun(browser, w, { mobile: true });
     for (const w of [1280, 768]) await nodeRun(browser, w);
   } finally { await browser.close(); }
   console.log(`source item row: ${passed} ok, ${failed} failed`);
