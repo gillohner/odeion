@@ -223,6 +223,8 @@ impl StreamingService for Qobuz {
             album_id(aid)?;
         } else if let Some(tid) = id.strip_prefix("track:") {
             numeric(tid)?;
+        } else {
+            return Err(ApiError::bad_request("a Qobuz item is album:<id> or track:<id>"));
         }
         let (app, sess) = ready(s, &crate::accounts::asking())?;
         pm_sources::qobuz::item(&s.http_client(), &app, &sess.token, id)
