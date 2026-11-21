@@ -40,6 +40,20 @@ pub(crate) fn endpoints(p: &Phone) -> Endpoints<'_> {
 /// How long a song waits, past the first 8 s, for a renewal of an expired session.
 const RENEWAL_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The phone's TIDAL session while it still works (not renewed).
+fn current(p: &Phone) -> Option<full::Session> {
+    let st = full::load(p.store.as_ref());
+    st.session
+        .filter(|s| st.enabled && s.expires_at > pm_sources::now_unix() + 5)
+}
+
+fn being_renewed() -> SourceError {
+    SourceError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "TIDAL: the sign-in is being renewed; try again in a moment",
+    )
+}
+
 /// The person's session when TIDAL can answer for them (renewed first when it is about to run
 /// out), else why not.
 pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
@@ -53,32 +67,27 @@ pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError
             let mut renewal = tokio::spawn(async move { super::vault::renew_tidal(&p2, &acct).await });
             let ended = match tokio::time::timeout(std::time::Duration::from_secs(8), &mut renewal).await {
                 Ok(r) => Some(r),
+                // Still renewing under the vault's lock: never a second renewal beside it (the
+                // two would spend each other's tokens)
                 Err(_) => {
-                    // Still renewing under the vault's lock: never a second renewal beside it (the
-                    // two would spend each other's tokens). The session the phone has plays
-                    // meanwhile while it still works; else the song waits for the renewal
-                    match full::load(p.store.as_ref()).session {
-                        Some(s)
-                            if full::load(p.store.as_ref()).enabled
-                                && s.expires_at > pm_sources::now_unix() + 5 =>
-                        {
+                    match current(p) {
+                        Some(s) => {
                             tracing::warn!("phone mode: TIDAL renewal in the vault takes long; the current session plays");
                             return Ok(s);
                         }
                         // Expired: the song waits for the renewal, within a limit
-                        _ => match tokio::time::timeout(RENEWAL_WAIT, renewal).await {
+                        None => match tokio::time::timeout(RENEWAL_WAIT, renewal).await {
                             Ok(r) => Some(r),
-                            Err(_) => {
-                                return Err(SourceError::new(
-                                    StatusCode::SERVICE_UNAVAILABLE,
-                                    "TIDAL: the sign-in is being renewed; try again in a moment",
-                                ))
-                            }
+                            Err(_) => return Err(being_renewed()),
                         },
                     }
                 }
             };
             match ended {
+                // Another vault step renews it, or holds the vault: the same, never beside it
+                Some(Ok(Ok(super::vault::Renewal::Busy))) => {
+                    return current(p).ok_or_else(being_renewed);
+                }
                 Some(Ok(Err(e))) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}"),
                 Some(Err(_)) => tracing::warn!("phone mode: TIDAL renewal in the vault stopped"),
                 _ => {}

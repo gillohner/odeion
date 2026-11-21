@@ -228,7 +228,10 @@ async fn the_phone_and_a_node_share_tidal_through_the_vault() {
         .unwrap();
     phone::vault::pass(&p, &acct).await.unwrap();
     assert_eq!(session_of(&p).unwrap().access_token, "due-token");
-    assert!(phone::vault::renew_tidal(&p, &acct).await.unwrap());
+    assert_eq!(
+        phone::vault::renew_tidal(&p, &acct).await.unwrap(),
+        phone::vault::Renewal::Renewed
+    );
     assert_eq!(renewed.load(Ordering::SeqCst), 1);
     assert_eq!(session_of(&p).unwrap().access_token, "renewed-on-the-phone");
     let seen = node.read("tidal-full").await.unwrap().unwrap();
@@ -263,7 +266,10 @@ async fn the_phone_and_a_node_share_tidal_through_the_vault() {
     )
     .await
     .unwrap();
-    assert!(phone::vault::renew_tidal(&p, &acct).await.unwrap());
+    assert_eq!(
+        phone::vault::renew_tidal(&p, &acct).await.unwrap(),
+        phone::vault::Renewal::Renewed
+    );
     assert_eq!(session_of(&p).unwrap().access_token, "node-new-sign-in");
     assert_eq!(
         pm_sources::SessionStore::get(p.store().as_ref(), "vault.lineage.tidal-full").as_deref(),

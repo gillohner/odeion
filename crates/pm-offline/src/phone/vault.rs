@@ -537,25 +537,36 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
     Ok(report)
 }
 
+/// What a renewal under the vault's lock did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Renewal {
+    /// Renewed (here, or by another device): the phone has a fresh session.
+    Renewed,
+    /// The vault has no copy of TIDAL in step with the phone's: the phone renews on its own.
+    NotInVault,
+    /// Another vault step holds the lock (a renewal, a pass): never a renewal beside it.
+    Busy,
+}
+
 /// TIDAL renewed under the vault blob's lock (VAULT.md, "Refreshing a token"): the session read
 /// under the lock is renewed with the client that made it and written back; one another device
-/// renewed meanwhile is used as it is. The result is the phone's session too. `Ok(false)` when the
+/// renewed meanwhile is used as it is. The result is the phone's session too. `NotInVault` when the
 /// vault has no copy of TIDAL in step with the phone's (the phone then renews on its own and the
 /// next sync writes it).
-pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Result<bool, VaultStoreError> {
+pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Result<Renewal, VaultStoreError> {
     // Behind a pass at most a while (a stalled pass ends by its own limit): then the phone keeps
     // its session for now
     let Ok(_one) = tokio::time::timeout(LOCK_WAIT, phone.vault_lock.lock()).await else {
-        return Ok(false);
+        return Ok(Renewal::Busy);
     };
     let svc = TIDAL_FULL.service;
     let path = record_path(phone);
     let Some(mine) = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref()).map_err(local)? else {
-        return Ok(false);
+        return Ok(Renewal::NotInVault);
     };
     let record = load_record(&path);
     if record.services.get(svc).map(|s| s.mine.as_str()) != Some(vault_form::hash(&mine).as_str()) {
-        return Ok(false);
+        return Ok(Renewal::NotInVault);
     }
     // "Sign out everywhere" as the last sync saw it
     let marker = record.marker;
@@ -634,17 +645,17 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
                     vault_form::node_lineage(&sign_in).as_deref(),
                 )?;
             }
-            return Ok(true);
+            return Ok(Renewal::Renewed);
         }
         Err(e) => return Err(e),
     };
     let si = r.sign_in();
     // One renewed by another device with another app is not taken here
     if !usable(phone, &TIDAL_FULL, si, marker) {
-        return Ok(false);
+        return Ok(Renewal::NotInVault);
     }
     let Some(travels) = vault_form::node_settings(si) else {
-        return Ok(false);
+        return Ok(Renewal::NotInVault);
     };
     // Taken only if the phone still holds the session it started from (a sign-out or a new
     // sign-in here meanwhile wins), with the id of the sign-in it takes
@@ -656,7 +667,7 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         Some(&travels),
         lineage.as_deref(),
     )? {
-        return Ok(false);
+        return Ok(Renewal::NotInVault);
     }
     let kept = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref())
         .map_err(local)?
@@ -675,7 +686,7 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     if matches!(r, Refreshed::ByUs(_)) {
         tracing::info!("phone mode: TIDAL renewed under the vault's lock");
     }
-    Ok(true)
+    Ok(Renewal::Renewed)
 }
 
 /// Whether the phone's TIDAL session runs out within a minute.
