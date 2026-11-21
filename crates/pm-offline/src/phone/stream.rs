@@ -33,11 +33,29 @@ pub(crate) fn blocking_client() -> &'static reqwest::blocking::Client {
     })
 }
 
-/// The cache of fetched tracks (`phone/streams/`), emptied at every start.
+/// How long a first ask waits for the whole track before it is sent as it arrives (the app's
+/// player gives up on an answer after 30 s; a whole track answers with ranges, so it seeks).
+const WHOLE_WITHIN_MS: u64 = 12_000;
+
+/// Where one track's fetch is.
+#[derive(Clone, Debug)]
+enum Fetch {
+    /// Being written to this file (of this media type); this many bytes so far.
+    Running(PathBuf, u64, &'static str),
+    /// Whole, in the cache.
+    Done(PathBuf),
+    /// Didn't work: the answer to give.
+    Failed(StatusCode, String),
+}
+
+/// The cache of fetched tracks (`streams/` in the app's cache), emptied at every start, and the
+/// fetches on their way: one per track, whoever asked first; a later ask (a retry, the player
+/// reading again) follows the same one.
 pub struct Streams {
     dir: PathBuf,
-    /// One fetch at a time: the second ask for the same track waits and finds it there.
-    fetching: tokio::sync::Mutex<()>,
+    fetches: std::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Receiver<Fetch>>>,
+    /// [`WHOLE_WITHIN_MS`] (tests shorten it).
+    whole_within_ms: std::sync::atomic::AtomicU64,
 }
 
 impl Streams {
@@ -50,8 +68,15 @@ impl Streams {
         std::fs::create_dir_all(dir)?;
         Ok(Self {
             dir: dir.to_path_buf(),
-            fetching: tokio::sync::Mutex::new(()),
+            fetches: Default::default(),
+            whole_within_ms: WHOLE_WITHIN_MS.into(),
         })
+    }
+
+    /// How long a first ask waits for the whole track (tests: shorter).
+    pub fn set_whole_within(&self, d: std::time::Duration) {
+        self.whole_within_ms
+            .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn kept(&self, name: &str) -> Option<PathBuf> {
@@ -61,7 +86,7 @@ impl Streams {
             .find(|p| p.is_file())
     }
 
-    /// Keeps the newest [`KEEP`] tracks.
+    /// Keeps the newest [`KEEP`] whole tracks (never one being written).
     fn trim(&self) {
         let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&self.dir)
             .into_iter()
@@ -76,23 +101,75 @@ impl Streams {
             let _ = std::fs::remove_file(p);
         }
     }
+
+    /// The fetch of `id`: the one on its way, or a new one (`start` runs it on a blocking thread
+    /// and reports through the sender).
+    fn fetch(
+        &self,
+        id: &str,
+        start: impl FnOnce(tokio::sync::watch::Sender<Fetch>) + Send + 'static,
+    ) -> tokio::sync::watch::Receiver<Fetch> {
+        let mut f = self.fetches.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(rx) = f.get(id) {
+            if !matches!(&*rx.borrow(), Fetch::Done(_) | Fetch::Failed(..)) {
+                return rx.clone();
+            }
+        }
+        let (tx, rx) = tokio::sync::watch::channel(Fetch::Running(PathBuf::new(), 0, "audio/flac"));
+        f.insert(id.to_string(), rx.clone());
+        tokio::task::spawn_blocking(move || start(tx));
+        rx
+    }
 }
 
-/// Reads `reader` into `<dir>/<name>.<ext>` (through a `.part` file), at most [`MAX_BYTES`].
-fn write_track(dir: &FsPath, name: &str, ext: &str, reader: &mut dyn Read) -> Result<PathBuf, String> {
-    let part = dir.join(format!("{name}.part"));
+/// A unique name for one fetch's file being written.
+fn part_name(name: &str) -> String {
+    let mut b = [0u8; 8];
+    let _ = getrandom::fill(&mut b);
+    format!(
+        "{name}.{}.part",
+        b.iter().map(|x| format!("{x:02x}")).collect::<String>()
+    )
+}
+
+/// Reads `reader` into `<dir>/<name>.<ext>` through a `.part` file of this fetch's own, at most
+/// [`MAX_BYTES`], telling `progress` the bytes written as they come.
+fn write_track(
+    dir: &FsPath,
+    name: &str,
+    ext: &str,
+    reader: &mut dyn Read,
+    progress: &dyn Fn(&FsPath, u64),
+) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let part = dir.join(part_name(name));
     let done = dir.join(format!("{name}.{ext}"));
     let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-    let n = std::io::copy(&mut reader.take(MAX_BYTES + 1), &mut f).map_err(|e| e.to_string())?;
-    if n > MAX_BYTES {
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut n: u64 = 0;
+    let fail = |e: String| {
         let _ = std::fs::remove_file(&part);
-        return Err("the track is larger than the phone takes".into());
+        e
+    };
+    loop {
+        let k = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(k) => k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(fail(e.to_string())),
+        };
+        n += k as u64;
+        if n > MAX_BYTES {
+            return Err(fail("the track is larger than the phone takes".into()));
+        }
+        f.write_all(&buf[..k]).map_err(|e| fail(e.to_string()))?;
+        f.flush().map_err(|e| fail(e.to_string()))?;
+        progress(&part, n);
     }
     if n == 0 {
-        let _ = std::fs::remove_file(&part);
-        return Err("TIDAL sent nothing".into());
+        return Err(fail("TIDAL sent nothing".into()));
     }
-    std::fs::rename(&part, &done).map_err(|e| e.to_string())?;
+    std::fs::rename(&part, &done).map_err(|e| fail(e.to_string()))?;
     Ok(done)
 }
 
@@ -100,7 +177,51 @@ fn numeric(id: &str) -> bool {
     !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// `GET /v1/sources/tidal/stream/{id}`: the full track, with ranges.
+/// The track as it is written: from the start, each part as soon as it is in the file, to the end
+/// (no length, no ranges: this play can't seek; the next one, from the whole file, can).
+fn following(rx: tokio::sync::watch::Receiver<Fetch>, path: PathBuf, mime: &'static str) -> Response {
+    let body = futures_util::stream::unfold(
+        (None::<tokio::fs::File>, rx, path, false),
+        |(file, mut rx, path, ended)| async move {
+            use tokio::io::AsyncReadExt;
+            if ended {
+                return None;
+            }
+            let mut file = match file {
+                Some(f) => f,
+                None => tokio::fs::File::open(&path).await.ok()?,
+            };
+            let mut buf = vec![0u8; 256 * 1024];
+            loop {
+                let k = file.read(&mut buf).await.ok()?;
+                if k > 0 {
+                    buf.truncate(k);
+                    return Some((Ok::<_, std::io::Error>(buf), (Some(file), rx, path, false)));
+                }
+                // At the end of what is written: the track's end, or wait for more
+                let state = rx.borrow_and_update().clone();
+                match state {
+                    Fetch::Done(_) => {
+                        // Every byte was written before Done: what is left of the (same, renamed)
+                        // file is the rest
+                        let mut rest = Vec::new();
+                        file.read_to_end(&mut rest).await.ok()?;
+                        return (!rest.is_empty()).then(|| (Ok(rest), (None, rx, path, true)));
+                    }
+                    Fetch::Failed(..) => return None,
+                    Fetch::Running(..) => rx.changed().await.ok()?,
+                }
+            }
+        },
+    );
+    let mut r = Response::new(Body::from_stream(body));
+    r.headers_mut()
+        .insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static(mime));
+    r
+}
+
+/// `GET /v1/sources/tidal/stream/{id}`: the full track. Whole in the cache: with ranges. Still on
+/// its way after [`WHOLE_WITHIN_MS`]: as it arrives.
 pub(crate) async fn tidal(
     State(p): State<Arc<Phone>>,
     Path(id): Path<String>,
@@ -113,38 +234,68 @@ pub(crate) async fn tidal(
     if let Some(f) = p.streams.kept(&name) {
         return crate::server::send_file(&f, &headers).await;
     }
-    let _one = p.streams.fetching.lock().await;
-    if let Some(f) = p.streams.kept(&name) {
-        return crate::server::send_file(&f, &headers).await;
-    }
     let p2 = p.clone();
-    let fetched = tokio::task::spawn_blocking(move || -> Result<Option<PathBuf>, (StatusCode, String)> {
-        let r = pm_sources::tidal::full::open(p2.store.as_ref(), blocking_client(), &tidal::endpoints(&p2), &id);
+    let id2 = id.clone();
+    let mut rx = p.streams.fetch(&id, move |tx| {
+        let r = pm_sources::tidal::full::open(p2.store.as_ref(), blocking_client(), &tidal::endpoints(&p2), &id2);
         pm_sources::tidal::full::record(p2.store.as_ref(), &r);
-        let mut full = match r {
-            Ok(Some(f)) => f,
-            Ok(None) => return Ok(None),
-            Err(pm_sources::tidal::full::FullError::Mode(m)) => return Err((StatusCode::PRECONDITION_FAILED, m)),
-            Err(pm_sources::tidal::full::FullError::Track(m)) => return Err((StatusCode::NOT_FOUND, m)),
+        let end = match r {
+            Ok(Some(mut full)) => {
+                let (ext, mime) = if full.mime == "audio/flac" {
+                    ("flac", "audio/flac")
+                } else {
+                    ("m4a", "audio/mp4")
+                };
+                let progress = |part: &FsPath, n: u64| {
+                    let _ = tx.send(Fetch::Running(part.to_path_buf(), n, mime));
+                };
+                match write_track(&p2.streams.dir, &name, ext, &mut full.reader, &progress) {
+                    Ok(path) => {
+                        tracing::info!(track = %id2, bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0), "phone mode: TIDAL full track fetched");
+                        p2.streams.trim();
+                        Fetch::Done(path)
+                    }
+                    Err(e) => Fetch::Failed(StatusCode::BAD_GATEWAY, format!("TIDAL: {e}")),
+                }
+            }
+            Ok(None) => Fetch::Failed(
+                StatusCode::PRECONDITION_FAILED,
+                "Sign in to TIDAL first (Settings › Streaming services)".into(),
+            ),
+            Err(pm_sources::tidal::full::FullError::Mode(m)) => Fetch::Failed(StatusCode::PRECONDITION_FAILED, m),
+            Err(pm_sources::tidal::full::FullError::Track(m)) => Fetch::Failed(StatusCode::NOT_FOUND, m),
         };
-        let ext = if full.mime == "audio/flac" { "flac" } else { "m4a" };
-        let path = write_track(&p2.streams.dir, &name, ext, &mut full.reader)
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("TIDAL: {e}")))?;
-        tracing::info!(track = %id, bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0), "phone mode: TIDAL full track fetched");
-        Ok(Some(path))
-    })
-    .await;
-    match fetched {
-        Ok(Ok(Some(path))) => {
-            p.streams.trim();
-            crate::server::send_file(&path, &headers).await
+        let _ = tx.send(end);
+    });
+    // Whole within a few seconds (most tracks): with ranges; else as it arrives
+    let deadline = tokio::time::sleep(std::time::Duration::from_millis(
+        p.streams
+            .whole_within_ms
+            .load(std::sync::atomic::Ordering::Relaxed),
+    ));
+    tokio::pin!(deadline);
+    loop {
+        let state = rx.borrow_and_update().clone();
+        match state {
+            Fetch::Done(path) => return crate::server::send_file(&path, &headers).await,
+            Fetch::Failed(status, m) => return err(status, &m),
+            Fetch::Running(part, n, mime) if n > 0 && deadline.is_elapsed() => {
+                // Only a read from the start follows a fetch; a range waits for the whole track
+                if headers
+                    .get(header::RANGE)
+                    .is_none_or(|r| r.as_bytes() == b"bytes=0-")
+                {
+                    return following(rx, part, mime);
+                }
+            }
+            Fetch::Running(..) => {}
         }
-        Ok(Ok(None)) => err(
-            StatusCode::PRECONDITION_FAILED,
-            "Sign in to TIDAL first (Settings › Streaming services)",
-        ),
-        Ok(Err((status, m))) => err(status, &m),
-        Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "the TIDAL fetch stopped"),
+        tokio::select! {
+            changed = rx.changed() => if changed.is_err() {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "the TIDAL fetch stopped");
+            },
+            _ = &mut deadline, if !deadline.is_elapsed() => {}
+        }
     }
 }
 
@@ -205,14 +356,14 @@ mod tests {
         let s = Streams::open(dir.path()).unwrap();
         for i in 0..5 {
             let mut r: &[u8] = b"fLaC....";
-            write_track(&s.dir, &format!("tidal-{i}"), "flac", &mut r).unwrap();
+            write_track(&s.dir, &format!("tidal-{i}"), "flac", &mut r, &|_, _| {}).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(20));
             s.trim();
         }
         assert!(s.kept("tidal-4").is_some() && s.kept("tidal-2").is_some());
         assert!(s.kept("tidal-0").is_none() && s.kept("tidal-1").is_none());
         let mut empty: &[u8] = b"";
-        assert!(write_track(&s.dir, "tidal-9", "flac", &mut empty).is_err());
+        assert!(write_track(&s.dir, "tidal-9", "flac", &mut empty, &|_, _| {}).is_err());
         assert!(s.kept("tidal-9").is_none(), "nothing half-written is served");
         // A new start begins empty
         let again = Streams::open(dir.path()).unwrap();
