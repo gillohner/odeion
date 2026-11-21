@@ -2,7 +2,9 @@
 // 768-1280 px): it closes first, with its grey scrim, and the shortcut runs. Before, it stayed open
 // over Now playing (greyed under its scrim) and behind Help, and over the page while the search field
 // had the focus. / leaves no history entry of it; after N or ?, Back (or Esc) closes Now playing or Help
-// and the page is still there, with no entry left.
+// and the page is still there, with no entry left. With the focus in the zone picker or the Sound
+// panel, Esc (or ? then Esc on Help) gives it back to the button that opened it (Now playing's Playing
+// on, when the zone picker was opened there).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-pop-keys.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -71,6 +73,65 @@ async function run(browser, width) {
       await page.keyboard.press('?'); await page.waitForTimeout(500);
       await page.keyboard.press('Escape'); await page.waitForTimeout(600);
       check(was && !await help() && !await shown(pop) && atLibrary() && !await entry(), `${width} ${name}: ? then Esc: both closed, no entry left in the history`);
+    }
+    // The focus in the zone picker or the Sound panel (tabbed into it): Esc, or ? then Esc on Help, puts
+    // it back on the button that opened it. Before, the zone picker left it on nothing (Tab started over
+    // at the page's top), and Help, closing, gave it back to nothing too
+    const focusId = () => page.evaluate(() => { const a = document.activeElement; return !a || a === document.body ? 'body' : a.id || a.tagName; });
+    for (const [name, btn, pop] of POPS.filter(([, b]) => b !== '#volbtn')) {
+      for (const key of ['Escape', '?']) {
+        await reset();
+        if (!await shown(btn)) { check(false, `${width} ${name}: button shown`); continue; }
+        await page.locator(btn).click(); await page.locator(pop).waitFor({ timeout: 3000 }).catch(() => {});
+        // (its first control; the Sound panel of this browser has none: the panel itself has it)
+        const first = page.locator(`${pop} button:visible`).first();
+        if (await first.count()) await first.focus(); else await page.locator(pop).focus();
+        const inside = await page.evaluate((p) => { const a = document.activeElement; return !!a && !!document.querySelector(p).contains(a); }, pop);
+        await page.keyboard.press(key); await page.waitForTimeout(400);
+        const helped = key !== '?' || await help();
+        if (key === '?') { await page.keyboard.press('Escape'); await page.waitForTimeout(500); }
+        const f = await focusId();
+        check(inside && helped && !await shown(pop) && !await help() && !await shown('#scrim') && f === btn.slice(1) && atLibrary() && !await entry(),
+          `${width} ${name}: the focus in it, ${key === '?' ? '? then Esc on the shortcuts' : 'Esc'} puts it back on its button (${f})`);
+      }
+    }
+    // A zone picked with the keyboard: the focus on the zone button. With a mouse it stays as it was (on
+    // the button, Space would open the picker again instead of playing or pausing)
+    {
+      await reset();
+      await page.locator('#zonebtn').focus(); await page.keyboard.press('Enter'); await page.locator('#zonepop').waitFor({ timeout: 3000 }).catch(() => {});
+      await page.locator('#zonepop [data-zone]').first().focus(); await page.keyboard.press('Enter'); await page.waitForTimeout(600);
+      const f = await focusId();
+      check(!await shown('#zonepop') && f === 'zonebtn', `${width} zone picked with the keyboard: the focus on the zone button (${f})`);
+      await reset();
+      await page.locator('#zonebtn').click(); await page.locator('#zonepop').waitFor({ timeout: 3000 }).catch(() => {});
+      await page.locator('#zonepop [data-zone]').first().click(); await page.waitForTimeout(600);
+      const m = await focusId();
+      check(!await shown('#zonepop') && m !== 'zonebtn', `${width} zone picked with a mouse: the focus not moved to the zone button (${m})`);
+    }
+    // Opened from Now playing's Playing on: the focus goes back there, not to the bar's zone button (Esc,
+    // and a zone picked with the keyboard: Now playing, drawn again, keeps it); its Sleep timer opens
+    // there with the focus on its first item
+    for (const how of ['Escape', 'pick', 'sleep']) {
+      await reset();
+      await page.keyboard.press('n'); await page.locator('#nowplaying').waitFor({ timeout: 3000 }).catch(() => {}); await page.waitForTimeout(300);
+      const nz = page.locator('#npzone');
+      const had = await nz.isVisible();
+      if (had) { await nz.focus(); await page.keyboard.press('Enter'); await page.locator('#zonepop').waitFor({ timeout: 3000 }).catch(() => {}); }
+      const was = had && await shown('#zonepop');
+      if (how === 'Escape') { await page.locator('#zonepop button:visible').first().focus(); await page.keyboard.press('Escape'); }
+      if (how === 'pick') { await page.locator('#zonepop [data-zone]').first().focus(); await page.keyboard.press('Enter'); }
+      if (how === 'sleep') { await page.locator('#zpsleep').focus(); await page.keyboard.press('Enter'); }
+      await page.waitForTimeout(600);
+      if (how === 'sleep') {
+        const item = await page.evaluate(() => { const a = document.activeElement; return !!a && !!a.closest('.pop-item') && !a.closest('#zonepop') && /minutes|Off/.test(a.textContent); });
+        await page.keyboard.press('Escape'); await page.waitForTimeout(400);
+        const f = await focusId();
+        check(was && item && f === 'npzone', `${width} zone picker from Now playing's Playing on: Sleep timer by keyboard, the focus on its first item, then back on Playing on (${f})`);
+      } else {
+        const f = await focusId();
+        check(was && !await shown('#zonepop') && await shown('#nowplaying') && f === 'npzone', `${width} zone picker from Now playing's Playing on: ${how === 'pick' ? 'a zone picked with the keyboard' : 'Esc'}, the focus back on it (${f})`);
+      }
     }
     // Opened over Now playing (the bar's zone picker, beside it at 1024 px and wider): / closes the
     // picker and Now playing (the search field is under it); N closes both too; no entry left
