@@ -170,9 +170,11 @@ pub(crate) fn forget_answers(s: &NodeState) {
 }
 
 /// Drop this node's cached library answers (the owner's and each listener's): a playlist was
-/// created, edited, deleted or imported (`NodeState::notify_library`), so a library hit's count
-/// ("3 songs · your playlist") may be old. Other sources keep theirs. A library answer being made
-/// right now isn't kept either (the epoch, bumped under the cache's lock, see [`keep_answer`]).
+/// written or imported, a song edited, taken out or matched, or a scan ended
+/// (`NodeState::notify_library`, `end_scan`), so a library hit's count ("3 songs · your
+/// playlist") or title may be old, or new songs missing. Other sources keep theirs. A library
+/// answer being made right now isn't kept either (the epoch, bumped under the cache's lock, see
+/// [`keep_answer`]).
 pub(crate) fn forget_library_answers(s: &NodeState) {
     let mut cache = s.search_answers.lock().expect("search cache");
     s.search_library_epoch.fetch_add(1, Ordering::SeqCst);
