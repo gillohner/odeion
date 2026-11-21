@@ -5621,9 +5621,10 @@
       return;
     }
     { const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' ? 'next' : e.key === 'ArrowLeft' ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
-    // An open ⋯ menu closes before Search, Now playing or Help: it stayed open over or behind them.
+    // An open ⋯ menu, zone picker, Sound panel or volume closes before Search, Now playing or Help: it
+    // stayed open (with its grey scrim) over or behind them.
     // (Now playing and Help take over its history entry, so Back then closes them; Search has none)
-    if ((e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') && !menuEl.hidden) closeMenu(e.key !== '/');
+    if (e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') { const keep = e.key !== '/'; closeMenu(keep); closePop(keep); closeQPanel(keep); closeVolPop(keep); }
     // (the search field is under an open Now playing, out of reach there: it closes first)
     if (e.key === '/') { e.preventDefault(); if (!overlay.hidden) toggleNowPlaying(false); search.focus(); search.select(); return; }
     // (Space is a press of its own: it spins no Play clicked just before)
