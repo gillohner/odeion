@@ -19,6 +19,7 @@ mod media;
 mod media_live;
 mod node;
 mod offline;
+mod phone;
 // The page's own player played by the app (Android; built everywhere the player is)
 #[cfg(any(desktop, target_os = "android"))]
 mod native;
@@ -55,12 +56,20 @@ struct AppState {
     offline: Option<Arc<offline::Offline>>,
     /// The remembered node at the address a node claiming its id answered from on the LAN.
     moved: Mutex<Option<Settings>>,
+    /// The local server's origin (the offline page's or phone mode's), for the navigation guard
+    /// and the media controls.
+    local_origin: Arc<Mutex<Option<String>>>,
 }
 
 /// Set while the offline page waits for the node to come back (one waiter at a time).
 static RETURNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl AppState {
+    /// The local server the window may show now (phone mode's, or none).
+    fn set_local_origin(&self, origin: Option<String>) {
+        *self.local_origin.lock().unwrap_or_else(PoisonError::into_inner) = origin;
+    }
+
     fn current(&self) -> Option<Settings> {
         self.settings.lock().ok()?.clone()
     }
@@ -622,6 +631,35 @@ fn qr_svg(data: &str) -> String {
 /// node record gives the address and token.
 #[tauri::command]
 async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let (hs, session) = ring_session(&app, &state, RING_CAPS).await?;
+    let record = hs
+        .read_node_record(&session)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("This identity has no node yet: sign the node in once on its web page (Settings → Pubky)")?;
+    // The record says where the node is, never how to sign in to it: this device signs in to the
+    // node itself with Pubky Ring and gets a credential of its own (ADR 0008)
+    let mut s = Settings::new(&record.api_url, "");
+    s.iroh = record.iroh;
+    // The identity whose record named this node: the node must say it is theirs, and only their
+    // approval signs this device in
+    s.owner = session.public_key().to_string();
+    sign_in_and_connect(&app, &state, s).await
+}
+
+/// A Pubky Ring sign-in asking for `caps`: the address goes to the page as `ring-url` (and its
+/// progress as `ring-state`); the session once the person approves.
+async fn ring_session(
+    app: &AppHandle,
+    state: &AppState,
+    caps: &str,
+) -> Result<
+    (
+        pm_pubky::homeserver::NodeHomeserver,
+        pm_pubky::homeserver::PubkySession,
+    ),
+    String,
+> {
     #[cfg(target_os = "android")]
     android::tls_ready().await;
     let hs =
@@ -636,7 +674,7 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     let records = hs.fresh_for_sign_in(identity.as_ref(), None, false).await?;
     tracing::info!(?records, "Ring: homeserver records before the sign-in");
     let flow = hs
-        .start_login_with("pubky-music-desktop", RING_CAPS)
+        .start_login_with("pubky-music-desktop", caps)
         .map_err(|e| e.to_string())?;
     // The relay listener runs from here: trips away from now on can stop it.
     let since_trip = ring_wait::trips();
@@ -666,19 +704,7 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         },
     )
     .await?;
-    let record = hs
-        .read_node_record(&session)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("This identity has no node yet: sign the node in once on its web page (Settings → Pubky)")?;
-    // The record says where the node is, never how to sign in to it: this device signs in to the
-    // node itself with Pubky Ring and gets a credential of its own (ADR 0008)
-    let mut s = Settings::new(&record.api_url, "");
-    s.iroh = record.iroh;
-    // The identity whose record named this node: the node must say it is theirs, and only their
-    // approval signs this device in
-    s.owner = session.public_key().to_string();
-    sign_in_and_connect(&app, &state, s).await
+    Ok((hs, session))
 }
 
 /// Reach the node at `s` (its address, else through the iroh tunnel) without a token, sign this
@@ -884,6 +910,11 @@ pub fn run() {
             follow_moved,
             discover_nodes,
             ring_connect,
+            phone::phone_saved,
+            phone::phone_available,
+            phone::phone_ring,
+            phone::open_phone,
+            phone::phone_leave,
             ring_cancel,
             open_ring,
             forget,
@@ -908,6 +939,8 @@ pub fn run() {
             if let Ok(dir) = app.path().app_local_data_dir() {
                 crash::set_dir(dir);
             }
+            #[cfg(feature = "phone-mode-fixture")]
+            phone::seed_fixture(app.handle());
             let path = app.path().app_config_dir()?.join("node.json");
             // ODEION_NODE/ODEION_TOKEN (or PM_NODE/PM_TOKEN) for scripts, then this app's file, then the
             // wry shell's file from before.
@@ -946,6 +979,7 @@ pub fn run() {
                 tunnel: Default::default(),
                 offline,
                 moved: Mutex::new(None),
+                local_origin: offline_origin.clone(),
             });
 
             let handle = app.handle().clone();
@@ -968,13 +1002,24 @@ pub fn run() {
                         return;
                     }
                     let s = loads.lock().ok().and_then(|s| s.clone());
-                    let node_page = s.as_ref().is_some_and(|s| {
-                        s.origin().as_deref() == Some(payload.url().origin().ascii_serialization().as_str())
-                    });
+                    let here = payload.url().origin().ascii_serialization();
+                    // Phone mode's page: its backend's key, as a node's page gets its token
+                    let phone_key = phone::key_for(&here);
+                    let node_page = phone_key.is_some()
+                        || s.as_ref()
+                            .is_some_and(|s| s.origin().as_deref() == Some(here.as_str()));
                     // Back never leaves the node's page for the connect page before it (which would
                     // connect again and register the phone's player once more)
                     #[cfg(target_os = "android")]
                     android::page_finished(&w, node_page);
+                    if let Some(key) = phone_key {
+                        let _ = w.eval(token_sync_script(&key));
+                        #[cfg(target_os = "android")]
+                        if let Some(m) = media_live::get() {
+                            m.page_loaded();
+                        }
+                        return;
+                    }
                     let Some(s) = s else {
                         return;
                     };
