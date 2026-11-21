@@ -59,7 +59,7 @@ const settled = (page) => until(() => page.evaluate(() => !!document.querySelect
 const watch = (page) => page.evaluate(() => {
   window.__frames = []; const f = () => {
     const s = document.querySelector('#stars'); const n = document.querySelector('#notesbtn');
-    window.__frames.push({ h1: (document.querySelector('h1') || {}).textContent || '', star: s ? Math.round(s.getBoundingClientRect().top) : null, notes: n ? Math.round(n.getBoundingClientRect().top) : null, skel: !!document.querySelector('#htags .tag-skel'), tags: [...document.querySelectorAll('#htags .tagitem')].map((t) => t.dataset.label), others: [...document.querySelectorAll('#htags .tagitem')].filter((t) => !t.querySelector('[data-htag-del]')).map((t) => t.dataset.label) });
+    window.__frames.push({ h1: (document.querySelector('h1') || {}).textContent || '', star: s ? Math.round(s.getBoundingClientRect().top) : null, notes: n ? Math.round(n.getBoundingClientRect().top) : null, skel: !!document.querySelector('#htags .tag-skel'), pre: !!document.querySelector('#htags[data-pre]'), tags: [...document.querySelectorAll('#htags .tagitem')].map((t) => t.dataset.label), others: [...document.querySelectorAll('#htags .tagitem')].filter((t) => !t.querySelector('[data-htag-del]')).map((t) => t.dataset.label) });
     if (window.__frames.length < 600) requestAnimationFrame(f);
   }; requestAnimationFrame(f);
 });
@@ -118,6 +118,8 @@ const press = async (page, v) => { const b = await page.evaluate((x) => { const 
     const both = await page.evaluate(() => [...document.querySelectorAll('#htags .tagitem')].map((t) => t.dataset.label));
     check(both.includes('fresh'), `${at}: after both answers are in, the newer one is shown (${both.join(', ')})`);
     s.lags = [1500];
+    // (the tags box before the press is marked: the redraw draws a new one)
+    await page.evaluate(() => { document.querySelector('#htags').dataset.pre = '1'; });
     await watch(page);
     await press(page, 8);
     await until(() => s.review && s.review.rating === 8);
@@ -125,9 +127,14 @@ const press = async (page, v) => { const b = await page.evaluate((x) => { const 
     if (width === 360 && !android) await page.screenshot({ path: path.join(SHOTS, 'redraw-after-two-quick-saves-360.png') });
     await sleep(450);
     const fz = await frames(page);
-    const older = fz.filter((x) => x.tags.length && !x.tags.includes('fresh')).length;
-    check(fz.length > 20 && !older, `${at}: the next redraw stands in the newer answer, not the one that landed last (${older} of ${fz.length} frames without "fresh")`);
-    await sleep(900); await settled(page);
+    // Every frame with the page drawn shows the newer answer: none without "fresh" (the older answer, a
+    // skeleton or no tags until the redraw's own answer lands)
+    const drawn = fz.filter((x) => /Journey/.test(x.h1));
+    const older = drawn.filter((x) => x.skel || !x.tags.includes('fresh')).length;
+    const redrawn = drawn.filter((x) => !x.pre).length;
+    check(drawn.length > 20 && redrawn > 10 && !older, `${at}: the next redraw stands in the newer answer, not the one that landed last (${older} of ${drawn.length} frames without "fresh" or with a skeleton; ${redrawn} after the redraw)`);
+    await sleep(900);
+    check(await settled(page) && (await page.evaluate(() => [...document.querySelectorAll('#htags .tagitem')].map((t) => t.dataset.label))).includes('fresh'), `${at}: the tags are in after that redraw, still with "fresh"`);
     s.pub[7] = old7;
     // Another album: never this one's tags
     await watch(page);
