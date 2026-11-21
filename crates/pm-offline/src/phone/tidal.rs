@@ -47,14 +47,29 @@ pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError
             // The renewal runs to its end (its new tokens are never dropped); a slow homeserver
             // only stops the song waiting for it (the phone then uses what it has)
             let p2 = p.clone();
-            let renewal = tokio::spawn(async move { super::vault::renew_tidal(&p2, &acct).await });
-            match tokio::time::timeout(std::time::Duration::from_secs(8), renewal).await {
-                Ok(Ok(Err(e))) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}"),
-                Ok(Err(_)) => tracing::warn!("phone mode: TIDAL renewal in the vault stopped"),
+            let mut renewal = tokio::spawn(async move { super::vault::renew_tidal(&p2, &acct).await });
+            let ended = match tokio::time::timeout(std::time::Duration::from_secs(8), &mut renewal).await {
+                Ok(r) => Some(r),
                 Err(_) => {
-                    tracing::warn!("phone mode: TIDAL renewal in the vault takes long; going on meanwhile")
+                    // Still renewing under the vault's lock: never a second renewal beside it (the
+                    // two would spend each other's tokens). The session the phone has plays
+                    // meanwhile while it still works; else the song waits for the renewal
+                    match full::load(p.store.as_ref()).session {
+                        Some(s)
+                            if full::load(p.store.as_ref()).enabled
+                                && s.expires_at > pm_sources::now_unix() + 5 =>
+                        {
+                            tracing::warn!("phone mode: TIDAL renewal in the vault takes long; the current session plays");
+                            return Ok(s);
+                        }
+                        _ => Some(renewal.await),
+                    }
                 }
-                Ok(Ok(Ok(_))) => {}
+            };
+            match ended {
+                Some(Ok(Err(e))) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}"),
+                Some(Err(_)) => tracing::warn!("phone mode: TIDAL renewal in the vault stopped"),
+                _ => {}
             }
         }
     }
@@ -269,18 +284,20 @@ async fn wait_for_approval(p: Arc<Phone>, c: full::Client, pending: full::Pendin
             Approval::Approved(Some(sess)) => sess,
         };
         let sess = full::fill_session(&p.http, &p.tidal.v1_base, sess).await;
-        let kept = full::update_if(p.store.as_ref(), |st| {
-            if st.login.as_ref().map(|x| &x.device_code) != Some(&pending.device_code) {
-                return false;
-            }
-            st.session = Some(sess);
-            st.login = None;
-            st.enabled = true;
-            st.health = Some(signed_in());
-            true
+        // The sign-in and its new id in one step
+        let kept = super::vault::sign_in_here(&p, pm_sources::vault_form::TIDAL_FULL.service, |store| {
+            full::update_if(store, |st| {
+                if st.login.as_ref().map(|x| &x.device_code) != Some(&pending.device_code) {
+                    return false;
+                }
+                st.session = Some(sess);
+                st.login = None;
+                st.enabled = true;
+                st.health = Some(signed_in());
+                true
+            })
         });
         if kept {
-            super::vault::signed_in(&p, pm_sources::vault_form::TIDAL_FULL.service);
             tracing::info!("phone mode: signed in to TIDAL (code sign-in)");
         }
         return;
@@ -354,16 +371,19 @@ pub(crate) async fn finish_browser(State(p): State<Arc<Phone>>, Json(b): Json<Fi
         Err(e) => return source_err(e),
     };
     let sess = full::fill_session(&p.http, &p.tidal.v1_base, sess).await;
-    let kept = full::update_if(p.store.as_ref(), |st| {
-        if st.browser.as_ref() != Some(&pending) {
-            return false;
-        }
-        st.session = Some(sess);
-        st.browser = None;
-        st.login = None;
-        st.enabled = true;
-        st.health = Some(signed_in());
-        true
+    // The sign-in and its new id in one step
+    let kept = super::vault::sign_in_here(&p, pm_sources::vault_form::TIDAL_FULL.service, |store| {
+        full::update_if(store, |st| {
+            if st.browser.as_ref() != Some(&pending) {
+                return false;
+            }
+            st.session = Some(sess);
+            st.browser = None;
+            st.login = None;
+            st.enabled = true;
+            st.health = Some(signed_in());
+            true
+        })
     });
     if !kept {
         return err(
@@ -371,7 +391,6 @@ pub(crate) async fn finish_browser(State(p): State<Arc<Phone>>, Json(b): Json<Fi
             "The sign-in changed meanwhile (signed out or started again here). Press Sign in with TIDAL to start again.",
         );
     }
-    super::vault::signed_in(&p, pm_sources::vault_form::TIDAL_FULL.service);
     tracing::info!("phone mode: signed in to TIDAL (Sign in with TIDAL)");
     Json(view(&p)).into_response()
 }

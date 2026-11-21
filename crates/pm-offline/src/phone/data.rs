@@ -34,6 +34,10 @@ pub enum Pending {
         service: Option<String>,
         duration_ms: Option<u64>,
         at: i64,
+        /// The post's id: its write time, set at the first try and kept for the retries (as a
+        /// node, which dates a listen's id by when it writes it, not by the play).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     /// A source's streaming quality changed here.
     Quality {
@@ -181,6 +185,7 @@ pub(crate) async fn played(State(p): State<Arc<Phone>>, Json(b): Json<Played>) -
             service,
             duration_ms: b.duration_ms,
             at: pm_pubky::ids::now_micros(),
+            id: None,
         })
     });
     p.data_soon();
@@ -251,6 +256,7 @@ async fn write(acct: &Account, p: &Phone, op: &Pending, history: History) -> Res
             service,
             duration_ms,
             at,
+            id,
         } => {
             let root = match history {
                 // The person keeps no listen history
@@ -266,7 +272,7 @@ async fn write(acct: &Account, p: &Phone, op: &Pending, history: History) -> Res
             let mut a = pm_pubky::Activity::new(&uri, source, *duration_ms);
             a.played_at = *at;
             let post = v1::to_v1(&pm_pubky::MusicContent::Activity(a)).map_err(|e| format!("{e:?}"))?;
-            let id = pm_pubky::ids::timestamp_id(*at);
+            let id = id.clone().unwrap_or_else(|| pm_pubky::ids::timestamp_id(*at));
             let path = post.version_path(&id, None, root, &owner(acct)?)?;
             acct.hs
                 .write_object(&acct.session, &path, &post.to_json())
@@ -302,6 +308,11 @@ async fn write_prefs(acct: &Account, p: &Phone, source: &str) -> Result<(), Stri
     if !prefs["quality"].is_object() {
         prefs["quality"] = json!({});
     }
+    // What another device set since (newer than what the phone took) applies here too: this
+    // write moves prefs_at past it
+    if prefs["updated_at"].as_u64().unwrap_or(0) > load(p).prefs_at {
+        apply_quality(p, &prefs);
+    }
     if let Some(q) = quality_of(p, source) {
         prefs["quality"][source] = Value::String(q);
     }
@@ -329,7 +340,13 @@ async fn take_prefs(acct: &Account, p: &Phone) -> Result<bool, String> {
     if at <= load(p).prefs_at {
         return Ok(false);
     }
-    // A quality changed here and not written yet stays
+    apply_quality(p, &prefs);
+    change(p, |l| l.prefs_at = at);
+    Ok(true)
+}
+
+/// The qualities in `prefs` applied here, except a source's changed here and not written yet.
+fn apply_quality(p: &Phone, prefs: &Value) {
     let waiting = |source: &str| {
         load(p)
             .pending
@@ -348,8 +365,6 @@ async fn take_prefs(acct: &Account, p: &Phone) -> Result<bool, String> {
     {
         super::qobuz::update(p, |st| st.quality = q.into());
     }
-    change(p, |l| l.prefs_at = at);
-    Ok(true)
 }
 
 /// A source's quality changed on the phone: prefs.json gets it at the next sync.
@@ -380,9 +395,13 @@ pub async fn sync(p: &Phone, acct: &Account) -> Report {
     let known = load(p).known;
     match acct.hs.read_v1_bookmarks_except(&acct.session, &known).await {
         Ok(list) => change(p, |l| {
+            // By file name, as the reader looks them up
             l.known = list
                 .iter()
-                .map(|(file, uri, at)| (file.clone(), (uri.clone(), *at)))
+                .map(|(path, uri, at)| {
+                    let file = path.rsplit('/').next().unwrap_or(path);
+                    (file.to_string(), (uri.clone(), *at))
+                })
                 .collect();
             let mut b: BTreeMap<String, i64> = list.into_iter().map(|(_, uri, at)| (uri, at)).collect();
             for op in &l.pending {
@@ -413,7 +432,20 @@ pub async fn write_pending(p: &Phone, acct: &Account) -> Report {
     let mut history = None;
     loop {
         let next = load(p).pending.first().cloned();
-        let Some(op) = next else { break };
+        let Some(mut op) = next else { break };
+        // A listen gets its id now, its write time, kept should this try fail
+        if let Pending::Listen { id: None, .. } = &op {
+            let new = pm_pubky::ids::timestamp_id(pm_pubky::ids::now_micros());
+            change(p, |l| {
+                if let Some(Pending::Listen { id, .. }) = l.pending.first_mut() {
+                    id.get_or_insert(new);
+                }
+            });
+            match load(p).pending.first().cloned() {
+                Some(o) => op = o,
+                None => break,
+            }
+        }
         if matches!(op, Pending::Listen { .. }) && history.is_none() {
             match read_history(acct).await {
                 Ok(h) => history = Some(h),
@@ -513,6 +545,7 @@ mod tests {
                     service: Some("tidal".into()),
                     duration_ms: Some(1000),
                     at: 6,
+                    id: None,
                 },
                 Pending::Quality {
                     source: "tidal".into(),

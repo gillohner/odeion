@@ -48,15 +48,6 @@ fn lineage_key(service: &str) -> String {
     format!("vault.lineage.{service}")
 }
 
-/// The id of the sign-in the phone holds for `service` (made here, or taken with its copy).
-fn lineage_here(phone: &Phone, service: &str) -> Option<String> {
-    phone.store.get(&lineage_key(service))
-}
-
-fn set_lineage(phone: &Phone, service: &str, lineage: Option<&str>) {
-    let _ = phone.store.put(&lineage_key(service), lineage);
-}
-
 /// Sets what the phone holds for `form` (`travels`, `None`: only the id) and the id of that
 /// sign-in, in one step and only when the phone still holds what it held at `from` (its
 /// `vault_form::hash`; `None`: nothing): a sign-in or sign-out made on the phone while the vault
@@ -87,9 +78,43 @@ fn apply_if_still(
 /// vault can tell it from a refresh of the one before, and from one made before a sign-out
 /// everywhere.
 pub fn signed_in(phone: &Phone, service: &str) {
-    let id = vault_form::lineage_after(service, None, pm_sources::now_unix() as u64);
-    set_lineage(phone, service, Some(&id));
-    phone.sync_soon();
+    sign_in_here(phone, service, |_| true);
+}
+
+/// A sign-in made here: `write` puts it in the phone's sign-ins (and says whether it did), and in
+/// the same step it gets its new id (dated after the last "Sign out everywhere", as on a node),
+/// so a sync never sees the new sign-in under the old id. Then the vault hears of it.
+pub fn sign_in_here(phone: &Phone, service: &str, write: impl FnOnce(&dyn SessionStore) -> bool) -> bool {
+    let floor = load_record(&record_path(phone)).marker;
+    let id = vault_form::lineage_after(service, floor, pm_sources::now_unix() as u64);
+    let kept = phone
+        .store
+        .change_if(|d| {
+            if !write(d) {
+                return Ok(false);
+            }
+            d.put(&lineage_key(service), Some(&id));
+            Ok(true)
+        })
+        .unwrap_or(false);
+    if kept {
+        phone.sync_soon();
+    }
+    kept
+}
+
+/// Whether what the phone holds for `service` differs from what the last sync recorded (a
+/// sign-in, a sign-out or a renewal here; not a health note).
+pub fn changed_here(phone: &Phone, form: &Form) -> bool {
+    let mine = vault_form::carried(form.carry, phone.store.as_ref())
+        .ok()
+        .flatten()
+        .map(|m| vault_form::hash(&m));
+    let seen = load_record(&record_path(phone))
+        .services
+        .get(form.service)
+        .map(|s| s.mine.clone());
+    mine != seen
 }
 
 /// What both sides held at the last sync, per service.
@@ -216,6 +241,8 @@ pub fn decide(
             None if here.is_some() && here != t.lineage.as_deref() => Do::Push,
             None => pull_or(t, Do::Nothing),
             Some(s) => match (m != s.mine, t.hash != s.theirs) {
+                // The same credentials signed in anew here (a new id): a new sign-in, out it goes
+                (false, _) if new_here(s) => Do::Push,
                 (false, false) => Do::InStep,
                 (true, false) if t.usable || new_here(s) => Do::Push,
                 (true, false) => Do::Nothing,
@@ -326,6 +353,8 @@ fn vault_of<'a>(
 
 /// One sync with the vault: list this phone, share, then each service by [`decide`].
 pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreError> {
+    // One vault step at a time (a pass, a renewal): each reads and writes synced.json
+    let _one = phone.vault_lock.lock().await;
     let d = dir(phone);
     std::fs::create_dir_all(&d).map_err(local)?;
     let secret = pm_pubky::vault::load_or_create_client_secret(&d.join("client.key")).map_err(local)?;
@@ -339,7 +368,16 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
     let mut report = Report::default();
     for form in FORMS {
         let svc = form.service;
-        let mine = vault_form::carried(form.carry, phone.store.as_ref()).map_err(local)?;
+        // What the phone holds and its id, read together (a sign-in here writes both at once)
+        let (mut mine, mut here) = (None, None);
+        phone
+            .store
+            .change_if(|d| {
+                mine = vault_form::carried(form.carry, d)?;
+                here = d.get(&lineage_key(svc));
+                Ok(false)
+            })
+            .map_err(local)?;
         let opened = match vault.read(svc).await {
             Ok(o) => o,
             // Not (yet) shared with this phone, not one of the person's devices', or older than one
@@ -356,7 +394,6 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
             sign_in: &o.sign_in,
         });
         let mine_hash = mine.as_ref().map(vault_form::hash);
-        let here = lineage_here(phone, svc);
         let seen = record.services.get(svc);
         // Made before the last sign-out everywhere, and not the copy synced since it
         let synced_since =
@@ -504,6 +541,7 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
 /// vault has no copy of TIDAL in step with the phone's (the phone then renews on its own and the
 /// next sync writes it).
 pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Result<bool, VaultStoreError> {
+    let _one = phone.vault_lock.lock().await;
     let svc = TIDAL_FULL.service;
     let path = record_path(phone);
     let Some(mine) = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref()).map_err(local)? else {
@@ -573,7 +611,27 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
                 &lineage,
             ))
         })
-        .await?;
+        .await;
+    let r = match r {
+        Ok(r) => r,
+        // Renewed, but the vault didn't take it yet: the new tokens may be the only ones that
+        // still work, so the phone keeps them; the record stays as it was, so the next pass
+        // writes them to the vault
+        Err(VaultStoreError::Unsaved { sign_in, reason, .. }) => {
+            tracing::warn!("phone mode: renewed TIDAL kept here, the vault takes it later: {reason}");
+            if let Some(travels) = vault_form::node_settings(&sign_in) {
+                apply_if_still(
+                    &phone.store,
+                    &TIDAL_FULL,
+                    Some(&vault_form::hash(&mine)),
+                    Some(&travels),
+                    vault_form::node_lineage(&sign_in).as_deref(),
+                )?;
+            }
+            return Ok(true);
+        }
+        Err(e) => return Err(e),
+    };
     let si = r.sign_in();
     // One renewed by another device with another app is not taken here
     if !usable(phone, &TIDAL_FULL, si, marker) {
@@ -624,6 +682,81 @@ pub fn tidal_due(phone: &Phone) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn phone_here(dir: &std::path::Path) -> std::sync::Arc<Phone> {
+        Phone::open(super::super::Config {
+            dir: dir.to_path_buf(),
+            cache: dir.join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_sign_in_and_its_new_id_are_one_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone_here(dir.path());
+        // "Sign out everywhere" was this second: the new id is dated after it
+        let now = pm_sources::now_unix() as u64;
+        std::fs::create_dir_all(super::dir(&p)).unwrap();
+        save_record(
+            &record_path(&p),
+            &Record {
+                marker: Some(now),
+                ..Default::default()
+            },
+        );
+        let session = || {
+            Some(pm_sources::tidal::full::Session {
+                access_token: "new".into(),
+                expires_at: 1,
+                country: "CH".into(),
+                ..Default::default()
+            })
+        };
+        let kept = sign_in_here(&p, "tidal-full", |store| {
+            pm_sources::tidal::full::update_if(store, |st| {
+                st.session = session();
+                true
+            })
+        });
+        assert!(kept);
+        assert_eq!(
+            pm_sources::tidal::full::load(p.store.as_ref())
+                .session
+                .unwrap()
+                .access_token,
+            "new"
+        );
+        let id = SessionStore::get(p.store.as_ref(), &lineage_key("tidal-full")).expect("its id");
+        assert!(vault_form::lineage_at(&id) > now, "{id}");
+        // One that didn't happen gets no id
+        let before = SessionStore::get(p.store.as_ref(), &lineage_key("qobuz"));
+        assert!(!sign_in_here(&p, "qobuz", |_| false));
+        assert_eq!(SessionStore::get(p.store.as_ref(), &lineage_key("qobuz")), before);
+        // A health note isn't a change for the vault, a sign-out is
+        save_record(&record_path(&p), &{
+            let mut r = Record::default();
+            let mine = vault_form::carried(TIDAL_FULL.carry, p.store.as_ref())
+                .unwrap()
+                .unwrap();
+            r.services.insert(
+                "tidal-full".into(),
+                Synced {
+                    mine: vault_form::hash(&mine),
+                    theirs: "x".into(),
+                    lineage: Some(id),
+                },
+            );
+            r
+        });
+        pm_sources::tidal::full::update(p.store.as_ref(), |st| st.health = None);
+        assert!(!changed_here(&p, &TIDAL_FULL));
+        pm_sources::tidal::full::update(p.store.as_ref(), |st| st.session = None);
+        assert!(changed_here(&p, &TIDAL_FULL));
+    }
 
     #[test]
     fn a_copy_from_before_sign_out_everywhere_is_not_taken() {
@@ -747,6 +880,11 @@ mod tests {
             sign_in: &si,
         };
         let s = seen("a", "x", "L1");
+        // The same credentials signed in anew here (a new id): out, as a new sign-in
+        assert_eq!(
+            decide(Some(&s), Some("a"), Some("L2"), Some(&t("x", "L1", true)), false),
+            Do::Push
+        );
         // Nothing anywhere
         assert_eq!(decide(None, None, None, None, false), Do::Nothing);
         assert_eq!(decide(Some(&s), None, None, None, false), Do::Forget);

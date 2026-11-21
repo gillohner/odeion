@@ -20,8 +20,13 @@ pub(crate) fn state(p: &Phone) -> ModeState {
 }
 
 pub(crate) fn update(p: &Phone, f: impl FnOnce(&mut ModeState)) {
+    update_in(p.store.as_ref(), f)
+}
+
+/// [`update`] on `store` (the phone's, or a draft of it).
+fn update_in(store: &dyn pm_sources::SessionStore, f: impl FnOnce(&mut ModeState)) {
     let mut f = Some(f);
-    p.store.update(qobuz::STATE_KEY, &mut |now| {
+    store.update(qobuz::STATE_KEY, &mut |now| {
         let mut st: ModeState = now
             .and_then(|v| serde_json::from_str(&v).ok())
             .unwrap_or_default();
@@ -210,12 +215,15 @@ pub(crate) async fn login(State(p): State<Arc<Phone>>, Json(l): Json<qobuz::Logi
         Ok(Err(e)) => return source_err(e),
         Ok(Ok(s)) => s,
     };
-    update(&p, |st| {
-        st.session = Some(sess);
-        st.enabled = true;
-        st.health = None;
+    // The sign-in and its new id in one step
+    super::vault::sign_in_here(&p, pm_sources::vault_form::QOBUZ.service, |store| {
+        update_in(store, |st| {
+            st.session = Some(sess);
+            st.enabled = true;
+            st.health = None;
+        });
+        true
     });
-    super::vault::signed_in(&p, pm_sources::vault_form::QOBUZ.service);
     tracing::info!("phone mode: signed in to Qobuz");
     Json(view(&p)).into_response()
 }

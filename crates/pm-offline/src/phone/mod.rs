@@ -97,6 +97,8 @@ pub struct Phone {
     sync_now: Arc<tokio::sync::Notify>,
     /// A Bookmark, listen or quality change waits to be written (that alone, no vault pass).
     data_now: Arc<tokio::sync::Notify>,
+    /// One vault step at a time.
+    pub(crate) vault_lock: tokio::sync::Mutex<()>,
     /// One change at a time to what the phone keeps of the person's data (`data.json`).
     pub(crate) data_lock: std::sync::Mutex<()>,
 }
@@ -129,6 +131,7 @@ impl Phone {
             account: Default::default(),
             sync_now: Default::default(),
             data_now: Default::default(),
+            vault_lock: Default::default(),
             data_lock: Default::default(),
         }))
     }
@@ -278,9 +281,13 @@ pub async fn serve(
     {
         let weak = Arc::downgrade(&phone);
         phone.store.on_change(move |key| {
-            if vault::FORMS.iter().any(|f| f.carry.iter().any(|c| c.key == key)) {
+            // Only a change the vault would carry (a sign-in, a sign-out, a renewal), not a
+            // health note written as a song starts
+            if let Some(form) = vault::FORMS.iter().find(|f| f.carry.iter().any(|c| c.key == key)) {
                 if let Some(p) = weak.upgrade() {
-                    p.sync_soon();
+                    if vault::changed_here(&p, form) {
+                        p.sync_soon();
+                    }
                 }
             }
         });

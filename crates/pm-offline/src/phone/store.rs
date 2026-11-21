@@ -5,7 +5,6 @@
 
 use pm_sources::qobuz::{App, AppCache};
 use pm_sources::{SessionStore, SourceError};
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -64,11 +63,11 @@ impl FileStore {
     pub fn change_if(&self, f: impl FnOnce(&Draft) -> Result<bool, String>) -> Result<bool, String> {
         let changed: Vec<String> = {
             let mut v = self.values.lock().unwrap_or_else(|e| e.into_inner());
-            let d = Draft(RefCell::new(v.clone()));
+            let d = Draft(Mutex::new(v.clone()));
             if !f(&d)? {
                 return Ok(false);
             }
-            let new = d.0.into_inner();
+            let new = d.0.into_inner().unwrap_or_else(|e| e.into_inner());
             let changed = v
                 .keys()
                 .chain(new.keys())
@@ -174,19 +173,32 @@ impl pm_sources::vault_form::Settings for FileStore {
 }
 
 /// The values as [`FileStore::change_if`] sees them, read and written like the store.
-pub struct Draft(RefCell<BTreeMap<String, String>>);
+pub struct Draft(Mutex<BTreeMap<String, String>>);
 
 impl Draft {
     pub fn get(&self, key: &str) -> Option<String> {
-        self.0.borrow().get(key).cloned()
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).get(key).cloned()
     }
     /// Sets (or with `None` removes) a key.
     pub fn put(&self, key: &str, value: Option<&str>) {
-        let mut v = self.0.borrow_mut();
+        let mut v = self.0.lock().unwrap_or_else(|e| e.into_inner());
         match value {
             Some(x) => v.insert(key.to_string(), x.to_string()),
             None => v.remove(key),
         };
+    }
+}
+
+/// The phone's sign-in code writes a draft as it writes the store.
+impl SessionStore for Draft {
+    fn get(&self, key: &str) -> Option<String> {
+        Draft::get(self, key)
+    }
+    fn update(&self, key: &str, f: &mut dyn FnMut(Option<String>) -> Option<String>) {
+        let now = Draft::get(self, key);
+        if let Some(new) = f(now) {
+            self.put(key, Some(&new));
+        }
     }
 }
 
