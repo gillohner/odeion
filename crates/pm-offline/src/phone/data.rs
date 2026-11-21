@@ -52,6 +52,9 @@ pub struct Local {
     /// The `updated_at` of the newest prefs.json the phone took or wrote.
     #[serde(default)]
     pub prefs_at: u64,
+    /// The Bookmarks as last read, by file: only new files are read again.
+    #[serde(default)]
+    pub known: std::collections::HashMap<String, (String, i64)>,
 }
 
 fn path(phone: &Phone) -> PathBuf {
@@ -136,7 +139,7 @@ async fn bookmark(p: &Arc<Phone>, it: &Item, on: bool) -> Response {
             at,
         });
     });
-    p.sync_soon();
+    p.data_soon();
     Json(json!({ "uri": url, "favourite": on, "pending": true })).into_response()
 }
 
@@ -180,7 +183,7 @@ pub(crate) async fn played(State(p): State<Arc<Phone>>, Json(b): Json<Played>) -
             at: pm_pubky::ids::now_micros(),
         })
     });
-    p.sync_soon();
+    p.data_soon();
     Json(json!({ "plays": [] })).into_response()
 }
 
@@ -359,7 +362,7 @@ pub(crate) fn prefs_changed(p: &Phone, source: &str) {
             l.pending.push(op.clone());
         }
     });
-    p.sync_soon();
+    p.data_soon();
 }
 
 /// What a data sync did.
@@ -373,6 +376,38 @@ pub struct Report {
 /// The pending writes, in order (one that fails stops the rest until the next sync), then the
 /// Bookmarks as the homeserver has them (with what is still pending on top), then prefs.json.
 pub async fn sync(p: &Phone, acct: &Account) -> Report {
+    let mut r = write_pending(p, acct).await;
+    let known = load(p).known;
+    match acct.hs.read_v1_bookmarks_except(&acct.session, &known).await {
+        Ok(list) => change(p, |l| {
+            l.known = list
+                .iter()
+                .map(|(file, uri, at)| (file.clone(), (uri.clone(), *at)))
+                .collect();
+            let mut b: BTreeMap<String, i64> = list.into_iter().map(|(_, uri, at)| (uri, at)).collect();
+            for op in &l.pending {
+                if let Pending::Bookmark { url, on, at } = op {
+                    if *on {
+                        b.insert(url.clone(), *at);
+                    } else {
+                        b.remove(url);
+                    }
+                }
+            }
+            l.bookmarks = b;
+        }),
+        Err(e) => tracing::warn!("phone mode: Bookmarks not read: {e}"),
+    }
+    match take_prefs(acct, p).await {
+        Ok(t) => r.prefs_taken = t,
+        Err(e) => tracing::warn!("phone mode: prefs.json not read: {e}"),
+    }
+    r.left = load(p).pending.len();
+    r
+}
+
+/// The waiting writes, in order (one that fails stops the rest until the next sync).
+pub async fn write_pending(p: &Phone, acct: &Account) -> Report {
     let mut r = Report::default();
     // Read once a pass, when a listen waits
     let mut history = None;
@@ -403,26 +438,6 @@ pub async fn sync(p: &Phone, acct: &Account) -> Report {
             }
         }
     }
-    match acct.hs.read_v1_bookmarks(&acct.session).await {
-        Ok(list) => change(p, |l| {
-            let mut b: BTreeMap<String, i64> = list.into_iter().map(|(_, uri, at)| (uri, at)).collect();
-            for op in &l.pending {
-                if let Pending::Bookmark { url, on, at } = op {
-                    if *on {
-                        b.insert(url.clone(), *at);
-                    } else {
-                        b.remove(url);
-                    }
-                }
-            }
-            l.bookmarks = b;
-        }),
-        Err(e) => tracing::warn!("phone mode: Bookmarks not read: {e}"),
-    }
-    match take_prefs(acct, p).await {
-        Ok(t) => r.prefs_taken = t,
-        Err(e) => tracing::warn!("phone mode: prefs.json not read: {e}"),
-    }
     r.left = load(p).pending.len();
     r
 }
@@ -430,6 +445,37 @@ pub async fn sync(p: &Phone, acct: &Account) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_change_on_the_page_wakes_only_the_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Phone::open(super::super::Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        let r = add(
+            State(p.clone()),
+            Json(Item {
+                uri: Some("tidal:track:1".into()),
+                track_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), axum::http::StatusCode::OK);
+        let wait = std::time::Duration::from_millis(50);
+        assert!(
+            tokio::time::timeout(wait, p.data_now.notified()).await.is_ok(),
+            "the write goes soon"
+        );
+        assert!(
+            tokio::time::timeout(wait, p.sync_now.notified()).await.is_err(),
+            "no vault pass for it"
+        );
+    }
 
     #[test]
     fn listens_go_where_the_person_keeps_them() {
@@ -473,6 +519,7 @@ mod tests {
                 },
             ],
             prefs_at: 3,
+            known: Default::default(),
         };
         let back: Local = serde_json::from_slice(&serde_json::to_vec(&l).unwrap()).unwrap();
         assert_eq!(back.pending, l.pending);

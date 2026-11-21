@@ -95,6 +95,8 @@ pub struct Phone {
     account: tokio::sync::RwLock<Option<Arc<account::Account>>>,
     /// Asks the vault sync to run now (a sign-in made or ended here).
     sync_now: Arc<tokio::sync::Notify>,
+    /// A Bookmark, listen or quality change waits to be written (that alone, no vault pass).
+    data_now: Arc<tokio::sync::Notify>,
     /// One change at a time to what the phone keeps of the person's data (`data.json`).
     pub(crate) data_lock: std::sync::Mutex<()>,
 }
@@ -126,6 +128,7 @@ impl Phone {
             streams,
             account: Default::default(),
             sync_now: Default::default(),
+            data_now: Default::default(),
             data_lock: Default::default(),
         }))
     }
@@ -159,6 +162,11 @@ impl Phone {
     /// Runs the vault sync now.
     pub fn sync_soon(&self) {
         self.sync_now.notify_one();
+    }
+
+    /// Writes the Bookmarks, listens and quality changes waiting here now (not a whole sync).
+    pub fn data_soon(&self) {
+        self.data_now.notify_one();
     }
 
     /// The streaming sign-ins kept on the phone.
@@ -385,6 +393,9 @@ const RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 /// The Pubky account restored, then a vault sync now and every [`SYNC_EVERY`], and whenever a
 /// sign-in changed here; until the phone backend is gone. Nothing without a session.
 async fn sync_loop(weak: std::sync::Weak<Phone>) {
+    // A whole pass (the vault, the person's data read back) at start, every SYNC_EVERY and when a
+    // sign-in changed; only the waiting writes when the page changed something
+    let mut full = true;
     loop {
         let Some(p) = weak.upgrade() else { return };
         let acct = match p.account().await {
@@ -414,22 +425,29 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
                 }
             },
         };
-        match vault::pass(&p, &acct).await {
-            Ok(r) if r != vault::Report::default() => tracing::info!(?r, "phone mode: vault synced"),
-            Ok(_) => {}
-            Err(e) => tracing::warn!("phone mode: vault: {e}"),
+        if full {
+            match vault::pass(&p, &acct).await {
+                Ok(r) if r != vault::Report::default() => tracing::info!(?r, "phone mode: vault synced"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("phone mode: vault: {e}"),
+            }
         }
-        let r = data::sync(&p, &acct).await;
+        let r = if full {
+            data::sync(&p, &acct).await
+        } else {
+            data::write_pending(&p, &acct).await
+        };
         if r != data::Report::default() {
             tracing::info!(?r, "phone mode: Pubky data synced");
         }
-        let now = p.sync_now.clone();
+        let (now, data_now) = (p.sync_now.clone(), p.data_now.clone());
         drop(p);
         drop(acct);
-        tokio::select! {
-            _ = now.notified() => {}
-            _ = tokio::time::sleep(SYNC_EVERY) => {}
-        }
+        full = tokio::select! {
+            _ = now.notified() => true,
+            _ = data_now.notified() => false,
+            _ = tokio::time::sleep(SYNC_EVERY) => true,
+        };
     }
 }
 

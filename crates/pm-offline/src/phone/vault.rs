@@ -251,10 +251,19 @@ fn app_for(phone: &Phone, form: &Form, travels: &Map<String, Value>) -> Option<S
 
 /// Whether the phone can use a vault copy: a node's copy (the node takes only those), made with the
 /// app the phone renews this kind of sign-in with (Qobuz: any app; the phone finds its own).
-fn usable(phone: &Phone, form: &Form, s: &SignIn) -> bool {
+fn usable(phone: &Phone, form: &Form, s: &SignIn, marker: Option<u64>) -> bool {
     let Some(travels) = vault_form::node_settings(s) else {
         return false;
     };
+    // Made before the last "Sign out everywhere" (a copy left behind or put back): not taken, as
+    // a node doesn't take it
+    let made = vault_form::node_lineage(s)
+        .as_deref()
+        .map(vault_form::lineage_at)
+        .unwrap_or(0);
+    if marker.is_some_and(|m| made <= m) {
+        return false;
+    }
     if form.service != TIDAL_FULL.service {
         return true;
     }
@@ -343,7 +352,7 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
         let theirs = opened.as_ref().map(|o| Theirs {
             hash: hash_of(&o.sign_in),
             lineage: vault_form::node_lineage(&o.sign_in),
-            usable: usable(phone, form, &o.sign_in),
+            usable: usable(phone, form, &o.sign_in, marker),
             sign_in: &o.sign_in,
         });
         let mine_hash = mine.as_ref().map(vault_form::hash);
@@ -500,10 +509,12 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     let Some(mine) = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref()).map_err(local)? else {
         return Ok(false);
     };
-    if load_record(&path).services.get(svc).map(|s| s.mine.as_str()) != Some(vault_form::hash(&mine).as_str())
-    {
+    let record = load_record(&path);
+    if record.services.get(svc).map(|s| s.mine.as_str()) != Some(vault_form::hash(&mine).as_str()) {
         return Ok(false);
     }
+    // "Sign out everywhere" as the last sync saw it
+    let marker = record.marker;
     let d = dir(phone);
     let secret = pm_pubky::vault::load_or_create_client_secret(&d.join("client.key")).map_err(local)?;
     let files = (d.join("revoked.json"), d.join("marks.json"));
@@ -511,7 +522,7 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     let p = phone.clone();
     let r = vault
         .refresh(svc, false, |si: SignIn| async move {
-            if !usable(&p, &TIDAL_FULL, &si) {
+            if !usable(&p, &TIDAL_FULL, &si, marker) {
                 return Err(RefreshFailed(
                     "the vault's TIDAL sign-in was made with another app".into(),
                 ));
@@ -565,7 +576,7 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         .await?;
     let si = r.sign_in();
     // One renewed by another device with another app is not taken here
-    if !usable(phone, &TIDAL_FULL, si) {
+    if !usable(phone, &TIDAL_FULL, si, marker) {
         return Ok(false);
     }
     let Some(travels) = vault_form::node_settings(si) else {
@@ -613,6 +624,50 @@ pub fn tidal_due(phone: &Phone) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_from_before_sign_out_everywhere_is_not_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let phone = Phone::open(super::super::Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: super::super::TidalConf {
+                device: Some(pm_sources::tidal::full::Client {
+                    id: "device-client".into(),
+                    secret: "s".into(),
+                    from: "builtin".into(),
+                }),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let mut travels = Map::new();
+        travels.insert(
+            "tidal.unofficial".into(),
+            serde_json::json!({"session": {"access_token": "a", "expires_at": 1, "country": "CH"}}),
+        );
+        let copy = vault_form::sign_in_for(
+            "tidal-full",
+            TIDAL_FULL.carry,
+            true,
+            &travels,
+            None,
+            Some("device-client".into()),
+            "1000-0123456789abcdef",
+        );
+        assert!(usable(&phone, &TIDAL_FULL, &copy, None));
+        assert!(
+            usable(&phone, &TIDAL_FULL, &copy, Some(999)),
+            "made after the sign-out"
+        );
+        assert!(
+            !usable(&phone, &TIDAL_FULL, &copy, Some(1000)),
+            "made before it (or then)"
+        );
+        assert!(!usable(&phone, &TIDAL_FULL, &copy, Some(2000)));
+    }
 
     #[test]
     fn what_the_vault_gives_waits_for_nothing_changed_here_meanwhile() {
