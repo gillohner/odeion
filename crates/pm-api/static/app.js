@@ -8926,7 +8926,7 @@
           const tagged = pg.tagged || [];
           main.innerHTML = backBtn('home', 'Home')
             + `<div class="hero person"><div class="art ${pg.avatar ? 'round' : 'placeholder'} monogram" style="background:linear-gradient(135deg, hsl(${hue(pid)} 35% 34%), hsl(${hue(pid)} 35% 20%));border-radius:50%" aria-hidden="true"><span>${esc(initials(pg.name))}</span>${pg.avatar ? heroImg(pg.avatar, true) : ''}</div><div><div class="eyebrow">${['Person on Pubky', pg.you ? 'you' : '', pg.followed_by ? 'follows you' : ''].filter(Boolean).join(' · ')}</div><h1>${esc(pg.name)}</h1><p class="sub">${keyHtml(pid)}</p>${pg.status ? `<p class="muted">${esc(pg.status)}</p>` : ''}${pg.bio ? `<p class="blurb">${esc(pg.bio)}</p>` : ''}
-              <div class="actions" style="margin-top:12px">${pg.you ? '' : `<button class="btn ${pg.following ? '' : 'primary'}" id="pfollow" aria-pressed="${!!pg.following}">${pg.following ? `${icon('check')} Following` : `${icon('plus')} Follow`}</button>`}<a class="btn ghost" href="${esc(webUrl(pg.profile_url))}" target="_blank" rel="noopener">${icon('external')} Profile on pubky.app</a></div>
+              <div class="actions" style="margin-top:12px">${pg.you || !can('owner_music') ? '' : `<button class="btn ${pg.following ? '' : 'primary'}" id="pfollow" aria-pressed="${!!pg.following}">${pg.following ? `${icon('check')} Following` : `${icon('plus')} Follow`}</button>`}<a class="btn ghost" href="${esc(webUrl(pg.profile_url))}" target="_blank" rel="noopener">${icon('external')} Profile on pubky.app</a></div>
               ${links ? `<div class="chips" style="margin-top:10px">${links}</div>` : ''}<p class="muted small">${countOf(pg.followers || 0, 'followers')} · ${pg.following_count || 0} following</p></div></div>`
             + `<section class="section"><div class="section-head"><h3>Tags they use</h3><span class="muted small">public on Pubky</span></div>${(pg.tags || []).length ? `<div class="chips">${pg.tags.map(([l, c]) => `<button class="chip" data-ptag="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : '<p class="muted small">No music tags from them on Pubky yet.</p>'}</section>`
             + (tagged.length ? `<section class="section"><div class="section-head"><h3>Recently tagged</h3></div><div class="list">${tagged.map((h, k) => `<div class="list-row clickable" data-ptagged="${k}">${h.image ? `<img class="thumb" src="${esc(imgSrc(h.image))}" alt="" loading="lazy" data-err="hide">` : svcBadge('pubky')}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist' }[h.kind] || h.kind, h.subtitle].filter(Boolean).join(' · '))}</div></div></div>`).join('')}</div></section>` : '')
@@ -8939,7 +8939,8 @@
           break;
         }
         case 'shared': {
-          // Someone's shared playlists, or one of them: read-only here; "Save a copy" makes it yours.
+          // Someone's shared playlists, or one of them: read-only here; "Save a copy" makes it yours
+          // (shown to who may save one: can('owner_music'), as Follow on a person's page).
           loading();
           const a = state.viewArg || {}; const who = shortKey(a.user);
           if (!a.id) {
@@ -8994,12 +8995,12 @@
           const songCount = songs.filter((t) => !t.card).length; const linkCount = songs.length - songCount;
           const chip = (t) => t.unavailable ? `<span class="chip srcchip none" title="${esc(t.unavailable)}">${icon('close')}<span>Unavailable</span></span>` : t.plays ? `<span class="chip srcchip${t.pinned ? ' pinned' : ''}" title="${esc(t.plays.label)}${t.pinned ? ' · the author’s pick' : ''}">${svcBadge(t.plays.service)}<span>${esc(srcName(t.plays.service))}</span>${t.pinned ? icon('pin') : ''}</span>` : '';
           main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic((sp.play_from.items || []).map((r) => r.image), sp.summary.name)}<div><div class="eyebrow">Shared playlist · by <code>${esc(who)}</code></div><h1>${esc(sp.summary.name)}</h1><p class="sub">${countOf(songCount, 'songs')}${linkCount ? ` · ${countOf(linkCount, 'links')}` : ''} · ${playable.length} play here</p>
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="shplay" ${playable.length ? '' : 'disabled title="None of these songs is on your services"'}>${icon('play')} Play</button><button class="btn" id="shcopy">${icon('plus')} Save a copy</button><button class="btn ghost" id="shlink" title="Copy the pubky:// link">${icon('copy')} Copy link</button></div></div></div>`
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="shplay" ${playable.length ? '' : 'disabled title="None of these songs is on your services"'}>${icon('play')} Play</button>${can('owner_music') ? `<button class="btn" id="shcopy">${icon('plus')} Save a copy</button>` : ''}<button class="btn ghost" id="shlink" title="Copy the pubky:// link">${icon('copy')} Copy link</button></div></div></div>`
             + `<section class="section" id="shsongs"><div class="section-head"><h3>Songs</h3><span class="muted small">where each plays from on your node</span></div>${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => (t.unavailable ? 'unavail' : ''), extra: (t) => chip(t) }) : emptyState('playlist', 'This playlist is empty', '')}</section>`
             + (sp.summary.description ? `<section class="section"><div class="section-head"><h3>About</h3></div><p>${esc(sp.summary.description)}</p></section>` : '');
           bindSongRows($('#shsongs'), songs, {});
           $('#shplay').onclick = (e) => playSongs(playable, 0, 'replace', null, e.currentTarget);
-          $('#shcopy').onclick = async () => { try { const d = await api('POST', `/shared/${a.user}/playlists/${a.id}/copy`); state.plPf = null; toast(`Saved “${d.summary.name}” to your playlists`); setView('playlist', d.summary.id); } catch (e) { toast(e.message, 'error'); } };
+          const shc = $('#shcopy'); if (shc) shc.onclick = async () => { try { const d = await api('POST', `/shared/${a.user}/playlists/${a.id}/copy`); state.plPf = null; toast(`Saved “${d.summary.name}” to your playlists`); setView('playlist', d.summary.id); } catch (e) { toast(e.message, 'error'); } };
           $('#shlink').onclick = async () => { try { await navigator.clipboard.writeText(sp.summary.link); toast('Link copied'); } catch { toast(sp.summary.link); } };
           break;
         }
@@ -9790,7 +9791,8 @@
           const fallback = { artist: pg.artist && pg.artist.name, album: kind === 'album' ? pg.title : '', image: pg.image };
           const songs = pg.songs || [];
           const target = pg.target;
-          // What comments are about: the song's own link, else this item's (a web link only)
+          // What comments are about: the song's own link, else this item's (a web link only). The
+          // section is drawn, and the comments asked for, only for who may comment: can('owner_music')
           const commentUri = [pg.song_uri, target && target.uri, pg.link].find((u) => /^https?:\/\//.test(u || '')) || '';
           const qs = new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)])).toString();
           // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3),
@@ -9938,7 +9940,7 @@
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}"${hrefAttr(pathFor('item', { kind, id: v.page }))}>${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + '<div id="isimilar-slot"></div>'
             + '<div id="icollections-slot"></div>'
-            + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
+            + (commentUri && can('owner_music') ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + (aboutTop ? aboutDetailsHtml(pg) : aboutHtml(pg));
           $('[data-back]', main).onclick = () => goBack(pg.section);
           // The article's opening is clamped to a few lines; More shows it all. Whether it is cut off
