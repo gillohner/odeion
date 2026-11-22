@@ -930,8 +930,7 @@ impl PubkySync {
                 report.pushed += 1;
             }
             // (as it was pushed: a bookmark removed or added again meanwhile stays to be pushed)
-            self.lib(library)?
-                .mark_bookmark_pushed(&row.id, row.deleted, now_micros())?;
+            self.lib(library)?.mark_bookmark_pushed(&row, now_micros())?;
         }
         Ok(removed)
     }
@@ -954,7 +953,9 @@ impl PubkySync {
             let lib = self.lib(library)?;
             match crate::listens::adopt_cleared(&lib, theirs) {
                 Ok(n) if n > 0 => {
-                    tracing::info!(listens = n, "history deleted on another node: removed here too")
+                    tracing::info!(listens = n, "history deleted on another node: removed here too");
+                    // Their copies on the homeserver go with the next pass's push: more to do
+                    report.pending += n;
                 }
                 Ok(_) => {}
                 Err(e) => report
@@ -1186,15 +1187,21 @@ type Fetched = (
     Result<Vec<u8>, HomeserverError>,
 );
 
-/// Whether a pull takes the homeserver's version of a post, edited at `remote_edited`, over the
-/// node's row `mine` (none: the node does not have the post). It does when that version is
-/// newer than the row's last edit and its last push. A delete that waits to be pushed is an
-/// edit like any other: the copy the homeserver still has does not bring the post back, a
-/// version written after the delete does.
+/// Whether a pull takes the homeserver's version of a post, written at `remote_edited`, over the
+/// node's row `mine` (none: the node does not have the post). A row that waits to be pushed (an
+/// edit, a move to the other folder, a delete: `unsynced_music_posts` lists it) is never
+/// replaced: every pass pushes before it pulls, so the node's change goes out over whatever the
+/// homeserver has, and until the push has reached it the pull must not take it back. The row's
+/// own time does not say enough for that: a review's and a listen's stay what they were when
+/// the review was written and the song was played. A row that was pushed or pulled gives way
+/// to a version written after that.
 fn pull_takes(remote_edited: i64, mine: Option<PostStamp>) -> bool {
     match mine {
         None => true,
-        Some((updated_at, synced_at, _)) => remote_edited > updated_at.max(synced_at.unwrap_or(0)),
+        Some((updated_at, synced_at, deleted)) => {
+            let waits = deleted || synced_at.is_none_or(|at| updated_at > at);
+            !waits && remote_edited > updated_at.max(synced_at.unwrap_or(0))
+        }
     }
 }
 
@@ -1727,23 +1734,21 @@ mod tests {
     #[test]
     fn a_pull_does_not_take_what_is_older_than_the_nodes_row() {
         assert!(pull_takes(10, None));
-        // (edit time, last push, tombstone)
+        // (the row's time, its last push or pull, tombstone)
         assert!(
             pull_takes(40, Some((10, Some(30), false))),
-            "written elsewhere since the push"
+            "written elsewhere since"
         );
         assert!(
             !pull_takes(30, Some((10, Some(30), false))),
             "the version this node pushed"
         );
-        assert!(!pull_takes(30, Some((40, Some(30), false))), "edited here since");
-        assert!(!pull_takes(30, Some((40, None, false))));
-        // Deleted here at 50 and not pushed yet: the homeserver's copy does not bring it back
+        // Waiting to be pushed: never replaced, whatever the times say. An edited review or a
+        // listen moved to the other folder keeps its old time (20), a collection has its edit's
+        assert!(!pull_takes(90, Some((20, None, false))));
+        assert!(!pull_takes(90, Some((40, Some(30), false))));
+        // Deleted here and not pushed yet: the homeserver's copy does not bring it back
         assert!(!pull_takes(30, Some((50, Some(30), true))));
-        assert!(!pull_takes(30, Some((50, None, true))));
-        assert!(
-            pull_takes(60, Some((50, Some(30), true))),
-            "written elsewhere after the delete"
-        );
+        assert!(!pull_takes(90, Some((50, None, true))));
     }
 }

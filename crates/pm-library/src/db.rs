@@ -1557,18 +1557,22 @@ impl Library {
         .map_err(Into::into)
     }
 
-    /// Record a successful push of a bookmark as it was read for the push (`removal`: its
-    /// tombstone, pushed as a delete), only if it is still that. One removed while its write was
-    /// on the way stays a tombstone to push; one added again while its delete was on the way
-    /// stays to be written. `true` when recorded (a pushed tombstone is purged).
-    pub fn mark_bookmark_pushed(&self, id: &str, removal: bool, at_micros: i64) -> Result<bool> {
+    /// Record a successful push of the bookmark `pushed` (as it was read for the push; a
+    /// tombstone was pushed as a delete), only if it is still that. One removed while its write
+    /// was on the way stays a tombstone to push; one added again while its delete was on the
+    /// way stays to be written, as does one removed and added again during its write (it has a
+    /// new time). `true` when recorded (a pushed tombstone is purged).
+    pub fn mark_bookmark_pushed(&self, pushed: &BookmarkRow, at_micros: i64) -> Result<bool> {
         let conn = self.lock();
-        let n = if removal {
-            conn.execute("DELETE FROM bookmarks WHERE id = ?1 AND deleted = 1", params![id])?
+        let n = if pushed.deleted {
+            conn.execute(
+                "DELETE FROM bookmarks WHERE id = ?1 AND deleted = 1",
+                params![pushed.id],
+            )?
         } else {
             conn.execute(
-                "UPDATE bookmarks SET synced_at = ?2 WHERE id = ?1 AND deleted = 0",
-                params![id, at_micros],
+                "UPDATE bookmarks SET synced_at = ?2 WHERE id = ?1 AND deleted = 0 AND created_at = ?3",
+                params![pushed.id, at_micros, pushed.created_at],
             )?
         };
         Ok(n > 0)
@@ -5787,21 +5791,28 @@ mod tag_tests {
         let lib = Library::open_in_memory().unwrap();
         let uri = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
         // Written, and removed while the write was on the way: the removal stays to be pushed
-        lib.add_bookmark("b1", uri, 1_000).unwrap();
+        let written = lib.add_bookmark("b1", uri, 1_000).unwrap();
         assert!(lib.remove_bookmark(uri).unwrap());
-        assert!(!lib.mark_bookmark_pushed("b1", false, 2_000).unwrap());
+        assert!(!lib.mark_bookmark_pushed(&written, 2_000).unwrap());
         let pending = lib.unsynced_bookmarks().unwrap();
         assert!(pending.len() == 1 && pending[0].deleted, "{pending:?}");
         // Its delete pushed, and added again while that was on the way: the add stays to be pushed
-        lib.add_bookmark("b1", uri, 3_000).unwrap();
-        assert!(!lib.mark_bookmark_pushed("b1", true, 4_000).unwrap());
+        let removal = pending[0].clone();
+        let again = lib.add_bookmark("b1", uri, 3_000).unwrap();
+        assert!(!lib.mark_bookmark_pushed(&removal, 4_000).unwrap());
         let pending = lib.unsynced_bookmarks().unwrap();
         assert!(pending.len() == 1 && !pending[0].deleted, "{pending:?}");
+        // Removed and added again during its write: it has a new time, which stays to be pushed
+        assert!(lib.remove_bookmark(uri).unwrap());
+        let newer = lib.add_bookmark("b1", uri, 4_500).unwrap();
+        assert!(!lib.mark_bookmark_pushed(&again, 4_600).unwrap());
+        assert_eq!(lib.unsynced_bookmarks().unwrap().len(), 1);
         // Nothing changed meanwhile: recorded; a tombstone is purged
-        assert!(lib.mark_bookmark_pushed("b1", false, 5_000).unwrap());
+        assert!(lib.mark_bookmark_pushed(&newer, 5_000).unwrap());
         assert!(lib.unsynced_bookmarks().unwrap().is_empty());
         assert!(lib.remove_bookmark(uri).unwrap());
-        assert!(lib.mark_bookmark_pushed("b1", true, 6_000).unwrap());
+        let removal = lib.unsynced_bookmarks().unwrap().remove(0);
+        assert!(lib.mark_bookmark_pushed(&removal, 6_000).unwrap());
         assert!(lib.bookmark_by_uri(uri).unwrap().is_none());
 
         lib.add_tag("t1", uri, "disco", 1_000).unwrap();

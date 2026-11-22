@@ -24,8 +24,11 @@ pub struct MusicPostRow {
     pub deleted: bool,
 }
 
-/// What decides whether the homeserver's version of a post replaces the node's row: the row's
-/// edit time, its last push, and whether it is a tombstone (a delete that waits to be pushed).
+/// What decides whether the homeserver's version of a post replaces the node's row:
+/// `updated_at` (a collection's last edit; for a review and a listen the time it was written or
+/// played, which an edit does not move), `synced_at` (the last push or pull; none while a
+/// change waits to be pushed) and whether the row is a tombstone (a delete that waits to be
+/// pushed).
 pub type PostStamp = (i64, Option<i64>, bool);
 
 fn row(r: &Row<'_>) -> rusqlite::Result<MusicPostRow> {
