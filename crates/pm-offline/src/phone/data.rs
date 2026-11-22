@@ -361,11 +361,8 @@ async fn write_prefs(acct: &Account, p: &Phone, source: &str) -> Result<(), Stri
         prefs["quality"] = json!({});
     }
     // What another device set since (newer than what the phone took) applies here too: this
-    // write moves prefs_at past it
-    let took = load(p).map_err(|e| e.to_string())?.prefs_at;
-    if prefs["updated_at"].as_u64().unwrap_or(0) > took {
-        apply_quality(p, &prefs);
-    }
+    // write moves prefs_at past it, so only once it is saved here (else this write waits)
+    apply_if_newer(p, &prefs)?;
     if let Some(q) = quality_of(p, source) {
         prefs["quality"][source] = Value::String(q);
     }
@@ -390,38 +387,63 @@ async fn take_prefs(acct: &Account, p: &Phone) -> Result<bool, String> {
     else {
         return Ok(false);
     };
-    let at = prefs["updated_at"].as_u64().unwrap_or(0);
-    if at <= load(p).map_err(|e| e.to_string())?.prefs_at {
+    took_prefs(p, &prefs)
+}
+
+/// `prefs` (the person's prefs.json) taken when newer than what the phone last took or wrote,
+/// and only then noted as taken: a quality the phone couldn't save is an error, and taken again
+/// next time.
+fn took_prefs(p: &Phone, prefs: &Value) -> Result<bool, String> {
+    let Some(at) = apply_if_newer(p, prefs)? else {
         return Ok(false);
-    }
-    apply_quality(p, &prefs);
+    };
     // Not kept: taken again next time (the same values)
     let _ = change(p, |l| l.prefs_at = at);
     Ok(true)
 }
 
-/// The qualities in `prefs` applied here, except a source's changed here and not written yet.
-fn apply_quality(p: &Phone, prefs: &Value) {
-    // (Not known: as if waiting, nothing applied)
+/// The qualities in `prefs` applied here when it is newer than what the phone last took or wrote
+/// (`Some`: its `updated_at`). An error when what the phone keeps can't be read or the qualities
+/// can't be saved: then nothing changed.
+fn apply_if_newer(p: &Phone, prefs: &Value) -> Result<Option<u64>, String> {
+    let at = prefs["updated_at"].as_u64().unwrap_or(0);
+    let l = load(p).map_err(|e| e.to_string())?;
+    if at <= l.prefs_at {
+        return Ok(None);
+    }
+    apply_quality(p, &l, prefs)?;
+    Ok(Some(at))
+}
+
+/// The qualities in `prefs` applied here, except a source's changed here and not written yet
+/// (`l.pending`), in one save; an error, and nothing changed, when it can't be saved.
+fn apply_quality(p: &Phone, l: &Local, prefs: &Value) -> Result<(), String> {
     let waiting = |source: &str| {
-        load(p).map_or(true, |l| {
-            l.pending
-                .iter()
-                .any(|op| matches!(op, Pending::Quality { source: s } if s == source))
-        })
+        l.pending
+            .iter()
+            .any(|op| matches!(op, Pending::Quality { source: s } if s == source))
     };
-    if let Some(q) = prefs["quality"]["tidal"]
+    let tidal = prefs["quality"]["tidal"]
         .as_str()
-        .filter(|q| ["max", "high"].contains(q) && !waiting("tidal"))
-    {
-        pm_sources::tidal::full::update(p.store.as_ref(), |st| st.quality = q.into());
-    }
-    if let Some(q) = prefs["quality"]["qobuz"]
+        .filter(|q| ["max", "high"].contains(q) && !waiting("tidal"));
+    let qobuz = prefs["quality"]["qobuz"]
         .as_str()
-        .filter(|q| ["max", "cd", "mp3"].contains(q) && !waiting("qobuz"))
-    {
-        super::qobuz::update(p, |st| st.quality = q.into());
+        .filter(|q| ["max", "cd", "mp3"].contains(q) && !waiting("qobuz"));
+    if tidal.is_none() && qobuz.is_none() {
+        return Ok(());
     }
+    p.store
+        .change_if(|d| {
+            if let Some(q) = tidal {
+                pm_sources::tidal::full::update(d, |st| st.quality = q.into());
+            }
+            if let Some(q) = qobuz {
+                super::qobuz::update_in(d, |st| st.quality = q.into());
+            }
+            Ok(true)
+        })
+        .map(|_| ())
+        .map_err(|e| format!("the streaming quality set on another device can't be saved here: {e}"))
 }
 
 /// What the page is told when a quality set here couldn't be queued for the person's other
@@ -692,6 +714,34 @@ mod tests {
         assert_eq!(r, Report::default());
         assert_eq!(s.taken.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(std::fs::read(path(&p)).unwrap(), cut);
+    }
+
+    #[test]
+    fn a_quality_from_another_device_that_cant_be_saved_is_taken_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Phone::open(super::super::Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        let prefs = json!({"version": 1, "updated_at": 10, "quality": {"tidal": "high", "qobuz": "mp3"}});
+        // The sign-ins file can't be replaced now
+        let file = dir.path().join(super::super::store::FILE);
+        let _ = std::fs::remove_file(&file);
+        std::fs::create_dir(&file).unwrap();
+        assert!(took_prefs(&p, &prefs).is_err());
+        assert_eq!(load(&p).unwrap().prefs_at, 0, "not noted as taken");
+        assert_ne!(pm_sources::tidal::full::load(p.store.as_ref()).quality, "high");
+        // It can be again: taken, both at once
+        std::fs::remove_dir(&file).unwrap();
+        assert_eq!(took_prefs(&p, &prefs), Ok(true));
+        assert_eq!(load(&p).unwrap().prefs_at, 10);
+        assert_eq!(pm_sources::tidal::full::load(p.store.as_ref()).quality, "high");
+        assert_eq!(super::super::qobuz::state(&p).quality, "mp3");
+        assert_eq!(took_prefs(&p, &prefs), Ok(false), "once");
     }
 
     #[test]

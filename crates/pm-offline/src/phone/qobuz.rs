@@ -36,7 +36,7 @@ fn change(p: &Phone, f: impl FnOnce(&mut ModeState)) -> Result<(), SourceError> 
 }
 
 /// [`update`] on `store` (the phone's, or a draft of it).
-fn update_in(store: &dyn pm_sources::SessionStore, f: impl FnOnce(&mut ModeState)) {
+pub(crate) fn update_in(store: &dyn pm_sources::SessionStore, f: impl FnOnce(&mut ModeState)) {
     let mut f = Some(f);
     store.update(qobuz::STATE_KEY, &mut |now| {
         let mut st: ModeState = now
