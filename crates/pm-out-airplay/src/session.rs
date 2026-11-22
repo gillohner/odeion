@@ -28,6 +28,8 @@ const AUTH_SETUP_KEY: [u8; 32] = [
 pub const LATENCY_FRAMES: u32 = 88_200;
 /// Packets kept for resend requests (about four seconds).
 const RESEND_KEEP: usize = 500;
+/// The longest body of an RTSP answer that is read (and dropped).
+const MAX_REPLY_BODY: usize = 1 << 20;
 
 /// Seconds between 1900 (NTP) and 1970 (Unix).
 const NTP_EPOCH: u64 = 2_208_988_800;
@@ -182,6 +184,12 @@ impl Rtsp {
             .header("Content-Length")
             .and_then(|l| l.parse::<usize>().ok())
         {
+            // (a receiver's answers carry a few hundred bytes; the length is the device's word)
+            if len > MAX_REPLY_BODY {
+                return Err(AirPlayError::Protocol(format!(
+                    "{method}: an answer of {len} bytes"
+                )));
+            }
             let mut skip = vec![0u8; len];
             self.reader.read_exact(&mut skip)?;
         }
@@ -643,5 +651,35 @@ mod tests {
             album: None,
         });
         assert_eq!(d, b"mlit\0\0\0\x0aminm\0\0\0\x02Ab".to_vec());
+    }
+
+    /// How long its answer is is the receiver's word: a length no answer has is a protocol
+    /// error, not memory set aside for it.
+    #[test]
+    fn an_answer_that_claims_an_impossible_length_is_a_protocol_error() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let Ok((conn, _)) = l.accept() else { return };
+            let mut r = BufReader::new(conn.try_clone().unwrap());
+            let mut w = conn;
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 || h.trim_end().is_empty() {
+                    break;
+                }
+            }
+            let _ = write!(
+                w,
+                "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: {}\r\n\r\n",
+                usize::MAX
+            );
+            // (open until the other side has read the answer and hung up)
+            let mut rest = Vec::new();
+            let _ = r.read_to_end(&mut rest);
+        });
+        let e = Session::start(addr, false).err().expect("no session");
+        assert!(matches!(e, AirPlayError::Protocol(_)), "{e}");
+        assert!(e.to_string().contains("bytes"), "{e}");
     }
 }

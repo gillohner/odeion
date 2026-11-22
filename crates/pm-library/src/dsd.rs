@@ -159,6 +159,12 @@ fn read_id3_at<R: Read + Seek>(path: &Path, r: &mut R, off: u64) -> Result<Optio
     Ok(Some(buf))
 }
 
+/// Where the chunk after the one at `at` starts (a 12-byte header, `size` bytes, padded to an
+/// even length), or `None` when the size is no size a file can have (the sum does not fit).
+fn next_chunk(at: u64, size: u64) -> Option<u64> {
+    at.checked_add(12)?.checked_add(size)?.checked_add(size & 1)
+}
+
 fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
     let mut hdr = [0u8; 16];
     read_exact_at(path, r, 0, &mut hdr)?;
@@ -166,7 +172,8 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
         return Err(bad(path, "dff: not a DSDIFF form"));
     }
     let form_size = u64::from_be_bytes(hdr[4..12].try_into().unwrap());
-    let end = 12 + form_size;
+    // Sizes are the file's word: sums are checked, and one that cannot be ends the walk
+    let end = form_size.saturating_add(12);
 
     let mut rate = None;
     let mut channels = None;
@@ -174,7 +181,7 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
     let mut id3 = None;
 
     let mut pos = 16u64;
-    while pos + 12 <= end {
+    while pos.saturating_add(12) <= end {
         let mut ch = [0u8; 12];
         if read_exact_at(path, r, pos, &mut ch).is_err() {
             break;
@@ -189,8 +196,8 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
                 read_exact_at(path, r, body, &mut kind)?;
                 if &kind == b"SND " {
                     let mut p = body + 4;
-                    let pend = body + size;
-                    while p + 12 <= pend {
+                    let pend = body.saturating_add(size);
+                    while p.saturating_add(12) <= pend {
                         let mut sc = [0u8; 12];
                         read_exact_at(path, r, p, &mut sc)?;
                         let sid = [sc[0], sc[1], sc[2], sc[3]];
@@ -208,7 +215,8 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
                             }
                             _ => {}
                         }
-                        p += 12 + ssize + (ssize & 1);
+                        let Some(next) = next_chunk(p, ssize) else { break };
+                        p = next;
                     }
                 }
             }
@@ -216,8 +224,8 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
             b"ID3 " => id3 = read_id3_at(path, r, body)?,
             b"DIIN" => {
                 let mut p = body;
-                let pend = body + size;
-                while p + 12 <= pend {
+                let pend = body.saturating_add(size);
+                while p.saturating_add(12) <= pend {
                     let mut sc = [0u8; 12];
                     read_exact_at(path, r, p, &mut sc)?;
                     let sid = [sc[0], sc[1], sc[2], sc[3]];
@@ -225,12 +233,14 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
                     if &sid == b"ID3 " {
                         id3 = read_id3_at(path, r, p + 12)?;
                     }
-                    p += 12 + ssize + (ssize & 1);
+                    let Some(next) = next_chunk(p, ssize) else { break };
+                    p = next;
                 }
             }
             _ => {}
         }
-        pos = body + size + (size & 1);
+        let Some(next) = next_chunk(pos, size) else { break };
+        pos = next;
     }
 
     let rate = rate.ok_or_else(|| bad(path, "dff: missing FS chunk"))?;
@@ -244,7 +254,7 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
     Ok(DsdHeader {
         container: DsdContainer::Dff,
         format,
-        sample_count: data_len * 8 / channels as u64,
+        sample_count: data_len.saturating_mul(8) / channels as u64,
         data_offset,
         data_len,
         block_size: 1,
@@ -404,5 +414,43 @@ mod tests {
         let p = dir.path().join("x.dsf");
         std::fs::write(&p, b"RIFF....WAVE").unwrap();
         assert!(matches!(read_header(&p), Err(LibraryError::Probe { .. })));
+    }
+
+    /// Chunk sizes are the file's word. One that cannot be a size (the sum with its place does
+    /// not fit) ends the read with an error; it does not wrap around to an earlier place.
+    #[test]
+    fn dff_chunk_sizes_that_cannot_be_are_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.dff");
+        let form = |form_size: u64, chunks: &[u8]| {
+            let mut b = b"FRM8".to_vec();
+            b.extend(form_size.to_be_bytes());
+            b.extend(b"DSD ");
+            b.extend(chunks);
+            b.extend([0u8; 64]);
+            b
+        };
+        let chunk = |id: &[u8; 4], size: u64, body: &[u8]| {
+            let mut b = id.to_vec();
+            b.extend(size.to_be_bytes());
+            b.extend(body);
+            b
+        };
+        for size in [u64::MAX, u64::MAX - 27, u64::MAX - 28, 1 << 63] {
+            // At the top level, with a form that claims every size there is
+            let top = form(u64::MAX, &chunk(b"JUNK", size, &[]));
+            // Inside the properties chunk and inside the edited-master chunk
+            let prop_body = [&b"SND "[..], &chunk(b"JUNK", size, &[])].concat();
+            let prop = form(200, &chunk(b"PROP", prop_body.len() as u64, &prop_body));
+            let diin_body = chunk(b"JUNK", size, &[]);
+            let diin = form(200, &chunk(b"DIIN", diin_body.len() as u64, &diin_body));
+            for (what, bytes) in [("top", top), ("PROP", prop), ("DIIN", diin)] {
+                std::fs::write(&p, bytes).unwrap();
+                assert!(
+                    matches!(read_header(&p), Err(LibraryError::Probe { .. })),
+                    "{what} {size}"
+                );
+            }
+        }
     }
 }
