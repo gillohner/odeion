@@ -40,6 +40,13 @@ for (const line of fs.readFileSync(path.join(__dirname, 'ui-fixtures.list'), 'ut
   pages.push({ script, folder, pin: pin ? Number(pin) : null });
 }
 
+// A page written against the fixtures (it loads ./ui-fixture) and left out of the list would
+// never run: ui-open-place.js was a fix's test for a week without running once
+for (const f of fs.readdirSync(__dirname)) {
+  if (!/^ui-.*\.js$/.test(f) || f === 'ui-fixture.js' || f === 'ui-fixtures-run.js' || pages.some((p) => p.script === f)) continue;
+  if (/require\(['"]\.\/ui-fixture['"]\)/.test(fs.readFileSync(path.join(__dirname, f), 'utf8'))) fail(`${f} uses the fixtures but is not in tools/ui-fixtures.list: add a line for it`);
+}
+
 let [shard, shards] = [1, 1];
 if (shardArg) {
   const m = /^(\d+)\/(\d+)$/.exec(shardArg);
