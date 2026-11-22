@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-22
+
+- **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
+
 ### 2026-11-21
 
 - **Search and song pages: a few leftovers after a library change are gone.** A search that couldn't finish after every source had answered now drops its "Search couldn't finish" note once it has been refreshed, even when the results didn't change. A search that failed because the node was offline now runs again in full when you open it after the library changes, instead of showing the old error and Retry. A song you removed from the library while its search was refreshing no longer comes back in the results. After Remove from library, chosen with the keyboard from a search result's ⋯ menu, the focus moves to the next result's ⋯ (or the search box after the last one) instead of the top of the page. A streaming copy of a removed song with no link of its own no longer points to the removed song's page. On an album or song page, public tags no longer come back when Pubky has since said it has no record of the item and its next answer failed.

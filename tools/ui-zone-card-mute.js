@@ -5,7 +5,9 @@
 // player by its audio) without choosing it; pressed again it unmutes. A refused mute puts the button
 // back, and one muted or unmuted elsewhere (the node's zone event) follows. Enter on it works; Zones
 // drawn again gives a focused Mute its focus back. A zone without a volume has none. Mute, slider and
-// level stay on one line together; cards that had one line keep it (1024, ~1000, ~1150 px). On a
+// level stay on one line together; cards that had one line keep it (1024, ~1000, ~1150 px), except this
+// browser's card at ~1000 and ~1150 px, whose volume goes under the transport there with "selected"
+// (tools/ui-zone-card-volume-room.js) rather than keep a 66-70 px slider beside it. On a
 // touch tablet Next and Mute share the 6 px between them, and where the volume goes under the
 // transport a press just under Previous is Previous's, not Mute's (the split checked by the half
 // pixel: 4 / 4.5 px on this browser's card, 5.5 / 6.5 px on a node's). Three quick presses while the zone
@@ -206,7 +208,11 @@ const lineOf = (page, id) => page.$eval(card(id), (c) => { const kids = [...c.qu
       }
       for (const w of [992, 1000, 1152, 1160]) {
         await page.setViewportSize({ width: w, height: 900 }); await page.waitForTimeout(150);
-        for (const id of ['browser', 'linn']) { const l = await lineOf(page, id); check(l.lines === 1 || l.spread <= 4, `${w}: ${id}'s controls stay on one line (${JSON.stringify(l)})`); }
+        { const l = await lineOf(page, 'linn'); check(l.lines === 1 || l.spread <= 4, `${w}: linn's controls stay on one line (${JSON.stringify(l)})`); }
+        // (this browser's card, whose "selected" and dB level are wider: one line, or its volume and
+        // "selected" together under the transport, not a slider under 80 px beside it)
+        const l = await lineOf(page, 'browser'); const sw = await page.$eval(`${card('browser')} [data-zvol]`, (r) => r.getBoundingClientRect().width);
+        check(l.lines === 1 || l.spread <= 4 ? sw >= 80 : l.lines === 2 && sw >= 80, `${w}: browser's controls stay on one line, or its volume goes under the transport with room (${JSON.stringify(l)}, slider ${Math.round(sw)} px)`);
       }
       await context.close();
     }
