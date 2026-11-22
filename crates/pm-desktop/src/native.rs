@@ -36,16 +36,19 @@ static PLAYER: OnceLock<AppPlayer> = OnceLock::new();
 static ORIGINS: Mutex<Origins> = Mutex::new(Origins {
     node: None,
     offline: None,
+    phone: None,
 });
 
 struct Origins {
     node: Option<String>,
     offline: Option<String>,
+    /// Phone mode's page (src/phone.rs).
+    phone: Option<String>,
 }
 
 impl Origins {
     fn has(&self, origin: &str) -> bool {
-        [&self.node, &self.offline]
+        [&self.node, &self.offline, &self.phone]
             .into_iter()
             .flatten()
             .any(|o| o == origin)
@@ -57,6 +60,9 @@ impl Origins {
 pub enum Page {
     Node,
     Offline,
+    /// Phone mode's page: also [`crate::phone::PHONE_COMMANDS`] (Android only).
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    Phone,
 }
 /// Whether the player said it plays (PlayerService keeps the app awake for it).
 static PLAYING: AtomicBool = AtomicBool::new(false);
@@ -230,6 +236,7 @@ pub fn allow_page(app: &AppHandle, origin: &str, page: Page) {
         let slot = match page {
             Page::Node => &mut o.node,
             Page::Offline => &mut o.offline,
+            Page::Phone => &mut o.phone,
         };
         *slot = Some(origin.to_string());
         if had {
@@ -239,7 +246,11 @@ pub fn allow_page(app: &AppHandle, origin: &str, page: Page) {
     let mut cap = tauri::ipc::CapabilityBuilder::new(format!("page-player-{origin}"))
         .remote(format!("{origin}/*"))
         .window(crate::MAIN);
-    for c in PAGE_COMMANDS {
+    let phone: &[&str] = match page {
+        Page::Phone => crate::phone::PHONE_COMMANDS,
+        Page::Node | Page::Offline => &[],
+    };
+    for c in PAGE_COMMANDS.iter().chain(phone) {
         cap = cap.permission(format!("allow-{}", c.replace('_', "-")));
     }
     if let Err(e) = app.add_capability(cap) {
@@ -358,6 +369,7 @@ mod tests {
         let o = Origins {
             node: Some("http://192.168.1.5:7788".into()),
             offline: Some("http://127.0.0.1:41234".into()),
+            phone: None,
         };
         let node = "http://192.168.1.5:7788/album/lib-7";
         let offline = "http://127.0.0.1:41234/downloads";
@@ -396,6 +408,7 @@ mod tests {
         let now = Origins {
             node: Some("http://192.168.1.9:7788".into()),
             offline: None,
+            phone: None,
         };
         assert!(!may_play("http://192.168.1.5:7788/x", node, &now));
     }
@@ -472,6 +485,7 @@ mod tests {
         let o = Origins {
             node: Some("http://192.168.1.5:7788".into()),
             offline: Some("http://127.0.0.1:41234".into()),
+            phone: None,
         };
         assert_eq!(
             kept_track_id("http://192.168.1.5:7788/v1/library/tracks/3/file?token=x", &o),
@@ -497,7 +511,7 @@ mod tests {
     #[test]
     fn the_manifest_lists_the_page_commands() {
         let build = include_str!("../build.rs");
-        for c in PAGE_COMMANDS {
+        for c in PAGE_COMMANDS.iter().chain(crate::phone::PHONE_COMMANDS) {
             assert!(build.contains(&format!("\"{c}\"")), "{c} missing from build.rs");
         }
     }

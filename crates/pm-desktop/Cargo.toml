@@ -23,6 +23,8 @@ tauri-build = { version = "=2.7.1", features = [] }
 pm-model = { path = "../pm-model" }
 pm-pubky = { path = "../pm-pubky" }
 pm-offline = { path = "../pm-offline" }
+# Phone mode's sign-in state (src/phone.rs)
+pm-sources = { path = "../pm-sources" }
 pm-discovery = { path = "../pm-discovery" }
 pm-remote = { path = "../pm-remote" }
 # The page's own player played by the app (src/native.rs; Android uses it)
@@ -85,6 +87,10 @@ ring-transport-probe = ["dep:pubky"]
 # Android emulator CI only (.github/workflows/android.yml, update): the build reads its update feed
 # from ODEION_UPDATE_FEED (plain http allowed) and logs a marker kept in the app's data. Never in releases.
 update-feed-fixture = []
+# Android emulator CI only (.github/workflows/android.yml, phone mode): phone mode is chosen and a
+# TIDAL session seeded at the first start, and TIDAL is the runner's stand-in at
+# ODEION_PHONE_FIXTURE_TIDAL (tools/android-phone-mode.py). Never in releases.
+phone-mode-fixture = []
 
 [profile.release]
 lto = "thin"

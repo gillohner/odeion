@@ -1,4 +1,4 @@
-# Device test prompt: Chromecast, Google TV, smart TVs, Sonos, AirPlay, Snapcast, Squeezebox, Android phones, USB DACs on Android
+# Device test prompt: Chromecast, Google TV, smart TVs, Sonos, AirPlay, Snapcast, Squeezebox, Android phones, USB DACs on Android, phone mode
 
 The multiroom outputs (infra brief §3) were built against mocks and open-source receivers on a machine
 with no speakers or TVs. Paste the section for each device you have into Claude Code on a laptop on
@@ -193,6 +193,57 @@ Edge or CI APK of the top PR of the stack. Start with the KA17's volume low (0-5
    album still plays from the node.
 7. If anything fails: `adb logcat -s pubky-music` (lines "the app's own player: …" say what it
    plays and the path), the phone's model and Android version.
+```
+
+## Phone mode: the app without a node (Android)
+
+Phone mode is the app with no node (ADR 0018). It signs in with Pubky Ring, plays TIDAL and Qobuz with
+the person's own accounts, keeps added songs on the phone, and keeps the person's data on their
+homeserver. CI checks it on an emulator (`android.yml`, `phone-mode`, with an APK built with the
+`phone-mode-fixture` feature): phone mode opens by itself with no node, a song is found by searching
+in the page and plays in real time from a stand-in TIDAL, and the log carries no token. Also checked
+without a phone:
+- the connect page and the page's phone views, on fixture pages (`tools/ui-connect-phone.js`,
+  `tools/ui-phone-mode.js`, `tools/ui-phone-songs.js`);
+- the backend, in `crates/pm-offline/tests/phone_mode.rs`;
+- the vault, Bookmarks, listens, prefs and the homeserver copy against a real homeserver, in
+  `crates/pm-offline/tests/phone_vault.rs`.
+
+Not checked there: a real Ring sign-in, the real TIDAL and Qobuz, the system file picker, and a real
+phone's network and battery.
+
+```
+APK of the top PR of the stack (or edge, once merged). A Pubky Ring account; a TIDAL and a Qobuz account.
+1. Fresh install. On the connect page, under "No node?", tap "Use without a node" and approve in Ring.
+   The app opens Search with no node. Settings › This phone shows your Pubky.
+2. Settings › My streaming accounts › TIDAL: sign in (Sign in with TIDAL, then the code way after
+   signing out). Search a song and play it: it starts within a few seconds, seek works, the next song
+   follows by itself, and it goes on with the screen off for 3 minutes.
+3. The same with Qobuz (email and password): search finds Qobuz songs and one plays.
+4. Bookmark a TIDAL album and play two songs. On your node, press Save now in Your library (a node
+   takes in what other devices wrote when it syncs: at start, after its own changes, or then): the
+   album is in its Bookmarks, and the songs are in its listen history.
+5. A fresh install takes the node's sign-in. Uninstall the app. On the node, sign out of TIDAL and sign
+   in again with the built-in app (not a TIDAL client of your own), so the vault holds the node's copy,
+   not the phone's from step 2. Install again, choose "Use without a node" and approve in Ring: the
+   phone lists itself in the vault. Then, with the node's token, `POST /v1/vault/sync` on the node (it
+   shares its sign-ins with the new phone; by itself it does every 15 minutes), then close the app on
+   the phone and open it again (a start syncs at once; else within 15 minutes): TIDAL shows signed in. The node's `GET /v1/vault` lists a
+   device "Odeion on this phone".
+6. Airplane mode: bookmark another album. Airplane mode off, then bookmark a third one (a change starts
+   a sync; otherwise wait up to 15 minutes), then Save now on the node: both albums are in the node's
+   Bookmarks.
+7. My songs (Library tab) › Add songs: pick two FLACs or MP3s in the system's picker. They are listed
+   with title, artist and cover, and play in airplane mode.
+8. Settings › This phone › Keep added songs on my homeserver: on by default only if your homeserver is
+   the one installed with your node. Turn it on: within a few minutes the songs are in your homeserver's
+   files. With the homeserver installed with the node (its files folder a library folder), the node's
+   library lists them; with another homeserver, the node's Bring files here offers them. Remove one there:
+   the phone doesn't copy it again.
+9. Settings › This phone › Connect to a node: the connect page. Connect to your node, then come back to
+   the connect page and choose "Use without a node" again: your sign-ins and songs are still there.
+10. If anything fails: `adb logcat -s pubky-music` (lines start "phone mode:"), the phone's model and
+   Android version.
 ```
 
 ## The Android app's screens (the owner's recording, 2026-11-06)
