@@ -84,20 +84,51 @@ pub(crate) fn adopt_cleared(lib: &Library, theirs: i64) -> Result<usize, ApiErro
 const CLEARED_AHEAD: &str = "history.cleared_ahead";
 const CLEARED_AHEAD_KEPT: usize = 16;
 
-fn adopt_cleared_at(lib: &Library, theirs: i64, now: i64) -> Result<usize, ApiError> {
-    let mut ahead: Vec<i64> = lib
+/// A delete time of this node's own that lies ahead of its clock cannot be right: it was taken
+/// as written from another node before ahead-dated times were known, or made here while this
+/// node's clock ran ahead. Left alone it deletes every listen written until that time, here and
+/// (in the sync's pull) from the homeserver. It becomes now, once, and is remembered as written
+/// so the copy naming it is not taken again.
+pub(crate) fn settle_cleared(lib: &Library) -> Result<(), ApiError> {
+    let mut ahead = cleared_ahead(lib)?;
+    settle_cleared_at(lib, &mut ahead, pm_pubky::ids::now_micros())
+}
+
+fn settle_cleared_at(lib: &Library, ahead: &mut Vec<i64>, now: i64) -> Result<(), ApiError> {
+    let Some(mine) = cleared_before(lib).filter(|mine| *mine > now) else {
+        return Ok(());
+    };
+    if !ahead.contains(&mine) {
+        remember_ahead(lib, ahead, mine)?;
+    }
+    lib.set_setting(CLEARED, &now.to_string())?;
+    Ok(())
+}
+
+fn cleared_ahead(lib: &Library) -> Result<Vec<i64>, ApiError> {
+    Ok(lib
         .get_setting(CLEARED_AHEAD)?
         .map(|v| v.split(',').filter_map(|t| t.parse().ok()).collect())
-        .unwrap_or_default();
+        .unwrap_or_default())
+}
+
+fn remember_ahead(lib: &Library, ahead: &mut Vec<i64>, written: i64) -> Result<(), ApiError> {
+    ahead.push(written);
+    let from = ahead.len().saturating_sub(CLEARED_AHEAD_KEPT);
+    let kept: Vec<String> = ahead[from..].iter().map(|t| t.to_string()).collect();
+    lib.set_setting(CLEARED_AHEAD, &kept.join(","))?;
+    Ok(())
+}
+
+fn adopt_cleared_at(lib: &Library, theirs: i64, now: i64) -> Result<usize, ApiError> {
+    let mut ahead = cleared_ahead(lib)?;
+    settle_cleared_at(lib, &mut ahead, now)?;
     // Taken before, whatever the clock says by now
     if ahead.contains(&theirs) {
         return Ok(0);
     }
     let at = if theirs > now {
-        ahead.push(theirs);
-        let from = ahead.len().saturating_sub(CLEARED_AHEAD_KEPT);
-        let kept: Vec<String> = ahead[from..].iter().map(|t| t.to_string()).collect();
-        lib.set_setting(CLEARED_AHEAD, &kept.join(","))?;
+        remember_ahead(lib, &mut ahead, theirs)?;
         now
     } else {
         theirs
@@ -617,6 +648,31 @@ mod tests {
         assert_eq!(super::cleared_before(&lib), Some(later + 10));
         assert_eq!(left(&lib), [later + 20]);
         assert!(!crate::sync::is_backed_up(super::CLEARED_AHEAD));
+
+        // A node that holds a delete time ahead of its clock (taken as written before this, or
+        // made while its own clock ran ahead): the time becomes now, once, and the copy naming
+        // the old one is no news
+        let lib = Library::open_in_memory().unwrap();
+        lib.set_setting(super::CLEARED, &ahead.to_string()).unwrap();
+        lib.upsert_music_post(&listen(5_000)).unwrap();
+        let mut none = Vec::new();
+        super::settle_cleared_at(&lib, &mut none, 10_000).unwrap();
+        assert_eq!(super::cleared_before(&lib), Some(10_000));
+        lib.upsert_music_post(&listen(20_000)).unwrap();
+        let mut seen = super::cleared_ahead(&lib).unwrap();
+        assert_eq!(seen, [ahead]);
+        super::settle_cleared_at(&lib, &mut seen, 30_000).unwrap();
+        assert_eq!(super::cleared_before(&lib), Some(10_000), "set right once");
+        assert_eq!(super::adopt_cleared_at(&lib, ahead, 30_000).unwrap(), 0);
+        assert_eq!(super::adopt_cleared_at(&lib, ahead, ahead + 1).unwrap(), 0);
+        assert_eq!(left(&lib), [20_000, 5_000]);
+        // The same through a delete that arrives: the stored time is set right first
+        let lib = Library::open_in_memory().unwrap();
+        lib.set_setting(super::CLEARED, &ahead.to_string()).unwrap();
+        lib.upsert_music_post(&listen(20_000)).unwrap();
+        assert_eq!(super::adopt_cleared_at(&lib, ahead, 30_000).unwrap(), 0);
+        assert_eq!(super::cleared_before(&lib), Some(30_000));
+        assert_eq!(left(&lib), [20_000]);
         // Only the newest ahead-dated times are remembered
         for n in 0..40 {
             super::adopt_cleared_at(&lib, 100 * hour + n, 50 * hour + n).unwrap();

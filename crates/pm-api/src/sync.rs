@@ -958,6 +958,10 @@ impl PubkySync {
         }
         let cleared_before = {
             let lib = self.lib(library)?;
+            // (a delete time that lies ahead of the clock is set right before it is used)
+            if let Err(e) = crate::listens::settle_cleared(&lib) {
+                report.errors.push(format!("history delete time: {}", e.message));
+            }
             crate::listens::cleared_before(&lib)
         };
         let mut reads = 0;
