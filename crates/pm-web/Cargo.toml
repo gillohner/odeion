@@ -17,4 +17,5 @@ sha2 = "0.10"
 tokio = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
