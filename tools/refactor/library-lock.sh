@@ -6,7 +6,8 @@
 # A file left with an unused `Mutex` import afterwards is reported by clippy.
 set -eu
 cd "$(dirname "$0")/../.."
-files=$(grep -rlE '(std::sync::)?Mutex<(pm_library::)?Library>|Mutex::new\(library\)' crates --include='*.rs' || true)
+# (pm-library itself is left out: `LibraryLock` there is the one place that holds the mutex)
+files=$(grep -rlE '(std::sync::)?Mutex<(pm_library::)?Library>|Mutex::new\(library\)' crates --include='*.rs' --exclude-dir=pm-library || true)
 [ -n "$files" ] || { echo "nothing to rewrite"; exit 0; }
 for f in $files; do
   sed -E -i \
