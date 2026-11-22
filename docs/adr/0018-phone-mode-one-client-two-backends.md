@@ -74,7 +74,13 @@ from a node.
   other apps on the phone out. A sign-ins file or vault sync record that can't be read is never taken
   for an empty one (that would be a sign-out the vault sync carries out, or a first sync): it stays as
   it is, and phone mode doesn't start (the sign-ins) or doesn't sync with the vault (the record) until
-  it reads.
+  it reads. A service's sign-in in the file that isn't its JSON counts as an unreadable file. The
+  phone's other files are kept the same way: the person's waiting writes (`data.json`), the record of
+  songs copied (`files.json`) and the song list (`songs.json`) are left as they are when they can't be
+  read, and nothing is saved over them (phone mode still starts).
+- One backend per person on the phone: leaving phone mode ends its sync and waits, and opening it again
+  while a step of the old one still runs gives back that one, so two never write the sign-ins over each
+  other's.
 - A TIDAL song is fetched once into the app's cache (the newest 3 are kept). It is sent to the player as
   it arrives when the fetch takes longer than 12 s, and a fetch that nobody reads for 5 s stops.
 - The built-in TIDAL clients ship inside the APK, masked as they are in the node's binaries.

@@ -590,8 +590,9 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
                 Ok(Some(a)) => {
                     let a = Arc::new(a);
                     // Phone mode left and opened again meanwhile: restored again for that start
+                    // (an account set meanwhile, a new Ring sign-in, is the one used)
                     let mut kept = p.account.write().await;
-                    if p.life.lock().unwrap_or_else(|e| e.into_inner()).opened != opened {
+                    if kept.is_some() || p.life.lock().unwrap_or_else(|e| e.into_inner()).opened != opened {
                         continue;
                     }
                     tracing::info!("phone mode: Pubky session restored");

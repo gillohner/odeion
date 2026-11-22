@@ -99,6 +99,19 @@ fn save_unsaved(p: &Phone) {
     }
 }
 
+/// A renewal that couldn't be saved before, saved now if it can be (not while a renewal runs).
+pub(crate) fn try_save_unsaved(p: &Phone) {
+    if p.tidal_unsaved
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+    {
+        if let Ok(_one) = p.tidal_renewal.try_lock() {
+            save_unsaved(p);
+        }
+    }
+}
+
 /// The TIDAL state as the phone keeps it, with a renewal it couldn't save yet in place of the
 /// session that renewal replaced.
 fn with_unsaved(p: &Phone, mut st: ModeState) -> ModeState {
@@ -145,16 +158,7 @@ fn due(s: &full::Session) -> bool {
 /// The person's session when TIDAL can answer for them (renewed first when it is about to run
 /// out), else why not.
 pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
-    // A renewal that couldn't be saved before: saved now if it can be (not while a renewal runs)
-    if p.tidal_unsaved
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_some()
-    {
-        if let Ok(_one) = p.tidal_renewal.try_lock() {
-            save_unsaved(p);
-        }
-    }
+    try_save_unsaved(p);
     let s = held(p)?;
     if !due(&s) {
         return Ok(s);

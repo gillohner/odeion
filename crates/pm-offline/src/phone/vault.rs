@@ -410,6 +410,9 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
         // A TIDAL renewal held since its save failed, which the vault doesn't have: what the
         // file holds is not what the phone uses (its refresh token may be spent), so it isn't
         // synced until it is saved
+        if svc == TIDAL_FULL.service {
+            super::tidal::try_save_unsaved(phone);
+        }
         if svc == TIDAL_FULL.service && super::tidal::held_outside_vault(phone) {
             report
                 .skipped
@@ -503,6 +506,7 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                     // Not taken (a copy this version can't read, or not saved): nothing recorded,
                     // the next pass tries again
                     Err(e) => {
+                        tracing::warn!("phone mode: vault: {svc}: the vault's copy is not taken: {e}");
                         report.skipped.push(format!("{svc}: {e}"));
                         continue;
                     }
