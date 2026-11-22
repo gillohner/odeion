@@ -15,6 +15,7 @@ pub mod activity;
 pub mod archive;
 pub mod art;
 pub mod artist_info;
+mod assets;
 pub mod audius;
 pub mod copy_guard;
 pub mod copy_jobs;
@@ -883,55 +884,33 @@ pub fn router(state: Arc<NodeState>) -> Router {
         // Installing the web app (docs/guides/install-web-app.md): public like the page
         .route(
             "/pwa.js",
-            get(|| async { install_file(INSTALL_JS, "no-cache", include_bytes!("../static/pwa.js")) }),
+            get(|h: HeaderMap| async move { assets::PWA_JS.respond(&h, &[]) }),
         )
         .route(
             "/pwa.css",
-            get(|| async { install_file(INSTALL_CSS, "no-cache", include_bytes!("../static/pwa.css")) }),
+            get(|h: HeaderMap| async move { assets::PWA_CSS.respond(&h, &[]) }),
         )
+        // (the worker is asked for again at every visit like the rest, so a changed one reaches
+        // browsers at once)
         .route(
             "/sw.js",
-            get(|| async { install_file(INSTALL_JS, "no-cache", include_bytes!("../static/sw.js")) }),
+            get(|h: HeaderMap| async move { assets::SW_JS.respond(&h, &[]) }),
         )
         .route(
             "/icon-192.png",
-            get(|| async {
-                install_file(
-                    INSTALL_PNG,
-                    INSTALL_ICON_CACHE,
-                    include_bytes!("../static/icon-192.png"),
-                )
-            }),
+            get(|h: HeaderMap| async move { assets::ICON_192.respond(&h, &[]) }),
         )
         .route(
             "/icon-512.png",
-            get(|| async {
-                install_file(
-                    INSTALL_PNG,
-                    INSTALL_ICON_CACHE,
-                    include_bytes!("../static/icon-512.png"),
-                )
-            }),
+            get(|h: HeaderMap| async move { assets::ICON_512.respond(&h, &[]) }),
         )
         .route(
             "/icon-maskable-512.png",
-            get(|| async {
-                install_file(
-                    INSTALL_PNG,
-                    INSTALL_ICON_CACHE,
-                    include_bytes!("../static/icon-maskable-512.png"),
-                )
-            }),
+            get(|h: HeaderMap| async move { assets::ICON_MASKABLE_512.respond(&h, &[]) }),
         )
         .route(
             "/apple-touch-icon.png",
-            get(|| async {
-                install_file(
-                    INSTALL_PNG,
-                    INSTALL_ICON_CACHE,
-                    include_bytes!("../static/apple-touch-icon.png"),
-                )
-            }),
+            get(|h: HeaderMap| async move { assets::APPLE_TOUCH_ICON.respond(&h, &[]) }),
         )
         .nest("/v1", v1)
         // Reached without a bearer token: the OAuth redirect target and the
@@ -1016,6 +995,8 @@ pub fn bind_error(listen: &str, e: &std::io::Error) -> String {
 
 /// Serve on an already bound listener (tests bind port 0).
 pub async fn serve_listener(state: Arc<NodeState>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+    // The page's files, hashed and gzipped before the first page load asks for them
+    tokio::task::spawn_blocking(assets::prepare);
     // Peer addresses: the renderer answers LAN peers only (peer.rs)
     axum::serve(
         listener,
@@ -1234,127 +1215,54 @@ async fn ux_file(Path(path): Path<String>) -> Response {
     }
 }
 
-async fn web_css() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("../static/app.css"),
-    )
-        .into_response()
+/// The page's files (assets.rs): each with an ETag, text gzipped for browsers that take it,
+/// and asked for again at every load (the icons keep their names when the picture changes).
+async fn web_css(h: HeaderMap) -> Response {
+    assets::APP_CSS.respond(&h, &[])
 }
 
-async fn web_js() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("../static/app.js"),
-    )
-        .into_response()
+async fn web_js(h: HeaderMap) -> Response {
+    assets::APP_JS.respond(&h, &[])
 }
 
 /// Help and problem reports (feedback.js, feedback.css), loaded by the page.
-async fn feedback_js() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("../static/feedback.js"),
-    )
-        .into_response()
+async fn feedback_js(h: HeaderMap) -> Response {
+    assets::FEEDBACK_JS.respond(&h, &[])
 }
 
 /// Usage insights' browser part (usage.js): records nothing unless the node's switch is on.
-async fn usage_js() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("../static/usage.js"),
-    )
-        .into_response()
+async fn usage_js(h: HeaderMap) -> Response {
+    assets::USAGE_JS.respond(&h, &[])
 }
 
-async fn feedback_css() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("../static/feedback.css"),
-    )
-        .into_response()
+async fn feedback_css(h: HeaderMap) -> Response {
+    assets::FEEDBACK_CSS.respond(&h, &[])
 }
 
-async fn web_manifest() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "application/manifest+json"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("../static/manifest.webmanifest"),
-    )
-        .into_response()
+async fn web_manifest(h: HeaderMap) -> Response {
+    assets::MANIFEST.respond(&h, &[])
 }
 
-async fn web_icon() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "image/svg+xml"),
-            (header::CACHE_CONTROL, INSTALL_ICON_CACHE),
-        ],
-        include_str!("../static/icon.svg"),
-    )
-        .into_response()
+async fn web_icon(h: HeaderMap) -> Response {
+    assets::ICON_SVG.respond(&h, &[])
 }
 
-const INSTALL_JS: &str = "text/javascript; charset=utf-8";
-const INSTALL_CSS: &str = "text/css; charset=utf-8";
-const INSTALL_PNG: &str = "image/png";
-/// The icons keep their file names when the picture changes (the Odeion logo replaced the old
-/// one), so browsers ask again every time instead of keeping a day-old icon.
-const INSTALL_ICON_CACHE: &str = "no-cache";
-
-/// One of the installable web app's files: the install script and its styles, the service
-/// worker (never cached by HTTP, so a changed one reaches browsers at once) and the icons.
-fn install_file(mime: &'static str, cache: &'static str, body: &'static [u8]) -> Response {
-    (
-        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, cache)],
-        body,
-    )
-        .into_response()
+/// What the node's pages are served with besides the file: the policy for their scripts
+/// (web.rs), and no framing by other sites.
+fn page_headers() -> [(header::HeaderName, &'static str); 2] {
+    [
+        (header::CONTENT_SECURITY_POLICY, web::PAGE_CSP.as_str()),
+        (header::X_FRAME_OPTIONS, "DENY"),
+    ]
 }
 
 /// `GET /party/{code}`: the page a party guest opens (no token; it joins with the code).
-async fn party_page() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-            (header::CONTENT_SECURITY_POLICY, web::PAGE_CSP.as_str()),
-            (header::X_FRAME_OPTIONS, "DENY"),
-        ],
-        include_str!("../static/party.html"),
-    )
-        .into_response()
+async fn party_page(h: HeaderMap) -> Response {
+    assets::PARTY_HTML.respond(&h, &page_headers())
 }
 
-async fn web_ui() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-            (header::CONTENT_SECURITY_POLICY, web::PAGE_CSP.as_str()),
-            (header::X_FRAME_OPTIONS, "DENY"),
-        ],
-        include_str!("../static/index.html"),
-    )
-        .into_response()
+async fn web_ui(h: HeaderMap) -> Response {
+    assets::INDEX_HTML.respond(&h, &page_headers())
 }
 
 // ---- handlers: node ----
@@ -13619,8 +13527,37 @@ exec sleep 300
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            let etag = resp.headers()[header::ETAG].clone();
             let body = resp.into_body().collect().await.unwrap().to_bytes();
             assert!(std::str::from_utf8(&body).unwrap().contains(needle), "{path}");
+            // A browser that takes gzip gets the same file smaller, and one that has it, nothing
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::ACCEPT_ENCODING, "gzip, deflate, br")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.headers()[header::CONTENT_ENCODING], "gzip", "{path}");
+            assert_eq!(resp.headers()[header::ETAG], etag, "{path}");
+            let zipped = resp.into_body().collect().await.unwrap().to_bytes();
+            assert!(zipped.len() < body.len(), "{path}");
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::IF_NONE_MATCH, &etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_MODIFIED, "{path}");
         }
     }
 
@@ -19411,12 +19348,30 @@ exec sleep 300
             assert_eq!(resp.status(), StatusCode::OK, "{path}");
             assert_eq!(resp.headers()[header::CONTENT_TYPE], mime, "{path}");
             assert_eq!(resp.headers()[header::CACHE_CONTROL], cache, "{path}");
+            let etag = resp.headers()[header::ETAG].clone();
             let body = resp.into_body().collect().await.unwrap().to_bytes();
             if mime == "image/png" {
                 assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"), "{path} is a PNG");
             } else {
                 assert!(!body.is_empty(), "{path}");
             }
+            // Asked for again by a browser that has it: no body (assets.rs)
+            let again = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::IF_NONE_MATCH, &etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(again.status(), StatusCode::NOT_MODIFIED, "{path}");
+            assert!(
+                again.into_body().collect().await.unwrap().to_bytes().is_empty(),
+                "{path}"
+            );
         }
         // The page names them, and its policy lets the node's own worker run
         let resp = app
