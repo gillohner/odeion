@@ -117,7 +117,7 @@ async fn client_round_trip() {
         match tokio::time::timeout_at(deadline, events.next()).await {
             Ok(Some(Ok(ApiEvent::ZoneEvent { zone, event }))) if zone.0 == zid => match event {
                 pm_zones::ZoneEvent::TrackStarted { .. } => started = true,
-                pm_zones::ZoneEvent::Stopped if started => stopped_after = true,
+                pm_zones::ZoneEvent::Stopped { .. } if started => stopped_after = true,
                 _ => {}
             },
             Ok(Some(Ok(_))) => {}

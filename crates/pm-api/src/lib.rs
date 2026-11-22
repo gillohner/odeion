@@ -13252,7 +13252,7 @@ exec sleep 300
                     assert_eq!(source_format.rate_hz, 44_100);
                 }
                 Ok(Ok(pm_zones::ZoneEvent::Error { message })) => panic!("playback error: {message}"),
-                Ok(Ok(pm_zones::ZoneEvent::Stopped)) if started => break,
+                Ok(Ok(pm_zones::ZoneEvent::Stopped { .. })) if started => break,
                 Ok(Ok(_)) => {}
                 Ok(Err(_)) => break,
                 Err(_) => {}
@@ -27336,4 +27336,7 @@ exec sleep 300
         assert_eq!(found(app.clone()).await, (false, one));
         drop(slot);
     }
+
+    /// Radio goes on when the queue runs out, not after a Stop (its own file).
+    mod radio_stop;
 }

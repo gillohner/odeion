@@ -307,7 +307,7 @@ impl Engine {
         self.emit(ZoneEvent::Error { message });
         if self.transport != Transport::Stopped {
             self.transport = Transport::Stopped;
-            self.emit(ZoneEvent::Stopped);
+            self.emit(ZoneEvent::Stopped { queue_ended: false });
         }
         self.dirty = true;
         self.publish();
@@ -826,7 +826,7 @@ impl Engine {
         if self.transport != Transport::Stopped {
             self.transport = Transport::Stopped;
             self.output.now_playing(None);
-            self.emit(ZoneEvent::Stopped);
+            self.emit(ZoneEvent::Stopped { queue_ended: false });
         }
         self.dirty = true;
     }
@@ -1258,7 +1258,7 @@ impl Engine {
         self.transport = Transport::Stopped;
         self.dirty = true;
         self.output.now_playing(None);
-        self.emit(ZoneEvent::Stopped);
+        self.emit(ZoneEvent::Stopped { queue_ended: true });
     }
 
     // ---- crossfade ----

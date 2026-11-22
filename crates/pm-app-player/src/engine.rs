@@ -245,7 +245,7 @@ impl Page {
                 }
                 true.into()
             }
-            ZoneEvent::Stopped => {
+            ZoneEvent::Stopped { .. } => {
                 self.resuming = None;
                 true.into()
             }
