@@ -198,6 +198,22 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     std::fs::create_dir_all(&cfg.data_dir)?;
     // First, so a port in use stops the start at once and says why (another node running)
     let listener = pm_api::bind(&cfg.api.listen).await?;
+    // The data folder is this node's while it runs: `odeiond restore` looks for this hold. A
+    // second node on the same folder (another port) is not refused, it is told
+    let _data_dir_hold = match library::lock_data_dir(cfg) {
+        Ok(Some(hold)) => Some(hold),
+        Ok(None) => {
+            tracing::warn!(
+                data_dir = %cfg.data_dir.display(),
+                "another node is running on this data folder: two nodes on one database lose each other's changes"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::debug!(data_dir = %cfg.data_dir.display(), "no lock on the data folder: {e}");
+            None
+        }
+    };
     let db_path = cfg.db_path();
     // Sign-ins, keys and the token live in these: the node's alone, before the database is opened
     // (and migrated) and before anything reads them

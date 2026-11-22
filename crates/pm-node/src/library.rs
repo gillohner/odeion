@@ -12,6 +12,29 @@ fn open(cfg: &NodeConfig) -> anyhow::Result<Library> {
     Library::open(&path).with_context(|| format!("opening library {}", path.display()))
 }
 
+/// A running node's hold on its data folder: a lock on `node.lock` there, kept as long as this
+/// lives. The system lets go of it when the process ends, however it ends, so no stale hold
+/// stays behind.
+pub struct DataDirLock {
+    _file: std::fs::File,
+}
+
+/// Take the hold on the data folder. `Ok(None)`: another process (a running node) has it.
+/// `Err`: the folder has no locks (some network shares) or the file can't be made.
+pub fn lock_data_dir(cfg: &NodeConfig) -> std::io::Result<Option<DataDirLock>> {
+    std::fs::create_dir_all(&cfg.data_dir)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(cfg.data_dir.join("node.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(DataDirLock { _file: file })),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
+}
+
 /// The work folders `backup` makes in the data folder: `backup-work-<pid>`.
 const WORK_PREFIX: &str = "backup-work-";
 
@@ -148,9 +171,21 @@ fn write_staged(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Replace the library database with a backup. Stop the node first: the
 /// previous database is kept as `library.db.bak`, and stale WAL files are
-/// removed so SQLite cannot replay them into the restored copy.
+/// removed so SQLite cannot replay them into the restored copy. While a node runs on the data
+/// folder this is refused: that node would go on writing into the database it has open (now
+/// `library.db.bak`, without its WAL files), and nothing it stores would be in the restored one.
 pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
+    let _hold = match lock_data_dir(cfg) {
+        Ok(Some(hold)) => Some(hold),
+        Ok(None) => anyhow::bail!(
+            "a node is running on {}: stop it first, or restore from Settings › Backup in the web app, \
+             which works while it runs",
+            cfg.data_dir.display()
+        ),
+        // A folder without locks: as before, on the word that the node is stopped
+        Err(_) => None,
+    };
     let db = cfg.db_path();
     // Validate (and migrate) a scratch copy first so a broken file never
     // replaces a working library.
@@ -792,5 +827,41 @@ mod tests {
         let lib = open(&cfg).unwrap();
         assert_eq!(lib.get_setting("accounts.owner_sessions").unwrap(), None);
         assert_eq!(lib.get_setting("home.layout").unwrap().as_deref(), Some("kept"));
+    }
+
+    /// `restore` does not replace the database while a node holds the data folder, and does
+    /// once that node is gone.
+    #[test]
+    fn the_restore_command_is_refused_while_a_node_runs_on_the_data_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.path().join("data"),
+            ..Default::default()
+        };
+        open(&cfg).unwrap().set_setting("home.layout", "old").unwrap();
+        let file = dir.path().join("copy.sqlite");
+        backup(&cfg, &file, false).unwrap();
+        open(&cfg).unwrap().set_setting("home.layout", "new").unwrap();
+        let bak = cfg.db_path().with_extension("db.bak");
+
+        let running = lock_data_dir(&cfg).unwrap().expect("no node holds it yet");
+        assert!(lock_data_dir(&cfg).unwrap().is_none(), "held once");
+        let e = restore(&cfg, &file).unwrap_err().to_string();
+        assert!(e.contains("a node is running"), "{e}");
+        assert!(!bak.exists(), "the database was not moved");
+        assert_eq!(
+            open(&cfg).unwrap().get_setting("home.layout").unwrap().as_deref(),
+            Some("new")
+        );
+
+        drop(running);
+        restore(&cfg, &file).unwrap();
+        assert!(bak.exists());
+        assert_eq!(
+            open(&cfg).unwrap().get_setting("home.layout").unwrap().as_deref(),
+            Some("old")
+        );
+        // The restore let go of it again
+        assert!(lock_data_dir(&cfg).unwrap().is_some());
     }
 }
