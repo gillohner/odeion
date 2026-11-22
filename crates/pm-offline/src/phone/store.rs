@@ -22,30 +22,110 @@ pub struct FileStore {
     values: Mutex<BTreeMap<String, String>>,
     /// Told after every change (phase 3: the vault hears of new sign-ins).
     changed: Mutex<Option<Hook>>,
+    /// The sign-ins set aside when this store was opened (they couldn't be read), and the copy
+    /// of the file kept with them (its name in the store's folder).
+    set_aside: Vec<String>,
+    kept_as: Option<String>,
+}
+
+/// The streaming sign-ins the file holds, each read by its service.
+const SIGN_INS: [&str; 2] = [pm_sources::tidal::full::STATE_KEY, pm_sources::qobuz::STATE_KEY];
+
+/// Where the store notes that the sign-in under `key` was set aside at start (the value: the copy
+/// of the file kept with it): until the person signs in to it again (or the vault's copy is taken),
+/// the vault sync writes nothing of it and never removes it from the vault (`vault::services`).
+pub(crate) fn set_aside_key(key: &str) -> String {
+    format!("vault.set_aside.{key}")
 }
 
 impl FileStore {
-    /// The store in `dir` (made if missing); with no file yet, empty. A file that can't be read,
-    /// or isn't the store's JSON, is an error and is left as it is: read as empty it would be a
-    /// sign-out of everything, which the vault sync would then carry to the vault. The same for a
-    /// streaming sign-in in it that isn't its service's JSON (each service reads one it can't
-    /// parse as signed out).
+    /// The store in `dir` (made if missing); with no file yet, empty.
+    ///
+    /// A file that can't be read, or isn't the store's JSON, is never read as empty, and a sign-in
+    /// in it that isn't its service's JSON is never read as signed out: either would be a sign-out
+    /// the vault sync carries to the vault. The file is kept whole under a dated name instead
+    /// (`sign-ins.json.<date>.unreadable`, beside it), and the store starts without what couldn't
+    /// be read (one bad sign-in: only that one), each such sign-in noted as set aside
+    /// ([`set_aside_key`]): signed out on this phone, and held out of the vault sync until the
+    /// person signs in to it again. When the copy can't be kept, an error, and the file is left as
+    /// it is.
     pub fn open(dir: &std::path::Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(FILE);
-        let values: BTreeMap<String, String> = match std::fs::read(&path) {
-            Ok(b) => serde_json::from_slice(&b).map_err(|e| unreadable(&path, e))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(e) => return Err(unreadable(&path, e)),
+        let (mut values, aside): (BTreeMap<String, String>, Vec<String>) = match std::fs::read(&path) {
+            Ok(b) => match serde_json::from_slice::<BTreeMap<String, String>>(&b) {
+                Ok(mut values) => {
+                    let bad: Vec<String> = values
+                        .iter()
+                        .filter_map(|(k, v)| {
+                            let e = sign_in_reads(k, v).err()?;
+                            tracing::error!(
+                                "phone mode: a sign-in in {} can't be read ({e})",
+                                path.display()
+                            );
+                            Some(k.clone())
+                        })
+                        .collect();
+                    for k in &bad {
+                        values.remove(k);
+                    }
+                    (values, bad)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "phone mode: the sign-ins in {} can't be read (line {}, column {})",
+                        path.display(),
+                        e.line(),
+                        e.column()
+                    );
+                    (BTreeMap::new(), SIGN_INS.map(String::from).to_vec())
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (BTreeMap::new(), Vec::new()),
+            Err(e) => {
+                tracing::error!(
+                    "phone mode: the sign-ins in {} can't be read ({e})",
+                    path.display()
+                );
+                (BTreeMap::new(), SIGN_INS.map(String::from).to_vec())
+            }
         };
-        for (k, v) in &values {
-            sign_in_reads(k, v).map_err(|e| unreadable(&path, e))?;
-        }
-        Ok(Self {
+        let mut store = Self {
             path,
-            values: Mutex::new(values),
+            values: Mutex::new(BTreeMap::new()),
             changed: Mutex::new(None),
-        })
+            set_aside: Vec::new(),
+            kept_as: None,
+        };
+        if !aside.is_empty() {
+            // The file kept whole first (another name for it: nothing is read or copied), then
+            // the one without what couldn't be read put in its place in one step: a crash in
+            // between leaves the file as it was, set aside again at the next start
+            let kept = keep_aside(&store.path).map_err(|e| unreadable(&store.path, e))?;
+            for k in &aside {
+                values.insert(set_aside_key(k), kept.clone());
+            }
+            if let Err(e) = store.save(&values) {
+                // (Only the extra name goes: the file is still there under its own)
+                let _ = std::fs::remove_file(store.path.with_file_name(&kept));
+                return Err(unreadable(&store.path, e));
+            }
+            tracing::warn!(
+                "phone mode: sign-ins that couldn't be read ({}) were set aside, kept as {kept}: \
+                 signed out here until signed in again",
+                aside.join(", ")
+            );
+            store.set_aside = aside;
+            store.kept_as = Some(kept);
+        }
+        *store.values.get_mut().unwrap_or_else(|e| e.into_inner()) = values;
+        Ok(store)
+    }
+
+    /// The sign-ins set aside when the store was opened ([`FileStore::open`]: their keys), and the
+    /// name the file was kept under.
+    pub fn set_aside(&self) -> (&[String], Option<&str>) {
+        (&self.set_aside, self.kept_as.as_deref())
     }
 
     /// Who hears of a changed key.
@@ -122,24 +202,79 @@ pub(crate) fn sign_in_reads(key: &str, value: &str) -> Result<(), String> {
         pm_sources::tidal::full::STATE_KEY => {
             serde_json::from_str::<pm_sources::tidal::full::ModeState>(value)
                 .map(|_| ())
-                .map_err(|e| format!("TIDAL: {e}"))
+                .map_err(|e| format!("TIDAL: {}", where_in(&e)))
         }
         pm_sources::qobuz::STATE_KEY => serde_json::from_str::<pm_sources::qobuz::ModeState>(value)
             .map(|_| ())
-            .map_err(|e| format!("Qobuz: {e}")),
+            .map_err(|e| format!("Qobuz: {}", where_in(&e))),
         _ => Ok(()),
     }
 }
 
-/// The sign-ins file can't be read (logged): phone mode doesn't start rather than start signed out.
+/// Where a sign-in doesn't read, never what it read (the parser quotes values: a token, say).
+fn where_in(e: &serde_json::Error) -> String {
+    let what = match e.classify() {
+        serde_json::error::Category::Io => "not read",
+        serde_json::error::Category::Syntax => "not JSON",
+        serde_json::error::Category::Data => "not its form",
+        serde_json::error::Category::Eof => "cut short",
+    };
+    format!("{what} (line {}, column {})", e.line(), e.column())
+}
+
+/// The sign-ins file can't be read and couldn't be set aside (logged): phone mode doesn't start
+/// rather than start signed out.
 fn unreadable(path: &std::path::Path, e: impl std::fmt::Display) -> std::io::Error {
     tracing::error!(
-        "phone mode: the sign-ins in {} can't be read ({e}); left as they are",
+        "phone mode: the sign-ins in {} can't be read, nor kept aside ({e}); left as they are",
         path.display()
     );
     std::io::Error::other(format!(
-        "the sign-ins on this phone can't be read ({e}); they are left as they are"
+        "the sign-ins on this phone can't be read, nor kept aside ({e}); they are left as they are"
     ))
+}
+
+/// `path` kept under a dated name beside it (`<name>.<UTC date>.unreadable`, never one already
+/// there), as another name for the same file: nothing needs reading. Its name.
+fn keep_aside(path: &std::path::Path) -> std::io::Result<String> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| std::io::Error::other("no file name"))?;
+    let at = utc_stamp(pm_sources::now_unix());
+    for n in 0..100 {
+        let kept = match n {
+            0 => format!("{name}.{at}.unreadable"),
+            n => format!("{name}.{at}-{n}.unreadable"),
+        };
+        match std::fs::hard_link(path, path.with_file_name(&kept)) {
+            Ok(()) => return Ok(kept),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("too many copies kept already"))
+}
+
+/// `secs` (Unix) as `2026-11-22T09-40-00Z` (a file name's form of the UTC time).
+fn utc_stamp(secs: i64) -> String {
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Days to a civil date (Howard Hinnant's algorithm)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}-{:02}-{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 /// What the page is told when the sign-ins couldn't be saved (nothing changed).
@@ -313,18 +448,55 @@ mod tests {
         assert_eq!(FileStore::open(dir.path()).unwrap().cached().unwrap().id, "1");
     }
 
+    /// The copies kept beside the sign-ins file: name, contents.
+    fn kept(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        let mut v: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".unreadable"))
+            .map(|n| (n.clone(), std::fs::read(dir.join(&n)).unwrap()))
+            .collect();
+        v.sort();
+        v
+    }
+
     #[test]
-    fn sign_ins_that_cant_be_read_are_an_error_and_stay_as_they_are() {
+    fn sign_ins_that_cant_be_read_are_kept_aside_whole() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(FILE);
-        // None yet: a first start, empty
-        assert!(SessionStore::get(&FileStore::open(dir.path()).unwrap(), "tidal.unofficial").is_none());
-        // Not the store's JSON (cut short): an error, the file as it was
+        // None yet: a first start, empty, nothing set aside
+        let s = FileStore::open(dir.path()).unwrap();
+        assert!(SessionStore::get(&s, "tidal.unofficial").is_none());
+        assert!(s.set_aside().0.is_empty());
+        // Not the store's JSON (cut short): kept whole under a dated name, both sign-ins set
+        // aside (signed out here, held out of the vault sync)
         let cut = br#"{"tidal.unofficial":"signed in""#;
         std::fs::write(&file, cut).unwrap();
-        assert!(FileStore::open(dir.path()).is_err());
-        assert_eq!(std::fs::read(&file).unwrap(), cut);
-        // Can't be read at all (a folder in its place): an error, left there
+        let s = FileStore::open(dir.path()).unwrap();
+        let (keys, name) = s.set_aside();
+        assert_eq!(keys, ["tidal.unofficial", "qobuz.unofficial"]);
+        let name = name.unwrap().to_string();
+        assert!(
+            name.starts_with("sign-ins.json.20") && name.ends_with(".unreadable"),
+            "{name}"
+        );
+        assert_eq!(kept(dir.path()), vec![(name.clone(), cut.to_vec())]);
+        for k in ["tidal.unofficial", "qobuz.unofficial"] {
+            assert!(SessionStore::get(&s, k).is_none());
+            assert_eq!(
+                SessionStore::get(&s, &set_aside_key(k)).as_deref(),
+                Some(name.as_str())
+            );
+        }
+        // The next start reads the file (nothing more set aside; the notes stay until a sign-in)
+        drop(s);
+        let s = FileStore::open(dir.path()).unwrap();
+        assert!(s.set_aside().0.is_empty());
+        assert!(SessionStore::get(&s, &set_aside_key("tidal.unofficial")).is_some());
+        assert_eq!(kept(dir.path()).len(), 1);
+        // Can't be kept aside (a folder in its place): an error, left there
+        drop(s);
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
         assert!(FileStore::open(dir.path()).is_err());
@@ -332,18 +504,39 @@ mod tests {
     }
 
     #[test]
-    fn a_sign_in_that_cant_be_read_is_never_a_sign_out() {
+    fn a_sign_in_that_cant_be_read_is_set_aside_alone() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(FILE);
-        // The file reads, one service's sign-in in it doesn't (each would read it as signed out,
-        // and the vault sync would remove the vault's copy): an error, the file as it was
-        for (key, bad) in [("tidal.unofficial", "{"), ("qobuz.unofficial", "{\"session\":7}")] {
-            let body = serde_json::to_vec(&BTreeMap::from([(key, bad)])).unwrap();
+        // The file reads, one service's sign-in in it doesn't (read as signed out, the vault sync
+        // would remove the vault's copy): only that one is set aside, the file kept whole
+        for (key, bad, other) in [
+            ("tidal.unofficial", "{", "qobuz.unofficial"),
+            ("qobuz.unofficial", "{\"session\":7}", "tidal.unofficial"),
+        ] {
+            let body = serde_json::to_vec(&BTreeMap::from([
+                (key, bad),
+                (other, r#"{"enabled":true}"#),
+                ("vault.lineage.qobuz", "q-1"),
+            ]))
+            .unwrap();
             std::fs::write(&file, &body).unwrap();
-            assert!(FileStore::open(dir.path()).is_err(), "{key}");
-            assert_eq!(std::fs::read(&file).unwrap(), body);
+            let s = FileStore::open(dir.path()).unwrap();
+            assert_eq!(s.set_aside().0, [key], "{key}");
+            assert!(SessionStore::get(&s, key).is_none());
+            assert!(SessionStore::get(&s, &set_aside_key(key)).is_some());
+            assert!(SessionStore::get(&s, &set_aside_key(other)).is_none());
+            assert_eq!(
+                SessionStore::get(&s, other).as_deref(),
+                Some(r#"{"enabled":true}"#)
+            );
+            assert_eq!(
+                SessionStore::get(&s, "vault.lineage.qobuz").as_deref(),
+                Some("q-1")
+            );
+            let name = s.set_aside().1.unwrap().to_string();
+            assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), body);
         }
-        // Both as they are kept: read
+        // Both as they are kept: read, nothing set aside
         let good = BTreeMap::from([
             ("tidal.unofficial", r#"{"enabled":true,"session":null}"#),
             ("qobuz.unofficial", r#"{"enabled":false}"#),
@@ -351,10 +544,25 @@ mod tests {
         ]);
         std::fs::write(&file, serde_json::to_vec(&good).unwrap()).unwrap();
         let s = FileStore::open(dir.path()).unwrap();
+        assert!(s.set_aside().0.is_empty());
         assert_eq!(
             SessionStore::get(&s, "vault.lineage.qobuz").as_deref(),
             Some("q-1")
         );
+    }
+
+    #[test]
+    fn why_a_sign_in_doesnt_read_never_quotes_it() {
+        let e = sign_in_reads("tidal.unofficial", r#"{"session":"tok-123"}"#).unwrap_err();
+        assert!(!e.contains("tok-123"), "{e}");
+        assert!(e.starts_with("TIDAL: not its form"), "{e}");
+    }
+
+    #[test]
+    fn the_copys_date_is_utc() {
+        assert_eq!(utc_stamp(0), "1970-01-01T00-00-00Z");
+        assert_eq!(utc_stamp(1_795_340_000), "2026-11-22T09-33-20Z");
+        assert_eq!(utc_stamp(951_782_400), "2000-02-29T00-00-00Z");
     }
 
     #[test]

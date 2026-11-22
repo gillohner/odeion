@@ -129,6 +129,8 @@ pub struct Phone {
     pub(crate) tidal_unsaved: std::sync::Mutex<Option<tidal::Unsaved>>,
     /// How long one TIDAL renewal request may take ([`tidal::RENEW_FOR`]; tests shorten it).
     pub(crate) tidal_renew_for_ms: std::sync::atomic::AtomicU64,
+    /// Whether the person was told of sign-ins set aside at start ([`Phone::set_aside_notice`]).
+    set_aside_told: std::sync::atomic::AtomicBool,
     /// Whether phone mode was left, and whether its sync runs.
     life: std::sync::Mutex<Life>,
 }
@@ -206,6 +208,7 @@ impl Phone {
             copier: Default::default(),
             tidal_unsaved: Default::default(),
             tidal_renew_for_ms: (tidal::RENEW_FOR.as_millis() as u64).into(),
+            set_aside_told: Default::default(),
             life: Default::default(),
         }))
     }
@@ -223,6 +226,37 @@ impl Phone {
     /// Whether phone mode was left ([`Phone::close`]).
     pub fn closed(&self) -> bool {
         self.life.lock().unwrap_or_else(|e| e.into_inner()).closed
+    }
+
+    /// What the person is told, once, when phone mode started with sign-ins it couldn't read:
+    /// they were set aside (the file kept whole under another name), and those services are
+    /// signed out on this phone, never on the person's other devices, until signed in again.
+    pub fn set_aside_notice(&self) -> Option<String> {
+        let (keys, kept) = self.store.set_aside();
+        if keys.is_empty()
+            || self
+                .set_aside_told
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
+        let names: Vec<&str> = keys
+            .iter()
+            .map(|k| match k.as_str() {
+                pm_sources::tidal::full::STATE_KEY => "TIDAL",
+                pm_sources::qobuz::STATE_KEY => "Qobuz",
+                other => other,
+            })
+            .collect();
+        let (names, them) = match names.as_slice() {
+            [one] => (format!("Your {one} sign-in"), "it"),
+            [a, b] => (format!("Your {a} and {b} sign-ins"), "them"),
+            _ => ("Your streaming sign-ins".to_string(), "them"),
+        };
+        Some(format!(
+            "{names} on this phone couldn't be read. The file was kept as {} in the app's storage,              and you are signed out of {them} on this phone only: your other devices keep {them}.              Sign in again in Settings › Streaming services.",
+            kept.unwrap_or(store::FILE)
+        ))
     }
 
     /// The key every `/v1` request needs (made at start, never stored).

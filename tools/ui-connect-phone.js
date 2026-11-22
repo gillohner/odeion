@@ -5,6 +5,8 @@
 //   * its press shows the loader at once, starts phone mode's Pubky Ring sign-in once (a second
 //     press does nothing), and the Ring code then shows on the page;
 //   * phone mode chosen before opens again by itself, without the connect form;
+//   * started with sign-ins it couldn't read (set aside), it says so first, and Continue opens it
+//     (after the Ring sign-in too);
 //   * a saved node still comes first (phone mode isn't asked about).
 //   node tools/ui-connect-phone.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -17,7 +19,8 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
 const PAGE = 'file://' + path.join(REPO, 'crates/pm-desktop/ui/index.html');
 
 // The app's commands: answers by name; `phone_ring` and `open_phone` never end (Ring waits, the
-// app navigates away). Every call is recorded.
+// app navigates away), except a first one answered with `phone_ring_notice` / `open_phone_notice`
+// (sign-ins set aside at start). Every call is recorded.
 const STUB = (answers) => {
   window.__calls = [];
   const listeners = {};
@@ -26,6 +29,8 @@ const STUB = (answers) => {
     core: {
       invoke: (cmd, args) => {
         window.__calls.push(cmd);
+        const notice = answers[`${cmd}_notice`];
+        if (notice && !window.__calls.slice(0, -1).includes(cmd)) return Promise.resolve(notice);
         if (cmd === 'phone_ring' || cmd === 'open_phone' || cmd === 'open_saved') return new Promise(() => {});
         if (cmd === 'discover_nodes') return Promise.resolve([]);
         return Promise.resolve(cmd in answers ? answers[cmd] : null);
@@ -78,6 +83,30 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
     check(c.includes('open_phone'), `phone mode chosen before opens again (${c.join(', ')})`);
     check(!(await visible(page, '#connect')), 'without the connect form');
     check((await page.textContent('#saved-msg')).includes('this phone'), 'and says so');
+    await ctx.close();
+  }
+  const NOTICE = "Your TIDAL and Qobuz sign-ins on this phone couldn't be read. The file was kept as sign-ins.json.2026-11-22T09-33-20Z.unreadable in the app's storage, and you are signed out of them on this phone only: your other devices keep them. Sign in again in Settings › Streaming services.";
+  {
+    const { ctx, page } = await open(browser, { phone_available: true, phone_saved: { pubky: 'o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo' }, open_phone_notice: NOTICE });
+    check(await visible(page, '#aside'), 'sign-ins set aside at start: said before phone mode opens');
+    check((await page.textContent('#aside-msg')) === NOTICE, 'in the app\'s words');
+    check(!(await visible(page, '#connect')) && !(await visible(page, '#saved')), 'without the connect form or the loader');
+    check(await page.evaluate(() => document.activeElement && document.activeElement.id === 'aside-go'), 'Continue has the focus');
+    check((await page.textContent('#saved-live')) === NOTICE, 'and a screen reader hears it');
+    await page.screenshot({ path: path.join(SHOTS, 'connect-phone-aside.png'), fullPage: true });
+    await page.tap('#aside-go');
+    await page.waitForTimeout(100);
+    check((await calls(page)).filter((c) => c === 'open_phone').length === 2, 'Continue opens phone mode');
+    await ctx.close();
+  }
+  {
+    const { ctx, page } = await open(browser, { phone_available: true, phone_ring_notice: NOTICE });
+    await page.tap('#phone-go');
+    await page.waitForTimeout(100);
+    check(await visible(page, '#aside') && !(await visible(page, '#connect')), 'after the Ring sign-in too');
+    await page.tap('#aside-go');
+    await page.waitForTimeout(100);
+    check((await calls(page)).includes('open_phone'), 'and Continue opens phone mode');
     await ctx.close();
   }
   {

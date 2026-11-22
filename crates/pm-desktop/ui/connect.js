@@ -233,6 +233,32 @@
     }
   };
 
+  // Phone mode started with sign-ins it couldn't read: they were set aside (the file kept), and
+  // the person is told before its page opens; Continue opens it (open_phone, src/phone.rs)
+  function showAside(text) {
+    show('connect', false);
+    show('saved', false);
+    show('ring-out', false);
+    $('aside-msg').textContent = String(text);
+    show('aside');
+    announce(String(text));
+    $('aside-go').focus();
+  }
+  $('aside-go').onclick = async () => {
+    clearErr();
+    $('aside-go').disabled = true;
+    try {
+      const more = await invoke('open_phone');
+      if (more) showAside(more);
+    } catch (e) {
+      show('aside', false);
+      connectView();
+      fail(e);
+    } finally {
+      $('aside-go').disabled = false;
+    }
+  };
+
   // Use without a node: Pubky Ring first (it keeps phone mode's settings, sign-ins and data),
   // then the app opens on this phone (phone_ring, src/phone.rs)
   $('phone-go').onclick = async () => {
@@ -242,7 +268,12 @@
     $('ring').disabled = true;
     $('phone-go').textContent = 'Starting…';
     try {
-      await invoke('phone_ring');
+      const notice = await invoke('phone_ring');
+      if (notice) {
+        $('phone-go').disabled = false;
+        $('phone-go').textContent = 'Use without a node';
+        showAside(notice);
+      }
     } catch (e) {
       if (String(e) !== 'Sign-in cancelled') fail(e);
       show('ring-out', false);
@@ -284,7 +315,11 @@
     show('saved-spin');
     say('Opening Odeion on this phone…');
     try {
-      await invoke('open_phone');
+      const notice = await invoke('open_phone');
+      if (notice) {
+        show('saved-spin', false);
+        showAside(notice);
+      }
     } catch (e) {
       show('saved-spin', false);
       connectView();

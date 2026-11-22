@@ -151,7 +151,7 @@ pub fn phone_available() -> bool {
 /// "Use without a node": Pubky Ring first (phone mode keeps settings, sign-ins and data on the
 /// person's homeserver), then phone mode. The Ring address reaches the page as `ring-url`.
 #[tauri::command]
-pub async fn phone_ring(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn phone_ring(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
     if !AVAILABLE {
         return Err("Phone mode is in the Android app".into());
     }
@@ -223,15 +223,18 @@ pub fn seed_fixture(app: &AppHandle) {
     }
 }
 
-/// Open phone mode as it was chosen before.
+/// Open phone mode as it was chosen before. `Some`: what the connect page tells the person first
+/// (sign-ins set aside at start); phone mode runs, and this again shows its page.
 #[tauri::command]
-pub async fn open_phone(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn open_phone(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
     let saved = phone_saved(app.clone()).ok_or("Phone mode isn't set up on this device")?;
     open(&app, &state, &saved).await
 }
 
-/// Starts the backend once and shows its page.
-async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<(), String> {
+/// Starts the backend once and shows its page; or, when it started with sign-ins it couldn't read
+/// (set aside: `Phone::set_aside_notice`), says so first (`Some`: shown on the connect page, whose
+/// Continue opens it again).
+async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<Option<String>, String> {
     // The running backend is this person's and still serves; else a new one (the old one ends)
     let running = {
         let mut r = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
@@ -255,6 +258,7 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<(), St
                 tidal: tidal_conf(),
             })
             .map_err(|e| format!("Phone mode can't start: {e}"))?;
+            let notice = phone.set_aside_notice();
             let key = phone.key().to_string();
             let weak = std::sync::Arc::downgrade(&phone);
             let (addr, task) = pm_offline::phone::serve(phone)
@@ -268,6 +272,9 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<(), St
                 task,
                 phone: weak,
             });
+            if notice.is_some() {
+                return Ok(notice);
+            }
             origin
         }
     };
@@ -284,7 +291,7 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<(), St
         .navigate(page)
         .map_err(|e| e.to_string())?;
     tracing::info!("phone mode: started");
-    Ok(())
+    Ok(None)
 }
 
 /// Settings › Connect to a node: phone mode ends (its sign-ins stay on the phone for next time)

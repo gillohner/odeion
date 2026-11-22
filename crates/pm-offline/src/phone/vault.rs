@@ -150,24 +150,17 @@ pub fn changed_here(phone: &Phone, form: &Form) -> bool {
     (mine, here) != seen.unwrap_or_default()
 }
 
-/// Where the phone notes that a service's sign-in was set aside at start (it couldn't be read:
-/// [`super::store::FileStore::open`]), keyed by the sign-in's key: until the person signs in to it
-/// again (or the vault's copy is taken), nothing of it is written to or removed from the vault.
-pub(crate) fn set_aside_key(key: &str) -> String {
-    format!("vault.set_aside.{key}")
-}
-
 /// Whether `form`'s sign-in was set aside here and not signed in again since.
 fn set_aside(store: &dyn SessionStore, form: &Form) -> bool {
     form.carry
         .iter()
-        .any(|c| SessionStore::get(store, &set_aside_key(c.key)).is_some())
+        .any(|c| SessionStore::get(store, &super::store::set_aside_key(c.key)).is_some())
 }
 
 /// `apply_if_still`'s draft, `d`, with a sign-in in it again: no longer set aside.
 fn not_set_aside(d: &super::store::Draft, form: &Form) {
     for c in form.carry {
-        d.put(&set_aside_key(c.key), None);
+        d.put(&super::store::set_aside_key(c.key), None);
     }
 }
 
@@ -1849,30 +1842,87 @@ mod tests {
         assert_eq!(SessionStore::get(p.store.as_ref(), "tidal.unofficial"), held);
     }
 
-    #[test]
-    fn sign_ins_that_cant_be_read_are_never_a_sign_out() {
+    #[tokio::test]
+    async fn sign_ins_that_cant_be_read_are_set_aside_and_never_a_sign_out() {
         let dir = tempfile::tempdir().unwrap();
-        // Signed in to TIDAL and synced with the vault before
-        let p = phone_here(dir.path());
+        // Signed in to TIDAL and synced with the vault before (the vault's copy is made with an
+        // app this phone doesn't renew with: never taken here)
+        let p = phone_with_device_client(dir.path());
         tidal_due_in_step(&p);
-        let record = std::fs::read(record_path(&p)).unwrap();
+        let vault = StandIn::default();
+        let other = node_copy(
+            &TIDAL_FULL,
+            serde_json::json!({"access_token": "t", "refresh_token": "rt", "expires_at": 1, "country": "CH"}),
+            Some("another-app"),
+            "1000-0123456789abcdef",
+        );
+        let mut r = record_here(&p);
+        let e = r.services.get_mut(TIDAL_FULL.service).unwrap();
+        e.theirs = hash_of(&other);
+        e.lineage = vault_form::node_lineage(&other);
+        save_record(&record_path(&p), &r).unwrap();
+        vault
+            .copies
+            .lock()
+            .unwrap()
+            .insert(TIDAL_FULL.service.into(), other);
+        // A Qobuz copy in the vault the phone can take
+        vault.copies.lock().unwrap().insert(
+            QOBUZ.service.into(),
+            node_copy(
+                &QOBUZ,
+                serde_json::json!({"token": "q"}),
+                None,
+                "2000-0123456789abcdef",
+            ),
+        );
         drop(p);
-        // The sign-ins file can't be read now: phone mode doesn't start (no pass would find TIDAL
-        // signed out here and remove it from the vault), and the files stay as they are
+        // The sign-ins file can't be read now: phone mode starts, both set aside, the file kept
         let file = dir.path().join(super::super::store::FILE);
         let cut = br#"{"tidal.unofficial":"#;
         std::fs::write(&file, cut).unwrap();
-        assert!(Phone::open(super::super::Config {
-            dir: dir.path().to_path_buf(),
-            cache: dir.path().join("streams"),
-            version: "test".into(),
-            pubky: None,
-            tidal: Default::default(),
-        })
-        .is_err());
-        assert_eq!(std::fs::read(&file).unwrap(), cut);
-        let again = dir.path().join("vault").join("synced.json");
-        assert_eq!(std::fs::read(again).unwrap(), record);
+        let p = phone_with_device_client(dir.path());
+        let told = p.set_aside_notice().expect("the person is told");
+        assert!(
+            told.contains("TIDAL and Qobuz") && told.contains(".unreadable"),
+            "{told}"
+        );
+        assert_eq!(p.set_aside_notice(), None, "once");
+        let name = p.store.set_aside().1.unwrap().to_string();
+        assert_eq!(std::fs::read(dir.path().join(&name)).unwrap(), cut);
+        assert_eq!(tidal_here(&p), None, "signed out on this phone");
+        // The sync never removes TIDAL from the vault for it, nor writes it; the vault's Qobuz
+        // copy is taken (a sign-in again)
+        let r = services_here(&p, &vault).await.unwrap();
+        assert!(r.removed.is_empty(), "{r:?}");
+        assert!(vault.copies.lock().unwrap().contains_key(TIDAL_FULL.service));
+        assert_eq!(r.pulled, vec![QOBUZ.service], "{r:?}");
+        assert!(!set_aside(p.store.as_ref(), &QOBUZ));
+        assert!(set_aside(p.store.as_ref(), &TIDAL_FULL));
+        // Still held at the next start (until a sign-in)
+        drop(p);
+        let p = phone_with_device_client(dir.path());
+        assert_eq!(p.set_aside_notice(), None, "the file reads now");
+        let r = services_here(&p, &vault).await.unwrap();
+        assert!(r.removed.is_empty() && r.pushed.is_empty(), "{r:?}");
+        // Signed in again here: synced as a sign-in made here
+        assert_eq!(
+            sign_in_here(&p, TIDAL_FULL.service, |store| {
+                pm_sources::tidal::full::update_if(store, |st| {
+                    st.session = Some(pm_sources::tidal::full::Session {
+                        access_token: "new".into(),
+                        expires_at: pm_sources::now_unix() + 3600,
+                        country: "CH".into(),
+                        ..Default::default()
+                    });
+                    true
+                })
+            }),
+            Ok(true)
+        );
+        assert!(!set_aside(p.store.as_ref(), &TIDAL_FULL));
+        let r = services_here(&p, &vault).await.unwrap();
+        assert_eq!(r.pushed, vec![TIDAL_FULL.service], "{r:?}");
     }
 
     #[tokio::test]
