@@ -4006,8 +4006,21 @@ impl Library {
         Ok(())
     }
 
-    /// Forget a library folder: its files, the tracks that lived only there,
+    /// Whether `path` is a folder this library was given ([`Self::add_folder`]) or scanned as a
+    /// root ([`Self::begin_scan`]): what a request may ask [`Self::remove_folder`] to forget.
+    pub fn is_root(&self, path: &Path) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "SELECT EXISTS (SELECT 1 FROM folders WHERE path = ?1) OR EXISTS (SELECT 1 FROM scans WHERE root = ?1)",
+            params![path.to_string_lossy()],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Forget a library folder: its files, the tracks that lived only there (with their plays),
     /// and the albums and artists left empty. Returns `(files, tracks)` removed.
+    ///
+    /// Everything under `root` goes, whatever `root` is: a caller that takes the path from
+    /// outside checks it with [`Self::is_root`] first.
     pub fn remove_folder(&self, root: &Path) -> Result<(u64, u64)> {
         let mut conn = self.lock();
         let tx = conn.savepoint()?;
@@ -5787,6 +5800,22 @@ mod folder_tests {
         let (files, _) = lib.remove_folder(Path::new("/m/a_other")).unwrap();
         assert_eq!(files, 0);
         assert!(lib.get_track(a).unwrap().is_some());
+    }
+
+    /// A root is a folder the library was given or one it scanned; nothing else is, also not
+    /// what lies above or below one.
+    #[test]
+    fn only_added_and_scanned_folders_are_roots() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.add_folder(Path::new("/m/a")).unwrap();
+        lib.begin_scan(Path::new("/srv/music")).unwrap();
+        lib.upsert_track(&sample_track("/m/a/x/one.flac", "One")).unwrap();
+        for root in ["/m/a", "/srv/music"] {
+            assert!(lib.is_root(Path::new(root)).unwrap(), "{root}");
+        }
+        for other in ["", "/", "/m", "/m/a/x", "/m/a/", "/srv", "/m/%", "/m/_"] {
+            assert!(!lib.is_root(Path::new(other)).unwrap(), "{other:?}");
+        }
     }
 }
 
