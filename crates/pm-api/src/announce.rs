@@ -215,11 +215,17 @@ pub(crate) async fn announce(
         it.by = crate::accounts::Who::of(&caller).by();
         items.push(it);
     }
-    let ids = zone.enqueue(items, Insert::Next);
+    let sent = items.len();
+    let mut ids = zone.enqueue(items, Insert::Next);
+    // A queue that filled up in this very moment took none of it, or the chime without the
+    // clip: nothing is played then, and the zone goes back to where it was below
+    if ids.len() < sent {
+        for id in ids.drain(..) {
+            zone.remove(id);
+        }
+    }
     let count = ids.len();
     let first = saved.map(|(i, _, _, _)| i + 1).unwrap_or(0);
-    // (a queue that filled up in this very moment took none: nothing to play, and the zone
-    // goes back to where it was below)
     if !ids.is_empty() {
         zone.play_index(first);
     }
