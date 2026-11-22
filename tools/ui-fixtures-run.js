@@ -65,6 +65,9 @@ let n = 0;
 for (const p of pages) p.shard = shards === 1 ? 1 : p.pin || (n++ % shards) + 1;
 for (const o of only) if (!pages.some((p) => p.script === o)) fail(`${o} is not in tools/ui-fixtures.list`);
 const mine = pages.filter((p) => p.shard === shard && (!only.length || only.includes(p.script)));
+// The pages with a runner number are the long ones: started first, so that with several at a
+// time a long page is not the last to start
+if (jobs > 1) mine.sort((a, b) => (b.pin ? 1 : 0) - (a.pin ? 1 : 0));
 
 if (planOnly) { for (const p of mine) console.log(p.script); process.exit(0); }
 

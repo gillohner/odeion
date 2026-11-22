@@ -2,14 +2,15 @@
 # `node tools/ui-fixtures-run.js` here). One page per line:
 #   <script in tools/>  <its screenshot folder>  [runner]
 # Each runs as `node tools/<script> <repo> <shots>/<folder>`. A page with a runner number always
-# runs on that runner: the pages that take a minute or more are spread by hand, so the runners
-# finish at about the same time. The others go round robin in the order of this list. A new page
-# goes at the end.
+# runs on that runner and starts first there: these are the pages that take a minute or more,
+# spread over the three runners by their measured times (#791) so that the runners finish at
+# about the same time. The others go round robin in the order of this list. A new page goes at
+# the end; give it a runner number only if it takes a minute or more.
 
 ui-browser-library.js library-playback-shots
 ui-search-routing.js search-routing-shots
 ui-artist-links.js artist-link-shots
-ui-review-fixes.js review-fixes-shots 5
+ui-review-fixes.js review-fixes-shots 1
 ui-personal-play-share.js personal-play-share-shots
 ui-tablet.js tablet-shots
 ui-topbar.js topbar-shots
@@ -24,7 +25,7 @@ ui-source-policy.js source-policy-shots
 ui-choice-chips.js choice-chips-shots
 ui-queue-covers.js queue-covers-shots
 ui-versions.js versions-shots
-ui-similar-tiles.js similar-shots 4
+ui-similar-tiles.js similar-shots 3
 ui-connect-ring.js connect-ring-shots
 ui-tap-highlight.js tap-highlight-shots
 ui-here-name.js here-name-shots
@@ -35,14 +36,14 @@ ui-phone-switch-targets.js phone-switch-targets-shots
 ui-phone-source-chip.js phone-source-chip-shots
 ui-phone-select-bar.js phone-select-bar-shots
 ui-nowplaying-phone.js nowplaying-phone-shots
-ui-phone-simplify.js phone-simplify-shots 4
-ui-motion.js motion-shots 6
-ui-shuffle-repeat.js shuffle-repeat-shots 6
+ui-phone-simplify.js phone-simplify-shots 1
+ui-motion.js motion-shots 3
+ui-shuffle-repeat.js shuffle-repeat-shots 2
 ui-redesign.js redesign-shots
 ui-item-about.js item-about-shots
 ui-rating-hero.js rating-hero-shots
-ui-usb-dac.js usb-dac-shots 2
-ui-native-player.js native-player-shots 6
+ui-usb-dac.js usb-dac-shots 1
+ui-native-player.js native-player-shots 3
 ui-app-downloads.js app-downloads-shots
 ui-offline-play.js offline-play-shots
 ui-downloads-rows.js downloads-rows-shots
@@ -66,7 +67,7 @@ ui-wrong-match.js wrong-match-shots
 ui-libstatus-wrap.js libstatus-wrap-shots
 ui-favourites-count.js favourites-count-shots
 ui-favourites-empty.js favourites-empty-shots
-ui-library-count-redraw.js library-count-redraw-shots 1
+ui-library-count-redraw.js library-count-redraw-shots 3
 ui-empty-head-count.js empty-head-count-shots
 ui-head-count-separators.js head-count-separators-shots
 ui-musicbrainz-contact.js musicbrainz-contact-shots
@@ -76,14 +77,14 @@ ui-phone-action-rows.js phone-action-rows-shots 2
 ui-phone-queue-rows.js phone-queue-rows-shots
 ui-phone-item-hero-row.js phone-item-hero-row-shots
 ui-phone-rating-taps.js phone-rating-taps-shots
-ui-phone-rating-redraw.js phone-rating-redraw-shots 7
+ui-phone-rating-redraw.js phone-rating-redraw-shots 3
 ui-phone-home-trending.js phone-home-trending-shots
 ui-search-scopes.js search-scopes-shots
 ui-phone-search-head.js phone-search-head-shots
 ui-search-music.js search-music-shots
 ui-search-leave.js search-leave-shots
-ui-search-shared-link.js search-shared-link-shots 5
-ui-roon-announce.js roon-announce-shots
+ui-search-shared-link.js search-shared-link-shots 1
+ui-roon-announce.js roon-announce-shots 1
 ui-library-sort.js library-sort-shots
 ui-artist-row-chevron.js artist-row-chevron-shots
 ui-list-redraw.js list-redraw-shots
@@ -100,7 +101,7 @@ ui-roon-import.js roon-import-shots
 ui-playlist-file-import.js playlist-file-import-shots
 ui-playlists-redraw.js playlists-redraw-shots
 ui-playlist-count.js playlist-count-shots
-ui-playlist-stale-draw.js playlist-stale-draw-shots
+ui-playlist-stale-draw.js playlist-stale-draw-shots 1
 ui-rows-search-sort.js rows-search-sort-shots
 ui-filter-none.js filter-none-shots
 ui-albums-empty.js albums-empty-shots
@@ -110,20 +111,20 @@ ui-phone-head-level.js phone-head-level-shots
 ui-album-tile-line.js album-tile-line-shots
 ui-home-album-line.js home-album-line-shots
 ui-empty-ways-in.js empty-ways-in-shots
-ui-item-redraw.js item-redraw-shots 1
+ui-item-redraw.js item-redraw-shots 3
 ui-songs-name.js songs-name-shots
 ui-song-row-album.js song-row-album-shots
 ui-song-row-focus-ring.js song-row-focus-ring-shots
-ui-row-click.js row-click-shots 3
+ui-row-click.js row-click-shots 2
 ui-menu-close-click.js menu-close-click-shots
 ui-list-focus-ring.js list-focus-ring-shots
 ui-list-filter-ends.js list-filter-ends-shots
-ui-srow-click.js srow-click-shots 2
-ui-browser-start-title.js browser-start-title-shots
+ui-srow-click.js srow-click-shots 1
+ui-browser-start-title.js browser-start-title-shots 2
 ui-latest-press.js latest-press-shots
 ui-browser-source-toast.js browser-source-toast-shots
-ui-sticky-focus.js sticky-focus-shots 4
-ui-select-bar-focus.js select-bar-focus-shots 3
+ui-sticky-focus.js sticky-focus-shots 3
+ui-select-bar-focus.js select-bar-focus-shots 2
 ui-row-line-focus.js row-line-focus-shots
 ui-phone-library-head.js phone-library-head-shots
 ui-song-menus.js song-menus-shots
@@ -136,14 +137,14 @@ ui-song-heart.js song-heart-shots
 ui-source-item-mark.js source-item-mark-shots
 ui-source-item-row.js source-item-row-shots
 ui-source-kinds.js source-kinds-shots
-ui-empty-queue.js empty-queue-shots 3
-ui-browser-place.js browser-place-shots 5
-ui-browser-keys.js browser-keys-shots 4
+ui-empty-queue.js empty-queue-shots 2
+ui-browser-place.js browser-place-shots 2
+ui-browser-keys.js browser-keys-shots 1
 ui-hero-cover-fallback.js hero-cover-fallback-shots
 ui-shortcut-modifiers.js shortcut-modifiers-shots
 ui-queue-keep-focus.js queue-keep-focus-shots
-ui-queue-row-menu.js queue-row-menu-shots 4
-ui-browser-midsong.js browser-midsong-shots 2
+ui-queue-row-menu.js queue-row-menu-shots 3
+ui-browser-midsong.js browser-midsong-shots 1
 ui-back-place.js back-place-shots
 ui-row-space-modifiers.js row-space-modifiers-shots
 ui-play-all-progress.js play-all-progress-shots
@@ -157,8 +158,8 @@ ui-home-stale.js home-stale-shots
 ui-home-retry.js home-retry-shots
 ui-home-trend-fail-chips.js home-trend-fail-chips-shots
 ui-progress-toast.js progress-toast-shots
-ui-move-toast.js move-toast-shots 6
-ui-phone-libnav-focus.js phone-libnav-focus-shots 3
+ui-move-toast.js move-toast-shots 2
+ui-phone-libnav-focus.js phone-libnav-focus-shots 2
 ui-queue-head-phone.js queue-head-phone-shots
 ui-phone-select-redraw.js phone-select-redraw-shots
 ui-page-title.js page-title-shots
@@ -167,7 +168,7 @@ ui-phone-row-numbers.js phone-row-numbers-shots
 ui-pubky-hang.js pubky-hang-shots
 ui-item-radio-zone.js item-radio-zone-shots
 ui-artist-top-songs.js artist-top-songs-shots
-ui-pop-keys.js pop-keys-shots
+ui-pop-keys.js pop-keys-shots 3
 ui-row-cover-mono.js row-cover-mono-shots
 ui-menu-keys.js menu-keys-shots 1
 ui-fixture-item-pages.js fixture-item-pages-shots
