@@ -5399,7 +5399,7 @@ mod tests {
 
     /// Every lookup that also asks "is the file there" must not be planned through the index on
     /// `files.missing`: it holds every file of the library, so one song's or one folder's lookup
-    /// read them all (an album Focus nothing matched took 30 s at 50,000 songs, each of a few
+    /// read them all (an album Focus nothing matched took 20 s at 50,000 songs, each of a few
     /// lookups Identify makes per song 4-12 ms). The `+` in `+missing = 0` rules that index out.
     #[test]
     fn presence_checks_never_go_through_the_missing_index() {
