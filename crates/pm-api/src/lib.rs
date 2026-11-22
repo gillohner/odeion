@@ -3251,13 +3251,9 @@ async fn remove_folder(
     State(s): State<Arc<NodeState>>,
     Query(req): Query<FolderRequest>,
 ) -> ApiResult<FoldersChanged> {
-    // As folders are stored: no slash at the end
+    // The path as it was sent: a folder from the config is stored as it is written there, with a
+    // slash at the end or without (`is_root` and `remove_folder` take either spelling)
     let raw = req.path.trim();
-    let raw = if raw.len() > 1 {
-        raw.trim_end_matches('/')
-    } else {
-        raw
-    };
     if raw.is_empty() {
         return Err(ApiError::bad_request("path is required"));
     }
@@ -4384,7 +4380,7 @@ mod tests {
         for (path, want) in [
             ("".to_string(), StatusCode::BAD_REQUEST),
             ("%20".to_string(), StatusCode::BAD_REQUEST),
-            ("//".to_string(), StatusCode::BAD_REQUEST),
+            ("//".to_string(), StatusCode::NOT_FOUND),
             ("/".to_string(), StatusCode::NOT_FOUND),
             (above, StatusCode::NOT_FOUND),
             (format!("{added}/album"), StatusCode::NOT_FOUND),
@@ -4410,6 +4406,31 @@ mod tests {
             .iter()
             .any(|f| f[0] == added.as_str()));
         assert_eq!(kept(&s).0, 0);
+
+        // A folder stored with a slash at the end (as a config may write it) goes whichever way
+        // it is asked for, and is no longer listed: it would be scanned back in otherwise
+        for asked in ["", "/"] {
+            let stored = format!("{}/", extra.to_string_lossy());
+            s.library
+                .lock()
+                .unwrap()
+                .add_folder(std::path::Path::new(&stored))
+                .unwrap();
+            let listed = |s: &Arc<NodeState>| {
+                s.library
+                    .lock()
+                    .unwrap()
+                    .list_folders()
+                    .unwrap()
+                    .iter()
+                    .any(|(p, _)| p.to_string_lossy() == stored.as_str())
+            };
+            assert!(listed(&s));
+            let path = format!("{}{asked}", extra.to_string_lossy());
+            let (st, r) = call(&app, "DELETE", &format!("/v1/library/folders?path={path}"), None).await;
+            assert_eq!(st, StatusCode::OK, "{path}: {r}");
+            assert!(!listed(&s), "{path}: still listed");
+        }
     }
 
     /// A zone's queue is saved on every change and comes back after a restart.
