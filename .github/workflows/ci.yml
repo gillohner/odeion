@@ -580,12 +580,12 @@ jobs:
         run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true; tail -n 30 /tmp/pwa/out/node.log || true
 
   # The UI pages checked against fixtures in a real Chromium (tools/ui-fixture.js: the app's own
-  # files, no node, no build), split over six runners; every page is in exactly one of them.
+  # files, no node, no build), split over seven runners; every page is in exactly one of them.
   # The pages that take a minute or more have a fixed runner (`pin` below), so new pages added to
   # the list cannot shift them all onto one runner; the others go round robin. Each runner has
   # about 15 minutes of pages, plus the Playwright install (usually under a minute).
   ui-fixtures:
-    name: ui-fixtures (${{ matrix.shard }}/6)
+    name: ui-fixtures (${{ matrix.shard }}/7)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -593,7 +593,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -622,6 +622,7 @@ jobs:
             ui-sticky-focus.js=4 ui-browser-keys.js=4 ui-similar-tiles.js=4 ui-phone-simplify.js=4 ui-queue-row-menu.js=4
             ui-browser-place.js=5 ui-review-fixes.js=5 ui-search-shared-link.js=5
             ui-motion.js=6 ui-shuffle-repeat.js=6 ui-move-toast.js=6 ui-native-player.js=6
+            ui-phone-rating-redraw.js=7
           '
           pin=" $(echo $pin) "
           n=0
