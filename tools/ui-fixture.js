@@ -103,4 +103,4 @@ async function cleanCopy(page) {
  assert.doesNotMatch(text,/\bundefined\b|\[object Object\]/,'rendered text and accessible labels');
  const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);assert.ok(overflow<=0,`no horizontal overflow: ${overflow}`);
 }
-module.exports={create,go,cleanCopy,ORIGIN,track,artists,detail,summary,SONG,LINK};
+module.exports={create,go,cleanCopy,itemPage,ORIGIN,track,artists,detail,summary,SONG,LINK};
