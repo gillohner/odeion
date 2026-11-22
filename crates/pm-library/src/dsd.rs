@@ -44,7 +44,7 @@ impl DsdHeader {
         if self.format.rate_hz == 0 {
             None
         } else {
-            Some(self.sample_count * 1000 / self.format.rate_hz as u64)
+            Some(self.sample_count.checked_mul(1000)? / self.format.rate_hz as u64)
         }
     }
 }
@@ -246,6 +246,12 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
     let rate = rate.ok_or_else(|| bad(path, "dff: missing FS chunk"))?;
     let channels = channels.ok_or_else(|| bad(path, "dff: missing CHNL chunk"))?;
     let (data_offset, data_len) = data.ok_or_else(|| bad(path, "dff: missing DSD data chunk"))?;
+    // No more audio than the file holds, whatever the chunk says its size is
+    let in_file = r
+        .seek(SeekFrom::End(0))
+        .map_err(|e| io_err(path, e))?
+        .saturating_sub(data_offset);
+    let data_len = data_len.min(in_file);
     if !(1..=8).contains(&channels) {
         return Err(bad(path, format!("dff: bad channel count {channels}")));
     }
@@ -451,6 +457,27 @@ mod tests {
                     "{what} {size}"
                 );
             }
+        }
+    }
+
+    /// A data chunk that says it is longer than the file is as long as the file: the length
+    /// and the playing time come from what is there.
+    #[test]
+    fn a_dff_data_chunk_is_no_longer_than_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.dff");
+        let data = vec![0x69u8; 1000];
+        let mut bytes = synth::dff(2_822_400, 2, &data, None);
+        // The `DSD ` data chunk is the last one: its size field sits 8 bytes before the data
+        let at = bytes.len() - data.len() - 8;
+        assert_eq!(&bytes[at - 4..at], b"DSD ");
+        for claimed in [u64::MAX, u64::MAX - 12, 1 << 62] {
+            bytes[at..at + 8].copy_from_slice(&claimed.to_be_bytes());
+            std::fs::write(&p, &bytes).unwrap();
+            let h = read_header(&p).unwrap();
+            assert_eq!(h.data_len, 1000, "{claimed}");
+            assert_eq!(h.sample_count, 1000 * 8 / 2, "{claimed}");
+            assert_eq!(h.duration_ms(), Some(4000 * 1000 / 2_822_400), "{claimed}");
         }
     }
 }

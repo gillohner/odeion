@@ -69,7 +69,7 @@ pub fn load_or_create_key(path: &Path) -> anyhow::Result<SecretKey> {
 }
 
 fn hex_decode(s: &str) -> anyhow::Result<[u8; 32]> {
-    anyhow::ensure!(s.len() == 64, "expected 64 hex characters");
+    anyhow::ensure!(s.len() == 64 && s.is_ascii(), "expected 64 hex characters");
     let mut out = [0u8; 32];
     for (i, b) in out.iter_mut().enumerate() {
         *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)?;

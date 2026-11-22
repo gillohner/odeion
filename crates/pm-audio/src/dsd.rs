@@ -241,6 +241,9 @@ impl DsdReader {
         format
             .validate()
             .map_err(|e| AudioError::Malformed(format!("dff: {e}")))?;
+        // No more audio than the file holds, whatever the chunk says its size is
+        let in_file = file.get_ref().metadata()?.len().saturating_sub(data_start);
+        let data_len = data_len.min(in_file);
         file.seek(SeekFrom::Start(data_start))?;
         Ok(Self {
             file,
@@ -265,7 +268,7 @@ impl DsdReader {
     }
 
     pub fn duration_ms(&self) -> Option<u64> {
-        Some(self.total_frames * 8 * 1000 / self.format.rate_hz as u64)
+        Some(self.total_frames.checked_mul(8000)? / (self.format.rate_hz as u64).max(1))
     }
 
     pub fn total_frames(&self) -> u64 {

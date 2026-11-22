@@ -180,10 +180,12 @@ impl Rtsp {
             }
         }
         let reply = Reply { status, headers };
-        if let Some(len) = reply
-            .header("Content-Length")
-            .and_then(|l| l.parse::<usize>().ok())
-        {
+        if let Some(len) = reply.header("Content-Length") {
+            // (a length that is no number would leave the body in the stream, to be read as the
+            // next answer)
+            let len: usize = len
+                .parse()
+                .map_err(|_| AirPlayError::Protocol(format!("{method}: an answer of length {len:?}")))?;
             // (a receiver's answers carry a few hundred bytes; the length is the device's word)
             if len > MAX_REPLY_BODY {
                 return Err(AirPlayError::Protocol(format!(
