@@ -635,9 +635,9 @@ struct TagChunk {
 /// files (the `id3` crate) reaches: the first chunk named `ID3 ` inside that length. One beyond
 /// it is not the tag the reader reads, and such a file is not written. With a tag chunk, what
 /// follows it is written again behind the new tag, so none of that may be the audio (`data`,
-/// `SSND`) and it must be small. Without one, the new chunk goes after the last chunk. Nothing
-/// in front of that place is written but the length in the file's header, and the audio is in
-/// front of it.
+/// `SSND`, a list of the kind `wavl`) and it must be small. Without one, the new chunk goes
+/// after the last chunk. Nothing in front of that place is written but the length in the file's
+/// header, and the audio is in front of it.
 fn tag_chunk_place(
     file: &mut std::fs::File,
     len: u64,
@@ -684,10 +684,18 @@ fn tag_chunk_place(
                 ));
             }
             tag = Some((at, name, size));
-        } else if tag.is_some() && name.eq_ignore_ascii_case(audio) {
-            return Ok(Err(
-                "its tag is stored in front of the audio; writing it would move the audio",
-            ));
+        } else if tag.is_some() {
+            // The audio is `data` or `SSND`, or, in a WAV file, a list of the kind `wavl` whose
+            // chunks hold it in pieces
+            let mut kind = [0u8; 4];
+            if name.eq_ignore_ascii_case(b"LIST") && size >= 4 {
+                file.read_exact(&mut kind)?;
+            }
+            if name.eq_ignore_ascii_case(audio) || kind.eq_ignore_ascii_case(b"wavl") {
+                return Ok(Err(
+                    "its tag is stored in front of the audio; writing it would move the audio",
+                ));
+            }
         }
         at += 8 + size + size % 2;
     }
@@ -1888,6 +1896,13 @@ mod tests {
         no_root[4..8].copy_from_slice(&0u32.to_le_bytes());
         // The audio after the tag chunk under a name in capitals
         let upper = wav_of(&[fmt.clone(), tag_chunk.clone(), wav_chunk(b"DATA", &[7u8; 800])]);
+        // The audio in pieces, in a list after the tag chunk (alone, and with audio in front too)
+        let pieces = wav_chunk(
+            b"LIST",
+            &[&b"wavl"[..], &wav_chunk(b"data", &[7u8; 800])[..]].concat(),
+        );
+        let wave_list = wav_of(&[fmt.clone(), tag_chunk.clone(), pieces.clone()]);
+        let wave_list_too = wav_of(&[fmt.clone(), data.clone(), tag_chunk.clone(), pieces]);
         // Chunks without end
         let mut endless = wav_of(&[fmt.clone(), data.clone()]);
         for _ in 0..=MAX_CHUNKS {
@@ -1904,6 +1919,8 @@ mod tests {
             ("front.wav", in_front),
             ("beyond.wav", beyond),
             ("upper.wav", upper),
+            ("wave-list.wav", wave_list),
+            ("wave-list-too.wav", wave_list_too),
             ("endless.wav", endless),
             ("trailing.wav", trailing),
             ("cut-audio.wav", cut_audio),
