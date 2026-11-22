@@ -379,6 +379,268 @@ pub struct PersonToken {
     pub hash: String,
     pub key: String,
     pub created_at: i64,
+    /// What signed in, as it named itself (its browser and system, or the app): for the list of
+    /// sign-ins in Settings. None for a sign-in made before the node kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// It did not sign in from the node's own network: through remote access, a tunnel or a
+    /// proxy, or from a public address.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote: bool,
+    /// The day it was last used (unix seconds at that UTC day's start), written once a day at
+    /// most. None until it is used after the node began keeping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<i64>,
+}
+
+/// What a new sign-in is: said when it starts (`/v1/auth/pubky/start`), kept with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewSignIn {
+    /// One of the owner's apps (a device sign-in, which a browser's Log out leaves), not a
+    /// browser session.
+    pub device: bool,
+    /// [`PersonToken::label`].
+    pub label: Option<String>,
+    /// [`PersonToken::remote`].
+    pub remote: bool,
+}
+
+impl NewSignIn {
+    /// From the request that starts a sign-in: its `User-Agent`, and how it reached the node.
+    pub fn of(user_agent: Option<&str>, device: bool, remote: bool) -> Self {
+        Self {
+            device,
+            label: user_agent.and_then(label_of),
+            remote,
+        }
+    }
+}
+
+/// A short name for what a `User-Agent` says it is: `Firefox on Linux`, `Safari on iPhone`,
+/// `Odeion app 0.2.4`. None when it names nothing known. Shown as what the sign-in says about
+/// itself, never trusted for anything.
+pub fn label_of(user_agent: &str) -> Option<String> {
+    let ua = user_agent;
+    // The app (desktop and Android): its own client's name, then its version
+    for app in ["pubky-music-desktop/", "odeion/"] {
+        if let Some(v) = ua.strip_prefix(app) {
+            let v: String = v
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .take(16)
+                .collect();
+            return Some(format!("Odeion app {v}").trim_end().to_string());
+        }
+    }
+    let system = if ua.contains("Android") {
+        "Android"
+    } else if ua.contains("iPhone") {
+        "iPhone"
+    } else if ua.contains("iPad") {
+        "iPad"
+    } else if ua.contains("Windows") {
+        "Windows"
+    } else if ua.contains("Mac OS X") || ua.contains("Macintosh") {
+        "Mac"
+    } else if ua.contains("CrOS") {
+        "ChromeOS"
+    } else if ua.contains("Linux") {
+        "Linux"
+    } else {
+        ""
+    };
+    // The order matters: Edge and Opera also say Chrome, and Chrome also says Safari
+    let browser = if ua.contains("Firefox/") || ua.contains("FxiOS/") {
+        "Firefox"
+    } else if ua.contains("Edg/") || ua.contains("EdgA/") || ua.contains("EdgiOS/") {
+        "Edge"
+    } else if ua.contains("OPR/") {
+        "Opera"
+    } else if ua.contains("Chrome/") || ua.contains("CriOS/") || ua.contains("Chromium/") {
+        "Chrome"
+    } else if ua.contains("Safari/") {
+        "Safari"
+    } else {
+        ""
+    };
+    match (browser, system) {
+        ("", "") => None,
+        (b, "") => Some(b.to_string()),
+        ("", sys) => Some(format!("A browser on {sys}")),
+        (b, sys) => Some(format!("{b} on {sys}")),
+    }
+}
+
+/// Which list a sign-in is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInKind {
+    /// One of the owner's browsers (Log out ends it).
+    Browser,
+    /// One of the owner's apps.
+    App,
+    /// A sign-in of someone with music access (their browser or app).
+    Person,
+}
+
+/// A sign-in as Settings lists it: never the token or its hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignIn {
+    /// Names it in `DELETE …/sign-ins/{id}`: made from the kept hash, so sign-ins made before
+    /// the node listed them have one too.
+    pub id: String,
+    pub kind: SignInKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub remote: bool,
+    pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<i64>,
+    /// The one this request came with.
+    pub current: bool,
+}
+
+/// The id a sign-in is listed under: a hash of its kept hash (which says nothing about the token).
+fn sign_in_id(hash: &str) -> String {
+    blake3::hash(format!("odeion sign-in {hash}").as_bytes()).to_hex()[..16].to_string()
+}
+
+fn listed(t: &PersonToken, kind: SignInKind, current: Option<&str>) -> SignIn {
+    SignIn {
+        id: sign_in_id(&t.hash),
+        kind,
+        label: t.label.clone(),
+        remote: t.remote,
+        created_at: t.created_at,
+        last_used: t.last_used,
+        current: current == Some(t.hash.as_str()),
+    }
+}
+
+/// Whose sign-ins: the owner's (browsers and apps) or one person's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Whose {
+    Owner,
+    Person(String),
+}
+
+impl Whose {
+    /// The caller's own.
+    pub fn of(c: &Caller) -> Option<Whose> {
+        match (c.role, &c.key) {
+            (Role::Owner, _) => Some(Whose::Owner),
+            (Role::Listener, Some(k)) => Some(Whose::Person(k.clone())),
+            _ => None,
+        }
+    }
+
+    fn lists(&self) -> &'static [(&'static str, SignInKind)] {
+        match self {
+            Whose::Owner => &[
+                (OWNER_SESSIONS, SignInKind::Browser),
+                (DEVICE_SESSIONS, SignInKind::App),
+            ],
+            Whose::Person(_) => &[(TOKENS, SignInKind::Person)],
+        }
+    }
+
+    fn has(&self, t: &PersonToken) -> bool {
+        match self {
+            // Both owner lists hold only the loaded identity's (`retain_owner`)
+            Whose::Owner => true,
+            Whose::Person(k) => t.key == *k,
+        }
+    }
+
+    fn revoke_usage(&self, s: &NodeState) {
+        match self {
+            Whose::Owner => s.usage.revoke_owner(),
+            Whose::Person(k) => s.usage.revoke_listener(k),
+        }
+    }
+}
+
+/// Their sign-ins, newest first. `current`: the token this request came with, to mark it.
+pub fn sign_ins(s: &NodeState, whose: &Whose, current: Option<&str>) -> Result<Vec<SignIn>, ApiError> {
+    let current = current.map(hash);
+    let lib = s.library.lock().expect("library poisoned");
+    let mut out = Vec::new();
+    for (list, kind) in whose.lists() {
+        out.extend(
+            load_checked(&lib, list)?
+                .iter()
+                .filter(|t| whose.has(t))
+                .map(|t| listed(t, *kind, current.as_deref())),
+        );
+    }
+    out.sort_by_key(|x| std::cmp::Reverse(x.created_at));
+    Ok(out)
+}
+
+/// Ends one of their sign-ins by its listed id; whether there was one. Its token stops working at
+/// once, and its usage insights end with it.
+pub fn end_sign_in(s: &NodeState, whose: &Whose, id: &str) -> Result<bool, ApiError> {
+    end_where(s, whose, |t| sign_in_id(&t.hash) == id).map(|ended| ended > 0)
+}
+
+/// Ends all of their sign-ins except the one with token `keep` (the one asking); how many ended.
+/// For the owner this works whatever the API token is, and leaves the API token as it is.
+pub fn end_sign_ins(s: &NodeState, whose: &Whose, keep: Option<&str>) -> Result<usize, ApiError> {
+    let keep = keep.map(hash);
+    end_where(s, whose, |t| keep.as_deref() != Some(t.hash.as_str()))
+}
+
+/// Ends those of their sign-ins that `ends` names; how many ended. Their lists change under one
+/// hold of the library, and a list nothing ends in is not written.
+fn end_where(s: &NodeState, whose: &Whose, ends: impl Fn(&PersonToken) -> bool) -> Result<usize, ApiError> {
+    let mut ended = 0;
+    let mut result = Ok(());
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        for (list, _) in whose.lists() {
+            let goes = |t: &PersonToken| whose.has(t) && ends(t);
+            let done = load_checked(&lib, list).and_then(|all| {
+                let n = all.iter().filter(|t| goes(t)).count();
+                if n > 0 {
+                    update_in(&lib, list, |all| all.retain(|t| !goes(t)))?;
+                    ended += n;
+                }
+                Ok(())
+            });
+            if result.is_ok() {
+                result = done;
+            }
+        }
+    }
+    if ended > 0 {
+        whose.revoke_usage(s);
+    }
+    result.map(|()| ended)
+}
+
+/// The start of today (UTC), in unix seconds.
+fn today() -> i64 {
+    now().div_euclid(86_400) * 86_400
+}
+
+/// Writes that the sign-in with `hash` in `list` was used on `today`; whether the list says so
+/// now. Never an error: a request is not refused because the day could not be written.
+fn used_today(s: &NodeState, list: &str, hash: &str, today: i64) -> bool {
+    let lib = s.library.lock().expect("library poisoned");
+    let Ok(mut all) = load_checked(&lib, list) else {
+        return false;
+    };
+    let Some(t) = all.iter_mut().find(|t| t.hash == hash) else {
+        return false;
+    };
+    if t.last_used == Some(today) {
+        return true;
+    }
+    t.last_used = Some(today);
+    // The set of sign-ins is the same: no `sign_ins_changed`
+    lib.set_setting(list, &serde_json::to_string(&all).expect("serializes"))
+        .is_ok()
 }
 
 fn hash(token: &str) -> String {
@@ -452,6 +714,11 @@ fn load_tokens(s: &NodeState) -> Vec<PersonToken> {
 
 /// A new personal token for `key` (returned once; the node keeps its hash).
 pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
+    mint_as(s, key, &NewSignIn::default())
+}
+
+/// [`mint`], keeping what the sign-in said it is.
+pub fn mint_as(s: &NodeState, key: &str, what: &NewSignIn) -> Result<String, ApiError> {
     let key = key.trim_start_matches("pubky").to_string();
     let token = format!("pml_{}", crate::tidal::random_urlsafe(32));
     let mut evicted = false;
@@ -471,6 +738,9 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
             hash: hash(&token),
             key: key.clone(),
             created_at: now(),
+            label: what.label.clone(),
+            remote: what.remote,
+            last_used: None,
         });
     });
     // Their oldest session ended: a request let in with it changes no usage insights (usage.rs),
@@ -485,17 +755,30 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
 /// A new browser session for the owner (key `key`), from a Pubky Ring sign-in: returned once,
 /// the node keeps its hash. At most `OWNER_SESSIONS_CAP`; the oldest goes first.
 pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
-    mint_owners(s, key, OWNER_SESSIONS, OWNER_SESSIONS_CAP)
+    mint_owner_as(s, key, &NewSignIn::default())
+}
+
+/// A sign-in for the owner, a browser's or (`what.device`) an app's, keeping what it said it is.
+pub fn mint_owner_as(s: &NodeState, key: &str, what: &NewSignIn) -> Result<String, ApiError> {
+    if what.device {
+        mint_owners(s, key, DEVICE_SESSIONS, DEVICE_SESSIONS_CAP, what)
+    } else {
+        mint_owners(s, key, OWNER_SESSIONS, OWNER_SESSIONS_CAP, what)
+    }
 }
 
 /// A sign-in for one of the owner's devices (the app), from a Pubky Ring sign-in the owner
 /// approved: as [`mint_owner`], in the devices' own list (`DEVICE_SESSIONS`).
 pub fn mint_device(s: &NodeState, key: &str) -> Result<String, ApiError> {
-    mint_owners(s, key, DEVICE_SESSIONS, DEVICE_SESSIONS_CAP)
+    let what = NewSignIn {
+        device: true,
+        ..Default::default()
+    };
+    mint_owner_as(s, key, &what)
 }
 
 /// `token`, `key`'s, into `all`, within `cap` (the oldest goes first); whether one went.
-fn remember(all: &mut Vec<PersonToken>, key: &str, token: &str, cap: usize) -> bool {
+fn remember(all: &mut Vec<PersonToken>, key: &str, token: &str, cap: usize, what: &NewSignIn) -> bool {
     let mut evicted = false;
     while all.len() >= cap {
         all.remove(0);
@@ -505,11 +788,20 @@ fn remember(all: &mut Vec<PersonToken>, key: &str, token: &str, cap: usize) -> b
         hash: hash(token),
         key: key.to_string(),
         created_at: now(),
+        label: what.label.clone(),
+        remote: what.remote,
+        last_used: None,
     });
     evicted
 }
 
-fn mint_owners(s: &NodeState, key: &str, list: &str, cap: usize) -> Result<String, ApiError> {
+fn mint_owners(
+    s: &NodeState,
+    key: &str,
+    list: &str,
+    cap: usize,
+    what: &NewSignIn,
+) -> Result<String, ApiError> {
     let token = format!("{OWNER_PREFIX}{}", crate::tidal::random_urlsafe(32));
     let key = key.trim_start_matches("pubky").to_string();
     let lib = s.library.lock().expect("library poisoned");
@@ -521,7 +813,7 @@ fn mint_owners(s: &NodeState, key: &str, list: &str, cap: usize) -> Result<Strin
             .sync_handle()
             .is_some_and(|h| h.z32().trim_start_matches("pubky") == key);
         if current {
-            evicted = remember(all, &key, &token, cap);
+            evicted = remember(all, &key, &token, cap, what);
         }
         current
     });
@@ -551,10 +843,15 @@ pub const IDENTITY_NOT_LOADED: &str = "this node couldn't load its Pubky identit
 /// An owner's browser session or device sign-in that is still open, for `owner`: the identity the
 /// node has loaded now (a node signed in as someone else no longer lets the old owner's in).
 fn owner_session(s: &NodeState, token: &str, owner: &str) -> bool {
+    owner_session_list(s, token, owner).is_some()
+}
+
+/// The list an open owner sign-in is in ([`owner_session`]).
+fn owner_session_list(s: &NodeState, token: &str, owner: &str) -> Option<&'static str> {
     let h = hash(token);
     [OWNER_SESSIONS, DEVICE_SESSIONS]
-        .iter()
-        .any(|list| load(s, list).iter().any(|t| t.hash == h && t.key == owner))
+        .into_iter()
+        .find(|list| load(s, list).iter().any(|t| t.hash == h && t.key == owner))
 }
 
 /// The node took on the identity `owner` (restored at start, or a log in renewed or changed it):
@@ -786,6 +1083,29 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     crate::access::decide_path(s, &listener, method, path)
 }
 
+/// [`caller`] for a request being let in: the sign-in it came with is noted as used today
+/// ([`PersonToken::last_used`]). The API token and party guests have no such note.
+pub fn caller_seen(s: &NodeState, token: Option<&str>) -> Option<Caller> {
+    let c = caller(s, token)?;
+    if let Some(t) = token.filter(|t| s.token().as_deref() != Some(*t)) {
+        // Once a day per sign-in: the day already noted costs one look at a map, nothing else,
+        // and a day that could not be written is tried again with the next request
+        let (h, today) = (hash(t), today());
+        let noted = s.sign_ins_seen.lock().expect("sign-ins seen").get(&h) == Some(&today);
+        if !noted {
+            let list = match (c.role, &c.key) {
+                (Role::Owner, Some(key)) if t.starts_with(OWNER_PREFIX) => owner_session_list(s, t, key),
+                (Role::Listener, _) => Some(TOKENS),
+                _ => None,
+            };
+            if list.is_some_and(|list| used_today(s, list, &h, today)) {
+                s.sign_ins_seen.lock().expect("sign-ins seen").insert(h, today);
+            }
+        }
+    }
+    Some(c)
+}
+
 /// The request's caller, from its token: the API token or an owner's browser session is the
 /// owner; a listener's personal token is a listener. `None` = not signed in.
 pub fn caller(s: &NodeState, token: Option<&str>) -> Option<Caller> {
@@ -834,6 +1154,10 @@ pub struct Me {
     pub key: Option<String>,
     /// For a listener: the zones they may play on (`null` = all).
     pub zones: Option<Vec<String>>,
+    /// What this caller may do here (`access::Capability`, in snake case): pages show and hide
+    /// by it instead of guessing from the role.
+    #[serde(default)]
+    pub can: Vec<crate::access::Capability>,
 }
 
 /// `GET /v1/me`: who this token is.
@@ -846,9 +1170,49 @@ pub(crate) async fn me(
         zones: (c.role == Role::Listener)
             .then(|| listener_zones(&s).unwrap_or(Some(Vec::new())))
             .flatten(),
+        can: crate::access::can(&s, &c),
         role: c.role,
         key: c.key,
     }))
+}
+
+/// `GET /v1/me/sign-ins`: the caller's own sign-ins on this node (the owner: their browsers and
+/// apps; someone with music access: theirs), newest first, the one asking marked `current`.
+pub(crate) async fn my_sign_ins(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<Caller>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<Vec<SignIn>> {
+    let whose = Whose::of(&c).ok_or_else(|| refused("sign-ins are kept per person"))?;
+    let token = crate::bearer(&headers, &Default::default());
+    Ok(Json(sign_ins(&s, &whose, token.as_deref())?))
+}
+
+/// `DELETE /v1/me/sign-ins/{id}`: end one of the caller's own sign-ins (404 when there is none
+/// with that id).
+pub(crate) async fn end_my_sign_in(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<Caller>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let whose = Whose::of(&c).ok_or_else(|| refused("sign-ins are kept per person"))?;
+    if !end_sign_in(&s, &whose, &id)? {
+        return Err(ApiError::not_found("no such sign-in"));
+    }
+    Ok(Json(serde_json::json!({"ended": 1})))
+}
+
+/// `DELETE /v1/me/sign-ins`: end every sign-in of the caller's own except the one asking (asked
+/// with the API token: all of the owner's). The API token stays as it is.
+pub(crate) async fn end_my_sign_ins(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<Caller>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult<serde_json::Value> {
+    let whose = Whose::of(&c).ok_or_else(|| refused("sign-ins are kept per person"))?;
+    let token = crate::bearer(&headers, &Default::default());
+    let ended = end_sign_ins(&s, &whose, token.as_deref())?;
+    Ok(Json(serde_json::json!({"ended": ended})))
 }
 
 /// `DELETE /v1/me/token`: Log out of this browser. A listener's token or an owner's browser
@@ -1762,7 +2126,13 @@ mod tests {
     fn sessions_stay_within_their_cap_oldest_first() {
         let mut all = Vec::new();
         for i in 0..OWNER_SESSIONS_CAP + 3 {
-            remember(&mut all, "k", &format!("pmo_{i}"), OWNER_SESSIONS_CAP);
+            remember(
+                &mut all,
+                "k",
+                &format!("pmo_{i}"),
+                OWNER_SESSIONS_CAP,
+                &NewSignIn::default(),
+            );
         }
         assert_eq!(all.len(), OWNER_SESSIONS_CAP);
         assert_eq!(all[0].hash, hash("pmo_3"), "the three oldest went");
