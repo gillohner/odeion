@@ -136,7 +136,7 @@ jobs:
           update=$(covers 'crates/pm-desktop/|tools/android-update-probe\.py$|tools/release/(android-patch\.py|android/|updater-manifest\.py|aab-check\.py|android-sign\.sh)|\.github/workflows/release\.yml$')
           background=$(covers 'crates/(pm-desktop|pm-app-player|pm-audio)/|tools/release/android/|tools/release/android-patch\.py$|tools/android-background-probe\.py$|tools/android-endpoint\.py$')
           sources=$(covers 'crates/pm-sources/|Cargo\.(toml|lock)$')
-          phone=$(covers 'crates/(pm-desktop|pm-offline|pm-sources|pm-app-player|pm-audio)/|crates/pm-api/static/|tools/android-phone-mode\.py$|tools/release/android-patch\.py$|tools/release/android/')
+          phone=$(covers 'crates/(pm-desktop|pm-offline|pm-sources|pm-pubky|pm-app-player|pm-audio)/|crates/pm-api/static/|tools/android-phone-mode\.py$|tools/release/android-patch\.py$|tools/release/android/')
           node=false
           if [ "$zone" = true ] || [ "$background" = true ]; then node=true; fi
           one='{"include":[{"api":"35","target":"google_apis"}]}'
