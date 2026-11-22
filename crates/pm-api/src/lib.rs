@@ -1030,9 +1030,10 @@ pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// [`serve_listener`] until `stop` resolves (the node was asked to stop): no new connection is
 /// taken here and no new request on any of the node's listeners ([`NodeState::begin_stop`]),
-/// requests being answered get [`STOP_GRACE`] to finish, those that have not by then are ended
-/// ([`NodeState::end_requests`]), and the call returns. Connections still open then (the event
-/// stream, audio to a player) are left to end with the process.
+/// requests being answered, on this listener or another, get [`STOP_GRACE`] to finish, those
+/// that have not by then are ended ([`NodeState::end_requests`]), and the call returns.
+/// Connections still open then (the event stream, audio to a player) are left to end with the
+/// process.
 pub async fn serve_listener_until(
     state: Arc<NodeState>,
     listener: tokio::net::TcpListener,
@@ -1074,8 +1075,15 @@ pub(crate) async fn serve_router_until(
             std::future::pending::<()>().await;
         }
     };
+    // Done when this listener's connections are, and no request is being answered on another
+    // of the node's listeners either (remote access has its own): those get the same time
+    let all_done = async {
+        let served = served.await;
+        state.requests_done().await;
+        served
+    };
     tokio::select! {
-        r = served => r?,
+        r = all_done => r?,
         () = grace_over => {
             state.end_requests();
             tracing::info!("requests not answered within the grace period were ended; open streams end with the node");

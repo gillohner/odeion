@@ -106,6 +106,8 @@ pub async fn not_while_stopping(State(s): State<Arc<NodeState>>, req: Request, n
     if s.is_stopping() {
         return stopping();
     }
+    // (counted while the handler runs; a body that is sent afterwards, a stream, is not)
+    let _in_flight = s.request_began();
     tokio::select! {
         // (first: once the time is over, a handler that is ready in the same instant is ended too)
         biased;
@@ -560,6 +562,63 @@ mod tests {
         assert_eq!(answer.status().as_u16(), 503);
         assert!(gone.load(Ordering::SeqCst), "the handler was dropped");
         assert!(!went_on.load(Ordering::SeqCst), "and did not go on");
+    }
+
+    /// A request being answered on another listener of the node (remote access has its own)
+    /// when the node is told to stop gets its time too: the stop waits for it, within the
+    /// grace period, and it is answered in full.
+    #[tokio::test]
+    async fn a_request_on_another_listener_gets_its_time_to_finish() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let s = crate::tests::state(dir.path(), None).await;
+        let (started, mut has_started) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let layer = || axum::middleware::from_fn_with_state(s.clone(), not_while_stopping);
+        let other = axum::Router::new()
+            .route(
+                "/slow",
+                axum::routing::get(move || async move {
+                    let _ = started.send(());
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    "done"
+                }),
+            )
+            .layer(layer());
+        let other_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_addr = other_l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(other_l, other).await });
+        // The listener that is told to stop has nothing to answer
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "here" }))
+            .layer(layer());
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (stop, asked) = tokio::sync::oneshot::channel::<()>();
+        let served = tokio::spawn(crate::serve_router_until(s.clone(), l, app, async move {
+            let _ = asked.await;
+        }));
+        let slow = tokio::spawn(reqwest::get(format!("http://{other_addr}/slow")));
+        tokio::time::timeout(Duration::from_secs(30), has_started.recv())
+            .await
+            .expect("the request is being answered");
+        let asked_at = Instant::now();
+        stop.send(()).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(30), served).await;
+        assert!(matches!(ended, Ok(Ok(Ok(())))), "the server returned: {ended:?}");
+        let took = asked_at.elapsed();
+        assert!(
+            took >= Duration::from_millis(300),
+            "the stop waited for it: {took:?}"
+        );
+        assert!(took < crate::STOP_GRACE, "and no longer than it took: {took:?}");
+        // What the node does next (`stop_for_exit`) ends nothing: the request was answered
+        s.end_requests();
+        let answer = tokio::time::timeout(Duration::from_secs(10), slow)
+            .await
+            .expect("answered")
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer.status().as_u16(), 200);
+        assert_eq!(answer.text().await.unwrap(), "done");
     }
 
     /// Requests another site's page makes reach a node without a token only as top-level

@@ -995,4 +995,22 @@ async fn the_node_stops_when_asked_with_an_event_socket_open() {
         .iter()
         .all(|z| z.transport == pm_zones::Transport::Stopped));
     assert_eq!(std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0), 0);
+
+    // A zone made after the stop began (a player found late, a Squeezebox connecting) is closed
+    // like the others: Play does not reach it (an open zone would try the item and say that
+    // nothing in its queue could be played)
+    let late = s.create_zone("Found late", Arc::new(pm_zones::outputs::NullOutput::new()));
+    late.enqueue(
+        vec![pm_zones::QueueItem::new("/no/such/file.flac")],
+        pm_zones::Insert::End,
+    );
+    late.play();
+    let st = tokio::time::timeout(std::time::Duration::from_secs(5), late.wait_stopped())
+        .await
+        .expect("a closed zone has nothing to wait for");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        (st.transport, late.state().error),
+        (pm_zones::Transport::Stopped, None)
+    );
 }

@@ -315,6 +315,8 @@ pub struct NodeState {
     stopping: std::sync::atomic::AtomicBool,
     /// Requests still being answered are ended ([`Self::end_requests`]).
     requests_ended: tokio::sync::watch::Sender<bool>,
+    /// How many requests are being answered right now, on all listeners ([`Self::request_began`]).
+    requests_in_flight: tokio::sync::watch::Sender<usize>,
     /// Sources the owner switched off (Sources page): hidden everywhere, sign-ins kept.
     sources_off: std::sync::RwLock<std::collections::HashSet<String>>,
     /// `public_url` was not configured: the binary picked this machine's network address for
@@ -589,6 +591,7 @@ impl NodeState {
             scanning: Mutex::new(false),
             stopping: Default::default(),
             requests_ended: tokio::sync::watch::channel(false).0,
+            requests_in_flight: tokio::sync::watch::channel(0).0,
             public_url_guessed: Default::default(),
             config_file: Mutex::new(None),
             pubky_client: std::sync::OnceLock::new(),
@@ -632,6 +635,13 @@ impl NodeState {
     /// library settings on every queue change) is restored, stopped.
     pub fn create_zone(self: &Arc<Self>, name: &str, output: Arc<dyn Output>) -> Arc<Zone> {
         let zone = self.zones.create(name, output);
+        // A zone made while the node stops (a player found, a Squeezebox connecting, a group
+        // made by a request still being answered) is closed like the others: it is in the list
+        // by now, and the stop sets its mark before it reads that list ([`Self::stop_for_exit`]),
+        // so one of the two closes it
+        if self.is_stopping() {
+            zone.close();
+        }
         self.restore_queue(&zone);
         // The zone's crossfade (`PUT /v1/zones/{id}/crossfade`), kept across restarts
         if let Ok(Some(ms)) = self
@@ -812,6 +822,23 @@ impl NodeState {
     pub fn end_requests(&self) {
         self.begin_stop();
         self.requests_ended.send_replace(true);
+    }
+
+    /// A request is being answered from now until the returned value is dropped
+    /// (`peer::not_while_stopping` holds it while the handler runs, on every listener).
+    pub(crate) fn request_began(&self) -> RequestInFlight<'_> {
+        self.requests_in_flight.send_modify(|n| *n += 1);
+        RequestInFlight(self)
+    }
+
+    /// Resolves once no request is being answered on any listener. A stop waits for this (at
+    /// most [`crate::STOP_GRACE`]): a request on another listener than the one that was told to
+    /// stop (remote access) gets the same time to finish.
+    pub(crate) async fn requests_done(&self) {
+        let mut in_flight = self.requests_in_flight.subscribe();
+        if in_flight.wait_for(|n| *n == 0).await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
 
     /// Resolves once [`Self::end_requests`] was called.
@@ -2689,6 +2716,17 @@ fn continue_radio(library: &Mutex<Library>, zone: &Arc<Zone>) {
     tracing::info!(zone = %zone.id(), added = items.len(), "radio: continuing with similar tracks");
     zone.enqueue(items, pm_zones::Insert::End);
     zone.play_index(start);
+}
+
+/// A request being answered ([`NodeState::request_began`]); it is over when this is dropped.
+pub(crate) struct RequestInFlight<'a>(&'a NodeState);
+
+impl Drop for RequestInFlight<'_> {
+    fn drop(&mut self) {
+        self.0
+            .requests_in_flight
+            .send_modify(|n| *n = n.saturating_sub(1));
+    }
 }
 
 /// Library tracks (`track:<id>`) go into the play history; other URIs do not.
