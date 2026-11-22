@@ -27390,7 +27390,9 @@ exec sleep 300
             .unwrap_err();
         assert_eq!(e.status, StatusCode::CONFLICT);
         // An account two people were signed in with before this keeps working for both (Anna's
-        // and the owner's are the same one in this node's stored sign-ins)
+        // and the owner's are the same one in this node's stored sign-ins: Ben can't take it)
+        let e = b.put(&lib, "tidal.user", Some(&sess("1"))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
         a.put(&lib, "tidal.user", Some(&sess("1")))
             .expect("her sign-in is renewed");
         // What names no account, and every other setting: as before
@@ -27519,5 +27521,127 @@ exec sleep 300
         assert!(row(&format!("person.{ben}.tidal.user"))
             .unwrap()
             .contains("fresh-token"));
+    }
+
+    /// The other TIDAL ways hold a person to the same rule: Sign in with TIDAL (the pasted
+    /// address) and a pasted sign-in. What a pasted sign-in says about its own account is not
+    /// taken while TIDAL answers; when TIDAL does not (a sign-in that has run out), it is what
+    /// counts until the renewal, which is held to TIDAL's answer too.
+    #[tokio::test]
+    async fn a_persons_tidal_sign_in_ways_are_held_to_one_account_each() {
+        let _home_guard = imports::HOME_TEST_LOCK.lock().await;
+        use base64::Engine;
+        let home = tempfile::tempdir().unwrap();
+        *imports::HOME_OVERRIDE.write().unwrap() = Some(home.path().to_path_buf());
+        // A token that names its account (`uid`), as TIDAL's do, or does not
+        let jwt = |claims: &str| {
+            let b = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+            format!("{}.{}.{}", b(r#"{"alg":"RS256"}"#), b(claims), b("s"))
+        };
+        let names_5 = jwt(r#"{"uid":5,"cc":"DE","exp":4000000000}"#);
+        let names_nobody = jwt(r#"{"cc":"DE","exp":4000000000}"#);
+        // TIDAL answers every sign-in and every "who is this" with account 77
+        let (base, _) = full_tracks_mock(Vec::new()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        point_tidal_at(&s, &base, true);
+        let app = router(s.clone());
+        let ben_tok = accounts::mint(&s, ben).unwrap();
+        let ben_who = accounts::Who::Listener(ben.to_string());
+        let owner_is = |account: &str| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(
+                    "tidal.user",
+                    &serde_json::json!({"access_token": "owner-token", "refresh_token": "r", "expires_at": pm_library::db::now_unix() + 3600, "user_id": account, "scope": "playback"}).to_string(),
+                )
+                .unwrap()
+        };
+        let bens = || tidal_unofficial::load(&s.library.lock().unwrap(), &ben_who).session;
+        let start = "/v1/sources/tidal/unofficial/browser";
+        let finish = "/v1/sources/tidal/unofficial/browser/finish";
+        let import = "/v1/sources/tidal/signin/import";
+        let landed = serde_json::json!({"text": "https://tidal.com/android/login/auth?code=good-code"});
+
+        // 77 is the owner's account here: not kept for Ben, whichever way
+        owner_is("77");
+        let (st, r, _) = send_as(&app, "POST", start, Some(&ben_tok), &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let (st, r, _) = send_as(&app, "POST", finish, Some(&ben_tok), &[], Some(landed.clone())).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("already signed in"), "{r}");
+        assert!(bens().is_none());
+        // (the pasted sign-in says it is account 5: TIDAL says 77)
+        let pasted = serde_json::json!({"text": names_5});
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(pasted.clone())).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        assert!(bens().is_none());
+
+        // 77 is nobody's here: kept for Ben, under the account TIDAL names
+        owner_is("1");
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(pasted.clone())).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(
+            bens().unwrap().user_id.as_deref(),
+            Some("77"),
+            "TIDAL's answer, not the paste's"
+        );
+        tidal_unofficial::update(&s, &ben_who, |st| st.session = None);
+        let (st, r, _) = send_as(&app, "POST", start, Some(&ben_tok), &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let (st, r, _) = send_as(&app, "POST", finish, Some(&ben_tok), &[], Some(landed)).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(bens().unwrap().user_id.as_deref(), Some("77"));
+        tidal_unofficial::update(&s, &ben_who, |st| st.session = None);
+
+        // TIDAL does not say who it is (out of reach here; a sign-in that has run out is the
+        // same): the account the sign-in names counts, and one that names none is not kept
+        s.tidal.write().unwrap().v1_base = "http://127.0.0.1:9/v1".into();
+        owner_is("5");
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(pasted.clone())).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        owner_is("1");
+        let nobody = serde_json::json!({"text": names_nobody});
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(nobody)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("doesn't say whose TIDAL account"),
+            "{r}"
+        );
+        assert!(bens().is_none());
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(pasted)).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let kept = bens().unwrap();
+        assert_eq!(kept.user_id.as_deref(), Some("5"));
+
+        // Its renewal names the account: the same one, another that is nobody's, or the owner's
+        {
+            let lib = s.library.lock().unwrap();
+            let renewed =
+                |answer: serde_json::Value| tidal_unofficial::renewed_for(&lib, &ben_who, &answer, &kept);
+            assert_eq!(renewed(serde_json::json!({"access_token": "t"})), Ok(None));
+            assert_eq!(renewed(serde_json::json!({"user_id": 5})), Ok(None));
+            assert_eq!(
+                renewed(serde_json::json!({"user": {"userId": 9}})),
+                Ok(Some("9".to_string()))
+            );
+            let why = renewed(serde_json::json!({"user_id": 1})).unwrap_err();
+            assert!(why.contains("already signed in"), "{why}");
+            // (the owner's own renewals are not held to it)
+            assert_eq!(
+                tidal_unofficial::renewed_for(
+                    &lib,
+                    &accounts::Who::Owner,
+                    &serde_json::json!({"user_id": 77}),
+                    &kept
+                ),
+                Ok(Some("77".to_string()))
+            );
+        }
+        *imports::HOME_OVERRIDE.write().unwrap() = None;
     }
 }

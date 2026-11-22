@@ -380,8 +380,10 @@ fn session_from(v: &Value, previous: Option<&Session>) -> Option<Session> {
 
 /// A sign-in of someone other than the owner, before it is stored: whose account it is must be
 /// known, and it must be nobody else's on this node ([`Who::account_free`]). `asked` says the
-/// account in `sess` is TIDAL's own answer; a pasted sign-in's is not, so TIDAL is asked. The
-/// owner's sign-ins pass as they are.
+/// account in `sess` is TIDAL's own answer. A pasted sign-in's is not: TIDAL is asked, and only
+/// when it does not answer (a sign-in that has run out and is renewed at its first play) the
+/// account is the one the sign-in names itself; the renewal then holds it to TIDAL's answer
+/// ([`renewed_for`]). The owner's sign-ins pass as they are.
 pub(crate) async fn held_to_its_person(
     s: &NodeState,
     who: &Who,
@@ -392,14 +394,46 @@ pub(crate) async fn held_to_its_person(
         return Ok(sess);
     }
     if !asked {
-        sess.user_id = None;
+        let named = sess.user_id.take();
         sess = fill_session(s, sess).await;
+        sess.user_id = sess.user_id.or(named);
     }
     let Some(account) = sess.user_id.as_deref().filter(|a| !a.trim().is_empty()) else {
-        return Err(crate::accounts::account_unknown("TIDAL"));
+        return Err(if asked {
+            crate::accounts::account_unknown("TIDAL")
+        } else {
+            ApiError::bad_request(
+                "This sign-in doesn't say whose TIDAL account it is, and TIDAL didn't either (it may have run out). Use Sign in with TIDAL instead.",
+            )
+        });
     };
     who.account_free(&s.library.lock().expect("library poisoned"), STATE_KEY, account)?;
     Ok(sess)
+}
+
+/// The account a renewal's answer names, when it is another one than the session was kept
+/// under (a pasted sign-in whose renewal belongs to a different account): for someone other
+/// than the owner it must be nobody else's on this node, as at sign-in. `Err` is why not.
+pub(crate) fn renewed_for(
+    lib: &pm_library::Library,
+    who: &Who,
+    answer: &Value,
+    kept: &Session,
+) -> Result<Option<String>, String> {
+    let named = answer["user_id"]
+        .as_i64()
+        .or(answer["user"]["userId"].as_i64())
+        .map(|u| u.to_string());
+    match named {
+        Some(account) if kept.user_id.as_deref() != Some(account.as_str()) => {
+            if !who.is_owner() {
+                who.account_free(lib, STATE_KEY, &account)
+                    .map_err(|e| e.message)?;
+            }
+            Ok(Some(account))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Who the session is: TIDAL's `/sessions` (user, country, session id).
@@ -1253,10 +1287,33 @@ fn token_blocking(
                 .unwrap_or("")
         )));
     }
-    let fresh =
+    let mut fresh =
         session_from(&v, Some(&sess)).ok_or_else(|| FullError::Mode("renewal without a token".into()))?;
     if let Ok(lib) = library.lock() {
         let mut st = load(&lib, who);
+        // The renewal names another account than the sign-in was kept under: held to the same
+        // rule as a sign-in (accounts.rs). Someone else's is not kept: the sign-in ends here
+        match renewed_for(&lib, who, &v, &sess) {
+            Ok(Some(account)) => fresh.user_id = Some(account),
+            Ok(None) => {}
+            Err(why) => {
+                if st
+                    .session
+                    .as_ref()
+                    .is_some_and(|c| c.access_token == sess.access_token)
+                {
+                    st.session = None;
+                    st.health = Some(Health {
+                        ok: false,
+                        detail: why.clone(),
+                        at: now(),
+                        lossy: false,
+                    });
+                    save(&lib, who, &st);
+                }
+                return Err(FullError::Mode(why));
+            }
+        }
         // Only over the session this renewal started from (the vault may have changed it
         // meanwhile); otherwise the session there now is the one to use
         if st
