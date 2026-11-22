@@ -748,8 +748,8 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
   .track .idmark { display: none; }
   .track .dur { padding-right: 0; }
   .track .row-actions { opacity: 1; }
-  /* (a row with a ⋯ keeps only it: Play next and Add to queue are in it. A service album's rows have
-     no ⋯, only Add to queue, so they keep it: hidden, a phone had no way to queue one of its songs) */
+  /* (a row with a ⋯ keeps only it: Play next and Add to queue are in it. A service album's row
+     without an address has no ⋯, only Add to queue, so it keeps that) */
   .track .row-actions:has([data-act="more"]) .icon-btn:not([data-act="more"]) { display: none; }
   .track .row-actions:has(.heart.on) .icon-btn:not(.heart) { opacity: 1; }
   .track.compact { grid-template-columns: 26px minmax(0, 1fr) 38px 32px; }

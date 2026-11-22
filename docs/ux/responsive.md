@@ -18,7 +18,7 @@ STEWARD-UX-RESPONSIVE.md step 1. **Approved by the owner on 2026-10-26, as drawn
 
 - **Tabs:** Home, Search, Library, Zones. The mini player above them carries the quality and the zone.
 - **Library:** my library first; shared libraries and Downloads as their own sections.
-- **Song rows:** the title, artist, length and ⋯; a bookmarked song has a small filled heart after its title (a mark, not a button: ⋯ adds or removes the bookmark). A streaming service's own album page (Sources › an album or set) has no ⋯ on its rows: they keep their + (Add to queue) instead.
+- **Song rows:** the title, artist, length and ⋯; a bookmarked song has a small filled heart after its title (a mark, not a button: ⋯ adds or removes the bookmark). A streaming service's own album page (Sources › an album or set) has the same ⋯ on its rows (Play next, Add to queue, Add to playlist…).
 - **Now playing:** art; title with the heart; the quality label (opens Details, the signal path); scrubber; transport. One row opens the five sheets; swipe down collapses it.
 - **Settings:** four groups, by where each setting is saved (STEWARD-SETTINGS-GROUPS.md). Each group header says where in one line:
   - **You:** saved on your homeserver, so it follows you to every node and device. My accounts, My library and sharing, Home, layout and appearance, playback quality.
