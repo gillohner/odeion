@@ -217,7 +217,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             let data_dir = cfg.data_dir.clone();
             tokio::spawn(async move {
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     if let Ok(Some(hold)) = library::lock_data_dir(&data_dir) {
                         tracing::info!(data_dir = %data_dir.display(), "the data folder is this node's alone now");
                         // (held until the process ends)

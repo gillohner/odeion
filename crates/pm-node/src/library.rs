@@ -63,6 +63,13 @@ impl Drop for Restoring {
     }
 }
 
+/// A restore at work: its hold on the data folder and its mark. The hold is let go first (a
+/// value's parts are dropped in the order they are written here), then the mark is removed.
+struct AtWork {
+    _hold: Option<DataDirLock>,
+    _mark: Restoring,
+}
+
 /// How long a starting node waits for the data folder when someone else holds it: the node it
 /// replaces, still on its way out.
 pub const HOLD_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
@@ -83,6 +90,8 @@ pub async fn wait_for_data_dir(
     let mut said = false;
     loop {
         if let Some(hold) = lock_data_dir(data_dir)? {
+            // (a mark with nobody holding the folder was left by a restore that was killed)
+            let _ = std::fs::remove_file(Restoring::path(data_dir));
             return Ok(Some(hold));
         }
         let restoring = Restoring::path(data_dir).exists();
@@ -238,10 +247,7 @@ fn write_staged(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// `library.db.bak`, without its WAL files), and nothing it stores would be in the restored one.
 pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
-    // The mark first and the hold second, so that the hold is let go first at the end: a node
-    // that waits sees the mark for as long as the hold is taken (also when the restore fails)
-    let _restoring = Restoring::begin(&cfg.data_dir);
-    let _hold = match lock_data_dir(&cfg.data_dir) {
+    let hold = match lock_data_dir(&cfg.data_dir) {
         Ok(Some(hold)) => Some(hold),
         Ok(None) => anyhow::bail!(
             "a node is running on {}: stop it first, or restore from Settings › Backup in the web app, \
@@ -253,6 +259,13 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
             println!("note: could not check whether a node is running on this folder ({e}); going on");
             None
         }
+    };
+    // The mark is written by the one that holds the folder and by no other (a second restore
+    // that is refused above leaves the first one's mark alone), and it is there until after the
+    // hold is let go, also when the restore fails: a node that waits sees it all that time
+    let _at_work = AtWork {
+        _hold: hold,
+        _mark: Restoring::begin(&cfg.data_dir),
     };
     let db = cfg.db_path();
     // Validate (and migrate) a scratch copy first so a broken file never
@@ -983,6 +996,19 @@ mod tests {
         };
         assert!(restore(&cfg, &dir.path().join("no-such-backup")).is_err());
         assert!(!Restoring::path(&data).exists());
-        assert!(lock_data_dir(&data).unwrap().is_some());
+        // A second restore that is refused leaves the mark of the one at work where it is
+        let at_work = AtWork {
+            _hold: lock_data_dir(&data).unwrap(),
+            _mark: Restoring::begin(&data),
+        };
+        let refused = restore(&cfg, &dir.path().join("no-such-backup")).unwrap_err();
+        assert!(refused.to_string().contains("a node is running"), "{refused}");
+        assert!(Restoring::path(&data).exists(), "the first restore's mark stays");
+        drop(at_work);
+        assert!(!Restoring::path(&data).exists());
+        // A mark left by a restore that was killed goes when a node takes the folder
+        std::fs::write(Restoring::path(&data), b"").unwrap();
+        let hold = wait_for_data_dir(&data, short, long).await.unwrap();
+        assert!(hold.is_some() && !Restoring::path(&data).exists());
     }
 }
