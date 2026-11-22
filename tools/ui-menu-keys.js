@@ -15,7 +15,8 @@
 // playing with the zone picker, the Sound panel, the volume or the copy's popup open there: the panel
 // closes first, and Back closes Help alone (before, Help, the panel and Now playing went together).
 // The copy's popup closes on Esc, /, N and ? as the others do. A page opened from a Now playing link by
-// keyboard leaves the focus on the mini player, not nowhere (it was on the row the page replaced).
+// keyboard (an album's or an artist's name) leaves the focus on the mini player, not nowhere (it was on
+// the row the page replaced).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-menu-keys.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -363,6 +364,17 @@ async function npPanels(browser, width) {
     await page.waitForFunction(() => /^\/album\//.test(location.pathname), null, { timeout: 3000 }).catch(() => {}); await page.waitForTimeout(500);
     const focus = await page.evaluate(() => { const a = document.activeElement; return !a || a === document.body ? 'body' : a.closest('#np') ? 'mini player' : a.id || a.tagName; });
     check(had && !await npShown(page) && /^\/album\//.test(new URL(page.url()).pathname) && focus === 'mini player', `${label}: the album opened from Now playing by keyboard, the focus on the mini player (${focus}, ${await at()})`);
+    // (the same from an artist's name there: before, Now playing closed first and gave the focus back
+    // to the row's ⋯ on the page about to go, so it was on nothing and the next Tab started at the top)
+    await reset();
+    await page.locator('.list.queue .list-row').nth(2).locator('[data-qmore]').focus();
+    await openNp();
+    const credit = page.locator('#nowplaying [data-artist-credit]').first();
+    const hadCredit = await credit.count();
+    if (hadCredit) { await credit.focus(); await page.keyboard.press('Enter'); }
+    await page.waitForFunction(() => /^\/(artist|search)\b/.test(location.pathname), null, { timeout: 3000 }).catch(() => {}); await page.waitForTimeout(500);
+    const focus3 = await page.evaluate(() => { const a = document.activeElement; return !a || a === document.body ? 'body' : a.closest('#np') ? 'mini player' : a.id || a.tagName; });
+    check(hadCredit && !await npShown(page) && /^\/(artist|search)\b/.test(new URL(page.url()).pathname) && focus3 === 'mini player', `${label}: the artist opened from Now playing by keyboard, the focus on the mini player (${focus3}, ${await at()})`);
     // (the same from Now playing's ⋯ › Go to song page: the page opens through setView, Now playing open)
     await reset();
     await page.locator('.list.queue .list-row').nth(2).locator('[data-qmore]').focus();
