@@ -737,12 +737,9 @@ impl PubkySync {
                 MusicContent::Playlist(p) => p.updated_at,
                 other => other.created_micros(),
             };
-            // (a tombstone is a row too: a post deleted here is not brought back by an older copy)
-            let take = match lib.music_post_stamp(&id)? {
-                None => true,
-                Some((updated_at, _, _)) => remote_updated > updated_at,
-            };
-            if take {
+            // (the same rule as for the new folders: nothing that waits to be pushed, a tombstone
+            // too, is replaced)
+            if pull_takes(remote_updated, lib.music_post_stamp(&id)?) {
                 store(&lib, &post, &id, Visibility::Private).map_err(|e| SyncError::Store(e.message))?;
                 lib.mark_music_post_synced(&id, now_micros())?;
                 report.pulled += 1;
