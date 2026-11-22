@@ -71,7 +71,7 @@ const ZONES = [zone('kitchen', 'Kitchen'), zone('den', 'Den'), zone('hall', 'Hal
 
 // What the node keeps, as its routes answer (crates/pm-api/src/people.rs, accounts.rs)
 const node = (over = {}) => ({
-  policy: 'own', replaceable: true, exposed: null, zones: [], parties: [], fail: {}, gate: {}, calls: [], half: {}, leftover: new Set(),
+  policy: 'own', replaceable: true, exposed: null, zones: [], none: false, parties: [], fail: {}, gate: {}, calls: [], half: {}, leftover: new Set(),
   homeserver: { configured: true, reachable: true, version: '0.6.0', users: 3, disk_used_mb: 2, public_key: HS },
   people: [
     { key: ANA, access: 'music', name: 'Ana', music_enabled: true, homeserver_enabled: true, added_at: T0, storage_quota_mb: null, used_bytes: null, sessions: 2, sign_ins: [
@@ -115,8 +115,19 @@ const serve = async (context, n) => {
     if (call === 'POST /party') { const pt = { id: `p${n.parties.length + 1}`, name: body.name || 'Party', zone: body.zone, zone_name: (ZONES.find((z) => z.id === body.zone) || {}).name, created_at: T0, expires_at: T0 + body.hours * 3600, adds_per_hour: body.adds_per_hour, waiting_per_guest: body.waiting_per_guest, guests: [], added: 0, url: `${ORIGIN}/party/abcdefghijklmnopqrstuvwxyz0123456789`, qr_svg: QR }; n.parties.push(pt); return json(pt); }
     if (m === 'DELETE' && seg[0] === 'party') { n.parties = n.parties.filter((p) => p.id !== seg[1]); return json({}); }
     if (call === 'GET /people') return json({ owner: null, people: n.people, invites: n.invites, homeserver: n.homeserver });
-    if (call === 'GET /people/zones') return json({ zones: n.zones });
-    if (call === 'PUT /people/zones') { n.zones = body.zones; return json({ zones: n.zones }); }
+    // The zones as a node of this version keeps them (`none`: no zone at all; an empty id is refused
+    // without it). `n.olderZones`: as a node before it does (no `none` in its answers, the list kept
+    // as sent: the list of one zone without a name opens no zone there). `n.dropsNone`: answers
+    // with `none`, but does not keep one sent to it.
+    if (call === 'GET /people/zones') return json(n.olderZones ? { zones: n.zones } : { zones: n.zones, none: n.none });
+    if (call === 'PUT /people/zones') {
+      if (n.olderZones) { n.zones = body.zones; return json({ zones: n.zones }); }
+      const ids = body.zones.filter((z) => z.trim());
+      if (body.none && ids.length) return json({ error: 'either the zones people may play on, or none: not both' }, 400);
+      if (!body.none && ids.length !== body.zones.length) return json({ error: 'a zone id is empty: send the zones’ ids, or none: true for no zone' }, 400);
+      n.zones = ids; n.none = !!body.none && !n.dropsNone;
+      return json({ zones: n.zones, none: n.none });
+    }
     if (call === 'POST /people/invites') {
       if (body.access === 'music') { n.people.push({ key: body.key, access: 'music', name: body.name || null, music_enabled: true, homeserver_enabled: true, added_at: T0, storage_quota_mb: null, used_bytes: null, sessions: 0, sign_ins: [] }); return json({ person: body.key }); }
       const inv = { id: `inv${n.invites.length + 1}`, access: body.access, name: body.name || null, token: 'DDDD-EEEE-FFFF', storage_quota_mb: body.storage_quota_mb || null, created_at: T0, url: `pubkyauth://direct_signup?hs=${HS}&st=DDDD-EEEE-FFFF`, qr_svg: QR };
@@ -187,9 +198,10 @@ const atLoopback = async (context) => {
       const phone = width < 600;
       // ---- the owner ----
       {
-        const n = node();
+        const n = node({ olderZones: phone });
         // At 1280 the node says what the owner can do, as a node of this version does (`can` in
-        // /v1/me); at 375 it doesn't (an older node): the page then goes by the role
+        // /v1/me), and knows "no zone"; at 375 it does neither (an older node): the page then goes by
+        // the role, and "no zone" reaches that node as a list it reads as no zone too
         const { context, page, state } = await owner(browser, width, n, { fixtures: phone ? {} : { '/me': { body: { role: 'owner', key: null, zones: null, can: OWNER_CAN } } } });
         const box = page.locator('#peoplebox');
         const person = (key) => box.locator(`[data-person="${key}"]`);
@@ -463,6 +475,40 @@ const atLoopback = async (context) => {
         await box.locator('#pzsave').click();
         await until(async () => /on every zone/.test(await says(FAY)), 'every zone again');
         assert.deepEqual(calls(n, 'PUT /people/zones').at(-1).body, { zones: [] }, 'every zone is the empty list');
+        // No zone at all is the third choice: they then play in their own browser or app only
+        assert.deepEqual((await box.locator('.pa-zmode label').allInnerTexts()).map((t) => t.trim()), ['Every zone', 'Only these', 'No zone']);
+        assert.equal(await box.locator('#pznonehelp').isVisible(), false);
+        await box.locator('label.check', { hasText: 'No zone' }).click();
+        assert.equal(await box.locator('#pznonehelp').innerText(), 'They play in their own browser or app only.');
+        assert.equal(await box.locator('#pzones').isVisible(), false);
+        const putsBefore = calls(n, 'PUT /people/zones').length;
+        await box.locator('#pzsave').dblclick();
+        await toast('The people you add play in their own browser or app only');
+        await until(async () => (await says(FAY)) === 'Plays music here in their own browser or app only, with their own TIDAL, Qobuz or Spotify.', 'the sentence under “No zone”');
+        await settled();
+        // Sent once, as `none` next to the list of one zone without a name: a node before `none`
+        // keeps that list and opens no zone either (an empty list would be every zone there)
+        assert.deepEqual(calls(n, 'PUT /people/zones').slice(putsBefore).map((c) => c.body), [{ zones: [''], none: true }], 'sent once, as no zone');
+        if (phone) assert.deepEqual(n.zones, [''], 'an older node keeps the list that opens no zone');
+        else assert.deepEqual([n.zones, n.none], [[], true], 'the node has “no zone”');
+        assert.equal(await box.locator('input[name="pzmode"][value="none"]').isChecked(), true, 'the choice is shown as saved');
+        assert.equal(await box.locator('#pznonehelp').isVisible(), true);
+        assert.equal(await box.locator('#pzones').isVisible(), false);
+        assert.equal(await box.locator('#pzones input:checked').count(), 0, 'no zone is ticked, and none without a name is listed');
+        assert.equal(await box.locator('#pzones input').count(), ZONES.length);
+        // What they can do follows: no zone is something they can't do
+        if (!phone) {
+          const [canNow, cantNow] = (await box.locator('#pcando').innerText()).split('They can’t');
+          assert.doesNotMatch(canNow, /zone/i, 'nothing about zones under “They can”');
+          assert.match(cantNow, /^\s+Play on a zone: none is open to them\s+Change settings/);
+        }
+        // Every zone again is the empty list without `none`
+        await box.locator('label.check', { hasText: 'Every zone' }).click();
+        await box.locator('#pzsave').click();
+        await until(async () => /^Plays music here, on every zone,/.test(await says(FAY)), 'every zone after no zone');
+        assert.deepEqual(calls(n, 'PUT /people/zones').at(-1).body, { zones: [] }, 'every zone: the empty list, without `none`');
+        assert.deepEqual([n.zones, !!n.none], [[], false], 'the node no longer has “no zone”');
+        if (!phone) assert.match(await box.locator('#pcando').innerText(), /Use the zones you open to them/);
 
         // 5. Whose music services: the three choices, here; each one's words in the sentence
         await openSec('services');
@@ -608,7 +654,7 @@ const atLoopback = async (context) => {
         if (phone) await box.locator('details[data-fold="zones"]').evaluate((d) => { d.open = true; });
         assert.equal(await box.locator('input[name="pzmode"]:checked').count(), 0, 'neither choice is taken for them');
         await box.locator('#pzsave').click();
-        await box.locator('#pzerr', { hasText: 'Choose “Every zone” or “Only these” first.' }).waitFor();
+        await box.locator('#pzerr', { hasText: 'Choose “Every zone”, “Only these” or “No zone” first.' }).waitFor();
         assert.equal(calls(n, 'PUT /people/zones').length, 0);
         await cleanCopy(page);
         assert.deepEqual(state.errors, [], 'no page errors');
@@ -635,6 +681,28 @@ const atLoopback = async (context) => {
         assert.deepEqual(state.errors, [], 'no page errors');
         await context.close();
       }
+      // A node that answers "no zone" and does not keep it: the screen is drawn again from what the
+      // node has now, and says so where the choice is (no word of a change that was not made)
+      if (!phone) {
+        const n = node({ dropsNone: true, zones: ['kitchen'] });
+        const { context, page, state } = await owner(browser, width, n);
+        const box = page.locator('#peoplebox');
+        const says = () => box.locator(`[data-person="${ANA}"] [data-psays]`).innerText();
+        await box.locator(`[data-person="${ANA}"]`).waitFor();
+        assert.equal(await says(), 'Plays music here, on Kitchen, with their own TIDAL, Qobuz or Spotify.');
+        assert.equal(await box.locator('input[name="pzmode"][value="some"]').isChecked(), true);
+        await box.locator('label.check', { hasText: 'No zone' }).click();
+        await box.locator('#pzsave').click();
+        await box.locator('#pzerr', { hasText: 'This node did not keep “No zone”. The choice above is what it has now.' }).waitFor();
+        await sleep(150);
+        assert.deepEqual(calls(n, 'PUT /people/zones').map((c) => c.body), [{ zones: [''], none: true }], 'asked once');
+        assert.equal(await box.locator('input[name="pzmode"][value="all"]').isChecked(), true, 'the choice shown is the node’s');
+        assert.equal(await says(), 'Plays music here, on every zone, with their own TIDAL, Qobuz or Spotify.');
+        assert.equal(await page.locator('#toast', { hasText: 'own browser or app only' }).count(), 0, 'no word of a change that was not kept');
+        await cleanCopy(page);
+        assert.deepEqual(state.errors, [], 'no page errors');
+        await context.close();
+      }
       // About's row opens this screen (on a computer in place, with the focus on its tab)
       if (!phone) {
         const n = node();
@@ -648,7 +716,8 @@ const atLoopback = async (context) => {
       }
       // ---- someone the owner added: their own Settings ----
       // (their own services only where the node lets them; a zone, or none open to them right now)
-      for (const [ownSignIn, zones] of [[true, ['kitchen']], [false, ['kitchen']], [true, []]]) {
+      // (a node before "no zone" was a choice says it as a list of one zone without a name)
+      for (const [ownSignIn, zones] of [[true, ['kitchen']], [false, ['kitchen']], [true, []], [true, ['']]]) {
         const n = node({ mine: [
           { id: 'l1', kind: 'person', label: 'Chromium on Linux', remote: false, created_at: T0, current: true },
           { id: 'l2', kind: 'person', label: 'Odeion app 0.2.4', remote: true, created_at: T0 - DAY, current: false },
@@ -670,7 +739,7 @@ const atLoopback = async (context) => {
         assert.equal(await page.locator('.set-group', { has: cando }).locator('.set-h').innerText().then((t) => t.toLowerCase()), 'what you can do here');
         const text = await cando.innerText();
         const [canText, cantText] = text.split('You can’t');
-        if (zones.length) {
+        if (zones.filter(Boolean).length) {
           assert.match(canText, /^You can\s+Play and search this node’s library\s+Use this zone: Kitchen\s+Keep your own bookmarks and collections, on your own Pubky account/);
           assert.match(cantText, /^\s+Change settings\s+Add, change or remove music\s+See the owner’s bookmarks, collections, tags or history\s+Add or remove people\s+Back up or restore\s+Change zones and speakers/);
         } else {
