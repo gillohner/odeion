@@ -982,4 +982,40 @@ async fn a_playlist_saved_with_one_song_id_per_song_keeps_them_all() {
     let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(d["summary"]["visibility"], "public", "{d}");
     assert_eq!(d["playlist"]["items"].as_array().unwrap().len(), 3, "{d}");
+
+    // The client is told the playlist is shared; sending that back with an edit keeps it so
+    assert_eq!(r["playlist"]["public"], true, "{r}");
+    let r = call(
+        &app,
+        &format!("/rest/updatePlaylist?playlistId={pl}&name=Mix%202&public=true&{auth}"),
+    )
+    .await;
+    assert_eq!(r["status"], "ok", "{r}");
+    let visibility = || async {
+        let (_, _, body) = owner_get(&app, &format!("/v1/playlists/{pid}")).await;
+        let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(d["playlist"]["name"], "Mix 2", "{d}");
+        assert_eq!(d["playlist"]["items"].as_array().unwrap().len(), 3, "{d}");
+        d["summary"]["visibility"].as_str().unwrap().to_string()
+    };
+    assert_eq!(visibility().await, "public");
+    // `public=false` takes it back: no longer shared, and the client is told so
+    let r = call(
+        &app,
+        &format!("/rest/updatePlaylist?playlistId={pl}&public=false&{auth}"),
+    )
+    .await;
+    assert_eq!(r["status"], "ok", "{r}");
+    assert_ne!(visibility().await, "public");
+    let r = call(&app, &format!("/rest/getPlaylist?id={pl}&{auth}")).await;
+    assert_eq!(r["playlist"]["public"], false, "{r}");
+    assert_eq!(titles(&r), ["T0", "T2"], "{r}");
+    // `public=true` does not share a playlist (that is asked for in the app)
+    let r = call(
+        &app,
+        &format!("/rest/updatePlaylist?playlistId={pl}&public=true&{auth}"),
+    )
+    .await;
+    assert_eq!(r["status"], "ok", "{r}");
+    assert_ne!(visibility().await, "public");
 }

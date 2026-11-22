@@ -494,7 +494,8 @@ fn playlist_json(lib: &Library, row: &MusicPostRow, p: &Playlist, with_entries: 
         "comment": p.description,
         "songCount": tracks.len(),
         "duration": duration,
-        "public": false,
+        // (shared on Pubky or not; a client that sends this back with an edit changes nothing)
+        "public": row.visibility == "public",
         "owner": "pubky",
         "created": iso(p.created_at / 1_000_000),
         "changed": iso(p.updated_at / 1_000_000),
@@ -551,7 +552,8 @@ fn add_repeated(params: &mut Params, key: &str, value: &str) {
     all.push_str(value);
 }
 
-/// What a stored playlist is: shared on Pubky or not. An edit keeps it.
+/// What a stored playlist is: shared on Pubky or not. An edit keeps it, unless it says
+/// `public=false` (`updatePlaylist`).
 fn visibility_of(row: &MusicPostRow) -> Visibility {
     if row.visibility == "public" {
         Visibility::Public
@@ -1427,7 +1429,14 @@ async fn dispatch(
             pl.items.extend(add);
             local.extend(add_local);
             playlists::set_local_ids(&lib, &row.id, &local).map_err(|e| SubErr::new(0, e.message))?;
-            save_playlist(&lib, &row.id, pl, visibility_of(&row))?;
+            // `public=false` takes a shared playlist back. `public=true` does not share one: to
+            // a Subsonic client the word means "the other accounts of this server may see it",
+            // and sharing here publishes the playlist on Pubky, which is asked for in the app.
+            let visibility = match p.get("public") {
+                Some(v) if v.trim().eq_ignore_ascii_case("false") => Visibility::Private,
+                _ => visibility_of(&row),
+            };
+            save_playlist(&lib, &row.id, pl, visibility)?;
             drop(lib);
             s.notify_library();
         }
