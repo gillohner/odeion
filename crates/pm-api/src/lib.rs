@@ -1030,11 +1030,23 @@ pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// [`serve_listener`] until `stop` resolves (the node was asked to stop): no new connection is
 /// taken here and no new request on any of the node's listeners ([`NodeState::begin_stop`]),
-/// requests being answered get [`STOP_GRACE`] to finish, and the call returns. Connections still
-/// open then are left to end with the process.
+/// requests being answered get [`STOP_GRACE`] to finish, those that have not by then are ended
+/// ([`NodeState::end_requests`]), and the call returns. Connections still open then (the event
+/// stream, audio to a player) are left to end with the process.
 pub async fn serve_listener_until(
     state: Arc<NodeState>,
     listener: tokio::net::TcpListener,
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let app = router(state.clone());
+    serve_router_until(state, listener, app, stop).await
+}
+
+/// [`serve_listener_until`] for `app`, which carries the node's own layers (`router`).
+pub(crate) async fn serve_router_until(
+    state: Arc<NodeState>,
+    listener: tokio::net::TcpListener,
+    app: Router,
     stop: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let (told, mut was_told) = tokio::sync::watch::channel(false);
@@ -1042,7 +1054,7 @@ pub async fn serve_listener_until(
     let served = std::future::IntoFuture::into_future(
         axum::serve(
             listener,
-            router(state.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
         .with_graceful_shutdown({
             let state = state.clone();
@@ -1064,7 +1076,10 @@ pub async fn serve_listener_until(
     };
     tokio::select! {
         r = served => r?,
-        () = grace_over => tracing::info!("connections still open after the grace period are not waited for"),
+        () = grace_over => {
+            state.end_requests();
+            tracing::info!("requests not answered within the grace period were ended; open streams end with the node");
+        }
     }
     Ok(())
 }

@@ -97,12 +97,21 @@ pub async fn tokenless_direct_only(State(s): State<Arc<NodeState>>, req: Request
 }
 
 /// Layer for every route on every listener: a node that was asked to stop takes no new request
-/// ([`NodeState::begin_stop`]).
+/// ([`NodeState::begin_stop`]), and a request it is still answering when the time for that is
+/// over is ended where it waits ([`NodeState::end_requests`]): the handler is dropped and does
+/// not go on while the node winds down. (Work a handler gave to a thread or to a task of its
+/// own is not ended by this.)
 pub async fn not_while_stopping(State(s): State<Arc<NodeState>>, req: Request, next: Next) -> Response {
+    let stopping = || (StatusCode::SERVICE_UNAVAILABLE, "the node is stopping").into_response();
     if s.is_stopping() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "the node is stopping").into_response();
+        return stopping();
     }
-    next.run(req).await
+    tokio::select! {
+        // (first: once the time is over, a handler that is ready in the same instant is ended too)
+        biased;
+        () = s.requests_ended() => stopping(),
+        answer = next.run(req) => answer,
+    }
 }
 
 /// A host and port as a request names them (`Host`, or the URI's authority as HTTP/2 sends it).
@@ -485,6 +494,72 @@ mod tests {
                 "{o}"
             );
         }
+    }
+
+    /// A request the node is still answering when the time to finish is over is ended there:
+    /// it is answered with 503 and its handler is dropped where it waits.
+    #[tokio::test]
+    async fn a_request_still_being_answered_after_the_grace_period_is_ended() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        /// Says when the handler that holds it is gone.
+        struct Gone(Arc<AtomicBool>);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let s = crate::tests::state(dir.path(), None).await;
+        let (went_on, gone) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (started, mut has_started) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let app = axum::Router::new()
+            .route(
+                "/slow",
+                axum::routing::get({
+                    let (went_on, gone) = (went_on.clone(), gone.clone());
+                    move || async move {
+                        let _gone = Gone(gone);
+                        let _ = started.send(());
+                        // (far longer than the test: only the end of the grace period ends it)
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        went_on.store(true, Ordering::SeqCst);
+                        "done"
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                s.clone(),
+                not_while_stopping,
+            ));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (stop, asked) = tokio::sync::oneshot::channel::<()>();
+        let served = tokio::spawn(crate::serve_router_until(s.clone(), l, app, async move {
+            let _ = asked.await;
+        }));
+        let slow = tokio::spawn(reqwest::get(format!("http://{addr}/slow")));
+        tokio::time::timeout(Duration::from_secs(30), has_started.recv())
+            .await
+            .expect("the request is being answered");
+        assert!(!gone.load(Ordering::SeqCst));
+        let asked_at = Instant::now();
+        stop.send(()).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(30), served).await;
+        assert!(matches!(ended, Ok(Ok(Ok(())))), "the server returned: {ended:?}");
+        assert!(
+            asked_at.elapsed() >= crate::STOP_GRACE,
+            "the request got its time: {:?}",
+            asked_at.elapsed()
+        );
+        let answer = tokio::time::timeout(Duration::from_secs(10), slow)
+            .await
+            .expect("answered when the time was over")
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer.status().as_u16(), 503);
+        assert!(gone.load(Ordering::SeqCst), "the handler was dropped");
+        assert!(!went_on.load(Ordering::SeqCst), "and did not go on");
     }
 
     /// Requests another site's page makes reach a node without a token only as top-level

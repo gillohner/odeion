@@ -525,6 +525,31 @@ async fn gapless_join_keeps_one_sink_open() {
     );
 }
 
+/// A zone closed for the node's exit takes no later command: nothing starts it again, and
+/// waiting for it to be stopped does not wait for what was not taken.
+#[tokio::test]
+async fn a_closed_zone_takes_no_command() {
+    let mut r = rig(&[("a", RATE, 250), ("b", RATE, 150)]);
+    r.gate.allow(1000);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.close();
+    assert_eq!(r.zone.wait_stopped().await.transport, Transport::Stopped);
+    drain_events(&mut r.events);
+    r.zone.play();
+    r.zone.next();
+    r.zone.toggle_pause();
+    let st = tokio::time::timeout(Duration::from_secs(2), r.zone.wait_stopped())
+        .await
+        .expect("nothing to wait for");
+    assert_eq!(st.transport, Transport::Stopped);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(r.zone.state().transport, Transport::Stopped);
+    assert_eq!(*r.rec.opens.lock().unwrap(), 0, "nothing was opened");
+    assert!(r.rec.samples.lock().unwrap().is_empty());
+    assert_eq!(kinds(&drain_events(&mut r.events)), Vec::<String>::new());
+}
+
 /// A sink of fixed size (a Linn's stream offered as a file) takes the next track gaplessly only
 /// when the whole track fits in what is left (with a margin of 2% and 10 s); else the track
 /// starts on a fresh sink after the old one played out. Every sample still plays, in order.

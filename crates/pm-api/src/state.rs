@@ -313,6 +313,8 @@ pub struct NodeState {
     scanning: Mutex<bool>,
     /// The node was asked to stop ([`Self::begin_stop`]): no new request is taken.
     stopping: std::sync::atomic::AtomicBool,
+    /// Requests still being answered are ended ([`Self::end_requests`]).
+    requests_ended: tokio::sync::watch::Sender<bool>,
     /// Sources the owner switched off (Sources page): hidden everywhere, sign-ins kept.
     sources_off: std::sync::RwLock<std::collections::HashSet<String>>,
     /// `public_url` was not configured: the binary picked this machine's network address for
@@ -586,6 +588,7 @@ impl NodeState {
             http: Mutex::new(None),
             scanning: Mutex::new(false),
             stopping: Default::default(),
+            requests_ended: tokio::sync::watch::channel(false).0,
             public_url_guessed: Default::default(),
             config_file: Mutex::new(None),
             pubky_client: std::sync::OnceLock::new(),
@@ -801,11 +804,30 @@ impl NodeState {
         self.stopping.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Before the node exits: every zone stops (a player is told to stop, a device is closed;
-    /// the queues are saved as they are), waiting at most `within` for all of them, and the
-    /// library's write-ahead log is folded into its file.
-    pub async fn stop_for_exit(&self, within: std::time::Duration) {
+    /// The time requests got to finish is over ([`crate::STOP_GRACE`]): a request still being
+    /// answered, on any listener, is ended where it waits and answered with 503
+    /// (`peer::not_while_stopping`), so that no handler goes on while the node winds down.
+    /// Streams already being sent (events, audio to a player) are no requests being answered:
+    /// they end with the process, as does work a handler gave to a thread or a task of its own.
+    pub fn end_requests(&self) {
         self.begin_stop();
+        self.requests_ended.send_replace(true);
+    }
+
+    /// Resolves once [`Self::end_requests`] was called.
+    pub(crate) async fn requests_ended(&self) {
+        let mut ended = self.requests_ended.subscribe();
+        if ended.wait_for(|ended| *ended).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Before the node exits: requests still being answered are ended ([`Self::end_requests`]),
+    /// every zone stops for good (a player is told to stop, a device is closed; the queues are
+    /// saved as they are; no later command starts one again, [`Zone::close`]), waiting at most
+    /// `within` for all of them, and the library's write-ahead log is folded into its file.
+    pub async fn stop_for_exit(&self, within: std::time::Duration) {
+        self.end_requests();
         let zones: Vec<Arc<Zone>> = self
             .zones
             .list()
@@ -813,7 +835,7 @@ impl NodeState {
             .filter_map(|z| self.zones.get(&z.id))
             .collect();
         for zone in &zones {
-            zone.stop();
+            zone.close();
         }
         let stopped = async {
             for zone in &zones {

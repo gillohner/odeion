@@ -156,6 +156,9 @@ pub struct Zone {
     queue: Arc<Mutex<Queue>>,
     cmds: mpsc::Sender<(u64, Command)>,
     seq: AtomicU64,
+    /// Closed for good ([`Zone::close`]); held while a command is sent, so that none follows
+    /// the last one.
+    closed: Mutex<bool>,
     state: watch::Receiver<ZoneState>,
     events: broadcast::Sender<ZoneEvent>,
     crossfade: Arc<AtomicU64>,
@@ -256,6 +259,7 @@ impl Zone {
             queue,
             cmds: cmd_tx,
             seq: AtomicU64::new(0),
+            closed: Mutex::new(false),
             state,
             events,
             crossfade,
@@ -304,10 +308,28 @@ impl Zone {
     }
 
     fn send(&self, cmd: Command) -> u64 {
+        let closed = self.closed.lock().unwrap_or_else(|e| e.into_inner());
+        if *closed {
+            // (not counted either: `wait_stopped` waits for every command that was sent)
+            return self.seq.load(Ordering::SeqCst);
+        }
+        self.send_now(cmd)
+    }
+
+    fn send_now(&self, cmd: Command) -> u64 {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         // A dead engine (panicked audio thread) shows up as a stale state; nothing to do here.
         let _ = self.cmds.send((seq, cmd));
         seq
+    }
+
+    /// Stop for good (the node is exiting): playback stops, and no command after this one
+    /// reaches the audio thread, whoever still sends one (a request being answered, a renderer,
+    /// a timer). Nothing starts the zone again.
+    pub fn close(&self) {
+        let mut closed = self.closed.lock().unwrap_or_else(|e| e.into_inner());
+        *closed = true;
+        self.send_now(Command::Stop);
     }
 
     fn with_queue<T>(&self, f: impl FnOnce(&mut Queue) -> T) -> T {
