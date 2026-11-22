@@ -151,14 +151,15 @@ impl DsdReader {
         if &hdr[12..16] != b"DSD " {
             return Err(AudioError::Unsupported("dff: form type is not DSD".into()));
         }
-        let end = 12 + form_size;
+        // Sizes are the file's word: sums are checked, and one that cannot be ends the walk
+        let end = form_size.saturating_add(12);
         let mut pos: u64 = 16;
         let mut rate = None;
         let mut channels = None;
         let mut compressed = false;
         let mut data: Option<(u64, u64)> = None;
         let mut id3 = None;
-        while pos + 12 <= end {
+        while pos.saturating_add(12) <= end {
             file.seek(SeekFrom::Start(pos))?;
             let mut ch = [0u8; 12];
             if file.read_exact(&mut ch).is_err() {
@@ -175,8 +176,8 @@ impl DsdReader {
                         return Err(AudioError::Unsupported("dff: PROP is not SND".into()));
                     }
                     let mut p = body + 4;
-                    let pend = body + size;
-                    while p + 12 <= pend {
+                    let pend = body.saturating_add(size);
+                    while p.saturating_add(12) <= pend {
                         file.seek(SeekFrom::Start(p))?;
                         let mut sc = [0u8; 12];
                         file.read_exact(&mut sc)?;
@@ -199,7 +200,8 @@ impl DsdReader {
                             }
                             _ => {}
                         }
-                        p += 12 + ssize + (ssize & 1);
+                        let Some(next) = next_chunk(p, ssize) else { break };
+                        p = next;
                     }
                 }
                 b"DSD " => data = Some((body, size)),
@@ -207,8 +209,8 @@ impl DsdReader {
                 b"ID3 " => id3 = read_exact_vec(&mut file, size).ok(),
                 b"DIIN" => {
                     let mut p = body;
-                    let pend = body + size;
-                    while p + 12 <= pend {
+                    let pend = body.saturating_add(size);
+                    while p.saturating_add(12) <= pend {
                         file.seek(SeekFrom::Start(p))?;
                         let mut sc = [0u8; 12];
                         file.read_exact(&mut sc)?;
@@ -216,12 +218,14 @@ impl DsdReader {
                         if &sc[0..4] == b"ID3 " && id3.is_none() {
                             id3 = read_exact_vec(&mut file, ssize).ok();
                         }
-                        p += 12 + ssize + (ssize & 1);
+                        let Some(next) = next_chunk(p, ssize) else { break };
+                        p = next;
                     }
                 }
                 _ => {}
             }
-            pos = body + size + (size & 1);
+            let Some(next) = next_chunk(pos, size) else { break };
+            pos = next;
         }
         if compressed {
             return Err(AudioError::Unsupported("dff: DST compressed audio".into()));
@@ -378,6 +382,12 @@ fn read_up_to<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
         total += n;
     }
     Ok(total)
+}
+
+/// Where the DSDIFF chunk after the one at `at` starts (a 12-byte header, `size` bytes, padded
+/// to an even length), or `None` when the size is no size a file can have (the sum does not fit).
+fn next_chunk(at: u64, size: u64) -> Option<u64> {
+    at.checked_add(12)?.checked_add(size)?.checked_add(size & 1)
 }
 
 fn read_exact_vec<R: Read>(r: &mut R, len: u64) -> std::io::Result<Vec<u8>> {
@@ -664,5 +674,49 @@ mod tests {
         let p = dir.path().join("x.dsf");
         std::fs::write(&p, b"RIFF....WAVE").unwrap();
         assert!(matches!(DsdReader::open(&p), Err(AudioError::Unsupported(_))));
+    }
+
+    /// Chunk sizes are the file's word. One that cannot be a size ends the walk: a file that
+    /// has what playing needs before it opens and plays, one that lacks it is malformed, and
+    /// neither wraps around to an earlier place.
+    #[test]
+    fn dff_chunk_sizes_that_cannot_be_end_the_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let fmt = AudioFormat::dsd(AudioFormat::DSD64_RATE, 2);
+        let data = pattern(1000, 2);
+        let good = dir.path().join("good.dff");
+        write_dff(&good, fmt, &data, None).unwrap();
+        let whole = std::fs::read(&good).unwrap();
+        for size in [u64::MAX, u64::MAX - 11, u64::MAX - 27, u64::MAX - 28] {
+            // After everything a player needs: a chunk of that size, in a form that claims any
+            let mut bytes = whole.clone();
+            bytes[4..12].copy_from_slice(&u64::MAX.to_be_bytes());
+            bytes.extend_from_slice(b"JUNK");
+            bytes.extend_from_slice(&size.to_be_bytes());
+            bytes.extend_from_slice(&[0u8; 32]);
+            let p = dir.path().join("after.dff");
+            std::fs::write(&p, &bytes).unwrap();
+            let mut r = DsdReader::open(&p).unwrap_or_else(|e| panic!("{size}: {e}"));
+            assert_eq!(r.total_frames(), 1000, "{size}");
+            assert_eq!(r.read_all().unwrap().len(), data.len(), "{size}");
+
+            // Inside the properties, before the sample rate: nothing to play
+            let mut prop = b"SND ".to_vec();
+            prop.extend_from_slice(b"JUNK");
+            prop.extend_from_slice(&size.to_be_bytes());
+            let mut bytes = b"FRM8".to_vec();
+            bytes.extend_from_slice(&200u64.to_be_bytes());
+            bytes.extend_from_slice(b"DSD ");
+            bytes.extend_from_slice(b"PROP");
+            bytes.extend_from_slice(&(prop.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&prop);
+            bytes.extend_from_slice(&[0u8; 64]);
+            let p = dir.path().join("prop.dff");
+            std::fs::write(&p, &bytes).unwrap();
+            assert!(
+                matches!(DsdReader::open(&p), Err(AudioError::Malformed(_))),
+                "{size}"
+            );
+        }
     }
 }

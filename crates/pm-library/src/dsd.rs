@@ -436,7 +436,7 @@ mod tests {
             b.extend(body);
             b
         };
-        for size in [u64::MAX, u64::MAX - 27, u64::MAX - 28, 1 << 63] {
+        for size in [u64::MAX, u64::MAX - 11, u64::MAX - 27, u64::MAX - 28, 1 << 63] {
             // At the top level, with a form that claims every size there is
             let top = form(u64::MAX, &chunk(b"JUNK", size, &[]));
             // Inside the properties chunk and inside the edited-master chunk
