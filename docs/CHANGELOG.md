@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **A listener's songs are not counted as the owner's listens.** A song that someone else on the node queued no longer becomes one of the owner's listens (the history the owner may publish) and is not sent to the owner's Last.fm or ListenBrainz when the music was moved to another zone, played in a listen-along group, continued by Radio, or started again by the owner. The owner's own songs, and what a control point on the home network or a Subsonic app plays, count as before. The node's own play counts (recently and most played) still count every play.
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21

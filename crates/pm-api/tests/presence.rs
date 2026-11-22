@@ -595,3 +595,128 @@ async fn listening_along_keeps_who_queued_each_song() {
     let (_, q) = call(&app, OWNER, "GET", "/v1/zones/hall/queue", None).await;
     assert_eq!(q[0]["by"], KEY2, "{q}");
 }
+
+/// A listener's music is never the owner's listen: not in a listen-along group around it (also
+/// one rebuilt when a joiner leaves), not on a zone they moved it to, and not a song they queued
+/// once the owner has the zone again. A song that carries no one is the zone's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listeners_music_is_never_the_owners_listen() {
+    use pm_api::listens::{play_is_the_owners, plays_are_the_owners};
+    let dir = tempfile::tempdir().unwrap();
+    let (s, app, track, l1, l2) = rooms(dir.path(), &["Kitchen", "Den", "Hall", "Attic"]).await;
+    let first_item = |q: &serde_json::Value| -> pm_zones::QueueItem {
+        serde_json::from_value(q[0].clone()).unwrap_or_else(|e| panic!("{e}: {q}"))
+    };
+    // A listener plays in the hall: the hall's plays are theirs
+    assert!(plays_are_the_owners(&s, "hall"));
+    play(&app, &l1, "hall", track).await;
+    assert!(!plays_are_the_owners(&s, "hall"));
+
+    // The owner listens along from the kitchen: the group plays the listener's music
+    let (st, g) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/presence/along",
+        Some(serde_json::json!({"key": KEY, "zone": "kitchen"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{g}");
+    let gid = g["id"].as_str().unwrap().to_string();
+    assert!(
+        !plays_are_the_owners(&s, &gid),
+        "a group around a listener's music is not the owner's"
+    );
+    let (st, back) = call(&app, OWNER, "DELETE", "/v1/presence/along", None).await;
+    assert_eq!(st, StatusCode::OK, "{back}");
+    assert!(!plays_are_the_owners(&s, "hall"));
+
+    // The listener moves the music to the den: the den is in their hands too
+    assert!(plays_are_the_owners(&s, "den"));
+    let (st, moved) = call(
+        &app,
+        &l1,
+        "POST",
+        "/v1/zones/hall/transfer",
+        Some(serde_json::json!({"to": "den"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{moved}");
+    assert!(
+        !plays_are_the_owners(&s, "den"),
+        "a zone a listener moved music to"
+    );
+
+    // The owner pauses the den: the zone is the owner's again, the listener's song still isn't
+    let (st, _) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/zones/den/transport",
+        Some(serde_json::json!({"action": "pause"})),
+    )
+    .await;
+    assert!(st.is_success(), "{st}");
+    assert!(plays_are_the_owners(&s, "den"));
+    let (_, q) = call(&app, OWNER, "GET", "/v1/zones/den/queue", None).await;
+    let theirs = first_item(&q);
+    assert_eq!(theirs.by.as_deref(), Some(KEY), "{q}");
+    assert!(
+        !play_is_the_owners(&s, "den", &theirs),
+        "a song a listener queued, on a zone the owner has"
+    );
+
+    // A song queued through another spelling of the zone's name carries their key all the same
+    let (st, r) = call(
+        &app,
+        &l1,
+        "POST",
+        "/v1/zones/%61ttic/queue",
+        Some(serde_json::json!({"track_ids": [track], "replace": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let (_, q) = call(&app, OWNER, "GET", "/v1/zones/attic/queue", None).await;
+    let theirs = first_item(&q);
+    assert_eq!(theirs.by.as_deref(), Some(KEY), "{q}");
+    assert!(!play_is_the_owners(&s, "attic", &theirs));
+
+    // The owner's own song on the owner's zone is the owner's listen
+    play(&app, OWNER, "den", track).await;
+    let (_, q) = call(&app, OWNER, "GET", "/v1/zones/den/queue", None).await;
+    let own = first_item(&q);
+    assert_eq!(own.by, None, "{q}");
+    assert!(play_is_the_owners(&s, "den", &own));
+    // And so is one a control point on the home network sent there: it carries where it may be
+    // fetched from, and no one
+    let sent = pm_zones::QueueItem {
+        limit: Some(pm_zones::FetchLimit {
+            peer: Some([192, 168, 1, 20].into()),
+            lan: true,
+        }),
+        ..own.clone()
+    };
+    assert!(play_is_the_owners(&s, "den", &sent));
+
+    // The group that is rebuilt when one of two joiners leaves stays in the listener's hands
+    play(&app, &l1, "hall", track).await;
+    for (who, room) in [(OWNER, "kitchen"), (l2.as_str(), "attic")] {
+        let (st, g) = call(
+            &app,
+            who,
+            "POST",
+            "/v1/presence/along",
+            Some(serde_json::json!({"key": KEY, "zone": room})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{g}");
+    }
+    let (st, rebuilt) = call(&app, OWNER, "DELETE", "/v1/presence/along", None).await;
+    assert_eq!(st, StatusCode::OK, "{rebuilt}");
+    let gid = rebuilt["id"].as_str().unwrap().to_string();
+    assert!(gid.starts_with("group:"), "{rebuilt}");
+    assert!(
+        !plays_are_the_owners(&s, &gid),
+        "the rebuilt group plays the listener's music still"
+    );
+}
