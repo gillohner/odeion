@@ -339,6 +339,24 @@ async fn guests_add_songs_in_their_section_within_the_limits() {
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{e}");
     assert!(e["error"].as_str().unwrap().contains("this hour"), "{e}");
 
+    // A full queue takes nothing more: a guest is told so, and the party goes on answering
+    let z = s.zones.get(&pm_zones::ZoneId::new(&zone)).unwrap();
+    let room = pm_zones::MAX_QUEUE_ITEMS - z.queue_len();
+    z.enqueue(
+        (0..room)
+            .map(|i| pm_zones::QueueItem::new(format!("https://radio.example/{i}")))
+            .collect(),
+        pm_zones::Insert::End,
+    );
+    for _ in 0..2 {
+        let (st, e) = add(&ben, "Song A").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        assert_eq!(e["error"], "The queue is full");
+    }
+    let (st, v) = call(&app, Some(&ben), "GET", "/v1/party/guest", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    z.clear();
+
     // The owner ends the party: guests' tokens stop
     let (st, list) = call(&app, own, "GET", "/v1/party", None).await;
     assert_eq!(st, StatusCode::OK);
