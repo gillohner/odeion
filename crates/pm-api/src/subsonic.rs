@@ -1348,8 +1348,8 @@ async fn dispatch(
             if let Some(pid) = p.get("playlistId") {
                 // Subsonic semantics: createPlaylist with playlistId replaces the item list.
                 // That is the list the client was given: what it was never shown (an item that
-                // is no song of this library, a song whose file is gone) stays, after the new
-                // songs.
+                // is no song of this library, such as one from a streaming service) stays, after
+                // the new songs.
                 let (row, mut pl) = load_playlist(&lib, pid)?;
                 let shown = playlist_entries(&lib, &row.id, &pl);
                 let old_local = playlists::local_ids(&lib, &row.id);
