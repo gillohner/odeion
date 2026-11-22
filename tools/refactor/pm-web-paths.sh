@@ -9,8 +9,22 @@ cd "$(git rev-parse --show-toplevel)"
 if [ -d crates/pm-api/static ]; then
   mkdir -p crates/pm-web
   if [ -d crates/pm-web/static ]; then
-    # Both exist (a merge brought new files to the old place): move them over one by one
-    git ls-files crates/pm-api/static | while read -r f; do git mv -f "$f" "crates/pm-web/static/${f#crates/pm-api/static/}"; done
+    # Both exist (a merge brought files to the old place): move over what the new place lacks,
+    # drop what is the same there, and stop at a file that differs: writing one over the other
+    # would lose one side's changes without a word
+    differ=""
+    while read -r f; do
+      to="crates/pm-web/static/${f#crates/pm-api/static/}"
+      if [ ! -e "$to" ]; then git mv "$f" "$to"
+      elif cmp -s "$f" "$to"; then git rm -q -f "$f"
+      else differ="$differ $f"
+      fi
+    done < <(git ls-files crates/pm-api/static)
+    if [ -n "$differ" ]; then
+      echo "these files are at both places with different content; merge each into its copy under crates/pm-web/static, remove the old one, and run this again:"
+      for f in $differ; do echo "  $f"; done
+      exit 1
+    fi
   else
     git mv crates/pm-api/static crates/pm-web/static
   fi
