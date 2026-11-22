@@ -34,6 +34,9 @@ use std::path::{Path, PathBuf};
 pub const FORMS: [&Form; 2] = [&TIDAL_FULL, &QOBUZ];
 /// How long a renewal waits for a vault pass running.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+/// The longest a renewal waits for the vault's copy when its record doesn't say whether the vault
+/// has the phone's sign-in.
+const READ_FOR: std::time::Duration = pm_pubky::homeserver::OBJECT_TIMEOUT;
 /// The phone's name in the device list (Settings › Accounts on a node shows it).
 pub const DEVICE_NAME: &str = "Odeion on this phone";
 
@@ -77,6 +80,9 @@ fn apply_if_still(
                             .map_err(|e| format!("not a sign-in this version reads ({e})"))?;
                     }
                 }
+                if !t.is_empty() {
+                    not_set_aside(d, form);
+                }
             }
             d.put(&lineage_key(form.service), lineage);
             Ok(true)
@@ -113,6 +119,9 @@ pub fn sign_in_here(
             return Ok(false);
         }
         d.put(&lineage_key(service), Some(&id));
+        if let Some(form) = FORMS.iter().find(|f| f.service == service) {
+            not_set_aside(d, form);
+        }
         Ok(true)
     })?;
     if kept {
@@ -121,19 +130,45 @@ pub fn sign_in_here(
     Ok(kept)
 }
 
-/// Whether what the phone holds for `service` differs from what the last sync recorded (a
-/// sign-in, a sign-out or a renewal here; not a health note). A record that can't be read: yes
-/// (the pass then says why it can't sync).
+/// Whether what the phone holds for `service`, and the id of its sign-in, differ from what the
+/// last sync recorded (a sign-in, a sign-out or a renewal here; not a health note). A sign-out of
+/// a sign-in the record doesn't have yet (a pass cut short after taking it) is one too. A record
+/// that can't be read: yes (the pass then says why it can't sync).
 pub fn changed_here(phone: &Phone, form: &Form) -> bool {
     let mine = vault_form::carried(form.carry, phone.store.as_ref())
         .ok()
         .flatten()
         .map(|m| vault_form::hash(&m));
+    let here = SessionStore::get(phone.store.as_ref(), &lineage_key(form.service));
     let Ok(record) = load_record(&record_path(phone)) else {
         return true;
     };
-    let seen = record.services.get(form.service).map(|s| s.mine.clone());
-    mine != seen
+    let seen = record
+        .services
+        .get(form.service)
+        .map(|s| (Some(s.mine.clone()), s.lineage.clone()));
+    (mine, here) != seen.unwrap_or_default()
+}
+
+/// Where the phone notes that a service's sign-in was set aside at start (it couldn't be read:
+/// [`super::store::FileStore::open`]), keyed by the sign-in's key: until the person signs in to it
+/// again (or the vault's copy is taken), nothing of it is written to or removed from the vault.
+pub(crate) fn set_aside_key(key: &str) -> String {
+    format!("vault.set_aside.{key}")
+}
+
+/// Whether `form`'s sign-in was set aside here and not signed in again since.
+fn set_aside(store: &dyn SessionStore, form: &Form) -> bool {
+    form.carry
+        .iter()
+        .any(|c| SessionStore::get(store, &set_aside_key(c.key)).is_some())
+}
+
+/// `apply_if_still`'s draft, `d`, with a sign-in in it again: no longer set aside.
+fn not_set_aside(d: &super::store::Draft, form: &Form) {
+    for c in form.carry {
+        d.put(&set_aside_key(c.key), None);
+    }
 }
 
 /// What both sides held at the last sync, per service.
@@ -153,9 +188,16 @@ pub struct Synced {
 pub struct Record {
     #[serde(default)]
     pub services: BTreeMap<String, Synced>,
-    /// The device list's "signed out everywhere" marker at the last sync.
+    /// The device list's "signed out everywhere" marker at the last sync that went through every
+    /// service.
     #[serde(default)]
     pub marker: Option<u64>,
+    /// Services whose take from the vault, write to it or renewal under its lock was under way
+    /// and isn't in `services` yet (a pass or a renewal cut short, or this record not saved after
+    /// it): the vault may hold the phone's sign-in though `services` doesn't say so, so a renewal
+    /// asks the vault first ([`renew_tidal`]). Written before the step, gone once it is recorded.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub under_way: std::collections::BTreeSet<String>,
 }
 
 fn record_path(phone: &Phone) -> PathBuf {
@@ -182,8 +224,8 @@ fn load_record(path: &Path) -> Result<Record, VaultStoreError> {
 }
 
 /// Written whole (to disk before it replaces the old one), so a crash never leaves a record that
-/// can't be read.
-fn save_record(path: &Path, r: &Record) {
+/// can't be read. An error when it couldn't be: the record on disk is the one before.
+fn save_record(path: &Path, r: &Record) -> Result<(), VaultStoreError> {
     let tmp = path.with_extension("json.tmp");
     let write = || -> std::io::Result<()> {
         use std::io::Write;
@@ -193,10 +235,13 @@ fn save_record(path: &Path, r: &Record) {
         f.sync_all()?;
         std::fs::rename(&tmp, path)
     };
-    if let Err(e) = write() {
+    write().map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        tracing::warn!("phone mode: the vault record could not be saved: {e}");
-    }
+        local(format!(
+            "the record of the vault sync ({}) can't be saved: {e}",
+            path.display()
+        ))
+    })
 }
 
 /// The vault's copy of a service, as the sync rules see it.
@@ -271,6 +316,9 @@ pub fn decide(
         (None, Some(t)) => match seen {
             // Signed out here: out of the vault too, even if renewed there since
             Some(s) if !new_there(s, t) => Do::Remove,
+            // The very sign-in the phone held (a sign-out keeps its id) though the record doesn't
+            // say so (a pass cut short after it took or wrote it): signed out here all the same
+            _ if here.is_some() && here == t.lineage.as_deref() => Do::Remove,
             _ => pull_or(t, Do::Nothing),
         },
         (Some(m), Some(t)) => match seen {
@@ -389,6 +437,44 @@ fn vault_of<'a>(
         .keep_marks(&d.1)
 }
 
+/// The vault steps a pass takes for each service: the vault client's own, or a test's stand-in.
+pub(crate) trait Side {
+    /// The service's copy (`None`: there is none).
+    async fn read(&self, service: &str) -> Result<Option<SignIn>, VaultStoreError>;
+    /// `s` written in the vault while its copy is still the one hashed `expect` (`None`: none) and
+    /// "Sign out everywhere" is still `marker`; whether it was written.
+    async fn write_if(
+        &self,
+        service: &str,
+        s: &SignIn,
+        marker: Option<u64>,
+        expect: Option<String>,
+    ) -> Result<bool, VaultStoreError>;
+    /// The copy removed while it is still the one hashed `expect`; whether it was.
+    async fn remove_if(&self, service: &str, expect: Option<String>) -> Result<bool, VaultStoreError>;
+}
+
+impl Side for Vault<'_> {
+    async fn read(&self, service: &str) -> Result<Option<SignIn>, VaultStoreError> {
+        Ok(Vault::read(self, service).await?.map(|o| o.sign_in))
+    }
+    async fn write_if(
+        &self,
+        service: &str,
+        s: &SignIn,
+        marker: Option<u64>,
+        expect: Option<String>,
+    ) -> Result<bool, VaultStoreError> {
+        let written = self
+            .write_shared_if(service, s, Some(marker), &|cur| cur.map(hash_of) == expect)
+            .await?;
+        Ok(written.is_some())
+    }
+    async fn remove_if(&self, service: &str, expect: Option<String>) -> Result<bool, VaultStoreError> {
+        Vault::remove_if(self, service, &|cur| cur.map(hash_of) == expect).await
+    }
+}
+
 /// One sync with the vault: list this phone, share, then each service by [`decide`].
 pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreError> {
     // One vault step at a time (a pass, a renewal): each reads and writes synced.json
@@ -404,6 +490,58 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
     vault.touch(DEVICE_NAME).await?;
     vault.share_with_trusted().await?;
     let marker = vault.marker(&vault.index().await?)?;
+    let report = services(phone, &vault, &path, &mut record, marker).await?;
+    qobuz_app(phone).await;
+    Ok(report)
+}
+
+/// `record` with `service`'s entry set to `entry` (`None`: none) and its step no longer under
+/// way, saved at once (only when that changes it): before the next step, so a pass cut short
+/// later (an error, its time limit, the app ending) never leaves a change the phone or the vault
+/// made unrecorded. An error, which ends the pass, when it can't be saved.
+fn record_service(
+    path: &Path,
+    record: &mut Record,
+    service: &str,
+    entry: Option<Synced>,
+) -> Result<(), VaultStoreError> {
+    let before = record.clone();
+    match entry {
+        Some(e) => {
+            record.services.insert(service.into(), e);
+        }
+        None => {
+            record.services.remove(service);
+        }
+    }
+    record.under_way.remove(service);
+    if *record != before {
+        save_record(path, record)?;
+    }
+    Ok(())
+}
+
+/// `service`'s step marked under way in `record`, saved before it is taken (see
+/// [`Record::under_way`]); an error, and the step isn't taken, when it can't be saved.
+fn mark_under_way(path: &Path, record: &mut Record, service: &str) -> Result<(), VaultStoreError> {
+    if record.under_way.insert(service.into()) {
+        save_record(path, record)?;
+    }
+    Ok(())
+}
+
+/// Each service by [`decide`], against the vault's `side`, with `record` (saved at `path`) as the
+/// last sync saw it: each service's outcome is recorded before the next one is looked at, and
+/// `marker` ("Sign out everywhere" now) only once every service was.
+pub(crate) async fn services(
+    phone: &Phone,
+    side: &impl Side,
+    path: &Path,
+    record: &mut Record,
+    marker: Option<u64>,
+) -> Result<Report, VaultStoreError> {
+    // "Sign out everywhere" as the last whole sync saw it (`record.marker` moves only at the end)
+    let before = record.marker;
     let mut report = Report::default();
     for form in FORMS {
         let svc = form.service;
@@ -419,17 +557,19 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                 .push(format!("{svc}: a renewal waits to be saved here"));
             continue;
         }
-        // What the phone holds and its id, read together (a sign-in here writes both at once)
-        let (mut mine, mut here) = (None, None);
+        // What the phone holds and its id, read together (a sign-in here writes both at once), and
+        // whether it was set aside at start (it couldn't be read)
+        let (mut mine, mut here, mut aside) = (None, None, false);
         phone
             .store
             .change_if(|d| {
                 mine = vault_form::carried(form.carry, d)?;
                 here = d.get(&lineage_key(svc));
+                aside = set_aside(d, form);
                 Ok(false)
             })
             .map_err(local)?;
-        let opened = match vault.read(svc).await {
+        let copy = match side.read(svc).await {
             Ok(o) => o,
             // Not (yet) shared with this phone, not one of the person's devices', or older than one
             // seen: what the phone has stays as it is
@@ -438,27 +578,43 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                 continue;
             }
         };
-        let theirs = opened.as_ref().map(|o| Theirs {
-            hash: hash_of(&o.sign_in),
-            lineage: vault_form::node_lineage(&o.sign_in),
-            usable: usable(phone, form, &o.sign_in, marker),
-            sign_in: &o.sign_in,
+        let theirs = copy.as_ref().map(|si| Theirs {
+            hash: hash_of(si),
+            lineage: vault_form::node_lineage(si),
+            usable: usable(phone, form, si, marker),
+            sign_in: si,
         });
         let mine_hash = mine.as_ref().map(vault_form::hash);
-        let seen = record.services.get(svc);
+        let seen = record.services.get(svc).cloned();
         // Made before the last sign-out everywhere, and not the copy synced since it
         let synced_since =
-            seen.is_some_and(|s| Some(&s.mine) == mine_hash.as_ref()) && record.marker == marker;
+            seen.as_ref().is_some_and(|s| Some(&s.mine) == mine_hash.as_ref()) && before == marker;
         let predates = marker.is_some_and(|m| here.as_deref().map(vault_form::lineage_at).unwrap_or(0) <= m)
             && !synced_since;
-        match decide(
-            seen,
-            mine_hash.as_deref(),
-            here.as_deref(),
-            theirs.as_ref(),
-            predates,
-        ) {
-            Do::Nothing => {}
+        let what = if aside {
+            // Set aside at start: signed out here only because it couldn't be read, so never a
+            // sign-out for the vault, and nothing of it is written there; the vault's copy is
+            // taken, as on a first sync, which is a sign-in again
+            match decide(None, None, None, theirs.as_ref(), false) {
+                Do::Pull if mine.is_none() => Do::Pull,
+                _ => {
+                    report
+                        .skipped
+                        .push(format!("{svc}: set aside here until signed in again"));
+                    continue;
+                }
+            }
+        } else {
+            decide(
+                seen.as_ref(),
+                mine_hash.as_deref(),
+                here.as_deref(),
+                theirs.as_ref(),
+                predates,
+            )
+        };
+        match what {
+            Do::Nothing => record_service(path, record, svc, seen)?,
             Do::InStep => {
                 let t = theirs.as_ref().expect("in step with a copy");
                 // The id of the sign-in both hold is the phone's too
@@ -475,22 +631,20 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                     report.skipped.push(format!("{svc}: changed meanwhile"));
                     continue;
                 }
-                record.services.insert(
-                    svc.into(),
-                    Synced {
-                        mine: mine_hash.clone().unwrap_or_default(),
-                        theirs: t.hash.clone(),
-                        lineage: t.lineage.clone(),
-                    },
-                );
+                let entry = Synced {
+                    mine: mine_hash.clone().unwrap_or_default(),
+                    theirs: t.hash.clone(),
+                    lineage: t.lineage.clone(),
+                };
+                record_service(path, record, svc, Some(entry))?;
             }
-            Do::Forget => {
-                record.services.remove(svc);
-            }
+            Do::Forget => record_service(path, record, svc, None)?,
             Do::Pull => {
                 let t = theirs.as_ref().expect("a copy to take");
                 let travels = vault_form::node_settings(t.sign_in).expect("a node's copy");
                 let lineage = vault_form::node_lineage(t.sign_in);
+                // From the take on, the phone holds the vault's tokens: noted first
+                mark_under_way(path, record, svc)?;
                 match apply_if_still(
                     &phone.store,
                     form,
@@ -500,6 +654,7 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                 ) {
                     Ok(true) => {}
                     Ok(false) => {
+                        record_service(path, record, svc, seen)?;
                         report.skipped.push(format!("{svc}: changed meanwhile"));
                         continue;
                     }
@@ -507,6 +662,7 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                     // the next pass tries again
                     Err(e) => {
                         tracing::warn!("phone mode: vault: {svc}: the vault's copy is not taken: {e}");
+                        record_service(path, record, svc, seen)?;
                         report.skipped.push(format!("{svc}: {e}"));
                         continue;
                     }
@@ -517,14 +673,12 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                     .map_err(local)?
                     .map(|m| vault_form::hash(&m))
                     .unwrap_or_default();
-                record.services.insert(
-                    svc.into(),
-                    Synced {
-                        mine: kept,
-                        theirs: t.hash.clone(),
-                        lineage: t.lineage.clone(),
-                    },
-                );
+                let entry = Synced {
+                    mine: kept,
+                    theirs: t.hash.clone(),
+                    lineage: t.lineage.clone(),
+                };
+                record_service(path, record, svc, Some(entry))?;
                 report.pulled.push(svc);
             }
             Do::Push => {
@@ -553,30 +707,34 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                     &lineage,
                 );
                 let expect = theirs.as_ref().map(|t| t.hash.clone());
-                let written = vault
-                    .write_shared_if(svc, &s, Some(marker), &|cur| cur.map(hash_of) == expect)
-                    .await?;
-                if written.is_some() {
+                // Once written, the vault holds the phone's tokens: noted first (a write that
+                // fails or is cut off may still have landed, so the note stays then)
+                mark_under_way(path, record, svc)?;
+                if side.write_if(svc, &s, marker, expect).await? {
                     // The id with the copy, unless the phone's sign-in changed during the write: its
                     // own new id stays, and the next pass (what was written is recorded) writes it
                     apply_if_still(&phone.store, form, mine_hash.as_deref(), None, Some(&lineage))?;
-                    record.services.insert(
-                        svc.into(),
-                        Synced {
-                            mine: vault_form::hash(travels),
-                            theirs: hash_of(&s),
-                            lineage: Some(lineage.clone()),
-                        },
-                    );
+                    let entry = Synced {
+                        mine: vault_form::hash(travels),
+                        theirs: hash_of(&s),
+                        lineage: Some(lineage.clone()),
+                    };
+                    record_service(path, record, svc, Some(entry))?;
                     report.pushed.push(svc);
                 } else {
+                    record_service(path, record, svc, seen)?;
                     report.skipped.push(format!("{svc}: changed meanwhile"));
                 }
             }
             Do::Remove => {
                 let expect = theirs.as_ref().map(|t| t.hash.clone());
-                if vault.remove_if(svc, &|cur| cur.map(hash_of) == expect).await? {
-                    record.services.remove(svc);
+                if side.remove_if(svc, expect).await? {
+                    record_service(path, record, svc, None)?;
+                    // The signed-out sign-in's id is let go too (unless signed in again
+                    // meanwhile); kept, it would only remove that copy again
+                    if let Err(e) = apply_if_still(&phone.store, form, None, None, None) {
+                        tracing::warn!("phone mode: vault: {svc}: {e}");
+                    }
                     report.removed.push(svc);
                 }
             }
@@ -585,14 +743,15 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
                     report.skipped.push(format!("{svc}: changed meanwhile"));
                     continue;
                 }
-                record.services.remove(svc);
+                record_service(path, record, svc, None)?;
                 report.dropped.push(svc);
             }
         }
     }
-    record.marker = marker;
-    save_record(&path, &record);
-    qobuz_app(phone).await;
+    if record.marker != marker {
+        record.marker = marker;
+        save_record(path, record)?;
+    }
     Ok(report)
 }
 
@@ -629,8 +788,10 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         return Ok(Renewal::NotInVault);
     };
     // Can't be read: an error (a lasting one: the phone renews on its own, as without a vault)
-    let record = load_record(&path)?;
-    if record.services.get(svc).map(|s| s.mine.as_str()) != Some(vault_form::hash(&mine).as_str()) {
+    let mut record = load_record(&path)?;
+    let in_record =
+        record.services.get(svc).map(|s| s.mine.as_str()) == Some(vault_form::hash(&mine).as_str());
+    if !in_record && !record.under_way.contains(svc) {
         return Ok(Renewal::NotInVault);
     }
     // "Sign out everywhere" as the last sync saw it
@@ -639,6 +800,27 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     let secret = pm_pubky::vault::load_or_create_client_secret(&d.join("client.key")).map_err(local)?;
     let files = (d.join("revoked.json"), d.join("marks.json"));
     let vault = vault_of(acct, &secret, &files);
+    if !in_record {
+        // A take, a write or a renewal of TIDAL was under way when a pass or a renewal was cut
+        // short (or its record not saved): the vault may hold the phone's tokens though the
+        // record doesn't say so. The vault is asked first; only a copy without the phone's refresh
+        // token is not in step (a homeserver that doesn't answer: never renewed beside it)
+        match tokio::time::timeout(READ_FOR, Side::read(&vault, svc)).await {
+            Err(_) => return Err(VaultStoreError::Busy(svc.into())),
+            Ok(Err(e)) => return Err(e),
+            Ok(Ok(copy)) => {
+                if !copy.is_some_and(|si| same_refresh_token(&si, &mine)) {
+                    return Ok(Renewal::NotInVault);
+                }
+            }
+        }
+    }
+    // Under way until its outcome is recorded: a renewal cut short, or one whose record can't be
+    // saved, leaves the next renewal asking the vault first (best effort: not noted, a renewal
+    // here is as before)
+    if let Err(e) = mark_under_way(&path, &mut record, svc) {
+        tracing::warn!("phone mode: {e}");
+    }
     let p = phone.clone();
     // Whether TIDAL was asked, and its own refusal (not a failure on the way), kept apart from
     // the vault's errors
@@ -761,19 +943,18 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     };
     let kept = vault_form::hash(&kept);
     // (Read before the renewal under the same lock; should it not read now, it stays as it is)
-    match load_record(&path) {
-        Ok(mut record) => {
-            record.services.insert(
-                svc.into(),
-                Synced {
-                    mine: kept,
-                    theirs: hash_of(si),
-                    lineage: vault_form::node_lineage(si),
-                },
-            );
-            save_record(&path, &record);
-        }
-        Err(e) => tracing::warn!("phone mode: {e}"),
+    // (Not saved: logged, not an error, as TIDAL answered; the renewal stays under way, so the next
+    // one asks the vault first)
+    let saved = load_record(&path).and_then(|mut record| {
+        let entry = Synced {
+            mine: kept,
+            theirs: hash_of(si),
+            lineage: vault_form::node_lineage(si),
+        };
+        record_service(&path, &mut record, svc, Some(entry))
+    });
+    if let Err(e) = saved {
+        tracing::warn!("phone mode: {e}");
     }
     if matches!(r, Refreshed::ByUs(_)) {
         tracing::info!("phone mode: TIDAL renewed under the vault's lock");
@@ -830,9 +1011,22 @@ pub fn tidal_in_step(phone: &Phone) -> bool {
     let Ok(Some(mine)) = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref()) else {
         return false;
     };
+    // (Or a step of it under way: the vault may hold the phone's tokens)
     load_record(&record_path(phone)).is_ok_and(|r| {
         r.services.get(TIDAL_FULL.service).map(|s| s.mine.as_str()) == Some(vault_form::hash(&mine).as_str())
+            || r.under_way.contains(TIDAL_FULL.service)
     })
+}
+
+/// Whether the vault's copy `si` carries the refresh token of the phone's TIDAL session (`mine`,
+/// what travels): renewed by either, it would be spent for the other.
+fn same_refresh_token(si: &SignIn, mine: &Map<String, Value>) -> bool {
+    let token = |m: &Map<String, Value>| {
+        vault_form::session_of(TIDAL_FULL.carry, m)
+            .and_then(|s| s.get("refresh_token").and_then(Value::as_str).map(str::to_string))
+    };
+    let theirs = vault_form::node_settings(si).and_then(|m| token(&m));
+    theirs.is_some() && theirs == token(mine)
 }
 
 /// Whether a failure before TIDAL was asked ([`renew_tidal`]'s error) leaves open that the
@@ -895,12 +1089,290 @@ pub(crate) fn tidal_due_in_step(p: &Phone) {
             lineage: None,
         },
     );
-    save_record(&record_path(p), &r);
+    save_record(&record_path(p), &r).unwrap();
+}
+
+/// Tests: the vault as a map of copies, for [`services`]; a service in `stalled` never answers a
+/// write or a removal (a pass cut off there by its time limit).
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct StandIn {
+    pub copies: std::sync::Mutex<BTreeMap<String, SignIn>>,
+    pub stalled: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+#[cfg(test)]
+impl StandIn {
+    async fn stall(&self, service: &str) {
+        if self.stalled.lock().unwrap().contains(service) {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+#[cfg(test)]
+impl Side for StandIn {
+    async fn read(&self, service: &str) -> Result<Option<SignIn>, VaultStoreError> {
+        Ok(self.copies.lock().unwrap().get(service).cloned())
+    }
+    async fn write_if(
+        &self,
+        service: &str,
+        s: &SignIn,
+        _marker: Option<u64>,
+        expect: Option<String>,
+    ) -> Result<bool, VaultStoreError> {
+        self.stall(service).await;
+        let mut c = self.copies.lock().unwrap();
+        if c.get(service).map(hash_of) != expect {
+            return Ok(false);
+        }
+        c.insert(service.into(), s.clone());
+        Ok(true)
+    }
+    async fn remove_if(&self, service: &str, expect: Option<String>) -> Result<bool, VaultStoreError> {
+        self.stall(service).await;
+        let mut c = self.copies.lock().unwrap();
+        if c.get(service).map(hash_of) != expect {
+            return Ok(false);
+        }
+        c.remove(service);
+        Ok(true)
+    }
+}
+
+/// Tests: a node's copy of `form` holding `session` (its `session` member), made with `app`,
+/// with the sign-in id `lineage`.
+#[cfg(test)]
+pub(crate) fn node_copy(form: &Form, session: Value, app: Option<&str>, lineage: &str) -> SignIn {
+    let mut travels = Map::new();
+    travels.insert(
+        form.carry[0].key.into(),
+        serde_json::json!({ "session": session }),
+    );
+    vault_form::sign_in_for(
+        form.service,
+        form.carry,
+        true,
+        &travels,
+        None,
+        app.map(str::to_string),
+        lineage,
+    )
+}
+
+/// Tests: [`services`] on the phone's own record, as [`pass`] runs it.
+#[cfg(test)]
+pub(crate) async fn services_here(phone: &Phone, side: &StandIn) -> Result<Report, VaultStoreError> {
+    let path = record_path(phone);
+    std::fs::create_dir_all(dir(phone)).map_err(local)?;
+    let mut record = load_record(&path)?;
+    services(phone, side, &path, &mut record, None).await
+}
+
+/// Tests: TIDAL's copy `copy` taken here (with its id), the take still under way in the record (as
+/// a pass leaves it when the record couldn't be saved after the take, or the app ended there).
+#[cfg(test)]
+pub(crate) fn taken_unrecorded(phone: &Phone, copy: &SignIn) {
+    let travels = vault_form::node_settings(copy).unwrap();
+    let lineage = vault_form::node_lineage(copy);
+    assert!(apply_if_still(
+        &phone.store,
+        &TIDAL_FULL,
+        None,
+        Some(&travels),
+        lineage.as_deref()
+    )
+    .unwrap());
+    after_pull(phone, &TIDAL_FULL);
+    std::fs::create_dir_all(dir(phone)).unwrap();
+    let mut r = Record::default();
+    r.under_way.insert(TIDAL_FULL.service.into());
+    save_record(&record_path(phone), &r).unwrap();
+}
+
+/// Tests: a Qobuz copy the phone signed out of since the last sync: a pass removes it from the
+/// vault (after TIDAL), and with `stall`, that removal never answers.
+#[cfg(test)]
+pub(crate) fn qobuz_removal_stalls(p: &Phone, vault: &StandIn) {
+    qobuz_to_remove(p, vault);
+    vault.stalled.lock().unwrap().insert(QOBUZ.service.into());
+}
+
+/// Tests: [`qobuz_removal_stalls`], answering.
+#[cfg(test)]
+pub(crate) fn qobuz_to_remove(p: &Phone, vault: &StandIn) {
+    let q = node_copy(
+        &QOBUZ,
+        serde_json::json!({"token": "q"}),
+        None,
+        "2000-0123456789abcdef",
+    );
+    std::fs::create_dir_all(dir(p)).unwrap();
+    let mut r = Record::default();
+    r.services.insert(
+        QOBUZ.service.into(),
+        Synced {
+            mine: "gone".into(),
+            theirs: hash_of(&q),
+            lineage: vault_form::node_lineage(&q),
+        },
+    );
+    save_record(&record_path(p), &r).unwrap();
+    vault.copies.lock().unwrap().insert(QOBUZ.service.into(), q);
+}
+
+/// Tests: the phone's record of the last sync.
+#[cfg(test)]
+pub(crate) fn record_here(phone: &Phone) -> Record {
+    load_record(&record_path(phone)).unwrap()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn phone_with_device_client(dir: &std::path::Path) -> std::sync::Arc<Phone> {
+        Phone::open(super::super::Config {
+            dir: dir.to_path_buf(),
+            cache: dir.join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: super::super::TidalConf {
+                device: Some(pm_sources::tidal::full::Client {
+                    id: "device-client".into(),
+                    secret: "s".into(),
+                    from: "builtin".into(),
+                }),
+                ..Default::default()
+            },
+        })
+        .unwrap()
+    }
+
+    fn tidal_copy(token: &str, lineage: &str) -> SignIn {
+        node_copy(
+            &TIDAL_FULL,
+            serde_json::json!({"access_token": token, "refresh_token": "rt", "expires_at": pm_sources::now_unix() + 3600, "country": "CH"}),
+            Some("device-client"),
+            lineage,
+        )
+    }
+
+    fn tidal_here(p: &Phone) -> Option<String> {
+        pm_sources::tidal::full::load(p.store.as_ref())
+            .session
+            .map(|s| s.access_token)
+    }
+
+    #[tokio::test]
+    async fn a_pass_cut_short_after_taking_tidal_has_recorded_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone_with_device_client(dir.path());
+        let vault = StandIn::default();
+        vault.copies.lock().unwrap().insert(
+            TIDAL_FULL.service.into(),
+            tidal_copy("a", "1000-0123456789abcdef"),
+        );
+        // The next step, Qobuz's removal, never answers: the pass ends by its time limit
+        qobuz_removal_stalls(&p, &vault);
+        tokio::time::pause();
+        let cut = tokio::time::timeout(std::time::Duration::from_secs(120), services_here(&p, &vault)).await;
+        assert!(cut.is_err(), "cut short at Qobuz");
+        assert_eq!(tidal_here(&p).as_deref(), Some("a"), "TIDAL was taken");
+        // Recorded before the next step: a renewal goes through the vault, and a sign-out here is
+        // one for the vault
+        let r = record_here(&p);
+        let t = r.services.get(TIDAL_FULL.service).expect("TIDAL's take recorded");
+        assert_eq!(t.lineage.as_deref(), Some("1000-0123456789abcdef"));
+        assert!(!r.under_way.contains(TIDAL_FULL.service));
+        assert!(tidal_in_step(&p));
+        assert!(
+            r.services.contains_key(QOBUZ.service),
+            "Qobuz's removal not done: as it was"
+        );
+        super::super::tidal::sign_out(&p).unwrap();
+        assert!(
+            changed_here(&p, &TIDAL_FULL),
+            "the sign-out goes to the vault at once"
+        );
+        vault.stalled.lock().unwrap().clear();
+        let next = services_here(&p, &vault).await.unwrap();
+        assert_eq!(next.removed, vec![TIDAL_FULL.service, QOBUZ.service], "{next:?}");
+        assert!(vault.copies.lock().unwrap().is_empty());
+        assert_eq!(tidal_here(&p), None, "the sign-out stays");
+    }
+
+    #[tokio::test]
+    async fn a_sign_out_of_a_take_the_record_missed_is_one_for_the_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone_with_device_client(dir.path());
+        let vault = StandIn::default();
+        let copy = tidal_copy("a", "1000-0123456789abcdef");
+        vault
+            .copies
+            .lock()
+            .unwrap()
+            .insert(TIDAL_FULL.service.into(), copy.clone());
+        // Taken from the vault, and the app ended before the record was saved (it has no TIDAL)
+        let travels = vault_form::node_settings(&copy).unwrap();
+        assert!(apply_if_still(
+            &p.store,
+            &TIDAL_FULL,
+            None,
+            Some(&travels),
+            Some("1000-0123456789abcdef")
+        )
+        .unwrap());
+        std::fs::create_dir_all(dir.path().join("vault")).unwrap();
+        save_record(&record_path(&p), &Record::default()).unwrap();
+        // Signed out here: never taken again, removed from the vault
+        super::super::tidal::sign_out(&p).unwrap();
+        assert!(changed_here(&p, &TIDAL_FULL));
+        let r = services_here(&p, &vault).await.unwrap();
+        assert_eq!(r.removed, vec![TIDAL_FULL.service], "{r:?}");
+        assert!(r.pulled.is_empty(), "{r:?}");
+        assert_eq!(tidal_here(&p), None);
+        assert!(vault.copies.lock().unwrap().is_empty());
+        // Its id let go with it: nothing more to sync
+        assert_eq!(
+            SessionStore::get(p.store.as_ref(), &lineage_key(TIDAL_FULL.service)),
+            None
+        );
+        assert!(!changed_here(&p, &TIDAL_FULL));
+        // A new sign-in there is still taken
+        vault.copies.lock().unwrap().insert(
+            TIDAL_FULL.service.into(),
+            tidal_copy("b", "3000-0123456789abcdef"),
+        );
+        let r = services_here(&p, &vault).await.unwrap();
+        assert_eq!(r.pulled, vec![TIDAL_FULL.service], "{r:?}");
+        assert_eq!(tidal_here(&p).as_deref(), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn a_record_that_cant_be_saved_stops_the_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone_with_device_client(dir.path());
+        let vault = StandIn::default();
+        vault.copies.lock().unwrap().insert(
+            TIDAL_FULL.service.into(),
+            tidal_copy("a", "1000-0123456789abcdef"),
+        );
+        qobuz_to_remove(&p, &vault);
+        let before = std::fs::read(record_path(&p)).unwrap();
+        // The record can't be replaced now
+        std::fs::create_dir(record_path(&p).with_extension("json.tmp")).unwrap();
+        let r = services_here(&p, &vault).await;
+        assert!(matches!(r, Err(VaultStoreError::Local(_))), "{r:?}");
+        // Nothing taken or removed that the record can't say
+        assert_eq!(tidal_here(&p), None);
+        assert!(
+            vault.copies.lock().unwrap().contains_key(QOBUZ.service),
+            "Qobuz not removed"
+        );
+        assert_eq!(std::fs::read(record_path(&p)).unwrap(), before);
+    }
 
     fn phone_here(dir: &std::path::Path) -> std::sync::Arc<Phone> {
         Phone::open(super::super::Config {
@@ -926,7 +1398,8 @@ mod tests {
                 marker: Some(now),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let session = || {
             Some(pm_sources::tidal::full::Session {
                 access_token: "new".into(),
@@ -970,7 +1443,8 @@ mod tests {
                 },
             );
             r
-        });
+        })
+        .unwrap();
         pm_sources::tidal::full::update(p.store.as_ref(), |st| st.health = None);
         assert!(!changed_here(&p, &TIDAL_FULL));
         pm_sources::tidal::full::update(p.store.as_ref(), |st| st.session = None);
@@ -1135,6 +1609,21 @@ mod tests {
         // ... but a new sign-in there is taken
         assert_eq!(
             decide(Some(&s), None, None, Some(&t("y", "L2", true)), false),
+            Do::Pull
+        );
+        // Signed out of the very sign-in the vault has (its id kept), which the record missed
+        // (a pass cut short after taking or writing it): out of the vault too
+        assert_eq!(
+            decide(None, None, Some("L2"), Some(&t("y", "L2", true)), false),
+            Do::Remove
+        );
+        assert_eq!(
+            decide(Some(&s), None, Some("L2"), Some(&t("y", "L2", true)), false),
+            Do::Remove
+        );
+        // ... and one signed out of before a new sign-in there isn't
+        assert_eq!(
+            decide(None, None, Some("L1"), Some(&t("y", "L2", true)), false),
             Do::Pull
         );
         // Each side compared with what it was (the phone's copy may read differently)

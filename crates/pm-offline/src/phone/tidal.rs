@@ -730,6 +730,83 @@ mod tests {
         .unwrap()
     }
 
+    /// The vault's TIDAL copy, made with the phone's device client, due in 30 s.
+    fn due_copy(lineage: &str) -> pm_appdata::vault::SignIn {
+        super::super::vault::node_copy(
+            &pm_sources::vault_form::TIDAL_FULL,
+            json!({"access_token": "due", "refresh_token": "rt", "expires_at": pm_sources::now_unix() + 30, "country": "CH"}),
+            Some("device-client"),
+            lineage,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn after_a_pass_cut_short_tidal_isnt_renewed_beside_the_vault() {
+        let (base, renewed) = tidal(std::time::Duration::ZERO).await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        // A pass takes TIDAL from the vault and is cut off at the next step (Qobuz never answers)
+        let vault = super::super::vault::StandIn::default();
+        vault.copies.lock().unwrap().insert(
+            pm_sources::vault_form::TIDAL_FULL.service.into(),
+            due_copy("1000-0123456789abcdef"),
+        );
+        super::super::vault::qobuz_removal_stalls(&p, &vault);
+        let cut = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::super::vault::services_here(&p, &vault),
+        )
+        .await;
+        assert!(cut.is_err(), "cut short at Qobuz");
+        assert_eq!(current(&p).map(|s| s.access_token).as_deref(), Some("due"));
+        // The vault's homeserver doesn't answer now: the vault can't say whether another device
+        // is renewing it, so the phone doesn't renew it on its own
+        p.set_account(super::super::stalled::refusing().await.account())
+            .await;
+        let s = session(&p)
+            .await
+            .expect("the current session, still good for 30 s");
+        assert_eq!(s.access_token, "due");
+        assert_eq!(
+            renewed.load(Ordering::SeqCst),
+            0,
+            "no renewal here beside the vault"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_take_the_record_missed_isnt_renewed_beside_the_vault() {
+        let (base, renewed) = tidal(std::time::Duration::ZERO).await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        // Taken from the vault; the record couldn't be saved after it (the take is under way)
+        super::super::vault::taken_unrecorded(&p, &due_copy("1000-0123456789abcdef"));
+        assert!(!super::super::vault::record_here(&p)
+            .services
+            .contains_key("tidal-full"));
+        p.set_account(super::super::stalled::refusing().await.account())
+            .await;
+        let s = session(&p)
+            .await
+            .expect("the current session, still good for 30 s");
+        assert_eq!(s.access_token, "due");
+        assert_eq!(
+            renewed.load(Ordering::SeqCst),
+            0,
+            "no renewal here beside the vault"
+        );
+        // Nor without the homeserver at all (no account restored)
+        let dir2 = tempfile::tempdir().unwrap();
+        let (base2, renewed2) = tidal(std::time::Duration::ZERO).await;
+        let p2 = phone(dir2.path(), base2);
+        super::super::vault::taken_unrecorded(&p2, &due_copy("1000-0123456789abcdef"));
+        assert_eq!(
+            session(&p2).await.map(|s| s.access_token).ok().as_deref(),
+            Some("due")
+        );
+        assert_eq!(renewed2.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn songs_at_once_wait_for_one_renewal() {
         let (base, renewed) = tidal(std::time::Duration::from_millis(300)).await;
