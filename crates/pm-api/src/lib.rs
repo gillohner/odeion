@@ -27336,4 +27336,188 @@ exec sleep 300
         assert_eq!(found(app.clone()).await, (false, one));
         drop(slot);
     }
+
+    /// One account at a service is one person's on a node: someone the owner added can't keep a
+    /// sign-in with an account that is the owner's or another person's here, whichever way the
+    /// sign-in came. Their own account again, a refresh, and the owner's sign-ins are as before.
+    #[tokio::test]
+    async fn one_account_at_a_service_is_one_persons() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:1").await;
+        let lib = s.library.lock().unwrap();
+        let owner = accounts::Who::Owner;
+        let (a, b) = (
+            accounts::Who::Listener(anna.to_string()),
+            accounts::Who::Listener(ben.to_string()),
+        );
+        let sess = |id: &str| serde_json::json!({"access_token": "t", "user_id": id}).to_string();
+        // Spotify: the owner's account is not Anna's to sign in with; her own is
+        owner.put(&lib, "spotify.user", Some(&sess("o1"))).unwrap();
+        let e = a.put(&lib, "spotify.user", Some(&sess("o1"))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(
+            e.message.contains("This Spotify account is already signed in"),
+            "{}",
+            e.message
+        );
+        assert!(a.get(&lib, "spotify.user").is_none(), "nothing kept");
+        a.put(&lib, "spotify.user", Some(&sess("a1"))).unwrap();
+        a.put(&lib, "spotify.user", Some(&sess("a1")))
+            .expect("the same account again (a renewal)");
+        // Nor another person's; his own is fine
+        let e = b.put(&lib, "spotify.user", Some(&sess("a1"))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        b.put(&lib, "spotify.user", Some(&sess("b1"))).unwrap();
+        // The owner's own sign-ins are not checked
+        owner.put(&lib, "spotify.user", Some(&sess("a1"))).unwrap();
+        // TIDAL: both of its sign-ins are one service (the id may be a number there)
+        owner
+            .put(
+                &lib,
+                "tidal.unofficial",
+                Some(&serde_json::json!({"enabled": true, "session": {"user_id": 77}}).to_string()),
+            )
+            .unwrap();
+        let e = b.put(&lib, "tidal.user", Some(&sess("77"))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(e.message.contains("This TIDAL account"), "{}", e.message);
+        let e = b
+            .put(
+                &lib,
+                "tidal.unofficial",
+                Some(&serde_json::json!({"session": {"user_id": "77"}}).to_string()),
+            )
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        // An account two people were signed in with before this keeps working for both (Anna's
+        // and the owner's are the same one in this node's stored sign-ins)
+        a.put(&lib, "tidal.user", Some(&sess("1")))
+            .expect("her sign-in is renewed");
+        // What names no account, and every other setting: as before
+        b.put(&lib, "spotify.user", Some(r#"{"access_token":"t"}"#))
+            .unwrap();
+        b.put(&lib, "tidal.signin_way", Some("browser")).unwrap();
+        b.put(&lib, "tidal.unofficial", Some(r#"{"enabled":true}"#))
+            .unwrap();
+    }
+
+    /// The same through the browser sign-in: an account that is the owner's on this node is not
+    /// kept for someone else, though it comes back to the browser that started it, or is pasted
+    /// by them.
+    #[tokio::test]
+    async fn a_persons_browser_sign_in_with_someone_elses_account_is_not_kept() {
+        // TIDAL answers every sign-in with account 77
+        let (base, _) = tidal_auth_and_search_mock("fresh-token").await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), &base).await;
+        let app = router(s.clone());
+        let ben_tok = accounts::mint(&s, ben).unwrap();
+        let row = |key: &str| s.library.lock().unwrap().get_setting(key).unwrap();
+        let session = |token: &str, account: &str| {
+            serde_json::json!({"access_token": token, "refresh_token": "r", "expires_at": pm_library::db::now_unix() + 3600, "user_id": account, "scope": "playback"}).to_string()
+        };
+        let start = || {
+            let (app, ben_tok) = (app.clone(), ben_tok.clone());
+            async move {
+                let (st, v, h) =
+                    send_as(&app, "GET", "/v1/sources/tidal/login", Some(&ben_tok), &[], None).await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                let url = url::Url::parse(v["url"].as_str().unwrap()).unwrap();
+                let state = url
+                    .query_pairs()
+                    .find(|(k, _)| k == "state")
+                    .unwrap()
+                    .1
+                    .to_string();
+                let cookie = h.get("set-cookie").unwrap().to_str().unwrap();
+                (state, cookie.split(';').next().unwrap().to_string())
+            }
+        };
+        // 77 is the owner's account here
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("tidal.user", &session("owner-token", "77"))
+            .unwrap();
+        // Back in Ben's own browser: not kept, and the page is told why
+        let (state, cookie) = start().await;
+        let (_, _, h) = send_as(
+            &app,
+            "GET",
+            &format!("/tidal/callback?code=c&state={state}"),
+            None,
+            &[("cookie", cookie.as_str())],
+            None,
+        )
+        .await;
+        let to = h.get("location").unwrap().to_str().unwrap();
+        assert!(
+            to.starts_with("/?tidal=error") && to.contains("already+signed+in"),
+            "{to}"
+        );
+        assert!(row(&format!("person.{ben}.tidal.user")).is_none());
+        // Pasted by Ben: the same
+        let (state, _) = start().await;
+        let pasted = serde_json::json!({"url": format!("http://node/tidal/callback?code=c&state={state}")});
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/sources/tidal/callback",
+            Some(&ben_tok),
+            &[],
+            Some(pasted),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{v}");
+        assert!(row(&format!("person.{ben}.tidal.user")).is_none());
+        assert!(
+            row("tidal.user").unwrap().contains("owner-token"),
+            "the owner's untouched"
+        );
+        // 77 is Anna's instead: not Ben's either
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting("tidal.user", &session("owner-token", "1"))
+                .unwrap();
+            lib.set_setting(&format!("person.{anna}.tidal.user"), &session("anna-token", "77"))
+                .unwrap();
+        }
+        let (state, cookie) = start().await;
+        let (_, _, h) = send_as(
+            &app,
+            "GET",
+            &format!("/tidal/callback?code=c&state={state}"),
+            None,
+            &[("cookie", cookie.as_str())],
+            None,
+        )
+        .await;
+        assert!(h
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("/?tidal=error"));
+        assert!(row(&format!("person.{ben}.tidal.user")).is_none());
+        // Nobody's here: kept for Ben
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(&format!("person.{anna}.tidal.user"), &session("anna-token", "5"))
+            .unwrap();
+        let (state, cookie) = start().await;
+        let (_, _, h) = send_as(
+            &app,
+            "GET",
+            &format!("/tidal/callback?code=c&state={state}"),
+            None,
+            &[("cookie", cookie.as_str())],
+            None,
+        )
+        .await;
+        assert_eq!(h.get("location").unwrap(), "/?tidal=signed_in");
+        assert!(row(&format!("person.{ben}.tidal.user"))
+            .unwrap()
+            .contains("fresh-token"));
+    }
 }

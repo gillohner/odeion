@@ -378,6 +378,30 @@ fn session_from(v: &Value, previous: Option<&Session>) -> Option<Session> {
     })
 }
 
+/// A sign-in of someone other than the owner, before it is stored: whose account it is must be
+/// known, and it must be nobody else's on this node ([`Who::account_free`]). `asked` says the
+/// account in `sess` is TIDAL's own answer; a pasted sign-in's is not, so TIDAL is asked. The
+/// owner's sign-ins pass as they are.
+pub(crate) async fn held_to_its_person(
+    s: &NodeState,
+    who: &Who,
+    mut sess: Session,
+    asked: bool,
+) -> Result<Session, ApiError> {
+    if who.is_owner() {
+        return Ok(sess);
+    }
+    if !asked {
+        sess.user_id = None;
+        sess = fill_session(s, sess).await;
+    }
+    let Some(account) = sess.user_id.as_deref().filter(|a| !a.trim().is_empty()) else {
+        return Err(crate::accounts::account_unknown("TIDAL"));
+    };
+    who.account_free(&s.library.lock().expect("library poisoned"), STATE_KEY, account)?;
+    Ok(sess)
+}
+
 /// Who the session is: TIDAL's `/sessions` (user, country, session id).
 async fn fill_session(s: &NodeState, mut sess: Session) -> Session {
     if let Ok(r) = s
@@ -753,8 +777,32 @@ async fn wait_for_approval(s: &Arc<NodeState>, who: &Who, c: Client, p: Pending)
         let ok = resp.status().is_success();
         let v: Value = resp.json().await.unwrap_or(Value::Null);
         if ok {
-            if let Some(sess) = session_from(&v, None) {
+            if let Some(mut sess) = session_from(&v, None) {
+                // The token answer names the user; /sessions adds the session id and country
+                sess.user_id = v["user_id"]
+                    .as_i64()
+                    .or(v["user"]["userId"].as_i64())
+                    .map(|u| u.to_string());
                 let sess = fill_session(s, sess).await;
+                // Someone else's account on this node, or one TIDAL did not name, is not kept
+                // for a person (accounts.rs): the code is given up, and the page says why
+                let sess = match held_to_its_person(s, who, sess, true).await {
+                    Ok(sess) => sess,
+                    Err(e) => {
+                        update(s, who, |st| {
+                            if st.login.as_ref().map(|x| &x.device_code) == Some(&p.device_code) {
+                                st.login = None;
+                                st.health = Some(Health {
+                                    ok: false,
+                                    detail: e.message.clone(),
+                                    at: now(),
+                                    lossy: false,
+                                });
+                            }
+                        });
+                        return;
+                    }
+                };
                 // Only while this code is still the sign-in on the way: signed out, replaced or
                 // removed (People) while TIDAL was asked, it isn't kept
                 let still =
@@ -1033,6 +1081,8 @@ pub(crate) async fn finish_browser(
         sess.country = cc.to_string();
     }
     let sess = fill_session(&s, sess).await;
+    // Someone else's account on this node, or one TIDAL did not name, is not kept for a person
+    let sess = held_to_its_person(&s, &who, sess, true).await?;
     // Only while this attempt is still the one on its way (signed out, restarted or removed
     // (People) while TIDAL was asked: not kept)
     let still = |st: &ModeState| st.browser.as_ref() == Some(&p);

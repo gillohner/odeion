@@ -1073,6 +1073,28 @@ pub(crate) fn make_room<T>(
     }
 }
 
+/// The most sign-ins one person has waiting at once.
+pub(crate) const SIGN_IN_EACH: usize = 4;
+
+/// Room for one more started sign-in of one person (`theirs`): while [`SIGN_IN_EACH`] of theirs
+/// wait, their oldest goes. So the room [`make_room`] makes is never taken by one person alone.
+pub(crate) fn make_room_of<T>(
+    pending: &mut HashMap<String, T>,
+    started: impl Fn(&T) -> std::time::Instant,
+    theirs: impl Fn(&T) -> bool,
+) {
+    loop {
+        let mine = pending.iter().filter(|(_, p)| theirs(p));
+        if mine.clone().count() < SIGN_IN_EACH {
+            break;
+        }
+        let Some(oldest) = mine.min_by_key(|(_, p)| started(p)).map(|(k, _)| k.clone()) else {
+            break;
+        };
+        pending.remove(&oldest);
+    }
+}
+
 pub(crate) fn random_urlsafe(bytes: usize) -> String {
     use rand::RngCore;
     let mut buf = vec![0u8; bytes];
@@ -1122,6 +1144,7 @@ pub(crate) async fn login(
     {
         let now = std::time::Instant::now();
         let mut pending = pending().lock().expect("pending");
+        make_room_of(&mut pending, |p| p.started, |p| p.who == who);
         make_room(&mut pending, |p| p.started, now);
         pending.insert(
             nonce,
@@ -1298,6 +1321,10 @@ async fn finish_login(
         }
     };
     let mut session = session_from(&v, None)?;
+    // A person's sign-in is held to the account it is for (accounts.rs): it has to be known
+    if session.user_id.as_deref().is_none_or(|a| a.trim().is_empty()) && !who.is_owner() {
+        return Err(crate::accounts::account_unknown("TIDAL"));
+    }
     if let Some(uid) = session.user_id.clone() {
         // Country decides catalogue availability; best effort.
         let me = s
@@ -1735,7 +1762,10 @@ impl crate::signin::SignInSource for TidalSignIn {
                 ))
             }
         };
-        import_sign_in(s, who, imp.session);
+        // What a person pastes says itself whose account it is: TIDAL is asked instead, and
+        // someone else's account on this node is not kept (the owner's imports are as they were)
+        let session = crate::tidal_unofficial::held_to_its_person(s, who, imp.session, false).await?;
+        import_sign_in(s, who, session);
         Ok(way)
     }
 }
@@ -2901,6 +2931,28 @@ mod tests {
         make_room(&mut m, |t| *t, at(SIGN_IN_MAX as u64));
         assert_eq!(m.len(), SIGN_IN_MAX - 1);
         assert!(!m.contains_key("s0") && m.contains_key("s1"), "the oldest goes");
+    }
+
+    /// One person's started sign-ins make room among their own: nobody else's goes for them.
+    #[test]
+    fn one_person_has_only_a_few_sign_ins_waiting() {
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        // (whose, when started)
+        let mut m: HashMap<String, (&str, std::time::Instant)> = HashMap::new();
+        m.insert("owner".into(), ("owner", t0));
+        for i in 0..40u64 {
+            make_room_of(&mut m, |p| p.1, |p| p.0 == "anna");
+            make_room(&mut m, |p| p.1, at(i + 1));
+            m.insert(format!("a{i}"), ("anna", at(i + 1)));
+        }
+        assert!(m.contains_key("owner"), "the owner's still waits");
+        let hers: Vec<&String> = m.iter().filter(|(_, p)| p.0 == "anna").map(|(k, _)| k).collect();
+        assert_eq!(hers.len(), SIGN_IN_EACH, "{hers:?}");
+        assert!(
+            m.contains_key("a39") && !m.contains_key("a35"),
+            "her newest are kept"
+        );
     }
 
     #[test]

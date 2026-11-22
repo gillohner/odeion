@@ -883,6 +883,7 @@ pub(crate) async fn login(
     {
         let now = std::time::Instant::now();
         let mut pending = pending().lock().expect("pending");
+        crate::tidal::make_room_of(&mut pending, |p| p.started, |p| p.who == who);
         crate::tidal::make_room(&mut pending, |p| p.started, now);
         pending.insert(
             nonce,
@@ -1026,19 +1027,6 @@ async fn finish_login(
         product: None,
         scope: v["scope"].as_str().unwrap_or("").to_string(),
     };
-    {
-        // Stored and marked new under one guard: no vault pass sees one without the other (the
-        // account details below are a later change of the same sign-in; the vault is the owner's)
-        let lib = s.library.lock().expect("library poisoned");
-        who.put(
-            &lib,
-            USER_KEY,
-            Some(&serde_json::to_string(&session).expect("serializes")),
-        )?;
-        if who.is_owner() {
-            crate::vault_cache::new_sign_in(&lib, "spotify");
-        }
-    }
     // Who this account is, asked with its own new token (nobody else's)
     let me = s
         .http_client()
@@ -1051,11 +1039,32 @@ async fn finish_login(
         _ => None,
     };
     if let Some(me) = me {
-        session.user_id = me["id"].as_str().map(str::to_string);
+        session.user_id = me["id"]
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string);
         session.display_name = me["display_name"].as_str().map(str::to_string);
         session.country = me["country"].as_str().map(str::to_string);
         session.product = me["product"].as_str().map(str::to_string);
-        store_user(s, &who, Some(&session))?;
+    }
+    // The owner's sign-in is kept even when Spotify did not say whose it is. Someone else's is
+    // kept only for an account that is nobody else's on this node (accounts.rs), so it has to
+    // be known first
+    if session.user_id.is_none() && !who.is_owner() {
+        return Err(crate::accounts::account_unknown("Spotify"));
+    }
+    {
+        // Stored and marked new under one guard: no vault pass sees one without the other (the
+        // vault is the owner's)
+        let lib = s.library.lock().expect("library poisoned");
+        who.put(
+            &lib,
+            USER_KEY,
+            Some(&serde_json::to_string(&session).expect("serializes")),
+        )?;
+        if who.is_owner() {
+            crate::vault_cache::new_sign_in(&lib, "spotify");
+        }
     }
     tracing::info!(user = ?session.user_id, "Spotify sign-in stored");
     Ok(())

@@ -363,11 +363,99 @@ impl Who {
                 ));
             }
         }
+        // A sign-in at a service: only an account that is nobody else's here
+        if ACCOUNT_KEYS.iter().any(|(_, keys)| keys.contains(&base)) {
+            if let Some(account) = value.and_then(account_of) {
+                self.account_free(lib, base, &account)?;
+            }
+        }
         match value {
             Some(v) => lib.set_setting(&key, v)?,
             None => {
                 lib.delete_setting(&key)?;
             }
+        }
+        Ok(())
+    }
+}
+
+/// The settings that hold a person's signed-in account at a service, by the service's name: one
+/// account is one person's on a node ([`Who::account_free`]).
+const ACCOUNT_KEYS: &[(&str, &[&str])] = &[
+    ("TIDAL", &["tidal.user", "tidal.unofficial"]),
+    ("Spotify", &["spotify.user"]),
+];
+
+/// What someone other than the owner is told when a service did not say whose account a sign-in
+/// is for: it is not kept, because it can't be held to [`Who::account_free`].
+pub(crate) fn account_unknown(service: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_GATEWAY,
+        format!("{service} didn't say whose account this is, so the sign-in was not kept. Try again."),
+    )
+}
+
+/// The account a stored sign-in is for, as its service names it (`user_id`, of the sign-in or of
+/// its `session`).
+fn account_of(stored: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(stored).ok()?;
+    let id = match &v["user_id"] {
+        serde_json::Value::Null => &v["session"]["user_id"],
+        id => id,
+    };
+    match id {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+impl Who {
+    /// Whether someone the owner added may keep a sign-in with `account` under `base` (one of
+    /// [`ACCOUNT_KEYS`]): yes when it is the account they are signed in with already, or one
+    /// that is not the owner's and no other person's on this node. Each person plays with their
+    /// own account; an account is shared through the node's sign-ins (the owner's choice in
+    /// Settings), not by a second person signing in with it. The owner's own sign-ins are not
+    /// checked. Under the caller's library guard, as [`Who::put`]. A sign-in whose account the
+    /// service did not name can't be checked: the sign-in handlers refuse those for anyone but
+    /// the owner ([`account_unknown`]).
+    pub(crate) fn account_free(
+        &self,
+        lib: &pm_library::Library,
+        base: &str,
+        account: &str,
+    ) -> Result<(), ApiError> {
+        let Who::Listener(me) = self else {
+            return Ok(());
+        };
+        let Some((service, keys)) = ACCOUNT_KEYS.iter().find(|(_, keys)| keys.contains(&base)) else {
+            return Ok(());
+        };
+        let held = |setting: String| {
+            lib.get_setting(&setting)
+                .ok()
+                .flatten()
+                .and_then(|j| account_of(&j))
+                .as_deref()
+                == Some(account)
+        };
+        let theirs = |key: &str| keys.iter().any(|b| held(format!("{PERSON_PREFIX}{key}.{b}")));
+        if theirs(me) {
+            return Ok(());
+        }
+        let taken = keys.iter().any(|b| held(b.to_string()))
+            || crate::people::listed_keys(lib)
+                .iter()
+                .any(|other| other != me && theirs(other));
+        if taken {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                format!(
+                    "This {service} account is already signed in on this node for someone else. \
+                     Sign in with your own account. To share the owner's, the owner can let \
+                     everyone play through the node's sign-ins (Settings)."
+                ),
+            ));
         }
         Ok(())
     }

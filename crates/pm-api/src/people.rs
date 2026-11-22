@@ -163,6 +163,16 @@ pub(crate) fn listed_for_music(lib: &pm_library::Library, key: &str) -> bool {
         })
 }
 
+/// The key of everyone in People (the library alone).
+pub(crate) fn listed_keys(lib: &pm_library::Library) -> Vec<String> {
+    lib.get_setting(SETTING)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<Roster>(&j).ok())
+        .map(|r| r.people.into_iter().map(|p| p.key).collect())
+        .unwrap_or_default()
+}
+
 pub fn load(s: &NodeState) -> Roster {
     s.library
         .lock()
