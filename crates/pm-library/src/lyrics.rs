@@ -151,9 +151,14 @@ pub fn sidecar(audio: &Path) -> Option<String> {
 }
 
 /// Open the sidecar at `path` (links already resolved) for reading. The name can change hands
-/// between the checks above and this call, so the call itself never waits (opening a pipe
-/// would, for someone at its other end) and never follows a link at the name (it could lead to
-/// a file that is no `.lrc`). What was opened is checked again by the caller.
+/// between the checks above and this call, so on unix the call itself never waits (opening a
+/// pipe would, for someone at its other end) and never follows a link at the name (it could
+/// lead to a file that is no `.lrc`). What was opened is checked again by the caller.
+///
+/// On Windows the open is a plain one: a link put at the name in that moment is followed
+/// (making one there takes an administrator or developer mode; a folder has no pipes). Its
+/// way to open the link itself (`FILE_FLAG_OPEN_REPARSE_POINT`) also changes how files that a
+/// sync program keeps online are read, so it waits for a build that is tested on Windows.
 fn open_sidecar(path: &Path) -> std::io::Result<std::fs::File> {
     let mut open = std::fs::OpenOptions::new();
     open.read(true);
