@@ -133,11 +133,11 @@ pub fn sidecar(audio: &Path) -> Option<String> {
             return None;
         }
     }
-    // Before it is opened: opening a pipe waits for someone at its other end
+    // Before it is opened: nothing but a file is opened at all
     if !std::fs::metadata(&lrc).ok()?.is_file() {
         return None;
     }
-    let file = std::fs::File::open(&lrc).ok()?;
+    let file = open_sidecar(&lrc).ok()?;
     // (and of the file that was opened, should the name have changed hands in between)
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.len() > SIDECAR_MAX_BYTES {
@@ -148,6 +148,21 @@ pub fn sidecar(audio: &Path) -> Option<String> {
     file.take(SIDECAR_MAX_BYTES).read_to_end(&mut text).ok()?;
     let text = String::from_utf8_lossy(&text).into_owned();
     (!text.trim().is_empty()).then_some(text)
+}
+
+/// Open the sidecar at `path` (links already resolved) for reading. The name can change hands
+/// between the checks above and this call, so the call itself never waits (opening a pipe
+/// would, for someone at its other end) and never follows a link at the name (it could lead to
+/// a file that is no `.lrc`). What was opened is checked again by the caller.
+fn open_sidecar(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    open.open(path)
 }
 
 #[cfg(test)]
@@ -228,6 +243,21 @@ mod tests {
         assert_eq!(sidecar(&audio).as_deref(), Some("[00:00.00]x"));
     }
 
+    /// What `ask` answers, on a thread: `None` when it has not answered after five seconds (it
+    /// waits on the pipe at `pipe`, which is then opened from here so that the thread ends). A
+    /// wait shows as a failure this way, not as a test that never ends.
+    #[cfg(unix)]
+    fn within_5s<T: Send + 'static>(pipe: &Path, ask: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(ask()));
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5)).ok();
+        if got.is_none() {
+            // (for reading too: an open for writing alone would itself wait for a reader)
+            let _ = std::fs::OpenOptions::new().read(true).write(true).open(pipe);
+        }
+        got
+    }
+
     /// Only a lyrics file is read as a sidecar: a regular file no longer than lyrics are, also
     /// behind a link, which is followed only to another `.lrc` file.
     #[cfg(unix)]
@@ -249,29 +279,46 @@ mod tests {
         std::fs::create_dir(dir.path().join("folder.lrc")).unwrap();
         symlink(dir.path().join("folder.lrc"), music.join("h.lrc")).unwrap();
         assert_eq!(sidecar(&music.join("h.flac")), None);
-        // A pipe is not opened: that would wait for a writer that never comes. (Asked on a
-        // thread, so that a wait shows as a failure here and not as a test that never ends.)
+        // A pipe is not opened: that would wait for a writer that never comes
         let pipe = music.join("p.lrc");
         let made = std::process::Command::new("mkfifo").arg(&pipe).status();
         if made.is_ok_and(|s| s.success()) {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let song = music.join("p.flac");
-            std::thread::spawn(move || tx.send(sidecar(&song)));
-            let got = rx.recv_timeout(std::time::Duration::from_secs(5));
-            if got.is_err() {
-                // (let the waiting thread go before failing)
-                let _ = std::fs::OpenOptions::new().write(true).open(&pipe);
-            }
-            assert_eq!(got, Ok(None), "a pipe named .lrc");
+            assert_eq!(
+                within_5s(&pipe, {
+                    let song = music.join("p.flac");
+                    move || sidecar(&song)
+                }),
+                Some(None),
+                "a pipe named .lrc"
+            );
+            // The open itself does not wait either (the name can become a pipe after the check)
+            assert_eq!(
+                within_5s(&pipe, {
+                    let pipe = pipe.clone();
+                    move || open_sidecar(&pipe).is_ok_and(|f| f.metadata().is_ok_and(|m| m.is_file()))
+                }),
+                Some(false),
+                "a pipe, opened"
+            );
             let linked = dir.path().join("pipe-target.lrc");
             std::fs::rename(&pipe, &linked).unwrap();
             symlink(&linked, music.join("q.lrc")).unwrap();
             assert_eq!(
-                sidecar(&music.join("q.flac")),
-                None,
+                within_5s(&linked, {
+                    let song = music.join("q.flac");
+                    move || sidecar(&song)
+                }),
+                Some(None),
                 "a link to a pipe named .lrc"
             );
         }
+        // The open does not follow a link at the name: links are resolved, and their target's
+        // name checked, before it
+        std::fs::write(dir.path().join("real.lrc"), "real").unwrap();
+        symlink(dir.path().join("real.lrc"), music.join("r.lrc")).unwrap();
+        assert!(open_sidecar(&music.join("r.lrc")).is_err());
+        assert!(open_sidecar(&dir.path().join("real.lrc")).is_ok());
+        assert_eq!(sidecar(&music.join("r.flac")).as_deref(), Some("real"));
         // A link that leads nowhere, a folder, a file longer than lyrics are
         symlink(dir.path().join("gone.lrc"), music.join("c.lrc")).unwrap();
         assert_eq!(sidecar(&music.join("c.flac")), None);
