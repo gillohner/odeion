@@ -856,11 +856,26 @@ pub enum Renewal {
 /// vault has no copy of TIDAL in step with the phone's (the phone then renews on its own and the
 /// next sync writes it).
 pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Result<Renewal, VaultStoreError> {
-    // Behind a pass at most a while (a stalled pass ends by its own limit): then the phone keeps
-    // its session for now
-    let Ok(_one) = tokio::time::timeout(LOCK_WAIT, phone.vault_lock.lock()).await else {
+    let Some(_turn) = vault_turn(phone).await else {
         return Ok(Renewal::Busy);
     };
+    renew_tidal_in_turn(phone, acct).await
+}
+
+/// The phone's turn at the vault (`Phone::vault_lock`: one vault step at a time, a pass or a TIDAL
+/// renewal, through the vault or on the phone), waited for behind a pass at most [`LOCK_WAIT`] (a
+/// stalled pass ends by its own limit); `None`: not now, the phone keeps its session for now.
+pub(crate) async fn vault_turn(phone: &Phone) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    tokio::time::timeout(LOCK_WAIT, phone.vault_lock.lock())
+        .await
+        .ok()
+}
+
+/// [`renew_tidal`] in the phone's turn at the vault ([`vault_turn`], held by the caller).
+pub(crate) async fn renew_tidal_in_turn(
+    phone: &std::sync::Arc<Phone>,
+    acct: &Account,
+) -> Result<Renewal, VaultStoreError> {
     let svc = TIDAL_FULL.service;
     let path = record_path(phone);
     let Some(mine) = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref()).map_err(local)? else {
@@ -922,6 +937,10 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     let refused2 = refused.clone();
     let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let asked2 = asked.clone();
+    // What the phone made of TIDAL's answer (what travels, in the sign-in it wrote): its own
+    // renewal, whatever the vault's copy says after the write
+    let made = std::sync::Arc::new(std::sync::Mutex::new(None::<SignIn>));
+    let made2 = made.clone();
     let r = vault
         .refresh(svc, false, |si: SignIn| async move {
             if !usable(&p, &TIDAL_FULL, &si, marker) {
@@ -963,15 +982,10 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
             let lineage = vault_form::node_lineage(&si)
                 .unwrap_or_else(|| vault_form::lineage_after(svc, None, pm_sources::now_unix() as u64));
             let app = si.client_id.clone();
-            Ok(vault_form::sign_in_for(
-                svc,
-                TIDAL_FULL.carry,
-                true,
-                &travels,
-                Some(&si),
-                app,
-                &lineage,
-            ))
+            let out =
+                vault_form::sign_in_for(svc, TIDAL_FULL.carry, true, &travels, Some(&si), app, &lineage);
+            *made2.lock().unwrap_or_else(|e| e.into_inner()) = Some(out.clone());
+            Ok(out)
         })
         .await;
     let r = match r {
@@ -1019,21 +1033,23 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
             return Err(e);
         }
     };
-    let si = r.sign_in();
-    // One renewed by another device with another app is not taken here
-    let not_taken = !usable(phone, &TIDAL_FULL, si, marker) || vault_form::node_settings(si).is_none();
-    if not_taken {
-        if !matches!(r, Refreshed::ByUs(_)) {
-            unmark();
+    let made = made.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let asked = asked.load(std::sync::atomic::Ordering::SeqCst);
+    let (travels, lineage) = match after_refresh(phone, &r, made.as_ref(), asked, marker) {
+        Ok(t) => t,
+        Err(other) => {
+            if other == Renewal::NotInVault {
+                unmark();
+            }
+            return Ok(other);
         }
-        return Ok(Renewal::NotInVault);
-    }
-    let travels = vault_form::node_settings(si).expect("checked");
+    };
+    let si = r.sign_in();
     // Taken only if the phone still holds the session it started from (a sign-out or a new
     // sign-in here meanwhile wins), with the id of the sign-in it takes. Not taken (changed
     // meanwhile, held, or unclear): the record stays as it was, and the next pass sees the
     // vault's copy as renewed there
-    if let Some(other) = keep_renewed(phone, &mine, &travels, vault_form::node_lineage(si), true) {
+    if let Some(other) = keep_renewed(phone, &mine, &travels, lineage, true) {
         return Ok(other);
     }
     // (Signed out just after it was taken: the record stays, the next pass sees it)
@@ -1059,6 +1075,41 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         tracing::info!("phone mode: TIDAL renewed under the vault's lock");
     }
     Ok(Renewal::Renewed)
+}
+
+/// What travels of the TIDAL sign-in a refresh under the vault's lock gave, and its id (`r`; `made`: the one
+/// the phone made of TIDAL's answer, when it renewed; `asked`: TIDAL was asked), or what the phone
+/// does instead. Its own renewal (`ByUs`) is the session it made, whatever the vault's copy shows
+/// after the write; once TIDAL was asked, nothing sends the phone to renew on its own (TIDAL may
+/// have spent the refresh token it holds): a copy it can't take is `Unclear`. Before that, a copy
+/// another device renewed or wrote that the phone can't take (another app, not a node's) is
+/// `NotInVault`: the phone renews its own.
+fn after_refresh(
+    phone: &Phone,
+    r: &Refreshed,
+    made: Option<&SignIn>,
+    asked: bool,
+    marker: Option<u64>,
+) -> Result<(Map<String, Value>, Option<String>), Renewal> {
+    if let Refreshed::ByUs(si) = r {
+        // (The vault's copy as written: the phone's own, unless another client's members came
+        // in; its own renewal is what it made either way)
+        let own = made.or(Some(si));
+        return own
+            .and_then(|s| Some((vault_form::node_settings(s)?, vault_form::node_lineage(s))))
+            .or_else(|| Some((vault_form::node_settings(si)?, vault_form::node_lineage(si))))
+            .ok_or_else(|| Renewal::Unclear("the renewed sign-in isn't one this phone can keep".into()));
+    }
+    let si = r.sign_in();
+    match vault_form::node_settings(si).filter(|_| usable(phone, &TIDAL_FULL, si, marker)) {
+        Some(t) => Ok((t, vault_form::node_lineage(si))),
+        // TIDAL was asked, and another device's copy stood instead of the phone's renewal
+        None if asked => Err(Renewal::Unclear(
+            "renewed, but the vault kept another device's sign-in this phone can't use".into(),
+        )),
+        // One renewed by another device with another app is not taken here
+        None => Err(Renewal::NotInVault),
+    }
 }
 
 /// The TIDAL session a renewal under the vault's lock gave (`travels`, the sign-in's `lineage`)
@@ -2045,6 +2096,69 @@ mod tests {
                 .unwrap()
                 .access_token,
             "due"
+        );
+    }
+
+    /// The vault's copy rewritten by another device while the phone renewed TIDAL under its lock
+    /// (a re-wrap for a new device: a new revision, the same tokens), then the phone's renewal
+    /// written over it: the copy stays the phone's (a node's copy, with the new session), and the
+    /// phone's own renewal is never one it renews again on its own.
+    #[test]
+    fn a_renewal_written_over_a_rewritten_copy_is_never_renewed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone_with_device_client(dir.path());
+        let lineage = "1000-0123456789abcdef";
+        let mut cur = tidal_copy("a0", lineage);
+        cur.revision = 3;
+        let mut theirs = cur.clone();
+        theirs.revision = 4;
+        // What the phone makes of TIDAL's answer (as renew_tidal does)
+        let fresh_session = serde_json::json!({"access_token": "a1", "refresh_token": "rt-1", "expires_at": pm_sources::now_unix() + 3600, "country": "CH"});
+        let mut travels = vault_form::node_settings(&cur).unwrap();
+        let key = TIDAL_FULL.carry[0].key;
+        let mut held = travels.get(key).and_then(vault_form::object_of).unwrap();
+        held.insert("session".into(), fresh_session);
+        travels.insert(key.into(), Value::Object(held));
+        let made = vault_form::sign_in_for(
+            TIDAL_FULL.service,
+            TIDAL_FULL.carry,
+            true,
+            &travels,
+            Some(&cur),
+            cur.client_id.clone(),
+            lineage,
+        );
+        // The copy the vault writes: still a node's copy, with the new session in it
+        let written = pm_pubky::vault::merge_refreshed(&cur, &theirs, &made);
+        let kept = vault_form::node_settings(&written).expect("a node's copy");
+        let token = |m: &Map<String, Value>| {
+            vault_form::session_of(TIDAL_FULL.carry, m).and_then(|s| s.get("access_token").cloned())
+        };
+        assert_eq!(token(&kept), Some(Value::from("a1")));
+        assert!(usable(&p, &TIDAL_FULL, &written, None));
+        // Whatever the vault's copy shows after the write (here: the old session's member beside
+        // the new tokens), the phone's own renewal is what it made, never NotInVault
+        let mut odd = theirs.clone();
+        odd.tokens = made.tokens.clone();
+        odd.expires_at = made.expires_at;
+        let got = after_refresh(&p, &Refreshed::ByUs(odd.clone()), Some(&made), true, None).unwrap();
+        assert_eq!(token(&got.0), Some(Value::from("a1")));
+        assert_eq!(got.1.as_deref(), Some(lineage));
+        // Another device's copy stood instead (TIDAL was asked): never renewed here on its own
+        let other = node_copy(
+            &TIDAL_FULL,
+            serde_json::json!({"access_token": "b", "refresh_token": "rt-b", "expires_at": pm_sources::now_unix() + 3600}),
+            Some("another-app"),
+            "2000-0123456789abcdef",
+        );
+        assert!(matches!(
+            after_refresh(&p, &Refreshed::ByAnother(other.clone()), Some(&made), true, None),
+            Err(Renewal::Unclear(_))
+        ));
+        // Before TIDAL was asked: the phone renews its own, as before
+        assert_eq!(
+            after_refresh(&p, &Refreshed::ByAnother(other), None, false, None).unwrap_err(),
+            Renewal::NotInVault
         );
     }
 

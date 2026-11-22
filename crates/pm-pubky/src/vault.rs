@@ -1701,6 +1701,36 @@ enum Saved {
     Theirs(SignIn),
 }
 
+/// The copy [`Vault::refresh`] writes when another client wrote the sign-in meanwhile without new
+/// tokens (`theirs`: a new device, a sign-out rotation, a setting), from `cur` (the copy refreshed)
+/// and `fresh` (the refresh's result): `theirs`, with the new tokens, their expiry, scopes and
+/// account, and every other member the refresh changed as it made it. So what a refresher
+/// derives from the tokens (a node's `node` member, whose `std` hashes them, with the session in
+/// it) follows them, never keeping the old tokens' value beside the new ones (the copy would stop
+/// counting as that client's, and its refreshed tokens be lost to it). A member only `theirs`
+/// changed stays theirs; one both changed is the refresh's (its tokens are the live ones).
+pub fn merge_refreshed(cur: &SignIn, theirs: &SignIn, fresh: &SignIn) -> SignIn {
+    let mut s = theirs.clone();
+    s.tokens = fresh.tokens.clone();
+    s.expires_at = fresh.expires_at;
+    s.scopes = fresh.scopes.clone();
+    s.last_refresh = fresh.last_refresh;
+    if fresh.user.is_some() || fresh.user != cur.user {
+        s.user = fresh.user.clone();
+    }
+    let keys: std::collections::BTreeSet<&String> = cur.extra.keys().chain(fresh.extra.keys()).collect();
+    for k in keys {
+        if cur.extra.get(k) == fresh.extra.get(k) {
+            continue;
+        }
+        match fresh.extra.get(k) {
+            Some(v) => s.extra.insert(k.clone(), v.clone()),
+            None => s.extra.remove(k),
+        };
+    }
+    s
+}
+
 /// The service refused the refresh (`String`: its words, never a token).
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -1989,15 +2019,7 @@ impl Vault<'_> {
         let mut s = if theirs.revision == cur.sign_in.revision {
             fresh.clone()
         } else {
-            let mut s = theirs.clone();
-            s.tokens = fresh.tokens.clone();
-            s.expires_at = fresh.expires_at;
-            s.scopes = fresh.scopes.clone();
-            s.last_refresh = fresh.last_refresh;
-            if fresh.user.is_some() {
-                s.user = fresh.user.clone();
-            }
-            s
+            merge_refreshed(&cur.sign_in, theirs, fresh)
         };
         let me = self.client_key();
         let others: Vec<ClientKey> = now_o.recipients.iter().copied().filter(|k| *k != me).collect();
@@ -2439,6 +2461,51 @@ fn jitter_ms(max: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refreshed sign-in written over a copy another client rewrote meanwhile without new tokens:
+    /// what the refresh made from the tokens (the `node` member, as a node and the phone write it)
+    /// goes with them; what only the other client changed stays.
+    #[test]
+    fn a_refresh_written_over_a_rewritten_copy_keeps_what_it_made_with_its_tokens() {
+        let sign_in = |v: serde_json::Value| serde_json::from_value::<SignIn>(v).unwrap();
+        let cur = sign_in(serde_json::json!({
+            "service": "tidal-full", "revision": 4,
+            "tokens": {"access_token": "a0", "refresh_token": "r0"}, "expires_at": 100,
+            "node": {"settings": {"s": "r0"}, "std": "hash of r0"},
+            "label": "Me", "theirs": "x",
+        }));
+        // A new device's re-wrap and a setting: a new revision, the same tokens
+        let mut theirs = cur.clone();
+        theirs.revision = 5;
+        theirs.label = Some("Me, renamed".into());
+        theirs.extra.insert("theirs".into(), serde_json::json!("y"));
+        theirs.extra.insert("added".into(), serde_json::json!(1));
+        let mut fresh = cur.clone();
+        fresh.tokens =
+            serde_json::from_value(serde_json::json!({"access_token": "a1", "refresh_token": "r1"})).unwrap();
+        fresh.expires_at = Some(200);
+        fresh.extra.insert(
+            "node".into(),
+            serde_json::json!({"settings": {"s": "r1"}, "std": "hash of r1"}),
+        );
+        let s = merge_refreshed(&cur, &theirs, &fresh);
+        assert_eq!(s.tokens, fresh.tokens);
+        assert_eq!(s.expires_at, Some(200));
+        assert_eq!(
+            s.extra["node"], fresh.extra["node"],
+            "the node member follows the new tokens"
+        );
+        assert_eq!(s.label.as_deref(), Some("Me, renamed"));
+        assert_eq!(s.extra["theirs"], "y");
+        assert_eq!(s.extra["added"], 1);
+        assert_eq!(s.revision, 5);
+        // A member the refresh dropped goes
+        let mut dropped = fresh.clone();
+        dropped.extra.remove("node");
+        assert!(!merge_refreshed(&cur, &theirs, &dropped)
+            .extra
+            .contains_key("node"));
+    }
 
     #[test]
     fn the_client_key_is_the_noise_static_key_pubky_noise_derives() {
