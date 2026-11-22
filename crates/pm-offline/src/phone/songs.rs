@@ -318,6 +318,10 @@ pub(crate) async fn start(State(p): State<Arc<Phone>>, Json(b): Json<NewUpload>)
     if b.size == 0 || b.size > MAX_SIZE {
         return err(StatusCode::BAD_REQUEST, "that file's size can't be a song");
     }
+    // The list can't be read: nothing is received for it
+    if let Some(why) = &p.songs.unreadable {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, why);
+    }
     if crate::sync::free_bytes(&p.songs.dir).is_some_and(|free| free < b.size + KEEP_FREE) {
         return err(
             StatusCode::INSUFFICIENT_STORAGE,

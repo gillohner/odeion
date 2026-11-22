@@ -137,6 +137,9 @@ struct Life {
     closed: bool,
     /// The sync loop runs (one at a time, also after phone mode was opened again).
     syncing: bool,
+    /// Counts the starts after phone mode was left: a Pubky session restored for an earlier
+    /// start is not kept.
+    opened: u64,
 }
 
 /// The phone backends alive now, one per person's folder ([`Phone::open`]).
@@ -386,7 +389,9 @@ pub async fn serve(
         (was, !std::mem::replace(&mut l.syncing, true))
     };
     if was_closed {
-        *phone.account.write().await = None;
+        let mut acct = phone.account.write().await;
+        phone.life.lock().unwrap_or_else(|e| e.into_inner()).opened += 1;
+        *acct = None;
     }
     // (Started here, not on the server's task: one that ends before it runs never leaves the
     // sync marked as running)
@@ -548,7 +553,21 @@ async fn next_wake(
     }
 }
 
+/// Marks the sync as ended should it stop on a panic (then `serve` starts one again).
+struct SyncRuns(std::sync::Weak<Phone>);
+
+impl Drop for SyncRuns {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            if let Some(p) = self.0.upgrade() {
+                p.life.lock().unwrap_or_else(|e| e.into_inner()).syncing = false;
+            }
+        }
+    }
+}
+
 async fn sync_loop(weak: std::sync::Weak<Phone>) {
+    let _runs = SyncRuns(weak.clone());
     // A whole pass (the vault, the person's data read back) at start, every SYNC_EVERY and when a
     // sign-in changed; only the waiting writes when the page changed something
     let mut full = true;
@@ -564,13 +583,20 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
                 return;
             }
         }
+        let opened = p.life.lock().unwrap_or_else(|e| e.into_inner()).opened;
         let acct = match p.account().await {
             Some(a) => a,
             None => match account::Account::restore(&p.dir).await {
                 Ok(Some(a)) => {
-                    tracing::info!("phone mode: Pubky session restored");
                     let a = Arc::new(a);
-                    *p.account.write().await = Some(a.clone());
+                    // Phone mode left and opened again meanwhile: restored again for that start
+                    let mut kept = p.account.write().await;
+                    if p.life.lock().unwrap_or_else(|e| e.into_inner()).opened != opened {
+                        continue;
+                    }
+                    tracing::info!("phone mode: Pubky session restored");
+                    *kept = Some(a.clone());
+                    drop(kept);
                     a
                 }
                 // No session (yet): wait to be told (set_account) or try again later
@@ -585,8 +611,13 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
                 }
                 Err(e) => {
                     tracing::warn!("phone mode: Pubky not reachable now: {e}");
+                    // (Phone mode left meanwhile: it ends at once)
+                    let now = p.sync_now.clone();
                     drop(p);
-                    tokio::time::sleep(RETRY).await;
+                    tokio::select! {
+                        _ = now.notified() => {}
+                        _ = tokio::time::sleep(RETRY) => {}
+                    }
                     continue;
                 }
             },
@@ -743,6 +774,15 @@ mod tests {
         let (_addr, _task) = serve(again.clone()).await.unwrap();
         assert!(!again.closed());
         assert!(syncing(&again));
+        // And it runs: leaving again ends it
+        again.close();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while syncing(&again) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "a sync ran after opening again");
     }
 
     #[test]

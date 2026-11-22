@@ -50,13 +50,31 @@ pub(crate) struct Unsaved {
     /// The access token of the session it renewed, as the phone keeps it.
     from: String,
     session: full::Session,
+    /// The vault holds it too (renewed under its lock and written there). Otherwise only the phone
+    /// does: it is renewed here, never the vault's copy of the session it replaced.
+    in_vault: bool,
 }
 
 /// Keeps `session`, renewed from the phone's session with access token `from`, until it can be
 /// saved ([`Unsaved`]).
-pub(crate) fn hold_unsaved(p: &Phone, from: String, session: full::Session) {
+pub(crate) fn hold_unsaved(p: &Phone, from: String, session: full::Session, in_vault: bool) {
     tracing::warn!("phone mode: a renewed TIDAL sign-in couldn't be saved; it is used and saved later");
-    *p.tidal_unsaved.lock().unwrap_or_else(|e| e.into_inner()) = Some(Unsaved { from, session });
+    *p.tidal_unsaved.lock().unwrap_or_else(|e| e.into_inner()) = Some(Unsaved {
+        from,
+        session,
+        in_vault,
+    });
+}
+
+/// Whether the phone uses a TIDAL renewal held unsaved that the vault doesn't have (over the
+/// session the phone keeps now).
+pub(crate) fn held_outside_vault(p: &Phone) -> bool {
+    let from = full::load(p.store.as_ref()).session.map(|s| s.access_token);
+    p.tidal_unsaved
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|u| !u.in_vault && from.as_deref() == Some(u.from.as_str()))
 }
 
 /// Saves a renewal held since its save failed ([`Unsaved`]), over the session it renewed only.
@@ -204,9 +222,12 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
     if !due(&s) {
         return Ok(s);
     }
-    let acct = p.account().await;
+    // A renewal held unsaved that the vault doesn't have: renewed here (the vault's copy is the
+    // session it replaced)
+    let outside = held_outside_vault(p);
+    let acct = if outside { None } else { p.account().await };
     // No account: the vault can't be asked, and the last sync found TIDAL there
-    if acct.is_none() && super::vault::tidal_in_step(p) {
+    if !outside && acct.is_none() && super::vault::tidal_in_step(p) {
         tracing::warn!(
             "phone mode: TIDAL is in the vault and the homeserver isn't reached yet; not renewed here"
         );
@@ -240,10 +261,18 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
             Err(e) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}; renewed here"),
         }
     }
-    // The session as the phone keeps it (a renewal not saved yet replaces it, not this one)
-    let Some(from) = full::load(p.store.as_ref()).session.map(|k| k.access_token) else {
+    // Read again after the vault's turn (a sign-in or sign-out may have come meanwhile): the
+    // session to renew, and the one it is saved over (as the phone keeps it; a renewal not saved
+    // yet replaces it, not this one), read together
+    let st = full::load(p.store.as_ref());
+    let Some(from) = st.session.as_ref().map(|k| k.access_token.clone()) else {
         return Err(sign_in_first());
     };
+    let st = with_unsaved(p, st);
+    let s = st.session.filter(|_| st.enabled).ok_or_else(sign_in_first)?;
+    if !due(&s) {
+        return Ok(s);
+    }
     let p2 = p.clone();
     let r = tokio::task::spawn_blocking(move || {
         full::renew(super::stream::blocking_client(), &endpoints(&p2), &s)
@@ -278,7 +307,7 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
                 }
                 Err(e) => {
                     tracing::warn!("phone mode: {e}");
-                    hold_unsaved(p, from, fresh.clone());
+                    hold_unsaved(p, from, fresh.clone(), false);
                     Ok(fresh)
                 }
             }
@@ -824,6 +853,65 @@ mod tests {
         let on_disk = super::super::store::FileStore::open(dir.path()).unwrap();
         assert_eq!(full::load(&on_disk).session.unwrap().access_token, "fresh-1");
         assert!(p.tidal_unsaved.lock().unwrap().is_none());
+        assert_eq!(renewed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_sign_in_made_while_the_vault_was_asked_is_not_renewed_over() {
+        let (base, renewed) = tidal(std::time::Duration::ZERO).await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        due_here(&p);
+        p.set_account(super::super::stalled::refusing().await.account())
+            .await;
+        // A vault pass holds the vault while the renewal starts; the person signs in again meanwhile
+        let pass = p.vault_lock.lock().await;
+        let p2 = p.clone();
+        let renewal = tokio::spawn(async move { renew(&p2).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        full::update(p.store.as_ref(), |st| {
+            st.session = Some(full::Session {
+                access_token: "new sign-in".into(),
+                expires_at: now() + 3600,
+                ..Default::default()
+            })
+        });
+        drop(pass);
+        let s = renewal.await.unwrap().unwrap();
+        assert_eq!(s.access_token, "new sign-in");
+        assert_eq!(
+            renewed.load(Ordering::SeqCst),
+            0,
+            "the old sign-in wasn't renewed"
+        );
+        assert_eq!(state(&p).session.unwrap().access_token, "new sign-in");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_held_renewal_the_vault_doesnt_have_is_renewed_here() {
+        let (base, renewed) = tidal(std::time::Duration::ZERO).await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        // In step with the vault, whose homeserver is down
+        super::super::vault::tidal_due_in_step(&p);
+        p.set_account(super::super::stalled::refusing().await.account())
+            .await;
+        // A renewal under the vault's lock that neither the vault nor the file took, held here
+        // and due again: only the phone has its refresh token, so it is renewed here (through
+        // the vault, the vault's copy of the session before would be renewed again)
+        let file = dir.path().join(super::super::store::FILE);
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let held = full::Session {
+            access_token: "held".into(),
+            refresh_token: Some("rt-held".into()),
+            expires_at: now() + 30,
+            ..Default::default()
+        };
+        hold_unsaved(&p, "due".into(), held, false);
+        assert!(held_outside_vault(&p));
+        let s = renew(&p).await.expect("renewed here");
+        assert_eq!(s.access_token, "fresh-1");
         assert_eq!(renewed.load(Ordering::SeqCst), 1);
     }
 

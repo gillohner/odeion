@@ -110,6 +110,8 @@ pub struct Copier {
     retry: Mutex<Option<(Instant, Duration)>>,
     /// Songs that took too long to copy (by content hash): each waits on its own, doubling.
     slow: Mutex<HashMap<String, (Instant, Duration)>>,
+    /// One change at a time to `files.json` (the copier and a new choice).
+    file: Mutex<()>,
 }
 
 /// After a failed upload the next pass waits this long, doubled after each failure up to
@@ -170,6 +172,7 @@ fn save_copies(p: &Phone, c: &Copies) -> std::io::Result<()> {
 /// One change to what the phone knows of its copies, read and saved; an error (logged) when
 /// either fails, and nothing changed.
 fn change_copies(p: &Phone, f: impl FnOnce(&mut Copies) -> bool) -> std::io::Result<()> {
+    let _one = p.copier.file.lock().unwrap_or_else(|e| e.into_inner());
     let mut c = load_copies(p).inspect_err(|e| tracing::warn!("phone mode: {e}"))?;
     if f(&mut c) {
         save_copies(p, &c)?;
@@ -529,20 +532,20 @@ pub(crate) struct Choice {
 /// `PUT /v1/phone/storage {on}`.
 pub(crate) async fn choose(State(p): State<Arc<Phone>>, Json(c): Json<Choice>) -> Response {
     let v = c.on.map(|on| if on { "on" } else { "off" });
+    // What was copied can't be read: nothing changes (the copier can't run anyway)
+    if let Err(e) = load_copies(&p) {
+        return err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
     if let Err(e) = p.store.put(KEY, v) {
         return err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
-    // A new choice tries the songs the homeserver refused again (it may have room now)
-    if let Err(e) = change_copies(&p, |c| {
+    // A new choice tries the songs the homeserver refused again (it may have room now; not
+    // kept, they are tried at the next choice)
+    let _ = change_copies(&p, |c| {
         let had = !c.refused.is_empty();
         c.refused.clear();
         had
-    }) {
-        return err(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("The choice is set, but {e}"),
-        );
-    }
+    });
     *p.copier.retry.lock().unwrap_or_else(|e| e.into_inner()) = None;
     copy_soon(&p);
     Json(view(&p)).into_response()
@@ -703,10 +706,11 @@ mod tests {
         assert_eq!(r.copied, 0);
         assert_eq!(uploaded(&f), 0);
         assert_eq!(std::fs::read(copies_path(&p)).unwrap(), cut);
-        // A new choice doesn't write over it either
-        let r = choose(State(p.clone()), Json(Choice { on: Some(true) })).await;
+        // A new choice doesn't write over it either, and isn't made (the page keeps its switch)
+        let r = choose(State(p.clone()), Json(Choice { on: Some(false) })).await;
         assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(std::fs::read(copies_path(&p)).unwrap(), cut);
+        assert_eq!(chosen(&p), Some(true));
     }
 
     #[tokio::test]

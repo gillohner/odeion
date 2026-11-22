@@ -38,13 +38,8 @@ impl FileStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(e) => return Err(unreadable(&path, e)),
         };
-        if let Some(v) = values.get(pm_sources::tidal::full::STATE_KEY) {
-            serde_json::from_str::<pm_sources::tidal::full::ModeState>(v)
-                .map_err(|e| unreadable(&path, format!("TIDAL: {e}")))?;
-        }
-        if let Some(v) = values.get(pm_sources::qobuz::STATE_KEY) {
-            serde_json::from_str::<pm_sources::qobuz::ModeState>(v)
-                .map_err(|e| unreadable(&path, format!("Qobuz: {e}")))?;
+        for (k, v) in &values {
+            sign_in_reads(k, v).map_err(|e| unreadable(&path, e))?;
         }
         Ok(Self {
             path,
@@ -117,6 +112,22 @@ impl FileStore {
         }
         self.tell(key);
         Ok(())
+    }
+}
+
+/// Whether `value` under `key` is what its service reads: a streaming sign-in (`tidal.unofficial`,
+/// `qobuz.unofficial`) that isn't its state's JSON would read as signed out. Any other key: yes.
+pub(crate) fn sign_in_reads(key: &str, value: &str) -> Result<(), String> {
+    match key {
+        pm_sources::tidal::full::STATE_KEY => {
+            serde_json::from_str::<pm_sources::tidal::full::ModeState>(value)
+                .map(|_| ())
+                .map_err(|e| format!("TIDAL: {e}"))
+        }
+        pm_sources::qobuz::STATE_KEY => serde_json::from_str::<pm_sources::qobuz::ModeState>(value)
+            .map(|_| ())
+            .map_err(|e| format!("Qobuz: {e}")),
+        _ => Ok(()),
     }
 }
 
