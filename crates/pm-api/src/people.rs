@@ -362,6 +362,8 @@ async fn finish_previous_removal(s: &NodeState, key: &str, started: u64) -> Resu
     if let Some(_removing) = cleanup {
         crate::accounts::forget_person(s, key).await?;
     }
+    // Whatever an earlier removal left is gone now (or nothing was): no longer "did not finish"
+    note_unfinished(s, key, false);
     Ok(())
 }
 
@@ -902,20 +904,20 @@ pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<Stri
     // Own the entire removal independently of the request, including the interval between
     // revoking access and waiting for the operation lock. Cancelling the request can't abandon
     // cleanup or release the membership barrier early.
-    let done = tokio::spawn(remove_person(s.clone(), key.clone()))
-        .await
-        .unwrap_or_else(|_| {
+    // A removal that did not finish is remembered ([`note_unfinished`]), so Remove again is
+    // still offered after a reload or a restart (the person may be off the list already). The
+    // removal notes its own outcome while it holds the person's membership lock; only a task
+    // that broke off is noted here
+    match tokio::spawn(remove_person(s.clone(), key.clone())).await {
+        Ok(done) => done,
+        Err(_) => {
+            note_unfinished(&s, &key, true);
             Err(ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "the removal task did not finish: try again",
             ))
-        });
-    // A removal that did not finish is remembered, so Remove again is still offered after a
-    // reload or a restart (the person may be off the list already). Done, or nobody by that key
-    // with nothing of theirs left: nothing to remember
-    let open = matches!(&done, Err(e) if e.status != StatusCode::NOT_FOUND);
-    note_unfinished(&s, &key, open);
-    done
+        }
+    }
 }
 
 async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
@@ -960,7 +962,9 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
         revoke_access(&s, &key);
         Ok(Removing::new(&s, &key))
     })
-    .await?;
+    .await
+    // (nobody by that key and nothing of theirs left: nothing to finish, nothing remembered)
+    .inspect_err(|e| note_unfinished(&s, &key, e.status != StatusCode::NOT_FOUND))?;
     // Their problem reports go while no one can give them music again: a re-add waits for the
     // membership lock held here, a restore for the removal marker. The roster is held around the
     // inbox delete as housekeeping holds it (roster, then inbox), and the library lock isn't held
@@ -984,6 +988,9 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
     if let Err(e) = crate::accounts::forget_person_locked(&s, &key).await {
         discovery_problems.insert(0, e.message);
     }
+    // Noted while the membership lock is held: two removals of one person can't note in the
+    // wrong order
+    note_unfinished(&s, &key, !discovery_problems.is_empty());
     if !discovery_problems.is_empty() {
         return Err(ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,

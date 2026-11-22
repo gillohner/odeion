@@ -28082,19 +28082,29 @@ exec sleep 300
                 (listed, v["unfinished"].clone())
             }
         };
+        // (Cy has an account on this node's homeserver too: removed, they stay listed without music)
+        let cy = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "people",
+                &serde_json::json!({"people": [
+                    {"key": anna, "access": "music", "music_enabled": true, "added_at": 1},
+                    {"key": ben, "access": "music", "music_enabled": true, "added_at": 1},
+                    {"key": cy, "access": "homeserver_music", "music_enabled": true, "added_at": 1}]})
+                .to_string(),
+            )
+            .unwrap();
         let (listed, unfinished) = people().await;
         assert!(
             listed.contains(&ben.to_string()) && unfinished.is_null(),
             "{listed:?} {unfinished}"
         );
         // Ben's homeserver approval can't be taken off the node (a folder stands where its file is)
-        let grant = s
-            .db_path
-            .parent()
-            .unwrap()
-            .join("grants")
-            .join(format!("{ben}.session"));
-        std::fs::create_dir_all(grant.join("in-the-way")).unwrap();
+        let grants = s.db_path.parent().unwrap().join("grants");
+        let in_the_way = |key: &str| grants.join(format!("{key}.session"));
+        std::fs::create_dir_all(in_the_way(ben).join("x")).unwrap();
         for _ in 0..2 {
             let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
             assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
@@ -28104,18 +28114,62 @@ exec sleep 300
             assert!(!listed.contains(&ben.to_string()), "{listed:?}");
             assert_eq!(unfinished, serde_json::json!([ben]));
         }
-        // What was in the way is gone: removing again finishes it, and it is forgotten
-        std::fs::remove_dir_all(&grant).unwrap();
+        // Adding Ben again has to finish the removal first: not while it can't
+        let add_ben = serde_json::json!({"access": "music", "key": ben});
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/people/invites",
+            owner,
+            &[],
+            Some(add_ben.clone()),
+        )
+        .await;
+        assert!(!st.is_success(), "{st} {v}");
+        assert_eq!(people().await.1, serde_json::json!([ben]));
+        // What was in the way is gone: adding Ben again finishes it, and Ben is no longer named
+        // as someone whose removal did not finish
+        std::fs::remove_dir_all(in_the_way(ben)).unwrap();
+        let (st, v, _) = send_as(&app, "POST", "/v1/people/invites", owner, &[], Some(add_ben)).await;
+        assert!(st.is_success(), "{st} {v}");
+        let (listed, unfinished) = people().await;
+        assert!(
+            listed.contains(&ben.to_string()) && unfinished.is_null(),
+            "{listed:?} {unfinished}"
+        );
+        // Cy's removal fails the same way: still listed (the homeserver account), and named
+        std::fs::create_dir_all(in_the_way(cy).join("x")).unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{cy}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+        let (listed, unfinished) = people().await;
+        assert!(listed.contains(&cy.to_string()), "{listed:?}");
+        assert_eq!(unfinished, serde_json::json!([cy]));
+        // Removing again, when it can finish, answers 200 and it is forgotten
+        std::fs::remove_dir_all(in_the_way(cy)).unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{cy}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (listed, unfinished) = people().await;
+        assert!(
+            listed.contains(&cy.to_string()) && unfinished.is_null(),
+            "{listed:?} {unfinished}"
+        );
+        // Ben again, off the list with something left: the next Remove finishes it (the grant
+        // file is there this time, and goes)
+        std::fs::create_dir_all(in_the_way(ben).join("x")).unwrap();
+        let (st, _, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
+        std::fs::remove_dir_all(in_the_way(ben)).unwrap();
+        std::fs::write(in_the_way(ben), b"left over").unwrap();
         let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
-        assert!(st == StatusCode::OK || st == StatusCode::NOT_FOUND, "{st} {v}");
-        let (_, unfinished) = people().await;
-        assert!(unfinished.is_null(), "{unfinished}");
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(!in_the_way(ben).exists());
+        assert!(people().await.1.is_null());
         // A removal that works leaves nothing to remember
         let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{anna}"), owner, &[], None).await;
         assert_eq!(st, StatusCode::OK, "{v}");
         let (listed, unfinished) = people().await;
         assert!(
-            listed.is_empty() && unfinished.is_null(),
+            !listed.contains(&anna.to_string()) && unfinished.is_null(),
             "{listed:?} {unfinished}"
         );
         // A name that was remembered for someone of whom nothing is left (a restored list, say)

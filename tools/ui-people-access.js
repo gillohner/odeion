@@ -708,6 +708,22 @@ const atLoopback = async (context) => {
           await context.close();
         }
       }
+      // The same for someone who is still listed (a homeserver account, no sign-in left): Remove is
+      // offered on their own row, which otherwise has none
+      if (!phone) {
+        const n = node({ leftover: new Set([CY]) });
+        const { context, page, state } = await owner(browser, width, n);
+        const box = page.locator('#peoplebox');
+        const cy = box.locator(`[data-person="${CY}"]`);
+        await cy.locator('[data-premove-err]').waitFor();
+        assert.equal(await cy.locator('[data-premove-err]').innerText(), 'Removing them did not finish. Remove again to finish it.');
+        assert.equal(await cy.locator('[data-premove]').count(), 1, 'Remove is offered though they have no sign-in left');
+        assert.equal(await box.locator('[data-pgone]').count(), 0, 'no second row: they are listed');
+        assert.equal(await box.locator(`[data-person="${BO}"] [data-premove-err]`).count(), 0, 'nobody else is marked');
+        await cleanCopy(page);
+        assert.deepEqual(state.errors, [], 'no page errors');
+        await context.close();
+      }
       // A node that answers "no zone" and does not keep it: the screen is drawn again from what the
       // node has now, and says so where the choice is (no word of a change that was not made)
       if (!phone) {
