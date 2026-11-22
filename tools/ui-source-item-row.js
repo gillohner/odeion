@@ -5,8 +5,8 @@
 // title (and on an empty spot of the row) plays from that song, the row shows a pointer, the row's
 // own buttons keep their job (+ only adds, ▶ plays once), the second click of a double click
 // doesn't start the song again (a node zone gets one queue load), a drag that selects the title
-// doesn't play, a phone tap on the row plays, and on a touch screen or a phone the row keeps its + (it has
-// no ⋯ to hold it) on one line. 1280/1024/768 px, a 768 px touch tablet, 360/412 px phones.
+// doesn't play, a phone tap on the row plays, and on a touch screen or a phone the row shows only its ⋯
+// (Play next, Add to queue, Add to playlist…: each checked), on one line, and a swipe right plays it next. 1280/1024/768 px, a 768 px touch tablet, 360/412 px phones.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-source-item-row.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -35,6 +35,9 @@ const fixtures = {
   '/sources/soundcloud/likes': { body: { tracks: [], playlists: [{ id: 'abc', title: 'Journey', creator: 'Sefa' }] } },
   '/sources/soundcloud/playlists': { body: [] },
   '/sources/soundcloud/items/abc': { body: item },
+  // (a song's ⋯ › Add to playlist…: one playlist to pick)
+  '/playlists': { body: [{ id: 'p1', name: 'Road trip', items: 4, covers: [], visibility: 'private', synced: false, layout: 'list', tracks_only: true }] },
+  '/playlists/p1/items': { body: {} },
 };
 
 const onBar = (page) => page.evaluate(() => (document.querySelector('.player .np-title') || {}).textContent || '');
@@ -74,25 +77,67 @@ async function browserRun(browser, width, opts = {}) {
     if (width === 1280 && !opts.touch) await page.screenshot({ path: path.join(SHOTS, `played-${width}.png`) });
 
     if (opts.mobile || opts.touch) {
-      // A touch screen / phone hides a song row's buttons other than its ⋯ (they are in it). These rows have
-      // no ⋯, only +, so they keep it: before, a phone had no way to queue one of the album's songs, the
-      // format's empty cell kept its column and the + wrapped to a second, empty grid line under the row
+      // A touch screen / phone hides a song row's buttons other than its ⋯ (they are in it). These rows
+      // have a ⋯ now (Play next, Add to queue, Add to playlist…), so they show only that, as every
+      // other song row does. Before #755 the rows had no way to queue a song on a phone; until this
+      // check they had only + (no Play next, no Add to playlist for one song). The format's empty
+      // cell takes no column and nothing wraps to a second, empty grid line under the row
       const rows = await page.evaluate(() => [...document.querySelectorAll('#main .src-tracks > .track')].map((r) => {
-        const b = r.querySelector('[data-aadd1]'), bb = b.getBoundingClientRect(), rb = r.getBoundingClientRect();
+        const b = r.querySelector('[data-amore1]'), a = r.querySelector('[data-aadd1]'), rb = r.getBoundingClientRect(); const bb = b ? b.getBoundingClientRect() : null;
         const shown = [...r.children].filter((c) => getComputedStyle(c).display !== 'none');
-        return { add: getComputedStyle(b).display !== 'none' && Math.round(bb.width) >= 40 && Math.round(bb.height) >= 40 && bb.left >= rb.left && bb.right <= rb.right + 0.5 && bb.top >= rb.top - 0.5 && bb.bottom <= rb.bottom + 0.5,
+        return { more: !!bb && getComputedStyle(b).display !== 'none' && Math.round(bb.width) >= 40 && Math.round(bb.height) >= 40 && bb.left >= rb.left && bb.right <= rb.right + 0.5 && bb.top >= rb.top - 0.5 && bb.bottom <= rb.bottom + 0.5,
+          plus: !!a && a.getClientRects().length > 0,
           lines: getComputedStyle(r).gridTemplateRows.split(' ').length, empty: shown.filter((c) => !c.innerText.trim() && ![...c.querySelectorAll('button')].some((x) => x.getClientRects().length)).length };
       }));
-      check(rows.length === 3 && rows.every((r) => r.add), `${tag}: every song row shows its + (Add to queue), a 40 px tap inside the row ${JSON.stringify(rows.map((r) => r.add))}`);
+      check(rows.length === 3 && rows.every((r) => r.more), `${tag}: every song row shows its ⋯, a 40 px tap inside the row ${JSON.stringify(rows.map((r) => r.more))}`);
+      check(rows.every((r) => !r.plus), `${tag}: and not its + (it is in the ⋯), as a library song row ${JSON.stringify(rows.map((r) => r.plus))}`);
       check(rows.every((r) => r.lines === 1 && r.empty === 0), `${tag}: each row is one line with no empty cell ${JSON.stringify(rows.map((r) => [r.lines, r.empty]))}`);
-      const add = row(page, 0).locator('[data-aadd1]');
-      if (await add.isVisible()) {
-        await add.tap();
+      const menuOf = async (i) => {
+        const more = row(page, i).locator('[data-amore1]');
+        if (!(await more.isVisible())) return null;
+        await more.tap();
+        await page.waitForSelector('.popover.menu:not([hidden]) .pop-item', { timeout: 2000 }).catch(() => {});
+        return page.evaluate(() => { const m = document.querySelector('.popover.menu:not([hidden])'); return m ? { title: (m.querySelector('.pop-title') || {}).textContent || '', items: [...m.querySelectorAll('.pop-item')].map((b) => b.textContent.trim()) } : null; });
+      };
+      const pick = async (label) => { await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: label }).first().tap(); };
+      const m1 = await menuOf(0);
+      check(!!m1 && m1.title === 'First' && m1.items.join('|') === 'Play next|Add to queue|Add to playlist…', `${tag}: song 1's ⋯ is its menu: Play next, Add to queue, Add to playlist… ${JSON.stringify(m1)}`);
+      if (width < 600) await page.screenshot({ path: path.join(SHOTS, `phone-menu-${width}.png`) });
+      if (m1) {
+        await pick('Add to queue');
         const q2 = await queueTitles(page, 'Second,Third,First');
-        check(q2 && q2.join() === 'Second,Third,First', `${tag}: a tap on song 1's + adds it to the end of the queue (${JSON.stringify(q2)})`);
+        check(q2 && q2.join() === 'Second,Third,First', `${tag}: its Add to queue adds song 1 to the end of the queue (${JSON.stringify(q2)})`);
         await page.waitForTimeout(150);
         check(/Second/.test(await onBar(page)), `${tag}: and doesn't play it ("${await onBar(page)}")`);
-      } else check(false, `${tag}: a tap on song 1's + adds it to the queue (no + to tap)`);
+      }
+      if (await menuOf(2)) {
+        await pick('Play next');
+        const q3 = await queueTitles(page, 'Second,Third,Third,First');
+        check(q3 && q3.join() === 'Second,Third,Third,First', `${tag}: song 3's ⋯ › Play next puts it right after the song playing (${JSON.stringify(q3)})`);
+      } else check(false, `${tag}: song 3's ⋯ › Play next (no ⋯)`);
+      if (await menuOf(1)) {
+        await pick('Add to playlist');
+        await page.waitForSelector('dialog [data-ppi]', { timeout: 2000 }).catch(() => {});
+        const n0 = state.hits.length;
+        const pl = page.locator('dialog [data-ppi]', { hasText: 'Road trip' });
+        if (await pl.count()) await pl.first().tap();
+        await page.waitForFunction(() => !document.querySelector('dialog[open]'), null, { timeout: 2000 }).catch(() => {});
+        for (let k = 0; k < 40 && !state.hits.slice(n0).some((h) => h.m === 'POST' && h.v === '/playlists/p1/items'); k++) await page.waitForTimeout(50);
+        const post = state.hits.slice(n0).find((h) => h.m === 'POST' && h.v === '/playlists/p1/items');
+        const body = post ? JSON.parse(post.body || '{}') : {};
+        check(!!post && JSON.stringify(body.uris) === JSON.stringify([tracks[1].url]), `${tag}: song 2's ⋯ › Add to playlist… › Road trip adds that one song by its address (${post ? post.body : 'no POST'})`);
+      } else check(false, `${tag}: song 2's ⋯ › Add to playlist… (no ⋯)`);
+      // A swipe right on a row is Play next, as on a library song row (the browser's own touch input)
+      const cdp = await context.newCDPSession(page);
+      const rb = await row(page, 0).boundingBox();
+      const y = rb.y + rb.height / 2, x0 = rb.x + 40;
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: x0, y }] });
+      for (let k = 1; k <= 8; k++) { await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x0 + k * 15, y }] }); await page.waitForTimeout(16); }
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      const q4 = await queueTitles(page, 'Second,First,Third,Third,First');
+      check(q4 && q4.join() === 'Second,First,Third,Third,First', `${tag}: a swipe right on song 1's row plays it next (${JSON.stringify(q4)})`);
+      await page.waitForTimeout(150);
+      check(/Second/.test(await onBar(page)), `${tag}: and the swipe doesn't play the row ("${await onBar(page)}")`);
       if (width < 600) await page.screenshot({ path: path.join(SHOTS, `phone-${width}.png`) });
     }
 
@@ -132,7 +177,7 @@ async function browserRun(browser, width, opts = {}) {
 async function nodeRun(browser, width) {
   const tag = `${width} px, node zone`;
   const Z = { id: 'z1', name: 'Kitchen', output: 'upnp:k', transport: 'stopped', now_playing: null, queue: [], queue_index: null, queue_version: 1, repeat: 'off', shuffle: false, radio: false, error: null, acked: 0, volume: { percent: 40 } };
-  const zf = { ...fixtures, '/zones': { body: [Z] }, '/zones/z1': { body: Z }, '/zones/z1/load': { body: Z }, '/outputs': { body: [{ id: 'upnp:k', name: 'Kitchen', kind: 'upnp', caps: { hw_volume: 'percent' } }] } };
+  const zf = { ...fixtures, '/zones': { body: [Z] }, '/zones/z1': { body: Z }, '/zones/z1/load': { body: Z }, '/zones/z1/queue': { body: Z }, '/outputs': { body: [{ id: 'upnp:k', name: 'Kitchen', kind: 'upnp', caps: { hw_volume: 'percent' } }] } };
   const { page, context, state } = await fx.create(browser, width, { fixtures: zf, zone: 'z1' });
   await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [Z] })); });
   const loads = () => state.hits.filter((h) => h.m === 'POST' && h.v === '/zones/z1/load');
@@ -168,6 +213,17 @@ async function nodeRun(browser, width) {
     await settle(n0);
     got = loads().slice(n0);
     check(got.length === 1, `${tag}: ▶ then a quick second click on the same row is one start (${got.length} loads)`);
+    // The row's ⋯ › Play next sends that one song to play next in Kitchen's queue (a mouse: the ⋯ shows on hover)
+    const n1 = state.hits.length;
+    await row(page, 1).hover();
+    if (await row(page, 1).locator('[data-amore1]').count()) await row(page, 1).locator('[data-amore1]').click();
+    await page.waitForSelector('.popover.menu:not([hidden]) .pop-item', { timeout: 2000 }).catch(() => {});
+    const items = await page.evaluate(() => [...document.querySelectorAll('.popover.menu:not([hidden]) .pop-item')].map((b) => b.textContent.trim()));
+    check(items.join('|') === 'Play next|Add to queue|Add to playlist…', `${tag}: song 2's ⋯ is the service song's menu, not a library song's (${JSON.stringify(items)})`);
+    if (items.length) await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Play next' }).click();
+    for (let k = 0; k < 40 && !state.hits.slice(n1).some((h) => h.m === 'POST' && h.v === '/zones/z1/queue'); k++) await page.waitForTimeout(50);
+    const qp = state.hits.slice(n1).find((h) => h.m === 'POST' && h.v === '/zones/z1/queue'); const qb = qp ? JSON.parse(qp.body || '{}') : {};
+    check(!!qp && qb.at === 'next' && qb.items && qb.items.length === 1 && qb.items[0].title === 'Second' && qb.items[0].uri === tracks[1].url && !qb.replace, `${tag}: its Play next queues song 2 next in Kitchen (${qp ? qp.body : 'no POST'})`);
     check(state.errors.length === 0, `${tag}: no page errors ${JSON.stringify(state.errors)}`);
   } finally { await context.close(); }
 }
