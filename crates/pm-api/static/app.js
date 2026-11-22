@@ -1056,6 +1056,13 @@
   // "Still loading…" under a skeleton after 2 s, as long as `still()` says it is the same load
   const slowNote = (el, still) => setTimeout(() => { if (still() && el.isConnected) { const n = el.querySelector('.slow-note'); if (n) n.hidden = false; } }, 2000);
   const SLOW = '<p class="muted small slow-note" role="status" hidden>Still loading…</p>';
+  // (the page's own first loader, index.html #bootskel, says so too while the node's first answers take long)
+  slowNote(document.getElementById('main'), () => !!document.getElementById('bootskel'));
+  // (and "Loading…" for a screen reader: in the status region navigate() uses, put in after the page
+  // has opened, since words a status region already has when the page loads are not read out; not
+  // behind Log in. The first page's draw empties it, as after any navigation)
+  { const said = document.createElement('p'); said.id = 'navstatus'; said.className = 'sr-only'; said.setAttribute('role', 'status'); document.body.appendChild(said);
+    setTimeout(() => { if (document.getElementById('bootskel') && !document.body.classList.contains('signedout')) said.textContent = 'Loading…'; }, 300); }
   const ROOT = '';
   const copyTree = () => ({ nodes: new Map([[ROOT, { path: ROOT, parent: null, kids: null, next: null, open: true }]]), sel: new Map(), focus: null, missing: false });
   // `body`: a preset (an album's or songs' ⋯ Copy); none opens on the folders
@@ -1538,7 +1545,11 @@
   {
     let queued = false;
     const tag = () => { queued = false; document.querySelectorAll(UNTAGGED).forEach(keyable); };
-    new MutationObserver(() => { if (!queued) { queued = true; requestAnimationFrame(tag); } }).observe(document.body, { childList: true, subtree: true });
+    // (what was just added is made reachable in the same step, before a key press or anything else
+    // can come: a frame later, Tab pressed in that frame went past a row that had just been drawn.
+    // The whole page is still looked over once a frame, for a row that became clickable in place)
+    const tagIn = (n) => { if (n.nodeType !== 1) return; if (n.matches(UNTAGGED)) keyable(n); n.querySelectorAll(UNTAGGED).forEach(keyable); };
+    new MutationObserver((recs) => { for (const r of recs) r.addedNodes.forEach(tagIn); if (!queued) { queued = true; requestAnimationFrame(tag); } }).observe(document.body, { childList: true, subtree: true });
   }
   // ---- Log in / Log out (TASK-login-ux) -------------------------------------
   // Signed out, the page is one Log in screen instead of the app: Pubky Ring for the owner and
@@ -11262,12 +11273,19 @@
   };
   const connect = async () => {
     try {
+      // The page's first three reads go together: one after another, a slow link (remote access, a
+      // phone's data) waited three round trips before the first page was asked for. (Logged in only:
+      // without a token the first refusal alone opens Log in, with its reason. Each is read where it
+      // was before; one that fails with /info is no unhandled rejection.)
+      const early = state.token ? { me: api('GET', '/me').then((m) => m, () => null), zones: api('GET', '/zones') } : null;
+      if (early) early.zones.catch(() => {});
       state.info = await api('GET', '/info');
       document.body.classList.toggle('offline', isOffline());
       if (isOffline()) {
         // The app's local server: no zones, no events; the app switches back when the node is reachable
         setConn(true, `Offline · ${countOf(state.info.library.tracks, 'songs')} on this device`);
-        try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
+        if (early) state.me = (await early.me) || { role: 'owner' };
+        else { try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; } }
         state.sources = []; state.zones = {}; state.zonesSeen = true; state.zone = BROWSER;
         loadFavourites().catch(() => { state.favUris = new Set(); paintHearts(); });
         renderZoneName(); renderBar();
@@ -11277,7 +11295,8 @@
       }
       setConn(true, `${state.info.name} · ${countOf(state.info.library.tracks, 'songs')}`);
       watchScan(state.info);
-      try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
+      if (early) state.me = (await early.me) || { role: 'owner' };
+      else { try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; } }
       document.body.classList.toggle('listener', isListener());
       drawMe().catch(() => {});
       // Usage insights (usage.js): off unless the owner turned them on; asks the node once
@@ -11292,7 +11311,7 @@
         // A listener's own bookmarks, from their homeserver (none until they connect it)
         loadFavourites().catch(() => {});
       }
-      const zones = await api('GET', '/zones');
+      const zones = await (early ? early.zones : api('GET', '/zones'));
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z])); state.zonesSeen = true;
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false); refreshAlong();
       {
@@ -11310,6 +11329,7 @@
     } catch (e) {
       if (signedOut()) return;
       main.innerHTML = `<div class="notice warn">Cannot reach the node: ${esc(e.message)} It retries by itself.</div>`;
+      { const said = document.getElementById('navstatus'); if (said && said.textContent === 'Loading…') said.textContent = ''; } // (the first loader's word)
       if (!link.downSince) link.downSince = Date.now();
       scheduleRetry(); showDown();
     }
