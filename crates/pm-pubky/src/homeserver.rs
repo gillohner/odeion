@@ -39,6 +39,20 @@ pub fn is_full(e: &HomeserverError) -> bool {
     )
 }
 
+/// The homeserver refused a write for good: a 4xx other than a timeout, too many requests or a
+/// session it no longer takes (`413` too large, `403` not allowed). Trying the same write again
+/// gets the same answer.
+pub fn refused_for_good(e: &HomeserverError) -> bool {
+    matches!(
+        e,
+        HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+            if status.is_client_error()
+                && *status != reqwest::StatusCode::REQUEST_TIMEOUT
+                && *status != reqwest::StatusCode::TOO_MANY_REQUESTS
+                && *status != reqwest::StatusCode::UNAUTHORIZED
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HomeserverError {
     #[error(transparent)]
@@ -79,6 +93,11 @@ impl HomeserverError {
             HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
                 if status.is_server_error()
         )
+    }
+
+    /// The homeserver has nothing at that path (404): a delete of it is done already.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, HomeserverError::Pubky(e) if is_not_found(e))
     }
 }
 
@@ -1267,6 +1286,72 @@ impl NodeHomeserver {
         Ok(())
     }
 
+    /// Uploads the file at `local` to `path` (under the private files folder) as it is read, never
+    /// whole in memory.
+    pub async fn upload_private_file(
+        &self,
+        session: &PubkySession,
+        path: &str,
+        local: &std::path::Path,
+    ) -> Result<(), HomeserverError> {
+        if !path.starts_with(PRIVATE_FILES_DIR) {
+            return Err(HomeserverError::Transport(format!(
+                "refusing to upload audio outside {PRIVATE_FILES_DIR}: {path}"
+            )));
+        }
+        let file = tokio::fs::File::open(local)
+            .await
+            .map_err(|e| HomeserverError::Transport(format!("{}: {e}", local.display())))?;
+        let stream = futures_util::stream::try_unfold(file, |mut f| async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 256 * 1024];
+            let n = f.read(&mut buf).await?;
+            if n == 0 {
+                return Ok::<_, std::io::Error>(None);
+            }
+            buf.truncate(n);
+            Ok(Some((bytes::Bytes::from(buf), f)))
+        });
+        session
+            .storage()
+            .put(path, reqwest::Body::wrap_stream(stream))
+            .await?;
+        Ok(())
+    }
+
+    /// The names of every file under the private files folder (complete, or an error), without
+    /// their sizes: one request per page of the listing.
+    pub async fn list_private_file_names(
+        &self,
+        session: &PubkySession,
+    ) -> Result<Vec<String>, HomeserverError> {
+        let storage = session.storage();
+        let listing = list_within(ListBounds::OWNER, PRIVATE_FILES_DIR, |cursor| {
+            let storage = &storage;
+            async move {
+                let mut b = storage.list(PRIVATE_FILES_DIR)?.limit(LIST_LIMIT).shallow(true);
+                if let Some(c) = &cursor {
+                    b = b.cursor(c);
+                }
+                match within(OBJECT_TIMEOUT, async { Ok(b.send().await) }).await? {
+                    Ok(p) => Ok(Some(
+                        p.into_iter()
+                            .map(|e| (e.path.to_string(), e.to_pubky_url()))
+                            .collect(),
+                    )),
+                    Err(e) if is_not_found(&e) => Ok(None),
+                    Err(e) => Err(e.into()),
+                }
+            }
+        })
+        .await?;
+        Ok(listing
+            .entries
+            .into_iter()
+            .map(|path: String| path.rsplit('/').next().unwrap_or(&path).to_string())
+            .collect())
+    }
+
     /// Check authenticated private storage with one bounded listing, not a file inventory.
     /// A new account's missing directory is healthy; access and transport errors propagate.
     pub async fn probe_private_storage(&self, session: &PubkySession) -> Result<(), HomeserverError> {
@@ -1438,6 +1523,11 @@ pub struct NodeRecord {
     /// The node's iroh key when remote access is on (ADR 0013): dial it from anywhere.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub iroh: String,
+    /// The public key (z32) of the homeserver installed with this node (deploy/bundle), when it
+    /// runs one: the person's devices compare it with their own homeserver (phone mode keeps the
+    /// songs added on the phone there by default when it is the same).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundled_homeserver: Option<String>,
 }
 
 impl NodeHomeserver {
@@ -1535,6 +1625,12 @@ pub struct LoginFlow {
 /// homeserver that normalises would lose the vault capability, and the vault counts only when it
 /// is named itself. A session from before, with the whole folder, still covers every part.
 pub const LOGIN_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/node.json:rw,/priv/pubky.music/settings.json:rw,/priv/pubky.music/prefs.json:rw,/priv/pubky.music/files/:rw,/pub/pubky.music/:rw,/priv/pubky.app/:rw,/pub/pubky.app/:rw,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
+
+/// What the app asks for in phone mode (no node): the sources vault (named on its own, as
+/// `crates/pm-appdata/VAULT.md` requires), the shared preferences, the files folder, the node's
+/// record (read only: whether the homeserver is a node's own), and the social and music posts
+/// (Collections, Bookmarks, listens, reviews). Never `/priv/pubky.music/` as a whole.
+pub const PHONE_CAPABILITIES: &str = "/priv/pubky.music/vault/:rw,/priv/pubky.music/prefs.json:rw,/priv/pubky.music/files/:rw,/priv/pubky.music/node.json:r,/priv/pubky.music/settings.json:r,/pub/social/v1/:rw,/priv/social/v1/:rw,/pub/music/v1/:rw,/priv/music/v1/:rw";
 
 /// The capabilities in `wanted` (a list like [`LOGIN_CAPABILITIES`]) that `granted` does not
 /// cover. A granted `scope:actions` covers a wanted one when its scope is the same folder or a
@@ -1779,6 +1875,30 @@ mod full_tests {
         assert!(!is_full(&server(404)));
         assert!(!is_full(&server(413)));
         assert!(!is_full(&HomeserverError::Transport("reset".into())));
+        assert!(server(404).is_not_found());
+        assert!(!server(403).is_not_found());
+        assert!(!HomeserverError::Transport("reset".into()).is_not_found());
+    }
+
+    #[test]
+    fn only_a_lasting_4xx_is_refused_for_good() {
+        let server = |status: u16| {
+            HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server {
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                message: String::new(),
+            }))
+        };
+        assert!(refused_for_good(&server(413)));
+        assert!(refused_for_good(&server(403)));
+        assert!(!refused_for_good(&server(408)));
+        assert!(!refused_for_good(&server(429)));
+        assert!(
+            !refused_for_good(&server(401)),
+            "signed out: not the song's fault"
+        );
+        assert!(!refused_for_good(&server(507)), "full: try again later");
+        assert!(!refused_for_good(&server(503)));
+        assert!(!refused_for_good(&HomeserverError::Transport("reset".into())));
     }
 }
 

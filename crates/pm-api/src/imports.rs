@@ -140,22 +140,8 @@ fn tidal_paths(home: &Path) -> Vec<Place> {
         .collect()
 }
 
-/// A client id, kept as its SHA-256 only: enough to tell two apart, and nothing to show or log.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ClientTag([u8; 32]);
-
-impl ClientTag {
-    pub(crate) fn of(id: &str) -> Self {
-        use sha2::Digest;
-        ClientTag(sha2::Sha256::digest(id.trim().as_bytes()).into())
-    }
-}
-
-impl std::fmt::Debug for ClientTag {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ClientTag(..)")
-    }
-}
+/// A client id, kept as its SHA-256 only (shared with the phone's TIDAL code).
+pub(crate) use pm_sources::tidal::ClientTag;
 
 /// Which TIDAL clients this node has: an imported session renews here only with the kind of
 /// client that made it (python-tidal's browser sessions with this build's browser client, the
