@@ -237,11 +237,17 @@ pub fn load(lib: &pm_library::Library, who: &Who) -> ModeState {
 }
 
 fn save(lib: &pm_library::Library, who: &Who, st: &ModeState) {
-    let _ = who.put(
+    let _ = try_save(lib, who, st);
+}
+
+/// [`save`], saying when the state was not kept (someone no longer listed, or a sign-in with an
+/// account that is someone else's here: accounts.rs).
+fn try_save(lib: &pm_library::Library, who: &Who, st: &ModeState) -> Result<(), ApiError> {
+    who.put(
         lib,
         STATE_KEY,
         Some(&serde_json::to_string(st).expect("state serializes")),
-    );
+    )
 }
 
 pub(crate) fn update(s: &NodeState, who: &Who, f: impl FnOnce(&mut ModeState)) -> ModeState {
@@ -255,30 +261,35 @@ pub(crate) fn update(s: &NodeState, who: &Who, f: impl FnOnce(&mut ModeState)) -
 /// [`update`] for an interactive sign-in: the state and the vault's "new sign-in" mark (the
 /// owner's only: the vault is theirs) are written under one library guard, so no vault pass sees
 /// one without the other.
-pub(crate) fn update_signed_in(s: &NodeState, who: &Who, service: &str, f: impl FnOnce(&mut ModeState)) {
-    update_signed_in_if(s, who, service, |_| true, f);
+pub(crate) fn update_signed_in(
+    s: &NodeState,
+    who: &Who,
+    service: &str,
+    f: impl FnOnce(&mut ModeState),
+) -> Result<(), ApiError> {
+    update_signed_in_if(s, who, service, |_| true, f).map(|_| ())
 }
 
 /// [`update_signed_in`] only while `still` holds for the state, checked under the same guard;
-/// whether it was written.
+/// whether it was written, or why the sign-in was not kept.
 pub(crate) fn update_signed_in_if(
     s: &NodeState,
     who: &Who,
     service: &str,
     still: impl FnOnce(&ModeState) -> bool,
     f: impl FnOnce(&mut ModeState),
-) -> bool {
+) -> Result<bool, ApiError> {
     let lib = s.library.lock().expect("library poisoned");
     let mut st = load(&lib, who);
     if !still(&st) {
-        return false;
+        return Ok(false);
     }
     f(&mut st);
-    save(&lib, who, &st);
+    try_save(&lib, who, &st)?;
     if who.is_owner() {
         crate::vault_cache::new_sign_in(&lib, service);
     }
-    true
+    Ok(true)
 }
 
 fn config_client() -> &'static std::sync::OnceLock<Client> {
@@ -398,7 +409,8 @@ pub(crate) async fn held_to_its_person(
         sess = fill_session(s, sess).await;
         sess.user_id = sess.user_id.or(named);
     }
-    let Some(account) = sess.user_id.as_deref().filter(|a| !a.trim().is_empty()) else {
+    sess.user_id = sess.user_id.as_deref().and_then(crate::accounts::account_id);
+    let Some(account) = sess.user_id.as_deref() else {
         return Err(if asked {
             crate::accounts::account_unknown("TIDAL")
         } else {
@@ -420,12 +432,16 @@ pub(crate) fn renewed_for(
     answer: &Value,
     kept: &Session,
 ) -> Result<Option<String>, String> {
-    let named = answer["user_id"]
-        .as_i64()
-        .or(answer["user"]["userId"].as_i64())
-        .map(|u| u.to_string());
+    // (TIDAL writes the id as a number; text is read too, and both the same way)
+    let id = |v: &Value| match v {
+        Value::Number(n) => crate::accounts::account_id(&n.to_string()),
+        Value::String(s) => crate::accounts::account_id(s),
+        _ => None,
+    };
+    let named = id(&answer["user_id"]).or_else(|| id(&answer["user"]["userId"]));
+    let was = kept.user_id.as_deref().and_then(crate::accounts::account_id);
     match named {
-        Some(account) if kept.user_id.as_deref() != Some(account.as_str()) => {
+        Some(account) if was.as_deref() != Some(account.as_str()) => {
             if !who.is_owner() {
                 who.account_free(lib, STATE_KEY, &account)
                     .map_err(|e| e.message)?;
@@ -852,8 +868,24 @@ async fn wait_for_approval(s: &Arc<NodeState>, who: &Who, c: Client, p: Pending)
                         lossy: false,
                     });
                 });
-                if kept {
-                    tracing::info!("TIDAL full tracks (unofficial): signed in");
+                match kept {
+                    Ok(true) => tracing::info!("TIDAL full tracks (unofficial): signed in"),
+                    Ok(false) => {}
+                    // Not kept after all (the account became someone else's meanwhile, or
+                    // this person is no longer listed): the code is given up, with why
+                    Err(e) => {
+                        update(s, who, |st| {
+                            if st.login.as_ref().map(|x| &x.device_code) == Some(&p.device_code) {
+                                st.login = None;
+                                st.health = Some(Health {
+                                    ok: false,
+                                    detail: e.message.clone(),
+                                    at: now(),
+                                    lossy: false,
+                                });
+                            }
+                        });
+                    }
                 }
             }
             return;
@@ -1131,7 +1163,7 @@ pub(crate) async fn finish_browser(
             at: now(),
             lossy: false,
         });
-    });
+    })?;
     if !kept {
         return Err(ApiError::new(
             StatusCode::CONFLICT,

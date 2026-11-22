@@ -27389,6 +27389,15 @@ exec sleep 300
             )
             .unwrap_err();
         assert_eq!(e.status, StatusCode::CONFLICT);
+        // The same account written another way is the same account
+        for written in ["077", " 77 ", "0077"] {
+            let e = b.put(&lib, "tidal.user", Some(&sess(written))).unwrap_err();
+            assert_eq!(e.status, StatusCode::CONFLICT, "{written:?}");
+        }
+        assert_eq!(accounts::account_id(" 0042 ").as_deref(), Some("42"));
+        assert_eq!(accounts::account_id("000").as_deref(), Some("0"));
+        assert_eq!(accounts::account_id("a1b").as_deref(), Some("a1b"));
+        assert_eq!(accounts::account_id("  "), None);
         // An account two people were signed in with before this keeps working for both (Anna's
         // and the owner's are the same one in this node's stored sign-ins: Ben can't take it)
         let e = b.put(&lib, "tidal.user", Some(&sess("1"))).unwrap_err();
@@ -27631,6 +27640,10 @@ exec sleep 300
             );
             let why = renewed(serde_json::json!({"user_id": 1})).unwrap_err();
             assert!(why.contains("already signed in"), "{why}");
+            // (the id as text, or written another way, is read the same)
+            assert_eq!(renewed(serde_json::json!({"user_id": "005"})), Ok(None));
+            assert!(renewed(serde_json::json!({"user_id": "1"})).is_err());
+            assert!(renewed(serde_json::json!({"user": {"userId": "01"}})).is_err());
             // (the owner's own renewals are not held to it)
             assert_eq!(
                 tidal_unofficial::renewed_for(

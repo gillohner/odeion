@@ -1677,7 +1677,11 @@ pub(crate) fn sign_in(
 /// A sign-in from another app's file or a paste becomes the device-way session: full tracks,
 /// kept like the node's own (`tidal.unofficial`, sealed in backups), renewed by the node where
 /// the refresh token came from the client this build carries.
-pub(crate) fn import_sign_in(s: &NodeState, who: &Who, session: crate::tidal_unofficial::Session) {
+pub(crate) fn import_sign_in(
+    s: &NodeState,
+    who: &Who,
+    session: crate::tidal_unofficial::Session,
+) -> Result<(), ApiError> {
     crate::tidal_unofficial::update_signed_in(s, who, "tidal-full", |st| {
         // What the file said made it was for the import's check only
         st.session = Some(crate::tidal_unofficial::Session {
@@ -1687,7 +1691,7 @@ pub(crate) fn import_sign_in(s: &NodeState, who: &Who, session: crate::tidal_uno
         st.login = None;
         st.enabled = true;
         st.health = None;
-    });
+    })
 }
 
 /// A way was picked. The device way is what the Full tracks switch used to turn on; the app way
@@ -1765,7 +1769,7 @@ impl crate::signin::SignInSource for TidalSignIn {
         // What a person pastes says itself whose account it is: TIDAL is asked instead, and
         // someone else's account on this node is not kept (the owner's imports are as they were)
         let session = crate::tidal_unofficial::held_to_its_person(s, who, imp.session, false).await?;
-        import_sign_in(s, who, session);
+        import_sign_in(s, who, session)?;
         Ok(way)
     }
 }

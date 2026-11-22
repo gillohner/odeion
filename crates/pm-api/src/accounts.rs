@@ -404,10 +404,24 @@ fn account_of(stored: &str) -> Option<String> {
         id => id,
     };
     match id {
-        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::String(s) => account_id(s),
+        serde_json::Value::Number(n) => account_id(&n.to_string()),
         _ => None,
     }
+}
+
+/// An account id written one way, so that the same account compares equal however a service or
+/// a pasted sign-in wrote it: without spaces around it, and a number without leading zeros.
+pub(crate) fn account_id(raw: &str) -> Option<String> {
+    let id = raw.trim();
+    if id.is_empty() {
+        return None;
+    }
+    if id.bytes().all(|b| b.is_ascii_digit()) {
+        let n = id.trim_start_matches('0');
+        return Some(if n.is_empty() { "0" } else { n }.to_string());
+    }
+    Some(id.to_string())
 }
 
 impl Who {
@@ -431,22 +445,39 @@ impl Who {
         let Some((service, keys)) = ACCOUNT_KEYS.iter().find(|(_, keys)| keys.contains(&base)) else {
             return Ok(());
         };
-        let held = |setting: String| {
-            lib.get_setting(&setting)
-                .ok()
-                .flatten()
-                .and_then(|j| account_of(&j))
-                .as_deref()
-                == Some(account)
+        let Some(account) = account_id(account) else {
+            return Ok(());
         };
-        let theirs = |key: &str| keys.iter().any(|b| held(format!("{PERSON_PREFIX}{key}.{b}")));
-        if theirs(me) {
+        // (a sign-in that can't be read is an error, not "nobody's": nothing is kept then)
+        let held = |setting: String| -> Result<bool, ApiError> {
+            Ok(lib
+                .get_setting(&setting)?
+                .as_deref()
+                .and_then(account_of)
+                .is_some_and(|theirs| theirs == account))
+        };
+        let holds = |key: Option<&str>| -> Result<bool, ApiError> {
+            for b in keys.iter() {
+                let setting = match key {
+                    Some(key) => format!("{PERSON_PREFIX}{key}.{b}"),
+                    None => b.to_string(),
+                };
+                if held(setting)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        if holds(Some(me))? {
             return Ok(());
         }
-        let taken = keys.iter().any(|b| held(b.to_string()))
-            || crate::people::listed_keys(lib)
-                .iter()
-                .any(|other| other != me && theirs(other));
+        let mut taken = holds(None)?;
+        for other in crate::people::listed_keys(lib) {
+            if taken {
+                break;
+            }
+            taken = other != *me && holds(Some(&other))?;
+        }
         if taken {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
