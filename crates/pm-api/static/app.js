@@ -10515,7 +10515,7 @@
             const ps = $('#phonestore', main); if (ps) {
               const draw = (st) => {
                 const why = st.bundled ? 'On by default: your homeserver is the one installed with your Odeion node, which finds them there.' : 'Your Odeion node finds them there too.';
-                const cant = st.cant || 0; const left = st.unreadable ? ' What this phone copied can’t be read here, so no song is copied until it can.' : (st.on && st.total > st.uploaded + cant ? ` ${countOf(st.total - st.uploaded - cant, 'songs')} still to copy.` : '') + (st.on && cant ? ` ${countOf(cant, 'songs')} can’t be copied: too big, or refused by your homeserver.` : '');
+                const cant = st.cant || 0; const left = st.unreadable ? ` What this phone copied can’t be read here${st.on ? ', so no song is copied until it can' : ''}.` : (st.on && st.total > st.uploaded + cant ? ` ${countOf(st.total - st.uploaded - cant, 'songs')} still to copy.` : '') + (st.on && cant ? ` ${countOf(cant, 'songs')} can’t be copied: too big, or refused by your homeserver.` : '');
                 ps.innerHTML = row('Keep added songs on my homeserver', `Copies the songs you add here to your Pubky homeserver (private). ${why}${left}`, `<input type="checkbox" class="switch" role="switch" id="psfiles" ${st.on ? 'checked' : ''} aria-label="Keep added songs on my homeserver">`);
                 const box = $('#psfiles', ps); box.onchange = async () => { box.disabled = true; try { draw(await api('PUT', '/phone/storage', { on: box.checked })); } catch (e) { box.checked = !box.checked; box.disabled = false; toast(e.message, 'error'); } };
               };

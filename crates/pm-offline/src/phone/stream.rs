@@ -286,6 +286,11 @@ pub(crate) async fn tidal(
         Ok(s) => s,
         Err(e) => return super::source_err(e),
     };
+    // (Named for the session it is fetched with: renewed, or another sign-in taken meanwhile)
+    let name = tidal_name(&id, quality, sess.user_id.as_deref());
+    if let Some(f) = p.streams.kept(&name) {
+        return crate::server::send_file(&f, &headers).await;
+    }
     let p2 = p.clone();
     let id2 = id.clone();
     let mut rx = p.streams.fetch(&name.clone(), move |tx, stop| {

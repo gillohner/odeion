@@ -331,7 +331,7 @@ async fn write(acct: &Account, p: &Phone, op: &Pending, history: History) -> Res
                 .await
                 .map_err(|e| e.to_string())
         }
-        Pending::Quality { source } => write_prefs(acct, p, source).await,
+        Pending::Quality { source } => write_prefs(acct, p, source).await.map(|_| ()),
     }
 }
 
@@ -346,8 +346,8 @@ fn quality_of(p: &Phone, source: &str) -> Option<String> {
 }
 
 /// prefs.json with the phone's quality for `source` in it (every other member as it is), newer
-/// than what is there.
-async fn write_prefs(acct: &Account, p: &Phone, source: &str) -> Result<(), String> {
+/// than what is there. The quality it wrote.
+async fn write_prefs(acct: &Account, p: &Phone, source: &str) -> Result<Option<String>, String> {
     let mut prefs = acct
         .hs
         .read_prefs(&acct.session)
@@ -363,8 +363,9 @@ async fn write_prefs(acct: &Account, p: &Phone, source: &str) -> Result<(), Stri
     // What another device set since (newer than what the phone took) applies here too: this
     // write moves prefs_at past it, so only once it is saved here (else this write waits)
     apply_if_newer(p, &prefs)?;
-    if let Some(q) = quality_of(p, source) {
-        prefs["quality"][source] = Value::String(q);
+    let wrote = quality_of(p, source);
+    if let Some(q) = &wrote {
+        prefs["quality"][source] = Value::String(q.clone());
     }
     prefs["updated_at"] = json!(at);
     acct.hs
@@ -373,7 +374,14 @@ async fn write_prefs(acct: &Account, p: &Phone, source: &str) -> Result<(), Stri
         .map_err(|e| e.to_string())?;
     // Not kept: the next read takes this prefs.json as another device's (the same values)
     let _ = change(p, |l| l.prefs_at = at);
-    Ok(())
+    Ok(wrote)
+}
+
+/// Whether a quality write that sent `wrote` for `source` is done: the phone's quality is still
+/// that one. One set here while it was on its way (its own write already waiting, so none was
+/// queued for it) is not, and is written again. Run with [`Phone::quality_lock`] held.
+fn quality_done(p: &Phone, source: &str, wrote: &Option<String>) -> bool {
+    quality_of(p, source) == *wrote
 }
 
 /// Takes the person's prefs.json when it is newer than what the phone last took or wrote: the
@@ -574,11 +582,25 @@ pub async fn write_pending(p: &Phone, acct: &Account) -> Report {
                 }
             }
         }
-        match write(acct, p, &op, history.unwrap_or(History::Private)).await {
-            Ok(()) => {
+        let wrote = match &op {
+            Pending::Quality { source } => write_prefs(acct, p, source).await.map(Some),
+            _ => write(acct, p, &op, history.unwrap_or(History::Private))
+                .await
+                .map(|()| None),
+        };
+        match wrote {
+            Ok(wrote) => {
+                // A quality set here meanwhile isn't written yet: its entry stays, and goes again
+                let _one = wrote
+                    .as_ref()
+                    .map(|_| p.quality_lock.lock().unwrap_or_else(|e| e.into_inner()));
+                let done = match (&op, &wrote) {
+                    (Pending::Quality { source }, Some(q)) => quality_done(p, source, q),
+                    _ => true,
+                };
                 // Not kept: written again next time (the same path, the same content)
                 if change(p, |l| {
-                    if l.pending.first() == Some(&op) {
+                    if done && l.pending.first() == Some(&op) {
                         l.pending.remove(0);
                     }
                 })
@@ -605,6 +627,25 @@ mod tests {
     thread_local! {
         /// Run by `apply_if_newer` between what it reads and what it applies (on this thread).
         pub(super) static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+    }
+
+    #[test]
+    fn a_quality_set_here_while_its_write_is_on_the_way_is_written_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Phone::open(super::super::Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        pm_sources::tidal::full::update(p.store.as_ref(), |st| st.quality = "high".into());
+        let wrote = quality_of(&p, "tidal");
+        assert!(quality_done(&p, "tidal", &wrote), "written as it is");
+        // Set to "max" while "high" was on its way: not done, written again
+        pm_sources::tidal::full::update(p.store.as_ref(), |st| st.quality = "max".into());
+        assert!(!quality_done(&p, "tidal", &wrote));
     }
 
     #[test]

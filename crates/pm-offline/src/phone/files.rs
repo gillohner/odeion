@@ -42,7 +42,7 @@ pub fn chosen(p: &Phone) -> Option<bool> {
 /// Whether the copy reads as off only because settings were lost with sign-ins that couldn't be
 /// read ([`chosen`]), not by a choice of the person's.
 pub(crate) fn off_until_chosen(p: &Phone) -> bool {
-    p.store.get(KEY).is_none() && p.store.get(super::store::SETTINGS_SET_ASIDE).is_some()
+    chosen(p) == Some(false) && !matches!(p.store.get(KEY).as_deref(), Some("off"))
 }
 
 /// Whether songs added here go to the homeserver: the person's choice, else on only when their
