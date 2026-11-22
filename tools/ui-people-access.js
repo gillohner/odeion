@@ -114,7 +114,8 @@ const serve = async (context, n) => {
     if (call === 'GET /party') return json(n.parties);
     if (call === 'POST /party') { const pt = { id: `p${n.parties.length + 1}`, name: body.name || 'Party', zone: body.zone, zone_name: (ZONES.find((z) => z.id === body.zone) || {}).name, created_at: T0, expires_at: T0 + body.hours * 3600, adds_per_hour: body.adds_per_hour, waiting_per_guest: body.waiting_per_guest, guests: [], added: 0, url: `${ORIGIN}/party/abcdefghijklmnopqrstuvwxyz0123456789`, qr_svg: QR }; n.parties.push(pt); return json(pt); }
     if (m === 'DELETE' && seg[0] === 'party') { n.parties = n.parties.filter((p) => p.id !== seg[1]); return json({}); }
-    if (call === 'GET /people') return json({ owner: null, people: n.people, invites: n.invites, homeserver: n.homeserver });
+    // (`unfinished`: the people whose removal did not finish, as the node remembers them; left out when none)
+    if (call === 'GET /people') return json({ owner: null, people: n.people, invites: n.invites, homeserver: n.homeserver, ...(n.leftover.size ? { unfinished: [...n.leftover] } : {}) });
     // The zones as a node of this version keeps them (`none`: no zone at all; an empty id is refused
     // without it). `n.olderZones`: as a node before it does (no `none` in its answers, the list kept
     // as sent: the list of one zone without a name opens no zone there). `n.dropsNone`: answers
@@ -135,7 +136,8 @@ const serve = async (context, n) => {
     }
     if (m === 'DELETE' && seg[1] === 'invites') { n.invites = n.invites.filter((i) => i.id !== seg[2]); return json({ forgotten: seg[2] }); }
     // (someone taken off the list by a removal that then failed: removing again finishes it)
-    if (m === 'DELETE' && seg.length === 2 && n.leftover.has(seg[1])) { n.leftover.delete(seg[1]); return json({ people: n.people, invites: n.invites }); }
+    // (`n.nothingLeft`: finished elsewhere meanwhile: the node answers that there is nobody by that key)
+    if (m === 'DELETE' && seg.length === 2 && n.leftover.has(seg[1])) { n.leftover.delete(seg[1]); return n.nothingLeft ? json({ error: 'no such person' }, 404) : json({ people: n.people, invites: n.invites }); }
     const p = n.people.find((x) => x.key === seg[1]);
     if (!p) return json({ error: 'no such person' }, 404);
     if (m === 'PATCH') {
@@ -680,6 +682,31 @@ const atLoopback = async (context) => {
         assert.equal(await page.locator('#peoplebox [data-srcpolicy="own"]').getAttribute('aria-checked'), 'true');
         assert.deepEqual(state.errors, [], 'no page errors');
         await context.close();
+      }
+      // A removal that did not finish on an earlier visit: the node remembers it, so the person is
+      // still on the screen (off the node's list, without a name) with Remove, which finishes it; and
+      // when nothing of theirs is left after all, that is said and the row goes
+      if (!phone) {
+        for (const nothingLeft of [false, true]) {
+          const n = node({ leftover: new Set([DI]), nothingLeft });
+          n.people = n.people.filter((p) => p.key !== DI);
+          const { context, page, state } = await owner(browser, width, n);
+          const box = page.locator('#peoplebox');
+          const gone = box.locator(`[data-person="${DI}"][data-pgone]`);
+          await gone.waitFor();
+          assert.match(await gone.innerText(), /^Someone you removed \(key ybndrf…[a-z0-9]{10}\)\s+Removing them did not finish\. Remove again to finish it\.\s+Remove…$/);
+          assert.equal(await gone.locator('[data-premove-err]').getAttribute('role'), null, 'not announced again on every draw');
+          await gone.locator('[data-premove]').click();
+          await page.locator('dialog.dialog .choice').click();
+          await page.locator('#toast', { hasText: nothingLeft ? /^Nothing of this person is left on this node$/ : /^Removed this person$/ }).waitFor();
+          await gone.waitFor({ state: 'detached' });
+          await sleep(150);
+          assert.equal(calls(n, `DELETE /people/${DI}`).length, 1, 'sent once');
+          assert.equal(await box.locator('[data-premove-err]').count(), 0, 'nothing is left to finish');
+          await cleanCopy(page);
+          assert.deepEqual(state.errors, [], 'no page errors');
+          await context.close();
+        }
       }
       // A node that answers "no zone" and does not keep it: the screen is drawn again from what the
       // node has now, and says so where the choice is (no word of a change that was not made)

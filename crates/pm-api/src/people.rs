@@ -521,6 +521,52 @@ pub struct PeopleView {
     pub invites: Vec<InviteView>,
     /// The bundled homeserver as a whole (users, disk used): `GET /v1/homeserver/bundled`.
     pub homeserver: crate::bundled::BundledStatus,
+    /// The keys of people whose removal did not finish (the setting `people.unfinished`):
+    /// removing them again finishes it. Left out when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unfinished: Vec<String>,
+}
+
+/// The setting that keeps the keys of people whose removal did not finish (a JSON list): a
+/// removal can fail after the person is off the list, and then only this says that something of
+/// theirs is still on the node. Kept so the page can offer Remove again after a reload or a
+/// restart; the newest [`UNFINISHED_MAX`].
+const UNFINISHED: &str = "people.unfinished";
+const UNFINISHED_MAX: usize = 50;
+
+/// The keys of people whose removal did not finish.
+pub(crate) fn unfinished(lib: &pm_library::Library) -> Vec<String> {
+    lib.get_setting(UNFINISHED)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+        .unwrap_or_default()
+}
+
+/// Notes that `key`'s removal did not finish (`open`), or that nothing of theirs is left to
+/// remove. Best effort: the removal's own answer already says what happened.
+fn note_unfinished(s: &NodeState, key: &str, open: bool) {
+    let lib = s.library.lock().expect("library poisoned");
+    let mut keys = unfinished(&lib);
+    let had = keys.iter().any(|k| k == key);
+    if had == open {
+        return;
+    }
+    keys.retain(|k| k != key);
+    if open {
+        keys.push(key.to_string());
+        if keys.len() > UNFINISHED_MAX {
+            keys.remove(0);
+        }
+    }
+    let written = if keys.is_empty() {
+        lib.delete_setting(UNFINISHED).map(|_| ())
+    } else {
+        lib.set_setting(UNFINISHED, &serde_json::to_string(&keys).expect("serializes"))
+    };
+    if let Err(e) = written {
+        tracing::warn!("people: the list of removals that did not finish was not written: {e}");
+    }
 }
 
 async fn homeserver_key(s: &NodeState) -> Result<String, ApiError> {
@@ -605,6 +651,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<PeopleVie
             .map(|i| invite_view(i, hs.as_deref()))
             .collect(),
         homeserver,
+        unfinished: unfinished(&s.library.lock().expect("library poisoned")),
     }))
 }
 
@@ -855,12 +902,20 @@ pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<Stri
     // Own the entire removal independently of the request, including the interval between
     // revoking access and waiting for the operation lock. Cancelling the request can't abandon
     // cleanup or release the membership barrier early.
-    tokio::spawn(remove_person(s, key)).await.map_err(|_| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "the removal task did not finish: try again",
-        )
-    })?
+    let done = tokio::spawn(remove_person(s.clone(), key.clone()))
+        .await
+        .unwrap_or_else(|_| {
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the removal task did not finish: try again",
+            ))
+        });
+    // A removal that did not finish is remembered, so Remove again is still offered after a
+    // reload or a restart (the person may be off the list already). Done, or nobody by that key
+    // with nothing of theirs left: nothing to remember
+    let open = matches!(&done, Err(e) if e.status != StatusCode::NOT_FOUND);
+    note_unfinished(&s, &key, open);
+    done
 }
 
 async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
