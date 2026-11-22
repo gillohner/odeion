@@ -714,7 +714,10 @@ async fn a_listeners_music_is_never_the_owners_listen() {
     let (st, rebuilt) = call(&app, OWNER, "DELETE", "/v1/presence/along", None).await;
     assert_eq!(st, StatusCode::OK, "{rebuilt}");
     let gid = rebuilt["id"].as_str().unwrap().to_string();
-    assert!(gid.starts_with("group:"), "{rebuilt}");
+    assert!(
+        gid != "hall" && rebuilt["now_playing"]["item"]["by"] == KEY,
+        "the group goes on with the listener's song: {rebuilt}"
+    );
     assert!(
         !plays_are_the_owners(&s, &gid),
         "the rebuilt group plays the listener's music still"
