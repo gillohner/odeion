@@ -6771,8 +6771,11 @@ mod tests {
     async fn the_log_in_screen_gets_names_and_small_pictures_inline() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), Some("s3cret")).await;
-        const ALICE: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
-        const BOB: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        // Keys no other test uses: this test puts names for them into the profile cache, which
+        // is one for the whole test process, and a test that asks Nexus (a mock) for the same
+        // key would get these names instead of its mock's
+        const ALICE: &str = "a11ce1og1nscreentestkey1111111111111111111111111111a";
+        const BOB: &str = "b0b1og1nscreentestkey22222222222222222222222222222b0";
         let view = |id: &str, name: &str| {
             serde_json::from_value::<pm_pubky::nexus::UserView>(serde_json::json!({
                 "details": {"id": id, "name": name, "image": format!("pubky://{id}/pub/pubky.app/files/1")}
