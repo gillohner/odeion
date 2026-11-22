@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **A restore keeps people's sign-ins as the node has them.** Backups no longer hold the list of other people's sign-ins on the node, and restoring a backup from Settings no longer replaces it: a browser someone logged out of stays logged out after an older backup is restored, and a sign-in made since the backup keeps working. The restored people list still decides who has music access. The owner's own sign-ins already worked this way. Where the library file itself is put back (a new machine, the bundle's `restore.sh`, going back to the previous version), the people you added now log in again with Pubky Ring, as you already did.
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21

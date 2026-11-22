@@ -23,7 +23,10 @@ use pm_zones::FetchLimit;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-const TOKENS: &str = "accounts.tokens";
+/// The listeners' personal tokens (their hashes). This node's own, like the owner's sessions:
+/// never in a backup, and a restore keeps the list the node has (`backup::NODE_OWN`), so a
+/// sign-in that ended stays ended and one made since the backup keeps working.
+pub(crate) const TOKENS: &str = "accounts.tokens";
 pub(crate) const OWNER_SESSIONS: &str = "accounts.owner_sessions";
 /// The owner's devices (the desktop and Android app), signed in with Pubky Ring: tokens with the
 /// same `pmo_` start as browser sessions, kept apart so a browser's Log out and the browsers' cap
