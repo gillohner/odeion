@@ -573,6 +573,8 @@ async fn local_name(
             return Some(name);
         }
         if matches!(tokio::fs::metadata(&at).await, Ok(m) if m.is_file() && m.len() == size) {
+            // (the name is this file's: no other file of the plan gets it in another case)
+            taken.insert(name.to_lowercase());
             return None;
         }
         // Another file under that name: the next one
@@ -676,6 +678,9 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
             set(&|j| j.current = Some(local.clone()));
             let target = dest.join(&local);
             let part = dest.join(format!(".{local}.part"));
+            // A part file an earlier bring left may still be one file with a song it put in
+            // place (the node stopped between the two steps): never written into, removed
+            let _ = tokio::fs::remove_file(&part).await;
             let rate = copy_rate(&s);
             let mut got = 0u64;
             let r = sync
@@ -963,6 +968,10 @@ mod tests {
         assert_eq!(
             local_name(d, "Song.flac", "dddddddddddddddd-Song.flac", 9, &mut taken).await,
             None
+        );
+        assert!(
+            taken.contains("dddddddddddddddd-song.flac"),
+            "a brought file's name is its own"
         );
         assert_eq!(
             local_name(d, "Song.flac", "eeeeeeeeeeeeeeee-Song.flac", 7, &mut taken).await,
