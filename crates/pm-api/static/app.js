@@ -6052,7 +6052,10 @@
   };
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
-  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true, `<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span>`)}<div class="t">${esc(a.title)}${dlAlbum(a.id) ? dlMark() : ''}</div><div class="a">${esc([a.album_artist, a.year].filter(Boolean).join(' · '))}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
+  // A tile's line under its title in a span of its own, so a long artist name is what is shortened
+  // with "…" and the quality badge after it stays whole (app.css .tile .a > .at)
+  const tileLine = (text) => (text ? `<span class="at">${esc(text)}</span>` : '');
+  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true, `<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span>`)}<div class="t">${esc(a.title)}${dlAlbum(a.id) ? dlMark() : ''}</div><div class="a">${tileLine([a.album_artist, a.year].filter(Boolean).join(' · '))}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
   // People on Pubky (STEWARD-UX-PEOPLE.md): profiles from Nexus via the node, cached here too.
   const profileCache = new Map();
   const loadProfiles = async (ids) => {
