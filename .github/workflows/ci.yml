@@ -69,6 +69,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # One cache of the dependencies for every job that builds the workspace, saved by this
+          # job on main only (it builds them all); pull requests read it and save nothing
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -83,21 +88,22 @@ jobs:
           RUSTDOCFLAGS: -D warnings
   # pm-node/odeiond and the big-library generator, built once for the jobs below that run them
   # (slimproto, plex, audiobookshelf, bundle, webdav, connection, web-ui, speed, ui-controls,
-  # ui-screens). Default features and line tables, as in .cargo/config.toml. Jobs with additional
+  # ui-screens). Default features, and line tables from .cargo/config.toml. Jobs with additional
   # Rust integration tests keep their own test builds; ALSA keeps its feature-specific node build.
   node:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
-    env:
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci
+          save-if: false
       - run: cargo build -p pm-node && cargo build -p pm-library --example big_library
       - run: tar -czf node-debug.tgz -C target/debug pm-node odeiond examples/big_library && ls -la node-debug.tgz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -165,6 +171,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: crates/pm-desktop
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libasound2-dev
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -186,8 +193,6 @@ jobs:
           context: .
           push: false
           tags: pubky-music-node:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
   sidecar:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -225,7 +230,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: alsa
+          shared-key: ci
+          save-if: false
       - name: a generic kernel with snd-aloop, and virtme-ng
         run: |
           bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
@@ -330,6 +336,9 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci
+          save-if: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
@@ -362,6 +371,9 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci
+          save-if: false
       # Same-run default-feature daemon; homeserver/vault test builds remain independent below.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
