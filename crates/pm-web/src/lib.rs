@@ -2,7 +2,8 @@
 //! and the routes that serve them ([`router`]). The node puts them next to its API
 //! (`pm_api::router_with_pages`).
 //!
-//! The files are compiled in (`static/`). They live in this small crate so that a change to the
+//! The files are compiled in: `static/` as they are, and the page's script from its ordered
+//! parts in `ui/app/` (see `ui/README.md`). They live in this small crate so that a change to the
 //! UI rebuilds it and relinks the node, not the API crate.
 
 mod assets;
@@ -19,7 +20,8 @@ pub use csp::PAGE_CSP;
 /// worker keeps).
 pub const INDEX_HTML: &str = include_str!("../static/index.html");
 pub const PARTY_HTML: &str = include_str!("../static/party.html");
-pub const APP_JS: &str = include_str!("../static/app.js");
+/// The page's script: its parts (`ui/app/`) joined in order by the build (`build.rs`).
+pub const APP_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/app.js"));
 pub const APP_CSS: &str = include_str!("../static/app.css");
 pub const USAGE_JS: &str = include_str!("../static/usage.js");
 pub const SW_JS: &str = include_str!("../static/sw.js");

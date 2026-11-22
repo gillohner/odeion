@@ -5,7 +5,7 @@
 //   node tools/tag-colour-check.js [path to pubky-app's src/libs/utils/utils.ts]
 const fs = require('fs');
 const path = require('path');
-const src = fs.readFileSync(path.join(__dirname, '..', 'crates', 'pm-web', 'static', 'app.js'), 'utf8');
+const src = require('./ui-src').appJs().toString('utf8');
 const block = /\n  const TAG_COLOURS = [\s\S]*?\n  const tagRgba = [^\n]*\n/.exec(src);
 if (!block) { console.error('tagColour and tagRgba not found in app.js'); process.exit(1); }
 const { tagColour, tagRgba } = new Function(`${block[0]}\nreturn { tagColour, tagRgba };`)();

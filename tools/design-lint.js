@@ -15,10 +15,13 @@
 const fs = require('fs');
 const path = require('path');
 const DIR = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-web', 'static');
-const files = fs.readdirSync(DIR).filter((f) => /\.(js|html)$/.test(f)).map((f) => [f, fs.readFileSync(path.join(DIR, f), 'utf8')]);
+// (app.js is kept as parts, crates/pm-web/ui/app: read joined, as the node serves it, and a
+// problem in it is reported at its part and line)
+const ui = require('./ui-src');
+const files = [...fs.readdirSync(DIR).filter((f) => /\.(js|html)$/.test(f) && f !== 'app.js').map((f) => [f, fs.readFileSync(path.join(DIR, f), 'utf8')]), ['app.js', ui.appJs(DIR).toString('utf8')]];
 const css = fs.readdirSync(DIR).filter((f) => f.endsWith('.css')).map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\n');
 const problems = [];
-const where = (file, src, idx) => `${file}:${src.slice(0, idx).split('\n').length}`;
+const where = (file, src, idx) => (file === 'app.js' && ui.hasParts(DIR) ? `app/${ui.where(idx, DIR)}` : `${file}:${src.slice(0, idx).split('\n').length}`);
 
 // Spacing, layers and font weights stand on their tokens: padding, margin and gap take a step of
 // the spacing scale (--sp-*), z-index a named layer (--z-*), font-weight a weight of the scale
@@ -142,8 +145,14 @@ for (const [file, src] of files) {
 // 6. Odeion's own words
 {
   const wording = require('./refactor/wording');
-  for (const f of wording.PAGE_FILES.map((x) => path.join(DIR, path.basename(x))).filter((x) => fs.existsSync(x))) {
-    for (const h of wording.run(f, 'check').found) problems.push(`${path.basename(f)}:${h.line}  says “${h.word}” (…${h.around}…): Odeion says Bookmarks and Collections; node tools/refactor/wording.js --write`);
+  // The script is the parts beside DIR (DIR/../ui/app) or, in a tree from before the split, DIR/app.js
+  const script = ui.hasParts(DIR) ? ui.parts(DIR).map((p) => path.join(DIR, '..', 'ui', 'app', p.name)) : [path.join(DIR, 'app.js')];
+  if (!script.some((x) => fs.existsSync(x))) problems.push('app.js: neither the script nor its parts found, so its words were not checked');
+  const isScript = (x) => /^\d\d-[a-z0-9-]+\.js$/.test(path.basename(x)) || path.basename(x) === 'app.js';
+  const pages = [...wording.PAGE_FILES.filter((x) => !isScript(x)).map((x) => path.join(DIR, path.basename(x))), ...script];
+  for (const f of pages.filter((x) => fs.existsSync(x))) {
+    const name = script.includes(f) && ui.hasParts(DIR) ? `app/${path.basename(f)}` : path.basename(f);
+    for (const h of wording.run(f, 'check').found) problems.push(`${name}:${h.line}  says “${h.word}” (…${h.around}…): Odeion says Bookmarks and Collections; node tools/refactor/wording.js --write`);
   }
 }
 
