@@ -43,6 +43,10 @@ on:
       - crates/pm-node/**
       - crates/pm-pubky/**
       - crates/pm-sources/**
+      # (phone mode's and the sources' own crates)
+      - crates/pm-appdata/**
+      - crates/pm-library/**
+      - crates/pm-model/**
       - Cargo.toml
       - Cargo.lock
       - tools/android-*.py
@@ -135,8 +139,8 @@ jobs:
           ring=$(covers 'crates/(pm-desktop|pm-pubky)/|tools/android-ring-probe\.py$|tools/release/android-patch\.py$')
           update=$(covers 'crates/pm-desktop/|tools/android-update-probe\.py$|tools/release/(android-patch\.py|android/|updater-manifest\.py|aab-check\.py|android-sign\.sh)|\.github/workflows/release\.yml$')
           background=$(covers 'crates/(pm-desktop|pm-app-player|pm-audio)/|tools/release/android/|tools/release/android-patch\.py$|tools/android-background-probe\.py$|tools/android-endpoint\.py$')
-          sources=$(covers 'crates/pm-sources/|Cargo\.(toml|lock)$')
-          phone=$(covers 'crates/(pm-desktop|pm-offline|pm-sources|pm-pubky|pm-app-player|pm-audio)/|crates/pm-api/static/|tools/android-phone-mode\.py$|tools/release/android-patch\.py$|tools/release/android/')
+          sources=$(covers 'crates/(pm-sources|pm-appdata|pm-model)/|Cargo\.(toml|lock)$')
+          phone=$(covers 'crates/(pm-desktop|pm-offline|pm-sources|pm-pubky|pm-appdata|pm-library|pm-model|pm-app-player|pm-audio)/|crates/pm-api/static/|tools/android-phone-mode\.py$|tools/release/android-patch\.py$|tools/release/android/')
           node=false
           if [ "$zone" = true ] || [ "$background" = true ]; then node=true; fi
           one='{"include":[{"api":"35","target":"google_apis"}]}'

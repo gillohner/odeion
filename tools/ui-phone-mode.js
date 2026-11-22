@@ -7,7 +7,9 @@
 //     shows the TIDAL hit, with Everywhere and the phone's sources as its scopes only; Settings has
 //     "This phone" with its streaming accounts and "Connect to a node" (busy at once, sent once);
 //     no request went to zones, events, Home, tags, reviews, Pubky, playlists or favourites;
-//   * a node (its /v1/info without mode): nothing of that is hidden, and it reads its zones.
+//   * a service's album page (however it is reached) offers no Playlist button on the phone;
+//   * a node (its /v1/info without mode): nothing of that is hidden, it reads its zones, and the
+//     album page has its Playlist button.
 //   node tools/ui-phone-mode.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -43,12 +45,28 @@ const record = async (run) => {
     window.__TAURI__ = { core: { invoke: (cmd) => { window.__inv.push(cmd); return new Promise(() => {}); } } };
   });
 };
-const phoneRun = async (browser, w) => {
+// A service's own album page (the source-item page: a Qobuz album here), opened from the page's
+// history as Back would open it (phone mode links to none today; it offers no Playlist button
+// however it is reached)
+const ALBUM = { title: 'Harbour', creator: 'Phone Fixture Band', year: 2024, url: 'https://www.qobuz.com/album/7', image: null,
+  tracks: [{ url: 'https://www.qobuz.com/track/71', title: 'Harbour Lights', track_no: 1, duration_ms: 200000 }] };
+const ALBUM_FIXTURES = { '/sources': { body: SOURCES }, '/sources/qobuz/items/7': { body: ALBUM } };
+const openAlbum = async (p) => {
+  await fx.go(p, '/search'); await sleep(600);
+  await p.evaluate(() => {
+    history.pushState({ v: 'source-item', arg: { source: 'qobuz', id: '7' }, depth: 1 }, '', '/search');
+    history.pushState({ v: 'search', depth: 2 }, '', '/search');
+  });
+  await sleep(300); await p.goBack().catch(() => {});
+  return p.waitForSelector('#main #aplay', { timeout: 5000 }).then(() => true).catch(() => false);
+};
+const phoneRun = async (browser, w, extra = {}) => {
   const run = await fx.create(browser, w, { mobile: w < 600 });
   run.served503 = [];
   await run.context.route((u) => u.origin === fx.ORIGIN && u.pathname.startsWith('/v1/'), async (route) => {
     const req = route.request(); const u = new URL(req.url()); const v = u.pathname.slice(3);
     const json = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+    if (extra[v]) return json(extra[v].body, extra[v].status || 200);
     if (!SERVED(v)) { run.served503.push(`${req.method()} ${v}`); return json({ error: 'Not available on this phone' }, 503); }
     if (v === '/info') return json(PHONE_INFO);
     if (v === '/me') return json({ role: 'owner', zones: [] });
@@ -118,6 +136,15 @@ const forbidden = (reqs) => reqs.filter((r) => FORBIDDEN.some((re) => re.test(r.
     check(!run.state.errors.length, `${at}: phone: no page errors (${run.state.errors.join(' | ')})`);
     await run.context.close();
 
+    // ---- A service's album page on the phone: no Playlist button (the phone keeps none) ----
+    const arun = await phoneRun(browser, w, ALBUM_FIXTURES);
+    const opened = await openAlbum(arun.page);
+    check(opened, `${at}: phone: a service's album page opens`);
+    check(opened && !(await arun.page.$('#main #amore')), `${at}: phone: the album page offers no Playlist button`);
+    check(!arun.reqs.some((r) => / \/playlists/.test(r)), `${at}: phone: the album page asks nothing of playlists`);
+    check(!arun.state.errors.length, `${at}: phone: album page: no page errors (${arun.state.errors.join(' | ')})`);
+    await arun.context.close();
+
     // ---- A node: nothing hidden ----
     const node = await fx.create(browser, w, { mobile: w < 600 }); await record(node);
     await fx.go(node.page, '/'); await sleep(900);
@@ -132,6 +159,11 @@ const forbidden = (reqs) => reqs.filter((r) => FORBIDDEN.some((re) => re.test(r.
     check(!(await n.locator('#main button', { hasText: 'Connect to a node' }).count()), `${at}: node: no "Connect to a node" in its Settings`);
     check(!node.state.errors.length, `${at}: node: no page errors (${node.state.errors.join(' | ')})`);
     await node.context.close();
+    // A node's album page keeps its Playlist button
+    const nalb = await fx.create(browser, w, { mobile: w < 600, fixtures: ALBUM_FIXTURES });
+    const nopened = await openAlbum(nalb.page);
+    check(nopened && !!(await nalb.page.$('#main #amore')), `${at}: node: the album page has its Playlist button`);
+    await nalb.context.close();
   }
   await browser.close();
   if (failed) { console.error(`${failed} check(s) failed`); process.exit(1); }
