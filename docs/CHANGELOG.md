@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-24
 
+- **Offline, the app's page loads all of its files.** The apps keep a copy of the page for when the node is out of reach, but three of the files the page loads were not in that copy: the help and problem-report script and its styles, and the usage script. Offline, the app answered each of them with the page itself, which the browser reported as a script error, and Help was missing. They are kept now (from the next sync on), and a file of the page that is not kept yet is answered as not found, not with the page.
 - **For people who build Odeion: the web UI is its own small crate.** The page's files moved from `crates/pm-api/static` to `crates/pm-web/static`, with the code that serves them (`pm-web`). A change to the UI now rebuilds that crate and relinks the node instead of rebuilding the whole API crate. Nothing changes for a running node: same addresses, same files. `tools/refactor/pm-web-paths.sh` updates a branch made before the move.
 - **SQLite 3.54.1.** The node's built-in SQLite moves from 3.53.2 to 3.54.1 (rusqlite 0.41), which fixes a flaw where a database opened with a crafted `-wal` file beside it could return stale bytes from memory.
 - **Dependencies: eight patch releases with security fixes.** tokio 1.54.1 (a race in `time::Interval`), url 2.5.9, rustls-webpki 0.103.16, webpki-roots and webpki-root-certs 1.0.10 (certificate authorities that are no longer trusted), ctutils 0.4.4, rustix 1.1.6 and form_urlencoded 1.2.3. Only `Cargo.lock` changes.

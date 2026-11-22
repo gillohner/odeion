@@ -17,5 +17,7 @@ sha2 = "0.10"
 tokio = { workspace = true }
 
 [dev-dependencies]
+# What the apps keep of the page for offline use: checked against what the page loads
+pm-offline = { workspace = true }
 serde_json = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
