@@ -3238,9 +3238,9 @@
     if (!isBrowser()) {
       const zid = state.zone; const ask = ++queueAsk;
       // (a failed fetch shows no songs, but says nothing of the zone's queue: Play still goes to the node)
-      let q = null; try { q = await api('GET', `/zones/${zid}/queue`); } catch { /* shown empty */ }
+      let q = null; let failed = null; try { q = await api('GET', `/zones/${zid}/queue`); } catch (e) { failed = e; /* said on the Queue page, not shown as an empty queue */ }
       if (ask !== queueAsk || zid !== state.zone) { queueDropped = true; return ask === queueAsk ? null : false; }
-      state.queue = q || []; state.queueZone = q ? zid : null;
+      state.queue = q || []; state.queueZone = q ? zid : null; state.queueError = q ? null : failed;
       // (the Queue page drew what it had when its own, older answer was dropped: drawn again now,
       // unless this answer is the page's own, as it is drawn: that draw has it, a second would take
       // the focus from a row)
@@ -7478,6 +7478,11 @@
   // (action: { view, label } opens a page; { id, label } is a button the page binds itself)
   // (songs: the button depends on whether the library has songs; the box notes the count it was drawn
   // with, songsChanged)
+  // A read that failed, said the same way wherever it happens: what went wrong, announced, with
+  // Try again in its place. Never the page's "nothing here" words: nothing was read, so nothing is
+  // known to be missing. (bound by the page's draw, renderPage, to drawing it again; `id`: a
+  // caller's own handle on the button)
+  const failedHtml = (e, id) => `<div class="notice warn" role="alert" data-failed>${esc((e && e.message) || String(e))} <button class="btn sm" type="button" data-retry${id ? ` id="${id}"` : ''}>Try again</button></div>`;
   const emptyState = (iconName, title, text, action, songs) => `<div class="empty"${songs ? ` data-songs="${hasSongs()}"` : ''}>${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" type="button" ${action.id ? `id="${action.id}"` : `data-empty-action="${action.view}"`}>${esc(action.label)}</button>` : ''}</div>`;
   // An empty library's Songs, Albums and Artists: the owner's way in is Add music (folders, shares
   // and drives are on Your library › Node library now; the old "in Settings (Library folders)" led
@@ -8713,7 +8718,7 @@
           // A smart playlist: its songs right now
           loading();
           const sid = state.viewArg;
-          let d; try { d = await api('GET', `/smart/${encodeURIComponent(sid)}/tracks`); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          let d; try { d = await api('GET', `/smart/${encodeURIComponent(sid)}/tracks`); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + failedHtml(e); break; }
           if (state.view !== 'smart' || state.viewArg !== sid) return;
           state.itemTitle = d.playlist.name;
           const ts = d.tracks || [];
@@ -8817,7 +8822,7 @@
           // A person on Pubky: their own profile.json (via Nexus), the music they tag, what they share
           loading();
           const pid = state.viewArg;
-          let pg; try { pg = await api('GET', `/profiles/${pid}`); } catch (e) { main.innerHTML = backBtn('home', 'Home') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          let pg; try { pg = await api('GET', `/profiles/${pid}`); } catch (e) { main.innerHTML = backBtn('home', 'Home') + failedHtml(e); break; }
           // Their homeserver may not answer: said as such, not as "no shared playlists"
           let sharedErr = null; let sharedPartial = false;
           const shared = await api('GET', `/shared/${pid}/playlists`, undefined, { onHeaders: (h) => { sharedPartial = h.get('x-partial') === '1'; } }).catch((e) => { sharedErr = e.message; return []; });
@@ -8844,7 +8849,7 @@
           loading();
           const a = state.viewArg || {}; const who = shortKey(a.user);
           if (!a.id) {
-            let list; let partial = false; try { list = await api('GET', `/shared/${a.user}/playlists`, undefined, { onHeaders: (h) => { partial = h.get('x-partial') === '1'; } }); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
+            let list; let partial = false; try { list = await api('GET', `/shared/${a.user}/playlists`, undefined, { onHeaders: (h) => { partial = h.get('x-partial') === '1'; } }); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + failedHtml(e); break; }
             if (state.view !== 'shared') return;
             state.itemTitle = `Shared by ${who}`;
             main.innerHTML = backBtn('playlists', 'Playlists') + pageHead(`Shared by ${who}`, list.length) + (partial ? `<p class="muted small" role="status">${esc(SHARED_PARTIAL)}</p>` : '') + (list.length ? `<div class="list">${list.map((p) => `<div class="list-row clickable" data-shpl="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${plCount(p)}${p.description ? ' · ' + esc(p.description) : ''}</div></div></div>`).join('')}</div>` : emptyState('playlist', 'Nothing shared yet', 'This person has no shared playlists on Pubky.'));
@@ -8884,7 +8889,7 @@
               }
               if (!typed && shellMode() === 'phone') { setView('search', undefined, 'replace'); return; }
             }
-            main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break;
+            main.innerHTML = backBtn('playlists', 'Playlists') + failedHtml(e); break;
           }
           if (state.view !== 'shared') return;
           state.itemTitle = sp.summary.name;
@@ -9167,8 +9172,11 @@
         case 'sources': {
           // One tab per service with its on/off switch, laid out like Settings (STEWARD-UX-SOURCES.md).
           // Off hides a source everywhere; its tab stays (dimmed) so it can be switched on again.
-          let listed = false; try { state.sources = await api('GET', '/sources'); applySourcesOff(); listed = true; } catch (e) { state.sources = state.sources || []; }
+          let listed = false; let listFailed = null; try { state.sources = await api('GET', '/sources'); applySourcesOff(); listed = true; } catch (e) { listFailed = e; state.sources = state.sources || []; }
           if (state.view !== 'sources') return;
+          // (no list, and none from before: said above the page, with Try again; Your library is still
+          // here, but the page is not a node with no services)
+          const listNote = !listed && !state.sources.length ? failedHtml({ message: `Couldn’t read the services: ${listFailed.message}` }) : '';
           const srcs = state.sources;
           const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
           const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
@@ -9234,7 +9242,7 @@
           // (the last sign-in here failed: why, above the way to try again)
           if (state.signinFailed && cur && state.signinFailed.svc === cur.id && /^signed in\b/.test(String(cur.status || ''))) state.signinFailed = null;
           const failed = state.signinFailed && cur && state.signinFailed.svc === cur.id ? `<p class="notice warn src-failed">Last sign-in failed: ${esc(state.signinFailed.why)}</p>` : '';
-          main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${failed}${body}</section>` : ''}</div></div>`;
+          main.innerHTML = (phone && active ? '' : pageHead('Sources')) + listNote + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${failed}${body}</section>` : ''}</div></div>`;
           // A new try (a sign-in button, or Finish sign-in with a pasted address) puts the note away
           if (failed) $(`#src-${CSS.escape(cur.id)}`, main).addEventListener('click', (e) => { if (!e.target.closest('#tidalin, #tbin, #tbfinish, #tfin, #spotin, #jamin, form[id$="paste"] button[type=submit]')) return; state.signinFailed = null; $$('.src-failed', main).forEach((n) => n.remove()); }, true);
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
@@ -9466,15 +9474,16 @@
             const box = document.createElement('div'); stillLoading(box, 'Still loading from Spotify… the first time can take a while.', () => !!box.querySelector('[data-loading]')); box.innerHTML = '<p class="muted small" data-loading>Loading your Spotify library…</p>'; ($('#srcmine') || main).appendChild(box);
             (async () => {
               try {
-                const [col, pls, devs] = await Promise.all([api('GET', '/sources/spotify/collection'), api('GET', '/sources/spotify/playlists'), api('GET', '/sources/spotify/devices').catch(() => [])]);
+                const [col, pls, devs] = await Promise.all([api('GET', '/sources/spotify/collection'), api('GET', '/sources/spotify/playlists'), api('GET', '/sources/spotify/devices').catch((e) => ({ failed: e }))]);
                 if (state.view !== 'sources' || state.sourceId !== 'spotify' || !box.isConnected) return;
                 const albums = col.items.filter((h) => h.kind === 'album'); const tracks = col.items.filter((h) => h.kind === 'track');
                 const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}${h.library_track_id || h.library_album_id ? ' <span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(homeKind(h))}</span><button class="icon-btn" data-splay="${esc(h.id)}" title="Play on Spotify" aria-label="Play ${h.kind === 'album' ? `the album ${esc(h.title || '')}`.trim() : esc(h.title || 'this')} on Spotify">${icon('play')}</button></div>`;
-                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your devices</h3><span class="muted small">Spotify Connect</span></div>${devs.length ? `<div class="chips">${devs.map((d) => `<span class="chip ${d.is_active ? 'on' : ''}">${esc(d.name)} <span class="muted">${esc(d.type)}${d.is_active ? ' · active' : ''}</span></span>`).join('')}</div>` : '<p class="muted small">No Spotify device online. Open Spotify on a phone, computer or speaker and it appears here.</p>'}</section>
+                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your devices</h3><span class="muted small">Spotify Connect</span></div>${devs.length ? `<div class="chips">${devs.map((d) => `<span class="chip ${d.is_active ? 'on' : ''}">${esc(d.name)} <span class="muted">${esc(d.type)}${d.is_active ? ' · active' : ''}</span></span>`).join('')}</div>` : devs.failed ? failedHtml({ message: `Couldn’t read your Spotify devices: ${devs.failed.message}` }, 'spdevretry') : '<p class="muted small">No Spotify device online. Open Spotify on a phone, computer or speaker and it appears here.</p>'}</section>
                   <section class="section"><div class="section-head"><h3>Your library</h3><span class="muted small">${countOf(tracks.length, 'songs')} · ${countOf(albums.length, 'albums')}</span><button class="btn sm" id="spotfav" title="Favourite them here too, by ISRC where Spotify has one">${icon('heart')} Import as favourites</button></div>${albums.length || tracks.length ? `<div class="list">${albums.slice(0, 20).map(hit).join('')}${tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing saved on Spotify yet.</p>'}</section>
                   <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row">${p.image ? `<img class="thumb" src="${esc(p.image)}" alt="" loading="lazy">` : ''}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'songs')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-spl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists on Spotify.</p>'}</section>`;
                 $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'spotify', id: b.dataset.sitem }));
                 $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); spotifyPlay([b.dataset.splay], b); });
+                { const dr = $('#spdevretry', box); if (dr) dr.onclick = (ev) => busy(dr, () => render(), ev); }
                 $('#spotfav').onclick = async () => { try { const r = await api('POST', '/sources/spotify/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
                 $$('[data-spl]', box).forEach((b) => b.onclick = () => importPlaylist(b, 'spotify', b.dataset.spl));
               } catch (e) { box.innerHTML = `<p class="muted small">Spotify library: ${esc(e.message)}</p>`; }
@@ -9681,7 +9690,7 @@
           if (!again) loading();
           let pg;
           try { [pg] = await Promise.all([api('GET', `/item/${kind}/${encodeURIComponent(id)}${refresh}`), loadSvcRank()]); }
-          catch (e) { if (!live()) return; state.drawnPage = null; if (state.placeHold) state.placeHold(); main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          catch (e) { if (!live()) return; state.drawnPage = null; if (state.placeHold) state.placeHold(); main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + failedHtml(e); break; }
           if (!live()) return;
           // The node leaves empty lists out of its answer.
           for (const k of ['songs', 'albums', 'versions', 'also_on', 'about', 'open_on', 'connect']) pg[k] = pg[k] || [];
@@ -10051,7 +10060,7 @@
           };
           const forDrawn = (f) => (...a) => (zoneMoved() ? undefined : f(...a));
           main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || !isListener() || !isBrowser()) ? `<button class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
-            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="${esc(rowWords.drag(itemName(it)))}" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here" aria-label="${esc(rowWords.play(itemName(it)))}">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" aria-label="${esc(rowWords.up(itemName(it)))}" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" aria-label="${esc(rowWords.down(itemName(it)))}" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove" aria-label="${esc(rowWords.unqueue(itemName(it)))}">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album, or add a song from its ⋯ menu.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null, true));
+            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="${esc(rowWords.drag(itemName(it)))}" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here" aria-label="${esc(rowWords.play(itemName(it)))}">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" aria-label="${esc(rowWords.up(itemName(it)))}" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" aria-label="${esc(rowWords.down(itemName(it)))}" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove" aria-label="${esc(rowWords.unqueue(itemName(it)))}">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : !isBrowser() && state.queueError && state.queueZone !== state.zone ? failedHtml({ message: `Couldn’t read the queue: ${state.queueError.message}` }) /* (not known to be empty) */ : emptyState('queue', 'The queue is empty', 'Play an album, or add a song from its ⋯ menu.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null, true));
           $$('[data-qi]', main).forEach((b) => b.onclick = forDrawn(() => transport({ action: 'play', index: Number(b.dataset.qi) })));
           // An empty queue offers the library shuffled here too, on the zone the page is for (before,
           // only words: the bar's Play said the queue was empty, and its note had the button). Only
@@ -10208,6 +10217,8 @@
             if (to) to.focus();
           }
           state.queueKey = queueKey(); state.qPage = main.firstElementChild;
+          // (the queue could not be read: Try again asks again, the button busy meanwhile)
+          { const fr = $('[data-failed] [data-retry]', main); if (fr) fr.onclick = (ev) => busy(fr, () => render(), ev); }
           const moveItems = () => zoneList().filter((o) => o.id !== drawnZone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: forDrawn(() => moveTo(o.id)) }));
           // (for the zone the page was drawn for; one save at a time, a second tap while the first is
           // on its way made a second playlist, and one the node hasn't answered yet says so)
@@ -10458,7 +10469,7 @@
           // What this device keeps (STEWARD-DOWNLOADS.md): offline, from the app's local server
           if (!isOffline() && appDl()) { await drawStorage(main); break; }
           if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Odeion app on your phone or laptop: keep an album or a playlist there with its ⋯ menu, and it plays without the node.</p><p><a class="btn" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/desktop-app.md" target="_blank" rel="noopener">' + icon('external') + ' Get the app</a></p>'; drawJobs(); break; }
-          let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + `<div class="notice">${esc(e.message)}</div>`; break; }
+          let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + failedHtml(e); break; }
           if (state.view !== 'downloads') return;
           const byId = new Map(d.tracks.map((t) => [t.id, t]));
           const songsOf = (ids) => ids.map((i) => byId.get(i)).filter(Boolean);
@@ -10985,11 +10996,13 @@
 
       $$('[data-crumb-kind]', main).forEach((b) => b.onclick = () => (b.dataset.asBack ? $('.pagebar > [data-back]', main).click() : setView('item', { kind: b.dataset.crumbKind, id: b.dataset.crumbId })));
       bindTrackRows(main, lists);
+      // A read that failed (failedHtml): Try again draws the page from the start, with its loader
+      $$('[data-failed] [data-retry]', main).forEach((b) => { if (!b.onclick) b.onclick = (ev) => busy(b, () => { if (state.drawnPage === v) state.drawnPage = null; return render(); }, ev); });
     } catch (e) {
       if ((listMine && listStale(v, listMine)) || (drawStale && drawStale())) return; // (an older list's or playlist draw's error over a newer one)
       const heldPl = v === 'playlist' ? plHolds.get(state.viewArg) : null; // (its Try again draws it in place, on this visit only: a fresh open is a new navGen)
       if (state.drawnPage === v) state.drawnPage = null; // (Albums, Artists: Try again draws it from the start)
-      main.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)} <button class="btn sm" id="navretry">Try again</button></div>`;
+      main.innerHTML = failedHtml(e, 'navretry');
       $('#navretry', main).onclick = () => { if (heldPl && plHolds.get(heldPl.id) === heldPl) heldPl.retry = navGen; render(); };
     }
   };

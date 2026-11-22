@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **A page that could not be read says so, with Try again, and no longer looks empty.** When the node did not answer for a zone's queue, the Queue page said "The queue is empty" and offered to shuffle your music over it; it now says the queue could not be read. Sources without an answer looked like a node with no services, and Spotify's devices like "No Spotify device online". A smart collection, a person's page, a shared collection, an album or artist page and the app's Downloads showed the error alone, with no way on but leaving the page: each now has Try again in place, and it is announced to a screen reader. On a phone that button is a full-size target.
+
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21
