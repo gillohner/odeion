@@ -6526,6 +6526,106 @@ mod tests {
         )
         .await;
         assert_ne!(st, StatusCode::FORBIDDEN, "{v}");
+        // No zone at all: said as such, kept, and every zone is closed (the people page shows
+        // "no zone", the listener's own page too); every zone again when the owner says so
+        let (st, v) = send(
+            "PUT",
+            "/v1/people/zones".into(),
+            "s3cret".into(),
+            Some(serde_json::json!({"zones": [], "none": true})),
+        )
+        .await;
+        assert_eq!(
+            (st, &v),
+            (StatusCode::OK, &serde_json::json!({"zones": [], "none": true}))
+        );
+        let (_, v) = send("GET", "/v1/people/zones".into(), "s3cret".into(), None).await;
+        assert_eq!(v, serde_json::json!({"zones": [], "none": true}));
+        let (st, v) = send(
+            "POST",
+            format!("/v1/zones/{zid}/transport"),
+            tok.clone(),
+            Some(serde_json::json!({"action": "stop"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        let (_, me) = send("GET", "/v1/me".into(), tok.clone(), None).await;
+        assert_eq!(me["zones"], serde_json::json!([]), "{me}");
+        let (_, seen) = send("GET", "/v1/zones".into(), tok.clone(), None).await;
+        assert_eq!(seen, serde_json::json!([]), "no zone is listed for them");
+        // The library is theirs to browse and play in their own browser all the same
+        let (st, _) = send("GET", "/v1/library/albums".into(), tok.clone(), None).await;
+        assert_eq!(st, StatusCode::OK);
+        // (stored as an older version reads it too: a list, of one zone no node has)
+        let stored = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("accounts.listener_zones")
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some(r#"[""]"#));
+        // Both at once is refused, and nothing changes
+        let (st, _) = send(
+            "PUT",
+            "/v1/people/zones".into(),
+            "s3cret".into(),
+            Some(serde_json::json!({"zones": [zid.clone()], "none": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // An empty id without `none` is refused too: dropped, it would leave every zone open
+        for zones in [serde_json::json!([""]), serde_json::json!([" ", zid.clone()])] {
+            let (st, v) = send(
+                "PUT",
+                "/v1/people/zones".into(),
+                "s3cret".into(),
+                Some(serde_json::json!({"zones": zones})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+        }
+        let (_, v) = send("GET", "/v1/people/zones".into(), "s3cret".into(), None).await;
+        assert_eq!(
+            v,
+            serde_json::json!({"zones": [], "none": true}),
+            "nothing changed"
+        );
+        // (a page that also talks to nodes before this sends the empty id next to `none`)
+        let (st, v) = send(
+            "PUT",
+            "/v1/people/zones".into(),
+            "s3cret".into(),
+            Some(serde_json::json!({"zones": [""], "none": true})),
+        )
+        .await;
+        assert_eq!(
+            (st, &v),
+            (StatusCode::OK, &serde_json::json!({"zones": [], "none": true}))
+        );
+        // A zone with no name in the path is no zone of theirs either
+        let (st, _) = send("GET", "/v1/zones//queue".into(), tok.clone(), None).await;
+        assert_ne!(st, StatusCode::OK);
+        let (st, v) = send(
+            "PUT",
+            "/v1/people/zones".into(),
+            "s3cret".into(),
+            Some(serde_json::json!({"zones": []})),
+        )
+        .await;
+        assert_eq!(
+            (st, &v),
+            (StatusCode::OK, &serde_json::json!({"zones": [], "none": false}))
+        );
+        let (_, me) = send("GET", "/v1/me".into(), tok.clone(), None).await;
+        assert_eq!(me["zones"], serde_json::Value::Null, "every zone: {me}");
+        let (st, v) = send(
+            "POST",
+            format!("/v1/zones/{zid}/transport"),
+            tok.clone(),
+            Some(serde_json::json!({"action": "stop"})),
+        )
+        .await;
+        assert_ne!(st, StatusCode::FORBIDDEN, "{v}");
         // Music access taken away: the token stops at once; a made-up token never works
         s.library.lock().unwrap().set_setting("people", &serde_json::json!({"people": [{"key": key, "access": "music", "music_enabled": false, "added_at": 1}]}).to_string()).unwrap();
         let (st, _) = send("GET", "/v1/library/tracks".into(), tok.clone(), None).await;
