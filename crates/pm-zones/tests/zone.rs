@@ -3116,4 +3116,15 @@ async fn stopped_says_whether_the_queue_ran_out() {
     let st = r.zone.wait_stopped().await;
     assert_eq!(st.queue.len(), 1);
     assert_eq!(stops(drain_events(&mut r.events)), [false]);
+
+    // Next on the last item: the queue is over, as when it plays out
+    let mut r = rig(&[("a", RATE, 100_000)]);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(2);
+    r.gate.blocked().await;
+    r.zone.next();
+    r.gate.allow(1000);
+    r.zone.wait_stopped().await;
+    assert_eq!(stops(drain_events(&mut r.events)), [true]);
 }

@@ -137,8 +137,8 @@ pub enum ZoneEvent {
     },
     /// Playback stopped.
     Stopped {
-        /// The queue ran out: its last item played to the end. Not set for a Stop, an error or
-        /// a queue moved to another zone.
+        /// The queue ran out: its last item played to the end, or was skipped past with Next.
+        /// Not set for a Stop, an error or a queue moved to another zone.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         queue_ended: bool,
     },
