@@ -1,11 +1,13 @@
 // Run the UI fixture pages of tools/ui-fixtures.list: all of them, or one runner's share.
 //
-//   node tools/ui-fixtures-run.js [--shard K/N] [--jobs J] [--shots DIR] [--plan] [page.js ...]
+//   node tools/ui-fixtures-run.js [--shard K/N] [--jobs J] [--no-pins] [--shots DIR] [--plan] [page.js ...]
 //
 // --shard K/N  only the pages of runner K of N (CI: one job per runner). A page with a runner
 //              number in the list runs there; the others go round robin in list order.
 // --jobs J     run J pages at a time (default 1). Each page is its own node process with its
 //              own Chromium, so they don't share anything but the machine.
+// --no-pins    ignore the runner numbers in the list: every page goes round robin (for a number
+//              of runners other than the one the list was balanced for)
 // --shots DIR  where the screenshot folders go (default /tmp/pm)
 // --plan       print which pages the runner would run, and run nothing
 // page.js ...  only these pages of the list
@@ -22,12 +24,16 @@ const args = process.argv.slice(2);
 const opt = (name) => { const i = args.indexOf(name); if (i < 0) return null; const v = args[i + 1]; args.splice(i, 2); return v; };
 const flag = (name) => { const i = args.indexOf(name); if (i < 0) return false; args.splice(i, 1); return true; };
 const shardArg = opt('--shard');
-const jobs = Math.max(1, Number(opt('--jobs') || process.env.UI_FIXTURES_JOBS || 1));
+const jobsArg = opt('--jobs') || process.env.UI_FIXTURES_JOBS || '1';
+const noPins = flag('--no-pins');
 const shots = opt('--shots') || '/tmp/pm';
 const planOnly = flag('--plan');
 const only = args;
 
 const fail = (m) => { console.error(`::error::${m}`); process.exit(1); };
+// "--jobs x" would be NaN: no page would run and the run would end green
+if (!/^[1-9]\d*$/.test(jobsArg)) fail(`--jobs ${jobsArg}: give a number of pages to run at a time, 1 or more`);
+const jobs = Number(jobsArg);
 const pages = [];
 for (const line of fs.readFileSync(path.join(__dirname, 'ui-fixtures.list'), 'utf8').split('\n')) {
   const t = line.trim();
@@ -44,7 +50,7 @@ for (const line of fs.readFileSync(path.join(__dirname, 'ui-fixtures.list'), 'ut
 // never run: ui-open-place.js was a fix's test for a week without running once
 for (const f of fs.readdirSync(__dirname)) {
   if (!/^ui-.*\.js$/.test(f) || f === 'ui-fixture.js' || f === 'ui-fixtures-run.js' || pages.some((p) => p.script === f)) continue;
-  if (/require\(['"]\.\/ui-fixture['"]\)/.test(fs.readFileSync(path.join(__dirname, f), 'utf8'))) fail(`${f} uses the fixtures but is not in tools/ui-fixtures.list: add a line for it`);
+  if (/require\(['"]\.\/ui-fixture(\.js)?['"]\)/.test(fs.readFileSync(path.join(__dirname, f), 'utf8'))) fail(`${f} uses the fixtures but is not in tools/ui-fixtures.list: add a line for it`);
 }
 
 let [shard, shards] = [1, 1];
@@ -52,6 +58,7 @@ if (shardArg) {
   const m = /^(\d+)\/(\d+)$/.exec(shardArg);
   if (!m || +m[1] < 1 || +m[1] > +m[2]) fail(`--shard ${shardArg}: give K/N with 1 <= K <= N`);
   [shard, shards] = [+m[1], +m[2]];
+  if (noPins) for (const p of pages) p.pin = null;
   for (const p of pages) if (p.pin && p.pin > shards) fail(`${p.script} is set to runner ${p.pin}: there are ${shards}`);
 }
 let n = 0;
@@ -69,6 +76,8 @@ function runOne(p) {
   return new Promise((done) => {
     const t0 = Date.now();
     const out = [];
+    // Said at once: a page that never ends is then named in the log (its output comes at its end)
+    console.log(`started ${p.script}`);
     const child = spawn(process.execPath, [path.join(__dirname, p.script), REPO, path.join(shots, p.folder)], { stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', (d) => out.push(d));
     child.stderr.on('data', (d) => out.push(d));
