@@ -2071,7 +2071,18 @@ async fn enqueue(
     Json(body): Json<Enqueue>,
 ) -> ApiResult<Enqueued> {
     let zone = zone_of(&s, &id)?;
-    let mut items = Vec::with_capacity(body.track_ids.len() + body.items.len());
+    // Before any song is looked up: a queue holds so many items and no more
+    let (asked, has) = (
+        body.track_ids.len() + body.items.len(),
+        if body.replace { 0 } else { zone.queue_len() },
+    );
+    if has + asked > pm_zones::MAX_QUEUE_ITEMS {
+        return Err(ApiError::bad_request(format!(
+            "a queue holds at most {} items (this one has {has}, {asked} more were sent)",
+            pm_zones::MAX_QUEUE_ITEMS
+        )));
+    }
+    let mut items = Vec::with_capacity(asked);
     {
         let lib = s.library.lock().expect("library poisoned");
         for tid in &body.track_ids {
@@ -13385,6 +13396,80 @@ exec sleep 300
         .await;
         assert!(v.get("ends_at_ms").is_none());
         assert!(s.sleep_ends_at(zone.id()).is_none());
+    }
+
+    /// A queue takes at most `MAX_QUEUE_ITEMS`: a request for more is a 400 before any song is
+    /// looked up (the ids here are no songs: without the limit the answer is a 404), and a
+    /// sleep timer of any length is set without its end time running over.
+    #[tokio::test]
+    async fn a_queue_and_a_sleep_timer_have_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let many: Vec<u64> = (0..=pm_zones::MAX_QUEUE_ITEMS as u64)
+            .map(|i| 9_000_000 + i)
+            .collect();
+        let (st, e) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"track_ids": many, "replace": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        assert!(
+            e["error"].as_str().unwrap().contains("at most 100000 items"),
+            "{e}"
+        );
+        let (st, e) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"track_ids": [9_000_000]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{e}");
+        // What is in the queue counts unless it is replaced
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        zone.enqueue(
+            (0..5)
+                .map(|i| pm_zones::QueueItem::new(format!("https://radio.example/{i}")))
+                .collect(),
+            pm_zones::Insert::End,
+        );
+        let fill: Vec<u64> = (0..pm_zones::MAX_QUEUE_ITEMS as u64 - 4)
+            .map(|i| 9_000_000 + i)
+            .collect();
+        let (st, e) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"track_ids": fill})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        assert!(e["error"].as_str().unwrap().contains("this one has 5"), "{e}");
+
+        let (st, v) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/sleep"),
+            Some(serde_json::json!({"seconds": u64::MAX})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["ends_at_ms"], u64::MAX);
+        let (st, v) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/sleep"),
+            Some(serde_json::json!({"seconds": null})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(v.get("ends_at_ms").is_none(), "{v}");
     }
 
     #[tokio::test]

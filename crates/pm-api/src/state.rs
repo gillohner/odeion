@@ -2225,7 +2225,7 @@ impl NodeState {
         let mut timers = self.sleep.lock().expect("sleep lock");
         timers.remove(zone.id());
         let secs = seconds?;
-        let ends_at_ms = unix_ms() + secs * 1000;
+        let ends_at_ms = unix_ms().saturating_add(secs.saturating_mul(1000));
         let state = Arc::clone(self);
         let id = zone.id().clone();
         let key = id.clone();

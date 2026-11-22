@@ -416,6 +416,11 @@ impl Zone {
         self.queue.lock().expect("queue poisoned").items().to_vec()
     }
 
+    /// How many items the queue holds.
+    pub fn queue_len(&self) -> usize {
+        self.queue.lock().expect("queue poisoned").len()
+    }
+
     // ---- transport ----
 
     /// Play: resume when paused, else start the current item (or the first).

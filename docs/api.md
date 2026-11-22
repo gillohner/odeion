@@ -40,7 +40,7 @@ Without one, a node listening beyond localhost makes its own on first start (`<d
 | POST | `/v1/zones` | `{name, output}` or `{name, outputs: [leader, …]}` for a group | the new `ZoneState`; `now_playing.members` carries per-output drift and `slipped_frames` (net frames duplicated/dropped to stay in time) for groups |
 | GET / DELETE | `/v1/zones/{id}` | | `ZoneState` / 204 |
 | GET | `/v1/zones/{id}/queue` | | `QueueItem[]`; an item a listener queued carries `by` (their key): a streaming service plays it with that person's own account, never anyone else's |
-| POST | `/v1/zones/{id}/queue` | `{track_ids?, items?, at: end\|next, replace?, play?}` | `{ids}`. Each item's `by` comes from the caller (the token), never from the body: a listener's items play with their own streaming accounts, the owner's with the owner's; an item whose queuer hasn't connected that service fails with "Connect TIDAL (Settings › You › Services) to play this" |
+| POST | `/v1/zones/{id}/queue` | `{track_ids?, items?, at: end\|next, replace?, play?}` | `{ids}`. Each item's `by` comes from the caller (the token), never from the body: a listener's items play with their own streaming accounts, the owner's with the owner's; an item whose queuer hasn't connected that service fails with "Connect TIDAL (Settings › You › Services) to play this". A queue holds at most 100 000 items: 400 when what it has (nothing with `replace`) and what is sent come to more |
 | DELETE | `/v1/zones/{id}/queue` | | 204 (stops and clears) |
 | DELETE / PUT | `/v1/zones/{id}/queue/{item}` | PUT: `{to_index}` | 204 |
 | POST | `/v1/zones/{id}/transport` | `{action: play\|pause\|toggle\|stop\|next\|previous\|seek, index?, position_ms?}` | `ZoneState` |

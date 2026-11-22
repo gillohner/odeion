@@ -264,6 +264,11 @@ pub struct QueueSnapshot {
     pub version: u64,
 }
 
+/// The most items a queue holds. Far more than a listener queues (a library of 100,000 songs
+/// played in one go fits); it keeps a queue, which every state update of its zone carries, from
+/// growing without end.
+pub const MAX_QUEUE_ITEMS: usize = 100_000;
+
 /// Where [`Queue::add`] puts new items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Insert {
@@ -375,8 +380,10 @@ impl Queue {
         self.token_check = Check(check);
     }
 
-    /// Insert items (ids are assigned here) and return their ids.
-    pub fn add(&mut self, items: Vec<QueueItem>, at: Insert) -> Vec<u64> {
+    /// Insert items (ids are assigned here) and return their ids. A queue holds at most
+    /// [`MAX_QUEUE_ITEMS`]: of more, the first that fit are taken and the rest left out.
+    pub fn add(&mut self, mut items: Vec<QueueItem>, at: Insert) -> Vec<u64> {
+        items.truncate(MAX_QUEUE_ITEMS.saturating_sub(self.items.len()));
         if items.is_empty() {
             return Vec::new();
         }
@@ -976,5 +983,36 @@ mod tests {
             before,
             "a bad saved order: the play order is the original"
         );
+    }
+
+    /// A queue takes items up to its limit and no more, whichever way they come; the order
+    /// shuffle keeps stays as long as the queue.
+    #[test]
+    fn a_queue_holds_no_more_than_its_limit() {
+        let mut q = q(MAX_QUEUE_ITEMS - 2);
+        q.set_current(Some(0));
+        q.set_shuffle(true, 7);
+        let three = || {
+            (0..3)
+                .map(|i| QueueItem::new(format!("n{i}")))
+                .collect::<Vec<_>>()
+        };
+        let ids = q.add(three(), Insert::Next);
+        assert_eq!(ids.len(), 2, "the first two fit");
+        assert_eq!(q.len(), MAX_QUEUE_ITEMS);
+        assert_eq!(q.shuffle_order().unwrap().len(), MAX_QUEUE_ITEMS);
+        assert_eq!(q.items()[1].uri, "n0");
+        assert_eq!(q.items()[2].uri, "n1");
+        let v = q.version();
+        assert_eq!(q.add(three(), Insert::End), Vec::<u64>::new());
+        assert_eq!(
+            (q.len(), q.version()),
+            (MAX_QUEUE_ITEMS, v),
+            "a full queue is left as it is"
+        );
+        // Room again once something is removed
+        assert!(q.remove(ids[0]));
+        assert_eq!(q.add(three(), Insert::End).len(), 1);
+        assert_eq!(q.len(), MAX_QUEUE_ITEMS);
     }
 }
