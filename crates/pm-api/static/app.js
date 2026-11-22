@@ -827,8 +827,8 @@
       await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library');
       // (the kept searches' answers lose the song now: the search on screen is drawn again from its
       // kept answer, not asked again, so it would list the song until started again; withoutTrack)
-      const mark = { id: Number(id), path: null, back: false }; removedTracks.push(mark);
-      file.then((f) => { mark.path = f; });
+      const mark = { id: Number(id), path: null, back: false, since: restoredPaths.length }; removedTracks.push(mark);
+      file.then((f) => { mark.path = f; if (f && restoredPaths.slice(mark.since).includes(f)) mark.back = true; });
       for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) r.answers[src] = withoutTrack(a, src, id);
       const at = anchor ? $$('#sresults [data-smore]').indexOf(anchor) : -1;
       const focused = at >= 0 && document.activeElement === anchor;
@@ -5557,11 +5557,14 @@
   // (an answer the same but for the time it took)
   // Songs removed from the library this session, in order (removeFromLibrary): an answer asked before
   // a removal and landing after it drops them (refreshSearch, startSearch), unless Bring back put the
-  // song back since (back: its file brought back, Node library; one whose file is not known, its
-  // lookup failed or still on its way, stays out until a fresh library answer lists it)
+  // song back since (back: its file brought back, Node library; one whose lookup failed stays out
+  // until a fresh library answer lists it. One whose lookup is still on its way when its file is
+  // brought back is marked once the lookup answers: restoredPaths, the files brought back in order,
+  // each removal looking only at those brought back after it, since: never an earlier Bring back)
   const removedTracks = [];
+  const restoredPaths = [];
   const goneSince = (since) => removedTracks.slice(since).filter((m) => !m.back).map((m) => m.id);
-  const broughtBack = (path) => { for (const m of removedTracks) if (m.path && m.path === path) m.back = true; };
+  const broughtBack = (path) => { restoredPaths.push(path); for (const m of removedTracks) if (m.path && m.path === path) m.back = true; };
   // An answer without library song id: the library's copy goes; a service's copy stays, without the
   // library's id (no Remove or Edit tags on it, its page not the removed song's)
   const withoutTrack = (a, src, id) => {
@@ -9184,9 +9187,11 @@
           // Summary bar: "12 songs · 8 Library · 3 TIDAL · 1 unavailable", each part a filter.
           const counts = new Map(); songs.forEach((t) => { const key = t.unavailable ? 'none' : t.plays ? t.plays.service : null; if (key) counts.set(key, (counts.get(key) || 0) + 1); });
           // (a chip whose songs are all gone, removed or now playing from elsewhere, goes off: the
-          // whole playlist shows again with "N songs" on, never an empty list with no chip on)
-          if (state.plFilter && state.plFilter.id === plId && !pfPending && !counts.has(state.plFilter.key)) state.plFilter = null;
-          const filt = state.plFilter && state.plFilter.id === plId ? state.plFilter.key : null;
+          // whole playlist shows again with "N songs" on, never an empty list with no chip on. Only an
+          // answer that came says so: a failed one keeps the chip chosen, the rows showing unfiltered
+          // with "Try again" until an answer comes, and the chip is on again then)
+          if (state.plFilter && state.plFilter.id === plId && pf && !counts.has(state.plFilter.key)) state.plFilter = null;
+          const filt = (pf || pfPending) && state.plFilter && state.plFilter.id === plId ? state.plFilter.key : null;
           // While the play-from answer is on its way, its chip row keeps its place, so the songs don't jump (second review #20)
           const summaryBar = pfPending && songs.length ? '<div class="chips plsummary" aria-hidden="true"><span class="chip skeleton chip-sk"></span><span class="chip skeleton chip-sk"></span></div>' : pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songCount} song${songCount === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
           const pfNote = !mine && !pf && !pfPending && songs.length ? '<p class="muted small pfnote" role="status">Couldn’t find where these songs play. <button class="link" id="pfretry">Try again</button></p>' : '';
