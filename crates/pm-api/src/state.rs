@@ -311,6 +311,8 @@ pub struct NodeState {
     /// (and so the User-Agent) changes: `(contact, client)`.
     http: Mutex<Option<(String, reqwest::Client)>>,
     scanning: Mutex<bool>,
+    /// The node was asked to stop ([`Self::begin_stop`]): no new request is taken.
+    stopping: std::sync::atomic::AtomicBool,
     /// Sources the owner switched off (Sources page): hidden everywhere, sign-ins kept.
     sources_off: std::sync::RwLock<std::collections::HashSet<String>>,
     /// `public_url` was not configured: the binary picked this machine's network address for
@@ -583,6 +585,7 @@ impl NodeState {
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
+            stopping: Default::default(),
             public_url_guessed: Default::default(),
             config_file: Mutex::new(None),
             pubky_client: std::sync::OnceLock::new(),
@@ -787,10 +790,22 @@ impl NodeState {
         zone
     }
 
+    /// The node was asked to stop: from now on every listener (the remote-access one too)
+    /// answers new requests with 503, so nothing starts a zone again or begins a write while
+    /// the node winds down. Requests already being answered go on.
+    pub fn begin_stop(&self) {
+        self.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Before the node exits: every zone stops (a player is told to stop, a device is closed;
     /// the queues are saved as they are), waiting at most `within` for all of them, and the
     /// library's write-ahead log is folded into its file.
     pub async fn stop_for_exit(&self, within: std::time::Duration) {
+        self.begin_stop();
         let zones: Vec<Arc<Zone>> = self
             .zones
             .list()

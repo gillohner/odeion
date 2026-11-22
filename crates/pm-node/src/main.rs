@@ -576,10 +576,11 @@ struct Stop {
     asked: tokio::sync::watch::Receiver<bool>,
 }
 
-/// Start listening for a stop. Until the node serves ([`Stop::when_serving`]) there is nothing
-/// to wind down (no request, no zone playing), so a stop asked for during the start ends the
-/// process there and then; a node that is the first process of a container would otherwise not
-/// react to SIGTERM at all until its start is over.
+/// Start listening for a stop. Until the node serves ([`Stop::when_serving`]) a stop ends the
+/// process there and then: whatever the start had begun by then (a scan, a copy, the first
+/// sync) is cut as a kill would cut it, which is what happened before; a node that is the first
+/// process of a container would otherwise not react to SIGTERM at all until its start is over.
+/// Once the node serves, a second signal ends a stop that takes too long.
 fn watch_for_stop() -> Stop {
     let serving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (tell, asked) = tokio::sync::watch::channel(false);
@@ -591,6 +592,9 @@ fn watch_for_stop() -> Stop {
             std::process::exit(0);
         }
         let _ = tell.send(true);
+        stop_signal().await;
+        tracing::warn!("asked to stop again: exiting now");
+        std::process::exit(130);
     });
     Stop { serving, asked }
 }

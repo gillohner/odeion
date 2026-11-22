@@ -96,6 +96,15 @@ pub async fn tokenless_direct_only(State(s): State<Arc<NodeState>>, req: Request
     next.run(req).await
 }
 
+/// Layer for every route on every listener: a node that was asked to stop takes no new request
+/// ([`NodeState::begin_stop`]).
+pub async fn not_while_stopping(State(s): State<Arc<NodeState>>, req: Request, next: Next) -> Response {
+    if s.is_stopping() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "the node is stopping").into_response();
+    }
+    next.run(req).await
+}
+
 /// A host and port as a request names them (`Host`, or the URI's authority as HTTP/2 sends it).
 #[derive(Debug, PartialEq)]
 struct Named {

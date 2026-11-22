@@ -971,10 +971,15 @@ async fn the_node_stops_when_asked_with_an_event_socket_open() {
     assert!(matches!(ended, Ok(Ok(Ok(())))), "the server returned: {ended:?}");
     // (the event socket is no request being answered: the stop does not wait for it)
     assert!(
-        asked_at.elapsed() < pm_api::STOP_GRACE + std::time::Duration::from_secs(1),
+        asked_at.elapsed() < pm_api::STOP_GRACE,
         "an open event socket does not hold the stop: {:?}",
         asked_at.elapsed()
     );
+    // No listener of the node takes a request any more (the remote-access one serves the same
+    // routes on a port of its own)
+    assert!(s.is_stopping());
+    let (st, _) = call(&router(s.clone()), OWNER, "GET", "/v1/info", None).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
     assert!(
         tokio::net::TcpStream::connect(addr).await.is_err(),
         "no new connection is taken"

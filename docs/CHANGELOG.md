@@ -6,7 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
-- **The node stops when asked.** On SIGTERM (`docker stop`, a restart, an update, systemd) or Ctrl-C the node now finishes the requests it is answering (up to 2 seconds), stops its zones, folds the library's write-ahead log into its file and exits. In a container it used to ignore SIGTERM (it is the container's first process), so every stop waited out Docker's 10 seconds and ended in a kill.
+- **The node stops when asked.** On SIGTERM (`docker stop`, a restart, an update, systemd) or Ctrl-C the node now takes no new request, finishes the ones it is answering (up to 2 seconds), stops its zones, folds the library's write-ahead log into its file and exits. In a container it used to ignore SIGTERM (it is the container's first process), so every stop waited out Docker's 10 seconds and ended in a kill.
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21

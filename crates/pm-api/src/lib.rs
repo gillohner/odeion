@@ -978,6 +978,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
             state.clone(),
             peer::tokenless_direct_only,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            peer::not_while_stopping,
+        ))
 }
 
 /// Bind and serve until the task is cancelled.
@@ -1025,8 +1029,9 @@ pub async fn serve_listener(state: Arc<NodeState>, listener: tokio::net::TcpList
 pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// [`serve_listener`] until `stop` resolves (the node was asked to stop): no new connection is
-/// taken, requests being answered get [`STOP_GRACE`] to finish, and the call returns. Connections
-/// still open then are left to end with the process.
+/// taken here and no new request on any of the node's listeners ([`NodeState::begin_stop`]),
+/// requests being answered get [`STOP_GRACE`] to finish, and the call returns. Connections still
+/// open then are left to end with the process.
 pub async fn serve_listener_until(
     state: Arc<NodeState>,
     listener: tokio::net::TcpListener,
@@ -1037,11 +1042,16 @@ pub async fn serve_listener_until(
     let served = std::future::IntoFuture::into_future(
         axum::serve(
             listener,
-            router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            router(state.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
-        .with_graceful_shutdown(async move {
-            stop.await;
-            let _ = told.send(true);
+        .with_graceful_shutdown({
+            let state = state.clone();
+            async move {
+                stop.await;
+                // Every listener of this node, not only this one, stops taking requests
+                state.begin_stop();
+                let _ = told.send(true);
+            }
         }),
     );
     let grace_over = async move {
