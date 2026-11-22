@@ -116,6 +116,9 @@ pub struct Songs {
     uploads: Mutex<HashMap<String, Upload>>,
     /// One song added at a time (two copies of one file never meet at its path).
     adding: Mutex<()>,
+    /// Why the list on the phone can't be read, when it can't: then it is left as it is, no song
+    /// is listed and none can be added (saved, the new list would replace the old one).
+    unreadable: Option<String>,
 }
 
 impl Songs {
@@ -128,15 +131,29 @@ impl Songs {
                 let _ = std::fs::remove_file(e.path());
             }
         }
-        let index = std::fs::read(dir.join("songs.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        // No list yet: none. One that can't be read stays as it is (phone mode still starts)
+        let list = dir.join("songs.json");
+        let (index, unreadable) = match std::fs::read(&list) {
+            Ok(b) => match serde_json::from_slice(&b) {
+                Ok(v) => (v, None),
+                Err(e) => (Vec::new(), Some(e.to_string())),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
+        let unreadable = unreadable.map(|e| {
+            tracing::error!(
+                "phone mode: the list of songs ({}) can't be read ({e}); left as it is",
+                list.display()
+            );
+            format!("this phone's list of songs can't be read ({e}), so no song can be added now")
+        });
         Ok(Self {
             dir,
             index: Mutex::new(index),
             uploads: Mutex::default(),
             adding: Mutex::default(),
+            unreadable,
         })
     }
 
@@ -170,6 +187,10 @@ impl Songs {
     /// one song.
     pub fn store(&self, part: &FsPath, name: &str) -> Result<Song, String> {
         let _one = self.adding.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(why) = &self.unreadable {
+            let _ = std::fs::remove_file(part);
+            return Err(why.clone());
+        }
         // Hashed as it is read (a song may be large)
         let mut hasher = blake3::Hasher::new();
         let mut f = std::fs::File::open(part).map_err(|e| e.to_string())?;
@@ -521,7 +542,7 @@ pub(crate) async fn listing(State(p): State<Arc<Phone>>) -> Json<Value> {
         "tracks": tracks,
         "albums": albums,
         "playlists": [],
-        "favourites": {"track_ids": favourite_ids(&songs, &super::data::load(&p).bookmarks)},
+        "favourites": {"track_ids": favourite_ids(&songs, &super::data::load(&p).map(|l| l.bookmarks).unwrap_or_default())},
     }))
 }
 
@@ -608,6 +629,39 @@ mod tests {
         assert_eq!(at, Some(4), "the part was written and the upload released");
         let r = put(4, b"data").await;
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn a_list_of_songs_that_cant_be_read_stays_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = |f: &str| {
+            let part = dir.path().join("x.part");
+            std::fs::copy(
+                format!("{}/../pm-audio/tests/fixtures/{f}", env!("CARGO_MANIFEST_DIR")),
+                &part,
+            )
+            .unwrap();
+            part
+        };
+        let songs = Songs::open(dir.path()).unwrap();
+        songs
+            .store(&part("60_mono_audio.flac"), "60_mono_audio.flac")
+            .unwrap();
+        drop(songs);
+        // The list is cut short (a power cut, a full disk)
+        let list = dir.path().join("music").join("songs.json");
+        let whole = std::fs::read(&list).unwrap();
+        let cut = &whole[..whole.len() - 5];
+        std::fs::write(&list, cut).unwrap();
+        // Phone mode still starts; no song can be added (saved, the new list would be the only
+        // one), and the list stays as it is
+        let again = Songs::open(dir.path()).unwrap();
+        assert!(again.list().is_empty());
+        let e = again
+            .store(&part("14_wasted_bits.flac"), "14_wasted_bits.flac")
+            .unwrap_err();
+        assert!(e.contains("list of songs"), "{e}");
+        assert_eq!(std::fs::read(&list).unwrap(), cut);
     }
 
     #[tokio::test]

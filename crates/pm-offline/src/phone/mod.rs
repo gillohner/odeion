@@ -125,7 +125,22 @@ pub struct Phone {
     pub(crate) copier: files::Copier,
     /// One change at a time to what the phone keeps of the person's data (`data.json`).
     pub(crate) data_lock: std::sync::Mutex<()>,
+    /// A TIDAL renewal the phone couldn't save yet (`tidal::session` saves it at the next try).
+    pub(crate) tidal_unsaved: std::sync::Mutex<Option<tidal::Unsaved>>,
+    /// Whether phone mode was left, and whether its sync runs.
+    life: std::sync::Mutex<Life>,
 }
+
+#[derive(Default)]
+struct Life {
+    /// Phone mode was left ([`Phone::close`]) and not opened again.
+    closed: bool,
+    /// The sync loop runs (one at a time, also after phone mode was opened again).
+    syncing: bool,
+}
+
+/// The phone backends alive now, one per person's folder ([`Phone::open`]).
+static OPEN: std::sync::Mutex<Vec<(PathBuf, std::sync::Weak<Phone>)>> = std::sync::Mutex::new(Vec::new());
 
 /// 32 random bytes as hex.
 fn new_key() -> String {
@@ -135,7 +150,27 @@ fn new_key() -> String {
 }
 
 impl Phone {
+    /// Phone mode for the person whose folder is `c.dir`. While a backend for that folder is still
+    /// alive (phone mode was left, and a renewal, a sync step or a request of it still runs), that
+    /// one comes back: one backend per folder, so two never hold their own copies of the sign-ins
+    /// and write them over each other's.
     pub fn open(c: Config) -> std::io::Result<Arc<Self>> {
+        let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        open.retain(|(_, w)| w.strong_count() > 0);
+        if let Some(p) = open
+            .iter()
+            .find(|(d, _)| *d == c.dir)
+            .and_then(|(_, w)| w.upgrade())
+        {
+            tracing::info!("phone mode: the backend still running for this person is used again");
+            return Ok(p);
+        }
+        let p = Self::new(c)?;
+        open.push((p.dir.clone(), Arc::downgrade(&p)));
+        Ok(p)
+    }
+
+    fn new(c: Config) -> std::io::Result<Arc<Self>> {
         let store = Arc::new(store::FileStore::open(&c.dir)?);
         let streams = stream::Streams::open(&c.cache)?;
         let songs = songs::Songs::open(&c.dir)?;
@@ -164,7 +199,24 @@ impl Phone {
             data_lock: Default::default(),
             bundled_here: Default::default(),
             copier: Default::default(),
+            tidal_unsaved: Default::default(),
+            life: Default::default(),
         }))
+    }
+
+    /// Phone mode was left (Settings › Connect to a node): its sync ends, a code sign-in waiting
+    /// for its approval stops waiting, and no more songs are copied. A renewal or a request under
+    /// way ends as it would (TIDAL's new tokens are never dropped). Opened again while any of it
+    /// still runs, this backend comes back ([`Phone::open`], [`serve`]).
+    pub fn close(&self) {
+        self.life.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        // A sync waiting for its next pass sees it now
+        self.sync_now.notify_one();
+    }
+
+    /// Whether phone mode was left ([`Phone::close`]).
+    pub fn closed(&self) -> bool {
+        self.life.lock().unwrap_or_else(|e| e.into_inner()).closed
     }
 
     /// The key every `/v1` request needs (made at start, never stored).
@@ -326,7 +378,21 @@ pub async fn serve(
         let _ = std::fs::write(&saved, port.to_string());
     }
     let key = phone.key.clone();
-    let phone2 = phone.clone();
+    // Opened again (left before): its Pubky session is restored again (a new Ring sign-in may
+    // have kept a new one); the sync starts unless the one from before still runs
+    let (was_closed, start_sync) = {
+        let mut l = phone.life.lock().unwrap_or_else(|e| e.into_inner());
+        let was = std::mem::replace(&mut l.closed, false);
+        (was, !std::mem::replace(&mut l.syncing, true))
+    };
+    if was_closed {
+        *phone.account.write().await = None;
+    }
+    // (Started here, not on the server's task: one that ends before it runs never leaves the
+    // sync marked as running)
+    if start_sync {
+        tokio::spawn(sync_loop(Arc::downgrade(&phone)));
+    }
     // A sign-in made or ended here goes to the vault at once
     {
         let weak = Arc::downgrade(&phone);
@@ -355,7 +421,6 @@ pub async fn serve(
         }
     }));
     let task = tokio::spawn(async move {
-        tokio::spawn(sync_loop(Arc::downgrade(&phone2)));
         if let Err(e) = axum::serve(listener, app).await {
             tracing::warn!("phone mode server stopped: {e}");
         }
@@ -491,6 +556,14 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
     let mut next_full = tokio::time::Instant::now();
     loop {
         let Some(p) = weak.upgrade() else { return };
+        // Phone mode left: the sync ends (opened again, `serve` starts it again)
+        {
+            let mut l = p.life.lock().unwrap_or_else(|e| e.into_inner());
+            if l.closed {
+                l.syncing = false;
+                return;
+            }
+        }
         let acct = match p.account().await {
             Some(a) => a,
             None => match account::Account::restore(&p.dir).await {
@@ -605,9 +678,71 @@ mod tests {
             assert_eq!(r, None, "given up");
             assert!(started.elapsed() <= DATA_FOR + std::time::Duration::from_secs(1));
             // The write still waits, for the next pass
-            assert_eq!(data::load(&p).pending, std::slice::from_ref(&wait));
+            assert_eq!(data::load(&p).unwrap().pending, std::slice::from_ref(&wait));
         }
         assert!(s.taken.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    fn config(dir: &std::path::Path) -> Config {
+        Config {
+            dir: dir.to_path_buf(),
+            cache: dir.join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        }
+    }
+
+    #[test]
+    fn phone_mode_opened_again_is_the_same_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Phone::open(config(dir.path())).unwrap();
+        vault::tidal_due_in_step(&old);
+        // Left while a step of it still runs (a renewal, a code sign-in waiting: it holds `old`),
+        // then opened again
+        old.close();
+        let new = Phone::open(config(dir.path())).unwrap();
+        let same = Arc::ptr_eq(&old, &new);
+        // Signed out of TIDAL now; then the old step writes what it holds (a Qobuz note, say)
+        tidal::sign_out(&new).unwrap();
+        qobuz::update(&old, |st| st.enabled = true);
+        drop((old, new));
+        // The sign-out stays (the next start reads the file)
+        let again = Phone::open(config(dir.path())).unwrap();
+        assert!(
+            tidal::state(&again).session.is_none(),
+            "the sign-out wasn't undone"
+        );
+        assert!(qobuz::state(&again).enabled);
+        assert!(same, "one backend for the person's folder");
+        // Gone, another person's folder, or a new start: a backend of its own
+        let other = tempfile::tempdir().unwrap();
+        assert!(!Arc::ptr_eq(&again, &Phone::open(config(other.path())).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn leaving_ends_the_sync_and_opening_again_starts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Phone::open(config(dir.path())).unwrap();
+        let syncing = |p: &Phone| p.life.lock().unwrap().syncing;
+        let (_addr, task) = serve(p.clone()).await.unwrap();
+        assert!(syncing(&p));
+        // Settings › Connect to a node
+        task.abort();
+        p.close();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while syncing(&p) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "the sync ended");
+        // Opened again: the same backend, one sync again
+        let again = Phone::open(config(dir.path())).unwrap();
+        assert!(Arc::ptr_eq(&p, &again));
+        let (_addr, _task) = serve(again.clone()).await.unwrap();
+        assert!(!again.closed());
+        assert!(syncing(&again));
     }
 
     #[test]

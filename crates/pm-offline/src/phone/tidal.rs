@@ -40,9 +40,61 @@ pub(crate) fn endpoints(p: &Phone) -> Endpoints<'_> {
 /// How long a song waits, past the first 8 s, for a renewal of an expired session.
 const RENEWAL_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// A renewal's new session the phone couldn't save (its sign-ins file can't be written now): the
+/// phone plays it and saves it at the next try, and never renews the session it replaced again
+/// (TIDAL may have spent that one's refresh token). Gone once saved, or once the phone holds
+/// another sign-in (a sign-out, a new sign-in, one taken from the vault). Lost if the app stops
+/// first: a disk that refuses the save keeps the session before it.
+#[derive(Clone)]
+pub(crate) struct Unsaved {
+    /// The access token of the session it renewed, as the phone keeps it.
+    from: String,
+    session: full::Session,
+}
+
+/// Keeps `session`, renewed from the phone's session with access token `from`, until it can be
+/// saved ([`Unsaved`]).
+pub(crate) fn hold_unsaved(p: &Phone, from: String, session: full::Session) {
+    tracing::warn!("phone mode: a renewed TIDAL sign-in couldn't be saved; it is used and saved later");
+    *p.tidal_unsaved.lock().unwrap_or_else(|e| e.into_inner()) = Some(Unsaved { from, session });
+}
+
+/// Saves a renewal held since its save failed ([`Unsaved`]), over the session it renewed only.
+/// Runs with [`Phone::tidal_renewal`] held (the only one that sets it).
+fn save_unsaved(p: &Phone) {
+    let Some(u) = p.tidal_unsaved.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        return;
+    };
+    let saved = p.store.change_if(|d| {
+        Ok(full::update_if(d, |st| {
+            let over = st.session.as_ref().is_some_and(|s| s.access_token == u.from);
+            if over {
+                st.session = Some(u.session.clone());
+            }
+            over
+        }))
+    });
+    match saved {
+        // Saved, or the phone holds another sign-in now (that one wins)
+        Ok(_) => *p.tidal_unsaved.lock().unwrap_or_else(|e| e.into_inner()) = None,
+        Err(e) => tracing::warn!("phone mode: a renewed TIDAL sign-in still can't be saved: {e}"),
+    }
+}
+
+/// The TIDAL state as the phone keeps it, with a renewal it couldn't save yet in place of the
+/// session that renewal replaced.
+fn with_unsaved(p: &Phone, mut st: ModeState) -> ModeState {
+    if let Some(u) = p.tidal_unsaved.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if st.session.as_ref().is_some_and(|s| s.access_token == u.from) {
+            st.session = Some(u.session.clone());
+        }
+    }
+    st
+}
+
 /// The phone's TIDAL session while it still works (not renewed).
 fn current(p: &Phone) -> Option<full::Session> {
-    let st = full::load(p.store.as_ref());
+    let st = with_unsaved(p, full::load(p.store.as_ref()));
     st.session
         .filter(|s| st.enabled && s.expires_at > pm_sources::now_unix() + 5)
 }
@@ -63,7 +115,7 @@ fn sign_in_first() -> SourceError {
 
 /// The phone's session as it is (not renewed), when TIDAL is on and signed in.
 fn held(p: &Phone) -> Result<full::Session, SourceError> {
-    let st = state(p);
+    let st = with_unsaved(p, state(p));
     st.session.filter(|_| st.enabled).ok_or_else(sign_in_first)
 }
 
@@ -75,6 +127,16 @@ fn due(s: &full::Session) -> bool {
 /// The person's session when TIDAL can answer for them (renewed first when it is about to run
 /// out), else why not.
 pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
+    // A renewal that couldn't be saved before: saved now if it can be (not while a renewal runs)
+    if p.tidal_unsaved
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+    {
+        if let Ok(_one) = p.tidal_renewal.try_lock() {
+            save_unsaved(p);
+        }
+    }
     let s = held(p)?;
     if !due(&s) {
         return Ok(s);
@@ -114,7 +176,13 @@ pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError
 /// ([`super::vault::uncertain`]: the homeserver didn't answer, or TIDAL didn't under the vault's
 /// lock), the phone never renews here instead: another device may be renewing the same sign-in,
 /// and the two would spend each other's tokens. It plays the current session while it works, and
-/// the next song tries the vault again. After any other vault failure it renews here.
+/// the next song tries the vault again. After any other vault failure it renews here. With no
+/// Pubky account restored (the homeserver didn't answer when the app started), a sign-in the last
+/// sync found in step with the vault is the same: another device may renew it under the vault's
+/// lock, so the phone plays its current session until the vault can be asked.
+///
+/// Renewed here, the new session is saved before it is used; one that can't be saved is held
+/// ([`Unsaved`]) and never renewed again meanwhile.
 async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
     let _one = match p.tidal_renewal.try_lock() {
         Ok(g) => g,
@@ -130,15 +198,27 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
             };
         }
     };
-    // Renewed just before this one took its turn
+    // Renewed just before this one took its turn (or one that couldn't be saved can be now)
+    save_unsaved(p);
     let s = held(p)?;
     if !due(&s) {
         return Ok(s);
     }
-    if let Some(acct) = p.account().await {
+    let acct = p.account().await;
+    // No account: the vault can't be asked, and the last sync found TIDAL there
+    if acct.is_none() && super::vault::tidal_in_step(p) {
+        tracing::warn!(
+            "phone mode: TIDAL is in the vault and the homeserver isn't reached yet; not renewed here"
+        );
+        return current(p).ok_or_else(not_now);
+    }
+    if let Some(acct) = acct {
         match super::vault::renew_tidal(p, &acct).await {
             Ok(super::vault::Renewal::NotInVault) => {}
-            Ok(super::vault::Renewal::Renewed) => return current(p).ok_or_else(being_renewed),
+            // (Or a sign-in or sign-out made here meanwhile: what the phone holds now)
+            Ok(super::vault::Renewal::Renewed) => {
+                return current(p).ok_or_else(|| held(p).err().unwrap_or_else(being_renewed))
+            }
             // Another vault step renews it, or holds the vault: the same, never beside it
             Ok(super::vault::Renewal::Busy) | Err(pm_pubky::vault::VaultStoreError::Busy(_)) => {
                 return current(p).ok_or_else(being_renewed);
@@ -160,13 +240,13 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
             Err(e) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}; renewed here"),
         }
     }
+    // The session as the phone keeps it (a renewal not saved yet replaces it, not this one)
+    let Some(from) = full::load(p.store.as_ref()).session.map(|k| k.access_token) else {
+        return Err(sign_in_first());
+    };
     let p2 = p.clone();
     let r = tokio::task::spawn_blocking(move || {
-        full::token(
-            p2.store.as_ref(),
-            super::stream::blocking_client(),
-            &endpoints(&p2),
-        )
+        full::renew(super::stream::blocking_client(), &endpoints(&p2), &s)
     })
     .await
     .map_err(|_| {
@@ -176,8 +256,33 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
         )
     })?;
     match r {
-        Ok(Some((sess, _))) => Ok(sess),
-        Ok(None) => Err(sign_in_first()),
+        Ok(fresh) => {
+            // Only over the session it renewed (a sign-in or sign-out meanwhile wins), saved
+            // before it is used; one that can't be saved is held, never renewed again meanwhile
+            let saved = p.store.change_if(|d| {
+                Ok(full::update_if(d, |st| {
+                    let over = st.session.as_ref().is_some_and(|k| k.access_token == from);
+                    if over {
+                        st.session = Some(fresh.clone());
+                    }
+                    over
+                }))
+            });
+            match saved {
+                Ok(true) => Ok(fresh),
+                Ok(false) => {
+                    tracing::info!(
+                        "phone mode: a renewed TIDAL session was dropped: the sign-in changed meanwhile"
+                    );
+                    held(p)
+                }
+                Err(e) => {
+                    tracing::warn!("phone mode: {e}");
+                    hold_unsaved(p, from, fresh.clone());
+                    Ok(fresh)
+                }
+            }
+        }
         Err(e) => {
             let mode = matches!(e, full::FullError::Mode(_));
             full::record(p.store.as_ref(), &Err(e));
@@ -391,6 +496,10 @@ pub(crate) async fn login(State(p): State<Arc<Phone>>) -> Response {
 async fn wait_for_approval(p: Arc<Phone>, c: full::Client, pending: full::Pending) {
     while now() < pending.expires_at {
         tokio::time::sleep(std::time::Duration::from_secs(pending.interval)).await;
+        // Phone mode left: no more waiting (the code is forgotten below)
+        if p.closed() {
+            break;
+        }
         if state(&p).login.as_ref().map(|x| &x.device_code) != Some(&pending.device_code) {
             return;
         }
@@ -562,6 +671,12 @@ mod tests {
         (base, renewed)
     }
 
+    /// Due, and not in the vault (never synced): renewed here.
+    fn due_here(p: &Phone) {
+        super::super::vault::tidal_due_in_step(p);
+        std::fs::remove_file(p.dir().join("vault").join("synced.json")).unwrap();
+    }
+
     fn phone(dir: &std::path::Path, auth_base: String) -> Arc<Phone> {
         Phone::open(super::super::Config {
             dir: dir.to_path_buf(),
@@ -569,6 +684,7 @@ mod tests {
             version: "test".into(),
             pubky: None,
             tidal: super::super::TidalConf {
+                v1_base: format!("{auth_base}/v1"),
                 auth_base,
                 device: Some(full::Client {
                     id: "device-client".into(),
@@ -586,8 +702,8 @@ mod tests {
         let (base, renewed) = tidal(std::time::Duration::from_millis(300)).await;
         let dir = tempfile::tempdir().unwrap();
         let p = phone(dir.path(), base);
-        // Due, and no Pubky account (offline): renewed here
-        super::super::vault::tidal_due_in_step(&p);
+        // Due, not in the vault, and no Pubky account (offline): renewed here
+        due_here(&p);
         let songs: Vec<_> = (0..3)
             .map(|_| {
                 let p = p.clone();
@@ -654,7 +770,7 @@ mod tests {
         });
         let dir = tempfile::tempdir().unwrap();
         let p = phone(dir.path(), base);
-        super::super::vault::tidal_due_in_step(&p);
+        due_here(&p);
         let songs: Vec<_> = (0..3)
             .map(|_| {
                 let p = p.clone();
@@ -666,6 +782,83 @@ mod tests {
             let _ = s.await.unwrap();
         }
         assert_eq!(tries.load(Ordering::SeqCst), 1, "one try for all three");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn without_the_homeserver_a_sign_in_in_the_vault_isnt_renewed_here() {
+        let (base, renewed) = tidal(std::time::Duration::ZERO).await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        // In step with the vault at the last sync; the homeserver didn't answer at start, so no
+        // Pubky account: another device may renew it under the vault's lock
+        super::super::vault::tidal_due_in_step(&p);
+        assert!(p.account().await.is_none());
+        let s = session(&p)
+            .await
+            .expect("the current session, still good for 30 s");
+        assert_eq!(s.access_token, "due");
+        assert_eq!(renewed.load(Ordering::SeqCst), 0, "no renewal beside the vault");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_renewal_that_cant_be_saved_is_used_and_never_renewed_again() {
+        let (base, renewed) = tidal(std::time::Duration::ZERO).await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        due_here(&p);
+        // The sign-ins file can't be replaced now (a folder in its place)
+        let file = dir.path().join(super::super::store::FILE);
+        let kept = std::fs::read(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        // Renewed: the new session plays, and the next songs use it (no second renewal of the
+        // session before, whose refresh token TIDAL may have spent)
+        for _ in 0..3 {
+            assert_eq!(session(&p).await.unwrap().access_token, "fresh-1");
+        }
+        assert_eq!(renewed.load(Ordering::SeqCst), 1);
+        // The disk takes it again: saved at the next song
+        std::fs::remove_dir(&file).unwrap();
+        std::fs::write(&file, kept).unwrap();
+        assert_eq!(session(&p).await.unwrap().access_token, "fresh-1");
+        let on_disk = super::super::store::FileStore::open(dir.path()).unwrap();
+        assert_eq!(full::load(&on_disk).session.unwrap().access_token, "fresh-1");
+        assert!(p.tidal_unsaved.lock().unwrap().is_none());
+        assert_eq!(renewed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn leaving_phone_mode_ends_the_wait_for_a_code_sign_in() {
+        let (base, renewed) = tidal(std::time::Duration::ZERO).await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        let pending = full::Pending {
+            device_code: "dc".into(),
+            user_code: "ABCD".into(),
+            uri: "link.tidal.com".into(),
+            expires_at: now() + 300,
+            interval: 1,
+        };
+        change(&p, |st| {
+            st.login = Some(pending.clone());
+            true
+        })
+        .unwrap();
+        let c = p.tidal.device.clone().unwrap();
+        // Settings › Connect to a node while the code waits (TIDAL would approve it at once)
+        p.close();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            wait_for_approval(p.clone(), c, pending),
+        )
+        .await
+        .expect("the wait ends");
+        assert_eq!(renewed.load(Ordering::SeqCst), 0, "TIDAL wasn't asked");
+        let st = state(&p);
+        assert!(
+            st.session.is_none() && st.login.is_none(),
+            "nothing signed in, the code forgotten"
+        );
     }
 
     #[tokio::test]

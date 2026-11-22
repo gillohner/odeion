@@ -32,6 +32,20 @@ struct Running {
     origin: String,
     key: String,
     task: tokio::task::JoinHandle<()>,
+    /// The backend itself (leaving phone mode ends its sync and its waits).
+    phone: std::sync::Weak<pm_offline::phone::Phone>,
+}
+
+impl Running {
+    /// Phone mode ends here: the server stops, and the backend's own tasks end
+    /// (`Phone::close`). Opened again while a step of it still runs, the same backend comes back
+    /// (`Phone::open`): never two for one person's folder.
+    fn stop(self) {
+        self.task.abort();
+        if let Some(p) = self.phone.upgrade() {
+            p.close();
+        }
+    }
 }
 
 static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
@@ -225,7 +239,7 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<(), St
             .is_some_and(|r| r.pubky != saved.pubky || r.task.is_finished())
         {
             if let Some(old) = r.take() {
-                old.task.abort();
+                old.stop();
             }
         }
         r.as_ref().map(|r| r.origin.clone())
@@ -242,6 +256,7 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<(), St
             })
             .map_err(|e| format!("Phone mode can't start: {e}"))?;
             let key = phone.key().to_string();
+            let weak = std::sync::Arc::downgrade(&phone);
             let (addr, task) = pm_offline::phone::serve(phone)
                 .await
                 .map_err(|e| format!("Phone mode can't start: {e}"))?;
@@ -251,6 +266,7 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<(), St
                 origin: origin.clone(),
                 key,
                 task,
+                phone: weak,
             });
             origin
         }
@@ -290,7 +306,7 @@ pub fn phone_leave(
         store_saved(&p, None)?;
     }
     if let Some(r) = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        r.task.abort();
+        r.stop();
     }
     state.set_local_origin(None);
     #[cfg(target_os = "android")]

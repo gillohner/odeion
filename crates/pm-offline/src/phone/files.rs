@@ -131,22 +131,58 @@ fn copies_path(p: &Phone) -> std::path::PathBuf {
     p.dir().join("files.json")
 }
 
-fn load_copies(p: &Phone) -> Copies {
-    std::fs::read(copies_path(p))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+/// What the phone knows of its copies; with no file yet, nothing. One that can't be read, or
+/// isn't its JSON, is an error and is left as it is: read as empty, songs the person removed from
+/// their homeserver would be copied there again. The copier then stops until it reads.
+fn load_copies(p: &Phone) -> std::io::Result<Copies> {
+    let path = copies_path(p);
+    let bad = |e: &dyn std::fmt::Display| {
+        std::io::Error::other(format!(
+            "what was copied to the homeserver ({}) can't be read ({e}); left as it is",
+            path.display()
+        ))
+    };
+    match std::fs::read(&path) {
+        Ok(b) => serde_json::from_slice(&b).map_err(|e| bad(&e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Copies::default()),
+        Err(e) => Err(bad(&e)),
+    }
 }
 
-fn save_copies(p: &Phone, c: &Copies) {
+/// Written whole, on the disk before it replaces the old one.
+fn save_copies(p: &Phone, c: &Copies) -> std::io::Result<()> {
+    use std::io::Write;
     let path = copies_path(p);
     let tmp = path.with_extension("json.tmp");
-    let ok = serde_json::to_vec(c)
-        .ok()
-        .is_some_and(|b| std::fs::write(&tmp, b).is_ok() && std::fs::rename(&tmp, &path).is_ok());
-    if !ok {
-        tracing::warn!("phone mode: what was copied to the homeserver could not be saved");
+    let b = serde_json::to_vec(c).map_err(std::io::Error::other)?;
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&b)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &path)
+    };
+    write().inspect_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::warn!("phone mode: what was copied to the homeserver could not be saved: {e}");
+    })
+}
+
+/// One change to what the phone knows of its copies, read and saved; an error (logged) when
+/// either fails, and nothing changed.
+fn change_copies(p: &Phone, f: impl FnOnce(&mut Copies) -> bool) -> std::io::Result<()> {
+    let mut c = load_copies(p).inspect_err(|e| tracing::warn!("phone mode: {e}"))?;
+    if f(&mut c) {
+        save_copies(p, &c)?;
     }
+    Ok(())
+}
+
+/// The copier stops after a failure of the phone's own (its record of copies), as after a failed
+/// upload: the next pass waits.
+fn wait_after_failure(p: &Phone) {
+    let mut retry = p.copier.retry.lock().unwrap_or_else(|e| e.into_inner());
+    let wait = next_wait(retry.map(|(_, w)| w));
+    *retry = Some((Instant::now() + wait, wait));
 }
 
 /// Starts a copy pass on its own task, unless one is running: it can take long (big songs, a slow
@@ -271,7 +307,8 @@ pub async fn copy_while(weak: &Weak<Phone>, remote: &impl Remote) -> Report {
 async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) -> Report {
     let mut r = Report::default();
     let Some(p) = weak.upgrade() else { return r };
-    if !on(&p) {
+    // Off, or phone mode left
+    if !on(&p) || p.closed() {
         return r;
     }
     if let Some((at, _)) = *p.copier.retry.lock().unwrap_or_else(|e| e.into_inner()) {
@@ -281,7 +318,14 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
     }
     // The songs that may need copying now; the homeserver is asked only when there are some. Too
     // big, gone from the phone, or waiting after being too slow: left for later
-    let copies = load_copies(&p);
+    // Can't be read: nothing is copied (a song copied before would go again)
+    let copies = match load_copies(&p) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("phone mode: no songs are copied: {e}");
+            return r;
+        }
+    };
     let now = Instant::now();
     let mut todo = Vec::new();
     for s in p.songs.list() {
@@ -329,8 +373,8 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
     drop(p);
     for (s, h) in todo {
         let Some(p) = weak.upgrade() else { break };
-        // Turned off meanwhile: no more uploads
-        if !on(&p) {
+        // Turned off (or phone mode left) meanwhile: no more uploads
+        if !on(&p) || p.closed() {
             break;
         }
         let local = p.songs.path_of(&s);
@@ -354,9 +398,10 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
         }
         if whole {
             let Some(p) = weak.upgrade() else { break };
-            let mut copies = load_copies(&p);
-            if copies.copied.insert(h) {
-                save_copies(&p, &copies);
+            if change_copies(&p, |c| c.copied.insert(h)).is_err() {
+                wait_after_failure(&p);
+                r.left += 1;
+                break;
             }
             continue;
         }
@@ -391,14 +436,17 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
         };
         match (sent, stored) {
             (Ok(Ok(())), Some(Ok(Some(n)))) if n == s.bytes => {
-                r.copied += 1;
                 p.copier.slow.lock().unwrap_or_else(|e| e.into_inner()).remove(&h);
-                let mut copies = load_copies(&p);
-                copies.copied.insert(h.clone());
-                save_copies(&p, &copies);
                 if let Some(t) = p.copier.there.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-                    t.insert(h);
+                    t.insert(h.clone());
                 }
+                // Not kept: the pass stops (the next one finds it there whole, and keeps it then)
+                if change_copies(&p, |c| c.copied.insert(h)).is_err() {
+                    wait_after_failure(&p);
+                    r.left += 1;
+                    break;
+                }
+                r.copied += 1;
                 *p.copier.retry.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
             // Short there (removed above), or not there: sent again later
@@ -413,18 +461,17 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
             // again), and the pass stops as after a failure
             (Ok(Ok(())), _) => {
                 tracing::warn!("phone mode: a song copied to the homeserver couldn't be checked there yet");
-                let mut retry = p.copier.retry.lock().unwrap_or_else(|e| e.into_inner());
-                let wait = next_wait(retry.map(|(_, w)| w));
-                *retry = Some((Instant::now() + wait, wait));
+                wait_after_failure(&p);
                 r.left += 1;
                 break;
             }
             (Ok(Err(e)), _) if pm_pubky::homeserver::refused_for_good(&e) => {
                 tracing::warn!("phone mode: the homeserver refused a song: {e}");
-                let mut copies = load_copies(&p);
-                copies.refused.insert(h, e.to_string());
-                save_copies(&p, &copies);
                 r.left += 1;
+                if change_copies(&p, |c| c.refused.insert(h, e.to_string()).is_none()).is_err() {
+                    wait_after_failure(&p);
+                    break;
+                }
             }
             // Too slow for this one: it waits on its own (doubling), the others go on
             (Err(_), _) => {
@@ -434,9 +481,7 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
             }
             (Ok(Err(e)), _) => {
                 tracing::warn!("phone mode: a song waits to be copied to the homeserver: {e}");
-                let mut retry = p.copier.retry.lock().unwrap_or_else(|e| e.into_inner());
-                let wait = next_wait(retry.map(|(_, w)| w));
-                *retry = Some((Instant::now() + wait, wait));
+                wait_after_failure(&p);
                 r.left += 1;
                 break;
             }
@@ -453,7 +498,8 @@ pub(crate) async fn status(State(p): State<Arc<Phone>>) -> Json<Value> {
 /// From what the phone knows (the last pass), without asking the homeserver.
 fn view(p: &Phone) -> Value {
     let songs = p.songs.list();
-    let copies = load_copies(p);
+    // (Can't be read: none counted; the copier says why)
+    let copies = load_copies(p).unwrap_or_default();
     let (mut uploaded, mut cant) = (0, 0);
     for s in &songs {
         match hash_of(&s.file) {
@@ -487,10 +533,15 @@ pub(crate) async fn choose(State(p): State<Arc<Phone>>, Json(c): Json<Choice>) -
         return err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
     // A new choice tries the songs the homeserver refused again (it may have room now)
-    let mut copies = load_copies(&p);
-    if !copies.refused.is_empty() {
-        copies.refused.clear();
-        save_copies(&p, &copies);
+    if let Err(e) = change_copies(&p, |c| {
+        let had = !c.refused.is_empty();
+        c.refused.clear();
+        had
+    }) {
+        return err(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("The choice is set, but {e}"),
+        );
     }
     *p.copier.retry.lock().unwrap_or_else(|e| e.into_inner()) = None;
     copy_soon(&p);
@@ -634,6 +685,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_record_of_copies_that_cant_be_read_copies_nothing() {
+        let (_d, p, _) = phone(2);
+        // One song copied before (the person may have removed it from their homeserver since),
+        // then files.json is cut short (a power cut)
+        let f = Fake::default();
+        let first = Copies {
+            copied: BTreeSet::from([hash_of(&p.songs.list()[0].file).unwrap().to_string()]),
+            ..Default::default()
+        };
+        save_copies(&p, &first).unwrap();
+        let whole = std::fs::read(copies_path(&p)).unwrap();
+        let cut = &whole[..whole.len() - 3];
+        std::fs::write(copies_path(&p), cut).unwrap();
+        // Nothing is copied (the removed song isn't sent again), the file stays as it is
+        let r = copy_while(&Arc::downgrade(&p), &f).await;
+        assert_eq!(r.copied, 0);
+        assert_eq!(uploaded(&f), 0);
+        assert_eq!(std::fs::read(copies_path(&p)).unwrap(), cut);
+        // A new choice doesn't write over it either
+        let r = choose(State(p.clone()), Json(Choice { on: Some(true) })).await;
+        assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(std::fs::read(copies_path(&p)).unwrap(), cut);
+    }
+
+    #[tokio::test]
+    async fn a_copy_the_phone_cant_note_stops_the_copier() {
+        let (_d, p, _) = phone(2);
+        // files.json can't be written now (a folder where it is written first)
+        std::fs::create_dir(copies_path(&p).with_extension("json.tmp")).unwrap();
+        let f = Fake::default();
+        let r = copy_while(&Arc::downgrade(&p), &f).await;
+        // The first song went and couldn't be noted: not counted, and no more songs go
+        assert_eq!(r, Report { copied: 0, left: 1 });
+        assert_eq!(uploaded(&f), 1);
+        // The next pass waits, as after a failure
+        assert_eq!(copy_while(&Arc::downgrade(&p), &f).await, Report::default());
+        assert_eq!(uploaded(&f), 1);
+    }
+
+    #[tokio::test]
     async fn a_song_gone_from_the_phone_is_skipped_and_the_others_go_on() {
         let (_d, p, songs) = phone(3);
         std::fs::remove_file(p.songs.path_of(&songs[0])).unwrap();
@@ -693,13 +784,13 @@ mod tests {
         f.answers.lock().unwrap().push_back(413);
         let r = copy_while(&Arc::downgrade(&p), &f).await;
         assert_eq!(r, Report { copied: 2, left: 1 }, "the others go on");
-        assert_eq!(load_copies(&p).refused.len(), 1);
+        assert_eq!(load_copies(&p).unwrap().refused.len(), 1);
         // Not tried again by itself
         assert_eq!(copy_while(&Arc::downgrade(&p), &f).await, Report::default());
         assert_eq!(view(&p)["cant"], 1);
         // A new choice in Settings tries it again
         choose(State(p.clone()), Json(Choice { on: Some(true) })).await;
-        assert!(load_copies(&p).refused.is_empty());
+        assert!(load_copies(&p).unwrap().refused.is_empty());
         assert_eq!(copy_while(&Arc::downgrade(&p), &f).await.copied, 1);
         assert_eq!(uploaded(&f), 3);
     }
@@ -741,7 +832,7 @@ mod tests {
             [path(&songs[1])],
             "the short copy went first"
         );
-        assert_eq!(load_copies(&p).copied.len(), 2);
+        assert_eq!(load_copies(&p).unwrap().copied.len(), 2);
     }
 
     #[tokio::test]
@@ -756,7 +847,7 @@ mod tests {
         copy_while(&Arc::downgrade(&p), &f).await;
         let path = format!("{}{}", pm_appdata::files::FILES_DIR, songs[0].file);
         assert_eq!(*f.deleted.lock().unwrap(), [path]);
-        assert!(load_copies(&p).copied.is_empty());
+        assert!(load_copies(&p).unwrap().copied.is_empty());
     }
 
     #[tokio::test]
@@ -779,7 +870,7 @@ mod tests {
         .expect("the pass ends");
         assert_eq!(uploaded(&f), 1);
         assert_eq!(r, Report { copied: 0, left: 1 });
-        assert!(load_copies(&p).copied.is_empty());
+        assert!(load_copies(&p).unwrap().copied.is_empty());
     }
 
     #[tokio::test]
@@ -793,7 +884,7 @@ mod tests {
         };
         let r = copy_while(&Arc::downgrade(&p), &f).await;
         assert_eq!(r, Report { copied: 0, left: 2 }, "neither counted");
-        assert!(load_copies(&p).copied.is_empty());
+        assert!(load_copies(&p).unwrap().copied.is_empty());
         assert_eq!(view(&p)["uploaded"], 0);
         assert_eq!(*f.deleted.lock().unwrap(), [path(&songs[0]), path(&songs[1])]);
         // Each waits on its own; its wait over, it is sent again, whole this time: copied
@@ -808,7 +899,7 @@ mod tests {
             *whole.uploaded.lock().unwrap(),
             [path(&songs[0]), path(&songs[1])]
         );
-        assert_eq!(load_copies(&p).copied.len(), 2);
+        assert_eq!(load_copies(&p).unwrap().copied.len(), 2);
     }
 
     #[tokio::test]
@@ -850,7 +941,7 @@ mod tests {
         );
         copy_while(&Arc::downgrade(&p), &f2).await;
         assert_eq!(uploaded(&f2), 0);
-        assert_eq!(load_copies(&p).copied.len(), 1);
+        assert_eq!(load_copies(&p).unwrap().copied.len(), 1);
     }
 
     #[test]

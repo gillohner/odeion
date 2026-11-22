@@ -681,16 +681,12 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         // writes them to the vault
         Err(VaultStoreError::Unsaved { sign_in, reason, .. }) => {
             tracing::warn!("phone mode: renewed TIDAL kept here, the vault takes it later: {reason}");
-            if let Some(travels) = vault_form::node_settings(&sign_in) {
-                apply_if_still(
-                    &phone.store,
-                    &TIDAL_FULL,
-                    Some(&vault_form::hash(&mine)),
-                    Some(&travels),
-                    vault_form::node_lineage(&sign_in).as_deref(),
-                )?;
-            }
-            return Ok(Renewal::Renewed);
+            return Ok(match vault_form::node_settings(&sign_in) {
+                Some(travels) => keep_renewed(phone, &mine, &travels, vault_form::node_lineage(&sign_in))
+                    .unwrap_or(Renewal::Renewed),
+                // (Never: the phone made this sign-in from such a copy)
+                None => Renewal::Unclear("the renewed sign-in isn't one this phone can keep".into()),
+            });
         }
         Err(e @ VaultStoreError::Refresh(_)) => {
             return match refused.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -719,19 +715,15 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         return Ok(Renewal::NotInVault);
     };
     // Taken only if the phone still holds the session it started from (a sign-out or a new
-    // sign-in here meanwhile wins), with the id of the sign-in it takes
-    let lineage = vault_form::node_lineage(si);
-    if !apply_if_still(
-        &phone.store,
-        &TIDAL_FULL,
-        Some(&vault_form::hash(&mine)),
-        Some(&travels),
-        lineage.as_deref(),
-    )? {
-        return Ok(Renewal::NotInVault);
+    // sign-in here meanwhile wins), with the id of the sign-in it takes. Not taken (changed
+    // meanwhile, held, or unclear): the record stays as it was, and the next pass sees the
+    // vault's copy as renewed there
+    if let Some(other) = keep_renewed(phone, &mine, &travels, vault_form::node_lineage(si)) {
+        return Ok(other);
     }
     let kept = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref())
-        .map_err(local)?
+        .ok()
+        .flatten()
         .map(|m| vault_form::hash(&m))
         .unwrap_or_default();
     // (Read before the renewal under the same lock; should it not read now, it stays as it is)
@@ -753,6 +745,58 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         tracing::info!("phone mode: TIDAL renewed under the vault's lock");
     }
     Ok(Renewal::Renewed)
+}
+
+/// The TIDAL session a renewal under the vault's lock gave (`travels`, the sign-in's `lineage`)
+/// put in the phone's sign-ins, only over the one it started from (`mine`). `None`: saved.
+/// Once TIDAL answered, nothing here lets the phone renew again on its own with the session
+/// before (no error, no `NotInVault`): a sign-in or sign-out made here meanwhile wins
+/// (`Renewed`: the phone uses what it holds now); a save that failed keeps the new session in
+/// memory ([`super::tidal::hold_unsaved`], `Renewed`), or, without a session in it, is `Unclear`.
+fn keep_renewed(
+    phone: &Phone,
+    mine: &Map<String, Value>,
+    travels: &Map<String, Value>,
+    lineage: Option<String>,
+) -> Option<Renewal> {
+    match apply_if_still(
+        &phone.store,
+        &TIDAL_FULL,
+        Some(&vault_form::hash(mine)),
+        Some(travels),
+        lineage.as_deref(),
+    ) {
+        Ok(true) => None,
+        Ok(false) => Some(Renewal::Renewed),
+        Err(e) => {
+            let fresh = vault_form::session_of(TIDAL_FULL.carry, travels).and_then(|m| {
+                serde_json::from_value::<pm_sources::tidal::full::Session>(Value::Object(m)).ok()
+            });
+            let from = pm_sources::tidal::full::load(phone.store.as_ref())
+                .session
+                .map(|s| s.access_token);
+            Some(match (fresh, from) {
+                (Some(fresh), Some(from)) => {
+                    tracing::warn!("phone mode: TIDAL renewed under the vault's lock, not saved here: {e}");
+                    super::tidal::hold_unsaved(phone, from, fresh);
+                    Renewal::Renewed
+                }
+                _ => Renewal::Unclear(format!("renewed, but not saved here: {e}")),
+            })
+        }
+    }
+}
+
+/// Whether the phone's TIDAL sign-in is the one the last sync found in step with the vault (a
+/// renewal then goes through the vault). A record that can't be read: no (as [`renew_tidal`]'s
+/// lasting error: the phone renews on its own).
+pub fn tidal_in_step(phone: &Phone) -> bool {
+    let Ok(Some(mine)) = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref()) else {
+        return false;
+    };
+    load_record(&record_path(phone)).is_ok_and(|r| {
+        r.services.get(TIDAL_FULL.service).map(|s| s.mine.as_str()) == Some(vault_form::hash(&mine).as_str())
+    })
 }
 
 /// Whether a failure before TIDAL was asked ([`renew_tidal`]'s error) leaves open that the
@@ -1158,6 +1202,46 @@ mod tests {
         ] {
             assert!(!uncertain(&e), "{e}");
         }
+    }
+
+    #[test]
+    fn once_tidal_answered_nothing_leads_to_another_renewal() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone_here(dir.path());
+        tidal_due_in_step(&p);
+        let mine = vault_form::carried(TIDAL_FULL.carry, p.store.as_ref())
+            .unwrap()
+            .unwrap();
+        // What the renewal under the vault's lock gave
+        let fresh = pm_sources::tidal::full::Session {
+            access_token: "fresh".into(),
+            refresh_token: Some("rt-2".into()),
+            expires_at: pm_sources::now_unix() + 3600,
+            country: "CH".into(),
+            ..Default::default()
+        };
+        let key = TIDAL_FULL.carry[0].key;
+        let mut travels = mine.clone();
+        let mut held = travels.get(key).and_then(vault_form::object_of).unwrap();
+        held.insert("session".into(), serde_json::to_value(&fresh).unwrap());
+        travels.insert(key.into(), Value::Object(held));
+        // The sign-ins file can't be replaced now (a full disk, say): no error (the phone would
+        // renew again with the session before), the new session kept in memory
+        let file = dir.path().join(super::super::store::FILE);
+        let kept = std::fs::read(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert_eq!(keep_renewed(&p, &mine, &travels, None), Some(Renewal::Renewed));
+        assert!(
+            p.tidal_unsaved.lock().unwrap().is_some(),
+            "held until it can be saved"
+        );
+        // A sign-out here meanwhile: that wins, and nothing is renewed again either
+        std::fs::remove_dir(&file).unwrap();
+        std::fs::write(&file, kept).unwrap();
+        super::super::tidal::sign_out(&p).unwrap();
+        assert_eq!(keep_renewed(&p, &mine, &travels, None), Some(Renewal::Renewed));
+        assert!(pm_sources::tidal::full::load(p.store.as_ref()).session.is_none());
     }
 
     #[test]

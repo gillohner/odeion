@@ -27,15 +27,25 @@ pub struct FileStore {
 impl FileStore {
     /// The store in `dir` (made if missing); with no file yet, empty. A file that can't be read,
     /// or isn't the store's JSON, is an error and is left as it is: read as empty it would be a
-    /// sign-out of everything, which the vault sync would then carry to the vault.
+    /// sign-out of everything, which the vault sync would then carry to the vault. The same for a
+    /// streaming sign-in in it that isn't its service's JSON (each service reads one it can't
+    /// parse as signed out).
     pub fn open(dir: &std::path::Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(FILE);
-        let values = match std::fs::read(&path) {
+        let values: BTreeMap<String, String> = match std::fs::read(&path) {
             Ok(b) => serde_json::from_slice(&b).map_err(|e| unreadable(&path, e))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(e) => return Err(unreadable(&path, e)),
         };
+        if let Some(v) = values.get(pm_sources::tidal::full::STATE_KEY) {
+            serde_json::from_str::<pm_sources::tidal::full::ModeState>(v)
+                .map_err(|e| unreadable(&path, format!("TIDAL: {e}")))?;
+        }
+        if let Some(v) = values.get(pm_sources::qobuz::STATE_KEY) {
+            serde_json::from_str::<pm_sources::qobuz::ModeState>(v)
+                .map_err(|e| unreadable(&path, format!("Qobuz: {e}")))?;
+        }
         Ok(Self {
             path,
             values: Mutex::new(values),
@@ -308,6 +318,32 @@ mod tests {
         std::fs::create_dir(&file).unwrap();
         assert!(FileStore::open(dir.path()).is_err());
         assert!(file.is_dir());
+    }
+
+    #[test]
+    fn a_sign_in_that_cant_be_read_is_never_a_sign_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        // The file reads, one service's sign-in in it doesn't (each would read it as signed out,
+        // and the vault sync would remove the vault's copy): an error, the file as it was
+        for (key, bad) in [("tidal.unofficial", "{"), ("qobuz.unofficial", "{\"session\":7}")] {
+            let body = serde_json::to_vec(&BTreeMap::from([(key, bad)])).unwrap();
+            std::fs::write(&file, &body).unwrap();
+            assert!(FileStore::open(dir.path()).is_err(), "{key}");
+            assert_eq!(std::fs::read(&file).unwrap(), body);
+        }
+        // Both as they are kept: read
+        let good = BTreeMap::from([
+            ("tidal.unofficial", r#"{"enabled":true,"session":null}"#),
+            ("qobuz.unofficial", r#"{"enabled":false}"#),
+            ("vault.lineage.qobuz", "q-1"),
+        ]);
+        std::fs::write(&file, serde_json::to_vec(&good).unwrap()).unwrap();
+        let s = FileStore::open(dir.path()).unwrap();
+        assert_eq!(
+            SessionStore::get(&s, "vault.lineage.qobuz").as_deref(),
+            Some("q-1")
+        );
     }
 
     #[test]

@@ -65,29 +65,46 @@ fn path(phone: &Phone) -> PathBuf {
     phone.dir().join("data.json")
 }
 
-pub(crate) fn load(phone: &Phone) -> Local {
-    std::fs::read(path(phone))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+/// What the phone keeps; with no file yet, nothing. One that can't be read, or isn't its JSON, is
+/// an error and is left as it is (read as empty, the next change would save over the writes still
+/// waiting): nothing changes and nothing is written to the homeserver until it reads again.
+pub(crate) fn load(phone: &Phone) -> std::io::Result<Local> {
+    let p = path(phone);
+    let bad = |e: &dyn std::fmt::Display| {
+        tracing::error!("phone mode: {} can't be read ({e}); left as it is", p.display());
+        std::io::Error::other(format!("what this phone keeps of your data can't be read ({e})"))
+    };
+    match std::fs::read(&p) {
+        Ok(b) => serde_json::from_slice(&b).map_err(|e| bad(&e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Local::default()),
+        Err(e) => Err(bad(&e)),
+    }
 }
 
+/// Written whole, on the disk before it replaces the old one (a power cut never leaves it cut
+/// short).
 fn save(phone: &Phone, l: &Local) -> std::io::Result<()> {
+    use std::io::Write;
     let p = path(phone);
     let tmp = p.with_extension("json.tmp");
     let b = serde_json::to_vec(l).map_err(std::io::Error::other)?;
-    std::fs::write(&tmp, b)?;
-    std::fs::rename(&tmp, &p).inspect_err(|_| {
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&b)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &p)
+    };
+    write().inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }
 
 /// One change to what the phone keeps, made under the phone's data lock. An error when it couldn't
-/// be saved: then nothing changed (the file is what every reader reads).
+/// be read or saved: then nothing changed (the file is what every reader reads).
 #[must_use = "a change that wasn't saved didn't happen"]
 pub(crate) fn change(phone: &Phone, f: impl FnOnce(&mut Local)) -> std::io::Result<()> {
     let _g = phone.data_lock.lock().unwrap_or_else(|e| e.into_inner());
-    let mut l = load(phone);
+    let mut l = load(phone)?;
     f(&mut l);
     save(phone, &l).inspect_err(|e| tracing::warn!("phone mode: the data cache could not be saved: {e}"))
 }
@@ -137,12 +154,16 @@ fn uri_of(p: &Phone, it: &Item) -> Result<String, SourceError> {
 }
 
 /// `GET /v1/favourites`: the Bookmarks (the node's shape; on a phone they are links, no library).
-pub(crate) async fn bookmarks(State(p): State<Arc<Phone>>) -> Json<Value> {
-    let l = load(&p);
+pub(crate) async fn bookmarks(State(p): State<Arc<Phone>>) -> Response {
+    let l = match load(&p) {
+        Ok(l) => l,
+        Err(e) => return super::err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
     let mut urls: Vec<(&String, &i64)> = l.bookmarks.iter().collect();
     urls.sort_by(|a, b| b.1.cmp(a.1));
     let urls: Vec<&String> = urls.into_iter().map(|(u, _)| u).collect();
     Json(json!({ "tracks": [], "albums": [], "artists": [], "posts": [], "other": urls, "uris": urls }))
+        .into_response()
 }
 
 async fn bookmark(p: &Arc<Phone>, it: &Item, on: bool) -> Response {
@@ -341,7 +362,8 @@ async fn write_prefs(acct: &Account, p: &Phone, source: &str) -> Result<(), Stri
     }
     // What another device set since (newer than what the phone took) applies here too: this
     // write moves prefs_at past it
-    if prefs["updated_at"].as_u64().unwrap_or(0) > load(p).prefs_at {
+    let took = load(p).map_err(|e| e.to_string())?.prefs_at;
+    if prefs["updated_at"].as_u64().unwrap_or(0) > took {
         apply_quality(p, &prefs);
     }
     if let Some(q) = quality_of(p, source) {
@@ -369,7 +391,7 @@ async fn take_prefs(acct: &Account, p: &Phone) -> Result<bool, String> {
         return Ok(false);
     };
     let at = prefs["updated_at"].as_u64().unwrap_or(0);
-    if at <= load(p).prefs_at {
+    if at <= load(p).map_err(|e| e.to_string())?.prefs_at {
         return Ok(false);
     }
     apply_quality(p, &prefs);
@@ -380,11 +402,13 @@ async fn take_prefs(acct: &Account, p: &Phone) -> Result<bool, String> {
 
 /// The qualities in `prefs` applied here, except a source's changed here and not written yet.
 fn apply_quality(p: &Phone, prefs: &Value) {
+    // (Not known: as if waiting, nothing applied)
     let waiting = |source: &str| {
-        load(p)
-            .pending
-            .iter()
-            .any(|op| matches!(op, Pending::Quality { source: s } if s == source))
+        load(p).map_or(true, |l| {
+            l.pending
+                .iter()
+                .any(|op| matches!(op, Pending::Quality { source: s } if s == source))
+        })
     };
     if let Some(q) = prefs["quality"]["tidal"]
         .as_str()
@@ -438,7 +462,10 @@ pub struct Report {
 /// Bookmarks as the homeserver has them (with what is still pending on top), then prefs.json.
 pub async fn sync(p: &Phone, acct: &Account) -> Report {
     let mut r = write_pending(p, acct).await;
-    let known = load(p).known;
+    // Can't be read: nothing more (write_pending said why)
+    let Ok(known) = load(p).map(|l| l.known) else {
+        return r;
+    };
     match acct.hs.read_v1_bookmarks_except(&acct.session, &known).await {
         Ok(list) => {
             // Not kept: read again next time
@@ -470,17 +497,24 @@ pub async fn sync(p: &Phone, acct: &Account) -> Report {
         Ok(t) => r.prefs_taken = t,
         Err(e) => tracing::warn!("phone mode: prefs.json not read: {e}"),
     }
-    r.left = load(p).pending.len();
+    r.left = load(p).map_or(0, |l| l.pending.len());
     r
 }
 
-/// The waiting writes, in order (one that fails stops the rest until the next sync).
+/// The waiting writes, in order (one that fails stops the rest until the next sync). When what
+/// the phone keeps can't be read, none (logged).
 pub async fn write_pending(p: &Phone, acct: &Account) -> Report {
     let mut r = Report::default();
     // Read once a pass, when a listen waits
     let mut history = None;
     loop {
-        let next = load(p).pending.first().cloned();
+        let next = match load(p) {
+            Ok(l) => l.pending.first().cloned(),
+            Err(e) => {
+                tracing::warn!("phone mode: nothing is written to the homeserver: {e}");
+                break;
+            }
+        };
         let Some(mut op) = next else { break };
         // A listen gets its id now, its write time, kept should this try fail
         if let Pending::Listen { id: None, .. } = &op {
@@ -495,7 +529,7 @@ pub async fn write_pending(p: &Phone, acct: &Account) -> Report {
             {
                 break;
             }
-            match load(p).pending.first().cloned() {
+            match load(p).ok().and_then(|l| l.pending.first().cloned()) {
                 Some(o) => op = o,
                 None => break,
             }
@@ -529,7 +563,7 @@ pub async fn write_pending(p: &Phone, acct: &Account) -> Report {
             }
         }
     }
-    r.left = load(p).pending.len();
+    r.left = load(p).map_or(0, |l| l.pending.len());
     r
 }
 
@@ -579,8 +613,8 @@ mod tests {
             tidal: Default::default(),
         })
         .unwrap();
-        // data.json can't be written now (a folder in its place)
-        std::fs::create_dir(path(&p)).unwrap();
+        // data.json can't be written now (a folder where it is written first)
+        std::fs::create_dir(path(&p).with_extension("json.tmp")).unwrap();
         let item = || Item {
             uri: Some("tidal:track:1".into()),
             track_id: None,
@@ -601,10 +635,63 @@ mod tests {
         assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
         assert!(prefs_changed(&p, "tidal").is_err());
         // Nothing waits to be written, nothing woke the writes, and the page's list is as it was
-        assert!(load(&p).pending.is_empty());
+        assert!(load(&p).unwrap().pending.is_empty());
         let wait = std::time::Duration::from_millis(50);
         assert!(tokio::time::timeout(wait, p.data_now.notified()).await.is_err());
-        assert_eq!(bookmarks(State(p.clone())).await.0["uris"], json!([]));
+        assert_eq!(body(bookmarks(State(p.clone())).await).await["uris"], json!([]));
+    }
+
+    async fn body(r: Response) -> Value {
+        serde_json::from_slice(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn what_the_phone_keeps_that_cant_be_read_stays_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Phone::open(super::super::Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        // A Bookmark removed here waits to be written, then data.json is cut short (a power cut)
+        change(&p, |l| {
+            l.pending.push(Pending::Bookmark {
+                url: "https://tidal.com/browse/track/1".into(),
+                on: false,
+                at: 5,
+            })
+        })
+        .unwrap();
+        let whole = std::fs::read(path(&p)).unwrap();
+        let cut = &whole[..whole.len() / 2];
+        std::fs::write(path(&p), cut).unwrap();
+        assert!(load(&p).is_err());
+        // A new Bookmark isn't kept over it (that would lose the one waiting): an error, the file
+        // as it was; the Bookmarks are an error too, not an empty list
+        let r = add(
+            State(p.clone()),
+            Json(Item {
+                uri: Some("tidal:track:2".into()),
+                track_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(std::fs::read(path(&p)).unwrap(), cut);
+        let r = bookmarks(State(p.clone())).await;
+        assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        // The sync neither writes nor reads the person's data meanwhile (nothing replaces it)
+        let s = super::super::stalled::homeserver().await;
+        let acct = s.account();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(10), sync(&p, &acct))
+            .await
+            .expect("the sync ends without the homeserver");
+        assert_eq!(r, Report::default());
+        assert_eq!(s.taken.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(path(&p)).unwrap(), cut);
     }
 
     #[test]
