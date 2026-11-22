@@ -1,7 +1,7 @@
 // The app's commands, each allowed by name: the connect page (capabilities/default.json) gets
 // the connect page's; the node's page (and the offline page) only the player's and the
 // downloads', through a capability the app adds for their origin (src/native.rs,
-// `PAGE_COMMANDS`).
+// `PAGE_COMMANDS`); phone mode's page also `phone_leave` (src/phone.rs, `PHONE_COMMANDS`).
 const COMMANDS: &[&str] = &[
     "saved",
     "open_saved",
@@ -9,6 +9,11 @@ const COMMANDS: &[&str] = &[
     "follow_moved",
     "discover_nodes",
     "ring_connect",
+    "phone_saved",
+    "phone_available",
+    "phone_ring",
+    "open_phone",
+    "phone_leave",
     "ring_cancel",
     "open_ring",
     "forget",

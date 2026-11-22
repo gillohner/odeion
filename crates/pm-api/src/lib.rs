@@ -38,9 +38,8 @@ pub mod backup;
 pub mod bandcamp;
 pub mod bookmarks;
 pub mod bundled;
-mod client_mask;
 pub mod comments;
-pub mod dash;
+pub use pm_sources::dash;
 pub mod deezer;
 pub mod devices;
 pub mod discover;
@@ -54,7 +53,7 @@ pub mod first_steps;
 pub mod gpodder;
 pub mod groups;
 pub mod health;
-pub mod hls;
+pub use pm_sources::hls;
 pub mod home;
 pub mod identify;
 pub mod imports;
@@ -75,6 +74,7 @@ pub mod opensubsonic;
 pub mod party;
 pub mod peer;
 pub mod people;
+pub(crate) mod person_store;
 pub mod personal;
 pub mod personal_collections;
 pub mod pinakes_reader;
@@ -90,12 +90,12 @@ pub mod qobuz;
 pub mod quality;
 pub mod radio;
 pub mod radio_sources;
-pub mod releases;
+pub use pm_sources::releases;
 pub mod remote;
 pub mod reviews;
 pub mod roon_import;
 pub mod search;
-pub mod segmented;
+pub use pm_sources::segmented;
 pub(crate) mod send_queue;
 pub mod shared;
 pub mod signin;
@@ -167,6 +167,12 @@ impl ApiError {
 impl From<pm_library::LibraryError> for ApiError {
     fn from(e: pm_library::LibraryError) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    }
+}
+
+impl From<pm_sources::SourceError> for ApiError {
+    fn from(e: pm_sources::SourceError) -> Self {
+        Self::new(e.status, e.message)
     }
 }
 
@@ -24018,6 +24024,9 @@ exec sleep 300
 
     /// Artist release sections (their own file, so parallel work doesn't meet at one anchor).
     mod release_sections;
+
+    /// TIDAL's segmented streams (`pm_sources::segmented`) through the node's frame sources.
+    mod segmented_streams;
 
     /// Links on the node in a queue never carry a sign-in (their own file).
     mod queue_links;

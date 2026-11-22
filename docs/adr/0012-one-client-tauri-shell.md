@@ -1,6 +1,7 @@
 # ADR 0012: One client: the node's web UI in a Tauri 2 shell; the egui app is frozen
 
 Status: accepted, 2026-10-20 (the shell); retiring `pm-app` accepted by the owner 2026-10-21 and done the same day.
+Amended by [ADR 0018](0018-phone-mode-one-client-two-backends.md) (2026-11-21): the Android app also works without a node (phone mode), with the same page served by a backend inside the app.
 
 ## Context
 
@@ -42,6 +43,7 @@ UI on machines where the app's WebView is missing.
 ## Consequences
 
 * The app shows nothing useful without a node. That is the product: the node is the library.
+  (Amended by ADR 0018: on Android, phone mode works without one.)
 * The browser zone in the WebView is not bit-perfect; bit-perfect playback on a desktop goes
   through the built-in player, a zone with the node's signal path.
 * Android needs two things outside Rust: cleartext HTTP to LAN nodes (`http://192.168…`), and

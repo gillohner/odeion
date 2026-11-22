@@ -330,17 +330,15 @@ fn urlencode_path(name: &str) -> String {
     out
 }
 
-impl SourceTrack {
-    /// The queue item that streams this track.
-    pub fn queue_item(&self, item: &SourceItem) -> QueueItem {
-        let mut q = QueueItem::new(self.url.clone());
-        q.title = Some(self.title.clone());
-        q.artist = self.artist.clone().or_else(|| item.creator.clone());
-        q.album = Some(item.title.clone());
-        q.duration_ms = self.duration_ms;
-        q.image = item.image.clone();
-        q
-    }
+/// The queue item that streams `track` of `item`.
+pub fn queue_item(track: &SourceTrack, item: &SourceItem) -> QueueItem {
+    let mut q = QueueItem::new(track.url.clone());
+    q.title = Some(track.title.clone());
+    q.artist = track.artist.clone().or_else(|| item.creator.clone());
+    q.album = Some(item.title.clone());
+    q.duration_ms = track.duration_ms;
+    q.image = item.image.clone();
+    q
 }
 
 #[cfg(test)]
@@ -447,7 +445,7 @@ mod tests {
         assert_eq!(it.tracks[1].title, "Loser");
         assert_eq!(it.tracks[1].format, "VBR MP3");
         assert_eq!(it.tracks[1].duration_ms, Some(460_000));
-        let q = it.tracks[1].queue_item(&it);
+        let q = queue_item(&it.tracks[1], &it);
         assert_eq!(q.album.as_deref(), Some("Barton Hall"));
         assert_eq!(q.artist.as_deref(), Some("Grateful Dead"));
         assert_eq!(lucene("a+b (c)"), "a\\+b \\(c\\)");

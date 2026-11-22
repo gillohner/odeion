@@ -14,26 +14,22 @@
 //! the browser sign-in's ([`tidal_pkce_client`], "Sign in with TIDAL", the only one TIDAL serves
 //! lossless and hi-res to) and the device-code sign-in's ([`tidal_device_client`]). They come
 //! only from the build environment (`PM_TIDAL_PKCE_CLIENT_ID` / `_SECRET`,
-//! `PM_TIDAL_DEVICE_CLIENT_ID` / `_SECRET`, release secrets), compiled in masked by `build.rs`
-//! (`client_mask`), never plain in the repository or the binary's strings. Masking is not a
+//! `PM_TIDAL_DEVICE_CLIENT_ID` / `_SECRET`, release secrets), compiled in masked by pm-sources' `build.rs`
+//! (`pm_sources::client_mask`), never plain in the repository or the binary's strings. Masking is not a
 //! security boundary. A build without them has neither: the browser sign-in is then unavailable
 //! and the code sign-in needs a device client the owner enters, which always wins over the
 //! built-in one.
 
 use pm_model::brand::build_env;
 
-mod built {
-    include!(concat!(env!("OUT_DIR"), "/tidal_clients.rs"));
-}
-
 /// The build's TIDAL device client (id, secret) for the code sign-in, if it carries one.
 pub fn tidal_device_client() -> Option<(String, String)> {
-    crate::client_mask::unmask_pair(built::DEVICE)
+    pm_sources::tidal::built_in_device_client()
 }
 
 /// The build's TIDAL browser sign-in client (id, secret; OAuth with PKCE), if it carries one.
 pub fn tidal_pkce_client() -> Option<(String, String)> {
-    crate::client_mask::unmask_pair(built::PKCE)
+    pm_sources::tidal::built_in_pkce_client()
 }
 
 /// The project's TIDAL app (public client id).
@@ -264,7 +260,7 @@ mod tests {
     /// build without them has neither, and a node with no client of the owner's then has none.
     #[test]
     fn tidal_clients_only_from_the_build_environment_masked() {
-        let build = include_str!("../build.rs");
+        let build = include_str!("../../pm-sources/build.rs");
         let release = include_str!("../../../.github/workflows/release.yml");
         let docker = include_str!("../../../Dockerfile");
         let armv7 = include_str!("../../../tools/release/build-armv7.sh");
@@ -308,7 +304,9 @@ mod tests {
         // What a release build carries is in no source file in plain
         let sources = [
             include_str!("project_apps.rs"),
-            include_str!("client_mask.rs"),
+            include_str!("../../pm-sources/src/client_mask.rs"),
+            include_str!("../../pm-sources/src/tidal/full.rs"),
+            include_str!("../../pm-sources/src/tidal/mod.rs"),
             include_str!("tidal_unofficial.rs"),
             include_str!("tidal.rs"),
             build,
