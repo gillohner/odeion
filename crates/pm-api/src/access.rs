@@ -467,7 +467,6 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
             (Get, "/library/stats"),
             (Get, "/library/tracks"),
             (Get, "/library/tracks/{id}"),
-            (Get, "/library/tracks/{id}/edit"),
             (Get, "/library/tracks/{id}/lyrics"),
             (Get, "/lyrics"),
             (Get, "/library/tracks/{id}/versions"),
@@ -542,7 +541,6 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
     (
         Own,
         &[
-            (Get, "/me/music"),
             (Get, "/collections"),
             (Post, "/collections"),
             (Get, "/collections/{id}"),
@@ -612,6 +610,8 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
     (
         OwnSignInState,
         &[
+            (Delete, "/sources/qobuz/unofficial/login"),
+            (Delete, "/sources/tidal/unofficial/login"),
             (Get, "/sources/{source}/signin"),
             (Delete, "/sources/{source}/signin"),
             (Get, "/sources/tidal/status"),
@@ -630,20 +630,19 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
             (Get, "/sources/tidal/login"),
             (Put, "/sources/tidal/unofficial"),
             (Post, "/sources/tidal/unofficial/login"),
-            (Delete, "/sources/tidal/unofficial/login"),
             (Post, "/sources/tidal/unofficial/browser"),
             (Post, "/sources/tidal/unofficial/browser/finish"),
             (Post, "/sources/tidal/callback"),
             (Post, "/sources/spotify/callback"),
             (Put, "/sources/qobuz/unofficial"),
             (Post, "/sources/qobuz/unofficial/login"),
-            (Delete, "/sources/qobuz/unofficial/login"),
             (Get, "/sources/spotify/login"),
         ],
     ),
     (
         OwnerMusic,
         &[
+            (Get, "/me/music"),
             (Get, "/library/new-releases"),
             (Post, "/library/new-releases/refresh"),
             (Get, "/library/history"),
@@ -780,6 +779,7 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
     (
         LibraryManage,
         &[
+            (Get, "/library/tracks/{id}/edit"),
             (Delete, "/library/tracks/{id}"),
             (Put, "/library/tracks/{id}/edit"),
             (Delete, "/library/tracks/{id}/edit"),
@@ -1254,7 +1254,7 @@ mod tests {
 
     /// The table gives listeners and party guests what the path lists gave them, for every route
     /// and method, under each source policy and zone list, with the owner's zone list set, unset
-    /// and unreadable.
+    /// and unreadable. The four places where it differs on purpose are named in the loop.
     #[tokio::test]
     async fn listeners_and_guests_reach_what_they_did() {
         let dir = tempfile::tempdir().unwrap();
@@ -1298,16 +1298,38 @@ mod tests {
                                     format!("{verb:?} {path} ({cap:?}; policy {policy:?}, zones {zones:?})");
                                 let was = before::listener_refusal(&s, &method, &path);
                                 let now = decide_path(&s, &LISTENER, &method, &path);
-                                assert_eq!(
-                                    was.is_some(),
-                                    now.is_some(),
-                                    "listener: {ctx}: was {was:?}, now {now:?}"
+                                // Where the table differs from the path lists on purpose:
+                                // the owner's own files and a song's saved edit passed the lists
+                                // and were refused by their handlers; they are refused here now
+                                let closed = matches!(
+                                    (verb, *route),
+                                    (Verb::Get, "/me/music") | (Verb::Get, "/library/tracks/{id}/edit")
                                 );
-                                // The refusals that say what to do about them keep their words
-                                if was.is_some_and(|w| {
-                                    w == crate::accounts::NODE_SOURCES_ONLY || w.contains("zone")
-                                }) {
-                                    assert_eq!(was, now, "listener: {ctx}");
+                                // Signing out of their own stays possible while the node plays
+                                // through its own sign-ins: these two were left out of that
+                                let sign_out = policy == Some("node")
+                                    && matches!(
+                                        (verb, *route),
+                                        (Verb::Delete, "/sources/tidal/unofficial/login")
+                                            | (Verb::Delete, "/sources/qobuz/unofficial/login")
+                                    );
+                                if closed {
+                                    assert!(was.is_none() && now.is_some(), "listener: {ctx}");
+                                } else if sign_out {
+                                    assert_eq!(was, Some(crate::accounts::NODE_SOURCES_ONLY), "{ctx}");
+                                    assert_eq!(now, None, "listener: {ctx}");
+                                } else {
+                                    assert_eq!(
+                                        was.is_some(),
+                                        now.is_some(),
+                                        "listener: {ctx}: was {was:?}, now {now:?}"
+                                    );
+                                    // The refusals that say what to do about them keep their words
+                                    if was.is_some_and(|w| {
+                                        w == crate::accounts::NODE_SOURCES_ONLY || w.contains("zone")
+                                    }) {
+                                        assert_eq!(was, now, "listener: {ctx}");
+                                    }
                                 }
                                 let was = before::guest_refusal(&method, &path);
                                 let now = guest_refusal(&method, &path);
