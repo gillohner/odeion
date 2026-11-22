@@ -91,6 +91,22 @@ for (const [c, at] of [...used.entries()].sort()) {
   }
 }
 
+// A form's submit handler hands its work to the page's busy mark: a block-bodied handler that
+// starts a save and returns nothing leaves the button without progress and lets a second Enter
+// send again (every onsubmit goes through busy(), which can only wait for a promise it is given).
+// `return` the save's promise, or make the handler async. (What it cannot see: an async handler
+// that starts a save without awaiting it, or a body that returns early and then starts one.)
+for (const [file, src] of files) {
+  if (!file.endsWith('.js')) continue;
+  for (const m of src.matchAll(/\.onsubmit\s*=\s*(async\s*)?\(([\w\s]*)\)\s*=>\s*\{/g)) {
+    if (m[1]) continue;
+    let i = m.index + m[0].length; let depth = 1;
+    while (i < src.length && depth) { const ch = src[i]; if (ch === '{') depth++; else if (ch === '}') depth--; i++; }
+    const body = src.slice(m.index + m[0].length, i - 1);
+    if (!/\breturn\b|\bawait\b/.test(body)) problems.push(`${where(file, src, m.index)}  a form's submit handler returns nothing: return the save's promise (or make it async), so its button shows progress and a second Enter does not send again: ${body.trim().slice(0, 70)}`);
+  }
+}
+
 // 4. durations on the motion scale
 {
   const cssFiles = fs.readdirSync(DIR).filter((f) => f.endsWith('.css'));

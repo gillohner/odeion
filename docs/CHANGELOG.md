@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **Saving a form shows progress on its button, and Enter twice no longer sends twice.** Nine forms started their save without telling the page: the AcoustID key, the Spotify app, a pasted sign-in, Bandcamp, Soloist (two), the Spotify Connect device, SoundCloud (two). Their button now shows the spinner at once and ignores a second Enter until the answer is in. Enter in a field that sits beside a button (add a folder, the contact address, a shared link, radio search) now presses that button, with the same progress; a shared link opened with Enter twice was looked up twice. Downloads' Play and Shuffle show their progress too.
+
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21
