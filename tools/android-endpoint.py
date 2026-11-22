@@ -280,19 +280,45 @@ def registered():
 PROMPT = re.compile(r'text="(Don.t allow|Deny)"', re.I)
 
 
+def not_responding(nodes):
+    """An "isn't responding" dialog in a dump: None when there is none; ("app", title, None) when it
+    is the app's own (a failure, never waited out); ("system", title, its Wait button or None) for
+    another app's. A loaded CI emulator shows "Pixel Launcher isn't responding" over the app, and
+    the dump then holds only that dialog: every wait behind it timed out (runs 45034884139, twice)."""
+    anr = next((n for n in nodes if re.search(r'text="[^"]*isn\S{0,6}t responding', n)), None)
+    if not anr:
+        return None
+    title = html.unescape(re.search(r'text="([^"]*)"', anr).group(1))
+    if re.search(r"odeion|pubky", title, re.I):
+        return ("app", title, None)
+    wait = next((n for n in nodes if re.search(r'resource-id="android:id/aerr_wait"|text="Wait"', n)), None)
+    return ("system", title, wait)
+
+
 def ui_nodes():
-    """The screen's nodes; Android 13+'s notification prompt, whenever it shows, is refused."""
-    for _ in range(3):
+    """The screen's nodes; Android 13+'s notification prompt, whenever it shows, is refused, and
+    another app's "isn't responding" dialog is answered with Wait."""
+    for _ in range(4):
         adb("shell", "uiautomator", "dump", "/sdcard/ui.xml")
         xml = adb("exec-out", "cat", "/sdcard/ui.xml")
         nodes = re.findall(r"<node [^>]*>", xml)
         prompt = next((n for n in nodes if PROMPT.search(n)), None)
-        if not prompt:
-            return nodes
-        x, y = center(prompt)
-        adb("shell", "input", "tap", str(x), str(y))
-        log("notifications refused")
-        time.sleep(1)
+        if prompt:
+            x, y = center(prompt)
+            adb("shell", "input", "tap", str(x), str(y))
+            log("notifications refused")
+            time.sleep(1)
+            continue
+        stuck = not_responding(nodes)
+        if stuck and stuck[0] == "app":
+            raise RuntimeError(f"the app itself is not responding ({stuck[1]!r})")
+        if stuck and stuck[2]:
+            x, y = center(stuck[2])
+            adb("shell", "input", "tap", str(x), str(y))
+            log(f"a system app was not responding ({stuck[1]!r}): tapped Wait")
+            time.sleep(2)
+            continue
+        return nodes
     return nodes
 
 
@@ -1571,6 +1597,21 @@ def self_test():
     check(named("Play Tone")('<node text="" content-desc="Play Tone, Play from here" />'), "a name with the tooltip after it")
     check(not named("More")('<node subtext="More" content-desc="" />'), "REJECT: another attribute ending in text")
     check(next((n for n in row if named("More")(n)), None) is row[3], "a bare More is only the node named More")
+    # Another app's "isn't responding" dialog is waited out; the app's own is a failure
+    def dialog(title):
+        return re.findall(r"<node [^>]*>", _ui(
+            ("android", "android:id/alertTitle", title, ""), ("android", "android:id/aerr_close", "Close app", ""),
+            ("android", "android:id/aerr_wait", "Wait", "")))
+
+    launcher = not_responding(dialog("Pixel Launcher isn't responding"))
+    check(launcher is not None and launcher[0] == "system" and launcher[1] == "Pixel Launcher isn't responding"
+          and 'aerr_wait' in (launcher[2] or ""), "a system app not responding: its Wait button is found")
+    check(not_responding(dialog("Pixel Launcher isn&apos;t responding"))[0] == "system", "the same with the apostrophe escaped")
+    own = not_responding(dialog("Odeion isn't responding"))
+    check(own is not None and own[0] == "app" and own[2] is None, "REJECT: the app's own dialog is a failure, never waited out")
+    check(not_responding(re.findall(r"<node [^>]*>", SAMPLE_APP_HOME)) is None, "no dialog on the app's own page")
+    check(not_responding(['<node text="" content-desc="Song isn\'t responding" bounds="[0,0][1,1]" />']) is None,
+          "REJECT: the words in a name (content-desc) are not the dialog")
     if failed:
         print(f"self-test FAILED: {len(failed)} check(s)")
         return 1
