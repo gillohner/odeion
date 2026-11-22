@@ -182,12 +182,18 @@ def find(pred, timeout, what):
             time.sleep(1)
             continue
         # A loaded runner can show "Pixel Launcher isn't responding" over the app; the dump then
-        # holds only that dialog. Wait for the system app instead of timing out behind it.
-        if any(re.search(r"isn\S{0,6}t responding", n) for n in nodes):
+        # holds only that dialog. Wait for the system app instead of timing out behind it. The
+        # app's own ANR is a failure, never waited out.
+        anr = next((n for n in nodes if re.search(r"isn\S{0,6}t responding", n)), None)
+        if anr:
+            title = re.search(r'text="([^"]*)"', anr).group(1)
+            if re.search(r"odeion|pubky", title, re.I):
+                shot("app-not-responding")
+                raise RuntimeError(f"the app itself is not responding ({title!r})")
             wait = next((n for n in nodes if re.search(r'resource-id="android:id/aerr_wait"|text="Wait"', n)), None)
             if wait:
                 adb("shell", "input", "tap", *map(str, center(wait)))
-                log("a system app was not responding: tapped Wait")
+                log(f"a system app was not responding ({title!r}): tapped Wait")
                 time.sleep(2)
                 continue
         hit = next((n for n in nodes if pred(n)), None)
@@ -265,7 +271,8 @@ def main():
     def confirm_update(name="2-confirm"):
         """Tap Android's Update once the dialog has settled: the same bounds in two dumps 2 s apart."""
         def pred(n):
-            return "packageinstaller" in n and re.search(r'text="(Update|Install|UPDATE|INSTALL)"', n)
+            return ("packageinstaller" in n and 'enabled="true"' in n
+                    and re.search(r'text="(Update|Install|UPDATE|INSTALL)"', n))
         node = find(pred, 240, "Android's install confirmation")
         for _ in range(10):
             time.sleep(2)
@@ -273,6 +280,8 @@ def main():
             if center(again) == center(node):
                 break
             node = again
+        else:
+            log("Android's confirmation kept moving for 20 s; tapping where it is now")
         shot(name)
         tap(again, "Android's Update")
     try:
@@ -327,7 +336,11 @@ def main():
         confirm_update()
         deadline = time.time() + 240
         while time.time() < deadline and version_code() != NEW_CODE:
-            if "INSTALL_FAILED_ABORTED" in logtext() and not report["steps"].get("confirm_retry"):
+            aborted = logtext().count("INSTALL_FAILED_ABORTED")
+            if aborted >= 2:
+                failures.append("update: Android counted the confirm tap as a cancel twice (INSTALL_FAILED_ABORTED)")
+                break
+            if aborted and not report["steps"].get("confirm_retry"):
                 # Seen on a slow runner: the dialog's button was in the dump before it was drawn, and
                 # Android counted the tap as a cancel. Ask once more; a second cancel fails the step.
                 report["steps"]["confirm_retry"] = True
