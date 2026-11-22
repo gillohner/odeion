@@ -29,11 +29,18 @@ jobs:
   # when what the image is made of changes: the Dockerfile, Cargo manifests or lock, deploy/docker,
   # the release tooling or a workflow; always on main and by hand. A code change that breaks the
   # build fails `check` and `node` on the same pull request.
+  # `rust` is false for a pull request that changes the web UI alone: nothing but the page's files
+  # (crates/pm-web/static), the fixture pages (tools/ui-*.js and their list) and docs. No Rust code
+  # or test can tell such a head from its base, apart from the tests that read the page's files,
+  # so the jobs that only build and test Rust are skipped (check, desktop, alsa-loopback, slimproto,
+  # plex, audiobookshelf, bundle, webdav) and `pages` runs those tests. The node is still built
+  # (the files are compiled into it) and every browser job runs. Main and runs by hand do everything.
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      rust: ${{ steps.diff.outputs.rust }}
       docker: ${{ steps.diff.outputs.docker }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -46,7 +53,7 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           if [ "$EVENT" = workflow_dispatch ] || [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-            printf 'code=true\ndocker=true\n' >> "$GITHUB_OUTPUT"; exit 0
+            printf 'code=true\nrust=true\ndocker=true\n' >> "$GITHUB_OUTPUT"; exit 0
           fi
           files=$(git diff --name-only "$BASE" "$GITHUB_SHA")
           code=$(printf '%s\n' "$files" | grep -Ev '^(docs/|NOTICE$|LICENSE$)|\.md$' | grep -c . || true)
@@ -54,12 +61,17 @@ jobs:
           # docs/access.md is read by a Rust test (pm-api access::tests): a change to it alone runs the code jobs
           held=$(printf '%s\n' "$files" | grep -cx 'docs/access\.md' || true)
           if [ "$code" -gt 0 ] || [ "$held" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
+          # Anything that is not the page's files, a fixture page or docs can reach Rust code
+          # (docs/APP-DATA.md, docs/access.md and a crate's own README are read by Rust tests, so they are not "docs" here)
+          rust=$(printf '%s\n' "$files" | sed -E 's#^docs/(APP-DATA|access)\.md$#rust:&#' | grep -Ev '^(crates/pm-web/static/|tools/ui-[^/]+\.js$|tools/ui-fixtures\.list$|docs/|NOTICE$|LICENSE$|[^/]+\.md$)' | grep -c . || true)
+          echo "$rust outside the web UI's files, the fixture pages and the docs"
+          if [ "$EVENT" = push ] || [ "$rust" -gt 0 ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
           image=$(printf '%s\n' "$files" | grep -Ec '^(Dockerfile|\.dockerignore|Cargo\.(toml|lock)|crates/[^/]+/Cargo\.toml|rust-toolchain(\.toml)?|deploy/docker/|tools/release/|\.github/workflows/)' || true)
           if [ "$EVENT" = push ] || [ "$image" -gt 0 ]; then echo "docker=true" >> "$GITHUB_OUTPUT"; else echo "docker=false" >> "$GITHUB_OUTPUT"; fi
           echo "$image files the image is built from"
   check:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     # Usually 15-23 min; a Cargo.lock change misses the cache and has run past 25
     timeout-minutes: 40
@@ -128,6 +140,23 @@ jobs:
           path: node-debug.tgz
           compression-level: 0
           retention-days: 2
+  # A pull request that changes the web UI alone (`rust` above): the tests that read the page's
+  # files. pm-web's own (what the router answers, the pages' policy), and the page against the
+  # API's lists (pm-api's tests/pages.rs: every view is one a problem report and the usage schema
+  # can name). `check` runs them with everything else when anything else changed.
+  pages:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.rust != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test -p pm-web
+      - run: cargo test -p pm-api --test pages
   # The node's download archive carries README.md, docs/deploy.md and docs/guides/ at their repo
   # paths, so the links between them work unpacked; the TrueNAS file mounts as many paths as it
   # says to edit. Runs on docs-only changes too.
@@ -168,7 +197,7 @@ jobs:
       - run: python3 -I tools/image-tag-copy-check.py
   desktop:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     # The app (Tauri 2: the web UI in a native window, plus a player) needs
     # WebKitGTK on Linux; it is outside the workspace so the other jobs do
     # not. Bundles for every platform come from the release workflow.
@@ -237,7 +266,7 @@ jobs:
     # 221 MB at 190 kB/s), and a build with an empty Rust cache did not finish within the old 20 minutes.
     runs-on: ubuntu-24.04
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.rust == 'true'
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -297,7 +326,8 @@ jobs:
     # reconnects (tools/slim-squeezelite.py).
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: node
+    needs: [changes, node]
+    if: needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -316,7 +346,8 @@ jobs:
     # version and checksum, unpacked and run without Docker (tools/plex-source.py).
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: node
+    needs: [changes, node]
+    if: needs.changes.outputs.rust == 'true'
     env:
       PMS_VERSION: 1.43.5.11029-6bf8af3f0
       PMS_SHA256: 562edf9456be338a24182f837fe5d532d7e75ba7b3d5f6bea2503083e77622e1
@@ -342,7 +373,8 @@ jobs:
     # release (tag and commit), run without Docker (tools/abs-source.py).
     runs-on: ubuntu-24.04
     timeout-minutes: 40
-    needs: node
+    needs: [changes, node]
+    if: needs.changes.outputs.rust == 'true'
     env:
       ABS_TAG: v2.37.1
       ABS_COMMIT: 3563d49424d50170324de9236a24c591b6d965e9
@@ -380,7 +412,8 @@ jobs:
     # node manages it, what listens where, and that no generated password reaches a log.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    needs: node
+    needs: [changes, node]
+    if: needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -502,7 +535,8 @@ jobs:
     # password: scan, play in a zone, the browser stream, rescan, remove (tools/webdav-source.py).
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: node
+    needs: [changes, node]
+    if: needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
