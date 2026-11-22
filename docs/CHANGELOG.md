@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **Search no longer uses more memory the longer the node runs.** The node keeps search answers for five minutes, but never dropped the old ones: every new search text, one per keystroke while you type, stayed in memory until a restart. It now keeps at most 512 answers and drops the old ones first. A search text over 2,000 characters is refused.
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21
