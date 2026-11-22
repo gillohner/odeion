@@ -728,6 +728,7 @@ jobs:
           ui-phone-song-rows.js phone-song-rows-shots
           ui-playlist-remove-window.js playlist-remove-window-shots
           ui-playlist-menu-remove-focus.js playlist-menu-remove-focus-shots
+          ui-playlist-filter-remove-focus.js playlist-filter-remove-focus-shots
           ui-item-links.js item-links-shots
           ui-item-source-line.js item-source-line-shots
           ui-phone-hero-reach.js phone-hero-reach-shots
