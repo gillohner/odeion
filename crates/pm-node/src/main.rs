@@ -195,6 +195,8 @@ enum DiscoverCmd {
 }
 
 async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    // From the first moment: a stop asked for while the node is still starting must not be lost
+    let stop = watch_for_stop();
     std::fs::create_dir_all(&cfg.data_dir)?;
     // First, so a port in use stops the start at once and says why (another node running)
     let listener = pm_api::bind(&cfg.api.listen).await?;
@@ -562,7 +564,74 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::identify::spawn_recheck(&state);
     let _announced = announce(cfg, &state);
     let _renderers = renderers(cfg, &state);
-    pm_api::serve_listener(state, listener).await
+    pm_api::serve_listener_until(state.clone(), listener, stop.when_serving()).await?;
+    tracing::info!("stopping");
+    state.stop_for_exit(std::time::Duration::from_secs(3)).await;
+    Ok(())
+}
+
+/// The node's ear for "stop" ([`stop_signal`]), from the start of [`serve`].
+struct Stop {
+    serving: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    asked: tokio::sync::watch::Receiver<bool>,
+}
+
+/// Start listening for a stop. Until the node serves ([`Stop::when_serving`]) there is nothing
+/// to wind down (no request, no zone playing), so a stop asked for during the start ends the
+/// process there and then; a node that is the first process of a container would otherwise not
+/// react to SIGTERM at all until its start is over.
+fn watch_for_stop() -> Stop {
+    let serving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tell, asked) = tokio::sync::watch::channel(false);
+    let started = serving.clone();
+    tokio::spawn(async move {
+        stop_signal().await;
+        if !started.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!("asked to stop while starting");
+            std::process::exit(0);
+        }
+        let _ = tell.send(true);
+    });
+    Stop { serving, asked }
+}
+
+impl Stop {
+    /// From now on a stop is wound down by the caller: resolves when one is asked for.
+    fn when_serving(mut self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.serving.store(true, std::sync::atomic::Ordering::SeqCst);
+        async move {
+            // (an error: the watching task is gone, so no stop can come)
+            if self.asked.wait_for(|asked| *asked).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
+/// Resolves when the node is asked to stop: SIGTERM (`docker stop`, systemd) or Ctrl-C. As
+/// the first process of a container the node gets no default action for SIGTERM, so without
+/// this a stop waited out Docker's grace period and ended in a kill.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = term.recv() => tracing::info!("SIGTERM"),
+                    _ = tokio::signal::ctrl_c() => tracing::info!("interrupted"),
+                }
+            }
+            Err(e) => {
+                tracing::warn!("cannot listen for SIGTERM: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Remote access settings from `[remote]` for the tunnel's listener at `target`, or `None` when
@@ -711,10 +780,12 @@ async fn upload(cfg: &NodeConfig, files: &[PathBuf]) -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     // First, while this is the only thread: ODEION_ settings onto the PM_ names the code reads
     let env_compat = pm_model::brand::apply_env_compat();
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(env_compat))
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let done = runtime.block_on(run(env_compat));
+    // Work still on a blocking thread (a scan, a copy) gets a second and is then cut, as a kill
+    // would cut it: a node asked to stop must exit. A scan and a copy carry on at the next start
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    done
 }
 
 async fn run(env_compat: pm_model::brand::EnvPlan) -> anyhow::Result<()> {

@@ -1016,12 +1016,46 @@ pub fn bind_error(listen: &str, e: &std::io::Error) -> String {
 
 /// Serve on an already bound listener (tests bind port 0).
 pub async fn serve_listener(state: Arc<NodeState>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+    serve_listener_until(state, listener, std::future::pending()).await
+}
+
+/// How long requests being answered get to finish once the node is told to stop. Connections
+/// that stay open by design (the event stream, audio to a player) are not waited for beyond it:
+/// they end when the process does.
+pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`serve_listener`] until `stop` resolves (the node was asked to stop): no new connection is
+/// taken, requests being answered get [`STOP_GRACE`] to finish, and the call returns. Connections
+/// still open then are left to end with the process.
+pub async fn serve_listener_until(
+    state: Arc<NodeState>,
+    listener: tokio::net::TcpListener,
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let (told, mut was_told) = tokio::sync::watch::channel(false);
     // Peer addresses: the renderer answers LAN peers only (peer.rs)
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
+    let served = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            stop.await;
+            let _ = told.send(true);
+        }),
+    );
+    let grace_over = async move {
+        // (an error: `stop` never resolved and the server ended by itself)
+        if was_told.wait_for(|t| *t).await.is_ok() {
+            tokio::time::sleep(STOP_GRACE).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        r = served => r?,
+        () = grace_over => tracing::info!("connections still open after the grace period are not waited for"),
+    }
     Ok(())
 }
 

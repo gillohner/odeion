@@ -787,6 +787,42 @@ impl NodeState {
         zone
     }
 
+    /// Before the node exits: every zone stops (a player is told to stop, a device is closed;
+    /// the queues are saved as they are), waiting at most `within` for all of them, and the
+    /// library's write-ahead log is folded into its file.
+    pub async fn stop_for_exit(&self, within: std::time::Duration) {
+        let zones: Vec<Arc<Zone>> = self
+            .zones
+            .list()
+            .iter()
+            .filter_map(|z| self.zones.get(&z.id))
+            .collect();
+        for zone in &zones {
+            zone.stop();
+        }
+        let stopped = async {
+            for zone in &zones {
+                zone.wait_stopped().await;
+            }
+        };
+        if tokio::time::timeout(within, stopped).await.is_err() {
+            tracing::warn!("a zone did not stop in time; exiting anyway");
+        }
+        // On a thread of its own and with a limit: a holder of the library, or a scan in the
+        // middle of its writes, must not keep the node from exiting (the log is read at the
+        // next start either way)
+        let library = self.library.clone();
+        let checkpoint =
+            tokio::task::spawn_blocking(move || library.lock().expect("library poisoned").checkpoint());
+        match tokio::time::timeout(std::time::Duration::from_secs(2), checkpoint).await {
+            Ok(Ok(Ok(true))) => {}
+            Ok(Ok(Ok(false))) => tracing::info!("part of the library's log stays for the next start"),
+            Ok(Ok(Err(e))) => tracing::warn!("the library's log was not folded into its file: {e}"),
+            Ok(Err(e)) => tracing::warn!("the library's log was not folded into its file: {e}"),
+            Err(_) => tracing::warn!("the library was busy; its log is folded in at the next start"),
+        }
+    }
+
     /// Put the saved queue back into a freshly created zone (no playback).
     pub(crate) fn restore_queue(&self, zone: &Arc<Zone>) {
         let json = {

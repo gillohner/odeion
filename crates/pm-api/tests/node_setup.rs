@@ -933,3 +933,61 @@ async fn search_finds_new_and_renamed_songs_right_after_a_scan_or_an_edit() {
     // Put back: lib.rs a_song_put_back_is_found_by_search_at_once_without_a_scan (it holds the
     // scan slot, so restore's own scan can't drop the kept answer first)
 }
+
+/// Asked to stop, the server returns within its grace period although a connection that never
+/// ends by itself (the event stream) is open, and takes no new one; then the zones are stopped
+/// and the library's write-ahead log is folded into its file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_node_stops_when_asked_with_an_event_socket_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), vec![], just_null());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let (stop, asked) = tokio::sync::oneshot::channel::<()>();
+    let served = tokio::spawn(pm_api::serve_listener_until(s.clone(), l, async move {
+        let _ = asked.await;
+    }));
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/events?token={OWNER}"))
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .unwrap();
+    assert!(
+        matches!(first, Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_)))),
+        "the snapshot"
+    );
+    let info = reqwest::Client::new()
+        .get(format!("http://{addr}/v1/info"))
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(info.status().as_u16(), 200);
+
+    let asked_at = std::time::Instant::now();
+    stop.send(()).unwrap();
+    let ended = tokio::time::timeout(pm_api::STOP_GRACE + std::time::Duration::from_secs(5), served).await;
+    assert!(matches!(ended, Ok(Ok(Ok(())))), "the server returned: {ended:?}");
+    // (the event socket is no request being answered: the stop does not wait for it)
+    assert!(
+        asked_at.elapsed() < pm_api::STOP_GRACE + std::time::Duration::from_secs(1),
+        "an open event socket does not hold the stop: {:?}",
+        asked_at.elapsed()
+    );
+    assert!(
+        tokio::net::TcpStream::connect(addr).await.is_err(),
+        "no new connection is taken"
+    );
+
+    let wal = dir.path().join("lib.sqlite-wal");
+    s.library.lock().unwrap().set_setting("stop.test", "1").unwrap();
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+    s.stop_for_exit(std::time::Duration::from_secs(3)).await;
+    assert!(s
+        .zones
+        .list()
+        .iter()
+        .all(|z| z.transport == pm_zones::Transport::Stopped));
+    assert_eq!(std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0), 0);
+}

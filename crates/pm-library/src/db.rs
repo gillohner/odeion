@@ -1694,6 +1694,17 @@ impl Library {
         Ok(())
     }
 
+    /// Fold the write-ahead log into the database file (before the node stops: the file alone
+    /// then holds everything). `false` when another connection kept part of it from being folded
+    /// in (a scan in the middle of its writes): that part stays in the log, which SQLite reads
+    /// at the next open; nothing is lost either way.
+    pub fn checkpoint(&self) -> Result<bool> {
+        let busy: i64 = self
+            .lock()
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+        Ok(busy == 0)
+    }
+
     /// What a backup carries, counted (shown before a restore and compared after it).
     pub fn backup_counts(&self) -> Result<BackupCounts> {
         let conn = self.lock();
