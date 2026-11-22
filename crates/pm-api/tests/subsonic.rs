@@ -791,3 +791,195 @@ async fn a_jukebox_list_set_with_shuffle_on_plays_shuffled() {
         "shuffle off: the order sent"
     );
 }
+
+/// A `/v1` write as the owner.
+async fn owner_send(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", "Bearer pw")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        status.is_success(),
+        "{method} {uri}: {status} {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+/// A client saves a playlist with one `songId=` per song (the form the Subsonic API describes):
+/// every song is kept, in the order sent, in the query and in a form body. Saving over an
+/// existing playlist keeps what the client was never shown (an item that is no song of this
+/// library) and whether the playlist is shared.
+#[tokio::test]
+async fn a_playlist_saved_with_one_song_id_per_song_keeps_them_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    let mbids = [
+        "b1a9c0e9-d987-4042-ae91-78d6a3267d61",
+        "b1a9c0e9-d987-4042-ae91-78d6a3267d62",
+        "b1a9c0e9-d987-4042-ae91-78d6a3267d63",
+    ];
+    for (n, mbid) in mbids.iter().enumerate() {
+        write_wav(
+            &music.join(format!("{n:02}.wav")),
+            &format!("T{n}"),
+            "Band",
+            "Album",
+            n as u32 + 1,
+            Some(mbid),
+        );
+    }
+    // One song with no identity yet: kept on this node only
+    write_wav(&music.join("03.wav"), "T3", "Band", "Album", 4, None);
+    let db = dir.path().join("lib.sqlite");
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![music.clone()],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: Some("pw".into()),
+            subsonic_user: "alice".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    let app = router(s.clone());
+    let auth = "u=alice&p=pw&v=1.16.1&c=test&f=json";
+    call(&app, &format!("/rest/startScan?{auth}")).await;
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let r = call(&app, &format!("/rest/search3?query=&songCount=20&{auth}")).await;
+    let id_of = |title: &str| -> String {
+        r["searchResult3"]["song"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["title"] == title)
+            .unwrap_or_else(|| panic!("no song {title}: {r}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (t0, t1, t2, t3) = (id_of("T0"), id_of("T1"), id_of("T2"), id_of("T3"));
+    let titles = |r: &serde_json::Value| -> Vec<String> {
+        r["playlist"]["entry"]
+            .as_array()
+            .map(|e| {
+                e.iter()
+                    .map(|x| x["title"].as_str().unwrap().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // One songId per song, in the query
+    let r = call(
+        &app,
+        &format!("/rest/createPlaylist?name=Mix&songId={t2}&songId={t0}&songId={t3}&songId={t1}&{auth}"),
+    )
+    .await;
+    assert_eq!(r["status"], "ok", "{r}");
+    let pl = r["playlist"]["id"].as_str().unwrap().to_string();
+    // (songs with an identity first, then the ones kept on this node only)
+    assert_eq!(titles(&r), ["T2", "T0", "T1", "T3"], "{r}");
+
+    // The owner adds an item that is no song of this library and shares the playlist
+    let pid = &pl[3..];
+    owner_send(
+        &app,
+        "POST",
+        &format!("/v1/playlists/{pid}/items"),
+        serde_json::json!({"uris": ["https://musicbrainz.org/isrc/USQX91300105"]}),
+    )
+    .await;
+    let d = owner_send(
+        &app,
+        "PUT",
+        &format!("/v1/playlists/{pid}/visibility"),
+        serde_json::json!({"public": true}),
+    )
+    .await;
+    assert_eq!(d["summary"]["visibility"], "public", "{d}");
+    assert_eq!(d["playlist"]["items"].as_array().unwrap().len(), 4, "{d}");
+
+    // The client saves the playlist again in a new order, as a form
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/rest/createPlaylist?{auth}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(format!("playlistId={pl}&songId={t1}&songId={t0}")))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let r: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let r = r["subsonic-response"].clone();
+    assert_eq!(r["status"], "ok", "{r}");
+    assert_eq!(titles(&r), ["T1", "T0"], "{r}");
+    let (_, _, body) = owner_get(&app, &format!("/v1/playlists/{pid}")).await;
+    let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(d["summary"]["visibility"], "public", "still shared: {d}");
+    let uris: Vec<&str> = d["playlist"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(uris.len(), 3, "{d}");
+    assert_eq!(
+        uris[2], "https://musicbrainz.org/isrc/USQX91300105",
+        "the item the client was never shown stays"
+    );
+
+    // Adding and removing several at once
+    let r = call(
+        &app,
+        &format!("/rest/updatePlaylist?playlistId={pl}&songIdToAdd={t2}&songIdToAdd={t3}&{auth}"),
+    )
+    .await;
+    assert_eq!(r["status"], "ok", "{r}");
+    let r = call(&app, &format!("/rest/getPlaylist?id={pl}&{auth}")).await;
+    assert_eq!(titles(&r), ["T1", "T0", "T2", "T3"], "{r}");
+    let r = call(
+        &app,
+        &format!("/rest/updatePlaylist?playlistId={pl}&songIndexToRemove=0&songIndexToRemove=3&{auth}"),
+    )
+    .await;
+    assert_eq!(r["status"], "ok", "{r}");
+    let r = call(&app, &format!("/rest/getPlaylist?id={pl}&{auth}")).await;
+    assert_eq!(titles(&r), ["T0", "T2"], "{r}");
+    let (_, _, body) = owner_get(&app, &format!("/v1/playlists/{pid}")).await;
+    let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(d["summary"]["visibility"], "public", "{d}");
+    assert_eq!(d["playlist"]["items"].as_array().unwrap().len(), 3, "{d}");
+}
