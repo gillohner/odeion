@@ -400,12 +400,15 @@ fn replace_file(
     // (one left by a write the node did not live to finish)
     let _ = std::fs::remove_file(&new);
     let made = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&new)
-            .map_err(|e| failed(&new, e))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        // (for the node alone while it is written: the original's mode comes at the end)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&new).map_err(|e| failed(&new, e))?;
         write(&mut file)?;
         file.sync_all().map_err(|e| failed(&new, e))?;
         // As the original was: its owner and group (the group at least, or it is not replaced:
@@ -1327,6 +1330,12 @@ mod tests {
         // One left by a write that never finished is no obstacle
         std::fs::write(rewrite_path(&f), b"left over").unwrap();
         let r = replace_file(&f, |new| {
+            // While it is written the new file is the node's alone, whatever the original's mode
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(new.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+            }
             new.write_all(b"half of the new").unwrap();
             Err(failed(&f, "the share went away"))
         });
