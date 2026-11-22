@@ -405,9 +405,14 @@ pub(crate) async fn held_to_its_person(
         return Ok(sess);
     }
     if !asked {
-        let named = sess.user_id.take();
+        // TIDAL's answer first; else the account the pasted token names itself; what the paste
+        // says next to it only when neither does
+        let stated = sess.user_id.take();
         sess = fill_session(s, sess).await;
-        sess.user_id = sess.user_id.or(named);
+        sess.user_id = sess
+            .user_id
+            .or_else(|| token_account(&sess.access_token))
+            .or(stated);
     }
     sess.user_id = sess.user_id.as_deref().and_then(crate::accounts::account_id);
     let Some(account) = sess.user_id.as_deref() else {
@@ -421,6 +426,15 @@ pub(crate) async fn held_to_its_person(
     };
     who.account_free(&s.library.lock().expect("library poisoned"), STATE_KEY, account)?;
     Ok(sess)
+}
+
+/// The account a TIDAL token names itself (its `uid` claim).
+fn token_account(access_token: &str) -> Option<String> {
+    match &crate::tidal::jwt_claims(access_token)["uid"] {
+        Value::Number(n) => crate::accounts::account_id(&n.to_string()),
+        Value::String(s) => crate::accounts::account_id(s),
+        _ => None,
+    }
 }
 
 /// The account a renewal's answer names, when it is another one than the session was kept
@@ -438,7 +452,10 @@ pub(crate) fn renewed_for(
         Value::String(s) => crate::accounts::account_id(s),
         _ => None,
     };
-    let named = id(&answer["user_id"]).or_else(|| id(&answer["user"]["userId"]));
+    // (and when the answer names none next to its token, the token does)
+    let named = id(&answer["user_id"])
+        .or_else(|| id(&answer["user"]["userId"]))
+        .or_else(|| answer["access_token"].as_str().and_then(token_account));
     let was = kept.user_id.as_deref().and_then(crate::accounts::account_id);
     match named {
         Some(account) if was.as_deref() != Some(account.as_str()) => {

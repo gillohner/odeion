@@ -397,9 +397,9 @@ pub(crate) fn account_unknown(service: &str) -> ApiError {
     )
 }
 
-/// The account a stored sign-in is for, as its service names it: `user_id` of the sign-in or of
-/// its `session`. A TIDAL sign-in (`tidal`) kept without one is read from its token, which names
-/// the account (`uid`), so that a sign-in from before the id was kept is still somebody's.
+/// The account a stored sign-in is for, as its service names it: for TIDAL (`tidal`) the account
+/// its token names (`uid`), which a sign-in kept without an id has too; else `user_id` of the
+/// sign-in or of its `session`.
 fn account_of(stored: &str, tidal: bool) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(stored).ok()?;
     let named = |v: &serde_json::Value| match v {
@@ -407,15 +407,17 @@ fn account_of(stored: &str, tidal: bool) -> Option<String> {
         serde_json::Value::Number(n) => account_id_of(&n.to_string(), tidal),
         _ => None,
     };
-    named(&v["user_id"])
+    // TIDAL's token names its account itself: that counts before what was written next to it
+    let from_token = || {
+        let token = v["access_token"]
+            .as_str()
+            .or(v["session"]["access_token"].as_str())
+            .filter(|_| tidal)?;
+        named(&crate::tidal::jwt_claims(token)["uid"])
+    };
+    from_token()
+        .or_else(|| named(&v["user_id"]))
         .or_else(|| named(&v["session"]["user_id"]))
-        .or_else(|| {
-            let token = v["access_token"]
-                .as_str()
-                .or(v["session"]["access_token"].as_str())
-                .filter(|_| tidal)?;
-            named(&crate::tidal::jwt_claims(token)["uid"])
-        })
 }
 
 /// A TIDAL account id written one way, so that the same account compares equal however TIDAL or

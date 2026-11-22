@@ -27572,6 +27572,10 @@ exec sleep 300
         };
         let names_5 = jwt(r#"{"uid":5,"cc":"DE","exp":4000000000}"#);
         let names_nobody = jwt(r#"{"cc":"DE","exp":4000000000}"#);
+        // (a token file that says account 9 next to a token that names account 5)
+        let says_9_names_5 = base64::engine::general_purpose::STANDARD.encode(format!(
+            r#"{{"userid": 9, "countryCode": "DE", "accessToken": "{names_5}", "refreshToken": "r", "expiresAfter": 4000000000}}"#
+        ));
         // TIDAL answers every sign-in and every "who is this" with account 77
         let (base, _) = full_tracks_mock(Vec::new()).await;
         let dir = tempfile::tempdir().unwrap();
@@ -27633,6 +27637,11 @@ exec sleep 300
         owner_is("5");
         let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(pasted.clone())).await;
         assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        // (and what the file says next to its token does not count over what the token names)
+        let two_names = serde_json::json!({"text": says_9_names_5});
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(two_names)).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        assert!(bens().is_none());
         owner_is("1");
         let nobody = serde_json::json!({"text": names_nobody});
         let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(nobody)).await;
@@ -27663,6 +27672,12 @@ exec sleep 300
             );
             let why = renewed(serde_json::json!({"user_id": 1})).unwrap_err();
             assert!(why.contains("already signed in"), "{why}");
+            // (an answer that names nobody next to its token: the token names the account)
+            assert!(renewed(serde_json::json!({"access_token": jwt(r#"{"uid":1}"#)})).is_err());
+            assert_eq!(
+                renewed(serde_json::json!({"access_token": jwt(r#"{"uid":5}"#)})),
+                Ok(None)
+            );
             // (the id as text, or written another way, is read the same)
             assert_eq!(renewed(serde_json::json!({"user_id": "005"})), Ok(None));
             assert!(renewed(serde_json::json!({"user_id": "1"})).is_err());
@@ -27679,5 +27694,136 @@ exec sleep 300
             );
         }
         *imports::HOME_OVERRIDE.write().unwrap() = None;
+    }
+
+    /// A Spotify sign-in kept without its account (Spotify did not answer when it was made) is
+    /// asked about before someone else's sign-in is kept: the account turns out to be the
+    /// owner's, and the other person's sign-in with it is not kept. One that can't be asked
+    /// about stops the sign-in with what to do.
+    #[tokio::test]
+    async fn a_persons_spotify_sign_in_is_held_to_sign_ins_kept_without_their_account() {
+        // Spotify: every code is good, and every token is account "sp-1"
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let knows = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mock = Router::new()
+            .route(
+                "/api/token",
+                post(|| async {
+                    Json(serde_json::json!({"access_token": "new-at", "refresh_token": "r", "expires_in": 3600, "scope": "x"}))
+                }),
+            )
+            .route(
+                "/me",
+                get({
+                    let knows = knows.clone();
+                    move |headers: HeaderMap| {
+                        let knows = knows.clone();
+                        async move {
+                            // (while it "doesn't know", it does not answer for the owner's token)
+                            let owners = headers.get("authorization").and_then(|v| v.to_str().ok())
+                                == Some("Bearer owner-at");
+                            if owners && !knows.load(std::sync::atomic::Ordering::SeqCst) {
+                                (StatusCode::BAD_GATEWAY, Json(serde_json::json!({})))
+                            } else {
+                                (StatusCode::OK, Json(serde_json::json!({"id": "sp-1", "display_name": "One"})))
+                            }
+                        }
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        {
+            let mut ep = s.spotify.write().unwrap();
+            (ep.api_base, ep.accounts_base) = (base.clone(), base.clone());
+            ep.creds = spotify::SpotifyCredentials {
+                client_id: "cid".into(),
+                client_secret: "sec".into(),
+            };
+        }
+        let app = router(s.clone());
+        let ben_tok = accounts::mint(&s, ben).unwrap();
+        let row = |key: &str| s.library.lock().unwrap().get_setting(key).unwrap();
+        // The owner's sign-in, kept without its account
+        let owners = serde_json::json!({"access_token": "owner-at", "refresh_token": "r", "expires_at": pm_library::db::now_unix() + 3600, "scope": "x"}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("spotify.user", &owners)
+            .unwrap();
+        let sign_in = || {
+            let (app, ben_tok) = (app.clone(), ben_tok.clone());
+            async move {
+                let (st, v, h) = send_as(
+                    &app,
+                    "GET",
+                    "/v1/sources/spotify/login",
+                    Some(&ben_tok),
+                    &[],
+                    None,
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                let url = url::Url::parse(v["url"].as_str().unwrap()).unwrap();
+                let state = url
+                    .query_pairs()
+                    .find(|(k, _)| k == "state")
+                    .unwrap()
+                    .1
+                    .to_string();
+                let cookie = h.get("set-cookie").unwrap().to_str().unwrap();
+                let cookie = cookie.split(';').next().unwrap().to_string();
+                let (_, _, h) = send_as(
+                    &app,
+                    "GET",
+                    &format!("/spotify/callback?code=c&state={state}"),
+                    None,
+                    &[("cookie", cookie.as_str())],
+                    None,
+                )
+                .await;
+                h.get("location").unwrap().to_str().unwrap().to_string()
+            }
+        };
+        // Spotify does not say whose the owner's sign-in is: Ben's is not kept, with what to do
+        knows.store(false, std::sync::atomic::Ordering::SeqCst);
+        let to = sign_in().await;
+        assert!(
+            to.contains("error") && to.contains("could+not+be+checked"),
+            "{to}"
+        );
+        assert!(row(&format!("person.{ben}.spotify.user")).is_none());
+        let kept: serde_json::Value = serde_json::from_str(&row("spotify.user").unwrap()).unwrap();
+        assert!(
+            kept["user_id"].is_null(),
+            "nothing is guessed about the owner's: {kept}"
+        );
+        // Spotify answers: the owner's sign-in is account sp-1, and so would Ben's be: not kept
+        knows.store(true, std::sync::atomic::Ordering::SeqCst);
+        let to = sign_in().await;
+        assert!(to.contains("error") && to.contains("already+signed+in"), "{to}");
+        assert!(row(&format!("person.{ben}.spotify.user")).is_none());
+        let owners: serde_json::Value = serde_json::from_str(&row("spotify.user").unwrap()).unwrap();
+        assert_eq!(
+            owners["user_id"], "sp-1",
+            "the owner's sign-in names its account now"
+        );
+        assert_eq!(owners["access_token"], "owner-at", "and is otherwise as it was");
+        // The owner signed in with another account: Ben's is kept
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "spotify.user",
+                &serde_json::json!({"access_token": "owner-at", "refresh_token": "r", "expires_at": pm_library::db::now_unix() + 3600, "user_id": "sp-2", "scope": "x"}).to_string(),
+            )
+            .unwrap();
+        let to = sign_in().await;
+        assert!(!to.contains("error"), "{to}");
+        assert!(row(&format!("person.{ben}.spotify.user"))
+            .unwrap()
+            .contains("sp-1"));
     }
 }
