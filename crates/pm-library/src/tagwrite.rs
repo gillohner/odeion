@@ -9,8 +9,11 @@
 //! them is not written (a write cut there can leave the tags unreadable, never the audio).
 //! Otherwise the file is written anew next to itself and takes the original's place only once
 //! all of the audio is in it (`replace_file`). An MP3's tag sits in front of its audio, so it is
-//! always written that way. WAV and AIFF keep their tag in a chunk of its own, written in place
-//! by the `id3` crate as before.
+//! always written that way, and only when everything inside the length the tag gives is tag
+//! (a length that is too large would take the start of the audio with it). WAV and AIFF keep
+//! their tag in a chunk of its own: that chunk and the chunks after it are written in place,
+//! nothing in front of it is but the length in the file's header, and a file whose audio comes
+//! after its tag chunk is reported and left as it is.
 //!
 //! Formats: FLAC (Vorbis comments, the names Picard uses), MP3, WAV and AIFF (ID3
 //! `TXXX` frames, as the scanner reads them). ALAC/MP4 and DSD are reported as
@@ -306,7 +309,7 @@ fn write_with(path: &Path, f: &Fixes, clear: Option<bool>, backup_dir: &Path) ->
                     });
                 }
             }
-            save_id3(path, &tag)?;
+            save_id3(path, &tag, format)?;
             Ok(bpath)
         }
     }
@@ -471,61 +474,251 @@ fn id3_audio_start(file: &mut std::fs::File) -> std::io::Result<u64> {
     }
 }
 
-/// Whether the length the ID3v2 header in front of `file` claims covers bytes that are neither
-/// frames nor zero padding: the audio, when the length field is too large. The writer replaces
-/// everything up to that length, so such a tag must not be rewritten. `None` when this does not
-/// walk the tag's layout (no tag, a version other than 2.3 or 2.4, an extended header,
-/// unsynchronisation, frames that run past the claimed end): no evidence either way.
-fn id3_length_covers_other_bytes(file: &mut std::fs::File, len: u64) -> std::io::Result<Option<bool>> {
+/// What the ID3v2 tag in front of a file is, read from the file itself.
+#[derive(Debug, PartialEq)]
+enum FrontTag {
+    /// The file does not start with one.
+    Absent,
+    /// Frames, then zero padding, up to exactly the length its header gives: nothing else is
+    /// inside that length.
+    Whole,
+    /// Not shown to be that (the reason, for the owner).
+    Unchecked(&'static str),
+}
+
+/// Read the ID3v2 tag in front of `file` (`len` bytes long) against the length its header gives.
+/// The writer replaces everything up to that length, so a tag is rewritten only when all of it
+/// is known to be tag: frames with the names frames have, each inside the length, then zeros
+/// only. A length that is too large takes in the start of the audio, which is neither. Layouts
+/// this does not walk (unsynchronised bytes, an extended header, a footer, a version other than
+/// 2.2 to 2.4) are not rewritten.
+fn id3_front_tag(file: &mut std::fs::File, len: u64) -> std::io::Result<FrontTag> {
     use std::io::{BufRead, Read, Seek, SeekFrom};
     let claimed = id3_front_len(file)?;
     if claimed < 10 {
-        return Ok(None);
+        return Ok(FrontTag::Absent);
     }
     let mut header = [0u8; 10];
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut header)?;
     let (version, flags) = (header[3], header[5]);
-    if !(version == 3 || version == 4) || flags & 0xC0 != 0 {
-        return Ok(None);
+    if !(2..=4).contains(&version) {
+        return Ok(FrontTag::Unchecked("its tag is of a version this does not write"));
     }
-    // (a footer, 2.4 only, is the last 10 bytes of what the header claims)
-    let footer = if flags & 0x10 != 0 { 10 } else { 0 };
-    let end = claimed.min(len).saturating_sub(footer);
+    if flags & 0xD0 != 0 {
+        return Ok(FrontTag::Unchecked(
+            "its tag is stored in a way this does not check (unsynchronised, or with an extended header or a footer)",
+        ));
+    }
+    if claimed > len {
+        return Ok(FrontTag::Unchecked("its tag says it is longer than the file"));
+    }
+    // A frame header: its name (capitals and digits), then its length
+    let (name, head) = if version == 2 { (3, 6u64) } else { (4, 10u64) };
     let mut pos = 10u64;
-    while pos + 10 <= end {
+    while pos + head <= claimed {
         let mut frame = [0u8; 10];
+        let frame = &mut frame[..head as usize];
         file.seek(SeekFrom::Start(pos))?;
-        file.read_exact(&mut frame)?;
+        file.read_exact(frame)?;
         if frame[0] == 0 {
             break;
         }
-        let size = if version == 4 {
-            frame[4..8]
+        if !frame[..name]
+            .iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        {
+            return Ok(FrontTag::Unchecked(
+                "the length its tag gives covers bytes that are no part of a tag; writing it would cut into the audio",
+            ));
+        }
+        let size = match version {
+            2 => (u64::from(frame[3]) << 16) | (u64::from(frame[4]) << 8) | u64::from(frame[5]),
+            3 => u64::from(u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]])),
+            _ => frame[4..8]
                 .iter()
-                .fold(0u64, |n, b| (n << 7) | u64::from(b & 0x7f))
-        } else {
-            u64::from(u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]))
+                .fold(0u64, |n, b| (n << 7) | u64::from(b & 0x7f)),
         };
-        pos += 10 + size;
-        if pos > end {
-            return Ok(None);
+        pos += head + size;
+        if pos > claimed {
+            return Ok(FrontTag::Unchecked(
+                "a frame of its tag runs past the length the tag gives",
+            ));
         }
     }
-    // What follows the frames, up to the claimed end, is padding: zeros and nothing else
+    // What follows the frames, up to the length, is padding: zeros and nothing else
     file.seek(SeekFrom::Start(pos))?;
-    let mut rest = std::io::BufReader::new(file.take(end.saturating_sub(pos)));
+    let mut rest = std::io::BufReader::new(file.take(claimed - pos));
     loop {
         let buf = rest.fill_buf()?;
         if buf.is_empty() {
-            return Ok(Some(false));
+            return Ok(FrontTag::Whole);
         }
         if buf.iter().any(|b| *b != 0) {
-            return Ok(Some(true));
+            return Ok(FrontTag::Unchecked(
+                "the length its tag gives covers bytes that are no part of a tag; writing it would cut into the audio",
+            ));
         }
         let n = buf.len();
         rest.consume(n);
     }
+}
+
+/// The most bytes after a WAV or AIFF file's tag chunk (other chunks, never the audio) that are
+/// written again behind a tag of another length.
+const MAX_AFTER_TAG: u64 = 16 * 1024 * 1024;
+/// The most chunks of a WAV or AIFF file that are walked (such a file has a handful).
+const MAX_CHUNKS: u32 = 10_000;
+
+/// Where a WAV or AIFF file's tag chunk is written ([`write_tag_chunk`]).
+#[derive(Debug)]
+struct TagChunk {
+    /// Where the write starts: at the tag chunk the file has, or at its end.
+    at: u64,
+    /// A new chunk after a last chunk of odd length whose pad byte is missing: that byte first.
+    pad_first: bool,
+    /// The chunk's name as the file has it (`ID3 ` for a new one).
+    name: [u8; 4],
+    /// The chunks after the tag chunk, as they are: written again behind the new tag.
+    after: Vec<u8>,
+}
+
+/// Find the place of a WAV or AIFF file's tag chunk, or why the tag is not written.
+///
+/// The chunks are walked as the reader of these files (the `id3` crate) walks them: inside the
+/// length the file's header gives, to the first chunk named `ID3 `. Every chunk must lie inside
+/// the file and the chunks must end where the file does. With a tag chunk, what follows it is
+/// written again behind the new tag, so none of that may be the audio (`data`, `SSND`) and it
+/// must be small. Without one, the new chunk goes after the last chunk. Nothing in front of
+/// that place is written but the length in the file's header, and the audio is in front of it.
+fn tag_chunk_place(
+    file: &mut std::fs::File,
+    len: u64,
+    big_endian: bool,
+) -> std::io::Result<Result<TagChunk, &'static str>> {
+    use std::io::{Read, Seek, SeekFrom};
+    const ENDS: &str = "its chunks do not end where the file does (or are too many); not written";
+    let number = |b: &[u8]| {
+        let b = [b[0], b[1], b[2], b[3]];
+        u64::from(if big_endian {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        })
+    };
+    let audio: &[u8; 4] = if big_endian { b"SSND" } else { b"data" };
+    let mut header = [0u8; 8];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header)?;
+    // (the root's length counts its four-letter kind, which is not a chunk)
+    let Some(end) = number(&header[4..]).checked_sub(4) else {
+        return Ok(Err(ENDS));
+    };
+    // The chunk at `at`: its header, when all of the chunk is inside the file (and the file is
+    // not made of chunks without end)
+    let mut chunks = 0;
+    let mut chunk = |at: u64| -> std::io::Result<Option<([u8; 4], u64)>> {
+        chunks += 1;
+        if at.saturating_add(8) > len || chunks > MAX_CHUNKS {
+            return Ok(None);
+        }
+        let mut header = [0u8; 8];
+        file.seek(SeekFrom::Start(at))?;
+        file.read_exact(&mut header)?;
+        let size = number(&header[4..]);
+        Ok((at + 8 + size <= len).then_some(([header[0], header[1], header[2], header[3]], size)))
+    };
+    let (mut at, mut walked) = (12u64, 0u64);
+    let mut tag = None;
+    while walked < end {
+        let Some((name, size)) = chunk(at)? else {
+            return Ok(Err(ENDS));
+        };
+        if name.eq_ignore_ascii_case(b"ID3 ") {
+            tag = Some((name, size));
+            break;
+        }
+        at += 8 + size + size % 2;
+        walked = at;
+    }
+    let Some((name, size)) = tag else {
+        // None: after the last chunk, which ends where the file does (its pad byte may be missing)
+        return Ok(match at.checked_sub(len) {
+            Some(pad @ (0 | 1)) => Ok(TagChunk {
+                at: len,
+                pad_first: pad == 1,
+                name: *b"ID3 ",
+                after: Vec::new(),
+            }),
+            _ => Err(ENDS),
+        });
+    };
+    let mut next = at + 8 + size + size % 2;
+    let after_from = next.min(len);
+    while next < len {
+        let Some((name, size)) = chunk(next)? else {
+            return Ok(Err(ENDS));
+        };
+        if name.eq_ignore_ascii_case(audio) {
+            return Ok(Err(
+                "its tag is stored in front of the audio; writing it would move the audio",
+            ));
+        }
+        next += 8 + size + size % 2;
+    }
+    if len - after_from > MAX_AFTER_TAG {
+        return Ok(Err(
+            "too much is stored after its tag to write it again; not written",
+        ));
+    }
+    let mut after = vec![0u8; (len - after_from) as usize];
+    file.seek(SeekFrom::Start(after_from))?;
+    file.read_exact(&mut after)?;
+    Ok(Ok(TagChunk {
+        at,
+        pad_first: false,
+        name,
+        after,
+    }))
+}
+
+/// Write the encoded `tag` as the file's tag chunk at `place`, then what followed the old one,
+/// and set the file's length and the length in its header. Only bytes from `place.at` on and
+/// those four are written.
+fn write_tag_chunk(
+    file: &mut std::fs::File,
+    place: &TagChunk,
+    big_endian: bool,
+    tag: &[u8],
+) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let too_long = || std::io::Error::other("the file would be longer than its format allows");
+    let number = |n: u32| {
+        if big_endian {
+            n.to_be_bytes()
+        } else {
+            n.to_le_bytes()
+        }
+    };
+    let mut bytes = vec![0u8; usize::from(place.pad_first)];
+    bytes.extend(place.name);
+    bytes.extend(number(u32::try_from(tag.len()).map_err(|_| too_long())?));
+    bytes.extend(tag);
+    if tag.len() % 2 == 1 {
+        bytes.push(0);
+    }
+    bytes.extend(&place.after);
+    let new_len = place.at + bytes.len() as u64;
+    // (before anything is written)
+    let root = u32::try_from(new_len - 8).map_err(|_| too_long())?;
+    file.seek(SeekFrom::Start(place.at))?;
+    file.write_all(&bytes)?;
+    file.set_len(new_len)?;
+    // (on the disk before the header's length counts them)
+    file.sync_data()?;
+    file.seek(SeekFrom::Start(4))?;
+    file.write_all(&number(root))?;
+    file.sync_data()
 }
 
 /// Save `tag` into the FLAC file at `path`. Tags that fit the file's metadata area replace
@@ -574,12 +767,19 @@ fn save_flac(path: &Path, tag: &mut metaflac::Tag) -> Result<(), WriteError> {
     })
 }
 
-/// Save `tag` into the file at `path`. A WAV or AIFF file holds the tag in a chunk of its own
-/// and is written in place. Any other file (an MP3) has the tag in front of its audio, and a tag
-/// of another length moves all of the audio: that is done in a copy, which takes the original's
-/// place only when its audio (what follows the tag and its padding, [`id3_audio_start`]) is as
-/// long as the original's.
-fn save_id3(path: &Path, tag: &id3::Tag) -> Result<(), WriteError> {
+/// Save `tag` into the file at `path`, which is of `format` by its name.
+///
+/// A WAV or AIFF file (by what it starts with) holds the tag in a chunk of its own. That chunk,
+/// and the chunks after it when there are any, are written in place ([`tag_chunk_place`],
+/// [`write_tag_chunk`]): nothing in front of the tag chunk is written but the length in the
+/// file's header, and a file whose audio comes after its tag chunk is not written at all. A file that only starts as a RIFF or IFF
+/// file does, or is named `.wav` or `.aiff` and starts as neither, is not written.
+///
+/// Any other file (an MP3) has the tag in front of its audio, and a tag of another length moves
+/// all of the audio. That is done in a copy, and only for a tag that is all tag
+/// ([`id3_front_tag`]); the copy takes the original's place only when its audio (what follows
+/// the tag and its padding, [`id3_audio_start`]) is as long as the original's.
+fn save_id3(path: &Path, tag: &id3::Tag, format: &str) -> Result<(), WriteError> {
     use std::io::{Read, Seek, SeekFrom};
     let io = |e: std::io::Error| failed(path, e);
     // Opened for writing although only read here: a file the node may not write is not replaced
@@ -589,28 +789,43 @@ fn save_id3(path: &Path, tag: &id3::Tag) -> Result<(), WriteError> {
         .write(true)
         .open(path)
         .map_err(io)?;
-    let mut mark = [0u8; 4];
-    let chunked = file.read_exact(&mut mark).is_ok() && (&mark == b"RIFF" || &mark == b"FORM");
-    if chunked {
-        drop(file);
-        return tag
-            .write_to_path(path, id3::Version::Id3v24)
-            .map_err(|e| failed(path, e));
-    }
     let len = file.metadata().map_err(io)?.len();
-    let audio = len.saturating_sub(id3_audio_start(&mut file).map_err(io)?);
-    // A tag whose length covers bytes that are no part of it (the audio) must not be rewritten:
-    // the writer replaces everything up to that length, and the comparison below would not see
-    // it. Where the tag's layout is not walked, one that claims the whole of a file leaves
-    // nothing to compare either, and is left alone too
-    let covers = id3_length_covers_other_bytes(&mut file, len).map_err(io)?;
-    let tagged = id3_front_len(&mut file).map_err(io)? >= 10;
-    if covers == Some(true) || (covers.is_none() && tagged && audio == 0) {
-        return Err(failed(
-            path,
-            "the tag's length covers more than the tag; writing it would cut into the audio",
-        ));
+    let mut start = [0u8; 12];
+    let mut read = 0;
+    while read < start.len() {
+        match file.read(&mut start[read..]).map_err(io)? {
+            0 => break,
+            n => read += n,
+        }
     }
+    let (kind, form) = (&start[..4.min(read)], &start[8.min(read)..read]);
+    let chunked = kind == b"RIFF" || kind == b"FORM";
+    if chunked || format != "mp3" {
+        let big_endian = kind == b"FORM";
+        let known = chunked
+            && if big_endian {
+                form == b"AIFF" || form == b"AIFC"
+            } else {
+                form == b"WAVE"
+            };
+        if !known {
+            return Err(failed(path, "neither a WAV nor an AIFF file inside; not written"));
+        }
+        // Encoded before the file is touched: a tag that cannot be written (a frame of an old
+        // version with no name in this one) is an error with the file as it was
+        let mut encoded = Vec::new();
+        tag.write_to(&mut encoded, id3::Version::Id3v24)
+            .map_err(|e| failed(path, e))?;
+        let place = match tag_chunk_place(&mut file, len, big_endian).map_err(io)? {
+            Ok(place) => place,
+            Err(why) => return Err(failed(path, why)),
+        };
+        return write_tag_chunk(&mut file, &place, big_endian, &encoded).map_err(io);
+    }
+    if let FrontTag::Unchecked(why) = id3_front_tag(&mut file, len).map_err(io)? {
+        return Err(failed(path, why));
+    }
+    let audio = len.saturating_sub(id3_audio_start(&mut file).map_err(io)?);
     replace_file(path, move |new| {
         file.seek(SeekFrom::Start(0)).map_err(io)?;
         copy_exact(&mut file, new, len).map_err(io)?;
@@ -668,7 +883,7 @@ pub fn restore(backup: &Backup) -> Result<(), WriteError> {
                     });
                 }
             }
-            save_id3(path, &tag)
+            save_id3(path, &tag, &backup.format)
         }
         other => Err(WriteError::Unsupported(other.into())),
     }
@@ -1108,31 +1323,42 @@ mod tests {
     #[test]
     fn an_mp3_whose_tag_claims_the_whole_file_is_left_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let mut front = Vec::new();
-        let mut tag = id3::Tag::new();
-        tag.set_title("T");
-        tag.write_to(&mut front, id3::Version::Id3v24).unwrap();
         let mut audio: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
         audio[..2].copy_from_slice(&[0xFF, 0xFB]);
-        let whole = audio.len() as u32 + front.len() as u32 + 1 - 10;
-        // (to the end of the file, past it, short of it by one byte, and half-way into the audio)
-        for claimed in [whole, 0x0FFF_FFFF, whole - 1, whole - 10_000] {
-            // The frames, a zero byte (where a reader stops), then the audio; the header says
-            // the tag is `claimed` bytes long
-            let mut bytes = [&front[..], &[0u8][..], &audio[..]].concat();
-            for (i, b) in bytes[6..10].iter_mut().enumerate() {
-                *b = ((claimed >> (7 * (3 - i))) & 0x7f) as u8;
+        // (every version of tag the node reads: the older two have another frame layout)
+        for (v, version) in [id3::Version::Id3v22, id3::Version::Id3v23, id3::Version::Id3v24]
+            .into_iter()
+            .enumerate()
+        {
+            let mut front = Vec::new();
+            let mut tag = id3::Tag::new();
+            tag.set_title("T");
+            tag.write_to(&mut front, version).unwrap();
+            let whole = audio.len() as u32 + front.len() as u32 + 1 - 10;
+            // (to the end of the file, past it, short of it by one byte, and half-way into the audio)
+            for claimed in [whole, 0x0FFF_FFFF, whole - 1, whole - 10_000] {
+                // The frames, a zero byte (where a reader stops), then the audio; the header says
+                // the tag is `claimed` bytes long
+                let mut bytes = [&front[..], &[0u8][..], &audio[..]].concat();
+                for (i, b) in bytes[6..10].iter_mut().enumerate() {
+                    *b = ((claimed >> (7 * (3 - i))) & 0x7f) as u8;
+                }
+                let f = dir.path().join(format!("claims-{v}-{claimed}.mp3"));
+                std::fs::write(&f, &bytes).unwrap();
+                let r = write_ids(&f, &ids(), &dir.path().join("backups"));
+                assert!(
+                    matches!(r, Err(WriteError::Failed { .. })),
+                    "2.{}, {claimed}: {r:?}",
+                    v + 2
+                );
+                assert_eq!(
+                    std::fs::read(&f).unwrap(),
+                    bytes,
+                    "2.{}, {claimed}: the file is as it was",
+                    v + 2
+                );
+                assert!(!rewrite_path(&f).exists());
             }
-            let f = dir.path().join(format!("claims-{claimed}.mp3"));
-            std::fs::write(&f, &bytes).unwrap();
-            let r = write_ids(&f, &ids(), &dir.path().join("backups"));
-            assert!(matches!(r, Err(WriteError::Failed { .. })), "{claimed}: {r:?}");
-            assert_eq!(
-                std::fs::read(&f).unwrap(),
-                bytes,
-                "{claimed}: the file is as it was"
-            );
-            assert!(!rewrite_path(&f).exists());
         }
     }
 
@@ -1257,5 +1483,460 @@ mod tests {
         write_ids(&zeros, &ids(), &dir.path().join("backups")).unwrap();
         assert_eq!(audio_of(&zeros), audio);
         assert!(id3::Tag::read_from_path(&zeros).is_ok());
+    }
+
+    /// A tag is rewritten only when all of what its length covers is tag. One stored in a way
+    /// that is not walked (unsynchronised, an extended header, a footer) is left alone, whatever
+    /// follows it; tags of the two older versions with a true length are written like any other.
+    #[test]
+    fn an_mp3_tag_is_rewritten_only_when_all_of_it_is_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut audio: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        audio[..2].copy_from_slice(&[0xFF, 0xFB]);
+        let front = |version| {
+            let mut front = Vec::new();
+            let mut tag = id3::Tag::new();
+            tag.set_title("T");
+            tag.write_to(&mut front, version).unwrap();
+            front
+        };
+        for (flag, version) in [
+            (0x80, id3::Version::Id3v23),
+            (0x80, id3::Version::Id3v24),
+            (0x40, id3::Version::Id3v23),
+            (0x10, id3::Version::Id3v24),
+        ] {
+            let mut bytes = [&front(version)[..], &audio[..]].concat();
+            bytes[5] = flag;
+            let f = dir.path().join(format!("stored-{flag}-{}.mp3", bytes[3]));
+            std::fs::write(&f, &bytes).unwrap();
+            let mut file = std::fs::File::open(&f).unwrap();
+            assert!(
+                matches!(
+                    id3_front_tag(&mut file, bytes.len() as u64).unwrap(),
+                    FrontTag::Unchecked(_)
+                ),
+                "{flag:#x}"
+            );
+            assert!(write_ids(&f, &ids(), &dir.path().join("backups")).is_err());
+            assert_eq!(
+                std::fs::read(&f).unwrap(),
+                bytes,
+                "{flag:#x}: the file is as it was"
+            );
+        }
+        // A frame that says it is longer than the tag: no walk to the tag's end
+        let mut bytes = [&front(id3::Version::Id3v23)[..], &audio[..]].concat();
+        bytes[14..18].copy_from_slice(&0x00FF_FFFFu32.to_be_bytes());
+        let f = dir.path().join("frame.mp3");
+        std::fs::write(&f, &bytes).unwrap();
+        let mut file = std::fs::File::open(&f).unwrap();
+        assert!(matches!(
+            id3_front_tag(&mut file, bytes.len() as u64).unwrap(),
+            FrontTag::Unchecked(_)
+        ));
+        // The older versions, laid out as their header says: written, the audio kept
+        for version in [id3::Version::Id3v22, id3::Version::Id3v23] {
+            let bytes = [&front(version)[..], &[0u8; 64][..], &audio[..]].concat();
+            let f = dir.path().join(format!("older-{}.mp3", bytes[3]));
+            std::fs::write(&f, &bytes).unwrap();
+            let mut file = std::fs::File::open(&f).unwrap();
+            assert_eq!(
+                id3_front_tag(&mut file, bytes.len() as u64).unwrap(),
+                FrontTag::Whole
+            );
+            write_ids(&f, &ids(), &dir.path().join("backups")).unwrap();
+            let now = std::fs::read(&f).unwrap();
+            assert!(now.ends_with(&audio));
+            let mut file = std::fs::File::open(&f).unwrap();
+            assert_eq!(
+                now.len() as u64 - id3_audio_start(&mut file).unwrap(),
+                audio.len() as u64,
+                "nothing but the audio after the new tag"
+            );
+            let tag = id3::Tag::read_from_path(&f).unwrap();
+            assert_eq!(tag.title(), Some("T"), "what the tag held is still there");
+            assert!(tag
+                .extended_texts()
+                .any(|t| t.description == "MusicBrainz Track Id" && t.value == MB));
+        }
+    }
+
+    /// A file that starts as a RIFF or IFF file does but is neither a WAV nor an AIFF file
+    /// inside is not written (the tag writer would put a tag in front of it, in place).
+    #[test]
+    fn a_riff_file_that_is_no_wav_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, kind, form) in [
+            ("a.mp3", b"RIFF", b"RMP3"),
+            ("b.wav", b"RIFF", b"AVI "),
+            ("c.aiff", b"FORM", b"8SVX"),
+        ] {
+            // One chunk that ends where the file does, its lengths as the format counts them
+            let body: Vec<u8> = (0..5_000u32).map(|i| (i % 251) as u8 + 1).collect();
+            let number = |n: u32| {
+                if kind == b"FORM" {
+                    n.to_be_bytes()
+                } else {
+                    n.to_le_bytes()
+                }
+            };
+            let bytes = [
+                &kind[..],
+                &number(body.len() as u32 + 12)[..],
+                &form[..],
+                b"data",
+                &number(body.len() as u32)[..],
+                &body[..],
+            ]
+            .concat();
+            let f = dir.path().join(name);
+            std::fs::write(&f, &bytes).unwrap();
+            let r = write_ids(&f, &ids(), &dir.path().join("backups"));
+            assert!(matches!(r, Err(WriteError::Failed { .. })), "{name}: {r:?}");
+            assert_eq!(std::fs::read(&f).unwrap(), bytes, "{name}: the file is as it was");
+        }
+        // A file named as a WAV or AIFF file that starts as neither (RF64 among them) gets no
+        // tag in front; nor does one too short to say what it is
+        for (name, bytes) in [
+            ("rf64.wav", &b"RF64\xff\xff\xff\xffWAVEds64 and so on"[..]),
+            ("other.aiff", &b"\xff\xfb\x90\x64 not an AIFF file at all"[..]),
+            ("short.wav", &b"RIFF\x10\0\0\0WA"[..]),
+        ] {
+            let f = dir.path().join(name);
+            std::fs::write(&f, bytes).unwrap();
+            let r = write_ids(&f, &ids(), &dir.path().join("backups"));
+            assert!(matches!(r, Err(WriteError::Failed { .. })), "{name}: {r:?}");
+            assert_eq!(std::fs::read(&f).unwrap(), bytes, "{name}: the file is as it was");
+        }
+    }
+
+    /// A chunk of a WAV file: name, length, bytes, and the pad byte of an odd length.
+    fn wav_chunk(name: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut c = name.to_vec();
+        c.extend((body.len() as u32).to_le_bytes());
+        c.extend(body);
+        if body.len() % 2 == 1 {
+            c.push(0);
+        }
+        c
+    }
+
+    /// A WAV file of these chunks.
+    fn wav_of(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let body = chunks.concat();
+        let mut f = b"RIFF".to_vec();
+        f.extend((body.len() as u32 + 4).to_le_bytes());
+        f.extend(b"WAVE");
+        f.extend(body);
+        f
+    }
+
+    /// (`fmt `: 16-bit mono at 8 kHz, `data`: `bytes` of it)
+    fn wav_audio(bytes: usize) -> (Vec<u8>, Vec<u8>) {
+        let fmt = wav_chunk(
+            b"fmt ",
+            &[1, 0, 1, 0, 0x40, 0x1F, 0, 0, 0x80, 0x3E, 0, 0, 2, 0, 16, 0],
+        );
+        let data = wav_chunk(
+            b"data",
+            &(0..bytes as u32).map(|i| (i % 251) as u8).collect::<Vec<_>>(),
+        );
+        (fmt, data)
+    }
+
+    /// An encoded tag of an even or an odd length.
+    fn tag_bytes(odd: bool) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut tag = id3::Tag::new();
+        tag.set_title("T");
+        tag.write_to(&mut bytes, id3::Version::Id3v24).unwrap();
+        if (bytes.len() % 2 == 1) != odd {
+            bytes.clear();
+            tag.set_title("TT");
+            tag.write_to(&mut bytes, id3::Version::Id3v24).unwrap();
+        }
+        assert_eq!(bytes.len() % 2 == 1, odd);
+        bytes
+    }
+
+    /// A WAV file's tag chunk is written where it is, or added at the end: every byte in front
+    /// of it stays, the chunks after it stay behind the new tag, the lengths in the file are
+    /// right, and the audio decodes as before, through writes of several lengths.
+    #[test]
+    fn a_wav_tag_chunk_is_written_without_touching_what_is_in_front() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fmt, data) = wav_audio(8_000);
+        let list = wav_chunk(b"LIST", b"INFOINAM\x05\0\0\0Song\0\0");
+        let odd_data = wav_chunk(b"data", &[7u8; 801]);
+        let unpadded = {
+            // (a last chunk of odd length whose pad byte is missing)
+            let mut f = wav_of(&[fmt.clone(), odd_data.clone()]);
+            f.pop();
+            let riff = f.len() as u32 - 8;
+            f[4..8].copy_from_slice(&riff.to_le_bytes());
+            f
+        };
+        let tag_unpadded = {
+            // (a tag chunk of odd length at the end, its pad byte missing)
+            let mut f = wav_of(&[fmt.clone(), data.clone(), wav_chunk(b"id3 ", &tag_bytes(true))]);
+            f.pop();
+            let riff = f.len() as u32 - 8;
+            f[4..8].copy_from_slice(&riff.to_le_bytes());
+            f
+        };
+        let wrong_root = {
+            // (the header gives the file's length where it should give 8 less: seen in the wild)
+            let mut f = wav_of(&[fmt.clone(), data.clone()]);
+            let riff = f.len() as u32;
+            f[4..8].copy_from_slice(&riff.to_le_bytes());
+            f
+        };
+        for (name, bytes, front, after) in [
+            (
+                "none.wav",
+                wav_of(&[fmt.clone(), data.clone()]),
+                12 + fmt.len() + data.len(),
+                &b""[..],
+            ),
+            (
+                "last.wav",
+                wav_of(&[fmt.clone(), data.clone(), wav_chunk(b"id3 ", &tag_bytes(false))]),
+                12 + fmt.len() + data.len(),
+                &b""[..],
+            ),
+            (
+                "odd.wav",
+                wav_of(&[fmt.clone(), data.clone(), wav_chunk(b"ID3 ", &tag_bytes(true))]),
+                12 + fmt.len() + data.len(),
+                &b""[..],
+            ),
+            (
+                "list.wav",
+                wav_of(&[
+                    fmt.clone(),
+                    data.clone(),
+                    wav_chunk(b"id3 ", &tag_bytes(true)),
+                    list.clone(),
+                ]),
+                12 + fmt.len() + data.len(),
+                &list[..],
+            ),
+            ("unpadded.wav", unpadded.clone(), unpadded.len(), &b""[..]),
+            (
+                "tag-unpadded.wav",
+                tag_unpadded.clone(),
+                12 + fmt.len() + data.len(),
+                &b""[..],
+            ),
+            ("root.wav", wrong_root.clone(), wrong_root.len(), &b""[..]),
+        ] {
+            let f = dir.path().join(name);
+            std::fs::write(&f, &bytes).unwrap();
+            let heard = (name != "unpadded.wav").then(|| samples(&f));
+            let short = Fixes {
+                ids: Some(ids()),
+                ..Fixes::default()
+            };
+            let long = Fixes {
+                ids: None,
+                artists: vec!["Sefa".into(), "Cyclon".repeat(700)],
+                artist_mbids: vec![],
+            };
+            // After each write: what is in front of the tag and after it, the lengths, the audio
+            let check = |step: &str| {
+                let now = std::fs::read(&f).unwrap();
+                assert_eq!(&now[..4], b"RIFF", "{name} {step}");
+                assert_eq!(
+                    u32::from_le_bytes(now[4..8].try_into().unwrap()) as usize,
+                    now.len() - 8,
+                    "{name} {step}: the length in the header"
+                );
+                assert_eq!(
+                    &now[8..front],
+                    &bytes[8..front],
+                    "{name} {step}: in front of the tag"
+                );
+                assert!(now.ends_with(after), "{name} {step}: after the tag");
+                let tag = id3::Tag::read_from_path(&f).unwrap();
+                assert!(
+                    tag.extended_texts()
+                        .any(|t| t.description == "MusicBrainz Track Id" && t.value == MB),
+                    "{name} {step}"
+                );
+                if let Some(heard) = &heard {
+                    assert_eq!(&samples(&f), heard, "{name} {step}: the audio");
+                }
+                // The chunks still end where the file does: the next write finds its place
+                let mut file = std::fs::File::open(&f).unwrap();
+                let place = tag_chunk_place(&mut file, now.len() as u64, false)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(place.after, after, "{name} {step}");
+                now.len()
+            };
+            // A first tag (or a longer one than the file had), a much longer one, then that one
+            // taken back: the tag chunk grows and shrinks
+            write_fixes(&f, &short, &dir.path().join("backups")).unwrap();
+            let first = check("first");
+            let bpath = write_fixes(&f, &long, &dir.path().join("backups")).unwrap();
+            assert!(check("longer") > first + 4_000);
+            let b: Backup = serde_json::from_slice(&std::fs::read(&bpath).unwrap()).unwrap();
+            restore(&b).unwrap();
+            assert_eq!(check("shorter"), first);
+        }
+    }
+
+    /// A WAV file whose tag cannot be written in place without moving the audio, or whose
+    /// chunks do not end where the file does, is left as it is.
+    #[test]
+    fn a_wav_file_that_cannot_be_written_in_place_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fmt, data) = wav_audio(8_000);
+        let tag_chunk = wav_chunk(b"id3 ", &tag_bytes(false));
+        // The tag chunk in front of the audio
+        let in_front = wav_of(&[fmt.clone(), tag_chunk.clone(), data.clone()]);
+        // Bytes after the last chunk the header counts
+        let mut trailing = wav_of(&[fmt.clone(), data.clone()]);
+        trailing.extend(b"left here by another program");
+        // A file cut inside its audio, and one cut inside its tag chunk
+        let mut cut_audio = wav_of(&[fmt.clone(), data.clone()]);
+        cut_audio.truncate(cut_audio.len() - 3_000);
+        let mut cut_tag = wav_of(&[fmt.clone(), data.clone(), tag_chunk.clone()]);
+        cut_tag.truncate(cut_tag.len() - 5);
+        // A tag chunk that says it is far longer than the file
+        let mut long_tag = wav_of(&[fmt.clone(), data.clone(), tag_chunk.clone()]);
+        let at = 12 + fmt.len() + data.len() + 4;
+        long_tag[at..at + 4].copy_from_slice(&0x00F0_0000u32.to_le_bytes());
+        // A stream written without its lengths
+        let mut no_lengths = wav_of(&[fmt.clone(), data.clone()]);
+        no_lengths[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        let at = 12 + fmt.len() + 4;
+        no_lengths[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        // A header that counts nothing
+        let mut no_root = wav_of(&[fmt.clone(), data.clone()]);
+        no_root[4..8].copy_from_slice(&0u32.to_le_bytes());
+        // The audio after the tag chunk under a name in capitals
+        let upper = wav_of(&[fmt.clone(), tag_chunk.clone(), wav_chunk(b"DATA", &[7u8; 800])]);
+        // Chunks without end
+        let mut endless = wav_of(&[fmt.clone(), data.clone()]);
+        for _ in 0..=MAX_CHUNKS {
+            endless.extend(wav_chunk(b"JUNK", b""));
+        }
+        let riff = endless.len() as u32 - 8;
+        endless[4..8].copy_from_slice(&riff.to_le_bytes());
+        for (name, bytes) in [
+            ("front.wav", in_front),
+            ("upper.wav", upper),
+            ("endless.wav", endless),
+            ("trailing.wav", trailing),
+            ("cut-audio.wav", cut_audio),
+            ("cut-tag.wav", cut_tag),
+            ("long-tag.wav", long_tag),
+            ("no-lengths.wav", no_lengths),
+            ("no-root.wav", no_root),
+        ] {
+            let f = dir.path().join(name);
+            std::fs::write(&f, &bytes).unwrap();
+            let mut file = std::fs::File::open(&f).unwrap();
+            let place = tag_chunk_place(&mut file, bytes.len() as u64, false).unwrap();
+            assert!(place.is_err(), "{name}: {place:?}");
+            let r = write_ids(&f, &ids(), &dir.path().join("backups"));
+            assert!(matches!(r, Err(WriteError::Failed { .. })), "{name}: {r:?}");
+            assert_eq!(std::fs::read(&f).unwrap(), bytes, "{name}: the file is as it was");
+        }
+    }
+
+    /// A tag that cannot be written as it is (a frame of an older version that has no name in
+    /// the version written) is an error before the file is touched.
+    #[test]
+    fn a_tag_that_cannot_be_written_leaves_the_file_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fmt, data) = wav_audio(2_000);
+        // (version 2.2, one frame `TCP` of two bytes)
+        let old_tag = [&b"ID3\x02\0\0\0\0\0\x08"[..], &b"TCP\0\0\x02\x001"[..]].concat();
+        let bytes = wav_of(&[fmt, data, wav_chunk(b"id3 ", &old_tag)]);
+        let f = dir.path().join("old.wav");
+        std::fs::write(&f, &bytes).unwrap();
+        assert!(id3::Tag::read_from_path(&f).is_ok(), "the tag is read");
+        let r = write_ids(&f, &ids(), &dir.path().join("backups"));
+        assert!(matches!(r, Err(WriteError::Failed { .. })), "{r:?}");
+        assert_eq!(std::fs::read(&f).unwrap(), bytes, "the file is as it was");
+        // The same tag in front of an MP3's audio: the copy is dropped, the file stays
+        let mut audio: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        audio[..2].copy_from_slice(&[0xFF, 0xFB]);
+        let bytes = [&old_tag[..], &audio[..]].concat();
+        let f = dir.path().join("old.mp3");
+        std::fs::write(&f, &bytes).unwrap();
+        let r = write_ids(&f, &ids(), &dir.path().join("backups"));
+        assert!(matches!(r, Err(WriteError::Failed { .. })), "{r:?}");
+        assert_eq!(std::fs::read(&f).unwrap(), bytes, "the file is as it was");
+        assert!(!rewrite_path(&f).exists());
+    }
+
+    /// An AIFF file's tag chunk is written the same way, with that format's byte order.
+    #[test]
+    fn an_aiff_tag_chunk_is_written_without_touching_what_is_in_front() {
+        let dir = tempfile::tempdir().unwrap();
+        let chunk = |name: &[u8; 4], body: &[u8]| {
+            let mut c = name.to_vec();
+            c.extend((body.len() as u32).to_be_bytes());
+            c.extend(body);
+            if body.len() % 2 == 1 {
+                c.push(0);
+            }
+            c
+        };
+        let form = |chunks: &[Vec<u8>]| {
+            let body = chunks.concat();
+            let mut f = b"FORM".to_vec();
+            f.extend((body.len() as u32 + 4).to_be_bytes());
+            f.extend(b"AIFF");
+            f.extend(body);
+            f
+        };
+        let aifc = {
+            let mut f = form(&[chunk(b"COMM", &[0u8; 18]), chunk(b"SSND", &[9u8; 4_001])]);
+            f[8..12].copy_from_slice(b"AIFC");
+            f
+        };
+        let comm = chunk(b"COMM", &[0u8; 18]);
+        let sound = chunk(
+            b"SSND",
+            &(0..4_001u32).map(|i| (i % 251) as u8).collect::<Vec<_>>(),
+        );
+        let front = 12 + comm.len() + sound.len();
+        for (name, bytes) in [
+            ("none.aiff", form(&[comm.clone(), sound.clone()])),
+            ("compressed.aifc", aifc.clone()),
+            (
+                "last.aif",
+                form(&[comm.clone(), sound.clone(), chunk(b"ID3 ", &tag_bytes(true))]),
+            ),
+        ] {
+            let f = dir.path().join(name);
+            std::fs::write(&f, &bytes).unwrap();
+            for round in 0..2 {
+                write_ids(&f, &ids(), &dir.path().join("backups")).unwrap();
+                let now = std::fs::read(&f).unwrap();
+                assert_eq!(&now[..4], b"FORM");
+                assert_eq!(
+                    u32::from_be_bytes(now[4..8].try_into().unwrap()) as usize,
+                    now.len() - 8,
+                    "{name} {round}"
+                );
+                assert_eq!(&now[8..front], &bytes[8..front], "{name} {round}");
+                let tag = id3::Tag::read_from_path(&f).unwrap();
+                assert!(tag
+                    .extended_texts()
+                    .any(|t| t.description == "MusicBrainz Track Id" && t.value == MB));
+            }
+        }
+        // The sound after the tag chunk: left as it is
+        let bytes = form(&[comm.clone(), chunk(b"ID3 ", &tag_bytes(false)), sound.clone()]);
+        let f = dir.path().join("front.aiff");
+        std::fs::write(&f, &bytes).unwrap();
+        assert!(write_ids(&f, &ids(), &dir.path().join("backups")).is_err());
+        assert_eq!(std::fs::read(&f).unwrap(), bytes);
     }
 }
