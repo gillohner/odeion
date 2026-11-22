@@ -396,7 +396,7 @@ fn store_user(s: &NodeState, who: &Who, u: Option<&UserSession>) -> Result<(), A
 }
 
 /// The claims of the access token (a JWT): `uid`, `cc` (country), `at` (access tier).
-fn jwt_claims(access_token: &str) -> Value {
+pub(crate) fn jwt_claims(access_token: &str) -> Value {
     access_token
         .split('.')
         .nth(1)

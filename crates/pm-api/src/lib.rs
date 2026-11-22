@@ -27398,6 +27398,29 @@ exec sleep 300
         assert_eq!(accounts::account_id("000").as_deref(), Some("0"));
         assert_eq!(accounts::account_id("a1b").as_deref(), Some("a1b"));
         assert_eq!(accounts::account_id("  "), None);
+        // A TIDAL sign-in kept without its account id is still somebody's: its token names it
+        use base64::Engine;
+        let b64 = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        let token = format!(
+            "{}.{}.s",
+            b64(r#"{"alg":"RS256"}"#),
+            b64(r#"{"uid":88,"cc":"DE"}"#)
+        );
+        owner
+            .put(
+                &lib,
+                "tidal.unofficial",
+                Some(&serde_json::json!({"enabled": true, "session": {"access_token": token}}).to_string()),
+            )
+            .unwrap();
+        let e = b.put(&lib, "tidal.user", Some(&sess("88"))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        // Spotify's ids are text: "007" and "7" are two accounts
+        owner.put(&lib, "spotify.user", Some(&sess("7"))).unwrap();
+        b.put(&lib, "spotify.user", Some(&sess("007")))
+            .expect("another account");
+        let e = b.put(&lib, "spotify.user", Some(&sess(" 7 "))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
         // An account two people were signed in with before this keeps working for both (Anna's
         // and the owner's are the same one in this node's stored sign-ins: Ben can't take it)
         let e = b.put(&lib, "tidal.user", Some(&sess("1"))).unwrap_err();

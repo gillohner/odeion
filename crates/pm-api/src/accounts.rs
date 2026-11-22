@@ -364,8 +364,8 @@ impl Who {
             }
         }
         // A sign-in at a service: only an account that is nobody else's here
-        if ACCOUNT_KEYS.iter().any(|(_, keys)| keys.contains(&base)) {
-            if let Some(account) = value.and_then(account_of) {
+        if let Some((service, _)) = ACCOUNT_KEYS.iter().find(|(_, keys)| keys.contains(&base)) {
+            if let Some(account) = value.and_then(|v| account_of(v, *service == TIDAL)) {
                 self.account_free(lib, base, &account)?;
             }
         }
@@ -382,9 +382,11 @@ impl Who {
 /// The settings that hold a person's signed-in account at a service, by the service's name: one
 /// account is one person's on a node ([`Who::account_free`]).
 const ACCOUNT_KEYS: &[(&str, &[&str])] = &[
-    ("TIDAL", &["tidal.user", "tidal.unofficial"]),
+    (TIDAL, &["tidal.user", "tidal.unofficial"]),
     ("Spotify", &["spotify.user"]),
 ];
+
+const TIDAL: &str = "TIDAL";
 
 /// What someone other than the owner is told when a service did not say whose account a sign-in
 /// is for: it is not kept, because it can't be held to [`Who::account_free`].
@@ -395,29 +397,41 @@ pub(crate) fn account_unknown(service: &str) -> ApiError {
     )
 }
 
-/// The account a stored sign-in is for, as its service names it (`user_id`, of the sign-in or of
-/// its `session`).
-fn account_of(stored: &str) -> Option<String> {
+/// The account a stored sign-in is for, as its service names it: `user_id` of the sign-in or of
+/// its `session`. A TIDAL sign-in (`tidal`) kept without one is read from its token, which names
+/// the account (`uid`), so that a sign-in from before the id was kept is still somebody's.
+fn account_of(stored: &str, tidal: bool) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(stored).ok()?;
-    let id = match &v["user_id"] {
-        serde_json::Value::Null => &v["session"]["user_id"],
-        id => id,
-    };
-    match id {
-        serde_json::Value::String(s) => account_id(s),
-        serde_json::Value::Number(n) => account_id(&n.to_string()),
+    let named = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => account_id_of(s, tidal),
+        serde_json::Value::Number(n) => account_id_of(&n.to_string(), tidal),
         _ => None,
-    }
+    };
+    named(&v["user_id"])
+        .or_else(|| named(&v["session"]["user_id"]))
+        .or_else(|| {
+            let token = v["access_token"]
+                .as_str()
+                .or(v["session"]["access_token"].as_str())
+                .filter(|_| tidal)?;
+            named(&crate::tidal::jwt_claims(token)["uid"])
+        })
 }
 
-/// An account id written one way, so that the same account compares equal however a service or
-/// a pasted sign-in wrote it: without spaces around it, and a number without leading zeros.
+/// A TIDAL account id written one way, so that the same account compares equal however TIDAL or
+/// a pasted sign-in wrote it: without spaces around it, and the number without leading zeros.
 pub(crate) fn account_id(raw: &str) -> Option<String> {
+    account_id_of(raw, true)
+}
+
+/// An account id without spaces around it; a TIDAL one (`tidal`, a number) also without leading
+/// zeros. Other services' ids are text and compare as they are.
+fn account_id_of(raw: &str, tidal: bool) -> Option<String> {
     let id = raw.trim();
     if id.is_empty() {
         return None;
     }
-    if id.bytes().all(|b| b.is_ascii_digit()) {
+    if tidal && id.bytes().all(|b| b.is_ascii_digit()) {
         let n = id.trim_start_matches('0');
         return Some(if n.is_empty() { "0" } else { n }.to_string());
     }
@@ -445,7 +459,8 @@ impl Who {
         let Some((service, keys)) = ACCOUNT_KEYS.iter().find(|(_, keys)| keys.contains(&base)) else {
             return Ok(());
         };
-        let Some(account) = account_id(account) else {
+        let tidal = *service == TIDAL;
+        let Some(account) = account_id_of(account, tidal) else {
             return Ok(());
         };
         // (a sign-in that can't be read is an error, not "nobody's": nothing is kept then)
@@ -453,7 +468,7 @@ impl Who {
             Ok(lib
                 .get_setting(&setting)?
                 .as_deref()
-                .and_then(account_of)
+                .and_then(|j| account_of(j, tidal))
                 .is_some_and(|theirs| theirs == account))
         };
         let holds = |key: Option<&str>| -> Result<bool, ApiError> {

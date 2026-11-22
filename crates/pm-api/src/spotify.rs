@@ -352,6 +352,26 @@ pub(crate) async fn user_token(s: &NodeState, who: &Who) -> Result<Option<String
     if let Some(r) = v["refresh_token"].as_str() {
         u.refresh_token = Some(r.to_string());
     }
+    // A sign-in kept without Spotify having said whose account it is: asked now, so that the
+    // account is known to be somebody's here (accounts.rs). Best effort, as at sign-in
+    if u.user_id.is_none() {
+        let me = s
+            .http_client()
+            .get(format!("{}/me", api_base(s)))
+            .bearer_auth(&u.access_token)
+            .send()
+            .await;
+        if let Ok(r) = me {
+            if r.status().is_success() {
+                if let Ok(me) = r.json::<Value>().await {
+                    u.user_id = me["id"]
+                        .as_str()
+                        .filter(|id| !id.trim().is_empty())
+                        .map(str::to_string);
+                }
+            }
+        }
+    }
     // Only over the session this refresh started from (the vault may have changed it meanwhile)
     let lib = s.library.lock().expect("library poisoned");
     let still = |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == was);
