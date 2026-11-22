@@ -823,6 +823,27 @@ mod tests {
         assert!(ended.is_ok(), "a sync ran after opening again");
     }
 
+    #[tokio::test]
+    async fn leaving_while_pubky_isnt_reachable_ends_the_sync_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        // A session the homeserver can't restore: the sync waits RETRY (a minute) between tries
+        std::fs::write(dir.path().join(account::SESSION_FILE), "not a session").unwrap();
+        let p = Phone::open(config(dir.path())).unwrap();
+        let syncing = |p: &Phone| p.life.lock().unwrap().syncing;
+        let (_addr, task) = serve(p.clone()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(p.account().await.is_none());
+        task.abort();
+        p.close();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while syncing(&p) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "the sync ended without waiting out its retry");
+    }
+
     #[test]
     fn the_key_is_needed_and_compared_whole() {
         let key = new_key();
