@@ -29,7 +29,7 @@ const zones = NAMES.map(([id, name, kind], i) => ({ id, name, output: `${kind}:$
 // Each card: where its Play to / selected mark is, its controls line, slider, note and height
 const cards = (page) => page.evaluate(() => [...document.querySelectorAll('#main .zone-card')].map((c) => {
   const box = (el) => { if (!el || !el.getClientRects().length) return null; const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height, right: r.right, bottom: r.bottom }; };
-  const pick = c.querySelector(':scope > .zc-now > [data-zsel], :scope > .zc-now > .pill.ok, :scope > .zc-controls > [data-zsel], :scope > .zc-controls > .pill.ok');
+  const pick = c.querySelector(':scope > .zc-now > [data-zsel], :scope > .zc-now > .pill.ok, :scope > .zc-controls > [data-zsel], :scope > .zc-controls > .pill.ok, :scope > .zc-controls > .zc-tail > [data-zsel], :scope > .zc-controls > .zc-tail > .pill.ok');
   const ctl = c.querySelector('.zc-controls');
   const note = [...c.querySelectorAll('.zc-controls span')].find((s) => /set on the device/.test(s.textContent));
   const pb = box(pick);
@@ -42,7 +42,8 @@ const cards = (page) => page.evaluate(() => [...document.querySelectorAll('#main
   }
   return {
     id: c.dataset.zcard, on: c.classList.contains('on'), h: c.getBoundingClientRect().height,
-    pickIn: pick ? pick.parentElement.className : null, pickKind: pick ? (pick.matches('[data-zsel]') ? 'button' : 'pill') : null,
+    // (a wider card's is in the controls' volume group, .zc-tail)
+    pickIn: pick ? (pick.parentElement.className === 'zc-tail' ? 'zc-controls' : pick.parentElement.className) : null, pickKind: pick ? (pick.matches('[data-zsel]') ? 'button' : 'pill') : null,
     pickLabel: pick && pick.getAttribute('aria-label'), pick: pb, hits,
     ctlH: ctl.getBoundingClientRect().height,
     slider: box(c.querySelector('.zc-controls input[type=range]')),
@@ -279,7 +280,7 @@ const open = async (page) => { await fx.go(page, '/zones'); await page.waitForSe
         cs = await cards(page);
         check(cs.filter((c) => !c.on).every((c) => c.pickIn === 'zc-now') && cs.every((c) => c.ctlH <= 48), 'desktop → 360: the cards take the phone layout');
         await page.setViewportSize({ width: 1280, height: 800 });
-        await page.waitForFunction(() => document.documentElement.dataset.shell === 'desktop' && document.querySelector('#main .zone-card .zc-controls > [data-zsel]'), null, { timeout: 3000 }).catch(() => {});
+        await page.waitForFunction(() => document.documentElement.dataset.shell === 'desktop' && document.querySelector('#main .zone-card .zc-controls [data-zsel]'), null, { timeout: 3000 }).catch(() => {});
         cs = await cards(page);
         check(cs.filter((c) => !c.on).every((c) => c.pickIn === 'zc-controls') && cs.filter((c) => !c.slider).every((c) => c.note && c.note.shown), '360 → desktop: Play to and the note are back in the controls line');
       } finally { await context.close(); }
