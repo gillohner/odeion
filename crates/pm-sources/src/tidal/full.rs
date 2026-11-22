@@ -824,6 +824,18 @@ pub fn renew(
     ep: &Endpoints<'_>,
     sess: &Session,
 ) -> Result<Session, FullError> {
+    renew_within(client, ep, sess, None)
+}
+
+/// [`renew`], the request (its answer read whole) given at most `limit` instead of the client's
+/// own: a renewal under the vault's lock must end before the vault stops waiting for it, or its
+/// new tokens are thrown away while the request still runs.
+pub fn renew_within(
+    client: &reqwest::blocking::Client,
+    ep: &Endpoints<'_>,
+    sess: &Session,
+    limit: Option<std::time::Duration>,
+) -> Result<Session, FullError> {
     let auth = ep.auth_base.trim_end_matches('/');
     let Some(refresh) = sess.refresh_token.clone() else {
         return Err(FullError::Mode("the session ran out: sign in again".into()));
@@ -859,10 +871,14 @@ pub fn renew(
             ])
         }
     };
-    let resp = client
+    let mut req = client
         .post(format!("{auth}/v1/oauth2/token"))
         .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(body)
+        .body(body);
+    if let Some(limit) = limit {
+        req = req.timeout(limit);
+    }
+    let resp = req
         .send()
         .map_err(|e| FullError::Track(format!("renewing the session: {}", e.without_url())))?;
     let status = resp.status();

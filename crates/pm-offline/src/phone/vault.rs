@@ -843,24 +843,18 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
                 .ok_or_else(|| RefreshFailed("the vault's TIDAL sign-in has no session".into()))?;
             let p2 = p.clone();
             asked2.store(true, std::sync::atomic::Ordering::SeqCst);
-            let fresh = tokio::task::spawn_blocking(move || {
-                pm_sources::tidal::full::renew(
-                    super::stream::blocking_client(),
-                    &super::tidal::endpoints(&p2),
-                    &sess,
-                )
-            })
-            .await
-            .map_err(|_| RefreshFailed("the renewal stopped".into()))?
-            .map_err(|e| {
-                RefreshFailed(match e {
-                    pm_sources::tidal::full::FullError::Mode(m) => {
-                        *refused2.lock().unwrap_or_else(|e| e.into_inner()) = Some(m.clone());
-                        m
-                    }
-                    pm_sources::tidal::full::FullError::Track(m) => m,
-                })
-            })?;
+            let fresh = tokio::task::spawn_blocking(move || super::tidal::renew_blocking(&p2, &sess))
+                .await
+                .map_err(|_| RefreshFailed("the renewal stopped".into()))?
+                .map_err(|e| {
+                    RefreshFailed(match e {
+                        pm_sources::tidal::full::FullError::Mode(m) => {
+                            *refused2.lock().unwrap_or_else(|e| e.into_inner()) = Some(m.clone());
+                            m
+                        }
+                        pm_sources::tidal::full::FullError::Track(m) => m,
+                    })
+                })?;
             let mut travels = travels;
             let key = TIDAL_FULL.carry[0].key;
             let mut held = travels

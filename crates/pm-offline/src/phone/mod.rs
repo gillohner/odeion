@@ -127,6 +127,8 @@ pub struct Phone {
     pub(crate) data_lock: std::sync::Mutex<()>,
     /// A TIDAL renewal the phone couldn't save yet (`tidal::session` saves it at the next try).
     pub(crate) tidal_unsaved: std::sync::Mutex<Option<tidal::Unsaved>>,
+    /// How long one TIDAL renewal request may take ([`tidal::RENEW_FOR`]; tests shorten it).
+    pub(crate) tidal_renew_for_ms: std::sync::atomic::AtomicU64,
     /// Whether phone mode was left, and whether its sync runs.
     life: std::sync::Mutex<Life>,
 }
@@ -203,6 +205,7 @@ impl Phone {
             bundled_here: Default::default(),
             copier: Default::default(),
             tidal_unsaved: Default::default(),
+            tidal_renew_for_ms: (tidal::RENEW_FOR.as_millis() as u64).into(),
             life: Default::default(),
         }))
     }

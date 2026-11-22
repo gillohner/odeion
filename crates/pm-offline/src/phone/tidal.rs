@@ -37,6 +37,19 @@ pub(crate) fn endpoints(p: &Phone) -> Endpoints<'_> {
     }
 }
 
+/// The longest one TIDAL renewal request may take, its answer read whole: well within the time
+/// the vault gives a renewal under its lock (`pm_pubky::vault::CALL_FOR`), so the vault never
+/// stops waiting for a renewal that can still answer (and then throws its new tokens away while
+/// the next song asks again with the same refresh token). The same here, without the vault.
+pub(crate) const RENEW_FOR: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// TIDAL's renewal of `s`, within the phone's limit (a blocking call: off the async runtime).
+pub(crate) fn renew_blocking(p: &Phone, s: &full::Session) -> Result<full::Session, full::FullError> {
+    let limit =
+        std::time::Duration::from_millis(p.tidal_renew_for_ms.load(std::sync::atomic::Ordering::Relaxed));
+    full::renew_within(super::stream::blocking_client(), &endpoints(p), s, Some(limit))
+}
+
 /// How long a song waits, past the first 8 s, for a renewal of an expired session.
 const RENEWAL_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -278,16 +291,14 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
         return Ok(s);
     }
     let p2 = p.clone();
-    let r = tokio::task::spawn_blocking(move || {
-        full::renew(super::stream::blocking_client(), &endpoints(&p2), &s)
-    })
-    .await
-    .map_err(|_| {
-        SourceError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "TIDAL: the sign-in check stopped",
-        )
-    })?;
+    let r = tokio::task::spawn_blocking(move || renew_blocking(&p2, &s))
+        .await
+        .map_err(|_| {
+            SourceError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "TIDAL: the sign-in check stopped",
+            )
+        })?;
     match r {
         Ok(fresh) => {
             // Only over the session it renewed (a sign-in or sign-out meanwhile wins), saved
@@ -805,6 +816,41 @@ mod tests {
             Some("due")
         );
         assert_eq!(renewed2.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_renewal_ends_well_before_the_vault_stops_waiting_for_it() {
+        // (Connecting is within it too)
+        assert!(RENEW_FOR + std::time::Duration::from_secs(15) <= pm_pubky::vault::CALL_FOR);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_tidal_that_never_answers_doesnt_hold_a_renewal_past_its_limit() {
+        // TIDAL takes the request and never answers
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((c, _)) = l.accept().await {
+                held.push(c);
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        due_here(&p);
+        // (The phone's limit, shortened; the client's own is far longer)
+        p.tidal_renew_for_ms
+            .store(500, std::sync::atomic::Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(20), session(&p))
+            .await
+            .expect("the renewal ends by its own limit");
+        assert_eq!(
+            r.map(|_| ()).unwrap_err().status,
+            StatusCode::BAD_GATEWAY,
+            "TIDAL didn't answer"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

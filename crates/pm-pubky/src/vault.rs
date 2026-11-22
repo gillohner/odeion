@@ -1639,8 +1639,9 @@ const LEASE_SETTLE: Duration = Duration::from_secs(2);
 const RENEW_EVERY: Duration = Duration::from_secs(spec::LOCK_SECONDS / 3);
 /// How long a client waits for another one's refresh before giving up.
 const WAIT_FOR_OTHERS: Duration = Duration::from_secs(spec::LOCK_SECONDS + 5);
-/// The longest a service is given to answer a refresh; then the lock is let go.
-const CALL_FOR: Duration = Duration::from_secs(2 * spec::LOCK_SECONDS);
+/// The longest a service is given to answer a refresh; then the lock is let go, and what it
+/// answers later is lost: a caller's own request to the service must end well before.
+pub const CALL_FOR: Duration = Duration::from_secs(2 * spec::LOCK_SECONDS);
 /// The device list's member saying when the person last signed out everywhere (Unix seconds).
 pub const SIGNED_OUT_EVERYWHERE: &str = "signed_out_everywhere_at";
 /// How far ahead of this node's clock a sign-out everywhere may be dated (another device's clock
