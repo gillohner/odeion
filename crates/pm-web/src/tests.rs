@@ -308,11 +308,16 @@ async fn the_web_app_is_called_odeion() {
 #[tokio::test]
 async fn the_apps_keep_every_file_the_page_loads() {
     let kept: Vec<&str> = pm_offline::sync::UI_FILES.iter().map(|(path, _)| *path).collect();
+    // Every `<script src=…>` and every `<link …>` that is a style sheet, however its attributes
+    // are ordered
     let mut loaded = Vec::new();
-    for (tag, attr) in [("<script ", "src=\""), ("<link rel=\"stylesheet\" ", "href=\"")] {
+    for (tag, attr) in [("<script ", "src=\""), ("<link ", "href=\"")] {
         for (i, _) in INDEX_HTML.match_indices(tag) {
             let rest = &INDEX_HTML[i..];
             let rest = &rest[..rest.find('>').unwrap()];
+            if tag == "<link " && !rest.contains("rel=\"stylesheet\"") {
+                continue;
+            }
             if let Some((_, url)) = rest.split_once(attr) {
                 loaded.push(url.split('"').next().unwrap());
             }
