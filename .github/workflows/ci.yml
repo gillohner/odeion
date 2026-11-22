@@ -55,7 +55,8 @@ jobs:
           if [ "$EVENT" = workflow_dispatch ] || [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
             printf 'code=true\nrust=true\ndocker=true\n' >> "$GITHUB_OUTPUT"; exit 0
           fi
-          files=$(git diff --name-only "$BASE" "$GITHUB_SHA")
+          # (--no-renames: a moved file counts at its old place too, e.g. a doc a Rust test reads)
+          files=$(git diff --name-only --no-renames "$BASE" "$GITHUB_SHA")
           code=$(printf '%s\n' "$files" | grep -Ev '^(docs/|NOTICE$|LICENSE$)|\.md$' | grep -c . || true)
           echo "$(printf '%s\n' "$files" | grep -c . || true) files changed, $code outside the docs"
           # docs/access.md is read by a Rust test (pm-api access::tests): a change to it alone runs the code jobs
@@ -148,13 +149,19 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.rust != 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # A few minutes with the cache; as long as `check` without it
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      # This job never runs on main, so it would never find a cache of its own: it reads the one
+      # `check` saves there (shared-key ci) and saves nothing.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci
+          save-if: false
       - run: cargo test -p pm-web
       - run: cargo test -p pm-api --test pages
   # The node's download archive carries README.md, docs/deploy.md and docs/guides/ at their repo
