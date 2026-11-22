@@ -45,8 +45,10 @@ from a node.
   device in the person's sources vault (ADR 0017, VAULT.md), named "Odeion on this phone" with device
   `android`. It writes sign-ins in the node's own form, so nodes take them. It takes a node's copy only
   when it was made with the app the phone uses. Where the vault holds the phone's TIDAL sign-in, it
-  renews it under the blob's lock or lease (`Vault::refresh`), and never beside a renewal still running
-  there (the current session plays meanwhile while it still works; an expired one waits up to 30 s);
+  renews it under the blob's lock or lease (`Vault::refresh`, each homeserver step within a time limit),
+  one renewal at a time, and never beside a renewal still running there or after a vault failure that
+  leaves open whether it is being renewed elsewhere (the homeserver didn't answer, or TIDAL didn't under
+  the lock; the current session plays meanwhile while it still works; an expired one waits up to 30 s);
   offline, it renews on the phone and the next sync writes
   the result. It follows "Sign out everywhere". It writes Bookmarks as social v1 bookmarks,
   listens as music v1 listen posts where the person's listen history setting puts them (off, private or

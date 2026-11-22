@@ -400,8 +400,19 @@ fn apply_quality(p: &Phone, prefs: &Value) {
     }
 }
 
+/// What the page is told when a quality set here couldn't be queued for the person's other
+/// devices (it is set on the phone).
+pub(crate) fn not_shared(e: std::io::Error) -> Response {
+    super::err(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        &format!(
+            "The quality is set on this phone, but this phone couldn't keep it for your other devices ({e}): set it again to share it"
+        ),
+    )
+}
+
 /// A source's quality changed on the phone: prefs.json gets it at the next sync. An error when the
-/// phone couldn't keep that ([`not_kept`] says it to the page).
+/// phone couldn't keep that ([`not_shared`] says it to the page).
 pub(crate) fn prefs_changed(p: &Phone, source: &str) -> std::io::Result<()> {
     let op = Pending::Quality {
         source: source.to_string(),

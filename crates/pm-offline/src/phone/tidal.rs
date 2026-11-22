@@ -110,13 +110,27 @@ pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError
 /// it at the same time), otherwise, or offline, here (the next sync writes it). A song that found
 /// the session due while another renewal ran waits for that one and uses what it got.
 ///
-/// After the vault failed part way (the homeserver, or TIDAL under the vault's lock), the phone
-/// never renews here instead: another device may be renewing the same sign-in, and the two would
-/// spend each other's tokens. It plays the current session while it works, and the next song
-/// tries the vault again.
+/// After a vault failure that leaves open whether the sign-in is being renewed elsewhere
+/// ([`super::vault::uncertain`]: the homeserver didn't answer, or TIDAL didn't under the vault's
+/// lock), the phone never renews here instead: another device may be renewing the same sign-in,
+/// and the two would spend each other's tokens. It plays the current session while it works, and
+/// the next song tries the vault again. After any other vault failure it renews here.
 async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
-    let _one = p.tidal_renewal.lock().await;
-    // Renewed while this one waited its turn
+    let _one = match p.tidal_renewal.try_lock() {
+        Ok(g) => g,
+        // Another renewal runs: this one waits for it and uses what it got, never one more after
+        // it (songs and searches meanwhile never queue renewals up)
+        Err(_) => {
+            let _after = p.tidal_renewal.lock().await;
+            let s = held(p)?;
+            return if due(&s) {
+                current(p).ok_or_else(being_renewed)
+            } else {
+                Ok(s)
+            };
+        }
+    };
+    // Renewed just before this one took its turn
     let s = held(p)?;
     if !due(&s) {
         return Ok(s);
@@ -134,7 +148,7 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
                 full::record(p.store.as_ref(), &Err(full::FullError::Mode(why)));
                 return Err(refused(p));
             }
-            Err(e) => {
+            Err(e) if super::vault::uncertain(&e) => {
                 tracing::warn!("phone mode: TIDAL renewal in the vault: {e}");
                 return current(p).ok_or_else(|| {
                     SourceError::new(
@@ -143,6 +157,7 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
                     )
                 });
             }
+            Err(e) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}; renewed here"),
         }
     }
     let p2 = p.clone();
@@ -336,7 +351,7 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
     }
     if u.quality.is_some() {
         if let Err(e) = super::data::prefs_changed(&p, "tidal") {
-            return super::data::not_kept(e);
+            return super::data::not_shared(e);
         }
     }
     Json(view(&p)).into_response()
@@ -597,6 +612,53 @@ mod tests {
             0,
             "no renewal here beside the vault"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lasting_vault_problem_doesnt_stop_tidal() {
+        let (base, renewed) = tidal(std::time::Duration::ZERO).await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        super::super::vault::tidal_due_in_step(&p);
+        p.set_account(super::super::stalled::refusing().await.account())
+            .await;
+        // The phone's vault key can't be read (not the homeserver: no other device is involved)
+        std::fs::write(dir.path().join("vault").join("client.key"), b"not a key").unwrap();
+        let s = session(&p).await.expect("renewed here");
+        assert_eq!(s.access_token, "fresh-1");
+        assert_eq!(renewed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn songs_waiting_on_a_failed_renewal_dont_each_try_again() {
+        // TIDAL takes the connection and drops it after a while: a failure on the way
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let tries = Arc::new(AtomicUsize::new(0));
+        let t2 = tries.clone();
+        tokio::spawn(async move {
+            while let Ok((c, _)) = l.accept().await {
+                t2.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    drop(c);
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        super::super::vault::tidal_due_in_step(&p);
+        let songs: Vec<_> = (0..3)
+            .map(|_| {
+                let p = p.clone();
+                tokio::spawn(async move { session(&p).await })
+            })
+            .collect();
+        for s in songs {
+            // The current session plays (it still works for 30 s), or the error of the one try
+            let _ = s.await.unwrap();
+        }
+        assert_eq!(tries.load(Ordering::SeqCst), 1, "one try for all three");
     }
 
     #[tokio::test]

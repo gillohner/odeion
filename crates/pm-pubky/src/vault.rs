@@ -1658,6 +1658,11 @@ const SAVE_TRIES: u32 = 6;
 /// caller that holds a lock of its own across the refresh mustn't be held by a dead connection.
 const STEP_FOR: Duration = crate::homeserver::OBJECT_TIMEOUT;
 
+/// How old the lock (or the lease) may be when the service is called: from then on it is renewed
+/// every [`RENEW_EVERY`], so it never lapses while the service answers. Older (a slow step under
+/// it), the refresh ends as [`VaultStoreError::Busy`] instead: another client may take it soon.
+const CALL_BEFORE: Duration = Duration::from_secs(spec::LOCK_SECONDS / 3);
+
 /// `step` within [`STEP_FOR`]; past it the refresh ends as [`VaultStoreError::Busy`] (a lock or a
 /// lease taken meanwhile lapses by itself). Only for the steps before the service is called: once
 /// it has answered, its tokens are written or handed back, never dropped.
@@ -1729,7 +1734,9 @@ impl Vault<'_> {
         // Somebody else's fresh copy, read without the lock: good enough to use.
         let by_another = |o: &Opened| o.sign_in.revision > seen && !o.sign_in.needs_refresh(now());
         let deadline = tokio::time::Instant::now() + WAIT_FOR_OTHERS;
-        let held = loop {
+        let (held, since) = loop {
+            // When the lock or the lease was asked for: its life is counted from no later
+            let since = tokio::time::Instant::now();
             let held = if self.lease_only {
                 Locked { lock: None }
             } else {
@@ -1751,11 +1758,12 @@ impl Vault<'_> {
                 }
             };
             if held.lock.is_some() {
-                break held;
+                break (held, since);
             }
             // No lock (405, or lease-only): the lease file
+            let since = tokio::time::Instant::now();
             match step(&path, self.take_lease(service)).await? {
-                true => break held,
+                true => break (held, since),
                 false if tokio::time::Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(1000 + jitter_ms(1000))).await;
                     if let Some(o) = step(&path, self.read(service)).await? {
@@ -1767,12 +1775,15 @@ impl Vault<'_> {
                 false => return Err(VaultStoreError::Busy(path.clone())),
             }
         };
-        self.refresh_held(held, service, &path, seen, refresh).await
+        self.refresh_held(held, since, service, &path, seen, refresh)
+            .await
     }
 
+    /// `since`: when the lock (or lease) `held` was asked for.
     async fn refresh_held<F, Fut>(
         &self,
         mut held: Locked,
+        since: tokio::time::Instant,
         service: &str,
         path: &str,
         seen: u64,
@@ -1816,6 +1827,12 @@ impl Vault<'_> {
         if cur.sign_in.revision > seen && !cur.sign_in.needs_refresh(now()) {
             release(held).await;
             return Ok(Refreshed::ByAnother(cur.sign_in));
+        }
+        // Too little of the lock's life left to call the service under it (a slow homeserver):
+        // nothing was renewed, another try starts afresh
+        if since.elapsed() > CALL_BEFORE {
+            release(held).await;
+            return Err(VaultStoreError::Busy(path.to_string()));
         }
         // The service call, with the lock (or the lease) renewed while it runs, and a limit
         let call = tokio::time::timeout(CALL_FOR, refresh(cur.sign_in.clone()));

@@ -581,9 +581,12 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     let files = (d.join("revoked.json"), d.join("marks.json"));
     let vault = vault_of(acct, &secret, &files);
     let p = phone.clone();
-    // TIDAL's own refusal (not a failure on the way), kept apart from the vault's errors
+    // Whether TIDAL was asked, and its own refusal (not a failure on the way), kept apart from
+    // the vault's errors
     let refused = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let refused2 = refused.clone();
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let asked2 = asked.clone();
     let r = vault
         .refresh(svc, false, |si: SignIn| async move {
             if !usable(&p, &TIDAL_FULL, &si, marker) {
@@ -598,6 +601,7 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
                 .and_then(|m| serde_json::from_value(Value::Object(m)).ok())
                 .ok_or_else(|| RefreshFailed("the vault's TIDAL sign-in has no session".into()))?;
             let p2 = p.clone();
+            asked2.store(true, std::sync::atomic::Ordering::SeqCst);
             let fresh = tokio::task::spawn_blocking(move || {
                 pm_sources::tidal::full::renew(
                     super::stream::blocking_client(),
@@ -662,8 +666,12 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         Err(e @ VaultStoreError::Refresh(_)) => {
             return match refused.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(why) => Ok(Renewal::Refused(why)),
-                None => Err(e),
-            }
+                // TIDAL was asked and didn't answer cleanly: it may have renewed
+                None if asked.load(std::sync::atomic::Ordering::SeqCst) => Err(e),
+                // The vault's copy is not one this phone renews (another app, no session):
+                // the phone renews its own
+                None => Ok(Renewal::NotInVault),
+            };
         }
         Err(e) => return Err(e),
     };
@@ -705,6 +713,27 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         tracing::info!("phone mode: TIDAL renewed under the vault's lock");
     }
     Ok(Renewal::Renewed)
+}
+
+/// Whether a failed renewal through the vault leaves open that the sign-in is being renewed, or
+/// was, elsewhere or at TIDAL: the homeserver didn't answer (or failed in a way it may not next
+/// time), another step holds the blob, or TIDAL was asked under the lock and didn't answer
+/// cleanly. Then the phone never renews it on its own beside the vault. After any other failure
+/// (the homeserver said no, the vault's copy can't be read or used here, a local file) it does, as
+/// without a vault, so a lasting vault problem never stops TIDAL.
+pub fn uncertain(e: &VaultStoreError) -> bool {
+    match e {
+        VaultStoreError::Busy(_) | VaultStoreError::TimedOut(_) | VaultStoreError::Refresh(_) => true,
+        VaultStoreError::Homeserver(h) => {
+            h.is_transient()
+                || matches!(
+                    h,
+                    pm_pubky::homeserver::HomeserverError::Transport(_)
+                        | pm_pubky::homeserver::HomeserverError::Timeout
+                )
+        }
+        _ => false,
+    }
 }
 
 /// Whether the phone's TIDAL session runs out within a minute.

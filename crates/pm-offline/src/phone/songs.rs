@@ -187,6 +187,10 @@ impl Songs {
             }
         };
         let mut index = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        // The same file added twice at once: one song (the file is that one's)
+        if let Some(s) = index.iter().find(|s| s.file == file) {
+            return Ok(s.clone());
+        }
         let id = index.iter().map(|s| s.id).max().unwrap_or(0) + 1;
         let stem = FsPath::new(name)
             .file_stem()

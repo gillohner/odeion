@@ -209,7 +209,7 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
     }
     if u.quality.is_some() {
         if let Err(e) = super::data::prefs_changed(&p, "qobuz") {
-            return super::data::not_kept(e);
+            return super::data::not_shared(e);
         }
     }
     Json(view(&p)).into_response()
