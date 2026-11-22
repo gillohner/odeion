@@ -69,24 +69,35 @@ pub(crate) fn cleared_before(lib: &Library) -> Option<i64> {
 /// push), as on the node that deleted them. Returns how many went.
 ///
 /// A delete cannot have happened after now. A time ahead of this node's clock (the other node's
-/// clock runs ahead) counts as now: taken as written it would also delete every listen written
-/// from now until that time. It is taken once ([`CLEARED_SEEN`]), not again at every sync.
+/// clock runs ahead) counts as made now for what this node writes from here on: taken as
+/// written it would also delete every listen written from now until that time. The listens it
+/// was meant for are still deleted up to the time as written: they carry that node's times.
+/// Such a time is taken once ([`CLEARED_AHEAD`]): the copy goes on naming it, at every sync and
+/// also after this node's clock has reached it.
 pub(crate) fn adopt_cleared(lib: &Library, theirs: i64) -> Result<usize, ApiError> {
     adopt_cleared_at(lib, theirs, pm_pubky::ids::now_micros())
 }
 
-/// The latest history delete dated ahead of this node's clock that it has taken, as the other
-/// node wrote it (microseconds). Not under `listens.`: it is this node's own note and stays out
-/// of the settings copy.
-const CLEARED_SEEN: &str = "history.cleared_seen";
+/// The history deletes dated ahead of this node's clock that it has taken, as the other node
+/// wrote them (microseconds, comma-separated, the newest [`CLEARED_AHEAD_KEPT`]). Not under
+/// `listens.`: it is this node's own note and stays out of the settings copy.
+const CLEARED_AHEAD: &str = "history.cleared_ahead";
+const CLEARED_AHEAD_KEPT: usize = 16;
 
 fn adopt_cleared_at(lib: &Library, theirs: i64, now: i64) -> Result<usize, ApiError> {
+    let mut ahead: Vec<i64> = lib
+        .get_setting(CLEARED_AHEAD)?
+        .map(|v| v.split(',').filter_map(|t| t.parse().ok()).collect())
+        .unwrap_or_default();
+    // Taken before, whatever the clock says by now
+    if ahead.contains(&theirs) {
+        return Ok(0);
+    }
     let at = if theirs > now {
-        let seen: Option<i64> = lib.get_setting(CLEARED_SEEN)?.and_then(|v| v.parse().ok());
-        if seen.is_some_and(|seen| seen >= theirs) {
-            return Ok(0);
-        }
-        lib.set_setting(CLEARED_SEEN, &theirs.to_string())?;
+        ahead.push(theirs);
+        let from = ahead.len().saturating_sub(CLEARED_AHEAD_KEPT);
+        let kept: Vec<String> = ahead[from..].iter().map(|t| t.to_string()).collect();
+        lib.set_setting(CLEARED_AHEAD, &kept.join(","))?;
         now
     } else {
         theirs
@@ -95,7 +106,9 @@ fn adopt_cleared_at(lib: &Library, theirs: i64, now: i64) -> Result<usize, ApiEr
         return Ok(0);
     }
     lib.set_setting(CLEARED, &at.to_string())?;
-    let up_to = pm_pubky::ids::timestamp_id(at);
+    // Up to the time as written: what lies between now and then came from the node that
+    // deleted its history (this one has written nothing later than now)
+    let up_to = pm_pubky::ids::timestamp_id(theirs);
     Ok(lib.delete_music_posts_of_kind_up_to(TYPE_ACTIVITY, &up_to, pm_pubky::ids::now_micros())?)
 }
 
@@ -536,8 +549,9 @@ mod tests {
     }
 
     /// A history delete from a node whose clock runs ahead counts as made now: listens written
-    /// after it stay, also at the next sync, which reads the same time again. A later delete is
-    /// still taken.
+    /// after it stay, at the next syncs (which read the same time again) and also once this
+    /// node's clock has reached that time. What that node wrote before its delete goes, although
+    /// it carries times ahead of now. A later delete is still taken.
     #[test]
     fn a_history_delete_dated_ahead_of_the_clock_counts_as_now() {
         let lib = Library::open_in_memory().unwrap();
@@ -555,15 +569,18 @@ mod tests {
             lib.music_posts_page(super::TYPE_ACTIVITY, None, 10)
                 .unwrap()
                 .iter()
-                .map(|r| r.updated_at)
+                .map(|r| r.created_at)
                 .collect()
         };
-        let year = 365 * 24 * 3600 * 1_000_000i64;
-        let ahead = 10_000 + 5 * year;
+        let hour = 3600 * 1_000_000i64;
+        let ahead = 10_000 + 3 * hour;
+        // Here it is 10 000; the other node's clock is three hours ahead. One listen of this
+        // node's, and one that node wrote just before its delete (dated by its clock)
         lib.upsert_music_post(&listen(1_000)).unwrap();
-        // The other node's clock is five years ahead; here it is 10 000
-        assert_eq!(super::adopt_cleared_at(&lib, ahead, 10_000).unwrap(), 1);
+        lib.upsert_music_post(&listen(ahead - 5)).unwrap();
+        assert_eq!(super::adopt_cleared_at(&lib, ahead, 10_000).unwrap(), 2);
         assert_eq!(super::cleared_before(&lib), Some(10_000));
+        assert!(left(&lib).is_empty());
         // Listens written from then on stay: the next syncs read the same time again
         lib.upsert_music_post(&listen(20_000)).unwrap();
         assert_eq!(super::adopt_cleared_at(&lib, ahead, 30_000).unwrap(), 0);
@@ -575,17 +592,37 @@ mod tests {
         assert_eq!(super::adopt_cleared_at(&lib, 25_000, 50_000).unwrap(), 1);
         assert_eq!(super::cleared_before(&lib), Some(25_000));
         assert_eq!(left(&lib), [40_000]);
-        // The copy naming the earlier time again changes nothing
+        // The copy naming the earlier time again changes nothing, now or when this node's
+        // clock has reached and passed it
         assert_eq!(super::adopt_cleared_at(&lib, ahead, 55_000).unwrap(), 0);
-        // A new delete on the node whose clock runs ahead is taken, as made now
-        assert_eq!(super::adopt_cleared_at(&lib, ahead + 1, 60_000).unwrap(), 1);
-        assert_eq!(super::cleared_before(&lib), Some(60_000));
-        // And one whose time has come: as written
-        lib.upsert_music_post(&listen(ahead + 5)).unwrap();
-        lib.upsert_music_post(&listen(ahead + 20)).unwrap();
-        assert_eq!(super::adopt_cleared_at(&lib, ahead + 10, ahead + 30).unwrap(), 1);
-        assert_eq!(super::cleared_before(&lib), Some(ahead + 10));
-        assert_eq!(left(&lib), [ahead + 20]);
-        assert!(!crate::sync::is_backed_up(super::CLEARED_SEEN));
+        lib.upsert_music_post(&listen(ahead - 1)).unwrap();
+        for now in [ahead - 1, ahead, ahead + 1, ahead + hour] {
+            assert_eq!(super::adopt_cleared_at(&lib, ahead, now).unwrap(), 0, "{now}");
+        }
+        assert_eq!(left(&lib), [ahead - 1, 40_000]);
+        assert_eq!(super::cleared_before(&lib), Some(25_000));
+        // A new delete on the node whose clock runs ahead is taken, as made now, once
+        let later = ahead + 2 * hour;
+        assert_eq!(super::adopt_cleared_at(&lib, later + 3 * hour, later).unwrap(), 2);
+        assert_eq!(super::cleared_before(&lib), Some(later));
+        lib.upsert_music_post(&listen(later + 5)).unwrap();
+        assert_eq!(
+            super::adopt_cleared_at(&lib, later + 3 * hour, later + 4 * hour).unwrap(),
+            0
+        );
+        assert_eq!(left(&lib), [later + 5]);
+        // And one from a node with the right clock: as written
+        lib.upsert_music_post(&listen(later + 20)).unwrap();
+        assert_eq!(super::adopt_cleared_at(&lib, later + 10, later + 30).unwrap(), 1);
+        assert_eq!(super::cleared_before(&lib), Some(later + 10));
+        assert_eq!(left(&lib), [later + 20]);
+        assert!(!crate::sync::is_backed_up(super::CLEARED_AHEAD));
+        // Only the newest ahead-dated times are remembered
+        for n in 0..40 {
+            super::adopt_cleared_at(&lib, 100 * hour + n, 50 * hour + n).unwrap();
+        }
+        let kept = lib.get_setting(super::CLEARED_AHEAD).unwrap().unwrap();
+        assert_eq!(kept.split(',').count(), super::CLEARED_AHEAD_KEPT);
+        assert!(kept.ends_with(&(100 * hour + 39).to_string()));
     }
 }
