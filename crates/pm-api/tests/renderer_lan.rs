@@ -115,13 +115,10 @@ async fn the_page_is_served_on_both_listeners() {
         ] {
             assert_eq!(status(&format!("{base}{path}"), &[]).await, 200, "{base}{path}");
         }
-        let page = reqwest::get(format!("{base}/"))
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
-        assert!(page.contains(r#"<script src="/app.js"></script>"#), "{base}");
+        // (what the page holds is pm-web's own test; here: it is a page, on this listener too)
+        let page = reqwest::get(format!("{base}/")).await.unwrap();
+        let kind = page.headers()["content-type"].to_str().unwrap().to_string();
+        assert!(kind.starts_with("text/html"), "{base}: {kind}");
     }
 }
 
