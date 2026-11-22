@@ -94,7 +94,11 @@ pub fn sign_in_here(
     service: &str,
     write: impl FnOnce(&dyn SessionStore) -> bool,
 ) -> Result<bool, String> {
-    let floor = load_record(&record_path(phone)).marker;
+    // (A record that can't be read: no floor; nothing is synced until it reads anyway)
+    let floor = load_record(&record_path(phone))
+        .inspect_err(|e| tracing::warn!("phone mode: {e}"))
+        .ok()
+        .and_then(|r| r.marker);
     let id = vault_form::lineage_after(service, floor, pm_sources::now_unix() as u64);
     let kept = phone.store.change_if(|d| {
         if !write(d) {
@@ -110,16 +114,17 @@ pub fn sign_in_here(
 }
 
 /// Whether what the phone holds for `service` differs from what the last sync recorded (a
-/// sign-in, a sign-out or a renewal here; not a health note).
+/// sign-in, a sign-out or a renewal here; not a health note). A record that can't be read: yes
+/// (the pass then says why it can't sync).
 pub fn changed_here(phone: &Phone, form: &Form) -> bool {
     let mine = vault_form::carried(form.carry, phone.store.as_ref())
         .ok()
         .flatten()
         .map(|m| vault_form::hash(&m));
-    let seen = load_record(&record_path(phone))
-        .services
-        .get(form.service)
-        .map(|s| s.mine.clone());
+    let Ok(record) = load_record(&record_path(phone)) else {
+        return true;
+    };
+    let seen = record.services.get(form.service).map(|s| s.mine.clone());
     mine != seen
 }
 
@@ -149,21 +154,40 @@ fn record_path(phone: &Phone) -> PathBuf {
     dir(phone).join("synced.json")
 }
 
-fn load_record(path: &Path) -> Record {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+/// The record of the last sync; with none yet (a first sync), empty. One that can't be read, or
+/// isn't the record's JSON, is an error and is left as it is: taken for a first sync, the
+/// first-contact rules could write an old sign-in over a newer one in the vault, or take back one
+/// signed out here. Then nothing is synced until it reads again.
+fn load_record(path: &Path) -> Result<Record, VaultStoreError> {
+    let bad = |e: &dyn std::fmt::Display| {
+        local(format!(
+            "the record of the last vault sync ({}) can't be read ({e}): nothing is synced \
+             with the vault until it can",
+            path.display()
+        ))
+    };
+    match std::fs::read(path) {
+        Ok(b) => serde_json::from_slice(&b).map_err(|e| bad(&e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Record::default()),
+        Err(e) => Err(bad(&e)),
+    }
 }
 
+/// Written whole (to disk before it replaces the old one), so a crash never leaves a record that
+/// can't be read.
 fn save_record(path: &Path, r: &Record) {
     let tmp = path.with_extension("json.tmp");
-    let ok = serde_json::to_vec(r)
-        .ok()
-        .and_then(|b| std::fs::write(&tmp, b).ok())
-        .and_then(|_| std::fs::rename(&tmp, path).ok());
-    if ok.is_none() {
-        tracing::warn!("phone mode: the vault record could not be saved");
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        let body = serde_json::to_vec(r).map_err(std::io::Error::other)?;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&body)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    };
+    if let Err(e) = write() {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::warn!("phone mode: the vault record could not be saved: {e}");
     }
 }
 
@@ -363,14 +387,15 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
     let _one = phone.vault_lock.lock().await;
     let d = dir(phone);
     std::fs::create_dir_all(&d).map_err(local)?;
+    // First: without what the last sync saw, nothing is pushed, pulled or removed
+    let path = record_path(phone);
+    let mut record = load_record(&path)?;
     let secret = pm_pubky::vault::load_or_create_client_secret(&d.join("client.key")).map_err(local)?;
     let files = (d.join("revoked.json"), d.join("marks.json"));
     let vault = vault_of(acct, &secret, &files);
     vault.touch(DEVICE_NAME).await?;
     vault.share_with_trusted().await?;
     let marker = vault.marker(&vault.index().await?)?;
-    let path = record_path(phone);
-    let mut record = load_record(&path);
     let mut report = Report::default();
     for form in FORMS {
         let svc = form.service;
@@ -573,7 +598,8 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     let Some(mine) = vault_form::carried(TIDAL_FULL.carry, phone.store.as_ref()).map_err(local)? else {
         return Ok(Renewal::NotInVault);
     };
-    let record = load_record(&path);
+    // Can't be read: an error (a lasting one: the phone renews on its own, as without a vault)
+    let record = load_record(&path)?;
     if record.services.get(svc).map(|s| s.mine.as_str()) != Some(vault_form::hash(&mine).as_str()) {
         return Ok(Renewal::NotInVault);
     }
@@ -708,16 +734,21 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
         .map_err(local)?
         .map(|m| vault_form::hash(&m))
         .unwrap_or_default();
-    let mut record = load_record(&path);
-    record.services.insert(
-        svc.into(),
-        Synced {
-            mine: kept,
-            theirs: hash_of(si),
-            lineage: vault_form::node_lineage(si),
-        },
-    );
-    save_record(&path, &record);
+    // (Read before the renewal under the same lock; should it not read now, it stays as it is)
+    match load_record(&path) {
+        Ok(mut record) => {
+            record.services.insert(
+                svc.into(),
+                Synced {
+                    mine: kept,
+                    theirs: hash_of(si),
+                    lineage: vault_form::node_lineage(si),
+                },
+            );
+            save_record(&path, &record);
+        }
+        Err(e) => tracing::warn!("phone mode: {e}"),
+    }
     if matches!(r, Refreshed::ByUs(_)) {
         tracing::info!("phone mode: TIDAL renewed under the vault's lock");
     }
@@ -1127,6 +1158,75 @@ mod tests {
         ] {
             assert!(!uncertain(&e), "{e}");
         }
+    }
+
+    #[test]
+    fn a_record_that_cant_be_read_is_not_a_first_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("synced.json");
+        // None yet: a first sync
+        assert_eq!(load_record(&path).unwrap(), Record::default());
+        // Not the record's JSON, or not readable at all: an error
+        std::fs::write(&path, br#"{"services":{"tidal-full":"#).unwrap();
+        assert!(matches!(load_record(&path), Err(VaultStoreError::Local(_))));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(load_record(&path), Err(VaultStoreError::Local(_))));
+    }
+
+    #[tokio::test]
+    async fn with_a_record_that_cant_be_read_nothing_is_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone_here(dir.path());
+        // Signed in here and synced before; then the record is cut short
+        tidal_due_in_step(&p);
+        let path = record_path(&p);
+        let cut = br#"{"services":{"tidal-full":{"mine":"#;
+        std::fs::write(&path, cut).unwrap();
+        let held = SessionStore::get(p.store.as_ref(), "tidal.unofficial");
+        let hs = super::super::stalled::homeserver().await;
+        let acct = hs.account();
+        tokio::time::pause();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(3600), pass(&p, &acct))
+            .await
+            .expect("the pass ends by itself");
+        assert!(matches!(r, Err(VaultStoreError::Local(_))), "{r:?}");
+        // Neither is it taken for "in step" by a renewal
+        let r = renew_tidal(&p, &acct).await;
+        assert!(matches!(r, Err(VaultStoreError::Local(_))), "{r:?}");
+        assert_eq!(
+            hs.taken.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the vault wasn't asked: nothing pushed, pulled or removed"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), cut, "the record as it was");
+        assert_eq!(SessionStore::get(p.store.as_ref(), "tidal.unofficial"), held);
+    }
+
+    #[test]
+    fn sign_ins_that_cant_be_read_are_never_a_sign_out() {
+        let dir = tempfile::tempdir().unwrap();
+        // Signed in to TIDAL and synced with the vault before
+        let p = phone_here(dir.path());
+        tidal_due_in_step(&p);
+        let record = std::fs::read(record_path(&p)).unwrap();
+        drop(p);
+        // The sign-ins file can't be read now: phone mode doesn't start (no pass would find TIDAL
+        // signed out here and remove it from the vault), and the files stay as they are
+        let file = dir.path().join(super::super::store::FILE);
+        let cut = br#"{"tidal.unofficial":"#;
+        std::fs::write(&file, cut).unwrap();
+        assert!(Phone::open(super::super::Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), cut);
+        let again = dir.path().join("vault").join("synced.json");
+        assert_eq!(std::fs::read(again).unwrap(), record);
     }
 
     #[tokio::test]

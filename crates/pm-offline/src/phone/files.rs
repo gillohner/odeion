@@ -242,7 +242,9 @@ impl Remote for Account {
 }
 
 /// Copies the songs added here that the homeserver doesn't have (by content hash), one at a time,
-/// when the setting is on. A song copied before, or refused for good, isn't tried again; one that
+/// when the setting is on. A song counts as copied once the homeserver says it holds all of it (a
+/// short copy is removed and sent again later). A song copied before, or refused for good, isn't
+/// tried again; one that
 /// takes too long waits for the next pass and the others go on; after any other failure the pass
 /// stops and the next one waits (doubling, up to 6 hours).
 pub async fn copy(p: &Arc<Phone>, acct: &Account) -> Report {
@@ -359,6 +361,17 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
             continue;
         }
         let sent = tokio::time::timeout(upload_for(s.bytes), remote.upload(&path, &local)).await;
+        // Taken: copied only once the homeserver says it holds the whole song (an answer that came
+        // early, or a copy cut on the way, is not); a short copy goes, and the song is sent again
+        let stored = match &sent {
+            Ok(Ok(())) => Some(within_for(limit, remote.size(&path)).await),
+            _ => None,
+        };
+        if let Some(Ok(Some(n))) = stored {
+            if n != s.bytes {
+                let _ = within_for(limit, remote.delete(&path)).await;
+            }
+        }
         if !matches!(sent, Ok(Ok(()))) {
             // Whatever part of it arrived goes (a later pass sends it whole), judged now: the
             // listing is from the pass's start, and a whole copy that landed under this name
@@ -370,8 +383,14 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
             }
         }
         let Some(p) = weak.upgrade() else { break };
-        match sent {
-            Ok(Ok(())) => {
+        // One song waits on its own (doubling), the others go on
+        let wait_alone = |h: String| {
+            let mut slow = p.copier.slow.lock().unwrap_or_else(|e| e.into_inner());
+            let wait = next_wait(slow.get(&h).map(|(_, w)| *w));
+            slow.insert(h, (Instant::now() + wait, wait));
+        };
+        match (sent, stored) {
+            (Ok(Ok(())), Some(Ok(Some(n)))) if n == s.bytes => {
                 r.copied += 1;
                 p.copier.slow.lock().unwrap_or_else(|e| e.into_inner()).remove(&h);
                 let mut copies = load_copies(&p);
@@ -382,7 +401,25 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
                 }
                 *p.copier.retry.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
-            Ok(Err(e)) if pm_pubky::homeserver::refused_for_good(&e) => {
+            // Short there (removed above), or not there: sent again later
+            (Ok(Ok(())), Some(Ok(_))) => {
+                tracing::warn!(
+                    "phone mode: a song the homeserver took isn't there whole; it is sent again later"
+                );
+                wait_alone(h);
+                r.left += 1;
+            }
+            // Its size couldn't be asked: not counted yet (the next pass finds it whole, or sends it
+            // again), and the pass stops as after a failure
+            (Ok(Ok(())), _) => {
+                tracing::warn!("phone mode: a song copied to the homeserver couldn't be checked there yet");
+                let mut retry = p.copier.retry.lock().unwrap_or_else(|e| e.into_inner());
+                let wait = next_wait(retry.map(|(_, w)| w));
+                *retry = Some((Instant::now() + wait, wait));
+                r.left += 1;
+                break;
+            }
+            (Ok(Err(e)), _) if pm_pubky::homeserver::refused_for_good(&e) => {
                 tracing::warn!("phone mode: the homeserver refused a song: {e}");
                 let mut copies = load_copies(&p);
                 copies.refused.insert(h, e.to_string());
@@ -390,14 +427,12 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
                 r.left += 1;
             }
             // Too slow for this one: it waits on its own (doubling), the others go on
-            Err(_) => {
+            (Err(_), _) => {
                 tracing::warn!("phone mode: a song took too long to copy to the homeserver");
-                let mut slow = p.copier.slow.lock().unwrap_or_else(|e| e.into_inner());
-                let wait = next_wait(slow.get(&h).map(|(_, w)| *w));
-                slow.insert(h, (Instant::now() + wait, wait));
+                wait_alone(h);
                 r.left += 1;
             }
-            Ok(Err(e)) => {
+            (Ok(Err(e)), _) => {
                 tracing::warn!("phone mode: a song waits to be copied to the homeserver: {e}");
                 let mut retry = p.copier.retry.lock().unwrap_or_else(|e| e.into_inner());
                 let wait = next_wait(retry.map(|(_, w)| w));
@@ -485,6 +520,8 @@ mod tests {
         /// The size of what is at the path after a failed upload: a part of it, or a whole copy
         /// another device put there meanwhile (none: nothing).
         left_there: Option<u64>,
+        /// The size of what is there after an upload the homeserver took (none: all of it).
+        kept_of_upload: Option<u64>,
     }
 
     impl Remote for Fake {
@@ -500,6 +537,7 @@ mod tests {
                 None => {
                     self.uploaded.lock().unwrap().push(path.to_string());
                     let n = std::fs::metadata(local).map(|m| m.len()).unwrap_or(0);
+                    let n = self.kept_of_upload.unwrap_or(n);
                     self.sizes.lock().unwrap().insert(path.to_string(), n);
                     Ok(())
                 }
@@ -725,7 +763,8 @@ mod tests {
     async fn a_homeserver_that_never_answers_doesnt_hold_the_copier() {
         let never = std::future::pending::<Result<(), HomeserverError>>();
         assert!(within_for(Duration::from_millis(20), never).await.is_err());
-        // Its size never comes for a name already there: the pass goes on (and sends the song)
+        // Its size never comes for a name already there: the pass goes on and sends the song;
+        // nor after the upload: not counted as copied (it can't be checked), and the pass ends
         let (_d, p, songs) = phone(1);
         let f = Fake {
             names: vec![songs[0].file.clone()],
@@ -738,7 +777,38 @@ mod tests {
         )
         .await
         .expect("the pass ends");
-        assert_eq!(r.copied, 1);
+        assert_eq!(uploaded(&f), 1);
+        assert_eq!(r, Report { copied: 0, left: 1 });
+        assert!(load_copies(&p).copied.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_copy_the_homeserver_holds_short_is_removed_and_sent_again() {
+        let (_d, p, songs) = phone(2);
+        let path = |s: &crate::phone::songs::Song| format!("{}{}", pm_appdata::files::FILES_DIR, s.file);
+        // Each upload is answered "taken", but only 10 bytes of it are there
+        let f = Fake {
+            kept_of_upload: Some(10),
+            ..Default::default()
+        };
+        let r = copy_while(&Arc::downgrade(&p), &f).await;
+        assert_eq!(r, Report { copied: 0, left: 2 }, "neither counted");
+        assert!(load_copies(&p).copied.is_empty());
+        assert_eq!(view(&p)["uploaded"], 0);
+        assert_eq!(*f.deleted.lock().unwrap(), [path(&songs[0]), path(&songs[1])]);
+        // Each waits on its own; its wait over, it is sent again, whole this time: copied
+        assert_eq!(
+            copy_while(&Arc::downgrade(&p), &f).await,
+            Report { copied: 0, left: 2 }
+        );
+        p.copier.slow.lock().unwrap().clear();
+        let whole = Fake::default();
+        assert_eq!(copy_while(&Arc::downgrade(&p), &whole).await.copied, 2);
+        assert_eq!(
+            *whole.uploaded.lock().unwrap(),
+            [path(&songs[0]), path(&songs[1])]
+        );
+        assert_eq!(load_copies(&p).copied.len(), 2);
     }
 
     #[tokio::test]

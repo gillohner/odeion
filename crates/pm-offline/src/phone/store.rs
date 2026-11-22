@@ -25,14 +25,17 @@ pub struct FileStore {
 }
 
 impl FileStore {
-    /// The store in `dir` (made if missing); a file that can't be read starts empty.
+    /// The store in `dir` (made if missing); with no file yet, empty. A file that can't be read,
+    /// or isn't the store's JSON, is an error and is left as it is: read as empty it would be a
+    /// sign-out of everything, which the vault sync would then carry to the vault.
     pub fn open(dir: &std::path::Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(FILE);
-        let values = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let values = match std::fs::read(&path) {
+            Ok(b) => serde_json::from_slice(&b).map_err(|e| unreadable(&path, e))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(e) => return Err(unreadable(&path, e)),
+        };
         Ok(Self {
             path,
             values: Mutex::new(values),
@@ -105,6 +108,17 @@ impl FileStore {
         self.tell(key);
         Ok(())
     }
+}
+
+/// The sign-ins file can't be read (logged): phone mode doesn't start rather than start signed out.
+fn unreadable(path: &std::path::Path, e: impl std::fmt::Display) -> std::io::Error {
+    tracing::error!(
+        "phone mode: the sign-ins in {} can't be read ({e}); left as they are",
+        path.display()
+    );
+    std::io::Error::other(format!(
+        "the sign-ins on this phone can't be read ({e}); they are left as they are"
+    ))
 }
 
 /// What the page is told when the sign-ins couldn't be saved (nothing changed).
@@ -276,6 +290,24 @@ mod tests {
             })
             .unwrap();
         assert_eq!(FileStore::open(dir.path()).unwrap().cached().unwrap().id, "1");
+    }
+
+    #[test]
+    fn sign_ins_that_cant_be_read_are_an_error_and_stay_as_they_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        // None yet: a first start, empty
+        assert!(SessionStore::get(&FileStore::open(dir.path()).unwrap(), "tidal.unofficial").is_none());
+        // Not the store's JSON (cut short): an error, the file as it was
+        let cut = br#"{"tidal.unofficial":"signed in""#;
+        std::fs::write(&file, cut).unwrap();
+        assert!(FileStore::open(dir.path()).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), cut);
+        // Can't be read at all (a folder in its place): an error, left there
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(FileStore::open(dir.path()).is_err());
+        assert!(file.is_dir());
     }
 
     #[test]

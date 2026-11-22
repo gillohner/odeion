@@ -367,20 +367,62 @@ pub(crate) async fn qobuz(State(p): State<Arc<Phone>>, Path(id): Path<String>) -
             return err(StatusCode::SERVICE_UNAVAILABLE, &m)
         }
     };
-    // The track itself takes as long as it takes: no overall timeout on this one
-    let resp = match reqwest::Client::new().get(&url).send().await {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => {
+    relay(
+        &p.qobuz_http,
+        &url,
+        QOBUZ_ANSWER_FOR,
+        pm_sources::qobuz::content_type_for(format),
+    )
+    .await
+}
+
+/// How long Qobuz's file host may take to take the connection.
+const QOBUZ_CONNECT_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long it may take to start answering.
+const QOBUZ_ANSWER_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long the track may stop coming before the relay ends (the player then asks again).
+const QOBUZ_STALL_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The client Qobuz tracks are relayed with: a time limit on the connection and on each wait for
+/// more of the track, none on the whole (a track takes as long as it takes).
+pub(crate) fn qobuz_client() -> reqwest::Result<reqwest::Client> {
+    client_within(QOBUZ_CONNECT_FOR, QOBUZ_STALL_FOR)
+}
+
+fn client_within(
+    connect: std::time::Duration,
+    stall: std::time::Duration,
+) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .read_timeout(stall)
+        .build()
+}
+
+/// The track at `url`, relayed as it comes: an error answer when the host doesn't answer within
+/// `answer_for` (a host that takes the connection and never answers never holds the page).
+async fn relay(client: &reqwest::Client, url: &str, answer_for: std::time::Duration, mime: &str) -> Response {
+    let resp = match tokio::time::timeout(answer_for, client.get(url).send()).await {
+        Ok(Ok(r)) if r.status().is_success() => r,
+        Ok(Ok(r)) => {
             return err(
                 StatusCode::BAD_GATEWAY,
                 &format!("Qobuz: the stream answered {}", r.status()),
             )
         }
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("Qobuz: {}", e.without_url())),
+        Ok(Err(e)) if !e.is_timeout() => {
+            return err(StatusCode::BAD_GATEWAY, &format!("Qobuz: {}", e.without_url()))
+        }
+        Ok(Err(_)) | Err(_) => {
+            return err(
+                StatusCode::GATEWAY_TIMEOUT,
+                "Qobuz: the stream didn't answer in time",
+            )
+        }
     };
     let len = resp.content_length();
     let mut out = Response::builder()
-        .header(header::CONTENT_TYPE, pm_sources::qobuz::content_type_for(format))
+        .header(header::CONTENT_TYPE, mime)
         .header(header::CACHE_CONTROL, "private, max-age=600");
     if let Some(n) = len {
         out = out.header(header::CONTENT_LENGTH, n);
@@ -393,6 +435,61 @@ pub(crate) async fn qobuz(State(p): State<Arc<Phone>>, Path(id): Path<String>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host that takes each connection, reads the request and answers `head` (nothing: never),
+    /// then nothing more (the connection held open).
+    async fn host(head: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = format!("http://{}/track.flac", l.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut c, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut got = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match c.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => got.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let _ = c.write_all(head).await;
+                    std::future::pending::<()>().await;
+                    drop(c);
+                });
+            }
+        });
+        at
+    }
+
+    #[tokio::test]
+    async fn a_qobuz_host_that_never_answers_never_holds_the_page() {
+        let short = std::time::Duration::from_millis(300);
+        // Takes the connection, never answers: ended by the limit on the answer, or on a stall
+        let url = host(b"").await;
+        for (answer, stall) in [(short, short * 10), (short * 10, short)] {
+            let c = client_within(short, stall).unwrap();
+            let r = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                relay(&c, &url, answer, "audio/flac"),
+            )
+            .await
+            .expect("the request ends by itself");
+            assert_eq!(r.status(), StatusCode::GATEWAY_TIMEOUT);
+        }
+        let c = client_within(short, short).unwrap();
+        // Answers, sends a little of the track, then stops: the relay ends (the player asks again)
+        let url = host(b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\n\r\nfLaC").await;
+        let r = relay(&c, &url, short, "audio/flac").await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            axum::body::to_bytes(r.into_body(), usize::MAX),
+        )
+        .await
+        .expect("the relay ends by itself");
+        assert!(body.is_err(), "cut short, not whole");
+    }
 
     #[test]
     fn a_track_is_written_whole_and_the_cache_keeps_the_newest() {

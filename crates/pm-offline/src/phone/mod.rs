@@ -101,6 +101,8 @@ pub struct Phone {
     key: String,
     pub(crate) store: Arc<store::FileStore>,
     pub(crate) http: reqwest::Client,
+    /// Qobuz tracks are relayed with this one (no limit on the whole track, on each wait).
+    pub(crate) qobuz_http: reqwest::Client,
     pub(crate) tidal: TidalConf,
     version: String,
     pubky: Option<String>,
@@ -142,11 +144,13 @@ impl Phone {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(std::io::Error::other)?;
+        let qobuz_http = stream::qobuz_client().map_err(std::io::Error::other)?;
         Ok(Arc::new(Self {
             dir: c.dir,
             key: new_key(),
             store,
             http,
+            qobuz_http,
             tidal: c.tidal,
             version: c.version,
             pubky: c.pubky,
