@@ -210,7 +210,10 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             None
         }
         Err(e) => {
-            tracing::debug!(data_dir = %cfg.data_dir.display(), "no lock on the data folder: {e}");
+            tracing::warn!(
+                data_dir = %cfg.data_dir.display(),
+                "no lock on the data folder ({e}): `odeiond restore` cannot tell that this node runs"
+            );
             None
         }
     };

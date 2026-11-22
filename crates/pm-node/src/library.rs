@@ -23,11 +23,17 @@ pub struct DataDirLock {
 /// `Err`: the folder has no locks (some network shares) or the file can't be made.
 pub fn lock_data_dir(cfg: &NodeConfig) -> std::io::Result<Option<DataDirLock>> {
     std::fs::create_dir_all(&cfg.data_dir)?;
-    let file = std::fs::OpenOptions::new()
+    let path = cfg.data_dir.join("node.lock");
+    let made = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(cfg.data_dir.join("node.lock"))?;
+        .open(&path);
+    let file = match made {
+        // Another user's file (a restore run with sudo made it): reading it is enough to lock it
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => std::fs::File::open(&path)?,
+        made => made?,
+    };
     match file.try_lock() {
         Ok(()) => Ok(Some(DataDirLock { _file: file })),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
