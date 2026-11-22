@@ -422,7 +422,9 @@ fn replace_file(
             })
             .map_err(|e| failed(path, e))?;
         }
-        std::fs::set_permissions(&new, meta.permissions()).map_err(|e| failed(&new, e))?;
+        // (on the open file, as the owner was: the name is not looked up again)
+        file.set_permissions(meta.permissions())
+            .map_err(|e| failed(&new, e))?;
         std::fs::rename(&new, path).map_err(|e| failed(path, e))?;
         // The rename itself on the disk (not every filesystem lets a folder be synced)
         if let Some(Ok(dir)) = path.parent().map(std::fs::File::open) {
