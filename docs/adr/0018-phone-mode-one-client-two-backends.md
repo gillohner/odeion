@@ -59,9 +59,10 @@ from a node.
   (`pm_appdata::files`). Their canonical URL comes from their tags (recording MBID, else ISRC), as on a
   node: a bookmark or a listen of one points at it. A setting copies them to
   `/priv/pubky.music/files/`, where a node finds them, on a task of its own, found there by content
-  hash, and counted as copied once the homeserver holds all of it (a short copy is sent again). The
-  setting is on by default only when the person's homeserver is the one installed with their
-  node (`node.json`'s `bundled_homeserver`).
+  hash, and counted as copied once the homeserver holds all of it (a short copy is sent again). A
+  copy there whose size the homeserver doesn't give counts as there, as on a node, and one whose
+  size it can't say now is never sent over or removed. The setting is on by default only when the
+  person's homeserver is the one installed with their node (`node.json`'s `bundled_homeserver`).
 
 ## Consequences
 
@@ -78,7 +79,9 @@ from a node.
   (`sign-ins.json.<date>.unreadable`, readable by the app alone; the app never deletes it, so it keeps
   the tokens it held until the app's data is cleared), and phone mode starts without what couldn't
   be read (a value that doesn't read, such as a service's sign-in that isn't its JSON: only that
-  one). A file that can't be read at all (a read error) stops phone mode's start as before.
+  one). Settings lost with it are noted, and copying added songs to the homeserver is off until
+  the person chooses again (an "off" never turns into the default). A file that can't be read at
+  all (a read error) stops phone mode's start as before.
   Those services are signed out on the phone and set aside: the vault sync never removes or writes
   them until the person signs in again (a copy in the vault the phone can use is taken, which is a
   sign-in again). The connect page says so before phone mode opens, until the person presses
@@ -97,10 +100,13 @@ from a node.
   id is let go once neither side has the sign-in. "Sign out everywhere" is recorded only by a sync
   that read every service's copy. A TIDAL renewal request is given 40 s, well within the 60 s the
   vault waits for it under its lock, and a yes from TIDAL whose answer doesn't arrive whole is not
-  taken for a refusal.
+  taken for a refusal. A renewal written over a vault copy another device rewrote meanwhile keeps
+  what the phone made with the new tokens, and once TIDAL renewed for the phone it never renews
+  the session before again on its own. A renewal on the phone runs in the vault's turn, so a vault
+  sync never writes the session being renewed.
 - One backend per person on the phone: leaving phone mode ends its sync and waits, and opening it again
   while a step of the old one still runs gives back that one, so two never write the sign-ins over each
-  other's.
+  other's. The app opens phone mode one open at a time, so it never starts two servers.
 - A TIDAL song is fetched once into the app's cache (the newest 3 are kept). It is sent to the player as
   it arrives when the fetch takes longer than 12 s, and a fetch that nobody reads for 5 s stops.
 - The built-in TIDAL clients ship inside the APK, masked as they are in the node's binaries.

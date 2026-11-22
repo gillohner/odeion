@@ -250,9 +250,16 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
     // The vault's turn, for the whole renewal (through the vault, or here and its save): a vault
     // pass never reads the session being renewed here and writes it to the vault (where another
     // device would renew it again), and none comes between the vault's answer and a renewal here
-    let Some(_turn) = super::vault::vault_turn(p).await else {
-        tracing::warn!("phone mode: a vault sync runs; TIDAL is renewed after it");
-        return current(p).ok_or_else(being_renewed);
+    // (A held renewal the vault doesn't have is never synced while it is held: no turn needed)
+    let _turn = match outside {
+        true => None,
+        false => match super::vault::vault_turn(p).await {
+            Some(t) => Some(t),
+            None => {
+                tracing::warn!("phone mode: a vault sync runs; TIDAL is renewed after it");
+                return current(p).ok_or_else(being_renewed);
+            }
+        },
     };
     // No account: the vault can't be asked, and the last sync found TIDAL there
     if !outside && acct.is_none() && super::vault::tidal_in_step(p) {
@@ -1104,7 +1111,14 @@ mod tests {
         };
         hold_unsaved(&p, "due".into(), held, false);
         assert!(held_outside_vault(&p));
-        let s = renew(&p).await.expect("renewed here");
+        // A vault pass runs meanwhile (stalled on the homeserver): it never syncs TIDAL while
+        // this is held, so the renewal doesn't wait for it
+        let pass = p.vault_lock.lock().await;
+        let s = tokio::time::timeout(std::time::Duration::from_secs(5), renew(&p))
+            .await
+            .expect("not behind the pass")
+            .expect("renewed here");
+        drop(pass);
         assert_eq!(s.access_token, "fresh-1");
         assert_eq!(renewed.load(Ordering::SeqCst), 1);
     }

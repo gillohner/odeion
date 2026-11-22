@@ -239,14 +239,28 @@ impl Phone {
         if kept.is_empty() || kept.iter().all(|k| told.lines().any(|t| t == k)) {
             return None;
         }
+        // Settings lost with them: the copy choice reads as off ([`store::SETTINGS_SET_ASIDE`])
+        let lost = pm_sources::SessionStore::get(self.store.as_ref(), store::SETTINGS_SET_ASIDE).is_some();
+        let off = if lost {
+            " Keeping the songs you add on your homeserver is off until you choose again in Settings."
+        } else {
+            ""
+        };
         let (what, them) = match names.as_slice() {
+            [] => {
+                return Some(format!(
+                    "Some settings on this phone couldn't be read. The file was kept as {} in the \
+                     app's storage.{off}",
+                    kept.join(", ")
+                ))
+            }
             [one] => (format!("Your {one} sign-in"), "it"),
             _ => ("Your streaming sign-ins".to_string(), "them"),
         };
         Some(format!(
             "{what} on this phone couldn't be read. The file was kept as {} in the app's \
              storage, and you are signed out of {them} on this phone only: your other devices \
-             keep {them}. Sign in again in Settings › Streaming services.",
+             keep {them}. Sign in again in Settings › Streaming services.{off}",
             kept.join(", ")
         ))
     }
@@ -261,7 +275,8 @@ impl Phone {
         self.store.put(SET_ASIDE_TOLD, Some(&kept.join("\n")))
     }
 
-    /// The services set aside now (their names), and the copies kept with them.
+    /// The services set aside now (their names), and the copies kept with them (and with settings
+    /// lost at the same time).
     fn set_aside_now(&self) -> (Vec<&'static str>, Vec<String>) {
         let (mut names, mut kept) = (Vec::new(), Vec::new());
         for (key, name) in [
@@ -273,6 +288,11 @@ impl Phone {
                 if !kept.contains(&k) {
                     kept.push(k);
                 }
+            }
+        }
+        if let Some(k) = pm_sources::SessionStore::get(self.store.as_ref(), store::SETTINGS_SET_ASIDE) {
+            if !kept.contains(&k) {
+                kept.push(k);
             }
         }
         (names, kept)

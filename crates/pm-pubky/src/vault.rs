@@ -1715,18 +1715,22 @@ pub fn merge_refreshed(cur: &SignIn, theirs: &SignIn, fresh: &SignIn) -> SignIn 
     s.expires_at = fresh.expires_at;
     s.scopes = fresh.scopes.clone();
     s.last_refresh = fresh.last_refresh;
-    if fresh.user.is_some() || fresh.user != cur.user {
-        s.user = fresh.user.clone();
-    }
     let keys: std::collections::BTreeSet<&String> = cur.extra.keys().chain(fresh.extra.keys()).collect();
+    let mut made_members = false;
     for k in keys {
         if cur.extra.get(k) == fresh.extra.get(k) {
             continue;
         }
+        made_members = true;
         match fresh.extra.get(k) {
             Some(v) => s.extra.insert(k.clone(), v.clone()),
             None => s.extra.remove(k),
         };
+    }
+    // The account as the refresh has it when it made members of its own (they may hash it), or
+    // gives one
+    if made_members || fresh.user.is_some() || fresh.user != cur.user {
+        s.user = fresh.user.clone();
     }
     s
 }
@@ -2499,6 +2503,16 @@ mod tests {
         assert_eq!(s.extra["theirs"], "y");
         assert_eq!(s.extra["added"], 1);
         assert_eq!(s.revision, 5);
+        // The account follows a refresh that made members of its own, also when it has none and
+        // another client put one in meanwhile (else the node member's hash wouldn't match)
+        let mut with_user = theirs.clone();
+        with_user.user = Some(pm_appdata::vault::ServiceUser {
+            id: "u".into(),
+            name: None,
+            country: None,
+            extra: Default::default(),
+        });
+        assert_eq!(merge_refreshed(&cur, &with_user, &fresh).user, None);
         // A member the refresh dropped goes
         let mut dropped = fresh.clone();
         dropped.extra.remove("node");

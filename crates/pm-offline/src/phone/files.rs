@@ -286,12 +286,12 @@ impl Remote for Account {
 
 /// Copies the songs added here that the homeserver doesn't have (by content hash), one at a time,
 /// when the setting is on. A song counts as copied once the homeserver says it holds all of it (a
-/// short copy is removed and sent again later); one there whose size it doesn't give is left as it
-/// is (never sent over, nor removed: it may be whole), and when it can't say the size at all the
-/// pass stops. A song copied before, or refused for good, isn't
-/// tried again; one that
-/// takes too long waits for the next pass and the others go on; after any other failure the pass
-/// stops and the next one waits (doubling, up to 6 hours).
+/// short copy is removed and sent again later). One found there whose size it doesn't give counts
+/// as there, as on the node (`copy_guard::needs_sending`): never sent over, nor removed (it may be
+/// whole); one it took and then gives no size of isn't counted until a later pass finds it there.
+/// A size it can't say at all stops the pass. A song copied before, or refused for good, isn't
+/// tried again; one that takes too long waits for the next pass and the others go on; after any
+/// other failure the pass stops and the next one waits (doubling, up to 6 hours).
 pub async fn copy(p: &Arc<Phone>, acct: &Account) -> Report {
     let known = bundled_here(acct).await;
     if known.is_some() {
@@ -390,9 +390,9 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
         drop(p);
         let path = format!("{}{}", pm_appdata::files::FILES_DIR, s.file);
         // There already, whole (a copy cut short by a failure or a kill is not): copied. A short
-        // one under the phone's own name is replaced. One whose size isn't known (the homeserver
-        // doesn't say, or didn't answer) may be whole: never sent over, nor removed (as the node's
-        // `copy_guard::needs_sending`)
+        // one under the phone's own name is replaced. One whose size the homeserver doesn't give
+        // counts as there, as on the node (`copy_guard::needs_sending`); one whose size it can't
+        // say now may be whole: never sent over, nor removed, and the pass stops
         let mut whole = false;
         let mut unknown = None;
         for name in there.get(&h).into_iter().flatten() {
@@ -416,11 +416,8 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
             }
         }
         match unknown.filter(|_| !whole) {
-            // There, its size not given: left as it is (not sent again, not counted)
-            Some(true) => {
-                r.left += 1;
-                continue;
-            }
+            // There, its size not given: there, as on the node
+            Some(true) => whole = true,
             // Its size couldn't be asked: the pass stops as after a failure
             Some(false) => {
                 if let Some(p) = weak.upgrade() {
@@ -484,8 +481,8 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
                 r.copied += 1;
                 *p.copier.retry.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
-            // There, its size not given: not counted, and never sent again (the next pass finds
-            // it there and leaves it, as the node does)
+            // There, its size not given: not counted yet, never sent again (the next pass finds it
+            // there and counts it, as the node does)
             (Ok(Ok(())), Some(Ok(Some(None)))) => {
                 tracing::warn!(
                     "phone mode: the homeserver doesn't say the size of a song it took; it is left as it is"
@@ -577,7 +574,13 @@ pub(crate) async fn choose(State(p): State<Arc<Phone>>, Json(c): Json<Choice>) -
     if let Err(e) = load_copies(&p) {
         return err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
-    if let Err(e) = p.store.put(KEY, v) {
+    // (A choice made now is the person's: settings lost before no longer stand in for it)
+    let saved = p.store.change_if(|d| {
+        d.put(KEY, v);
+        d.put(super::store::SETTINGS_SET_ASIDE, None);
+        Ok(true)
+    });
+    if let Err(e) = saved {
         return err(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
     // A new choice tries the songs the homeserver refused again (it may have room now; not
@@ -1019,8 +1022,10 @@ mod tests {
         let r = copy_while(&Arc::downgrade(&p), &f).await;
         assert_eq!(f.tried.load(Ordering::SeqCst), 0, "nothing sent over it");
         assert!(f.deleted.lock().unwrap().is_empty());
-        assert_eq!(r, Report { copied: 0, left: 1 });
-        // Nor at the next pass
+        // There, as on the node: counted, so never asked about again
+        assert_eq!(r, Report::default());
+        assert_eq!(load_copies(&p).unwrap().copied.len(), 1);
+        assert_eq!(view(&p)["uploaded"], 1);
         copy_while(&Arc::downgrade(&p), &f).await;
         assert_eq!(f.tried.load(Ordering::SeqCst), 0);
     }
@@ -1048,6 +1053,8 @@ mod tests {
         }
         assert_eq!(f.tried.load(Ordering::SeqCst), 1, "sent once");
         assert!(f.deleted.lock().unwrap().is_empty());
+        // Found there by the next pass: counted, as on the node
+        assert_eq!(load_copies(&p).unwrap().copied.len(), 1);
     }
 
     #[tokio::test]
@@ -1109,8 +1116,19 @@ mod tests {
             0,
             "nothing sent against the choice"
         );
-        // A new choice is the person's
-        p.store.put(KEY, Some("on")).unwrap();
+        // They are told, with the sign-ins set aside
+        let told = p.set_aside_notice().unwrap();
+        assert!(
+            told.ends_with(
+                "Keeping the songs you add on your homeserver is off until you choose again in Settings."
+            ),
+            "{told}"
+        );
+        // A new choice is the person's, "back to the default" too (on, with their node's
+        // homeserver)
+        let back = choose(State(p.clone()), Json(Choice { on: None })).await;
+        assert_eq!(back.status(), axum::http::StatusCode::OK);
+        assert_eq!(chosen(&p), None);
         assert!(on(&p));
         assert_eq!(copy_while(&Arc::downgrade(&p), &f).await.copied, 1);
     }
