@@ -9557,10 +9557,14 @@
           // by its address). Phones and touch screens then show only the ⋯ (the + is in it), and a
           // swipe or a long press on the row works as on a library row. Before, the rows had only +, so
           // a phone could neither play one song next nor put one in a playlist from here.
+          // Add to playlist… only where playlists can be kept, as in the shared song menus: the Android app
+          // without a node has no 'collections' (its /playlists answers 503), so there a left swipe picks
+          // nothing instead of ending in "This needs an Odeion node".
+          const keepsPlaylists = () => !state.info || !Array.isArray(state.info.capabilities) || state.info.capabilities.includes('collections');
           $$('[data-amore1]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const i = Number(b.dataset.amore1); const t = it.tracks[i]; showMenu(b, [{ title: t.title },
             { label: 'Play next', icon: 'playnext', run: () => playSourceItems([qitems[i]], false, 'next') },
             { label: 'Add to queue', icon: 'plus', run: () => add1(i) },
-            { label: 'Add to playlist…', icon: 'playlist', run: () => uriMenu(b, [t.url], t.title) }]); });
+            ...(keepsPlaylists() ? [{ label: 'Add to playlist…', icon: 'playlist', run: () => uriMenu(b, [t.url], t.title) }] : [])]); });
           break;
         }
         case 'radio': {

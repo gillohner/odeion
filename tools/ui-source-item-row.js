@@ -7,6 +7,7 @@
 // doesn't start the song again (a node zone gets one queue load), a drag that selects the title
 // doesn't play, a phone tap on the row plays, and on a touch screen or a phone the row shows only its ⋯
 // (Play next, Add to queue, Add to playlist…: each checked), on one line, and a swipe right plays it next. 1280/1024/768 px, a 768 px touch tablet, 360/412 px phones.
+// In phone mode (no collections) a song's ⋯ has no Add to playlist… and a swipe left adds to no playlist.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-source-item-row.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -228,6 +229,45 @@ async function nodeRun(browser, width) {
   } finally { await context.close(); }
 }
 
+// Phone mode (the Android app without a node): no 'collections' in /info's capabilities and /playlists
+// answers 503. A song's ⋯ then has Play next and Add to queue only (as the shared song menus), and a
+// swipe left adds to no playlist: no dialog, no /playlists request, only "isn't available for this row".
+async function phoneModeRun(browser, width) {
+  const tag = `${width} px phone mode (no collections)`;
+  const pf = { ...fixtures,
+    '/info': { body: { name: 'This phone', offline: false, capabilities: ['library', 'sources', 'bookmarks'], library: { tracks: 0, albums: 0, artists: 0, files: 0, missing_files: 0 } } },
+    '/playlists': { status: 503, body: { error: 'This needs an Odeion node' } } };
+  const { page, context, state } = await fx.create(browser, width, { fixtures: pf, realAudio: true, mobile: true });
+  await page.route('**/audio/*.wav', serveWav);
+  await context.addInitScript(() => { window.pmDesktop = Object.assign(window.pmDesktop || {}, { platform: 'android' }); });
+  try {
+    await openItem(page);
+    const more = row(page, 0).locator('[data-amore1]');
+    if (await more.isVisible()) await more.tap();
+    await page.waitForSelector('.popover.menu:not([hidden]) .pop-item', { timeout: 2000 }).catch(() => {});
+    const items = await page.evaluate(() => [...document.querySelectorAll('.popover.menu:not([hidden]) .pop-item')].map((b) => b.textContent.trim()));
+    check(items.join('|') === 'Play next|Add to queue', `${tag}: song 1's ⋯ has Play next and Add to queue only (${JSON.stringify(items)})`);
+    if (width < 400) await page.screenshot({ path: path.join(SHOTS, `phone-mode-menu-${width}.png`) });
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => { const m = document.querySelector('.popover.menu'); if (m) m.hidden = true; });
+    // A swipe left on song 2's row: nothing is added and no playlist dialog opens
+    const n0 = state.hits.length;
+    const cdp = await context.newCDPSession(page);
+    const rb = await row(page, 1).boundingBox();
+    const y = rb.y + rb.height / 2, x0 = rb.x + rb.width - 40;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: x0, y }] });
+    for (let k = 1; k <= 8; k++) { await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x0 - k * 15, y }] }); await page.waitForTimeout(16); }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.waitForTimeout(600);
+    const after = await page.evaluate(() => ({ dialog: !!document.querySelector('dialog[open]'), toasts: [...document.querySelectorAll('.toast')].map((t) => t.textContent.trim()) }));
+    const pl = state.hits.slice(n0).filter((h) => h.v.startsWith('/playlists'));
+    check(!after.dialog && pl.length === 0, `${tag}: a swipe left on song 2 opens no playlist dialog and asks no /playlists (${after.dialog ? 'dialog open' : 'no dialog'}, ${pl.map((h) => h.m + ' ' + h.v).join(', ') || 'no request'})`);
+    // (the swipe did reach the row's ⋯: it says so, as a shared song row in phone mode does)
+    check(after.toasts.some((t) => /Add to playlist isn.t available for this row/.test(t)), `${tag}: and says "Add to playlist isn't available for this row" (${JSON.stringify(after.toasts)})`);
+    check(state.errors.length === 0, `${tag}: no page errors ${JSON.stringify(state.errors)}`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -235,6 +275,7 @@ async function nodeRun(browser, width) {
     await browserRun(browser, 768, { touch: true });
     for (const w of [360, 412]) await browserRun(browser, w, { mobile: true });
     for (const w of [1280, 768]) await nodeRun(browser, w);
+    for (const w of [360, 412]) await phoneModeRun(browser, w);
   } finally { await browser.close(); }
   console.log(`source item row: ${passed} ok, ${failed} failed`);
   process.exit(failed ? 1 : 0);
