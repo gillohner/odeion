@@ -50,6 +50,46 @@ impl Running {
 
 static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
 
+/// One open at a time ([`open`]): two at once (a double tap, Ring's answer while the page opens it
+/// again) would each start a server, the second rewriting the port the page is kept under, and
+/// the first left running where nothing can stop it.
+static OPENING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The backend in `slot` when it is `pubky`'s and still serves, else one `start` starts (an old
+/// one ends first), one open at a time (`opening`): its origin and the backend.
+async fn running_or_started<F, Fut>(
+    slot: &Mutex<Option<Running>>,
+    opening: &tokio::sync::Mutex<()>,
+    pubky: &str,
+    start: F,
+) -> Result<(String, std::sync::Weak<pm_offline::phone::Phone>), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Running, String>>,
+{
+    let _one = opening.lock().await;
+    {
+        let mut r = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if r.as_ref()
+            .is_some_and(|r| r.pubky != pubky || r.task.is_finished())
+        {
+            if let Some(old) = r.take() {
+                old.stop();
+            }
+        }
+        if let Some(r) = r.as_ref() {
+            return Ok((r.origin.clone(), r.phone.clone()));
+        }
+    }
+    let new = start().await?;
+    let got = (new.origin.clone(), new.phone.clone());
+    // (Nothing else starts one meanwhile; were one there, it ends rather than run on unseen)
+    if let Some(old) = slot.lock().unwrap_or_else(|e| e.into_inner()).replace(new) {
+        old.stop();
+    }
+    Ok(got)
+}
+
 fn saved_path(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("phone.json"))
 }
@@ -246,44 +286,29 @@ async fn open(
     seen: bool,
 ) -> Result<Option<String>, String> {
     // The running backend is this person's and still serves; else a new one (the old one ends)
-    let running = {
-        let mut r = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-        if r.as_ref()
-            .is_some_and(|r| r.pubky != saved.pubky || r.task.is_finished())
-        {
-            if let Some(old) = r.take() {
-                old.stop();
-            }
-        }
-        r.as_ref().map(|r| (r.origin.clone(), r.phone.clone()))
-    };
-    let (origin, phone) = match running {
-        Some(o) => o,
-        None => {
-            let phone = pm_offline::phone::Phone::open(pm_offline::phone::Config {
-                dir: dir(app, &saved.pubky)?,
-                cache: cache_dir(app, &saved.pubky)?,
-                version: env!("CARGO_PKG_VERSION").into(),
-                pubky: Some(saved.pubky.clone()),
-                tidal: tidal_conf(),
-            })
+    let (origin, phone) = running_or_started(&RUNNING, &OPENING, &saved.pubky, || async {
+        let phone = pm_offline::phone::Phone::open(pm_offline::phone::Config {
+            dir: dir(app, &saved.pubky)?,
+            cache: cache_dir(app, &saved.pubky)?,
+            version: env!("CARGO_PKG_VERSION").into(),
+            pubky: Some(saved.pubky.clone()),
+            tidal: tidal_conf(),
+        })
+        .map_err(|e| format!("Phone mode can't start: {e}"))?;
+        let key = phone.key().to_string();
+        let weak = std::sync::Arc::downgrade(&phone);
+        let (addr, task) = pm_offline::phone::serve(phone)
+            .await
             .map_err(|e| format!("Phone mode can't start: {e}"))?;
-            let key = phone.key().to_string();
-            let weak = std::sync::Arc::downgrade(&phone);
-            let (addr, task) = pm_offline::phone::serve(phone)
-                .await
-                .map_err(|e| format!("Phone mode can't start: {e}"))?;
-            let origin = format!("http://127.0.0.1:{}", addr.port());
-            *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Running {
-                pubky: saved.pubky.clone(),
-                origin: origin.clone(),
-                key,
-                task,
-                phone: weak.clone(),
-            });
-            (origin, weak)
-        }
-    };
+        Ok(Running {
+            pubky: saved.pubky.clone(),
+            origin: format!("http://127.0.0.1:{}", addr.port()),
+            key,
+            task,
+            phone: weak,
+        })
+    })
+    .await?;
     // Sign-ins set aside (they couldn't be read): said before its page, until seen
     if let Some(p) = phone.upgrade() {
         if seen {
@@ -358,6 +383,48 @@ mod tests {
         assert_eq!(load_saved(&path), None);
         store_saved(&path, None).unwrap();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn two_opens_at_once_start_one_server() {
+        let slot = Mutex::new(None);
+        let opening = tokio::sync::Mutex::new(());
+        let started = std::sync::atomic::AtomicUsize::new(0);
+        let start = || async {
+            let n = started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Opening the backend and its server takes a while
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(Running {
+                pubky: "a".into(),
+                origin: format!("http://127.0.0.1:{}", 1000 + n),
+                key: "k".into(),
+                task: tokio::spawn(std::future::pending()),
+                phone: std::sync::Weak::new(),
+            })
+        };
+        let (one, two) = tokio::join!(
+            running_or_started(&slot, &opening, "a", start),
+            running_or_started(&slot, &opening, "a", start),
+        );
+        assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 1, "one server");
+        assert_eq!(one.unwrap().0, two.unwrap().0, "one origin for the page");
+        let running = slot.lock().unwrap().take().unwrap();
+        assert!(!running.task.is_finished());
+        running.stop();
+        // Another person's: the one there ends, a new one starts
+        let first = running_or_started(&slot, &opening, "a", start).await.unwrap();
+        let task_of =
+            |slot: &Mutex<Option<Running>>| slot.lock().unwrap().as_ref().unwrap().task.abort_handle();
+        let old = task_of(&slot);
+        let other = running_or_started(&slot, &opening, "b", start).await.unwrap();
+        assert_ne!(first.0, other.0);
+        for _ in 0..100 {
+            if old.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(old.is_finished(), "the old server stopped");
     }
 
     #[test]
