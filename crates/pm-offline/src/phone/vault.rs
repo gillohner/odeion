@@ -80,29 +80,33 @@ fn apply_if_still(
 /// vault can tell it from a refresh of the one before, and from one made before a sign-out
 /// everywhere.
 pub fn signed_in(phone: &Phone, service: &str) {
-    sign_in_here(phone, service, |_| true);
+    if let Err(e) = sign_in_here(phone, service, |_| true) {
+        tracing::warn!("phone mode: a sign-in's id couldn't be saved: {e}");
+    }
 }
 
 /// A sign-in made here: `write` puts it in the phone's sign-ins (and says whether it did), and in
 /// the same step it gets its new id (dated after the last "Sign out everywhere", as on a node),
-/// so a sync never sees the new sign-in under the old id. Then the vault hears of it.
-pub fn sign_in_here(phone: &Phone, service: &str, write: impl FnOnce(&dyn SessionStore) -> bool) -> bool {
+/// so a sync never sees the new sign-in under the old id. Then the vault hears of it. An error when
+/// it couldn't be saved: then nothing changed.
+pub fn sign_in_here(
+    phone: &Phone,
+    service: &str,
+    write: impl FnOnce(&dyn SessionStore) -> bool,
+) -> Result<bool, String> {
     let floor = load_record(&record_path(phone)).marker;
     let id = vault_form::lineage_after(service, floor, pm_sources::now_unix() as u64);
-    let kept = phone
-        .store
-        .change_if(|d| {
-            if !write(d) {
-                return Ok(false);
-            }
-            d.put(&lineage_key(service), Some(&id));
-            Ok(true)
-        })
-        .unwrap_or(false);
+    let kept = phone.store.change_if(|d| {
+        if !write(d) {
+            return Ok(false);
+        }
+        d.put(&lineage_key(service), Some(&id));
+        Ok(true)
+    })?;
     if kept {
         phone.sync_soon();
     }
-    kept
+    Ok(kept)
 }
 
 /// Whether what the phone holds for `service` differs from what the last sync recorded (a
@@ -538,7 +542,7 @@ pub async fn pass(phone: &Phone, acct: &Account) -> Result<Report, VaultStoreErr
 }
 
 /// What a renewal under the vault's lock did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Renewal {
     /// Renewed (here, or by another device): the phone has a fresh session.
     Renewed,
@@ -546,6 +550,8 @@ pub enum Renewal {
     NotInVault,
     /// Another vault step holds the lock (a renewal, a pass): never a renewal beside it.
     Busy,
+    /// TIDAL refused to renew the sign-in (its words): signing in again is the way back.
+    Refused(String),
 }
 
 /// TIDAL renewed under the vault blob's lock (VAULT.md, "Refreshing a token"): the session read
@@ -575,6 +581,9 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     let files = (d.join("revoked.json"), d.join("marks.json"));
     let vault = vault_of(acct, &secret, &files);
     let p = phone.clone();
+    // TIDAL's own refusal (not a failure on the way), kept apart from the vault's errors
+    let refused = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let refused2 = refused.clone();
     let r = vault
         .refresh(svc, false, |si: SignIn| async move {
             if !usable(&p, &TIDAL_FULL, &si, marker) {
@@ -600,8 +609,11 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
             .map_err(|_| RefreshFailed("the renewal stopped".into()))?
             .map_err(|e| {
                 RefreshFailed(match e {
-                    pm_sources::tidal::full::FullError::Mode(m)
-                    | pm_sources::tidal::full::FullError::Track(m) => m,
+                    pm_sources::tidal::full::FullError::Mode(m) => {
+                        *refused2.lock().unwrap_or_else(|e| e.into_inner()) = Some(m.clone());
+                        m
+                    }
+                    pm_sources::tidal::full::FullError::Track(m) => m,
                 })
             })?;
             let mut travels = travels;
@@ -646,6 +658,12 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
                 )?;
             }
             return Ok(Renewal::Renewed);
+        }
+        Err(e @ VaultStoreError::Refresh(_)) => {
+            return match refused.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                Some(why) => Ok(Renewal::Refused(why)),
+                None => Err(e),
+            }
         }
         Err(e) => return Err(e),
     };
@@ -696,6 +714,36 @@ pub fn tidal_due(phone: &Phone) -> bool {
         .is_some_and(|s| s.expires_at - pm_sources::now_unix() <= 60)
 }
 
+/// Tests: TIDAL signed in here with a session that runs out in 30 s, made with the phone's device
+/// client, and in step with the vault as the last sync saw it (a renewal goes through the vault).
+#[cfg(test)]
+pub(crate) fn tidal_due_in_step(p: &Phone) {
+    pm_sources::tidal::full::update(p.store.as_ref(), |st| {
+        st.enabled = true;
+        st.session = Some(pm_sources::tidal::full::Session {
+            access_token: "due".into(),
+            refresh_token: Some("rt".into()),
+            expires_at: pm_sources::now_unix() + 30,
+            country: "CH".into(),
+            ..Default::default()
+        });
+    });
+    let mine = vault_form::carried(TIDAL_FULL.carry, p.store.as_ref())
+        .unwrap()
+        .unwrap();
+    std::fs::create_dir_all(dir(p)).unwrap();
+    let mut r = Record::default();
+    r.services.insert(
+        TIDAL_FULL.service.into(),
+        Synced {
+            mine: vault_form::hash(&mine),
+            theirs: "x".into(),
+            lineage: None,
+        },
+    );
+    save_record(&record_path(p), &r);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,7 +787,7 @@ mod tests {
                 true
             })
         });
-        assert!(kept);
+        assert_eq!(kept, Ok(true));
         assert_eq!(
             pm_sources::tidal::full::load(p.store.as_ref())
                 .session
@@ -751,7 +799,7 @@ mod tests {
         assert!(vault_form::lineage_at(&id) > now, "{id}");
         // One that didn't happen gets no id
         let before = SessionStore::get(p.store.as_ref(), &lineage_key("qobuz"));
-        assert!(!sign_in_here(&p, "qobuz", |_| false));
+        assert_eq!(sign_in_here(&p, "qobuz", |_| false), Ok(false));
         assert_eq!(SessionStore::get(p.store.as_ref(), &lineage_key("qobuz")), before);
         // A health note isn't a change for the vault, a sign-out is
         save_record(&record_path(&p), &{
@@ -997,5 +1045,28 @@ mod tests {
             decide(Some(&s), Some("b"), Some("L0"), Some(&t("x", "L1", false)), true),
             Do::DropHere
         );
+    }
+
+    #[tokio::test]
+    async fn a_homeserver_that_never_answers_never_holds_the_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone_here(dir.path());
+        tidal_due_in_step(&p);
+        let hs = super::super::stalled::homeserver().await;
+        let acct = hs.account();
+        // From here only the homeserver is waited for: time moves on whenever nothing else can
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(3600), renew_tidal(&p, &acct))
+            .await
+            .expect("the renewal ends by itself");
+        assert!(matches!(r, Err(VaultStoreError::Busy(_))), "{r:?}");
+        assert!(started.elapsed() <= std::time::Duration::from_secs(60));
+        assert!(
+            hs.taken.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "it waited on the homeserver"
+        );
+        // The vault is free again: the next pass or renewal doesn't wait for this one
+        assert!(p.vault_lock.try_lock().is_ok());
     }
 }

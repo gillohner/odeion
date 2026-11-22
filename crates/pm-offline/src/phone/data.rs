@@ -72,24 +72,32 @@ pub(crate) fn load(phone: &Phone) -> Local {
         .unwrap_or_default()
 }
 
-fn save(phone: &Phone, l: &Local) {
+fn save(phone: &Phone, l: &Local) -> std::io::Result<()> {
     let p = path(phone);
     let tmp = p.with_extension("json.tmp");
-    let ok = serde_json::to_vec(l)
-        .ok()
-        .and_then(|b| std::fs::write(&tmp, b).ok())
-        .and_then(|_| std::fs::rename(&tmp, &p).ok());
-    if ok.is_none() {
-        tracing::warn!("phone mode: the data cache could not be saved");
-    }
+    let b = serde_json::to_vec(l).map_err(std::io::Error::other)?;
+    std::fs::write(&tmp, b)?;
+    std::fs::rename(&tmp, &p).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
-/// One change to what the phone keeps, made under the phone's data lock.
-pub(crate) fn change(phone: &Phone, f: impl FnOnce(&mut Local)) {
+/// One change to what the phone keeps, made under the phone's data lock. An error when it couldn't
+/// be saved: then nothing changed (the file is what every reader reads).
+#[must_use = "a change that wasn't saved didn't happen"]
+pub(crate) fn change(phone: &Phone, f: impl FnOnce(&mut Local)) -> std::io::Result<()> {
     let _g = phone.data_lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut l = load(phone);
     f(&mut l);
-    save(phone, &l);
+    save(phone, &l).inspect_err(|e| tracing::warn!("phone mode: the data cache could not be saved: {e}"))
+}
+
+/// What the page is told when the phone couldn't keep what it asked for.
+pub(crate) fn not_kept(e: std::io::Error) -> Response {
+    super::err(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        &format!("This phone couldn't keep that ({e}), so it isn't saved: try again"),
+    )
 }
 
 /// The canonical URL of what the page names (a queue URI, a service link, a MusicBrainz link).
@@ -144,7 +152,7 @@ async fn bookmark(p: &Arc<Phone>, it: &Item, on: bool) -> Response {
     };
     let url = uri.to_url();
     let at = pm_pubky::ids::now_micros();
-    change(p, |l| {
+    let kept = change(p, |l| {
         if on {
             l.bookmarks.insert(url.clone(), at);
         } else {
@@ -156,6 +164,9 @@ async fn bookmark(p: &Arc<Phone>, it: &Item, on: bool) -> Response {
             at,
         });
     });
+    if let Err(e) = kept {
+        return not_kept(e);
+    }
     p.data_soon();
     Json(json!({ "uri": url, "favourite": on, "pending": true })).into_response()
 }
@@ -196,7 +207,7 @@ pub(crate) async fn played(State(p): State<Arc<Phone>>, Json(b): Json<Played>) -
         pm_model::MusicUri::Service(s) => Some(s.service.label().to_string()),
         _ => None,
     };
-    change(&p, |l| {
+    let kept = change(&p, |l| {
         l.pending.push(Pending::Listen {
             url: uri.to_url(),
             service,
@@ -205,6 +216,9 @@ pub(crate) async fn played(State(p): State<Arc<Phone>>, Json(b): Json<Played>) -
             id: None,
         })
     });
+    if let Err(e) = kept {
+        return not_kept(e);
+    }
     p.data_soon();
     Json(json!({ "plays": [] })).into_response()
 }
@@ -338,7 +352,8 @@ async fn write_prefs(acct: &Account, p: &Phone, source: &str) -> Result<(), Stri
         .write_prefs(&acct.session, &prefs)
         .await
         .map_err(|e| e.to_string())?;
-    change(p, |l| l.prefs_at = at);
+    // Not kept: the next read takes this prefs.json as another device's (the same values)
+    let _ = change(p, |l| l.prefs_at = at);
     Ok(())
 }
 
@@ -358,7 +373,8 @@ async fn take_prefs(acct: &Account, p: &Phone) -> Result<bool, String> {
         return Ok(false);
     }
     apply_quality(p, &prefs);
-    change(p, |l| l.prefs_at = at);
+    // Not kept: taken again next time (the same values)
+    let _ = change(p, |l| l.prefs_at = at);
     Ok(true)
 }
 
@@ -384,8 +400,9 @@ fn apply_quality(p: &Phone, prefs: &Value) {
     }
 }
 
-/// A source's quality changed on the phone: prefs.json gets it at the next sync.
-pub(crate) fn prefs_changed(p: &Phone, source: &str) {
+/// A source's quality changed on the phone: prefs.json gets it at the next sync. An error when the
+/// phone couldn't keep that ([`not_kept`] says it to the page).
+pub(crate) fn prefs_changed(p: &Phone, source: &str) -> std::io::Result<()> {
     let op = Pending::Quality {
         source: source.to_string(),
     };
@@ -393,8 +410,9 @@ pub(crate) fn prefs_changed(p: &Phone, source: &str) {
         if !l.pending.contains(&op) {
             l.pending.push(op.clone());
         }
-    });
+    })?;
     p.data_soon();
+    Ok(())
 }
 
 /// What a data sync did.
@@ -411,27 +429,30 @@ pub async fn sync(p: &Phone, acct: &Account) -> Report {
     let mut r = write_pending(p, acct).await;
     let known = load(p).known;
     match acct.hs.read_v1_bookmarks_except(&acct.session, &known).await {
-        Ok(list) => change(p, |l| {
-            // By file name, as the reader looks them up
-            l.known = list
-                .iter()
-                .map(|(path, uri, at)| {
-                    let file = path.rsplit('/').next().unwrap_or(path);
-                    (file.to_string(), (uri.clone(), *at))
-                })
-                .collect();
-            let mut b: BTreeMap<String, i64> = list.into_iter().map(|(_, uri, at)| (uri, at)).collect();
-            for op in &l.pending {
-                if let Pending::Bookmark { url, on, at } = op {
-                    if *on {
-                        b.insert(url.clone(), *at);
-                    } else {
-                        b.remove(url);
+        Ok(list) => {
+            // Not kept: read again next time
+            let _ = change(p, |l| {
+                // By file name, as the reader looks them up
+                l.known = list
+                    .iter()
+                    .map(|(path, uri, at)| {
+                        let file = path.rsplit('/').next().unwrap_or(path);
+                        (file.to_string(), (uri.clone(), *at))
+                    })
+                    .collect();
+                let mut b: BTreeMap<String, i64> = list.into_iter().map(|(_, uri, at)| (uri, at)).collect();
+                for op in &l.pending {
+                    if let Pending::Bookmark { url, on, at } = op {
+                        if *on {
+                            b.insert(url.clone(), *at);
+                        } else {
+                            b.remove(url);
+                        }
                     }
                 }
-            }
-            l.bookmarks = b;
-        }),
+                l.bookmarks = b;
+            });
+        }
         Err(e) => tracing::warn!("phone mode: Bookmarks not read: {e}"),
     }
     match take_prefs(acct, p).await {
@@ -453,11 +474,16 @@ pub async fn write_pending(p: &Phone, acct: &Account) -> Report {
         // A listen gets its id now, its write time, kept should this try fail
         if let Pending::Listen { id: None, .. } = &op {
             let new = pm_pubky::ids::timestamp_id(pm_pubky::ids::now_micros());
-            change(p, |l| {
+            // Never written without its id kept (a retry must land on the same post)
+            if change(p, |l| {
                 if let Some(Pending::Listen { id, .. }) = l.pending.first_mut() {
                     id.get_or_insert(new);
                 }
-            });
+            })
+            .is_err()
+            {
+                break;
+            }
             match load(p).pending.first().cloned() {
                 Some(o) => op = o,
                 None => break,
@@ -474,11 +500,16 @@ pub async fn write_pending(p: &Phone, acct: &Account) -> Report {
         }
         match write(acct, p, &op, history.unwrap_or(History::Private)).await {
             Ok(()) => {
-                change(p, |l| {
+                // Not kept: written again next time (the same path, the same content)
+                if change(p, |l| {
                     if l.pending.first() == Some(&op) {
                         l.pending.remove(0);
                     }
-                });
+                })
+                .is_err()
+                {
+                    break;
+                }
                 r.written += 1;
             }
             Err(e) => {
@@ -524,6 +555,45 @@ mod tests {
             tokio::time::timeout(wait, p.sync_now.notified()).await.is_err(),
             "no vault pass for it"
         );
+    }
+
+    #[tokio::test]
+    async fn what_the_phone_couldnt_keep_is_never_acknowledged() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Phone::open(super::super::Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        // data.json can't be written now (a folder in its place)
+        std::fs::create_dir(path(&p)).unwrap();
+        let item = || Item {
+            uri: Some("tidal:track:1".into()),
+            track_id: None,
+        };
+        let r = add(State(p.clone()), Json(item())).await;
+        assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let r = remove(State(p.clone()), Query(item())).await;
+        assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let r = played(
+            State(p.clone()),
+            Json(Played {
+                uri: Some("tidal:track:1".into()),
+                track_id: None,
+                duration_ms: Some(1000),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(prefs_changed(&p, "tidal").is_err());
+        // Nothing waits to be written, nothing woke the writes, and the page's list is as it was
+        assert!(load(&p).pending.is_empty());
+        let wait = std::time::Duration::from_millis(50);
+        assert!(tokio::time::timeout(wait, p.data_now.notified()).await.is_err());
+        assert_eq!(bookmarks(State(p.clone())).await.0["uris"], json!([]));
     }
 
     #[test]

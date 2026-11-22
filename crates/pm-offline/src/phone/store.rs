@@ -1,7 +1,8 @@
 //! What phone mode keeps on the phone for its one person: the streaming sign-ins
 //! (`tidal.unofficial`, `qobuz.unofficial`) and Qobuz's web-player app values (`qobuz.app`), as
 //! one JSON file in the app's own storage (`phone/sign-ins.json`, readable only by the app).
-//! Every change is written whole to a temporary file and renamed over the old one.
+//! Every change is written whole to a temporary file and renamed over the old one, and only once
+//! it is there does the phone use it: a change that couldn't be saved didn't happen.
 
 use pm_sources::qobuz::{App, AppCache};
 use pm_sources::{SessionStore, SourceError};
@@ -48,7 +49,9 @@ impl FileStore {
         let tmp = self.path.with_extension("json.tmp");
         let body = serde_json::to_vec(values).map_err(std::io::Error::other)?;
         write_private(&tmp, &body)?;
-        std::fs::rename(&tmp, &self.path)
+        std::fs::rename(&tmp, &self.path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
     }
 
     fn tell(&self, key: &str) {
@@ -86,19 +89,30 @@ impl FileStore {
         Ok(true)
     }
 
-    /// Sets (or with `None` removes) a key.
+    /// Sets (or with `None` removes) a key: saved first, then used (an error, and nothing
+    /// changed, when it can't be saved).
     pub fn put(&self, key: &str, value: Option<&str>) -> std::io::Result<()> {
         {
             let mut v = self.values.lock().unwrap_or_else(|e| e.into_inner());
+            let mut new = v.clone();
             match value {
-                Some(x) => v.insert(key.to_string(), x.to_string()),
-                None => v.remove(key),
+                Some(x) => new.insert(key.to_string(), x.to_string()),
+                None => new.remove(key),
             };
-            self.save(&v)?;
+            self.save(&new)?;
+            *v = new;
         }
         self.tell(key);
         Ok(())
     }
+}
+
+/// What the page is told when the sign-ins couldn't be saved (nothing changed).
+pub(crate) fn not_saved(e: impl std::fmt::Display) -> SourceError {
+    SourceError::new(
+        pm_sources::StatusCode::INTERNAL_SERVER_ERROR,
+        format!("This phone couldn't save its sign-ins ({e}), so nothing changed: try again"),
+    )
 }
 
 /// Writes `body` to `path`, readable and writable by this app's user only.
@@ -125,16 +139,25 @@ impl SessionStore for FileStore {
             .cloned()
     }
 
+    /// Saved first, then used: a change that can't be saved is left out (and logged; the phone's
+    /// own answers go through [`FileStore::change_if`], which says so).
     fn update(&self, key: &str, f: &mut dyn FnMut(Option<String>) -> Option<String>) {
         let wrote = {
             let mut v = self.values.lock().unwrap_or_else(|e| e.into_inner());
             match f(v.get(key).cloned()) {
-                Some(new) => {
-                    v.insert(key.to_string(), new);
-                    if let Err(e) = self.save(&v) {
-                        tracing::warn!("phone mode: can't save the sign-ins: {e}");
+                Some(value) => {
+                    let mut new = v.clone();
+                    new.insert(key.to_string(), value);
+                    match self.save(&new) {
+                        Ok(()) => {
+                            *v = new;
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!("phone mode: can't save the sign-ins, nothing changed: {e}");
+                            false
+                        }
                     }
-                    true
                 }
                 None => false,
             }
@@ -253,5 +276,40 @@ mod tests {
             })
             .unwrap();
         assert_eq!(FileStore::open(dir.path()).unwrap().cached().unwrap().id, "1");
+    }
+
+    #[test]
+    fn a_change_that_cant_be_saved_doesnt_happen() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = FileStore::open(dir.path()).unwrap();
+        s.put("tidal.unofficial", Some("signed in")).unwrap();
+        let told = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let t2 = told.clone();
+        s.on_change(move |_| {
+            t2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        // The file can't be replaced now (a folder in its place)
+        let file = dir.path().join(FILE);
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        // A sign-out: an error, and still signed in
+        assert!(s.put("tidal.unofficial", None).is_err());
+        assert_eq!(s.get("tidal.unofficial").as_deref(), Some("signed in"));
+        // A renewal through the shared code: left out
+        s.update("tidal.unofficial", &mut |_| Some("renewed".into()));
+        assert_eq!(s.get("tidal.unofficial").as_deref(), Some("signed in"));
+        // A step of the phone's own: an error, nothing changed
+        assert!(s
+            .change_if(|d| {
+                d.put("tidal.unofficial", None);
+                Ok(true)
+            })
+            .is_err());
+        assert_eq!(s.get("tidal.unofficial").as_deref(), Some("signed in"));
+        assert_eq!(
+            told.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "nobody told of a change"
+        );
     }
 }

@@ -337,8 +337,6 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
         // There already, whole (a copy cut short by a failure or a kill is not): copied. A short
         // one under the phone's own name is replaced
         let mut whole = false;
-        // A file under the phone's own name whose size isn't known stays if the upload fails
-        let mut keep_ours = false;
         for name in there.get(&h).into_iter().flatten() {
             let at = format!("{}{name}", pm_appdata::files::FILES_DIR);
             match within_for(limit, remote.size(&at)).await {
@@ -349,7 +347,6 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
                 Ok(Some(_)) if at == path => {
                     let _ = within_for(limit, remote.delete(&at)).await;
                 }
-                _ if at == path => keep_ours = true,
                 _ => {}
             }
         }
@@ -362,9 +359,15 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
             continue;
         }
         let sent = tokio::time::timeout(upload_for(s.bytes), remote.upload(&path, &local)).await;
-        if !matches!(sent, Ok(Ok(()))) && !keep_ours {
-            // Whatever part of it arrived goes (a later pass sends it whole)
-            let _ = within_for(limit, remote.delete(&path)).await;
+        if !matches!(sent, Ok(Ok(()))) {
+            // Whatever part of it arrived goes (a later pass sends it whole), judged now: the
+            // listing is from the pass's start, and a whole copy that landed under this name
+            // meanwhile (the node's) stays, as does one whose size the homeserver doesn't say
+            if let Ok(Some(n)) = within_for(limit, remote.size(&path)).await {
+                if n != s.bytes {
+                    let _ = within_for(limit, remote.delete(&path)).await;
+                }
+            }
         }
         let Some(p) = weak.upgrade() else { break };
         match sent {
@@ -479,6 +482,9 @@ mod tests {
         deleted: Mutex<Vec<String>>,
         /// Size and removal requests never answer.
         stalls: bool,
+        /// The size of what is at the path after a failed upload: a part of it, or a whole copy
+        /// another device put there meanwhile (none: nothing).
+        left_there: Option<u64>,
     }
 
     impl Remote for Fake {
@@ -497,13 +503,20 @@ mod tests {
                     self.sizes.lock().unwrap().insert(path.to_string(), n);
                     Ok(())
                 }
-                Some(0) => Err(HomeserverError::Transport("connection reset".into())),
-                Some(code) => Err(HomeserverError::Pubky(pubky::Error::Request(
-                    pubky::errors::RequestError::Server {
-                        status: pubky::StatusCode::from_u16(code).unwrap(),
-                        message: String::new(),
-                    },
-                ))),
+                Some(code) => {
+                    if let Some(n) = self.left_there {
+                        self.sizes.lock().unwrap().insert(path.to_string(), n);
+                    }
+                    Err(match code {
+                        0 => HomeserverError::Transport("connection reset".into()),
+                        _ => HomeserverError::Pubky(pubky::Error::Request(
+                            pubky::errors::RequestError::Server {
+                                status: pubky::StatusCode::from_u16(code).unwrap(),
+                                message: String::new(),
+                            },
+                        )),
+                    })
+                }
             }
         }
         async fn size(&self, path: &str) -> Result<Option<u64>, HomeserverError> {
@@ -696,7 +709,11 @@ mod tests {
     #[tokio::test]
     async fn a_failed_upload_leaves_nothing_behind() {
         let (_d, p, songs) = phone(1);
-        let f = Fake::default();
+        // Cut off after 10 bytes
+        let f = Fake {
+            left_there: Some(10),
+            ..Default::default()
+        };
         f.answers.lock().unwrap().push_back(0);
         copy_while(&Arc::downgrade(&p), &f).await;
         let path = format!("{}{}", pm_appdata::files::FILES_DIR, songs[0].file);
@@ -736,6 +753,34 @@ mod tests {
             "{:?}",
             f.deleted.lock().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn a_whole_copy_put_there_during_a_failed_upload_stays() {
+        let (_d, p, songs) = phone(1);
+        // Not there when the pass listed; the node puts its whole copy under the same name while
+        // the phone's upload of it fails
+        let f = Fake {
+            left_there: Some(songs[0].bytes),
+            ..Default::default()
+        };
+        f.answers.lock().unwrap().push_back(0);
+        copy_while(&Arc::downgrade(&p), &f).await;
+        assert!(
+            f.deleted.lock().unwrap().is_empty(),
+            "{:?}",
+            f.deleted.lock().unwrap()
+        );
+        // The next pass finds it whole: copied, nothing sent
+        *p.copier.retry.lock().unwrap() = None;
+        let f2 = Fake::listing(vec![songs[0].file.clone()]);
+        f2.sizes.lock().unwrap().insert(
+            format!("{}{}", pm_appdata::files::FILES_DIR, songs[0].file),
+            songs[0].bytes,
+        );
+        copy_while(&Arc::downgrade(&p), &f2).await;
+        assert_eq!(uploaded(&f2), 0);
+        assert_eq!(load_copies(&p).copied.len(), 1);
     }
 
     #[test]

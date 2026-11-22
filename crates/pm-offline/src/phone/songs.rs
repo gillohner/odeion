@@ -149,22 +149,18 @@ impl Songs {
         self.dir.join(&s.file)
     }
 
-    fn save(&self, list: &[Song]) {
+    fn save(&self, list: &[Song]) -> std::io::Result<()> {
+        use std::io::Write;
         let p = self.dir.join("songs.json");
         let tmp = p.with_extension("json.tmp");
-        let ok = serde_json::to_vec(list)
-            .ok()
-            .and_then(|b| {
-                use std::io::Write;
-                // On the disk before it replaces the list (a power cut never leaves it empty)
-                let mut f = std::fs::File::create(&tmp).ok()?;
-                f.write_all(&b).ok()?;
-                f.sync_all().ok()
-            })
-            .and_then(|_| std::fs::rename(&tmp, &p).ok());
-        if ok.is_none() {
-            tracing::warn!("phone mode: the songs list could not be saved");
-        }
+        let b = serde_json::to_vec(list).map_err(std::io::Error::other)?;
+        // On the disk before it replaces the list (a power cut never leaves it empty)
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&b)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &p).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
     }
 
     /// A whole uploaded file: named by its hash, its tags read, listed. The same file twice is
@@ -217,14 +213,32 @@ impl Songs {
             cover: None,
             canonical: pm_library::canonical::assign(&tags).map(|(u, _)| u.to_url()),
         };
+        // A cover written for this song alone goes again if the song can't be listed
+        let mut new_cover = None;
         if let (Some(pic), Some(aid)) = (&tags.picture, song.album_id()) {
             let cover = format!("{aid}.{}", pic.extension());
-            if std::fs::write(self.dir.join("covers").join(&cover), &pic.data).is_ok() {
+            let at = self.dir.join("covers").join(&cover);
+            let there = at.exists();
+            if std::fs::write(&at, &pic.data).is_ok() {
                 song.cover = Some(cover);
+                new_cover = (!there).then_some(at);
             }
         }
-        index.push(song.clone());
-        self.save(&index);
+        // Listed only once the list is saved: a song missing after a restart is never answered
+        // as added
+        let mut new = index.clone();
+        new.push(song.clone());
+        if let Err(e) = self.save(&new) {
+            tracing::warn!("phone mode: the songs list could not be saved: {e}");
+            let _ = std::fs::remove_file(&path);
+            if let Some(c) = new_cover {
+                let _ = std::fs::remove_file(c);
+            }
+            return Err(format!(
+                "this phone couldn't save its list of songs ({e}): add it again"
+            ));
+        }
+        *index = new;
         Ok(song)
     }
 
@@ -590,6 +604,58 @@ mod tests {
         assert_eq!(at, Some(4), "the part was written and the upload released");
         let r = put(4, b"data").await;
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_song_that_cant_be_listed_is_not_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Phone::open(super::super::Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        // The list can't be saved now (a folder in its place)
+        let music = dir.path().join("music");
+        std::fs::create_dir(music.join("songs.json")).unwrap();
+        let song = std::fs::read(format!(
+            "{}/../pm-audio/tests/fixtures/60_mono_audio.flac",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let r = start(
+            State(p.clone()),
+            Json(NewUpload {
+                name: "60_mono_audio.flac".into(),
+                size: song.len() as u64,
+            }),
+        )
+        .await;
+        let v: Value =
+            serde_json::from_slice(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        let r = put_part(
+            State(p.clone()),
+            Path(id.clone()),
+            Query(At { offset: 0 }),
+            Bytes::from(song),
+        )
+        .await;
+        let v: Value =
+            serde_json::from_slice(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(v["state"], "failed", "{v}");
+        assert!(v["error"].as_str().unwrap().contains("list of songs"), "{v}");
+        assert!(p.songs.list().is_empty());
+        // Nothing left behind: no song file, no cover made for it
+        let left: Vec<_> = std::fs::read_dir(&music)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n != "covers" && n != "songs.json")
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        assert_eq!(std::fs::read_dir(music.join("covers")).unwrap().count(), 0);
     }
 
     #[test]

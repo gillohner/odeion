@@ -1653,6 +1653,19 @@ const BEFORE_FOR: Duration = Duration::from_secs(20);
 const RENEW_FOR: Duration = Duration::from_secs(5);
 /// Tries at writing refreshed tokens before handing them back unsaved.
 const SAVE_TRIES: u32 = 6;
+/// The longest one homeserver step of a refresh outside the service call may take (a read, the
+/// lock, the lease, giving them back): the homeserver client has no time limit of its own, and a
+/// caller that holds a lock of its own across the refresh mustn't be held by a dead connection.
+const STEP_FOR: Duration = crate::homeserver::OBJECT_TIMEOUT;
+
+/// `step` within [`STEP_FOR`]; past it the refresh ends as [`VaultStoreError::Busy`] (a lock or a
+/// lease taken meanwhile lapses by itself). Only for the steps before the service is called: once
+/// it has answered, its tokens are written or handed back, never dropped.
+async fn step<T>(path: &str, f: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(STEP_FOR, f)
+        .await
+        .unwrap_or_else(|_| Err(VaultStoreError::Busy(path.to_string())))
+}
 
 /// What [`Vault::refresh`] did.
 #[derive(Debug)]
@@ -1696,13 +1709,17 @@ impl Vault<'_> {
     /// Once the service has answered, its new tokens are written back, retried if the write
     /// fails, or returned in [`VaultStoreError::Unsaved`]: they may be the only ones that still
     /// work. Dropping this future after the service answered loses them, so callers let it run.
+    ///
+    /// Every homeserver step has a time limit: one before the service call that doesn't answer in
+    /// time ends the refresh as [`VaultStoreError::Busy`] (nothing was renewed; a lock taken
+    /// meanwhile lapses by itself), and giving the lock back is tried within one too.
     pub async fn refresh<F, Fut>(&self, service: &str, force: bool, refresh: F) -> Result<Refreshed>
     where
         F: FnOnce(SignIn) -> Fut,
         Fut: std::future::Future<Output = std::result::Result<SignIn, RefreshFailed>>,
     {
         let path = Self::blob_path(service)?;
-        let Some(first) = self.read(service).await? else {
+        let Some(first) = step(&path, self.read(service)).await? else {
             return Err(VaultError::Format("no sign-in to refresh").into());
         };
         if !force && !first.sign_in.needs_refresh(now()) {
@@ -1716,30 +1733,32 @@ impl Vault<'_> {
             let held = if self.lease_only {
                 Locked { lock: None }
             } else {
-                match self.lock(&path).await {
-                    Ok(h) => h,
-                    Err(VaultStoreError::Busy(_)) if tokio::time::Instant::now() < deadline => {
+                match tokio::time::timeout(STEP_FOR, self.lock(&path)).await {
+                    // The homeserver didn't answer: given up (a lock it took lapses by itself)
+                    Err(_) => return Err(VaultStoreError::Busy(path.clone())),
+                    Ok(Ok(h)) => h,
+                    Ok(Err(VaultStoreError::Busy(_))) if tokio::time::Instant::now() < deadline => {
                         // Another client is refreshing: read again shortly
                         tokio::time::sleep(Duration::from_millis(1000 + jitter_ms(1000))).await;
-                        if let Some(o) = self.read(service).await? {
+                        if let Some(o) = step(&path, self.read(service)).await? {
                             if by_another(&o) {
                                 return Ok(Refreshed::ByAnother(o.sign_in));
                             }
                         }
                         continue;
                     }
-                    Err(e) => return Err(e),
+                    Ok(Err(e)) => return Err(e),
                 }
             };
             if held.lock.is_some() {
                 break held;
             }
             // No lock (405, or lease-only): the lease file
-            match self.take_lease(service).await? {
+            match step(&path, self.take_lease(service)).await? {
                 true => break held,
                 false if tokio::time::Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(1000 + jitter_ms(1000))).await;
-                    if let Some(o) = self.read(service).await? {
+                    if let Some(o) = step(&path, self.read(service)).await? {
                         if by_another(&o) {
                             return Ok(Refreshed::ByAnother(o.sign_in));
                         }
@@ -1764,15 +1783,24 @@ impl Vault<'_> {
         Fut: std::future::Future<Output = std::result::Result<SignIn, RefreshFailed>>,
     {
         let leased = held.lock.is_none();
+        // Best effort, within a limit: what isn't given back lapses by itself
         let release = |held: Locked| async move {
-            if leased {
-                self.drop_lease(service).await;
-            } else {
-                self.unlock(held).await;
+            let given_back = async {
+                if leased {
+                    self.drop_lease(service).await;
+                } else {
+                    self.unlock(held).await;
+                }
+            };
+            if tokio::time::timeout(STEP_FOR, given_back).await.is_err() {
+                tracing::warn!(
+                    service,
+                    "vault: the lock wasn't given back in time; it lapses by itself"
+                );
             }
         };
         // Read again under the lock: another client may have refreshed meanwhile
-        let cur = match self.read(service).await {
+        let cur = match step(path, self.read(service)).await {
             Ok(Some(o)) => o,
             Ok(None) => {
                 release(held).await;
@@ -1891,12 +1919,19 @@ impl Vault<'_> {
             );
             if lapsed && held.lock.is_some() {
                 let old = std::mem::replace(held, Locked { lock: None });
-                self.unlock(old).await;
+                // Within the deadline too: a stalled homeserver hands the tokens back unsaved
+                let _ = tokio::time::timeout(STEP_FOR, self.unlock(old)).await;
                 *held = loop {
-                    match self.lock(path).await {
-                        Ok(h) => break h,
-                        Err(VaultStoreError::Busy(_)) if tokio::time::Instant::now() < deadline => continue,
-                        Err(e) => return Err(e),
+                    let left = deadline
+                        .saturating_duration_since(tokio::time::Instant::now())
+                        .max(Duration::from_secs(1));
+                    match tokio::time::timeout(left, self.lock(path)).await {
+                        Ok(Ok(h)) => break h,
+                        Ok(Err(VaultStoreError::Busy(_))) if tokio::time::Instant::now() < deadline => {
+                            continue
+                        }
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => return Err(VaultStoreError::Busy(path.to_string())),
                     }
                 };
             } else {

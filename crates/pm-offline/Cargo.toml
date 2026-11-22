@@ -40,4 +40,5 @@ tempfile = "3"
 # a test signer and the local relays the node's vault tests use
 pubky = { workspace = true }
 http-relay = { version = "0.7", default-features = false, features = ["server"] }
-tokio = { workspace = true }
+# Paused time for the never-answering homeserver tests (phone/stalled.rs)
+tokio = { workspace = true, features = ["test-util"] }

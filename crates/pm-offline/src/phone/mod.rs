@@ -21,6 +21,9 @@ pub mod tidal;
 pub mod ui;
 pub mod vault;
 
+#[cfg(test)]
+mod stalled;
+
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
@@ -112,6 +115,8 @@ pub struct Phone {
     data_now: Arc<tokio::sync::Notify>,
     /// One vault step at a time.
     pub(crate) vault_lock: tokio::sync::Mutex<()>,
+    /// One TIDAL renewal at a time, through the vault or here (`tidal::session`).
+    pub(crate) tidal_renewal: tokio::sync::Mutex<()>,
     /// Whether the person's homeserver is the one installed with their node, as last known.
     pub(crate) bundled_here: std::sync::Mutex<Option<bool>>,
     /// Songs being copied to the homeserver.
@@ -151,6 +156,7 @@ impl Phone {
             sync_now: Default::default(),
             data_now: Default::default(),
             vault_lock: Default::default(),
+            tidal_renewal: Default::default(),
             data_lock: Default::default(),
             bundled_here: Default::default(),
             copier: Default::default(),
@@ -420,14 +426,14 @@ async fn signin_out(
     axum::extract::Path(source): axum::extract::Path<String>,
 ) -> Response {
     match source.as_str() {
-        "tidal" => {
-            tidal::sign_out(&p);
-            Json(tidal::sign_in(&p)).into_response()
-        }
-        "qobuz" => {
-            qobuz::sign_out(&p);
-            Json(qobuz::sign_in(&p)).into_response()
-        }
+        "tidal" => match tidal::sign_out(&p) {
+            Ok(()) => Json(tidal::sign_in(&p)).into_response(),
+            Err(e) => source_err(e),
+        },
+        "qobuz" => match qobuz::sign_out(&p) {
+            Ok(()) => Json(qobuz::sign_in(&p)).into_response(),
+            Err(e) => source_err(e),
+        },
         _ => err(StatusCode::NOT_FOUND, "phone mode has TIDAL and Qobuz"),
     }
 }
@@ -438,6 +444,24 @@ const SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const PASS_FOR: std::time::Duration = std::time::Duration::from_secs(120);
 /// How long it waits before trying the homeserver again.
 const RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+/// The most the person's data may take in one pass (the waiting writes; on a whole pass also the
+/// Bookmarks and prefs.json read back), as a vault pass.
+const DATA_FOR: std::time::Duration = PASS_FOR;
+
+/// The data part of a pass within [`DATA_FOR`] (`None`: it took too long; the rest waits for the
+/// next pass). Cut off anywhere, nothing is lost: each change to what the phone keeps is made
+/// whole between two homeserver calls, a listen has its id saved before its first try, a write
+/// goes to the same path every try, and a write leaves the queue only once the homeserver took it.
+async fn data_pass(p: &Phone, acct: &account::Account, full: bool) -> Option<data::Report> {
+    let pass = async {
+        if full {
+            data::sync(p, acct).await
+        } else {
+            data::write_pending(p, acct).await
+        }
+    };
+    tokio::time::timeout(DATA_FOR, pass).await.ok()
+}
 
 /// The Pubky account restored, then a vault sync now and every [`SYNC_EVERY`], and whenever a
 /// sign-in changed here; until the phone backend is gone. Nothing without a session.
@@ -501,13 +525,14 @@ async fn sync_loop(weak: std::sync::Weak<Phone>) {
                 Err(_) => tracing::warn!("phone mode: the vault sync took too long; next time"),
             }
         }
-        let r = if full {
-            data::sync(&p, &acct).await
-        } else {
-            data::write_pending(&p, &acct).await
-        };
-        if r != data::Report::default() {
-            tracing::info!(?r, "phone mode: Pubky data synced");
+        // Within a limit too: a stalled write never stops the vault passes, the other writes or
+        // the songs' copy
+        match data_pass(&p, &acct, full).await {
+            Some(r) if r != data::Report::default() => tracing::info!(?r, "phone mode: Pubky data synced"),
+            Some(_) => {}
+            None => {
+                tracing::warn!("phone mode: the homeserver took too long with the person's data; next time")
+            }
         }
         if full {
             files::start(&p, &acct);
@@ -546,6 +571,39 @@ mod tests {
         songs.abort();
         assert!(writes >= 2, "the writes went in between ({writes})");
         assert!(tokio::time::Instant::now() >= due);
+    }
+
+    #[tokio::test]
+    async fn a_homeserver_that_never_answers_doesnt_hold_the_data_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Phone::open(Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        let wait = data::Pending::Bookmark {
+            url: "https://tidal.com/browse/track/1".into(),
+            on: true,
+            at: 5,
+        };
+        data::change(&p, |l| l.pending.push(wait.clone())).unwrap();
+        let s = stalled::homeserver().await;
+        let acct = s.account();
+        tokio::time::pause();
+        for full in [false, true] {
+            let started = tokio::time::Instant::now();
+            let r = tokio::time::timeout(std::time::Duration::from_secs(3600), data_pass(&p, &acct, full))
+                .await
+                .expect("the data pass ends by itself");
+            assert_eq!(r, None, "given up");
+            assert!(started.elapsed() <= DATA_FOR + std::time::Duration::from_secs(1));
+            // The write still waits, for the next pass
+            assert_eq!(data::load(&p).pending, std::slice::from_ref(&wait));
+        }
+        assert!(s.taken.load(std::sync::atomic::Ordering::SeqCst) > 0);
     }
 
     #[test]

@@ -23,6 +23,18 @@ pub(crate) fn update(p: &Phone, f: impl FnOnce(&mut ModeState)) {
     update_in(p.store.as_ref(), f)
 }
 
+/// [`update`], saved before anything sees it: an error, and nothing changed, when it can't be
+/// saved (what the page asked for).
+fn change(p: &Phone, f: impl FnOnce(&mut ModeState)) -> Result<(), SourceError> {
+    p.store
+        .change_if(|d| {
+            update_in(d, f);
+            Ok(true)
+        })
+        .map(|_| ())
+        .map_err(super::store::not_saved)
+}
+
 /// [`update`] on `store` (the phone's, or a draft of it).
 fn update_in(store: &dyn pm_sources::SessionStore, f: impl FnOnce(&mut ModeState)) {
     let mut f = Some(f);
@@ -159,8 +171,8 @@ pub(crate) fn sign_in(p: &Phone) -> Value {
     })
 }
 
-pub(crate) fn sign_out(p: &Phone) {
-    update(p, |st| st.session = None);
+pub(crate) fn sign_out(p: &Phone) -> Result<(), SourceError> {
+    change(p, |st| st.session = None)
 }
 
 /// `GET /v1/sources/qobuz/unofficial`.
@@ -181,7 +193,7 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
             return err(StatusCode::BAD_REQUEST, "quality is max, cd or mp3");
         }
     }
-    update(&p, |st| {
+    let changed = change(&p, |st| {
         if let Some(e) = u.enabled {
             st.enabled = e;
             if e {
@@ -192,8 +204,13 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
             st.quality = q;
         }
     });
+    if let Err(e) = changed {
+        return source_err(e);
+    }
     if u.quality.is_some() {
-        super::data::prefs_changed(&p, "qobuz");
+        if let Err(e) = super::data::prefs_changed(&p, "qobuz") {
+            return super::data::not_kept(e);
+        }
     }
     Json(view(&p)).into_response()
 }
@@ -216,7 +233,7 @@ pub(crate) async fn login(State(p): State<Arc<Phone>>, Json(l): Json<qobuz::Logi
         Ok(Ok(s)) => s,
     };
     // The sign-in and its new id in one step
-    super::vault::sign_in_here(&p, pm_sources::vault_form::QOBUZ.service, |store| {
+    let kept = super::vault::sign_in_here(&p, pm_sources::vault_form::QOBUZ.service, |store| {
         update_in(store, |st| {
             st.session = Some(sess);
             st.enabled = true;
@@ -224,12 +241,17 @@ pub(crate) async fn login(State(p): State<Arc<Phone>>, Json(l): Json<qobuz::Logi
         });
         true
     });
+    if let Err(e) = kept {
+        return source_err(super::store::not_saved(e));
+    }
     tracing::info!("phone mode: signed in to Qobuz");
     Json(view(&p)).into_response()
 }
 
 /// `DELETE /v1/sources/qobuz/unofficial/login`: forget the session.
-pub(crate) async fn logout(State(p): State<Arc<Phone>>) -> Json<Value> {
-    sign_out(&p);
-    Json(view(&p))
+pub(crate) async fn logout(State(p): State<Arc<Phone>>) -> Response {
+    match sign_out(&p) {
+        Ok(()) => Json(view(&p)).into_response(),
+        Err(e) => source_err(e),
+    }
 }

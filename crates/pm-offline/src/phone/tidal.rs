@@ -54,44 +54,94 @@ fn being_renewed() -> SourceError {
     )
 }
 
+fn sign_in_first() -> SourceError {
+    SourceError::new(
+        StatusCode::PRECONDITION_FAILED,
+        "Sign in to TIDAL first (Settings › Streaming services)",
+    )
+}
+
+/// The phone's session as it is (not renewed), when TIDAL is on and signed in.
+fn held(p: &Phone) -> Result<full::Session, SourceError> {
+    let st = state(p);
+    st.session.filter(|_| st.enabled).ok_or_else(sign_in_first)
+}
+
+/// Due for renewal: it runs out within a minute (as `full::token` and the vault judge it).
+fn due(s: &full::Session) -> bool {
+    s.expires_at - now() <= 60
+}
+
 /// The person's session when TIDAL can answer for them (renewed first when it is about to run
 /// out), else why not.
 pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
-    // Renewed under the vault's lock where the vault has this sign-in (the person's other devices
-    // never renew it at the same time); otherwise, or offline, here (the next sync writes it)
-    if super::vault::tidal_due(p) {
-        if let Some(acct) = p.account().await {
-            // The renewal runs to its end (its new tokens are never dropped); a slow homeserver
-            // only stops the song waiting for it (the phone then uses what it has)
-            let p2 = p.clone();
-            let mut renewal = tokio::spawn(async move { super::vault::renew_tidal(&p2, &acct).await });
-            let ended = match tokio::time::timeout(std::time::Duration::from_secs(8), &mut renewal).await {
-                Ok(r) => Some(r),
-                // Still renewing under the vault's lock: never a second renewal beside it (the
-                // two would spend each other's tokens)
-                Err(_) => {
-                    match current(p) {
-                        Some(s) => {
-                            tracing::warn!("phone mode: TIDAL renewal in the vault takes long; the current session plays");
-                            return Ok(s);
-                        }
-                        // Expired: the song waits for the renewal, within a limit
-                        None => match tokio::time::timeout(RENEWAL_WAIT, renewal).await {
-                            Ok(r) => Some(r),
-                            Err(_) => return Err(being_renewed()),
-                        },
-                    }
-                }
-            };
-            match ended {
-                // Another vault step renews it, or holds the vault: the same, never beside it
-                Some(Ok(Ok(super::vault::Renewal::Busy)))
-                | Some(Ok(Err(pm_pubky::vault::VaultStoreError::Busy(_)))) => {
-                    return current(p).ok_or_else(being_renewed);
-                }
-                Some(Ok(Err(e))) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}"),
-                Some(Err(_)) => tracing::warn!("phone mode: TIDAL renewal in the vault stopped"),
-                _ => {}
+    let s = held(p)?;
+    if !due(&s) {
+        return Ok(s);
+    }
+    // The renewal runs to its end on its own task (its new tokens are never dropped); a slow
+    // homeserver or TIDAL only stops the song waiting for it (the phone then uses what it has)
+    let p2 = p.clone();
+    let mut renewal = tokio::spawn(async move { renew(&p2).await });
+    let ended = match tokio::time::timeout(std::time::Duration::from_secs(8), &mut renewal).await {
+        Ok(r) => r,
+        Err(_) => match current(p) {
+            Some(s) => {
+                tracing::warn!("phone mode: the TIDAL renewal takes long; the current session plays");
+                return Ok(s);
+            }
+            // Expired: the song waits for the renewal, within a limit
+            None => match tokio::time::timeout(RENEWAL_WAIT, renewal).await {
+                Ok(r) => r,
+                Err(_) => return Err(being_renewed()),
+            },
+        },
+    };
+    ended.unwrap_or_else(|_| {
+        Err(SourceError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "TIDAL: the sign-in check stopped",
+        ))
+    })
+}
+
+/// Renews the phone's TIDAL session, one renewal at a time on the phone ([`Phone::tidal_renewal`]):
+/// under the vault's lock where the vault has this sign-in (the person's other devices never renew
+/// it at the same time), otherwise, or offline, here (the next sync writes it). A song that found
+/// the session due while another renewal ran waits for that one and uses what it got.
+///
+/// After the vault failed part way (the homeserver, or TIDAL under the vault's lock), the phone
+/// never renews here instead: another device may be renewing the same sign-in, and the two would
+/// spend each other's tokens. It plays the current session while it works, and the next song
+/// tries the vault again.
+async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
+    let _one = p.tidal_renewal.lock().await;
+    // Renewed while this one waited its turn
+    let s = held(p)?;
+    if !due(&s) {
+        return Ok(s);
+    }
+    if let Some(acct) = p.account().await {
+        match super::vault::renew_tidal(p, &acct).await {
+            Ok(super::vault::Renewal::NotInVault) => {}
+            Ok(super::vault::Renewal::Renewed) => return current(p).ok_or_else(being_renewed),
+            // Another vault step renews it, or holds the vault: the same, never beside it
+            Ok(super::vault::Renewal::Busy) | Err(pm_pubky::vault::VaultStoreError::Busy(_)) => {
+                return current(p).ok_or_else(being_renewed);
+            }
+            // TIDAL said no: switched off with why, as a refusal here
+            Ok(super::vault::Renewal::Refused(why)) => {
+                full::record(p.store.as_ref(), &Err(full::FullError::Mode(why)));
+                return Err(refused(p));
+            }
+            Err(e) => {
+                tracing::warn!("phone mode: TIDAL renewal in the vault: {e}");
+                return current(p).ok_or_else(|| {
+                    SourceError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "TIDAL: the sign-in couldn't be renewed through your homeserver just now; try again in a moment",
+                    )
+                });
             }
         }
     }
@@ -112,27 +162,37 @@ pub(crate) async fn session(p: &Arc<Phone>) -> Result<full::Session, SourceError
     })?;
     match r {
         Ok(Some((sess, _))) => Ok(sess),
-        Ok(None) => Err(SourceError::new(
-            StatusCode::PRECONDITION_FAILED,
-            "Sign in to TIDAL first (Settings › Streaming services)",
-        )),
+        Ok(None) => Err(sign_in_first()),
         Err(e) => {
             let mode = matches!(e, full::FullError::Mode(_));
             full::record(p.store.as_ref(), &Err(e));
-            let why = state(p)
-                .health
-                .map(|h| h.detail)
-                .unwrap_or_else(|| "TIDAL didn't answer".into());
-            Err(SourceError::new(
-                if mode {
-                    StatusCode::PRECONDITION_FAILED
-                } else {
-                    StatusCode::BAD_GATEWAY
-                },
-                why,
-            ))
+            if mode {
+                return Err(refused(p));
+            }
+            Err(SourceError::new(StatusCode::BAD_GATEWAY, why_not(p)))
         }
     }
+}
+
+/// What the health note says went wrong (TIDAL's words), else that it didn't answer.
+fn why_not(p: &Phone) -> String {
+    state(p)
+        .health
+        .map(|h| h.detail)
+        .unwrap_or_else(|| "TIDAL didn't answer".into())
+}
+
+/// TIDAL refused the renewal: sign in again.
+fn refused(p: &Phone) -> SourceError {
+    SourceError::new(StatusCode::PRECONDITION_FAILED, why_not(p))
+}
+
+/// Changes the TIDAL state, saved before anything sees it: an error, and nothing changed, when it
+/// can't be saved.
+fn change(p: &Phone, f: impl FnOnce(&mut ModeState) -> bool) -> Result<bool, SourceError> {
+    p.store
+        .change_if(|d| Ok(full::update_if(d, f)))
+        .map_err(super::store::not_saved)
 }
 
 fn view(p: &Phone) -> Value {
@@ -224,12 +284,14 @@ pub(crate) fn sign_in(p: &Phone) -> Value {
     })
 }
 
-pub(crate) fn sign_out(p: &Phone) {
-    full::update(p.store.as_ref(), |st| {
+pub(crate) fn sign_out(p: &Phone) -> Result<(), SourceError> {
+    change(p, |st| {
         st.session = None;
         st.login = None;
         st.browser = None;
-    });
+        true
+    })
+    .map(|_| ())
 }
 
 /// `GET /v1/sources/tidal/unofficial`.
@@ -257,7 +319,7 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
             return err(StatusCode::BAD_REQUEST, "quality is max or high");
         }
     }
-    full::update(p.store.as_ref(), |st| {
+    let changed = change(&p, |st| {
         if let Some(e) = u.enabled {
             st.enabled = e;
             if e {
@@ -267,9 +329,15 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
         if let Some(q) = u.quality.clone() {
             st.quality = q;
         }
+        true
     });
+    if let Err(e) = changed {
+        return source_err(e);
+    }
     if u.quality.is_some() {
-        super::data::prefs_changed(&p, "tidal");
+        if let Err(e) = super::data::prefs_changed(&p, "tidal") {
+            return super::data::not_kept(e);
+        }
     }
     Json(view(&p)).into_response()
 }
@@ -287,7 +355,12 @@ pub(crate) async fn login(State(p): State<Arc<Phone>>) -> Response {
         Ok(x) => x,
         Err(e) => return source_err(e),
     };
-    full::update(p.store.as_ref(), |st| st.login = Some(pending.clone()));
+    if let Err(e) = change(&p, |st| {
+        st.login = Some(pending.clone());
+        true
+    }) {
+        return source_err(e);
+    }
     let p2 = p.clone();
     tokio::spawn(async move { wait_for_approval(p2, c, pending).await });
     Json(view(&p)).into_response()
@@ -319,8 +392,10 @@ async fn wait_for_approval(p: Arc<Phone>, c: full::Client, pending: full::Pendin
                 true
             })
         });
-        if kept {
-            tracing::info!("phone mode: signed in to TIDAL (code sign-in)");
+        match kept {
+            Ok(true) => tracing::info!("phone mode: signed in to TIDAL (code sign-in)"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("phone mode: the TIDAL sign-in couldn't be saved: {e}"),
         }
         return;
     }
@@ -351,7 +426,12 @@ pub(crate) async fn start_browser(State(p): State<Arc<Phone>>) -> Response {
     let pending = full::new_browser_pending();
     let url = full::authorize_url(p.tidal.login_base.trim_end_matches('/'), &c.id, &pending);
     let expires_at = pending.expires_at;
-    full::update(p.store.as_ref(), |st| st.browser = Some(pending));
+    if let Err(e) = change(&p, |st| {
+        st.browser = Some(pending);
+        true
+    }) {
+        return source_err(e);
+    }
     Json(json!({ "url": url, "expires_at": expires_at })).into_response()
 }
 
@@ -407,23 +487,140 @@ pub(crate) async fn finish_browser(State(p): State<Arc<Phone>>, Json(b): Json<Fi
             true
         })
     });
-    if !kept {
-        return err(
-            StatusCode::CONFLICT,
-            "The sign-in changed meanwhile (signed out or started again here). Press Sign in with TIDAL to start again.",
-        );
+    match kept {
+        Ok(true) => {}
+        Ok(false) => {
+            return err(
+                StatusCode::CONFLICT,
+                "The sign-in changed meanwhile (signed out or started again here). Press Sign in with TIDAL to start again.",
+            )
+        }
+        Err(e) => return source_err(super::store::not_saved(e)),
     }
     tracing::info!("phone mode: signed in to TIDAL (Sign in with TIDAL)");
     Json(view(&p)).into_response()
 }
 
 /// `DELETE /v1/sources/tidal/unofficial/login`: forget the session (the switch stays as set).
-pub(crate) async fn logout(State(p): State<Arc<Phone>>) -> Json<Value> {
-    sign_out(&p);
-    Json(view(&p))
+pub(crate) async fn logout(State(p): State<Arc<Phone>>) -> Response {
+    match sign_out(&p) {
+        Ok(()) => Json(view(&p)).into_response(),
+        Err(e) => source_err(e),
+    }
 }
 
 /// Whether `store` holds a TIDAL sign-in (for the store's own tests and the vault).
 pub fn signed_in_store(store: &dyn SessionStore) -> bool {
     full::load(store).session.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// TIDAL's sign-in service, counting renewals; each answers after `slow`.
+    async fn tidal(slow: std::time::Duration) -> (String, Arc<AtomicUsize>) {
+        let renewed = Arc::new(AtomicUsize::new(0));
+        let r2 = renewed.clone();
+        let app = axum::Router::new().route(
+            "/v1/oauth2/token",
+            axum::routing::post(move || {
+                let r = r2.clone();
+                async move {
+                    let n = r.fetch_add(1, Ordering::SeqCst) + 1;
+                    tokio::time::sleep(slow).await;
+                    Json(json!({"access_token": format!("fresh-{n}"), "expires_in": 3600}))
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (base, renewed)
+    }
+
+    fn phone(dir: &std::path::Path, auth_base: String) -> Arc<Phone> {
+        Phone::open(super::super::Config {
+            dir: dir.to_path_buf(),
+            cache: dir.join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: super::super::TidalConf {
+                auth_base,
+                device: Some(full::Client {
+                    id: "device-client".into(),
+                    secret: "s".into(),
+                    from: "builtin".into(),
+                }),
+                ..Default::default()
+            },
+        })
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn songs_at_once_wait_for_one_renewal() {
+        let (base, renewed) = tidal(std::time::Duration::from_millis(300)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        // Due, and no Pubky account (offline): renewed here
+        super::super::vault::tidal_due_in_step(&p);
+        let songs: Vec<_> = (0..3)
+            .map(|_| {
+                let p = p.clone();
+                tokio::spawn(async move { session(&p).await })
+            })
+            .collect();
+        for s in songs {
+            assert_eq!(s.await.unwrap().unwrap().access_token, "fresh-1");
+        }
+        assert_eq!(renewed.load(Ordering::SeqCst), 1, "one renewal for all three");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn after_the_vault_failed_the_phone_doesnt_renew_beside_it() {
+        let (base, renewed) = tidal(std::time::Duration::ZERO).await;
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        // In step with the vault, whose homeserver is down: the vault can't say whether another
+        // device is renewing it
+        super::super::vault::tidal_due_in_step(&p);
+        let down = super::super::stalled::refusing().await;
+        p.set_account(down.account()).await;
+        let s = session(&p)
+            .await
+            .expect("the current session, still good for 30 s");
+        assert_eq!(s.access_token, "due");
+        assert_eq!(
+            renewed.load(Ordering::SeqCst),
+            0,
+            "no renewal here beside the vault"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sign_out_that_cant_be_saved_doesnt_happen() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), "http://127.0.0.1:9".into());
+        super::super::vault::tidal_due_in_step(&p);
+        // The sign-ins file can't be replaced now (a folder in its place)
+        let file = dir.path().join(super::super::store::FILE);
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let r = logout(State(p.clone())).await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(state(&p).session.is_some(), "still signed in, as the file says");
+        let r = put(
+            State(p.clone()),
+            Json(Update {
+                enabled: Some(false),
+                quality: None,
+                client_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(state(&p).enabled, "still on");
+    }
 }
