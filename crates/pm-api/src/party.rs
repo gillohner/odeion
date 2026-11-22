@@ -564,7 +564,10 @@ pub(crate) async fn add(
         } else {
             zone.enqueue(vec![item], Insert::Next)
         };
-        let id = ids[0];
+        // (a full queue takes nothing more)
+        let Some(&id) = ids.first() else {
+            return Err(ApiError::bad_request("The queue is full"));
+        };
         if let (false, Some(l)) = (idle, last_guest) {
             zone.move_item(id, l + 1);
         }

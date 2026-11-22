@@ -2431,8 +2431,8 @@ pub(crate) async fn load_zone(
     // Off until the items are in: a queue loaded in order with shuffle off is in order
     to.set_shuffle(false);
     let mut events = to.subscribe();
-    let len = queue.len();
-    to.enqueue(queue, Insert::End);
+    // (what the queue took: it holds so many items and no more)
+    let len = to.enqueue(queue, Insert::End).len();
     let mut index = index.filter(|i| *i < len);
     match shuffle {
         LoadShuffle::Off => {}

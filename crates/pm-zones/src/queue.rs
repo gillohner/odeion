@@ -1000,7 +1000,7 @@ mod tests {
         let ids = q.add(three(), Insert::Next);
         assert_eq!(ids.len(), 2, "the first two fit");
         assert_eq!(q.len(), MAX_QUEUE_ITEMS);
-        assert_eq!(q.shuffle_order().unwrap().len(), MAX_QUEUE_ITEMS);
+        assert_eq!(q.order.len(), MAX_QUEUE_ITEMS);
         assert_eq!(q.items()[1].uri, "n0");
         assert_eq!(q.items()[2].uri, "n1");
         let v = q.version();

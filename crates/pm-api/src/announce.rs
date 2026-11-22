@@ -158,6 +158,12 @@ pub(crate) async fn announce(
             return Err(ApiError::bad_request("volume_percent is 0 to 100"));
         }
     }
+    // (the clip and its chime go into the queue, which holds so many items and no more)
+    if zone.queue_len() + 2 > pm_zones::MAX_QUEUE_ITEMS {
+        return Err(ApiError::bad_request(
+            "this zone's queue is full: remove something from it first",
+        ));
+    }
     if !busy().lock().expect("announce busy").insert(id.clone()) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -209,10 +215,14 @@ pub(crate) async fn announce(
         it.by = crate::accounts::Who::of(&caller).by();
         items.push(it);
     }
-    let count = items.len();
     let ids = zone.enqueue(items, Insert::Next);
+    let count = ids.len();
     let first = saved.map(|(i, _, _, _)| i + 1).unwrap_or(0);
-    zone.play_index(first);
+    // (a queue that filled up in this very moment took none: nothing to play, and the zone
+    // goes back to where it was below)
+    if !ids.is_empty() {
+        zone.play_index(first);
+    }
     let restore_to = volume_applied.then_some(previous).flatten();
     let out = Announced {
         resumes: saved.is_some(),
@@ -224,29 +234,30 @@ pub(crate) async fn announce(
     let id2 = id.clone();
     tokio::spawn(async move {
         let start = std::time::Instant::now();
-        let last = *ids.last().expect("at least one item");
-        // Give the engine a moment to pick the first item up, then wait until the last clip is
-        // no longer what plays (it ended, was skipped, or the zone stopped)
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        loop {
-            let st = zone2.state();
-            let on_clip = st
-                .now_playing
-                .as_ref()
-                .is_some_and(|np| ids.contains(&np.item.id));
-            if !on_clip
-                && (st.transport != Transport::Playing
-                    || st.now_playing.as_ref().is_some_and(|np| np.item.id != last))
-            {
-                break;
+        if let Some(&last) = ids.last() {
+            // Give the engine a moment to pick the first item up, then wait until the last clip is
+            // no longer what plays (it ended, was skipped, or the zone stopped)
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            loop {
+                let st = zone2.state();
+                let on_clip = st
+                    .now_playing
+                    .as_ref()
+                    .is_some_and(|np| ids.contains(&np.item.id));
+                if !on_clip
+                    && (st.transport != Transport::Playing
+                        || st.now_playing.as_ref().is_some_and(|np| np.item.id != last))
+                {
+                    break;
+                }
+                if st.transport == Transport::Stopped && st.now_playing.is_none() {
+                    break;
+                }
+                if start.elapsed() > MAX_CLIP {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
-            if st.transport == Transport::Stopped && st.now_playing.is_none() {
-                break;
-            }
-            if start.elapsed() > MAX_CLIP {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         // Back to where it was
         match saved {

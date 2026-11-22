@@ -2614,7 +2614,10 @@ fn continue_radio(library: &Mutex<Library>, zone: &Arc<Zone>) {
     }
     let start = state.queue.len();
     tracing::info!(zone = %zone.id(), added = items.len(), "radio: continuing with similar tracks");
-    zone.enqueue(items, pm_zones::Insert::End);
+    // (a full queue takes nothing more: nothing to go on with)
+    if zone.enqueue(items, pm_zones::Insert::End).is_empty() {
+        return;
+    }
     zone.play_index(start);
 }
 
