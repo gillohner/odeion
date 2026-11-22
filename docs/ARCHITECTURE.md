@@ -47,9 +47,12 @@ below it. Tests may (dev-dependencies): `pm-api`'s use `pm-web` and `pm-endpoint
   `crates/pm-api/tests/pages.rs` when it compares the page with a list of the API (the views a
   problem report may name, the usage schema). `pm-api`'s unit tests do not read those files.
 - That is what lets CI skip the jobs that only build and test Rust for a pull request that
-  changes nothing but `crates/pm-web/static`, `tools/ui-*.js`, the fixture page list and docs
-  (`changes` in `.github/workflows/ci.yml`); the `pages` job runs the tests above instead. Docs
-  that a Rust test reads are not docs there: `docs/APP-DATA.md` and Markdown inside a crate.
-  Main runs everything.
-- A page checked against fixtures is a script `tools/ui-<name>.js`; `tools/ui-fixture.js` serves
-  the UI's files from the source tree, so these need no node.
+  changes nothing but `crates/pm-web/static`, `tools/ui-*.js`, `tools/ui-fixtures.list` and docs (`changes` in
+  `.github/workflows/ci.yml`); the `pages` job runs the tests above instead. Three kinds of
+  Markdown are not docs there, because a Rust test reads them: `docs/APP-DATA.md` (`pm-appdata`
+  checks every app path against it) and `docs/access.md` (`pm-api` checks it against the access
+  table), and Markdown below the top level outside `docs/`
+  (`pubky-music-specs` reads every file of its crate, its README too). Main runs everything.
+- A page checked against fixtures is a script `tools/ui-<name>.js`, listed in
+  `tools/ui-fixtures.list` (CI runs only listed pages and refuses an unlisted one);
+  `tools/ui-fixture.js` serves the UI's files from the source tree, so these need no node.
