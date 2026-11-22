@@ -5404,10 +5404,11 @@
   // (an answer the same but for the time it took)
   // Songs removed from the library this session, in order (removeFromLibrary): an answer asked before
   // a removal and landing after it drops them (refreshSearch, startSearch), unless Bring back put the
-  // song back since (back: its file, or one whose file is not known, brought back; Node library)
+  // song back since (back: its file brought back, Node library; one whose file is not known, its
+  // lookup failed or still on its way, stays out until a fresh library answer lists it)
   const removedTracks = [];
   const goneSince = (since) => removedTracks.slice(since).filter((m) => !m.back).map((m) => m.id);
-  const broughtBack = (path) => { for (const m of removedTracks) if (!m.path || m.path === path) m.back = true; };
+  const broughtBack = (path) => { for (const m of removedTracks) if (m.path && m.path === path) m.back = true; };
   // An answer without library song id: the library's copy goes; a service's copy stays, without the
   // library's id (no Remove or Edit tags on it, its page not the removed song's)
   const withoutTrack = (a, src, id) => {

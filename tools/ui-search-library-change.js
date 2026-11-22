@@ -394,17 +394,21 @@ async function removedWhileAsked(browser, width) {
 // the same id) before that answer lands: the answer is not cut, so Back on the search lists the song
 // at once, while the next ask is still on its way (before, it stayed out until that ask was in).
 // Another song removed then and not brought back stays out (Bring back names a file: only that
-// file's song is back)
+// file's song is back), also when the app never learnt its file (other: 'failed', its lookup
+// answered 500; 'pending', its lookup still on its way)
 const FILES = { 1: '/music/Sefa/Journey/01 Journey Through Time.flac', 2: '/music/Sefa/Journey/02 Journey Home.flac' };
-async function broughtBack(browser, width) {
+async function broughtBack(browser, width, other = 'known') {
   const { page, context, state, lib, changed } = await setup(browser, width);
   lib.song2 = true;
   const restored = []; const hiddenFiles = new Set();
+  let releaseLookup = () => {}; const lookupHeld = new Promise((r) => { releaseLookup = r; });
   // A song's file as the node says it (none once it is out: its file is hidden, so 404), and Node
   // library's list of files taken out
   await context.route(/\/v1\/library\/tracks\/\d+$/, (route) => {
     const id = Number(route.request().url().split('/').pop()); const f = FILES[id];
     if (route.request().method() === 'DELETE') { hiddenFiles.add(f); return route.fulfill({ status: 204, body: '' }); }
+    if (id === 2 && other === 'failed') return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'database busy' }) });
+    if (id === 2 && other === 'pending') return lookupHeld.then(() => route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })).catch(() => {});
     if (hiddenFiles.has(f)) return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: `no track ${id}` }) });
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ...fx.track, id, file: { ...fx.track.file, path: f } }) });
   });
@@ -435,14 +439,14 @@ async function broughtBack(browser, width) {
     for (const end = Date.now() + 7000; lib.asked.length <= asked; await sleep(50)) if (Date.now() > end) throw new Error('Timed out: asked again after Back');
     await countShown(page, 4);
     await sleep(200);
-    await page.screenshot({ path: path.join(shots, `brought-back-${width}.png`) });
-    assert.ok(await songListed(page), `${width}: brought back before the answer landed, the song is listed again at once (${(await shown(page)).replace(/\s+/g, ' ')})`);
-    assert.ok(!(await songListed(page, SONG2)), `${width}: the other removed song, not brought back, stays out (${(await shown(page)).replace(/\s+/g, ' ')})`);
+    await page.screenshot({ path: path.join(shots, `brought-back-${other}-${width}.png`) });
+    assert.ok(await songListed(page), `${width} (${other}): brought back before the answer landed, the song is listed again at once (${(await shown(page)).replace(/\s+/g, ' ')})`);
+    assert.ok(!(await songListed(page, SONG2)), `${width} (${other}): the other removed song, not brought back, stays out (${(await shown(page)).replace(/\s+/g, ' ')})`);
     release2(); lib.hold = null;
     await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone');
-    assert.ok(await songListed(page) && !(await songListed(page, SONG2)), `${width}: and after the next answer`);
+    assert.ok(await songListed(page) && !(await songListed(page, SONG2)), `${width} (${other}): and after the next answer`);
     assert.deepEqual(state.errors, []);
-  } finally { await context.close(); }
+  } finally { releaseLookup(); await context.close(); }
 }
 
 (async () => {
@@ -461,8 +465,10 @@ async function broughtBack(browser, width) {
       await offlineFirst(browser, width);
       await removedWhileAsked(browser, width);
       await broughtBack(browser, width);
+      await broughtBack(browser, width, 'failed');
+      await broughtBack(browser, width, 'pending');
       if (width === 360) await hung(browser, width);
-      console.log(`ok ${width}px: a playlist write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing, or when the stream broke after every answer); an offline one starts afresh; a song removed during the ask stays out, unless brought back meanwhile`);
+      console.log(`ok ${width}px: a playlist write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing, or when the stream broke after every answer); an offline one starts afresh; a song removed during the ask stays out, unless brought back meanwhile (only the song whose file was brought back, not one whose file lookup failed or is still on its way)`);
     }
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });
