@@ -382,13 +382,21 @@ pub fn permissive_tls() -> std::sync::Arc<rustls::ClientConfig> {
             ]
         }
     }
-    let mut cfg = rustls::ClientConfig::builder()
+    // The crypto back end is named here: a program that also links another one (the node does,
+    // for its other TLS code) has no default for rustls to pick, and asking for it panics
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("the back end has the default TLS versions")
         .dangerous()
         .with_custom_certificate_verifier(std::sync::Arc::new(NoVerify))
         .with_no_client_auth();
     cfg.alpn_protocols = Vec::new();
     std::sync::Arc::new(cfg)
 }
+
+/// How long a device has to finish the TLS handshake.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Open a TLS Cast link to `addr`.
 pub async fn connect_tls(
@@ -400,9 +408,10 @@ pub async fn connect_tls(
     tcp.set_nodelay(true)?;
     let connector = tokio_rustls::TlsConnector::from(permissive_tls());
     let name = rustls::pki_types::ServerName::IpAddress(addr.ip().into());
-    let tls = connector
-        .connect(name, tcp)
+    // (a device that takes the connection and then says nothing must not hold the zone)
+    let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, connector.connect(name, tcp))
         .await
+        .map_err(|_| CastError::Timeout("TLS handshake"))?
         .map_err(|e| CastError::Tls(e.to_string()))?;
     Ok(CastLink::new(tls))
 }
