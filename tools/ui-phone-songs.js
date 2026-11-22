@@ -8,7 +8,8 @@
 //   * Shuffle plays the phone's file (/v1/library/tracks/<id>/file);
 //   * a song's heart bookmarks it by its canonical URL, shows it when drawn again, and removes it;
 //   * Settings has "Keep added songs on my homeserver" (off where the homeserver is not the node's
-//     own), and turning it on tells the phone (PUT /v1/phone/storage).
+//     own), and turning it on tells the phone (PUT /v1/phone/storage); a record of copies the
+//     phone can't read is said there, never counted as songs still to copy.
 //   node tools/ui-phone-songs.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -46,7 +47,11 @@ const run = async (browser, w) => {
     if (v === '/favourites' && req.method() === 'GET') return json({ tracks: [], albums: [], artists: [], posts: [], other: [...r.favs], uris: [...r.favs] });
     if (v === '/favourites' && req.method() === 'PUT') { r.favs.add(SONG.canonical.url); return json({ uri: SONG.canonical.url, favourite: true, pending: true }); }
     if (v === '/favourites' && req.method() === 'DELETE') { r.favs.delete(SONG.canonical.url); return json({ uri: SONG.canonical.url, favourite: false, pending: true }); }
-    if (v === '/phone/storage') { const on = req.method() === 'PUT' ? JSON.parse(req.postData() || '{}').on : false; return json({ on: !!on, chosen: req.method() === 'PUT' ? on : null, bundled: false, uploaded: 0, total: 1 }); }
+    if (v === '/phone/storage') {
+      // (r.unreadable: what the phone copied can't be read there, so it isn't counted)
+      if (r.unreadable) return json({ on: true, chosen: true, bundled: false, uploaded: null, cant: null, total: 1, unreadable: true });
+      const on = req.method() === 'PUT' ? JSON.parse(req.postData() || '{}').on : false; return json({ on: !!on, chosen: req.method() === 'PUT' ? on : null, bundled: false, uploaded: 0, total: 1 });
+    }
     if (v === '/library/uploads' && req.method() === 'POST') return json({ id: 'up1', offset: 0, chunk_size: 4194304, already: false });
     if (v === '/library/uploads/up1' && req.method() === 'PUT') return json({ offset: Number(req.headers()['content-length'] || 4), state: 'stored' });
     if (/^\/library\/tracks\/1\/file/.test(v)) return route.fulfill({ status: 404, body: '' });
@@ -141,6 +146,12 @@ const shown = (page, sel) => page.evaluate((s) => { const el = document.querySel
     await p.click('#psfiles').catch(() => {}); await sleep(400);
     check(r.reqs.some((x) => x === 'PUT /phone/storage'), `${at}: turning it on tells the phone`);
     check(await p.isChecked('#psfiles').catch(() => false), `${at}: and it shows on`);
+    // What the phone copied can't be read there: said, never counted as songs still to copy
+    r.unreadable = true;
+    await fx.go(p, '/queue'); await sleep(200); await fx.go(p, '/settings');
+    await p.waitForSelector('#psfiles', { timeout: 5000 }).catch(() => {});
+    const said = await p.$eval('#phonestore', (e) => e.textContent).catch(() => '');
+    check(said.includes('can’t be read here') && !said.includes('still to copy'), `${at}: a record of copies that can't be read is said, not counted (${said})`);
     check(!r.state.errors.length, `${at}: no page errors (${r.state.errors.join(' | ')})`);
     await r.context.close();
   }

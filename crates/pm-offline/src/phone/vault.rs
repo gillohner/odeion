@@ -1049,10 +1049,12 @@ pub(crate) async fn renew_tidal_in_turn(
         }
     };
     if !in_vault {
-        // Only the phone has it: kept here, not in step with the vault (it stays under way, so
-        // the next renewal asks the vault first, finds another sign-in there and renews this one
-        // here)
-        return Ok(keep_renewed(phone, &mine, &travels, lineage, false).unwrap_or(Renewal::Renewed));
+        // Only the phone has it: kept here, not in step with the vault (nothing of it was written
+        // there, so not under way either: the next renewal is the phone's own, also while the
+        // homeserver is out of reach)
+        let kept = keep_renewed(phone, &mine, &travels, lineage, false).unwrap_or(Renewal::Renewed);
+        unmark();
+        return Ok(kept);
     }
     let si = r.sign_in();
     // Taken only if the phone still holds the session it started from (a sign-out or a new

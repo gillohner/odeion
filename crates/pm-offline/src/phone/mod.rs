@@ -119,6 +119,10 @@ pub struct Phone {
     pub(crate) vault_lock: tokio::sync::Mutex<()>,
     /// One TIDAL renewal at a time, through the vault or here (`tidal::session`).
     pub(crate) tidal_renewal: tokio::sync::Mutex<()>,
+    /// One streaming-quality step at a time (never held across an await): a quality set here
+    /// with its write queued, or one from another device applied (`data::apply_if_newer`), so a
+    /// sync never applies another device's quality between the two halves of a change here.
+    pub(crate) quality_lock: std::sync::Mutex<()>,
     /// Whether the person's homeserver is the one installed with their node, as last known.
     pub(crate) bundled_here: std::sync::Mutex<Option<bool>>,
     /// Songs being copied to the homeserver.
@@ -204,6 +208,7 @@ impl Phone {
             data_now: Default::default(),
             vault_lock: Default::default(),
             tidal_renewal: Default::default(),
+            quality_lock: Default::default(),
             data_lock: Default::default(),
             bundled_here: Default::default(),
             copier: Default::default(),
@@ -240,8 +245,7 @@ impl Phone {
             return None;
         }
         // Settings lost with them: the copy choice reads as off ([`store::SETTINGS_SET_ASIDE`])
-        let lost = pm_sources::SessionStore::get(self.store.as_ref(), store::SETTINGS_SET_ASIDE).is_some();
-        let off = if lost {
+        let off = if files::off_until_chosen(self) {
             " Keeping the songs you add on your homeserver is off until you choose again in Settings."
         } else {
             ""

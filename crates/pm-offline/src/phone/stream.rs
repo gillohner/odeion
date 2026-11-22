@@ -245,6 +245,14 @@ fn following(rx: tokio::sync::watch::Receiver<Fetch>, file: tokio::fs::File, mim
     r
 }
 
+/// The cache's name for TIDAL track `id` fetched at `quality` for the TIDAL account `user`: a track
+/// fetched at another quality, or for another account signed in since, is never the one played
+/// (nor a fetch of it under way joined).
+fn tidal_name(id: &str, quality: &str, user: Option<&str>) -> String {
+    let only = |x: &str| x.chars().filter(char::is_ascii_alphanumeric).collect::<String>();
+    format!("tidal-{id}-{}-{}", only(quality), only(user.unwrap_or("")))
+}
+
 /// `GET /v1/sources/tidal/stream/{id}`: the full track. Whole in the cache: with ranges. Still on
 /// its way after [`WHOLE_WITHIN_MS`]: as it arrives.
 pub(crate) async fn tidal(
@@ -262,7 +270,13 @@ pub(crate) async fn tidal(
             "Sign in to TIDAL first (Settings › Streaming services)",
         );
     }
-    let name = format!("tidal-{id}");
+    let st = pm_sources::tidal::full::load(p.store.as_ref());
+    let quality = pm_sources::tidal::full::quality_of(&st);
+    let name = tidal_name(
+        &id,
+        quality,
+        st.session.as_ref().and_then(|s| s.user_id.as_deref()),
+    );
     if let Some(f) = p.streams.kept(&name) {
         return crate::server::send_file(&f, &headers).await;
     }
@@ -272,10 +286,9 @@ pub(crate) async fn tidal(
         Ok(s) => s,
         Err(e) => return super::source_err(e),
     };
-    let quality = pm_sources::tidal::full::quality_of(&pm_sources::tidal::full::load(p.store.as_ref()));
     let p2 = p.clone();
     let id2 = id.clone();
-    let mut rx = p.streams.fetch(&id, move |tx, stop| {
+    let mut rx = p.streams.fetch(&name.clone(), move |tx, stop| {
         let r = pm_sources::tidal::full::open_as(blocking_client(), &tidal::endpoints(&p2), &sess, quality, &id2)
             .map(Some);
         pm_sources::tidal::full::record(p2.store.as_ref(), &r);
@@ -452,6 +465,21 @@ async fn relay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_track_is_kept_by_its_quality_and_account() {
+        let n = tidal_name("42", "LOSSLESS", Some("1001"));
+        assert_eq!(n, tidal_name("42", "LOSSLESS", Some("1001")));
+        assert_ne!(
+            n,
+            tidal_name("42", "HI_RES_LOSSLESS", Some("1001")),
+            "another quality"
+        );
+        assert_ne!(n, tidal_name("42", "LOSSLESS", Some("2002")), "another account");
+        assert_ne!(n, tidal_name("42", "LOSSLESS", None));
+        // Only letters and digits from the account in a file name
+        assert_eq!(tidal_name("42", "LOSSLESS", Some("../x")), "tidal-42-LOSSLESS-x");
+    }
 
     /// A host that takes each connection, reads the request and answers `head` (nothing: never),
     /// then nothing more (the connection held open).

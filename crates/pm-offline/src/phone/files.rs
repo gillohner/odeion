@@ -39,6 +39,12 @@ pub fn chosen(p: &Phone) -> Option<bool> {
     }
 }
 
+/// Whether the copy reads as off only because settings were lost with sign-ins that couldn't be
+/// read ([`chosen`]), not by a choice of the person's.
+pub(crate) fn off_until_chosen(p: &Phone) -> bool {
+    p.store.get(KEY).is_none() && p.store.get(super::store::SETTINGS_SET_ASIDE).is_some()
+}
+
 /// Whether songs added here go to the homeserver: the person's choice, else on only when their
 /// homeserver is their node's own.
 pub fn on(p: &Phone) -> bool {
@@ -539,12 +545,15 @@ pub(crate) async fn status(State(p): State<Arc<Phone>>) -> Json<Value> {
 /// From what the phone knows (the last pass), without asking the homeserver.
 fn view(p: &Phone) -> Value {
     let songs = p.songs.list();
-    // (Can't be read: none counted; the copier says why)
-    let copies = load_copies(p).unwrap_or_default();
+    // Can't be read: not counted, and said (nothing is copied until it reads)
+    let (copies, unreadable) = match load_copies(p) {
+        Ok(c) => (c, false),
+        Err(_) => (Copies::default(), true),
+    };
     let (mut uploaded, mut cant) = (0, 0);
     for s in &songs {
         match hash_of(&s.file) {
-            // Only what a pass checked whole (a name found there may be a copy cut short)
+            // Only what a pass found there whole, or there with no size given (as on a node)
             Some(h) if copies.copied.contains(h) => uploaded += 1,
             Some(h) if copies.refused.contains_key(h) => cant += 1,
             _ if s.bytes > MAX_COPY => cant += 1,
@@ -555,9 +564,10 @@ fn view(p: &Phone) -> Value {
         "on": on(p),
         "chosen": chosen(p),
         "bundled": *p.bundled_here.lock().unwrap_or_else(|e| e.into_inner()),
-        "uploaded": uploaded,
-        "cant": cant,
+        "uploaded": if unreadable { Value::Null } else { json!(uploaded) },
+        "cant": if unreadable { Value::Null } else { json!(cant) },
         "total": songs.len(),
+        "unreadable": unreadable,
     })
 }
 
@@ -766,6 +776,9 @@ mod tests {
         assert_eq!(r.copied, 0);
         assert_eq!(uploaded(&f), 0);
         assert_eq!(std::fs::read(copies_path(&p)).unwrap(), cut);
+        // The page is told it can't be read, never "none uploaded"
+        assert_eq!(view(&p)["unreadable"], true);
+        assert!(view(&p)["uploaded"].is_null());
         // A new choice doesn't write over it either, and isn't made (the page keeps its switch)
         let r = choose(State(p.clone()), Json(Choice { on: Some(false) })).await;
         assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
@@ -1131,6 +1144,33 @@ mod tests {
         assert_eq!(chosen(&p), None);
         assert!(on(&p));
         assert_eq!(copy_while(&Arc::downgrade(&p), &f).await.copied, 1);
+    }
+
+    #[test]
+    fn a_choice_that_reads_stands_when_another_setting_is_lost() {
+        // A setting that doesn't read is left out; the copy choice beside it reads: it stands,
+        // and the notice doesn't say the copy is off
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join(super::super::store::FILE),
+            br#"{"phone.files_on_homeserver":"on","qobuz.app":7}"#,
+        )
+        .unwrap();
+        let p = Phone::open(super::super::Config {
+            dir: d.path().to_path_buf(),
+            cache: d.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        assert_eq!(chosen(&p), Some(true));
+        let told = p.set_aside_notice().unwrap();
+        assert!(
+            told.starts_with("Some settings on this phone couldn't be read."),
+            "{told}"
+        );
+        assert!(!told.contains("is off"), "{told}");
     }
 
     #[test]

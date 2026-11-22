@@ -193,6 +193,8 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
             return err(StatusCode::BAD_REQUEST, "quality is max, cd or mp3");
         }
     }
+    // The quality and its write for the person's other devices, as one step against a sync
+    let one = p.quality_lock.lock().unwrap_or_else(|e| e.into_inner());
     let changed = change(&p, |st| {
         if let Some(e) = u.enabled {
             st.enabled = e;
@@ -212,6 +214,7 @@ pub(crate) async fn put(State(p): State<Arc<Phone>>, Json(u): Json<Update>) -> R
             return super::data::not_shared(e);
         }
     }
+    drop(one);
     Json(view(&p)).into_response()
 }
 

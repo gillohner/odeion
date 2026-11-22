@@ -407,10 +407,19 @@ fn took_prefs(p: &Phone, prefs: &Value) -> Result<bool, String> {
 /// can't be saved: then nothing changed.
 fn apply_if_newer(p: &Phone, prefs: &Value) -> Result<Option<u64>, String> {
     let at = prefs["updated_at"].as_u64().unwrap_or(0);
+    // What waits to be written read, and the qualities applied, as one step: a quality set here
+    // meanwhile is either waiting already (kept) or set after (wins)
+    let _one = p.quality_lock.lock().unwrap_or_else(|e| e.into_inner());
     let l = load(p).map_err(|e| e.to_string())?;
     if at <= l.prefs_at {
         return Ok(None);
     }
+    #[cfg(test)]
+    tests::BETWEEN.with(|b| {
+        if let Some(f) = b.borrow_mut().take() {
+            f();
+        }
+    });
     apply_quality(p, &l, prefs)?;
     Ok(Some(at))
 }
@@ -592,6 +601,60 @@ pub async fn write_pending(p: &Phone, acct: &Account) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Run by `apply_if_newer` between what it reads and what it applies (on this thread).
+        pub(super) static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+    }
+
+    #[test]
+    fn a_quality_set_here_while_a_sync_applies_another_devices_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Phone::open(super::super::Config {
+            dir: dir.path().to_path_buf(),
+            cache: dir.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        // Another device set "high"; the sync takes it while the person sets "max" here, just
+        // after the sync read what waits to be written
+        let prefs = json!({"version": 1, "updated_at": 10, "quality": {"tidal": "high"}});
+        let p2 = p.clone();
+        let (done, set) = std::sync::mpsc::channel();
+        BETWEEN.with(|b| {
+            *b.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    let u: super::super::tidal::Update =
+                        serde_json::from_value(json!({"quality": "max"})).unwrap();
+                    let r = tokio::runtime::Runtime::new()
+                        .unwrap()
+                        .block_on(super::super::tidal::put(axum::extract::State(p2), Json(u)));
+                    let _ = done.send(r.status());
+                });
+                // (Set within this, unless it waits for the sync's step)
+                let _ = set.recv_timeout(std::time::Duration::from_millis(500));
+            }))
+        });
+        let taken = took_prefs(&p, &prefs);
+        // The person's "max" stands, and it is what goes to their other devices
+        let t0 = std::time::Instant::now();
+        let queued = || {
+            load(&p).unwrap().pending.contains(&Pending::Quality {
+                source: "tidal".into(),
+            })
+        };
+        // (The person's change ends once its write is queued)
+        while !queued() && t0.elapsed().as_secs() < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(taken, Ok(true));
+        assert_eq!(pm_sources::tidal::full::load(p.store.as_ref()).quality, "max");
+        assert!(load(&p).unwrap().pending.contains(&Pending::Quality {
+            source: "tidal".into()
+        }));
+    }
 
     #[tokio::test]
     async fn a_change_on_the_page_wakes_only_the_writes() {

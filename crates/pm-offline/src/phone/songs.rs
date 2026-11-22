@@ -497,8 +497,16 @@ async fn write_part(
 /// A song's place on its album: disc, number, id.
 type SongAt = (u32, u32, i64);
 
-/// `GET /v1/offline`: the phone's songs as the offline page lists what a device keeps.
-pub(crate) async fn listing(State(p): State<Arc<Phone>>) -> Json<Value> {
+/// `GET /v1/offline`: the phone's songs as the offline page lists what a device keeps. A list of
+/// songs or of Bookmarks that can't be read is an error (the page says why), never "none".
+pub(crate) async fn listing(State(p): State<Arc<Phone>>) -> Response {
+    if let Some(why) = &p.songs.unreadable {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, why);
+    }
+    let bookmarks = match super::data::load(&p) {
+        Ok(l) => l.bookmarks,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
     let songs = p.songs.list();
     let mut albums: BTreeMap<i64, (Value, Vec<SongAt>)> = BTreeMap::new();
     for s in &songs {
@@ -546,8 +554,9 @@ pub(crate) async fn listing(State(p): State<Arc<Phone>>) -> Json<Value> {
         "tracks": tracks,
         "albums": albums,
         "playlists": [],
-        "favourites": {"track_ids": favourite_ids(&songs, &super::data::load(&p).map(|l| l.bookmarks).unwrap_or_default())},
+        "favourites": {"track_ids": favourite_ids(&songs, &bookmarks)},
     }))
+    .into_response()
 }
 
 /// `GET /v1/library/tracks/{id}`.
@@ -633,6 +642,49 @@ mod tests {
         assert_eq!(at, Some(4), "the part was written and the upload released");
         let r = put(4, b"data").await;
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_list_that_cant_be_read_is_never_shown_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || {
+            Phone::open(super::super::Config {
+                dir: dir.path().to_path_buf(),
+                cache: dir.path().join("streams"),
+                version: "test".into(),
+                pubky: None,
+                tidal: Default::default(),
+            })
+            .unwrap()
+        };
+        let p = open();
+        let part = dir.path().join("x.part");
+        std::fs::copy(
+            format!(
+                "{}/../pm-audio/tests/fixtures/60_mono_audio.flac",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            &part,
+        )
+        .unwrap();
+        p.songs.store(&part, "60_mono_audio.flac").unwrap();
+        assert_eq!(listing(State(p.clone())).await.status(), StatusCode::OK);
+        // The Bookmarks can't be read: an error, not "no favourites"
+        let data = dir.path().join("data.json");
+        std::fs::write(&data, b"{\"bookmarks\": {").unwrap();
+        let r = listing(State(p.clone())).await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        std::fs::remove_file(&data).unwrap();
+        // The list of songs can't be read (cut short): an error that says so, not "no songs"
+        drop(p);
+        let list = dir.path().join("music").join("songs.json");
+        let whole = std::fs::read(&list).unwrap();
+        std::fs::write(&list, &whole[..whole.len() - 5]).unwrap();
+        let p = open();
+        let r = listing(State(p.clone())).await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("list of songs"));
     }
 
     #[test]

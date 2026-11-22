@@ -305,6 +305,23 @@ async fn an_album_page_plays_from_tidal_and_its_song_streams_with_ranges() {
         1,
         "the second ask came from the cache"
     );
+    // Another quality chosen: the song is fetched again at it, never the one kept at the other
+    let r = f
+        .http
+        .put(format!("{}/v1/sources/tidal/unofficial", f.base))
+        .bearer_auth(f.phone.key())
+        .json(&json!({ "quality": "high" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let again = f.get("/v1/sources/tidal/stream/2").send().await.unwrap();
+    assert_eq!(&again.bytes().await.unwrap()[..], AUDIO);
+    assert_eq!(
+        f.tidal.playback.load(Ordering::SeqCst),
+        2,
+        "fetched again at the quality chosen"
+    );
     // An id that isn't TIDAL's is refused before anything is asked
     let (st, _) = f.json("/v1/sources/tidal/stream/2..%2F3").await;
     assert_eq!(st, 400);

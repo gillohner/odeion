@@ -87,7 +87,8 @@ from a node.
   sign-in again). The connect page says so before phone mode opens, until the person presses
   Continue. The phone's other files are kept the same way: the person's waiting writes (`data.json`), the record of
   songs copied (`files.json`) and the song list (`songs.json`) are left as they are when they can't be
-  read, and nothing is saved over them (phone mode still starts).
+  read, and nothing is saved over them (phone mode still starts). The page says they can't be read,
+  never "none".
 - The vault sync records each service's outcome before it looks at the next one, and a record it
   can't save ends the sync. A take from the vault or a write to it is noted as under way first: until
   it is recorded, a TIDAL renewal asks the vault whether it holds the phone's refresh token rather than
@@ -107,7 +108,8 @@ from a node.
 - One backend per person on the phone: leaving phone mode ends its sync and waits, and opening it again
   while a step of the old one still runs gives back that one, so two never write the sign-ins over each
   other's. The app opens phone mode one open at a time, so it never starts two servers.
-- A TIDAL song is fetched once into the app's cache (the newest 3 are kept). It is sent to the player as
+- A TIDAL song is fetched once into the app's cache (the newest 3 are kept), for the quality and the
+  TIDAL account it was fetched with. It is sent to the player as
   it arrives when the fetch takes longer than 12 s, and a fetch that nobody reads for 5 s stops.
 - The built-in TIDAL clients ship inside the APK, masked as they are in the node's binaries.
 - CI starts phone mode on an emulator with no node and plays a song from a stand-in TIDAL
