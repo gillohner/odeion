@@ -46,7 +46,7 @@ impl FileStore {
     /// carries to the vault. The file is kept whole under a dated name instead
     /// (`sign-ins.json.<date>.unreadable`, beside it, never deleted), and the store starts
     /// without what couldn't be read (a value that doesn't read: only that one), each such
-    /// sign-in noted as set aside ([`set_aside_key`]): signed out on this phone, and held out of
+    /// sign-in noted as set aside (`vault.set_aside.<key>`): signed out on this phone, and held out of
     /// the vault sync until the person signs in to it again. A file that can't be read at all (a
     /// read error), or a copy that can't be kept, is an error, and the file is left as it is.
     pub fn open(dir: &std::path::Path) -> std::io::Result<Self> {
