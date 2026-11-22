@@ -3,8 +3,8 @@
 ## What to back up
 
 Your music files are yours to back up as usual; the node never changes them. The node's own data
-is the library database (matches, playlists, favourites, tags, play history, queues, settings) and
-your sign-ins to services. If you signed in to Pubky, playlists, favourites and tags are also kept
+is the library database (matches, collections, bookmarks, tags, play history, queues, settings) and
+your sign-ins to services. If you signed in to Pubky, collections, bookmarks and tags are also kept
 in your Pubky account and come back on a new node by themselves.
 
 With the node's own homeserver (the `deploy/bundle` install), back up the homeserver too: its
@@ -78,7 +78,7 @@ find the music again is in the backup:
   matching `/etc/fstab` lines in `config/fstab-lines.txt`. Mount them again before the restore.
 
 The library remembers each song by its path in the container (`/music/Roon/...`). Keep the same
-mount targets and every match, playlist and play stays with its song; for a new place, see
+mount targets and every match, collection and play stays with its song; for a new place, see
 [Restore a backup file](#restore-a-backup-file).
 
 ### Restore on a new disk or machine
@@ -108,7 +108,7 @@ half-restored install (only this one; the backup folder is never changed), then 
 On a new or reinstalled node: Home's **Get started** card links to it, or **Settings › Backup ›
 Choose a backup file**. The node shows what the file holds first, then puts the library back and
 rescans. If your music now lives at another path, it asks for each folder's new place, and the
-tracks keep their playlists and history.
+tracks keep their collections and history.
 
 ## Copying the whole data folder
 

@@ -50,7 +50,7 @@ the old `change-me` placeholder gets a made token instead (the log says so).
 
 ## With its own Pubky homeserver (bundled)
 
-`deploy/bundle/` runs the node together with a Pubky homeserver, so your playlists, favourites and
+`deploy/bundle/` runs the node together with a Pubky homeserver, so your collections, bookmarks and
 files (Copy to homeserver, Bring files here) live on your own machine instead of a shared public
 homeserver. It follows Pubky's own homeserver setup: PostgreSQL, pubky-homeserver (v0.16.2) with its
 config wrapper, and optionally Pubky's homeserver dashboard and a Cloudflare tunnel. Every image is
@@ -112,13 +112,13 @@ docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http
   folder on the machine into the homeserver, or keep using folders in place (mounts and shares as
   before). Uploads and copies go into your homeserver's private storage. The node mounts the
   homeserver's files read-only and plays them from there, so there is no second copy. Saving
-  playlists, favourites and tags to the homeserver is automatic; `GET /v1/storage` is the status
+  collections, bookmarks and tags to the homeserver is automatic; `GET /v1/storage` is the status
   line.
-- **Signing in per person:** everyone signs in to the node's web app with Pubky Ring. The owner gets the node's API token, as before; apps and integrations keep using it. Someone in People with music access gets a personal token: the shared library, search, radio and other public directories, and playing on the zones you open to listeners (`/v1/people/zones`; all by default). Settings, People, the homeserver, the library's folders, your streaming accounts, and your favourites, playlists, tags and history stay yours. Taking someone's music access away stops their token at once. Their own playlists and favourites (on their own homeserver) come next.
+- **Signing in per person:** everyone signs in to the node's web app with Pubky Ring. The owner gets the node's API token, as before; apps and integrations keep using it. Someone in People with music access gets a personal token: the shared library, search, radio and other public directories, and playing on the zones you open to listeners (`/v1/people/zones`; all by default). Settings, People, the homeserver, the library's folders, your streaming accounts, and your bookmarks, collections, tags and history stay yours. Taking someone's music access away stops their token at once. Their own collections and bookmarks (on their own homeserver) come next.
 - **Your account on it:** on first run, "Create your Pubky account on this node's homeserver"
   (`POST /v1/homeserver/bundled/owner-signup`) shows a Pubky Ring link and QR. The node mints the
   owner's signup token (unlimited storage); Ring creates the account on this homeserver and signs
-  the node in. Playlists, favourites, Copy to homeserver and Bring files here then use it. "Use an
+  the node in. Collections, bookmarks, Copy to homeserver and Bring files here then use it. "Use an
   existing homeserver" is the usual Pubky sign-in; moving an existing account here comes later.
 
 ## With its own Pubky homeserver, without Docker (bare metal)
@@ -384,8 +384,8 @@ The node scans folders; anything the operating system can mount is a folder.
 | Your Pubky homeserver | `odeiond upload` or `POST /v1/pubky/files` stores originals under `/priv/pubky.music/files/`; "Bring files here" (`POST /v1/pubky/files/mirror`) pulls what the node lacks into a library folder as a background job and scans it |
 | Streams | internet radio and the Internet Archive need no storage at all |
 
-Scans read tags, embedded art and MusicBrainz ids; tag with Picard first and favourites, tags,
-reviews and playlists can refer to the music by its canonical identity.
+Scans read tags, embedded art and MusicBrainz ids; tag with Picard first and bookmarks, tags,
+reviews and collections can refer to the music by its canonical identity.
 
 ## Adding music after the node is running
 
@@ -399,7 +399,7 @@ only in it.
 Settings → **Backup and restore** makes one file (`pubky-music-<date>-<time>.pmbackup`) with
 everything needed to rebuild the node, never the audio:
 
-- the library database: matches and corrections, playlists, reviews, favourites, tags, play
+- the library database: matches and corrections, collections, reviews, bookmarks, tags, play
   history, queues, saved radio stations, settings, the lyrics index;
 - with a passphrase the owner picks: the sign-ins (TIDAL, Spotify, Jamendo, ListenBrainz, your
   Subsonic and Jellyfin servers), the Pubky session, the remote-access key and the node's config
@@ -414,7 +414,7 @@ put in a backup. `GET /v1/backup` serves a backup without sign-ins for a cron jo
 Choose a backup file. The node checks the file and shows what it holds first, then swaps the
 library in while it runs, puts the sign-ins back, reconnects Pubky and rescans. Unchanged files
 are skipped, so every match stays. If the music lives somewhere else now, the restore lists the
-folders it cannot find. Type each folder's new place and the tracks keep their matches, playlists
+folders it cannot find. Type each folder's new place and the tracks keep their matches, collections
 and history (`POST /v1/library/folders/move`). Covers taken from the files are read again. The old
 config file is kept as `<data_dir>/node.restored.toml`; from the next start its service keys fill
 whatever this node's own config leaves empty.
