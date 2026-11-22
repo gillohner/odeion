@@ -224,6 +224,11 @@ def api(method, path, body=None):
     return json.loads(raw) if raw else None
 
 
+class AppNotResponding(RuntimeError):
+    """The app's own "isn't responding" dialog is on the screen: a failure at once, not something
+    to wait behind."""
+
+
 def until(what, fn, timeout=60, every=1.0):
     end = time.time() + timeout
     while True:
@@ -231,6 +236,8 @@ def until(what, fn, timeout=60, every=1.0):
             v = fn()
             if v:
                 return v
+        except AppNotResponding:
+            raise
         except Exception as e:  # noqa: BLE001 (retried until the deadline)
             last = e
         else:
@@ -295,9 +302,11 @@ def not_responding(nodes):
     return ("system", title, wait)
 
 
-def ui_nodes():
+def ui_nodes(evidence=False):
     """The screen's nodes; Android 13+'s notification prompt, whenever it shows, is refused, and
-    another app's "isn't responding" dialog is answered with Wait."""
+    another app's "isn't responding" dialog is answered with Wait. The app's own such dialog
+    raises AppNotResponding, except with `evidence` (the screen as it is, for a failure's
+    artifact: saving it must not hide the failure being reported)."""
     for _ in range(4):
         adb("shell", "uiautomator", "dump", "/sdcard/ui.xml")
         xml = adb("exec-out", "cat", "/sdcard/ui.xml")
@@ -311,7 +320,9 @@ def ui_nodes():
             continue
         stuck = not_responding(nodes)
         if stuck and stuck[0] == "app":
-            raise RuntimeError(f"the app itself is not responding ({stuck[1]!r})")
+            if evidence:
+                return nodes
+            raise AppNotResponding(f"the app itself is not responding ({stuck[1]!r})")
         if stuck and stuck[2]:
             x, y = center(stuck[2])
             adb("shell", "input", "tap", str(x), str(y))
@@ -495,7 +506,7 @@ def zone_percent(zid):
 
 def diagnose(what):
     """The screen's nodes and the media-controls log lines, kept in the artifact (ui-/media-<what>.txt)."""
-    (out / f"ui-{what}.txt").write_text("\n".join(ui_nodes()))
+    (out / f"ui-{what}.txt").write_text("\n".join(ui_nodes(evidence=True)))
     lines = [l for l in logcat().splitlines() if "media controls" in l or "message port" in l]
     (out / f"media-{what}.txt").write_text("\n".join(lines[-80:]))
 
@@ -1612,6 +1623,17 @@ def self_test():
     check(not_responding(re.findall(r"<node [^>]*>", SAMPLE_APP_HOME)) is None, "no dialog on the app's own page")
     check(not_responding(['<node text="" content-desc="Song isn\'t responding" bounds="[0,0][1,1]" />']) is None,
           "REJECT: the words in a name (content-desc) are not the dialog")
+    # ...and it ends a wait at once instead of being retried until the deadline
+    def stuck():
+        raise AppNotResponding("the app itself is not responding")
+
+    began = time.time()
+    try:
+        until("a control", stuck, timeout=30)
+        ended = "returned"
+    except AppNotResponding:
+        ended = "raised"
+    check(ended == "raised" and time.time() - began < 5, "the app's own dialog ends a wait at once")
     if failed:
         print(f"self-test FAILED: {len(failed)} check(s)")
         return 1
