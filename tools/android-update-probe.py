@@ -12,7 +12,8 @@ tools/release/updater-manifest.py, as a release does) and made the phone's local
    must keep N.
 2. Update: the right APK is served. Install is tapped; "Install unknown apps" is off, so the app
    explains and opens its settings page; the setting is turned on (appops) and the app continues
-   to Android's own confirmation, which is accepted. N+1 must be installed, and when it starts
+   to Android's own confirmation, which is accepted (once more if Android took the tap as a
+   cancel, as it can before the dialog is drawn). N+1 must be installed, and when it starts
    it must find the file N wrote to the app's data (and offer nothing: it is the newest).
 
 Usage: android-update-probe.py <apk N> <apk N+1> <out dir> [--settings-optional]
@@ -180,6 +181,15 @@ def find(pred, timeout, what):
             log("notifications refused")
             time.sleep(1)
             continue
+        # A loaded runner can show "Pixel Launcher isn't responding" over the app; the dump then
+        # holds only that dialog. Wait for the system app instead of timing out behind it.
+        if any(re.search(r"isn\S{0,6}t responding", n) for n in nodes):
+            wait = next((n for n in nodes if re.search(r'resource-id="android:id/aerr_wait"|text="Wait"', n)), None)
+            if wait:
+                adb("shell", "input", "tap", *map(str, center(wait)))
+                log("a system app was not responding: tapped Wait")
+                time.sleep(2)
+                continue
         hit = next((n for n in nodes if pred(n)), None)
         if hit:
             return hit
@@ -251,6 +261,20 @@ def main():
         return found
 
     question = f"Odeion {NEW_NAME} is available (this is {OLD_NAME})."
+
+    def confirm_update(name="2-confirm"):
+        """Tap Android's Update once the dialog has settled: the same bounds in two dumps 2 s apart."""
+        def pred(n):
+            return "packageinstaller" in n and re.search(r'text="(Update|Install|UPDATE|INSTALL)"', n)
+        node = find(pred, 240, "Android's install confirmation")
+        for _ in range(10):
+            time.sleep(2)
+            again = find(pred, 60, "Android's install confirmation (again)")
+            if center(again) == center(node):
+                break
+            node = again
+        shot(name)
+        tap(again, "Android's Update")
     try:
         # 1. tampered
         if version_code() != OLD_CODE:
@@ -300,12 +324,22 @@ def main():
         log("Install unknown apps: allowed for the app (appops)")
         if opened:
             adb("shell", "input", "keyevent", "KEYCODE_BACK")
-        confirm = find(lambda n: "packageinstaller" in n and re.search(r'text="(Update|Install|UPDATE|INSTALL)"', n),
-                       240, "Android's install confirmation")
-        shot("2-confirm")
-        tap(confirm, "Android's Update")
+        confirm_update()
         deadline = time.time() + 240
         while time.time() < deadline and version_code() != NEW_CODE:
+            if "INSTALL_FAILED_ABORTED" in logtext() and not report["steps"].get("confirm_retry"):
+                # Seen on a slow runner: the dialog's button was in the dump before it was drawn, and
+                # Android counted the tap as a cancel. Ask once more; a second cancel fails the step.
+                report["steps"]["confirm_retry"] = True
+                log("Android counted the tap as a cancel (INSTALL_FAILED_ABORTED); asking once more")
+                shot("2-cancelled")
+                adb("shell", "am", "force-stop", PKG)
+                time.sleep(2)
+                launch()
+                find(lambda n: question in n, 300, "the update question after the cancel")
+                tap(find(text_is("Install"), 30, "Install"), "Install")
+                confirm_update("2-confirm-again")
+                deadline = time.time() + 240
             time.sleep(3)
         report["steps"]["updated_version_code"] = version_code()
         if version_code() != NEW_CODE:
