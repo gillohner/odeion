@@ -129,8 +129,6 @@ pub struct Phone {
     pub(crate) tidal_unsaved: std::sync::Mutex<Option<tidal::Unsaved>>,
     /// How long one TIDAL renewal request may take ([`tidal::RENEW_FOR`]; tests shorten it).
     pub(crate) tidal_renew_for_ms: std::sync::atomic::AtomicU64,
-    /// Whether the person was told of sign-ins set aside at start ([`Phone::set_aside_notice`]).
-    set_aside_told: std::sync::atomic::AtomicBool,
     /// Whether phone mode was left, and whether its sync runs.
     life: std::sync::Mutex<Life>,
 }
@@ -155,6 +153,9 @@ fn new_key() -> String {
     getrandom::fill(&mut b).expect("the system's random source");
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
+
+/// Where the phone notes the set-aside copies the person was told of ([`Phone::set_aside_seen`]).
+const SET_ASIDE_TOLD: &str = "phone.set_aside_told";
 
 impl Phone {
     /// Phone mode for the person whose folder is `c.dir`. While a backend for that folder is still
@@ -208,7 +209,6 @@ impl Phone {
             copier: Default::default(),
             tidal_unsaved: Default::default(),
             tidal_renew_for_ms: (tidal::RENEW_FOR.as_millis() as u64).into(),
-            set_aside_told: Default::default(),
             life: Default::default(),
         }))
     }
@@ -228,35 +228,54 @@ impl Phone {
         self.life.lock().unwrap_or_else(|e| e.into_inner()).closed
     }
 
-    /// What the person is told, once, when phone mode started with sign-ins it couldn't read:
-    /// they were set aside (the file kept whole under another name), and those services are
-    /// signed out on this phone, never on the person's other devices, until signed in again.
+    /// What the person is told when phone mode holds sign-ins it couldn't read, set aside
+    /// ([`store::FileStore::open`]): the file was kept whole under another name, and those
+    /// services are signed out on this phone, never on the person's other devices, until signed
+    /// in again. Said until the person has seen it ([`Phone::set_aside_seen`]); `None` then, or
+    /// with nothing set aside.
     pub fn set_aside_notice(&self) -> Option<String> {
-        let (keys, kept) = self.store.set_aside();
-        if keys.is_empty()
-            || self
-                .set_aside_told
-                .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
+        let (names, kept) = self.set_aside_now();
+        let told = pm_sources::SessionStore::get(self.store.as_ref(), SET_ASIDE_TOLD).unwrap_or_default();
+        if kept.is_empty() || kept.iter().all(|k| told.lines().any(|t| t == k)) {
             return None;
         }
-        let names: Vec<&str> = keys
-            .iter()
-            .map(|k| match k.as_str() {
-                pm_sources::tidal::full::STATE_KEY => "TIDAL",
-                pm_sources::qobuz::STATE_KEY => "Qobuz",
-                other => other,
-            })
-            .collect();
-        let (names, them) = match names.as_slice() {
+        let (what, them) = match names.as_slice() {
             [one] => (format!("Your {one} sign-in"), "it"),
-            [a, b] => (format!("Your {a} and {b} sign-ins"), "them"),
             _ => ("Your streaming sign-ins".to_string(), "them"),
         };
         Some(format!(
-            "{names} on this phone couldn't be read. The file was kept as {} in the app's storage,              and you are signed out of {them} on this phone only: your other devices keep {them}.              Sign in again in Settings › Streaming services.",
-            kept.unwrap_or(store::FILE)
+            "{what} on this phone couldn't be read. The file was kept as {} in the app's \
+             storage, and you are signed out of {them} on this phone only: your other devices \
+             keep {them}. Sign in again in Settings › Streaming services.",
+            kept.join(", ")
         ))
+    }
+
+    /// The person saw [`Phone::set_aside_notice`] (Continue on the connect page): not said again
+    /// for those copies.
+    pub fn set_aside_seen(&self) -> std::io::Result<()> {
+        let (_, kept) = self.set_aside_now();
+        if kept.is_empty() {
+            return Ok(());
+        }
+        self.store.put(SET_ASIDE_TOLD, Some(&kept.join("\n")))
+    }
+
+    /// The services set aside now (their names), and the copies kept with them.
+    fn set_aside_now(&self) -> (Vec<&'static str>, Vec<String>) {
+        let (mut names, mut kept) = (Vec::new(), Vec::new());
+        for (key, name) in [
+            (pm_sources::tidal::full::STATE_KEY, "TIDAL"),
+            (pm_sources::qobuz::STATE_KEY, "Qobuz"),
+        ] {
+            if let Some(k) = pm_sources::SessionStore::get(self.store.as_ref(), &store::set_aside_key(key)) {
+                names.push(name);
+                if !kept.contains(&k) {
+                    kept.push(k);
+                }
+            }
+        }
+        (names, kept)
     }
 
     /// The key every `/v1` request needs (made at start, never stored).

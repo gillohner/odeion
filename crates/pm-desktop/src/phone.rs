@@ -166,7 +166,7 @@ pub async fn phone_ring(app: AppHandle, state: State<'_, AppState>) -> Result<Op
     let path = saved_path(&app).ok_or("no folder for the app's settings")?;
     store_saved(&path, Some(&saved))?;
     tracing::info!("phone mode: signed in with Pubky Ring");
-    open(&app, &state, &saved).await
+    open(&app, &state, &saved, false).await
 }
 
 /// Where TIDAL is: TIDAL itself, or (Android emulator CI only, feature `phone-mode-fixture`)
@@ -224,17 +224,27 @@ pub fn seed_fixture(app: &AppHandle) {
 }
 
 /// Open phone mode as it was chosen before. `Some`: what the connect page tells the person first
-/// (sign-ins set aside at start); phone mode runs, and this again shows its page.
+/// (sign-ins set aside: `Phone::set_aside_notice`); phone mode runs, and this again with `seen`
+/// (they saw it) shows its page.
 #[tauri::command]
-pub async fn open_phone(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
+pub async fn open_phone(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    seen: Option<bool>,
+) -> Result<Option<String>, String> {
     let saved = phone_saved(app.clone()).ok_or("Phone mode isn't set up on this device")?;
-    open(&app, &state, &saved).await
+    open(&app, &state, &saved, seen.unwrap_or(false)).await
 }
 
-/// Starts the backend once and shows its page; or, when it started with sign-ins it couldn't read
-/// (set aside: `Phone::set_aside_notice`), says so first (`Some`: shown on the connect page, whose
-/// Continue opens it again).
-async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<Option<String>, String> {
+/// Starts the backend once and shows its page; or, while it holds sign-ins it couldn't read (set
+/// aside: `Phone::set_aside_notice`) that the person hasn't seen yet (`seen`), says so first
+/// (`Some`: shown on the connect page, whose Continue opens it again with `seen`).
+async fn open(
+    app: &AppHandle,
+    state: &AppState,
+    saved: &Saved,
+    seen: bool,
+) -> Result<Option<String>, String> {
     // The running backend is this person's and still serves; else a new one (the old one ends)
     let running = {
         let mut r = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
@@ -245,9 +255,9 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<Option
                 old.stop();
             }
         }
-        r.as_ref().map(|r| r.origin.clone())
+        r.as_ref().map(|r| (r.origin.clone(), r.phone.clone()))
     };
-    let origin = match running {
+    let (origin, phone) = match running {
         Some(o) => o,
         None => {
             let phone = pm_offline::phone::Phone::open(pm_offline::phone::Config {
@@ -258,7 +268,6 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<Option
                 tidal: tidal_conf(),
             })
             .map_err(|e| format!("Phone mode can't start: {e}"))?;
-            let notice = phone.set_aside_notice();
             let key = phone.key().to_string();
             let weak = std::sync::Arc::downgrade(&phone);
             let (addr, task) = pm_offline::phone::serve(phone)
@@ -270,14 +279,21 @@ async fn open(app: &AppHandle, state: &AppState, saved: &Saved) -> Result<Option
                 origin: origin.clone(),
                 key,
                 task,
-                phone: weak,
+                phone: weak.clone(),
             });
-            if notice.is_some() {
-                return Ok(notice);
-            }
-            origin
+            (origin, weak)
         }
     };
+    // Sign-ins set aside (they couldn't be read): said before its page, until seen
+    if let Some(p) = phone.upgrade() {
+        if seen {
+            if let Err(e) = p.set_aside_seen() {
+                tracing::warn!("phone mode: {e}");
+            }
+        } else if let Some(notice) = p.set_aside_notice() {
+            return Ok(Some(notice));
+        }
+    }
     // The navigation guard and the media controls know the local server by this
     state.set_local_origin(Some(origin.clone()));
     #[cfg(target_os = "android")]

@@ -1883,11 +1883,12 @@ mod tests {
         std::fs::write(&file, cut).unwrap();
         let p = phone_with_device_client(dir.path());
         let told = p.set_aside_notice().expect("the person is told");
-        assert!(
-            told.contains("TIDAL and Qobuz") && told.contains(".unreadable"),
-            "{told}"
-        );
-        assert_eq!(p.set_aside_notice(), None, "once");
+        assert!(told.starts_with("Your streaming sign-ins on this phone couldn't be read. The file was kept as sign-ins.json.20"), "{told}");
+        assert!(!told.contains("  "), "{told}");
+        // Until they saw it (Continue on the connect page)
+        assert!(p.set_aside_notice().is_some());
+        p.set_aside_seen().unwrap();
+        assert_eq!(p.set_aside_notice(), None);
         let name = p.store.set_aside().1.unwrap().to_string();
         assert_eq!(std::fs::read(dir.path().join(&name)).unwrap(), cut);
         assert_eq!(tidal_here(&p), None, "signed out on this phone");
@@ -1899,10 +1900,10 @@ mod tests {
         assert_eq!(r.pulled, vec![QOBUZ.service], "{r:?}");
         assert!(!set_aside(p.store.as_ref(), &QOBUZ));
         assert!(set_aside(p.store.as_ref(), &TIDAL_FULL));
-        // Still held at the next start (until a sign-in)
+        // Still held at the next start (until a sign-in); the person isn't told again
         drop(p);
         let p = phone_with_device_client(dir.path());
-        assert_eq!(p.set_aside_notice(), None, "the file reads now");
+        assert_eq!(p.set_aside_notice(), None, "seen");
         let r = services_here(&p, &vault).await.unwrap();
         assert!(r.removed.is_empty() && r.pushed.is_empty(), "{r:?}");
         // Signed in again here: synced as a sign-in made here
@@ -1923,6 +1924,49 @@ mod tests {
         assert!(!set_aside(p.store.as_ref(), &TIDAL_FULL));
         let r = services_here(&p, &vault).await.unwrap();
         assert_eq!(r.pushed, vec![TIDAL_FULL.service], "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_set_aside_alone_keeps_its_id_and_is_never_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone_with_device_client(dir.path());
+        // TIDAL taken from the vault and recorded
+        let vault = StandIn::default();
+        let copy = tidal_copy("a", "1000-0123456789abcdef");
+        vault
+            .copies
+            .lock()
+            .unwrap()
+            .insert(TIDAL_FULL.service.into(), copy);
+        assert_eq!(
+            services_here(&p, &vault).await.unwrap().pulled,
+            vec![TIDAL_FULL.service]
+        );
+        drop(p);
+        // Its entry in the file is cut now (its id, beside it, reads): set aside alone
+        let file = dir.path().join(super::super::store::FILE);
+        let mut v: BTreeMap<String, String> = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        v.insert("tidal.unofficial".into(), "{".into());
+        std::fs::write(&file, serde_json::to_vec(&v).unwrap()).unwrap();
+        let p = phone_with_device_client(dir.path());
+        assert!(p
+            .set_aside_notice()
+            .unwrap()
+            .starts_with("Your TIDAL sign-in on this phone"));
+        assert_eq!(
+            SessionStore::get(p.store.as_ref(), &lineage_key(TIDAL_FULL.service)).as_deref(),
+            Some("1000-0123456789abcdef")
+        );
+        assert!(changed_here(&p, &TIDAL_FULL));
+        // Never read as a sign-out of the vault's very sign-in: nothing removed, and the vault's
+        // copy (one this phone can use) is taken back
+        let r = services_here(&p, &vault).await.unwrap();
+        assert!(r.removed.is_empty(), "{r:?}");
+        assert_eq!(r.pulled, vec![TIDAL_FULL.service], "{r:?}");
+        assert!(vault.copies.lock().unwrap().contains_key(TIDAL_FULL.service));
+        assert_eq!(tidal_here(&p).as_deref(), Some("a"));
+        assert!(!set_aside(p.store.as_ref(), &TIDAL_FULL));
+        assert_eq!(p.set_aside_notice(), None, "signed in again");
     }
 
     #[tokio::test]

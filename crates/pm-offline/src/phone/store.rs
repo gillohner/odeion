@@ -41,55 +41,60 @@ pub(crate) fn set_aside_key(key: &str) -> String {
 impl FileStore {
     /// The store in `dir` (made if missing); with no file yet, empty.
     ///
-    /// A file that can't be read, or isn't the store's JSON, is never read as empty, and a sign-in
-    /// in it that isn't its service's JSON is never read as signed out: either would be a sign-out
-    /// the vault sync carries to the vault. The file is kept whole under a dated name instead
-    /// (`sign-ins.json.<date>.unreadable`, beside it), and the store starts without what couldn't
-    /// be read (one bad sign-in: only that one), each such sign-in noted as set aside
-    /// ([`set_aside_key`]): signed out on this phone, and held out of the vault sync until the
-    /// person signs in to it again. When the copy can't be kept, an error, and the file is left as
-    /// it is.
+    /// A file that isn't the store's JSON is never read as empty, and a sign-in in it that isn't
+    /// its service's JSON is never read as signed out: either would be a sign-out the vault sync
+    /// carries to the vault. The file is kept whole under a dated name instead
+    /// (`sign-ins.json.<date>.unreadable`, beside it, never deleted), and the store starts
+    /// without what couldn't be read (a value that doesn't read: only that one), each such
+    /// sign-in noted as set aside ([`set_aside_key`]): signed out on this phone, and held out of
+    /// the vault sync until the person signs in to it again. A file that can't be read at all (a
+    /// read error), or a copy that can't be kept, is an error, and the file is left as it is.
     pub fn open(dir: &std::path::Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(FILE);
-        let (mut values, aside): (BTreeMap<String, String>, Vec<String>) = match std::fs::read(&path) {
-            Ok(b) => match serde_json::from_slice::<BTreeMap<String, String>>(&b) {
-                Ok(mut values) => {
-                    let bad: Vec<String> = values
-                        .iter()
-                        .filter_map(|(k, v)| {
-                            let e = sign_in_reads(k, v).err()?;
-                            tracing::error!(
-                                "phone mode: a sign-in in {} can't be read ({e})",
-                                path.display()
-                            );
-                            Some(k.clone())
-                        })
-                        .collect();
-                    for k in &bad {
-                        values.remove(k);
-                    }
-                    (values, bad)
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "phone mode: the sign-ins in {} can't be read (line {}, column {})",
-                        path.display(),
-                        e.line(),
-                        e.column()
-                    );
-                    (BTreeMap::new(), SIGN_INS.map(String::from).to_vec())
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (BTreeMap::new(), Vec::new()),
-            Err(e) => {
-                tracing::error!(
-                    "phone mode: the sign-ins in {} can't be read ({e})",
-                    path.display()
-                );
-                (BTreeMap::new(), SIGN_INS.map(String::from).to_vec())
-            }
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => Some(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(unreadable(&path, e)),
         };
+        let mut values = BTreeMap::new();
+        // The sign-ins that don't read, and whether anything else was left out
+        let (mut aside, mut left_out) = (Vec::new(), false);
+        match bytes
+            .as_deref()
+            .map(serde_json::from_slice::<BTreeMap<String, serde_json::Value>>)
+        {
+            None => {}
+            Some(Ok(all)) => {
+                for (k, v) in all {
+                    let read = match &v {
+                        serde_json::Value::String(x) => sign_in_reads(&k, x).map(|()| x.clone()),
+                        _ => Err("not a string".to_string()),
+                    };
+                    match read {
+                        Ok(x) => {
+                            values.insert(k, x);
+                        }
+                        Err(e) => {
+                            tracing::error!("phone mode: {k} in {} can't be read ({e})", path.display());
+                            if SIGN_INS.contains(&k.as_str()) {
+                                aside.push(k);
+                            } else {
+                                left_out = true;
+                            }
+                        }
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                tracing::error!(
+                    "phone mode: the sign-ins in {} can't be read ({})",
+                    path.display(),
+                    where_in(&e)
+                );
+                aside = SIGN_INS.map(String::from).to_vec();
+            }
+        }
         let mut store = Self {
             path,
             values: Mutex::new(BTreeMap::new()),
@@ -97,23 +102,28 @@ impl FileStore {
             set_aside: Vec::new(),
             kept_as: None,
         };
-        if !aside.is_empty() {
-            // The file kept whole first (another name for it: nothing is read or copied), then
-            // the one without what couldn't be read put in its place in one step: a crash in
-            // between leaves the file as it was, set aside again at the next start
-            let kept = keep_aside(&store.path).map_err(|e| unreadable(&store.path, e))?;
+        if let (Some(bytes), true) = (&bytes, !aside.is_empty() || left_out) {
+            // The file kept whole first (on disk before anything replaces it), then the one
+            // without what couldn't be read put in its place in one step: a crash in between
+            // leaves the file as it was, set aside again at the next start
+            let kept = keep_aside(&store.path, bytes).map_err(|e| unreadable(&store.path, e))?;
             for k in &aside {
                 values.insert(set_aside_key(k), kept.clone());
             }
             if let Err(e) = store.save(&values) {
-                // (Only the extra name goes: the file is still there under its own)
+                // (Only the copy just made goes: the file is still there as it was)
                 let _ = std::fs::remove_file(store.path.with_file_name(&kept));
                 return Err(unreadable(&store.path, e));
             }
+            sync_dir(&store.path);
             tracing::warn!(
-                "phone mode: sign-ins that couldn't be read ({}) were set aside, kept as {kept}: \
-                 signed out here until signed in again",
-                aside.join(", ")
+                "phone mode: what couldn't be read in the sign-ins ({}) was set aside, the file kept \
+                 as {kept}: signed out here until signed in again",
+                if aside.is_empty() {
+                    "no sign-in".to_string()
+                } else {
+                    aside.join(", ")
+                }
             );
             store.set_aside = aside;
             store.kept_as = Some(kept);
@@ -234,9 +244,11 @@ fn unreadable(path: &std::path::Path, e: impl std::fmt::Display) -> std::io::Err
     ))
 }
 
-/// `path` kept under a dated name beside it (`<name>.<UTC date>.unreadable`, never one already
-/// there), as another name for the same file: nothing needs reading. Its name.
-fn keep_aside(path: &std::path::Path) -> std::io::Result<String> {
+/// `bytes` (what `path` holds) kept under a dated name beside it (`<name>.<UTC date>.unreadable`,
+/// never one already there), readable by this app's user only and on disk before this returns.
+/// Its name.
+fn keep_aside(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<String> {
+    use std::io::Write;
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -247,13 +259,38 @@ fn keep_aside(path: &std::path::Path) -> std::io::Result<String> {
             0 => format!("{name}.{at}.unreadable"),
             n => format!("{name}.{at}-{n}.unreadable"),
         };
-        match std::fs::hard_link(path, path.with_file_name(&kept)) {
-            Ok(()) => return Ok(kept),
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let mut f = match o.open(path.with_file_name(&kept)) {
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
+        };
+        let written = f.write_all(bytes).and_then(|()| f.sync_all());
+        if let Err(e) = written {
+            drop(f);
+            let _ = std::fs::remove_file(path.with_file_name(&kept));
+            return Err(e);
         }
+        sync_dir(path);
+        return Ok(kept);
     }
     Err(std::io::Error::other("too many copies kept already"))
+}
+
+/// The folder of `path` flushed (its new and renamed names on disk); best effort.
+fn sync_dir(path: &std::path::Path) {
+    #[cfg(unix)]
+    if let Some(d) = path.parent() {
+        if let Err(e) = std::fs::File::open(d).and_then(|f| f.sync_all()) {
+            tracing::debug!("phone mode: {} not flushed: {e}", d.display());
+        }
+    }
 }
 
 /// `secs` (Unix) as `2026-11-22T09-40-00Z` (a file name's form of the UTC time).
@@ -495,7 +532,7 @@ mod tests {
         assert!(s.set_aside().0.is_empty());
         assert!(SessionStore::get(&s, &set_aside_key("tidal.unofficial")).is_some());
         assert_eq!(kept(dir.path()).len(), 1);
-        // Can't be kept aside (a folder in its place): an error, left there
+        // Can't be read at all (a folder in its place, a read error): an error, left there
         drop(s);
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
@@ -536,6 +573,20 @@ mod tests {
             let name = s.set_aside().1.unwrap().to_string();
             assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), body);
         }
+        // A value that isn't a string: that one alone (a sign-in set aside, anything else left
+        // out), the rest read
+        let body =
+            br#"{"tidal.unofficial":{"enabled":true},"qobuz.app":7,"qobuz.unofficial":"{\"enabled\":true}"}"#;
+        std::fs::write(&file, body).unwrap();
+        let s = FileStore::open(dir.path()).unwrap();
+        assert_eq!(s.set_aside().0, ["tidal.unofficial"]);
+        assert!(SessionStore::get(&s, "qobuz.app").is_none());
+        assert_eq!(
+            SessionStore::get(&s, "qobuz.unofficial").as_deref(),
+            Some(r#"{"enabled":true}"#)
+        );
+        let name = s.set_aside().1.unwrap().to_string();
+        assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), body);
         // Both as they are kept: read, nothing set aside
         let good = BTreeMap::from([
             ("tidal.unofficial", r#"{"enabled":true,"session":null}"#),

@@ -248,7 +248,7 @@
     clearErr();
     $('aside-go').disabled = true;
     try {
-      const more = await invoke('open_phone');
+      const more = await invoke('open_phone', { seen: true });
       if (more) showAside(more);
     } catch (e) {
       show('aside', false);

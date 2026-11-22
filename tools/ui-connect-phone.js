@@ -23,12 +23,14 @@ const PAGE = 'file://' + path.join(REPO, 'crates/pm-desktop/ui/index.html');
 // (sign-ins set aside at start). Every call is recorded.
 const STUB = (answers) => {
   window.__calls = [];
+  window.__args = [];
   const listeners = {};
   window.__emit = (name, payload) => (listeners[name] || []).forEach((f) => f({ payload }));
   window.__TAURI__ = {
     core: {
       invoke: (cmd, args) => {
         window.__calls.push(cmd);
+        window.__args.push(args || null);
         const notice = answers[`${cmd}_notice`];
         if (notice && !window.__calls.slice(0, -1).includes(cmd)) return Promise.resolve(notice);
         if (cmd === 'phone_ring' || cmd === 'open_phone' || cmd === 'open_saved') return new Promise(() => {});
@@ -97,6 +99,8 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
     await page.tap('#aside-go');
     await page.waitForTimeout(100);
     check((await calls(page)).filter((c) => c === 'open_phone').length === 2, 'Continue opens phone mode');
+    const args = await page.evaluate(() => window.__args.filter((a, i) => window.__calls[i] === 'open_phone'));
+    check(!(args[0] && args[0].seen) && args[1] && args[1].seen === true, `saying the person saw it (${JSON.stringify(args)})`);
     await ctx.close();
   }
   {
