@@ -882,8 +882,9 @@ pub fn renew_within(
         .send()
         .map_err(|e| FullError::Track(format!("renewing the session: {}", e.without_url())))?;
     let status = resp.status();
-    let v: Value = resp.json().unwrap_or(Value::Null);
+    let v = resp.json::<Value>();
     if !status.is_success() {
+        let v = v.unwrap_or(Value::Null);
         return Err(FullError::Mode(format!(
             "TIDAL did not renew the session ({status}): {}",
             v["error_description"]
@@ -892,6 +893,14 @@ pub fn renew_within(
                 .unwrap_or("")
         )));
     }
+    // TIDAL said yes, and its answer didn't arrive whole (cut off, or past the time limit): it
+    // may have renewed, so not a refusal (that would ask the person to sign in again)
+    let v = v.map_err(|e| {
+        FullError::Track(format!(
+            "renewing the session: TIDAL's answer didn't arrive whole: {}",
+            e.without_url()
+        ))
+    })?;
     session_from(&v, Some(sess)).ok_or_else(|| FullError::Mode("renewal without a token".into()))
 }
 

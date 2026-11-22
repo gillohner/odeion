@@ -854,6 +854,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_yes_from_tidal_that_doesnt_arrive_whole_is_not_a_refusal() {
+        // TIDAL answers 200, and its answer is cut off
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut c, _)) = l.accept().await {
+                let mut b = [0u8; 4096];
+                let _ = c.read(&mut b).await;
+                let _ = c
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 200\r\n\r\n{\"access_tok")
+                    .await;
+                drop(c);
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let p = phone(dir.path(), base);
+        due_here(&p);
+        let r = session(&p).await.map(|_| ());
+        assert_eq!(r.unwrap_err().status, StatusCode::BAD_GATEWAY);
+        // Still on: not "sign in again"
+        let st = full::load(p.store.as_ref());
+        assert!(st.enabled && st.session.is_some(), "{:?}", st.health);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn songs_at_once_wait_for_one_renewal() {
         let (base, renewed) = tidal(std::time::Duration::from_millis(300)).await;
         let dir = tempfile::tempdir().unwrap();

@@ -73,20 +73,31 @@ from a node.
   Backup may still copy the app's storage: a follow-up), and the key keeps
   other apps on the phone out. A sign-ins file or vault sync record that can't be read is never taken
   for an empty one (that would be a sign-out the vault sync carries out, or a first sync). The record
-  stays as it is, and the phone doesn't sync with the vault until it reads. The sign-ins file is kept
-  whole under a dated name beside it (`sign-ins.json.<date>.unreadable`, never deleted), and phone
-  mode starts without what couldn't be read (a service's sign-in that isn't its JSON: only that one).
+  stays as it is, and the phone doesn't sync with the vault until it reads. A sign-ins file that reads
+  but isn't the store's JSON is kept whole under a dated name beside it
+  (`sign-ins.json.<date>.unreadable`, readable by the app alone; the app never deletes it, so it keeps
+  the tokens it held until the app's data is cleared), and phone mode starts without what couldn't
+  be read (a value that doesn't read, such as a service's sign-in that isn't its JSON: only that
+  one). A file that can't be read at all (a read error) stops phone mode's start as before.
   Those services are signed out on the phone and set aside: the vault sync never removes or writes
   them until the person signs in again (a copy in the vault the phone can use is taken, which is a
-  sign-in again). The connect page says so before phone mode opens. The phone's other files are kept the same way: the person's waiting writes (`data.json`), the record of
+  sign-in again). The connect page says so before phone mode opens, until the person presses
+  Continue. The phone's other files are kept the same way: the person's waiting writes (`data.json`), the record of
   songs copied (`files.json`) and the song list (`songs.json`) are left as they are when they can't be
   read, and nothing is saved over them (phone mode still starts).
 - The vault sync records each service's outcome before it looks at the next one, and a record it
   can't save ends the sync. A take from the vault or a write to it is noted as under way first: until
   it is recorded, a TIDAL renewal asks the vault whether it holds the phone's refresh token rather than
-  renew beside it. A sign-out on the phone keeps the sign-in's id, so a sign-out of the very sign-in
-  the vault has goes to the vault even when the sync stopped before recording it. A TIDAL renewal
-  request is given 40 s, well within the 60 s the vault waits for it under its lock.
+  renew beside it, and the next sync reads the vault's copy as if the step had been recorded (a new
+  sign-in there is taken, one gone is signed out here), unless a write's copy is still the one it
+  replaced, so it never landed: then it is written again. A write cut off where the vault had no copy
+  before, with none there at the next sync, is written again: the phone can't tell a write that never
+  landed from one removed since. A sign-out on the phone keeps the sign-in's id, so a sign-out of the
+  very sign-in the vault has goes to the vault even when the sync stopped before recording it; the
+  id is let go once neither side has the sign-in. "Sign out everywhere" is recorded only by a sync
+  that read every service's copy. A TIDAL renewal request is given 40 s, well within the 60 s the
+  vault waits for it under its lock, and a yes from TIDAL whose answer doesn't arrive whole is not
+  taken for a refusal.
 - One backend per person on the phone: leaving phone mode ends its sync and waits, and opening it again
   while a step of the old one still runs gives back that one, so two never write the sign-ins over each
   other's.
