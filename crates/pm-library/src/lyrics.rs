@@ -76,9 +76,16 @@ fn parse_timestamp(tag: &str) -> Option<u64> {
         Some((s, f)) => (s, f),
         None => (last, ""),
     };
-    let secs: u64 = secs.parse().ok()?;
-    // Digits only, so the first three are three bytes (a file's text is anything: `[ti:9.99€ x]`
-    // reads as minutes "ti", seconds 9 and a fraction that is no number)
+    // Digits only, everywhere (`"+5".parse()` is a number, and a file's text is anything)
+    let digits = |s: &str| -> Option<u64> {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse().ok()
+    };
+    let secs = digits(secs)?;
+    // So the fraction's first three are three bytes: `[ti:9.99€ x]` reads as minutes "ti",
+    // seconds 9 and a fraction that is no number
     if !frac.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -90,10 +97,10 @@ fn parse_timestamp(tag: &str) -> Option<u64> {
     };
     // (numbers too long for a time are no time, not an overflow)
     let mut ms = secs.checked_mul(1000)?.checked_add(frac_ms)?;
-    let mins: u64 = parts.pop()?.parse().ok()?;
+    let mins = digits(parts.pop()?)?;
     ms = ms.checked_add(mins.checked_mul(60_000)?)?;
     if let Some(h) = parts.pop() {
-        ms = ms.checked_add(h.parse::<u64>().ok()?.checked_mul(3_600_000)?)?;
+        ms = ms.checked_add(digits(h)?.checked_mul(3_600_000)?)?;
     }
     Some(ms)
 }
@@ -126,7 +133,12 @@ pub fn sidecar(audio: &Path) -> Option<String> {
             return None;
         }
     }
+    // Before it is opened: opening a pipe waits for someone at its other end
+    if !std::fs::metadata(&lrc).ok()?.is_file() {
+        return None;
+    }
     let file = std::fs::File::open(&lrc).ok()?;
+    // (and of the file that was opened, should the name have changed hands in between)
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.len() > SIDECAR_MAX_BYTES {
         return None;
@@ -185,6 +197,10 @@ mod tests {
             "00:01.€",
             "00:01.1é",
             "00:01.+12",
+            "00:+05",
+            "+1:00",
+            "+1:00:00",
+            ":05",
             "00:99999999999999999999",
             "18446744073709551615:00",
             "18446744073709551:00:00",
@@ -227,9 +243,35 @@ mod tests {
         // A link to a file that is no .lrc
         symlink(&other, music.join("a.lrc")).unwrap();
         assert_eq!(sidecar(&music.join("a.flac")), None);
-        // A link to something that is no file
+        // A link to something that is no file, whatever it is named
         symlink("/dev/zero", music.join("b.lrc")).unwrap();
         assert_eq!(sidecar(&music.join("b.flac")), None);
+        std::fs::create_dir(dir.path().join("folder.lrc")).unwrap();
+        symlink(dir.path().join("folder.lrc"), music.join("h.lrc")).unwrap();
+        assert_eq!(sidecar(&music.join("h.flac")), None);
+        // A pipe is not opened: that would wait for a writer that never comes. (Asked on a
+        // thread, so that a wait shows as a failure here and not as a test that never ends.)
+        let pipe = music.join("p.lrc");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if made.is_ok_and(|s| s.success()) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let song = music.join("p.flac");
+            std::thread::spawn(move || tx.send(sidecar(&song)));
+            let got = rx.recv_timeout(std::time::Duration::from_secs(5));
+            if got.is_err() {
+                // (let the waiting thread go before failing)
+                let _ = std::fs::OpenOptions::new().write(true).open(&pipe);
+            }
+            assert_eq!(got, Ok(None), "a pipe named .lrc");
+            let linked = dir.path().join("pipe-target.lrc");
+            std::fs::rename(&pipe, &linked).unwrap();
+            symlink(&linked, music.join("q.lrc")).unwrap();
+            assert_eq!(
+                sidecar(&music.join("q.flac")),
+                None,
+                "a link to a pipe named .lrc"
+            );
+        }
         // A link that leads nowhere, a folder, a file longer than lyrics are
         symlink(dir.path().join("gone.lrc"), music.join("c.lrc")).unwrap();
         assert_eq!(sidecar(&music.join("c.flac")), None);
