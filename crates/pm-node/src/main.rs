@@ -198,15 +198,39 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     std::fs::create_dir_all(&cfg.data_dir)?;
     // First, so a port in use stops the start at once and says why (another node running)
     let listener = pm_api::bind(&cfg.api.listen).await?;
-    // The data folder is this node's while it runs: `odeiond restore` looks for this hold. A
-    // second node on the same folder (another port) is not refused, it is told
-    let _data_dir_hold = match library::lock_data_dir(cfg) {
+    // The data folder is this node's while it runs: `odeiond restore` looks for this hold, and
+    // holds it itself while it replaces the database. Someone else has it: a restore that is
+    // about to finish, or the node this one replaces, still on its way out; a few seconds are
+    // given for that before the database is opened. A second node on the same folder (another
+    // port) is not refused, it is told; and whoever starts without the hold keeps asking for it,
+    // so that a restore is refused as soon as this node is the only one left.
+    let mut data_dir_hold = library::lock_data_dir(&cfg.data_dir);
+    for _ in 0..20 {
+        if !matches!(data_dir_hold, Ok(None)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        data_dir_hold = library::lock_data_dir(&cfg.data_dir);
+    }
+    let _data_dir_hold = match data_dir_hold {
         Ok(Some(hold)) => Some(hold),
         Ok(None) => {
             tracing::warn!(
                 data_dir = %cfg.data_dir.display(),
                 "another node is running on this data folder: two nodes on one database lose each other's changes"
             );
+            let data_dir = cfg.data_dir.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if let Ok(Some(hold)) = library::lock_data_dir(&data_dir) {
+                        tracing::info!(data_dir = %data_dir.display(), "the data folder is this node's alone now");
+                        // (held until the process ends)
+                        let _hold = hold;
+                        std::future::pending::<()>().await;
+                    }
+                }
+            });
             None
         }
         Err(e) => {

@@ -19,11 +19,11 @@ pub struct DataDirLock {
     _file: std::fs::File,
 }
 
-/// Take the hold on the data folder. `Ok(None)`: another process (a running node) has it.
-/// `Err`: the folder has no locks (some network shares) or the file can't be made.
-pub fn lock_data_dir(cfg: &NodeConfig) -> std::io::Result<Option<DataDirLock>> {
-    std::fs::create_dir_all(&cfg.data_dir)?;
-    let path = cfg.data_dir.join("node.lock");
+/// Take the hold on the data folder. `Ok(None)`: another process (a running node, a restore)
+/// has it. `Err`: the folder has no locks (some network shares) or the file can't be made.
+pub fn lock_data_dir(data_dir: &Path) -> std::io::Result<Option<DataDirLock>> {
+    std::fs::create_dir_all(data_dir)?;
+    let path = data_dir.join("node.lock");
     let made = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -182,7 +182,7 @@ fn write_staged(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// `library.db.bak`, without its WAL files), and nothing it stores would be in the restored one.
 pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
-    let _hold = match lock_data_dir(cfg) {
+    let _hold = match lock_data_dir(&cfg.data_dir) {
         Ok(Some(hold)) => Some(hold),
         Ok(None) => anyhow::bail!(
             "a node is running on {}: stop it first, or restore from Settings › Backup in the web app, \
@@ -190,7 +190,10 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
             cfg.data_dir.display()
         ),
         // A folder without locks: as before, on the word that the node is stopped
-        Err(_) => None,
+        Err(e) => {
+            println!("note: could not check whether a node is running on this folder ({e}); going on");
+            None
+        }
     };
     let db = cfg.db_path();
     // Validate (and migrate) a scratch copy first so a broken file never
@@ -850,8 +853,10 @@ mod tests {
         open(&cfg).unwrap().set_setting("home.layout", "new").unwrap();
         let bak = cfg.db_path().with_extension("db.bak");
 
-        let running = lock_data_dir(&cfg).unwrap().expect("no node holds it yet");
-        assert!(lock_data_dir(&cfg).unwrap().is_none(), "held once");
+        let running = lock_data_dir(&cfg.data_dir)
+            .unwrap()
+            .expect("no node holds it yet");
+        assert!(lock_data_dir(&cfg.data_dir).unwrap().is_none(), "held once");
         let e = restore(&cfg, &file).unwrap_err().to_string();
         assert!(e.contains("a node is running"), "{e}");
         assert!(!bak.exists(), "the database was not moved");
@@ -868,6 +873,6 @@ mod tests {
             Some("old")
         );
         // The restore let go of it again
-        assert!(lock_data_dir(&cfg).unwrap().is_some());
+        assert!(lock_data_dir(&cfg.data_dir).unwrap().is_some());
     }
 }
