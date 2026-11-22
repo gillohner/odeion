@@ -4295,6 +4295,65 @@ fn originals_of(t: &Track) -> (String, String, Option<String>, Option<String>) {
     )
 }
 
+/// The library as the node's tasks and threads share it: one holder at a time, like a mutex.
+/// A plain `Mutex` stays poisoned after a panic in one holder, and every later
+/// `lock().expect(..)` then panics too, so one bad call (a file's tag a parser trips over) would
+/// stop every request and every track change until the node is restarted. Here `lock` always
+/// succeeds: after a panic the next holder gets the library with whatever transaction the panic
+/// left open rolled back, and the panic is logged. The results keep the mutex's own types, so
+/// callers read as before.
+pub struct LibraryLock(Mutex<Library>);
+
+impl LibraryLock {
+    pub fn new(library: Library) -> Self {
+        Self(Mutex::new(library))
+    }
+
+    /// Wait for the library. Always `Ok` (see the type).
+    pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Library>> {
+        Ok(match self.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => self.after_panic(poisoned.into_inner()),
+        })
+    }
+
+    /// The library if nobody holds it now; else `WouldBlock`.
+    pub fn try_lock(&self) -> std::sync::TryLockResult<std::sync::MutexGuard<'_, Library>> {
+        match self.0.try_lock() {
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(self.after_panic(poisoned.into_inner())),
+            other => other,
+        }
+    }
+
+    fn after_panic<'a>(
+        &'a self,
+        guard: std::sync::MutexGuard<'a, Library>,
+    ) -> std::sync::MutexGuard<'a, Library> {
+        self.0.clear_poison();
+        let rolled_back = guard.end_open_transaction();
+        tracing::error!(
+            rolled_back,
+            "a call panicked while it held the library; the library is in use again"
+        );
+        guard
+    }
+}
+
+impl Library {
+    /// Roll back a transaction left open on this connection (by a call that panicked in the
+    /// middle of one). Whether there was one.
+    fn end_open_transaction(&self) -> bool {
+        let conn = self.lock();
+        if conn.is_autocommit() {
+            return false;
+        }
+        if let Err(e) = conn.execute_batch("ROLLBACK") {
+            tracing::error!("a transaction left open by a panic could not be rolled back: {e}");
+        }
+        true
+    }
+}
+
 /// Run `f` holding the write lock from its start (`BEGIN IMMEDIATE`, waiting for another writer
 /// through the busy handler), unless a batch already holds it. A transaction that reads first
 /// and writes later asks for the lock only at its first write, and in WAL mode that write fails
@@ -4305,7 +4364,19 @@ fn immediately<T>(conn: &mut Connection, f: impl FnOnce(&mut Connection) -> Resu
     if began {
         conn.execute_batch("BEGIN IMMEDIATE")?;
     }
-    let r = f(conn);
+    // (should `f` panic: the transaction must not stay open on the connection, where every later
+    // write would join it and never be committed)
+    struct RollBack<'a>(&'a mut Connection, bool);
+    impl Drop for RollBack<'_> {
+        fn drop(&mut self) {
+            if self.1 && std::thread::panicking() && !self.0.is_autocommit() {
+                let _ = self.0.execute_batch("ROLLBACK");
+            }
+        }
+    }
+    let guard = RollBack(conn, began);
+    let r = f(&mut *guard.0);
+    let conn = &mut *guard.0;
     if began {
         let end = match &r {
             Ok(_) => conn.execute_batch("COMMIT"),
@@ -5745,6 +5816,72 @@ mod tag_tests {
             lib.tag_by_id("t1").unwrap().is_none(),
             "pushed tombstones are purged"
         );
+    }
+
+    /// A call that panics while it holds the shared library does not lock everyone else out:
+    /// the next holder gets it, with the transaction the panic left open rolled back.
+    #[test]
+    fn the_shared_library_is_usable_after_a_holder_panicked() {
+        let shared = std::sync::Arc::new(LibraryLock::new(Library::open_in_memory().unwrap()));
+        shared.lock().unwrap().set_setting("kept", "1").unwrap();
+        let held = shared.clone();
+        let panicked = std::thread::spawn(move || {
+            let lib = held.lock().unwrap();
+            lib.lock().execute_batch("BEGIN IMMEDIATE").unwrap();
+            lib.set_setting("half", "written").unwrap();
+            panic!("a parser tripped over a file's tag");
+        })
+        .join();
+        assert!(panicked.is_err());
+        // As every caller takes it
+        let lib = shared.lock().expect("library poisoned");
+        assert_eq!(lib.get_setting("kept").unwrap().as_deref(), Some("1"));
+        assert_eq!(lib.get_setting("half").unwrap(), None, "rolled back");
+        assert!(lib.lock().is_autocommit());
+        lib.set_setting("after", "2").unwrap();
+        drop(lib);
+        assert!(shared.try_lock().is_ok());
+        let held = shared.lock().unwrap();
+        assert!(matches!(
+            shared.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        // And again: a second panic is no different
+        let again = shared.clone();
+        assert!(std::thread::spawn(move || {
+            let _lib = again.try_lock().unwrap();
+            panic!("again");
+        })
+        .join()
+        .is_err());
+        assert_eq!(
+            shared
+                .try_lock()
+                .unwrap()
+                .get_setting("after")
+                .unwrap()
+                .as_deref(),
+            Some("2")
+        );
+    }
+
+    /// A write that panics inside its transaction leaves none open on the connection, where
+    /// every later write would join it and never be committed.
+    #[test]
+    fn a_panic_inside_a_write_leaves_no_transaction_open() {
+        let lib = Library::open_in_memory().unwrap();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            immediately(&mut lib.lock(), |conn| -> Result<()> {
+                conn.execute("INSERT INTO settings(key, value) VALUES ('half', 'written')", [])?;
+                panic!("in the middle of a write");
+            })
+        }));
+        assert!(r.is_err());
+        assert!(lib.lock().is_autocommit());
+        assert_eq!(lib.get_setting("half").unwrap(), None);
+        lib.set_setting("after", "1").unwrap();
+        assert_eq!(lib.get_setting("after").unwrap().as_deref(), Some("1"));
     }
 }
 
