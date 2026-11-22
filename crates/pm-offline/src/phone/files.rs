@@ -27,11 +27,14 @@ fn z32(k: &str) -> &str {
     k.strip_prefix("pubky").filter(|x| x.len() == 52).unwrap_or(k)
 }
 
-/// The person's choice, if they made one.
+/// The person's choice, if they made one. Settings left out when the sign-ins file couldn't be
+/// read ([`super::store::SETTINGS_SET_ASIDE`]) may have held an "off": until a new choice, off
+/// (songs never go to the homeserver against it).
 pub fn chosen(p: &Phone) -> Option<bool> {
     match p.store.get(KEY).as_deref() {
         Some("on") => Some(true),
         Some("off") => Some(false),
+        _ if p.store.get(super::store::SETTINGS_SET_ASIDE).is_some() => Some(false),
         _ => None,
     }
 }
@@ -256,11 +259,12 @@ pub trait Remote: Sync {
         path: &str,
         local: &std::path::Path,
     ) -> impl std::future::Future<Output = Result<(), HomeserverError>> + Send;
-    /// The size of the file at `path`, when it is there and the homeserver says.
+    /// Whether the file at `path` is there (`None`: not), and its size when the homeserver says
+    /// (`Some(None)`: there, its size not given).
     fn size(
         &self,
         path: &str,
-    ) -> impl std::future::Future<Output = Result<Option<u64>, HomeserverError>> + Send;
+    ) -> impl std::future::Future<Output = Result<Option<Option<u64>>, HomeserverError>> + Send;
     /// Removes the file at `path`.
     fn delete(&self, path: &str) -> impl std::future::Future<Output = Result<(), HomeserverError>> + Send;
 }
@@ -272,8 +276,8 @@ impl Remote for Account {
     async fn upload(&self, path: &str, local: &std::path::Path) -> Result<(), HomeserverError> {
         self.hs.upload_private_file(&self.session, path, local).await
     }
-    async fn size(&self, path: &str) -> Result<Option<u64>, HomeserverError> {
-        Ok(self.hs.stat_private(&self.session, path).await?.flatten())
+    async fn size(&self, path: &str) -> Result<Option<Option<u64>>, HomeserverError> {
+        self.hs.stat_private(&self.session, path).await
     }
     async fn delete(&self, path: &str) -> Result<(), HomeserverError> {
         self.hs.delete_private(&self.session, path).await
@@ -282,7 +286,9 @@ impl Remote for Account {
 
 /// Copies the songs added here that the homeserver doesn't have (by content hash), one at a time,
 /// when the setting is on. A song counts as copied once the homeserver says it holds all of it (a
-/// short copy is removed and sent again later). A song copied before, or refused for good, isn't
+/// short copy is removed and sent again later); one there whose size it doesn't give is left as it
+/// is (never sent over, nor removed: it may be whole), and when it can't say the size at all the
+/// pass stops. A song copied before, or refused for good, isn't
 /// tried again; one that
 /// takes too long waits for the next pass and the others go on; after any other failure the pass
 /// stops and the next one waits (doubling, up to 6 hours).
@@ -384,20 +390,46 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
         drop(p);
         let path = format!("{}{}", pm_appdata::files::FILES_DIR, s.file);
         // There already, whole (a copy cut short by a failure or a kill is not): copied. A short
-        // one under the phone's own name is replaced
+        // one under the phone's own name is replaced. One whose size isn't known (the homeserver
+        // doesn't say, or didn't answer) may be whole: never sent over, nor removed (as the node's
+        // `copy_guard::needs_sending`)
         let mut whole = false;
+        let mut unknown = None;
         for name in there.get(&h).into_iter().flatten() {
             let at = format!("{}{name}", pm_appdata::files::FILES_DIR);
             match within_for(limit, remote.size(&at)).await {
-                Ok(Some(n)) if n == s.bytes => {
+                Ok(Some(Some(n))) if n == s.bytes => {
                     whole = true;
                     break;
                 }
-                Ok(Some(_)) if at == path => {
+                Ok(Some(Some(_))) if at == path => {
                     let _ = within_for(limit, remote.delete(&at)).await;
+                }
+                Ok(Some(None)) => unknown = unknown.or(Some(true)),
+                Err(e) => {
+                    tracing::warn!(
+                        "phone mode: the size of a song on the homeserver can't be asked now: {e}"
+                    );
+                    unknown = Some(false);
                 }
                 _ => {}
             }
+        }
+        match unknown.filter(|_| !whole) {
+            // There, its size not given: left as it is (not sent again, not counted)
+            Some(true) => {
+                r.left += 1;
+                continue;
+            }
+            // Its size couldn't be asked: the pass stops as after a failure
+            Some(false) => {
+                if let Some(p) = weak.upgrade() {
+                    wait_after_failure(&p);
+                }
+                r.left += 1;
+                break;
+            }
+            None => {}
         }
         if whole {
             let Some(p) = weak.upgrade() else { break };
@@ -415,7 +447,7 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
             Ok(Ok(())) => Some(within_for(limit, remote.size(&path)).await),
             _ => None,
         };
-        if let Some(Ok(Some(n))) = stored {
+        if let Some(Ok(Some(Some(n)))) = stored {
             if n != s.bytes {
                 let _ = within_for(limit, remote.delete(&path)).await;
             }
@@ -424,7 +456,7 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
             // Whatever part of it arrived goes (a later pass sends it whole), judged now: the
             // listing is from the pass's start, and a whole copy that landed under this name
             // meanwhile (the node's) stays, as does one whose size the homeserver doesn't say
-            if let Ok(Some(n)) = within_for(limit, remote.size(&path)).await {
+            if let Ok(Some(Some(n))) = within_for(limit, remote.size(&path)).await {
                 if n != s.bytes {
                     let _ = within_for(limit, remote.delete(&path)).await;
                 }
@@ -438,7 +470,7 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
             slow.insert(h, (Instant::now() + wait, wait));
         };
         match (sent, stored) {
-            (Ok(Ok(())), Some(Ok(Some(n)))) if n == s.bytes => {
+            (Ok(Ok(())), Some(Ok(Some(Some(n))))) if n == s.bytes => {
                 p.copier.slow.lock().unwrap_or_else(|e| e.into_inner()).remove(&h);
                 if let Some(t) = p.copier.there.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                     t.insert(h.clone());
@@ -451,6 +483,15 @@ async fn copy_within(weak: &Weak<Phone>, remote: &impl Remote, limit: Duration) 
                 }
                 r.copied += 1;
                 *p.copier.retry.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+            // There, its size not given: not counted, and never sent again (the next pass finds
+            // it there and leaves it, as the node does)
+            (Ok(Ok(())), Some(Ok(Some(None)))) => {
+                tracing::warn!(
+                    "phone mode: the homeserver doesn't say the size of a song it took; it is left as it is"
+                );
+                p.copier.slow.lock().unwrap_or_else(|e| e.into_inner()).remove(&h);
+                r.left += 1;
             }
             // Short there (removed above), or not there: sent again later
             (Ok(Ok(())), Some(Ok(_))) => {
@@ -576,14 +617,27 @@ mod tests {
         left_there: Option<u64>,
         /// The size of what is there after an upload the homeserver took (none: all of it).
         kept_of_upload: Option<u64>,
+        /// Files there whose size the homeserver doesn't give.
+        no_size: Mutex<HashSet<String>>,
+        /// What was uploaded is listed by the next passes.
+        lists_uploads: bool,
+        /// Uploads tried (taken or not).
+        tried: AtomicUsize,
     }
 
     impl Remote for Fake {
         async fn names(&self) -> Result<Vec<String>, HomeserverError> {
             self.listed.fetch_add(1, Ordering::SeqCst);
-            Ok(self.names.clone())
+            let mut names = self.names.clone();
+            if self.lists_uploads {
+                for u in self.uploaded.lock().unwrap().iter() {
+                    names.push(u.trim_start_matches(pm_appdata::files::FILES_DIR).to_string());
+                }
+            }
+            Ok(names)
         }
         async fn upload(&self, path: &str, local: &std::path::Path) -> Result<(), HomeserverError> {
+            self.tried.fetch_add(1, Ordering::SeqCst);
             if let Some(f) = &self.during {
                 f();
             }
@@ -611,11 +665,14 @@ mod tests {
                 }
             }
         }
-        async fn size(&self, path: &str) -> Result<Option<u64>, HomeserverError> {
+        async fn size(&self, path: &str) -> Result<Option<Option<u64>>, HomeserverError> {
             if self.stalls {
                 std::future::pending::<()>().await;
             }
-            Ok(self.sizes.lock().unwrap().get(path).copied())
+            if self.no_size.lock().unwrap().contains(path) {
+                return Ok(Some(None));
+            }
+            Ok(self.sizes.lock().unwrap().get(path).copied().map(Some))
         }
         async fn delete(&self, path: &str) -> Result<(), HomeserverError> {
             if self.stalls {
@@ -858,8 +915,29 @@ mod tests {
     async fn a_homeserver_that_never_answers_doesnt_hold_the_copier() {
         let never = std::future::pending::<Result<(), HomeserverError>>();
         assert!(within_for(Duration::from_millis(20), never).await.is_err());
-        // Its size never comes for a name already there: the pass goes on and sends the song;
-        // nor after the upload: not counted as copied (it can't be checked), and the pass ends
+        // Its size never comes after the upload: not counted as copied (it can't be checked), and
+        // the pass ends
+        let (_d, p, _songs) = phone(1);
+        let f = Fake {
+            stalls: true,
+            ..Default::default()
+        };
+        let r = tokio::time::timeout(
+            Duration::from_secs(5),
+            copy_within(&Arc::downgrade(&p), &f, Duration::from_millis(20)),
+        )
+        .await
+        .expect("the pass ends");
+        assert_eq!(uploaded(&f), 1);
+        assert_eq!(r, Report { copied: 0, left: 1 });
+        assert!(load_copies(&p).unwrap().copied.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_copy_whose_size_cant_be_asked_is_never_sent_over() {
+        // There under the phone's own name (it may be whole), its size never comes: nothing is
+        // sent over it (an upload that failed would leave it cut short, and then remove it), the
+        // pass ends and the next one waits
         let (_d, p, songs) = phone(1);
         let f = Fake {
             names: vec![songs[0].file.clone()],
@@ -872,8 +950,9 @@ mod tests {
         )
         .await
         .expect("the pass ends");
-        assert_eq!(uploaded(&f), 1);
+        assert_eq!(f.tried.load(Ordering::SeqCst), 0, "nothing sent over it");
         assert_eq!(r, Report { copied: 0, left: 1 });
+        assert!(p.copier.retry.lock().unwrap().is_some(), "the next pass waits");
         assert!(load_copies(&p).unwrap().copied.is_empty());
     }
 
@@ -909,15 +988,66 @@ mod tests {
     #[tokio::test]
     async fn a_failed_upload_keeps_a_copy_it_couldnt_check() {
         let (_d, p, songs) = phone(1);
-        // There under the phone's name, its size unknown; the upload fails
-        let f = Fake::listing(vec![songs[0].file.clone()]);
+        let path = format!("{}{}", pm_appdata::files::FILES_DIR, songs[0].file);
+        // Not there when the pass listed; after the failed upload something is there, its size
+        // not given: kept
+        let f = Fake::default();
         f.answers.lock().unwrap().push_back(0);
+        f.no_size.lock().unwrap().insert(path.clone());
         copy_while(&Arc::downgrade(&p), &f).await;
+        assert_eq!(f.tried.load(Ordering::SeqCst), 1);
         assert!(
             f.deleted.lock().unwrap().is_empty(),
             "{:?}",
             f.deleted.lock().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn a_copy_whose_size_isnt_given_is_never_sent_over_nor_removed() {
+        let (_d, p, songs) = phone(1);
+        let path = format!("{}{}", pm_appdata::files::FILES_DIR, songs[0].file);
+        // There under the phone's own name, whole perhaps: the homeserver doesn't give its size.
+        // Were it sent over, an upload that fails (as here) would leave it cut short and remove it
+        let f = Fake {
+            names: vec![songs[0].file.clone()],
+            left_there: Some(10),
+            ..Default::default()
+        };
+        f.no_size.lock().unwrap().insert(path.clone());
+        f.answers.lock().unwrap().push_back(0);
+        let r = copy_while(&Arc::downgrade(&p), &f).await;
+        assert_eq!(f.tried.load(Ordering::SeqCst), 0, "nothing sent over it");
+        assert!(f.deleted.lock().unwrap().is_empty());
+        assert_eq!(r, Report { copied: 0, left: 1 });
+        // Nor at the next pass
+        copy_while(&Arc::downgrade(&p), &f).await;
+        assert_eq!(f.tried.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_song_taken_whose_size_isnt_given_is_not_sent_again() {
+        let (_d, p, songs) = phone(1);
+        let path = format!("{}{}", pm_appdata::files::FILES_DIR, songs[0].file);
+        // Taken, and then there with no size given (the next passes list it)
+        let f = Fake {
+            lists_uploads: true,
+            ..Default::default()
+        };
+        f.no_size.lock().unwrap().insert(path.clone());
+        assert_eq!(
+            copy_while(&Arc::downgrade(&p), &f).await,
+            Report { copied: 0, left: 1 }
+        );
+        assert_eq!(f.tried.load(Ordering::SeqCst), 1);
+        // Later passes (any wait over) leave it as it is: never sent again, never removed
+        for _ in 0..3 {
+            p.copier.slow.lock().unwrap().clear();
+            *p.copier.retry.lock().unwrap() = None;
+            copy_while(&Arc::downgrade(&p), &f).await;
+        }
+        assert_eq!(f.tried.load(Ordering::SeqCst), 1, "sent once");
+        assert!(f.deleted.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -946,6 +1076,43 @@ mod tests {
         copy_while(&Arc::downgrade(&p), &f2).await;
         assert_eq!(uploaded(&f2), 0);
         assert_eq!(load_copies(&p).unwrap().copied.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_choice_lost_with_sign_ins_that_cant_be_read_is_off() {
+        // The person turned copies to the homeserver off; then the sign-ins file is cut short
+        // (it holds the choice too) and set aside at the next start, on a homeserver that is
+        // their node's (where "not chosen" means on)
+        let (d, p, _) = phone(1);
+        p.store.put(KEY, Some("off")).unwrap();
+        drop(p);
+        std::fs::write(
+            d.path().join(super::super::store::FILE),
+            br#"{"phone.files_on_homeserver":"of"#,
+        )
+        .unwrap();
+        let p = Phone::open(super::super::Config {
+            dir: d.path().to_path_buf(),
+            cache: d.path().join("streams"),
+            version: "test".into(),
+            pubky: None,
+            tidal: Default::default(),
+        })
+        .unwrap();
+        *p.bundled_here.lock().unwrap() = Some(true);
+        assert_eq!(chosen(&p), Some(false));
+        assert!(!on(&p), "off until the person chooses again");
+        let f = Fake::default();
+        assert_eq!(copy_while(&Arc::downgrade(&p), &f).await, Report::default());
+        assert_eq!(
+            f.tried.load(Ordering::SeqCst),
+            0,
+            "nothing sent against the choice"
+        );
+        // A new choice is the person's
+        p.store.put(KEY, Some("on")).unwrap();
+        assert!(on(&p));
+        assert_eq!(copy_while(&Arc::downgrade(&p), &f).await.copied, 1);
     }
 
     #[test]

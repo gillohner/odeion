@@ -38,6 +38,13 @@ pub(crate) fn set_aside_key(key: &str) -> String {
     format!("vault.set_aside.{key}")
 }
 
+/// Where the store notes that settings were left out when it was opened (the file wasn't the
+/// store's JSON, or a setting in it didn't read; the value: the copy of the file kept with them).
+/// A choice the person made may be among them: one that only "on" can lose reads as "off" until
+/// they choose again (the copy of added songs to the homeserver: `files::chosen`), never as "not
+/// chosen" (whose default may be on).
+pub const SETTINGS_SET_ASIDE: &str = "phone.settings_set_aside";
+
 impl FileStore {
     /// The store in `dir` (made if missing); with no file yet, empty.
     ///
@@ -47,7 +54,8 @@ impl FileStore {
     /// (`sign-ins.json.<date>.unreadable`, beside it, never deleted), and the store starts
     /// without what couldn't be read (a value that doesn't read: only that one), each such
     /// sign-in noted as set aside (`vault.set_aside.<key>`): signed out on this phone, and held out of
-    /// the vault sync until the person signs in to it again. A file that can't be read at all (a
+    /// the vault sync until the person signs in to it again. Settings left out with them are noted
+    /// too ([`SETTINGS_SET_ASIDE`]). A file that can't be read at all (a
     /// read error), or a copy that can't be kept, is an error, and the file is left as it is.
     pub fn open(dir: &std::path::Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
@@ -93,6 +101,8 @@ impl FileStore {
                     where_in(&e)
                 );
                 aside = SIGN_INS.map(String::from).to_vec();
+                // (And every setting with them)
+                left_out = true;
             }
         }
         let mut store = Self {
@@ -109,6 +119,9 @@ impl FileStore {
             let kept = keep_aside(&store.path, bytes).map_err(|e| unreadable(&store.path, e))?;
             for k in &aside {
                 values.insert(set_aside_key(k), kept.clone());
+            }
+            if left_out {
+                values.insert(SETTINGS_SET_ASIDE.to_string(), kept.clone());
             }
             if let Err(e) = store.save(&values) {
                 // (Only the copy just made goes: the file is still there as it was)
