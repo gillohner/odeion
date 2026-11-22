@@ -22,8 +22,14 @@
   function connectView() {
     show('saved', false);
     show('connect');
+    // Phone mode (the app without a node) where this build has it
+    invoke('phone_available').then((on) => show('phone', !!on)).catch(() => show('phone', false));
     searchLan();
   }
+
+  // Which sign-in is waiting for Ring: the node's (Sign in with Pubky Ring) or phone mode's
+  let ringFor = 'node';
+  const ringButton = () => $(ringFor === 'phone' ? 'phone-go' : 'ring');
 
   // Nodes on the LAN (mDNS and SSDP). A node without a token connects at once; one with a token
   // fills the address form and asks for it.
@@ -198,7 +204,7 @@
     show('connect');
     ringUrl = ev.payload.url;
     $('qr').innerHTML = ev.payload.qr_svg;
-    $('ring').textContent = 'Waiting for Pubky Ring…';
+    ringButton().textContent = 'Waiting for Pubky Ring…';
     $('ring-cancel').disabled = false;
     $('ring-cancel').textContent = 'Cancel';
     show('ring-out');
@@ -206,11 +212,13 @@
 
   // While the sign-in waits for the app to be on screen and online (ring_wait.rs).
   // Only while a sign-in runs (the button is disabled then): a late event must not relabel it.
-  listen('ring-state', (ev) => { if ($('ring').disabled) $('ring').textContent = String(ev.payload); });
+  listen('ring-state', (ev) => { const b = ringButton(); if (b.disabled) b.textContent = String(ev.payload); });
 
   $('ring').onclick = async () => {
     clearErr();
+    ringFor = 'node';
     $('ring').disabled = true;
+    $('phone-go').disabled = true;
     $('ring').textContent = 'Starting…';
     try {
       await invoke('ring_connect');
@@ -220,7 +228,28 @@
       show('ring-out', false);
     } finally {
       $('ring').disabled = false;
+      $('phone-go').disabled = false;
       $('ring').textContent = 'Sign in with Pubky Ring';
+    }
+  };
+
+  // Use without a node: Pubky Ring first (it keeps phone mode's settings, sign-ins and data),
+  // then the app opens on this phone (phone_ring, src/phone.rs)
+  $('phone-go').onclick = async () => {
+    clearErr();
+    ringFor = 'phone';
+    $('phone-go').disabled = true;
+    $('ring').disabled = true;
+    $('phone-go').textContent = 'Starting…';
+    try {
+      await invoke('phone_ring');
+    } catch (e) {
+      if (String(e) !== 'Sign-in cancelled') fail(e);
+      show('ring-out', false);
+      $('phone-go').disabled = false;
+      $('phone-go').textContent = 'Use without a node';
+    } finally {
+      $('ring').disabled = false;
     }
   };
   $('ring-open').onclick = () => { if (ringUrl) invoke('open_ring', { url: ringUrl }).catch(fail); };
@@ -246,7 +275,30 @@
     }
   };
 
-  const start = () => invoke('saved').then((s) => (s ? reconnect(s.node_url) : connectView())).catch(fail);
+  // Phone mode chosen before (and no node since): open it again
+  async function openPhone() {
+    show('connect', false);
+    show('saved');
+    show('retry', false);
+    show('other', false);
+    show('saved-spin');
+    say('Opening Odeion on this phone…');
+    try {
+      await invoke('open_phone');
+    } catch (e) {
+      show('saved-spin', false);
+      connectView();
+      fail(e);
+    }
+  }
+
+  const start = () => invoke('saved')
+    .then(async (s) => {
+      if (s) return reconnect(s.node_url);
+      const phone = await invoke('phone_saved').catch(() => null);
+      return phone ? openPhone() : connectView();
+    })
+    .catch(fail);
 
   // A crash last time: show its report first, and reconnect only after Continue, so a crash on
   // reconnecting cannot loop (src/crash.rs).

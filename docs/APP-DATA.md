@@ -15,12 +15,12 @@ Two layers, two namespaces (STEWARD-SPEC-SPLIT.md):
 | Path | Who writes it | Format | Version |
 | :-- | :-- | :-- | :-- |
 | `/priv/pubky.music/` | the person's Odeion clients | the app's private folder | — |
-| `/priv/pubky.music/node.json` | the node | the node record (ADR 0008): `{name, api_url, version, updated_at, iroh?}`, so the person's own devices find their node; never a token (each device signs in to the node itself) | unversioned; readers ignore unknown members |
+| `/priv/pubky.music/node.json` | the node | the node record (ADR 0008): `{name, api_url, version, updated_at, iroh?, bundled_homeserver?}`, so the person's own devices find their node. `bundled_homeserver` is the public key of the homeserver installed with the node, when it has one: phone mode keeps added songs on the homeserver by default only when it is the person's own; never a token (each device signs in to the node itself) | unversioned; readers ignore unknown members |
 | `/priv/pubky.music/settings.json` | the node, after every sync and change | the settings backup: `{version, saved_at, node, contact, folders, settings: {key: value}}`, restored after one Ring sign-in on a new or reinstalled node. Never a sign-in or a token: it is plain JSON, and sign-ins travel in the vault or the encrypted backup file | `version: 1` |
 | `/priv/pubky.music/prefs.json` | every node the person uses (`PUT /v1/me/prefs`) | "You" in Settings: `{version, updated_at, home_layout?, quality?, appearance?}`; the newer copy (`updated_at`) wins between nodes | `version: 1` |
-| `/priv/pubky.music/files/` | the node (uploads, copies, imports) and the person | the person's own music files, any audio format; the node names them `<16 hex digits of the BLAKE3 hash>-<name>` | — |
+| `/priv/pubky.music/files/` | the node (uploads, copies, imports), phone mode (songs added on the phone, with Keep added songs on my homeserver on) and the person | the person's own music files, any audio format; the node names them `<16 hex digits of the BLAKE3 hash>-<name>` | — |
 | `/priv/pubky.music/files/.pubky-music-layout-check` | the node, once | an empty probe that shows how the homeserver lays out its files | — |
-| `/priv/pubky.music/vault/` | every Odeion client the person authorised | the sources vault: streaming sign-ins encrypted to each device (`crates/pm-appdata/VAULT.md`) | the index and the sign-ins carry `version: 1` |
+| `/priv/pubky.music/vault/` | every Odeion client the person authorised | the sources vault: streaming sign-ins encrypted to each device (`crates/pm-appdata/VAULT.md`). Phone mode is one of those devices ("Odeion on this phone", device `android`, ADR 0018) and writes sign-ins in the node's form | the index and the sign-ins carry `version: 1` |
 | `/priv/pubky.music/vault/index.json` | the same clients | the vault's device list, every entry with a grant proof (VAULT.md) | `version: 1` |
 | `/priv/pubky.music/vault/<service>.json` | the same clients | one sign-in's envelope (VAULT.md) | `version: 1` |
 | `/priv/pubky.music/vault/<service>.lease.json` | the same clients | a refresh lease, only on homeservers without locks (VAULT.md) | — |
@@ -58,6 +58,10 @@ still cover every part. It also asks for `/pub/pubky.music/:rw`, to move the old
 social and music folders (`/pub|priv/social/v1/:rw`, `/pub|priv/music/v1/:rw`), and `/priv/pubky.app/:rw`
 and `/pub/pubky.app/:rw` for the move from older objects (`pm_pubky::homeserver::LOGIN_CAPABILITIES`). The
 desktop app asks Ring only for `/priv/pubky.music/:r`, to read the node record and find the person's node.
+Phone mode (the Android app without a node, ADR 0018) asks for `/priv/pubky.music/vault/:rw`,
+`/priv/pubky.music/prefs.json:rw`, `/priv/pubky.music/files/:rw`, `/priv/pubky.music/node.json:r`,
+`/priv/pubky.music/settings.json:r` (for the listen history setting) and the social
+and music folders (`/pub|priv/social/v1/:rw`, `/pub|priv/music/v1/:rw`) (`pm_pubky::homeserver::PHONE_CAPABILITIES`).
 
 ## Settings groups
 Settings is in four groups, the same in the app, the API and this page (`GET /v1/node` lists them):
@@ -67,6 +71,15 @@ Settings is in four groups, the same in the app, the API and this page (`GET /v1
   localStorage `pm.theme`, `pm.layout`, `pm.dense`, `pm.sidebar`, `pm.zone`, `pm.repeat`, `pm.browserQueue`,
   `pm.browserAt`, `pm.setupHidden`, and `pm.token` (the device's API token: a credential, never in a backup);
   in the apps, the offline store (`pm-offline`), the desktop app's `node.json`, and Android's USB DAC choice.
+  Phone mode keeps `phone.json` (whose phone mode it is) in the app's config folder, and one folder per
+  person in the app's own storage, `phone/<pubky>/`: `pubky-session` (the Ring session), `sign-ins.json`
+  (streaming sign-ins and the `phone.files_on_homeserver` choice; both files readable only by the app; Android's Auto Backup may copy the app's storage),
+  `data.json` (Bookmarks as last known and the writes still to make), `vault/` (the vault key, the vault
+  client's records and `synced.json`, hashes of what the last sync saw), `music/` (added songs,
+  `songs.json`, `covers/`), `port` (the port phone mode serves the page on, kept so the page keeps its
+  origin) and `files.json` (which added songs were copied to the homeserver, by content
+  hash, and which it refused). TIDAL songs being played are cached in the app's cache folder,
+  `phone/<pubky>-streams/`, the last three.
 - **This node** (admin): node settings in the node's database, backed up to `settings.json` above (service
   apps: `GET /v1/node/apps`).
 - **This homeserver** (admin, only with a bundled one): the bundled homeserver's own config, through

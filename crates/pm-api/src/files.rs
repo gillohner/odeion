@@ -39,41 +39,9 @@ pub fn remote_name(bytes: &[u8], local: &Path) -> String {
     remote_name_for(&blake3_hex(bytes), &safe_file_name(local))
 }
 
-/// A file's name with anything but letters, digits, `.`, `-` and `_` turned into `_`.
-pub(crate) fn safe_file_name(local: &Path) -> String {
-    let name = local
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".into());
-    let safe: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    safe
-}
-
-/// `<first 16 hex of the hash>-<name>`, adding the prefix once: a file the node brought from the
-/// homeserver already carries it (that is how `x-x-01.flac` names appeared, owner 2026-10-22).
-pub(crate) fn remote_name_for(hash: &str, safe_name: &str) -> String {
-    let prefix = &hash[..16];
-    match split_remote_name(safe_name) {
-        Some((h, _)) if h == prefix => safe_name.to_string(),
-        _ => format!("{prefix}-{safe_name}"),
-    }
-}
-
-/// A remote file name's hash prefix and original name, when it has one.
-pub fn split_remote_name(name: &str) -> Option<(&str, &str)> {
-    let (h, rest) = name.split_at_checked(17)?;
-    let h = h.strip_suffix('-')?;
-    (h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()) && !rest.is_empty()).then_some((h, rest))
-}
+// Song file names are shared with the phone (pm-appdata)
+pub use pm_appdata::files::split_remote_name;
+pub(crate) use pm_appdata::files::{remote_name_for, safe_file_name};
 
 fn blake3_hex(bytes: &[u8]) -> String {
     let mut hasher = blake3::Hasher::new();

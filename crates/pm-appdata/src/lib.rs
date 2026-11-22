@@ -7,5 +7,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod files;
 pub mod paths;
 pub mod vault;

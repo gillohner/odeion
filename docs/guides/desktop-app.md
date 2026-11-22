@@ -2,7 +2,8 @@
 
 The Odeion app is the node's web page in its own window, for macOS, Windows, Linux and
 Android. It connects to a node you have installed (see the [README](../../README.md#get-started));
-it doesn't hold your library itself. What it adds over a browser:
+it doesn't hold your library itself. On Android it also works
+[without a node](#without-a-node-android). What it adds over a browser:
 
 - it finds your node on the home network, and from anywhere once the node is signed in to Pubky;
 - on a computer, it plays through that computer's sound outputs and DACs;
@@ -44,6 +45,42 @@ The app opens on a connect page. Use one of these:
 
 The app remembers the node. If the node's address changes (a new IP from the router), the app
 finds it again on the network by itself.
+
+## Without a node (Android)
+
+On Android the app also works with no node: under **No node?** on the connect page, choose **Use
+without a node** and sign in with Pubky Ring. This is phone mode. The app plays on the phone from your
+own TIDAL and Qobuz accounts and from songs you add to the phone. It keeps what you do on your Pubky
+homeserver, so a node you add later has it too.
+
+- **Settings › My streaming accounts:** sign in to TIDAL (Sign in with TIDAL, or a code on
+  link.tidal.com) and to Qobuz (email and password). TIDAL plays full tracks. Your sign-ins go to your
+  sources vault on your homeserver, encrypted, and your nodes can use them. A sign-in you already made on
+  your node shows up on the phone the same way, when the node made it with the same app (the built-in
+  one, not a TIDAL client of your own).
+- **Search** finds songs, albums and artists on both services and among your own songs. Their pages and
+  the queue work as on a node.
+- **Bookmarks** and **listens** are written to your homeserver as your node writes them, and so is the
+  streaming quality you choose. Listens follow the listen history setting you chose on your node (off,
+  private or public). What you change while offline goes up at the next sync once the phone is online again: within
+  15 minutes, or at once with your next change.
+- **My songs** (the Library tab on a phone, or My songs in the sidebar) lists the songs on the phone.
+  **Add songs** opens the phone's file picker. The files are copied into the app's own storage, and
+  nothing else on the phone sees them. A song you added can be bookmarked, and its plays kept as listens,
+  when its tags carry a MusicBrainz recording id or an ISRC (as on a node).
+- **Settings › This phone › Keep added songs on my homeserver** copies the songs you add to your
+  homeserver (`/priv/pubky.music/files/`, private), where your node finds them. It is on by default only
+  when your homeserver is the one installed with your Odeion node. Songs over 300 MB, and songs your
+  homeserver refuses (too big for it), stay on the phone only; the setting says how many. A song you
+  remove from your homeserver isn't copied again.
+- **Settings › This phone › Connect to a node** goes back to the connect page. Your sign-ins and songs
+  stay on the phone for the next time you use it without a node.
+
+Not in phone mode: your node's library and zones, collections, reviews, tags, lyrics and other
+services. Your node takes in what the phone wrote when it next syncs with your homeserver (when it
+starts, after a change of its own, or Save now in Your library). Each
+person who uses phone mode on the phone has their own folder in the app. A TIDAL song is fetched into the
+app's cache while it plays, and the cache keeps the last three.
 
 ## Playing on this computer or phone
 

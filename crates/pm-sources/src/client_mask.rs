@@ -1,5 +1,5 @@
 //! The build's TIDAL clients, masked (owner, 2026-11-04). `build.rs` includes this file to write
-//! `$OUT_DIR/tidal_clients.rs` from the build environment; `project_apps` includes it to read the
+//! `$OUT_DIR/tidal_clients.rs` from the build environment; `tidal` includes it to read the
 //! values back. Only the variable names are in the repository, never a value.
 //!
 //! Masking keeps the values out of the repository and out of the binary's plain strings; it is
