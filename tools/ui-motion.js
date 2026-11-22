@@ -201,7 +201,7 @@ const settledLyricsScroll = (page) => page.$eval('#nplyrics .lyric-lines', (box)
   {
     const { execFileSync } = require('node:child_process');
     let out = ''; let ok = true;
-    try { out = execFileSync(process.execPath, [path.join(__dirname, 'design-lint.js'), path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-api/static')], { encoding: 'utf8' }); } catch (e) { ok = false; out = String(e.stdout || e.message); }
+    try { out = execFileSync(process.execPath, [path.join(__dirname, 'design-lint.js'), path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-web/static')], { encoding: 'utf8' }); } catch (e) { ok = false; out = String(e.stdout || e.message); }
     check(ok && !/raw duration/.test(out), `design-lint: every transition and animation takes its duration from the motion scale${ok ? '' : ': ' + out.split('\n').filter((l) => /raw duration/.test(l)).slice(0, 3).join(' | ')}`);
   }
   // No horizontal overflow on the main pages

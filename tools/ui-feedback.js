@@ -21,7 +21,7 @@ const AFTER_INTAKE = process.argv[4] === '--after-intake';
 const SHOTS = AFTER_INTAKE ? null : process.argv[4];
 const MOCK = NODE === 'mock';
 const ORIGIN = MOCK ? 'http://feedback.test' : NODE;
-const STATIC = path.join(__dirname, '..', 'crates', 'pm-api', 'static');
+const STATIC = path.join(__dirname, '..', 'crates', 'pm-web', 'static');
 const HOST = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/app.css"><title>feedback test page</title></head>
 <body><header class="topbar" id="top" style="display:flex;justify-content:flex-end;padding:8px 16px"></header><main><p>Test page</p></main>

@@ -110,9 +110,8 @@ fn takes_gzip(asked: &HeaderMap) -> bool {
 }
 
 macro_rules! assets {
-    ($($name:ident: $mime:expr, $file:literal;)*) => {
-        $(pub(crate) static $name: LazyLock<Asset> =
-            LazyLock::new(|| Asset::new($mime, include_bytes!(concat!("../static/", $file))));)*
+    ($($name:ident: $mime:expr, $body:expr;)*) => {
+        $(pub(crate) static $name: LazyLock<Asset> = LazyLock::new(|| Asset::new($mime, $body));)*
 
         /// Hash and gzip every file now (the node does it once as it starts serving, off the
         /// async threads), so no page load waits for it.
@@ -128,22 +127,22 @@ const CSS: &str = "text/css; charset=utf-8";
 const PNG: &str = "image/png";
 
 assets! {
-    INDEX_HTML: HTML, "index.html";
-    PARTY_HTML: HTML, "party.html";
-    APP_JS: JS, "app.js";
-    APP_CSS: CSS, "app.css";
-    FEEDBACK_JS: JS, "feedback.js";
-    FEEDBACK_CSS: CSS, "feedback.css";
-    USAGE_JS: JS, "usage.js";
-    PWA_JS: JS, "pwa.js";
-    PWA_CSS: CSS, "pwa.css";
-    SW_JS: JS, "sw.js";
-    MANIFEST: "application/manifest+json", "manifest.webmanifest";
-    ICON_SVG: "image/svg+xml", "icon.svg";
-    ICON_192: PNG, "icon-192.png";
-    ICON_512: PNG, "icon-512.png";
-    ICON_MASKABLE_512: PNG, "icon-maskable-512.png";
-    APPLE_TOUCH_ICON: PNG, "apple-touch-icon.png";
+    INDEX_HTML: HTML, crate::INDEX_HTML.as_bytes();
+    PARTY_HTML: HTML, crate::PARTY_HTML.as_bytes();
+    APP_JS: JS, crate::APP_JS.as_bytes();
+    APP_CSS: CSS, crate::APP_CSS.as_bytes();
+    FEEDBACK_JS: JS, include_bytes!("../static/feedback.js");
+    FEEDBACK_CSS: CSS, include_bytes!("../static/feedback.css");
+    USAGE_JS: JS, crate::USAGE_JS.as_bytes();
+    PWA_JS: JS, include_bytes!("../static/pwa.js");
+    PWA_CSS: CSS, include_bytes!("../static/pwa.css");
+    SW_JS: JS, crate::SW_JS.as_bytes();
+    MANIFEST: "application/manifest+json", include_bytes!("../static/manifest.webmanifest");
+    ICON_SVG: "image/svg+xml", include_bytes!("../static/icon.svg");
+    ICON_192: PNG, include_bytes!("../static/icon-192.png");
+    ICON_512: PNG, include_bytes!("../static/icon-512.png");
+    ICON_MASKABLE_512: PNG, include_bytes!("../static/icon-maskable-512.png");
+    APPLE_TOUCH_ICON: PNG, include_bytes!("../static/apple-touch-icon.png");
 }
 
 #[cfg(test)]
@@ -173,7 +172,7 @@ mod tests {
         assert_eq!(first.headers()[header::CACHE_CONTROL], "no-cache");
         let etag = first.headers()[header::ETAG].to_str().unwrap().to_string();
         assert!(etag.starts_with("W/\"") && etag.ends_with('"'), "{etag}");
-        assert_eq!(body(first).await, include_bytes!("../static/app.js"));
+        assert_eq!(body(first).await, crate::APP_JS.as_bytes());
 
         // As a browser sends it back, alone or in a list, weak or not
         let strong = etag.trim_start_matches("W/").to_string();
@@ -200,7 +199,7 @@ mod tests {
 
     #[tokio::test]
     async fn text_goes_out_gzipped_to_browsers_that_take_it() {
-        let plain = include_bytes!("../static/app.js");
+        let plain = crate::APP_JS.as_bytes();
         for accept in ["gzip", "gzip, deflate, br", "br;q=1.0, GZIP;q=0.5", "x-gzip"] {
             let r = APP_JS.respond(&asked(&[(header::ACCEPT_ENCODING, accept)]), &[]);
             assert_eq!(r.status(), StatusCode::OK);

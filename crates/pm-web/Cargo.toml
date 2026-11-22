@@ -1,0 +1,20 @@
+[package]
+name = "pm-web"
+description = "The Odeion node's web UI: its pages and files, and how the node serves them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+base64 = "0.22"
+blake3 = { workspace = true }
+bytes = { workspace = true }
+# The files go out gzipped (assets.rs); already in the tree (zip, reqwest)
+flate2 = "1"
+sha2 = "0.10"
+tokio = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

@@ -16,7 +16,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const CSS = path.join(__dirname, '..', '..', 'crates', 'pm-api', 'static', 'app.css');
+const CSS = path.join(__dirname, '..', '..', 'crates', 'pm-web', 'static', 'app.css');
 
 // The spacing scale: 4 px steps, with the half steps a dense player's rows and pills are built on.
 const SPACE = { '2px': '--sp-0h', '4px': '--sp-1', '6px': '--sp-1h', '8px': '--sp-2', '10px': '--sp-2h', '12px': '--sp-3', '14px': '--sp-3h', '16px': '--sp-4', '24px': '--sp-5', '32px': '--sp-6' };

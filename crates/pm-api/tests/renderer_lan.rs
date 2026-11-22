@@ -41,8 +41,11 @@ fn node(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
 async fn serve(s: Arc<NodeState>) -> (String, String) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let direct = format!("http://{}", l.local_addr().unwrap());
-    tokio::spawn(pm_api::serve_listener(s.clone(), l));
-    let remote = format!("http://{}", pm_api::peer::serve_remote(s).await.unwrap());
+    tokio::spawn(pm_api::serve_listener_with_pages(s.clone(), l, pm_web::router()));
+    let remote = format!(
+        "http://{}",
+        pm_api::peer::serve_remote(s, pm_web::router()).await.unwrap()
+    );
     (direct, remote)
 }
 
@@ -80,6 +83,46 @@ async fn the_renderer_answers_lan_peers_only() {
     let bearer = [("authorization", "Bearer owner-token")];
     assert_eq!(status(&format!("{remote}/v1/info"), &bearer).await, 200);
     assert_eq!(status(&format!("{direct}/v1/info"), &bearer).await, 200);
+}
+
+/// The page and its files need no token and come through the tunnel too: the app away from home
+/// opens the same page, and keeps a copy of these files.
+#[tokio::test]
+async fn the_page_is_served_on_both_listeners() {
+    let dir = tempfile::tempdir().unwrap();
+    let (direct, remote) = serve(node(dir.path(), Some("owner-token"))).await;
+    for base in [&direct, &remote] {
+        for path in [
+            "/",
+            "/app",
+            "/albums",
+            "/settings/about",
+            "/party/abc",
+            "/app.js",
+            "/app.css",
+            "/usage.js",
+            "/feedback.js",
+            "/feedback.css",
+            "/pwa.js",
+            "/pwa.css",
+            "/sw.js",
+            "/manifest.webmanifest",
+            "/icon.svg",
+            "/icon-192.png",
+            "/icon-512.png",
+            "/icon-maskable-512.png",
+            "/apple-touch-icon.png",
+        ] {
+            assert_eq!(status(&format!("{base}{path}"), &[]).await, 200, "{base}{path}");
+        }
+        let page = reqwest::get(format!("{base}/"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(page.contains(r#"<script src="/app.js"></script>"#), "{base}");
+    }
 }
 
 #[tokio::test]

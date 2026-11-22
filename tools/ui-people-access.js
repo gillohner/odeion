@@ -178,7 +178,7 @@ const owner = async (browser, width, n, opts = {}) => {
 // (the fixture serves one made-up origin only): for what the page says when it is opened there
 const LOOPBACK = 'http://127.0.0.1:7788';
 const atLoopback = async (context) => {
-  const STATIC = path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-api/static');
+  const STATIC = path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-web/static');
   const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
   const quiet = { '/info': { name: 'Fixture node', offline: false, library: { tracks: 1, albums: 1, artists: 2, files: 1, missing_files: 0 } }, '/me': { role: 'owner', key: null, zones: null, can: OWNER_CAN }, '/zones': ZONES, '/outputs': [], '/sources': [], '/presence': [], '/node/apps': [], '/pubky': { user: null }, '/me/prefs': {} };
   await context.route(`${LOOPBACK}/**`, (r) => {

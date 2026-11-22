@@ -451,7 +451,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         tracing::info!("remote access off: the node has no API token");
     } else if cfg.remote.enabled {
         // The tunnel gets its own listener, so the node knows those requests came through it
-        match pm_api::peer::serve_remote(state.clone()).await {
+        match pm_api::peer::serve_remote(state.clone(), pm_web::router()).await {
             Ok(target) => {
                 if let Some(remote) = remote_config(cfg, target) {
                     state.configure_remote(remote).await;
@@ -562,7 +562,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::identify::spawn_recheck(&state);
     let _announced = announce(cfg, &state);
     let _renderers = renderers(cfg, &state);
-    pm_api::serve_listener(state, listener).await
+    pm_api::serve_listener_with_pages(state, listener, pm_web::router()).await
 }
 
 /// Remote access settings from `[remote]` for the tunnel's listener at `target`, or `None` when

@@ -91,14 +91,15 @@ the routes the node serves). Each hands out nothing private, or checks a key or 
 | Route | Why it is open |
 | :-- | :-- |
 | `/v1/auth/pubky/start`, `/v1/auth/pubky/poll`, `/v1/auth/pubky/owner/avatar` | logging in with Pubky Ring: this is how a sign-in is got |
-| `/party/{code}`, `/v1/party/join` | a party's page and joining it, with the code in its link |
+| `/v1/party/join` | joining a party, with the code in its link |
 | `/tidal/callback`, `/spotify/callback`, `/lastfm/callback`, `/jamendo/callback`, `/drives/{provider}/callback` | where a service sends the browser back after a sign-in someone started |
 | `/v1/outputs/pull/{name}/{file}`, `/v1/art/{id}` | a stream or a cover for a speaker or TV, with that stream's or cover's own key |
 | `/v1/upnp/events/{token}` | a speaker's volume events, from the home network only |
 | `/upnp/node.xml` | discovery: the node's name, id and version |
 | `/mb/ws/2/{*path}` | the MusicBrainz caching proxy: public data only, one upstream request a second |
 
-The web page's own files and the UPnP renderer (above) need no sign-in either. A Subsonic app signs
+The web page's own pages and files (`crates/pm-web`, a party's link `/party/{code}` among them)
+and the UPnP renderer (above) need no sign-in either. A Subsonic app signs
 in with the API token as its password (`/rest`). A node without an API token answers only its own
 machine.
 

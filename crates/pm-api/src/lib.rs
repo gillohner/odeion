@@ -16,7 +16,6 @@ pub mod activity;
 pub mod archive;
 pub mod art;
 pub mod artist_info;
-mod assets;
 pub mod audius;
 pub mod copy_guard;
 pub mod copy_jobs;
@@ -853,80 +852,19 @@ fn v1_routes() -> access::Routes {
 }
 
 pub fn router(state: Arc<NodeState>) -> Router {
+    router_with_pages(state, Router::new())
+}
+
+/// The node's API next to `pages`: the web UI's pages and files (`pm_web::router()`), which
+/// need no token. The pages are their own crate, so a change to the UI doesn't rebuild this one.
+pub fn router_with_pages(state: Arc<NodeState>, pages: Router) -> Router {
     let (v1, _) = v1_routes().into_parts();
     let v1 = v1
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .layer(middleware::map_response(plain_errors))
         .with_state(state.clone());
-    // The web UI's paths (navigation brief): a deep link or reload lands on
-    // the same view, so every page path serves index.html.
-    let mut web = Router::new()
-        .route("/", get(web_ui))
-        .route("/app", get(web_ui))
-        .route("/app/", get(web_ui))
-        .route("/song/{id}", get(web_ui))
-        .route("/album/{id}", get(web_ui))
-        .route("/artist/{id}", get(web_ui))
-        .route("/artist/{id}/releases/{section}", get(web_ui))
-        .route("/playlist/{id}", get(web_ui))
-        .route("/person/{id}", get(web_ui))
-        .route("/smart/{id}", get(web_ui))
-        .route("/now-playing", get(web_ui))
-        .route("/shared/{user}", get(web_ui))
-        .route("/shared/{user}/{id}", get(web_ui))
-        .route("/genre/{id}", get(web_ui))
-        .route("/source/{id}", get(web_ui))
-        .route("/sources/{id}", get(web_ui))
-        .route("/settings/{tab}", get(web_ui))
-        .route("/library/{tab}", get(web_ui))
-        .route("/home/{section}", get(web_ui))
-        .route("/tag/{labels}", get(web_ui))
-        .route("/discover", get(web_ui))
-        .route("/discover/{*rest}", get(web_ui))
-        .route("/search", get(web_ui));
-    for view in WEB_VIEWS {
-        web = web.route(&format!("/{view}"), get(web_ui));
-    }
-    web.route("/app.css", get(web_css))
-        .route("/ux/", get(ux_index))
-        .route("/ux/{*path}", get(ux_file))
-        .route("/app.js", get(web_js))
-        .route("/feedback.js", get(feedback_js))
-        .route("/feedback.css", get(feedback_css))
-        .route("/usage.js", get(usage_js))
-        .route("/manifest.webmanifest", get(web_manifest))
-        .route("/icon.svg", get(web_icon))
-        // Installing the web app (docs/guides/install-web-app.md): public like the page
-        .route(
-            "/pwa.js",
-            get(|h: HeaderMap| async move { assets::PWA_JS.respond(&h, &[]) }),
-        )
-        .route(
-            "/pwa.css",
-            get(|h: HeaderMap| async move { assets::PWA_CSS.respond(&h, &[]) }),
-        )
-        // (the worker is asked for again at every visit like the rest, so a changed one reaches
-        // browsers at once)
-        .route(
-            "/sw.js",
-            get(|h: HeaderMap| async move { assets::SW_JS.respond(&h, &[]) }),
-        )
-        .route(
-            "/icon-192.png",
-            get(|h: HeaderMap| async move { assets::ICON_192.respond(&h, &[]) }),
-        )
-        .route(
-            "/icon-512.png",
-            get(|h: HeaderMap| async move { assets::ICON_512.respond(&h, &[]) }),
-        )
-        .route(
-            "/icon-maskable-512.png",
-            get(|h: HeaderMap| async move { assets::ICON_MASKABLE_512.respond(&h, &[]) }),
-        )
-        .route(
-            "/apple-touch-icon.png",
-            get(|h: HeaderMap| async move { assets::APPLE_TOUCH_ICON.respond(&h, &[]) }),
-        )
+    // The web UI's pages and files (pm-web), public like the routes without a token below
+    pages
         .nest("/v1", v1)
         .merge(open_routes().into_open_router().with_state(state.clone()))
         .merge(subsonic::router(state.clone()))
@@ -946,7 +884,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
 }
 
 /// The routes reached without a sign-in: the OAuth redirect targets and the Pubky Ring sign-in
-/// that hands the token out, a party's link, and what carries a key of its own. Each is listed in
+/// that hands the token out, joining a party, and what carries a key of its own. Each is listed in
 /// [`access::OPEN`] with why it is open; one that is not listed fails the tests.
 fn open_routes() -> access::Routes {
     access::Routes::new()
@@ -958,8 +896,7 @@ fn open_routes() -> access::Routes {
         .route("/v1/auth/pubky/start", post(controller_login_start))
         .route("/v1/auth/pubky/poll", get(controller_login_poll))
         .route("/v1/auth/pubky/owner/avatar", get(profiles::owner_avatar))
-        // A party guest's link: the page, and joining it (party.rs)
-        .route("/party/{code}", get(party_page))
+        // Joining a party from its link (party.rs; the link's page is pm-web's, public like every page)
         .route("/v1/party/join", post(party::join))
         // LAN discovery: the SSDP LOCATION (pm-discovery); names the node, nothing more.
         .route(pm_discovery::DESCRIPTION_PATH, get(upnp_description))
@@ -974,12 +911,6 @@ fn open_routes() -> access::Routes {
         .route("/v1/art/{id}", get(keyed_cover))
         // MusicBrainz caching proxy for Pinakes and the owner's tools.
         .route("/mb/ws/2/{*path}", get(mbproxy::forward))
-}
-
-/// Bind and serve until the task is cancelled.
-pub async fn serve(state: Arc<NodeState>, listen: &str) -> anyhow::Result<()> {
-    let listener = bind(listen).await?;
-    serve_listener(state, listener).await
 }
 
 /// Bind the API's address. A port in use is the one fatal port: the error names it and the
@@ -1010,14 +941,22 @@ pub fn bind_error(listen: &str, e: &std::io::Error) -> String {
     }
 }
 
-/// Serve on an already bound listener (tests bind port 0).
+/// Serve the API on an already bound listener (tests bind port 0).
 pub async fn serve_listener(state: Arc<NodeState>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
-    // The page's files, hashed and gzipped before the first page load asks for them
-    tokio::task::spawn_blocking(assets::prepare);
+    serve_listener_with_pages(state, listener, Router::new()).await
+}
+
+/// Serve the API and `pages` (the web UI, `pm_web::router()`) on an already bound listener: what
+/// the node runs.
+pub async fn serve_listener_with_pages(
+    state: Arc<NodeState>,
+    listener: tokio::net::TcpListener,
+    pages: Router,
+) -> anyhow::Result<()> {
     // Peer addresses: the renderer answers LAN peers only (peer.rs)
     axum::serve(
         listener,
-        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        router_with_pages(state, pages).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await?;
     Ok(())
@@ -1181,109 +1120,6 @@ fn token_ok(
         // Browsers cannot set headers on WebSocket upgrades: allow `?token=`.
         .or_else(|| query.get("token").cloned());
     bearer.as_deref() == Some(token.as_str())
-}
-
-// ---- web UI ----
-
-/// The built-in browser controller: one static page over `/v1`. It asks for
-/// the token itself, so the page is served without auth.
-/// Top-level views of the web UI that have their own path.
-const WEB_VIEWS: [&str; 15] = [
-    "library",
-    "add-music",
-    "downloads",
-    "favourites",
-    "albums",
-    "artists",
-    "genres",
-    "tracks",
-    "playlists",
-    "radio",
-    "sources",
-    "queue",
-    "zones",
-    "settings",
-    "identify",
-];
-
-/// `/ux/`: the UX wireframes in `docs/ux/` (steward brief 2026-10-20), read
-/// from the source tree on debug builds only; release builds answer 404.
-async fn ux_index() -> Response {
-    ux_file(Path("index.html".to_string())).await
-}
-
-async fn ux_file(Path(path): Path<String>) -> Response {
-    if !cfg!(debug_assertions) || path.contains("..") || path.starts_with('/') {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/ux");
-    let file = root.join(&path);
-    let mime = match file.extension().and_then(|e| e.to_str()) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("png") => "image/png",
-        Some("md") => "text/markdown; charset=utf-8",
-        _ => "application/octet-stream",
-    };
-    match tokio::fs::read(&file).await {
-        Ok(bytes) => (
-            [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "no-cache")],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-/// The page's files (assets.rs): each with an ETag, text gzipped for browsers that take it,
-/// and asked for again at every load (the icons keep their names when the picture changes).
-async fn web_css(h: HeaderMap) -> Response {
-    assets::APP_CSS.respond(&h, &[])
-}
-
-async fn web_js(h: HeaderMap) -> Response {
-    assets::APP_JS.respond(&h, &[])
-}
-
-/// Help and problem reports (feedback.js, feedback.css), loaded by the page.
-async fn feedback_js(h: HeaderMap) -> Response {
-    assets::FEEDBACK_JS.respond(&h, &[])
-}
-
-/// Usage insights' browser part (usage.js): records nothing unless the node's switch is on.
-async fn usage_js(h: HeaderMap) -> Response {
-    assets::USAGE_JS.respond(&h, &[])
-}
-
-async fn feedback_css(h: HeaderMap) -> Response {
-    assets::FEEDBACK_CSS.respond(&h, &[])
-}
-
-async fn web_manifest(h: HeaderMap) -> Response {
-    assets::MANIFEST.respond(&h, &[])
-}
-
-async fn web_icon(h: HeaderMap) -> Response {
-    assets::ICON_SVG.respond(&h, &[])
-}
-
-/// What the node's pages are served with besides the file: the policy for their scripts
-/// (web.rs), and no framing by other sites.
-fn page_headers() -> [(header::HeaderName, &'static str); 2] {
-    [
-        (header::CONTENT_SECURITY_POLICY, web::PAGE_CSP.as_str()),
-        (header::X_FRAME_OPTIONS, "DENY"),
-    ]
-}
-
-/// `GET /party/{code}`: the page a party guest opens (no token; it joins with the code).
-async fn party_page(h: HeaderMap) -> Response {
-    assets::PARTY_HTML.respond(&h, &page_headers())
-}
-
-async fn web_ui(h: HeaderMap) -> Response {
-    assets::INDEX_HTML.respond(&h, &page_headers())
 }
 
 // ---- handlers: node ----
@@ -3902,6 +3738,12 @@ mod tests {
             w.write_sample(-((i % 100) as i16)).unwrap();
         }
         w.finalize().unwrap();
+    }
+
+    /// The node's router as the node serves it: the API with the web UI's pages next to it
+    /// (pm-web), so the tests below see a page path and an API path side by side.
+    fn router(state: Arc<NodeState>) -> Router {
+        router_with_pages(state, pm_web::router())
     }
 
     pub(crate) async fn state(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
@@ -16507,7 +16349,7 @@ exec sleep 300
     /// shared link, not a 404.
     #[tokio::test]
     async fn every_page_view_is_served_by_its_path() {
-        let js = include_str!("../static/app.js");
+        let js = pm_web::APP_JS;
         let start = js.find("const NAV_VIEWS = [").expect("NAV_VIEWS");
         let end = start + js[start..].find("];").expect("end of NAV_VIEWS");
         let views: Vec<&str> = js[start..end].split('\'').skip(1).step_by(2).collect();
@@ -19684,7 +19526,7 @@ exec sleep 300
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-cache");
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(std::str::from_utf8(&body).unwrap().contains("window.PM_USAGE"));
-        let page = include_str!("../static/index.html");
+        let page = pm_web::INDEX_HTML;
         let usage = page
             .find(r#"<script src="/usage.js"></script>"#)
             .expect("index.html loads usage.js");
@@ -19694,7 +19536,7 @@ exec sleep 300
             page.contains(r#"<div id="usagenotice" hidden></div>"#),
             "the notice's slot"
         );
-        let sw = include_str!("../static/sw.js");
+        let sw = pm_web::SW_JS;
         for list in ["const FILES = [", "const BLOCKING = ["] {
             let l = sw
                 .split_once(list)
@@ -19704,7 +19546,7 @@ exec sleep 300
             assert!(l.contains("'/usage.js'"), "sw.js {list} keeps /usage.js");
         }
         // The party page has no part of it yet (guests: a later slice)
-        assert!(!include_str!("../static/party.html").contains("usage"));
+        assert!(!pm_web::PARTY_HTML.contains("usage"));
     }
 
     // Identification review, completion and reuse (their own file: fewer shared lines here)

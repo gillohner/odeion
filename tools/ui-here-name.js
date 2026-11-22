@@ -145,7 +145,7 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
   // written on the same line as ` : '…'` (the pattern every guarded sentence uses). Anything else,
   // such as a new toast saying "this browser", fails here. Sentences about real browsers ("your
   // browser", "other browsers", "every browser of yours") are not guarded words.
-  const srcText = fs.readFileSync(path.join(REPO, 'crates/pm-api/static/app.js'), 'utf8');
+  const srcText = fs.readFileSync(path.join(REPO, 'crates/pm-web/static/app.js'), 'utf8');
   const lines = srcText.split('\n');
   const HELPER = /const (hereName|hereIn|hereOnly|playedBy|decodedBy|decodeNote|wordHere) =/;
   const PHRASES = [/\b(this|the|in a)(\s|&nbsp;|\u00a0)browser\b/gi, /['"`>\s·]Browser\b/g];

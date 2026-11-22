@@ -4,7 +4,7 @@
 //   node tools/palette-contrast.js [app.css]
 const fs = require('fs');
 const path = require('path');
-const file = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-api', 'static', 'app.css');
+const file = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-web', 'static', 'app.css');
 const css = fs.readFileSync(file, 'utf8');
 
 // The variables of a :root block, in order, with var() references kept for resolving
