@@ -1402,9 +1402,16 @@
     : p.state === 'queued' ? 'Waiting to copy' : p.state === 'paused' ? 'Copy paused'
       : (jobDone(p) ? (jobStopped(p) ? 'Copy stopped' : 'Copied to your homeserver') : 'Copying to your homeserver'));
   const jobPct = (p) => (p.bytes_total ? Math.min(100, Math.round((100 * p.bytes_done) / p.bytes_total)) : (jobDone(p) ? 100 : 0));
+  // A panel closed with the keyboard (the zone picker, the Sound panel, the volume, the copy's popup)
+  // gives the focus back to the button that opened it when the focus was in it, or on nothing: not lost
+  // to the page's top (then Tab started over, and Help, opened with ?, gave it back to nothing). Read
+  // before it hides; focus elsewhere stays. After a mouse it stays as it was, as a ⋯ menu's does, so
+  // Space still plays or pauses (on the button it would open the panel again). (A button no longer
+  // shown takes none: the copy's chip, gone with its copy)
+  const focusWasIn = (panel) => { const a = document.activeElement; return !!panel && keyedLast && (panel.contains(a) || !a || a === document.body); };
+  const focusBack = (had, btn) => { if (had && btn && btn.isConnected && btn.getClientRects().length) btn.focus({ preventScroll: true }); };
   const jobPop = () => $('#jobpop');
-  // (the focus in it, or on nothing, goes back to the chip, as the other panels give it to their button)
-  const closeJobPop = (fromBack) => { const jp = jobPop(); if (!jp || jp.hidden) return; const inside = jp.contains(document.activeElement) || document.activeElement === document.body; jp.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); const c = $('#jobchip'); if (inside && c && c.getClientRects().length) c.focus({ preventScroll: true }); };
+  const closeJobPop = (fromBack) => { const jp = jobPop(); if (!jp || jp.hidden) return; const had = focusWasIn(jp); jp.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); focusBack(had, $('#jobchip')); };
   const hideJobChip = () => { const c = $('#jobchip'); if (c) c.hidden = true; };
   // An error line, as the node sends it: text, or {path, reason}
   const jobErr = (e) => (typeof e === 'string' ? esc(e) : `<span class="jeprob">${esc(e.reason || '')}</span> <span class="muted">${esc(e.path || '')}</span>`);
@@ -2282,11 +2289,11 @@
   const volPop = () => $('#volpop');
   const closeVolPop = (fromBack) => {
     const vp = volPop(); if (!vp || vp.hidden) return;
-    const inside = vp.contains(document.activeElement) || document.activeElement === document.body;
+    const had = focusWasIn(vp);
     vp.hidden = true; $('#scrim').hidden = true; $('#volbtn').setAttribute('aria-expanded', 'false');
     const k = transients.indexOf(volTr); if (k >= 0) transients.splice(k, 1);
     if (fromBack !== true) popTransient();
-    if (inside) $('#volbtn').focus();
+    focusBack(had, $('#volbtn'));
   };
   const volTr = { open: () => !volPop().hidden, close: closeVolPop };
   // Where the bar has no room for the slider: the volume button opens this, the zone's one slider
@@ -3409,7 +3416,9 @@
 
   // Zone picker.
   const zonePop = $('#zonepop');
-  const closePop = (fromBack) => { if (zonePop.hidden) return; zonePop.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); };
+  let zOpener = '#zonebtn'; // the button that opened it (the bar's, or Now playing's) gets the focus back
+  const zoneAnchor = () => { const op = $(zOpener); return op && op.getClientRects().length ? op : $('#zonebtn'); };
+  const closePop = (fromBack) => { if (zonePop.hidden) return; const had = focusWasIn(zonePop); zonePop.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); focusBack(had, zoneAnchor()); zOpener = '#zonebtn'; };
   // What a device is, in words (owner, 2026-10-29: the line showed raw ids like airplay:9056…):
   // the protocol of its output id, and the device's maker and model when the node knows them
   // (`model` in GET /v1/outputs); the id itself stays as the tooltip.
@@ -3790,8 +3799,9 @@
   const renderZonePop = (err) => {
     zonePopErr = err || null;
     zonePop.innerHTML = zonePopDrawn = zonePopHtml(zonePopErr);
-    const zs = $('#zpsleep', zonePop); if (zs) zs.onclick = () => { closePop(); menuAfterPop($('#zonebtn'), [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]); };
-    const zv = $('#zpvisible', zonePop); if (zv) zv.onclick = () => { closePop(); menuAfterPop($('#zonebtn'), [{ title: 'Who sees what you play' }, ...VISIBLE.map(([v, label, note]) => ({ label, note, icon: 'artist', on: (state.presenceVisible || 'hidden') === v, run: () => setVisible(v) }))]); };
+    // (their menu opens at the button the picker was opened with, which has the focus back)
+    const zs = $('#zpsleep', zonePop); if (zs) zs.onclick = () => { const at = zoneAnchor(); closePop(); menuAfterPop(at, [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]); };
+    const zv = $('#zpvisible', zonePop); if (zv) zv.onclick = () => { const at = zoneAnchor(); closePop(); menuAfterPop(at, [{ title: 'Who sees what you play' }, ...VISIBLE.map(([v, label, note]) => ({ label, note, icon: 'artist', on: (state.presenceVisible || 'hidden') === v, run: () => setVisible(v) }))]); };
     $$('[data-move]', zonePop).forEach((b) => b.onclick = () => { b.disabled = true; b.innerHTML = '<span class="spin"></span> Moving…'; moveTo(b.dataset.move); });
     $$('[data-zone]', zonePop).forEach((b) => b.onclick = () => {
       state.zone = b.dataset.zone; localStorage.setItem('pm.zone', state.zone); state.zonePicked = true;
@@ -3817,6 +3827,7 @@
     if (!zonePop.hidden) { closePop(); return; }
     closeJobPop();
     renderZonePop();
+    { const a = document.activeElement; zOpener = a && a.id === 'npzone' ? '#npzone' : '#zonebtn'; }
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
     // The devices' models: the owner's output list, fetched once
     if (isOwner() && !state.outputs) loadOutputs().then(() => { followZonePop(); renderBar(); }).catch(() => {});
@@ -4053,7 +4064,8 @@
     const a = e.target.closest && e.target.closest('[data-artist-credit]');
     if (!a || opensElsewhere(e)) return;
     e.preventDefault(); e.stopPropagation();
-    if (!overlay.hidden) toggleNowPlaying();
+    // (the page opened replaces the one the focus came from: it goes to the mini player, as in setView)
+    if (!overlay.hidden) { npReturn = null; toggleNowPlaying(); }
     if (a.dataset.creditId) setView('item', { kind: 'artist', id: a.dataset.creditId });
     else { search.value = a.dataset.artistCredit; setView('search', { q: a.dataset.artistCredit, in: 'everywhere' }); }
   }, true);
@@ -4387,7 +4399,7 @@
   const qPanel = $('#qpanel');
   let qPanelKey = null;
   let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
-  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); const op = $(qOpener); if (op) op.setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) { if (op && op.getClientRects().length) op.focus(); } qOpener = '#quality'; if (fromBack !== true) popTransient(); };
+  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; const had = focusWasIn(qPanel); qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); const op = $(qOpener); if (op) op.setAttribute('aria-expanded', 'false'); focusBack(had, op); qOpener = '#quality'; if (fromBack !== true) popTransient(); };
   const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${z && z.error ? z.error : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) : ''}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
@@ -4671,6 +4683,8 @@
       { const k = transients.indexOf(npSheetTr); if (k >= 0) { transients.splice(k, 1); popTransient(true); } }
       if (npCompact()) state.npSheet = null;
       overlay.dataset.layout = `${shellMode()}-${npCompact()}`; overlay.dataset.sheet = ''; overlay.dataset.npuri = '';
+      // (drawn again, it keeps the focus it had, as with a song: Playing on after a zone picked by keyboard)
+      if (keep.focus && (!document.activeElement || document.activeElement === document.body)) { const f = $(keep.focus, overlay); if (f) f.focus({ preventScroll: true }); }
       return;
     }
     const it = np.item;
@@ -5683,14 +5697,12 @@
       return;
     }
     { const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' ? 'next' : e.key === 'ArrowLeft' ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
-    // An open ⋯ menu, zone picker, Sound panel or volume closes before Search, Now playing or Help: it
-    // stayed open (with its grey scrim) over or behind them.
-    // (Now playing and Help take over its history entry, so Back then closes them; Search has none)
-    if (e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') { const keep = e.key !== '/'; closeMenu(keep); closePop(keep); closeQPanel(keep); closeVolPop(keep); }
+    // An open ⋯ menu, zone picker, Sound panel, volume or copy's popup closes before Search, Now playing
+    // or Help: it stayed open (with its grey scrim) over or behind them.
+    // (Now playing and Help take over its history entry, so Back then closes them; Search has none. So
+    // over Now playing, Help is a layer of its own: Back closes Help, and Now playing stays)
+    if (e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') { const keep = e.key !== '/'; closeMenu(keep); closePop(keep); closeQPanel(keep); closeVolPop(keep); closeJobPop(keep); }
     // (the search field is under an open Now playing, out of reach there: it closes first)
-    // The copy's popup closes too, before Search, Now playing and Help, as the panels above do. (So over
-    // Now playing, Help is a layer of its own: Back closes Help, and Now playing stays)
-    if (e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n') closeJobPop(e.key !== '/');
     if (e.key === '/') { e.preventDefault(); if (!overlay.hidden) toggleNowPlaying(false); search.focus(); search.select(); return; }
     // (Space is a press of its own: it spins no Play clicked just before)
     if (e.code === 'Space') { e.preventDefault(); state.startAnchor = null; transport({ action: 'toggle' }); }
