@@ -114,6 +114,8 @@ pub struct Songs {
     dir: PathBuf,
     index: Mutex<Vec<Song>>,
     uploads: Mutex<HashMap<String, Upload>>,
+    /// One song added at a time (two copies of one file never meet at its path).
+    adding: Mutex<()>,
 }
 
 impl Songs {
@@ -134,6 +136,7 @@ impl Songs {
             dir,
             index: Mutex::new(index),
             uploads: Mutex::default(),
+            adding: Mutex::default(),
         })
     }
 
@@ -166,6 +169,7 @@ impl Songs {
     /// A whole uploaded file: named by its hash, its tags read, listed. The same file twice is
     /// one song.
     pub fn store(&self, part: &FsPath, name: &str) -> Result<Song, String> {
+        let _one = self.adding.lock().unwrap_or_else(|e| e.into_inner());
         // Hashed as it is read (a song may be large)
         let mut hasher = blake3::Hasher::new();
         let mut f = std::fs::File::open(part).map_err(|e| e.to_string())?;
@@ -187,10 +191,6 @@ impl Songs {
             }
         };
         let mut index = self.index.lock().unwrap_or_else(|e| e.into_inner());
-        // The same file added twice at once: one song (the file is that one's)
-        if let Some(s) = index.iter().find(|s| s.file == file) {
-            return Ok(s.clone());
-        }
         let id = index.iter().map(|s| s.id).max().unwrap_or(0) + 1;
         let stem = FsPath::new(name)
             .file_stem()

@@ -86,6 +86,16 @@ impl HomeserverError {
         }
     }
 
+    /// The server answered "not now": 408 (request timeout) or 429 (too many requests).
+    pub fn is_not_now(&self) -> bool {
+        matches!(
+            self,
+            HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+                if *status == reqwest::StatusCode::REQUEST_TIMEOUT
+                    || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        )
+    }
+
     /// The server answered 5xx.
     pub fn is_server_error(&self) -> bool {
         matches!(

@@ -1660,7 +1660,8 @@ const STEP_FOR: Duration = crate::homeserver::OBJECT_TIMEOUT;
 
 /// How old the lock (or the lease) may be when the service is called: from then on it is renewed
 /// every [`RENEW_EVERY`], so it never lapses while the service answers. Older (a slow step under
-/// it), the refresh ends as [`VaultStoreError::Busy`] instead: another client may take it soon.
+/// it), it is renewed once first; if that doesn't hold, the refresh ends as
+/// [`VaultStoreError::Busy`] (another client may have it by then).
 const CALL_BEFORE: Duration = Duration::from_secs(spec::LOCK_SECONDS / 3);
 
 /// `step` within [`STEP_FOR`]; past it the refresh ends as [`VaultStoreError::Busy`] (a lock or a
@@ -1829,10 +1830,15 @@ impl Vault<'_> {
             return Ok(Refreshed::ByAnother(cur.sign_in));
         }
         // Too little of the lock's life left to call the service under it (a slow homeserver):
-        // nothing was renewed, another try starts afresh
+        // renewed first, or nothing was renewed and another try starts afresh
         if since.elapsed() > CALL_BEFORE {
-            release(held).await;
-            return Err(VaultStoreError::Busy(path.to_string()));
+            let renewed = tokio::time::timeout(RENEW_FOR, self.renewed_now(&mut held, service))
+                .await
+                .unwrap_or(false);
+            if !renewed {
+                release(held).await;
+                return Err(VaultStoreError::Busy(path.to_string()));
+            }
         }
         // The service call, with the lock (or the lease) renewed while it runs, and a limit
         let call = tokio::time::timeout(CALL_FOR, refresh(cur.sign_in.clone()));
@@ -2045,7 +2051,8 @@ impl Vault<'_> {
     }
 
     /// Push our lease's `until` on while the service answers (only while it is still ours).
-    async fn renew_lease(&self, service: &str) -> Result<()> {
+    /// `Ok(false)`: it isn't ours (any more), nothing written.
+    async fn renew_lease(&self, service: &str) -> Result<bool> {
         let path =
             spec::lease_path(service).ok_or_else(|| VaultStoreError::BadService(service.to_string()))?;
         let me = self.client_key();
@@ -2055,7 +2062,7 @@ impl Vault<'_> {
             .and_then(|b| serde_json::from_slice::<spec::Lease>(&b).ok())
             .is_some_and(|l| l.client == me);
         if !ours {
-            return Ok(());
+            return Ok(false);
         }
         let lease = spec::Lease {
             client: me,
@@ -2064,7 +2071,16 @@ impl Vault<'_> {
         let body = serde_json::to_vec(&lease).map_err(|_| VaultError::Format("lease"))?;
         self.current()?;
         self.session.storage().put(path.as_str(), body).await?;
-        Ok(())
+        Ok(true)
+    }
+
+    /// Renew the lock (or our lease) now: whether it held. A lapsed lock or a lease another
+    /// client took is not.
+    async fn renewed_now(&self, held: &mut Locked, service: &str) -> bool {
+        match held.lock.as_mut() {
+            Some(l) => self.session.storage().refresh_lock(l, LOCK_FOR).await.is_ok(),
+            None => self.renew_lease(service).await.unwrap_or(false),
+        }
     }
 
     /// Give the lease back: only ours, and only while it is live. Once it has run out another

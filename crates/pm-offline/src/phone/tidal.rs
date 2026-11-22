@@ -148,14 +148,14 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
                 full::record(p.store.as_ref(), &Err(full::FullError::Mode(why)));
                 return Err(refused(p));
             }
+            // TIDAL was asked, and what came of it is unknown here: never asked again beside it
+            Ok(super::vault::Renewal::Unclear(why)) => {
+                tracing::warn!("phone mode: TIDAL renewal in the vault: {why}");
+                return current(p).ok_or_else(not_now);
+            }
             Err(e) if super::vault::uncertain(&e) => {
                 tracing::warn!("phone mode: TIDAL renewal in the vault: {e}");
-                return current(p).ok_or_else(|| {
-                    SourceError::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "TIDAL: the sign-in couldn't be renewed through your homeserver just now; try again in a moment",
-                    )
-                });
+                return current(p).ok_or_else(not_now);
             }
             Err(e) => tracing::warn!("phone mode: TIDAL renewal in the vault: {e}; renewed here"),
         }
@@ -187,6 +187,13 @@ async fn renew(p: &Arc<Phone>) -> Result<full::Session, SourceError> {
             Err(SourceError::new(StatusCode::BAD_GATEWAY, why_not(p)))
         }
     }
+}
+
+fn not_now() -> SourceError {
+    SourceError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "TIDAL: the sign-in couldn't be renewed through your homeserver just now; try again in a moment",
+    )
 }
 
 /// What the health note says went wrong (TIDAL's words), else that it didn't answer.

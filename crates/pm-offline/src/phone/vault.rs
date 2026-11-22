@@ -552,6 +552,9 @@ pub enum Renewal {
     Busy,
     /// TIDAL refused to renew the sign-in (its words): signing in again is the way back.
     Refused(String),
+    /// TIDAL was asked, but what came of it didn't reach the phone (why): it may have renewed,
+    /// so the phone never renews this one on its own.
+    Unclear(String),
 }
 
 /// TIDAL renewed under the vault blob's lock (VAULT.md, "Refreshing a token"): the session read
@@ -667,11 +670,17 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
             return match refused.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(why) => Ok(Renewal::Refused(why)),
                 // TIDAL was asked and didn't answer cleanly: it may have renewed
-                None if asked.load(std::sync::atomic::Ordering::SeqCst) => Err(e),
+                None if asked.load(std::sync::atomic::Ordering::SeqCst) => {
+                    Ok(Renewal::Unclear(e.to_string()))
+                }
                 // The vault's copy is not one this phone renews (another app, no session):
                 // the phone renews its own
                 None => Ok(Renewal::NotInVault),
             };
+        }
+        // After TIDAL was asked (its new tokens dropped: the sign-in changed hands meanwhile)
+        Err(e) if asked.load(std::sync::atomic::Ordering::SeqCst) => {
+            return Ok(Renewal::Unclear(e.to_string()))
         }
         Err(e) => return Err(e),
     };
@@ -715,17 +724,22 @@ pub async fn renew_tidal(phone: &std::sync::Arc<Phone>, acct: &Account) -> Resul
     Ok(Renewal::Renewed)
 }
 
-/// Whether a failed renewal through the vault leaves open that the sign-in is being renewed, or
-/// was, elsewhere or at TIDAL: the homeserver didn't answer (or failed in a way it may not next
-/// time), another step holds the blob, or TIDAL was asked under the lock and didn't answer
-/// cleanly. Then the phone never renews it on its own beside the vault. After any other failure
-/// (the homeserver said no, the vault's copy can't be read or used here, a local file) it does, as
-/// without a vault, so a lasting vault problem never stops TIDAL.
+/// Whether a failure before TIDAL was asked ([`renew_tidal`]'s error) leaves open that the
+/// sign-in is being renewed elsewhere: the homeserver didn't answer (or failed in a way it may not
+/// next time, or said "not now"), another step holds the blob, or it served a copy older than one
+/// seen (a newer write exists). Then the phone never renews it on its own beside the vault. After
+/// any other failure (the homeserver said no, the vault's copy can't be read or used here, a local
+/// file) it does, as without a vault, so a lasting vault problem never stops TIDAL. (Once TIDAL
+/// was asked, the answer is [`Renewal::Unclear`] instead.)
 pub fn uncertain(e: &VaultStoreError) -> bool {
     match e {
-        VaultStoreError::Busy(_) | VaultStoreError::TimedOut(_) | VaultStoreError::Refresh(_) => true,
+        VaultStoreError::Busy(_)
+        | VaultStoreError::TimedOut(_)
+        | VaultStoreError::Refresh(_)
+        | VaultStoreError::Stale { .. } => true,
         VaultStoreError::Homeserver(h) => {
             h.is_transient()
+                || h.is_not_now()
                 || matches!(
                     h,
                     pm_pubky::homeserver::HomeserverError::Transport(_)
@@ -1074,6 +1088,45 @@ mod tests {
             decide(Some(&s), Some("b"), Some("L0"), Some(&t("x", "L1", false)), true),
             Do::DropHere
         );
+    }
+
+    #[test]
+    fn which_vault_failures_keep_the_phone_from_renewing_on_its_own() {
+        use pm_pubky::homeserver::HomeserverError;
+        let answered = |code: u16| {
+            VaultStoreError::Homeserver(HomeserverError::Pubky(pubky::Error::Request(
+                pubky::errors::RequestError::Server {
+                    status: pubky::StatusCode::from_u16(code).unwrap(),
+                    message: String::new(),
+                },
+            )))
+        };
+        // Another device may be renewing it: never beside it
+        for e in [
+            VaultStoreError::Busy("p".into()),
+            VaultStoreError::TimedOut("p".into()),
+            VaultStoreError::Homeserver(HomeserverError::Transport("reset".into())),
+            VaultStoreError::Homeserver(HomeserverError::Timeout),
+            answered(503),
+            answered(429),
+            answered(408),
+            VaultStoreError::Stale {
+                service: "tidal-full".into(),
+                why: "older",
+            },
+        ] {
+            assert!(uncertain(&e), "{e}");
+        }
+        // Lasting: renewed here, so TIDAL doesn't stop for good
+        for e in [
+            answered(401),
+            answered(403),
+            VaultStoreError::Revoked,
+            VaultStoreError::NotOurs("tidal-full".into()),
+            VaultStoreError::Local(std::io::Error::other("bad key")),
+        ] {
+            assert!(!uncertain(&e), "{e}");
+        }
     }
 
     #[tokio::test]
