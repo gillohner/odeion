@@ -230,7 +230,7 @@ jobs:
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           npm ci --no-audit --no-fund
           npx tauri android init --ci --skip-targets-install
-          npx tauri icon ../pm-api/static/icon.svg
+          npx tauri icon ../pm-web/static/icon.svg
           python3 -I ../../tools/release/android-patch.py .
       - name: build
         env:

@@ -61,8 +61,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = "0.1"
 bytes = { workspace = true }
-# The web UI's files go out gzipped (assets.rs); already in the tree (zip, reqwest)
-flate2 = "1"
 tracing = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -76,6 +74,9 @@ test-hooks = []
 [dev-dependencies]
 # This crate's own tests turn its test hooks on (dev-dependencies don't reach normal builds)
 pm-api = { path = ".", features = ["test-hooks"] }
+# The web UI's pages and files, for the tests that read them next to the API (which views the
+# page has, that a page path needs no token). Tests only: the node puts the two together.
+pm-web = { workspace = true }
 # Hermetic authenticated homeserver health tests over local HTTPS.
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 rcgen = "0.14"

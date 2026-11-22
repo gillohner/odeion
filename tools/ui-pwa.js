@@ -1,4 +1,4 @@
-// The install button and its help (crates/pm-api/static/pwa.js) in jsdom, without a node.
+// The install button and its help (crates/pm-web/static/pwa.js) in jsdom, without a node.
 // The browser's install events are fakes here: this covers the page's own behaviour (only on a
 // click, the deferred prompt used once and dropped, nothing for an installed app or inside the
 // desktop app, the right steps per browser), NOT whether a browser will install the app. The
@@ -9,7 +9,7 @@
 const { JSDOM, VirtualConsole } = require(require.resolve('jsdom', { paths: [process.cwd(), __dirname] }));
 const fs = require('fs');
 const ROOT = process.argv[2] || require('path').resolve(__dirname, '..');
-const STATIC = ROOT + '/crates/pm-api/static/';
+const STATIC = ROOT + '/crates/pm-web/static/';
 const html = fs.readFileSync(STATIC + 'index.html', 'utf8');
 const pwa = fs.readFileSync(STATIC + 'pwa.js', 'utf8');
 const UA = {

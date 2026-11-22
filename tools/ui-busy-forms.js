@@ -35,7 +35,7 @@ const busyNow = (page, sel) => page.evaluate((s) => { const b = document.querySe
 (async () => {
   // the lint that keeps it
   let lint = ''; let lintOk = true;
-  try { lint = execFileSync(process.execPath, [path.join(REPO, 'tools', 'design-lint.js'), path.join(REPO, 'crates', 'pm-api', 'static')], { encoding: 'utf8' }); } catch (e) { lintOk = false; lint = String(e.stdout || e.message); }
+  try { lint = execFileSync(process.execPath, [path.join(REPO, 'tools', 'design-lint.js'), path.join(REPO, 'crates', 'pm-web', 'static')], { encoding: 'utf8' }); } catch (e) { lintOk = false; lint = String(e.stdout || e.message); }
   check(lintOk && !/submit handler returns nothing/.test(lint), `no form's submit handler returns nothing (${lintOk ? 'design lint ok' : lint.split('\n').filter((l) => /submit handler/.test(l)).length + ' found'})`);
 
   const browser = await chromium.launch();

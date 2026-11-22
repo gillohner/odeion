@@ -11,7 +11,7 @@
 //     Home's tags use the same chip and colours (the now-playing tags share tagChip, unchecked here).
 // The node's /v1/item, /v1/tags, /v1/discover/uri and /v1/profiles are mocked here.
 //   node tools/ui-tags-hero.js <api token> <node URL> [screenshot dir]
-//   PM_STATIC_DIR=crates/pm-api/static serves the page from those files instead of the node's
+//   PM_STATIC_DIR=crates/pm-web/static serves the page from those files instead of the node's
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
@@ -30,7 +30,7 @@ const ALINK = 'https://tidal.com/album/654321';
 // Pubky ids are 52 characters of z-base-32
 const P = Array.from({ length: 8 }, (_, i) => `${'p'.repeat(4)}${String.fromCharCode(97 + i)}`.padEnd(52, 'y'));
 const NAMES = ['Ann', 'Bo', 'Cy', 'Di', 'Ed', 'Flo', 'Gus', 'Hal'];
-const appSrc = fs.readFileSync(path.join(__dirname, '..', 'crates', 'pm-api', 'static', 'app.js'), 'utf8');
+const appSrc = fs.readFileSync(path.join(__dirname, '..', 'crates', 'pm-web', 'static', 'app.js'), 'utf8');
 const block = /\n  const TAG_COLOURS = [\s\S]*?\n  const tagRgba = [^\n]*\n/.exec(appSrc);
 // Without them (before this change) the page checks still run, and fail on the page itself
 const { tagColour, tagRgba } = block ? new Function(`${block[0]}\nreturn { tagColour, tagRgba };`)() : { tagColour: () => null, tagRgba: () => 'no tagColour in app.js' };

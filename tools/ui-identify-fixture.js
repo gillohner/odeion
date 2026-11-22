@@ -1,5 +1,5 @@
 // Confirm matches and the Identify card on the page's real assets, without a node: a loopback
-// server serves crates/pm-api/static as the node does and answers /v1 itself (synthetic data,
+// server serves crates/pm-web/static as the node does and answers /v1 itself (synthetic data,
 // delays on demand). Checks, on a phone (390), a tablet (834) and a desktop (1440):
 //   - a loading state at once, the first albums when they come (a slow answer);
 //   - the owner's choices kept across "Show more albums", and the exact choices sent;
@@ -23,7 +23,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
-const STATIC = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-api', 'static');
+const STATIC = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-web', 'static');
 const SHOTS = process.argv[3] || '';
 const problems = [];
 let checks = 0;

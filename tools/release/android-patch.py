@@ -244,7 +244,7 @@ if "pubky-music: insets" not in atext:
     }
     pubkyMusicBars()""")
     # The bars follow the system theme, as the web UI does unless Settings picks one
-    # (theme-color in crates/pm-api/static/index.html). uiMode changes do not recreate the activity.
+    # (theme-color in crates/pm-web/static/index.html). uiMode changes do not recreate the activity.
     tail = atext.rstrip().rfind("}")
     atext = atext[:tail] + """
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {

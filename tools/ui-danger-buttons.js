@@ -47,11 +47,11 @@ const colours = (page, sel) => page.evaluate((s) => { const el = document.queryS
 (async () => {
   // Every confirmation that asks about deleting, removing, forgetting, ending, signing someone out
   // ("Sign <name> out everywhere?" too), switching someone's music off or replacing
-  const app = fs.readFileSync(path.join(ROOT, 'crates/pm-api/static/app.js'), 'utf8');
+  const app = fs.readFileSync(path.join(ROOT, 'crates/pm-web/static/app.js'), 'utf8');
   const asks = [...app.matchAll(/choiceDialog\(\{ title: (['`])((?:Delete|Remove|Forget|Clear|End|Disconnect|Sign\b[^'`]*?\bout|Switch music off|Log out|Make a new (?:token|password))[^'`]*)\1/g)];
   const plain = asks.filter((m) => !app.slice(m.index, app.indexOf('})', m.index)).includes('danger: true')).map((m) => m[2]);
   // (the usage panel asks through the page's dialog: its fourth argument is the destructive mark)
-  const usage = fs.readFileSync(path.join(ROOT, 'crates/pm-api/static/usage.js'), 'utf8');
+  const usage = fs.readFileSync(path.join(ROOT, 'crates/pm-web/static/usage.js'), 'utf8');
   const uasks = [...usage.matchAll(/await ask\('((?:Delete|Remove|Forget|Clear|End|Disconnect|Sign out|Log out)[^']*)', '(?:[^'\\]|\\.)*', '[^']*'(, true)?\)/g)];
   plain.push(...uasks.filter((m) => !m[2]).map((m) => m[1]));
   check(asks.length >= 6 && uasks.length >= 2 && plain.length === 0 && /danger: !!danger/.test(app), `each of the ${asks.length + uasks.length} confirmations whose title begins with Delete, Remove, Clear… has a destructive main choice (without: ${plain.join(' | ') || 'none'})`);

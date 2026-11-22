@@ -44,7 +44,7 @@ const CASES = [
   const browser = await chromium.launch();
   // The script itself: nothing an old WebView cannot read
   {
-    const html = fs.readFileSync(path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-api/static/index.html'), 'utf8');
+    const html = fs.readFileSync(path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-web/static/index.html'), 'utf8');
     const m = /<script>\/\* The Android app draws this page[\s\S]*?\*\/([\s\S]*?)<\/script>/.exec(html);
     const newer = m ? (m[1].match(/=>|`|\?\.|\?\?|\b(?:const|let|class|async|await)\b|\.\.\./g) || []) : ['no script'];
     check(m && !newer.length, `index.html's check uses no syntax newer than ES5 (${newer.join(' ') || 'none'})`);

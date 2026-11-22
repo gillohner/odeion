@@ -1697,7 +1697,7 @@ mod tests {
     /// every report sent from it with details into a 400 (and reloading lands on the same page).
     #[test]
     fn every_page_the_app_shows_is_a_view_a_report_may_name() {
-        let js = include_str!("../static/app.js");
+        let js = pm_web::APP_JS;
         let mut pages: Vec<&str> = js
             .match_indices("setView('")
             .filter_map(|(i, m)| js[i + m.len()..].split('\'').next())

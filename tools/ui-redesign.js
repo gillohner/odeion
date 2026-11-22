@@ -32,17 +32,17 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
   // The palette and the scales, from the files
   {
     let ok = true; let out = '';
-    try { out = execFileSync(process.execPath, [path.join(REPO, 'tools/palette-contrast.js'), path.join(REPO, 'crates/pm-api/static/app.css')], { encoding: 'utf8' }); } catch (e) { ok = false; out = String(e.stdout || e.message); }
+    try { out = execFileSync(process.execPath, [path.join(REPO, 'tools/palette-contrast.js'), path.join(REPO, 'crates/pm-web/static/app.css')], { encoding: 'utf8' }); } catch (e) { ok = false; out = String(e.stdout || e.message); }
     check(ok, `palette: every pair at AA${ok ? ` (${(out.match(/(\d+) pairs/) || [])[1]} pairs)` : ': ' + out.split('\n').filter((l) => /FAIL/.test(l)).slice(0, 3).join(' | ')}`);
     let lint = ''; let lintOk = true;
-    try { lint = execFileSync(process.execPath, [path.join(REPO, 'tools/design-lint.js'), path.join(REPO, 'crates/pm-api/static')], { encoding: 'utf8' }); } catch (e) { lintOk = false; lint = String(e.stdout || e.message); }
+    try { lint = execFileSync(process.execPath, [path.join(REPO, 'tools/design-lint.js'), path.join(REPO, 'crates/pm-web/static')], { encoding: 'utf8' }); } catch (e) { lintOk = false; lint = String(e.stdout || e.message); }
     // (a failure names its first problems whatever the rule: a class with no CSS rule too, not
     // only a size off the scale)
     const probs = lint.split('\n').map((l) => l.trim()).filter((l) => l && !/^\d+ design problems?$/.test(l));
     check(lintOk && !/off the/.test(lint), `design lint passes, every font-size and radius on its scale (rule 5)${lintOk ? '' : `: ${probs.slice(0, 3).join(' | ')}${probs.length > 3 ? ` (+${probs.length - 3} more)` : ''}`}`);
     // (the words in app.js's string literals: a small scan that knows quotes, template strings and
     // their ${} holes, and reads the code inside a hole for strings of its own)
-    const js = fs.readFileSync(path.join(REPO, 'crates/pm-api/static/app.js'), 'utf8');
+    const js = fs.readFileSync(path.join(REPO, 'crates/pm-web/static/app.js'), 'utf8');
     const strings = [];
     const scan = (code, base) => {
       let q = null; let buf = ''; let line = base; let at = base;

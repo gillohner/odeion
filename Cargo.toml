@@ -8,6 +8,7 @@ members = [
     "crates/pm-pubky",
     "crates/pm-out-local",
     "crates/pm-api",
+    "crates/pm-web",
     "crates/pm-node",
     "crates/pm-client",
     "crates/pm-stream",
@@ -48,6 +49,7 @@ pm-pubky = { path = "crates/pm-pubky" }
 pm-offline = { path = "crates/pm-offline" }
 pm-out-local = { path = "crates/pm-out-local" }
 pm-api = { path = "crates/pm-api" }
+pm-web = { path = "crates/pm-web" }
 pm-client = { path = "crates/pm-client" }
 pm-stream = { path = "crates/pm-stream" }
 pm-endpoint = { path = "crates/pm-endpoint" }
