@@ -140,6 +140,9 @@ fn read_dsf<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
     })
 }
 
+/// The longest ID3v2 tag that is read from a DSF file (as the reader that plays it allows).
+const MAX_ID3: u64 = 16 * 1024 * 1024;
+
 /// Read an ID3v2 tag starting at `off`: header + the synchsafe size.
 fn read_id3_at<R: Read + Seek>(path: &Path, r: &mut R, off: u64) -> Result<Option<Vec<u8>>> {
     let mut h = [0u8; 10];
@@ -154,6 +157,11 @@ fn read_id3_at<R: Read + Seek>(path: &Path, r: &mut R, off: u64) -> Result<Optio
         .fold(0u64, |acc, b| (acc << 7) | (*b as u64 & 0x7f));
     let footer = if h[5] & 0x10 != 0 { 10 } else { 0 };
     let total = 10 + size + footer;
+    // The length is the file's word (up to 256 MiB fits its four bytes): no memory is set aside
+    // for a tag longer than tags are; the file is read without it
+    if total > MAX_ID3 {
+        return Ok(None);
+    }
     let mut buf = vec![0u8; total as usize];
     read_exact_at(path, r, off, &mut buf)?;
     Ok(Some(buf))
@@ -479,5 +487,24 @@ mod tests {
             assert_eq!(h.sample_count, 1000 * 8 / 2, "{claimed}");
             assert_eq!(h.duration_ms(), Some(4000 * 1000 / 2_822_400), "{claimed}");
         }
+    }
+
+    /// How long a DSF file's tag is is the file's word: for one that says it is longer than
+    /// tags are, no memory is set aside, and the file is read without its tag.
+    #[test]
+    fn a_dsf_tag_of_an_impossible_length_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.dsf");
+        let data = vec![0x69u8; 4096 * 2];
+        // (a tag header that gives the longest length its four bytes hold, about 256 MiB)
+        let header = [b'I', b'D', b'3', 4, 0, 0, 0x7F, 0x7F, 0x7F, 0x7F];
+        std::fs::write(&p, synth::dsf(2_822_400, 2, 4096, &data, Some(&header))).unwrap();
+        let h = read_header(&p).unwrap();
+        assert!(h.id3.is_none());
+        assert_eq!(h.data_len, data.len() as u64);
+        // (a tag of a usual length is still read)
+        let tag = id3_bytes();
+        std::fs::write(&p, synth::dsf(2_822_400, 2, 4096, &data, Some(&tag))).unwrap();
+        assert_eq!(read_header(&p).unwrap().id3.as_deref(), Some(&tag[..]));
     }
 }
