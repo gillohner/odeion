@@ -38,7 +38,7 @@ const cases = [
         const { page, context, state } = await fx.create(browser, w, { fixtures: { '/favourites': { body: c.f }, '/discover/describe': { body: described } } });
         try {
           await fx.go(page, '/favourites');
-          await page.waitForFunction(() => /Favourites/.test((document.querySelector('#main .page-head h2') || {}).textContent || ''));
+          await page.waitForFunction(() => /Bookmarks/.test((document.querySelector('#main .page-head h2') || {}).textContent || ''));
           if (c.f.other.length) await page.waitForSelector('#favother .list-row');
           const got = await page.evaluate(() => {
             const n = document.querySelector('#main .page-head h2 .count');

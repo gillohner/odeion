@@ -116,14 +116,14 @@ async function expectRing(page, sel, what, shot) {
     // Playlists: a row of the list
     await fx.go(page, '/playlists');
     await page.waitForSelector('.main .list .list-row.clickable');
-    await expectRing(page, '.main .list .list-row.clickable', `${w} Playlists, first row`, `playlists-${w}`);
+    await expectRing(page, '.main .list .list-row.clickable', `${w} Collections, first row`, `playlists-${w}`);
     // Add to playlist (a scrolling picker): New playlist, then a playlist
     await fx.go(page, '/tracks');
     await page.click('#tracklist .track:first-child [data-act="more"]', { force: true });
-    await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Add to playlist…' }).click();
+    await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Add to collection…' }).click();
     await page.waitForSelector('dialog #pplist [data-ppi="1"]');
-    await expectRing(page, 'dialog #pplist [data-ppnew]', `${w} Add to playlist, New playlist`, `picker-new-${w}`);
-    await expectRing(page, 'dialog #pplist [data-ppi="1"]', `${w} Add to playlist, a playlist`, `picker-row-${w}`);
+    await expectRing(page, 'dialog #pplist [data-ppnew]', `${w} Add to collection, New collection`, `picker-new-${w}`);
+    await expectRing(page, 'dialog #pplist [data-ppi="1"]', `${w} Add to collection, a collection`, `picker-row-${w}`);
     check(state.errors.length === 0, `${w} no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
     await context.close();
   }

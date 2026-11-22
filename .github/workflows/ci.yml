@@ -795,6 +795,7 @@ jobs:
           ui-queue-head-phone.js queue-head-phone-shots
           ui-phone-select-redraw.js phone-select-redraw-shots
           ui-page-title.js page-title-shots
+          ui-wording.js wording-shots
           ui-row-focus-redraw.js row-focus-redraw-shots
           ui-phone-row-numbers.js phone-row-numbers-shots
           ui-pubky-hang.js pubky-hang-shots

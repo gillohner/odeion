@@ -181,7 +181,7 @@ async function connectLinks(browser, width) {
   try {
     for (const [from, box, label, want, where] of [
       ['/album/mb-nowhere', '#isongs', 'Connect TIDAL', '/sources/tidal', `album page Connect ${width}`],
-      ['/favourites', '#favother', 'Connect TIDAL', '/sources/tidal', `Favourites row Connect ${width}`],
+      ['/favourites', '#favother', 'Connect TIDAL', '/sources/tidal', `Bookmarks row Connect ${width}`],
       ['/album/mb-either', '#isongs', 'Connect TIDAL or Spotify', '/sources', `album page Connect two ${width}`],
     ]) {
       const sel = `${box} a[href="${want}"]`;

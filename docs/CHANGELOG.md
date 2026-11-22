@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **Favourites are called Bookmarks and playlists are called Collections, everywhere in the app.** The side menu, the library's chips, page titles, every ⋯ menu ("Add to collection…", "Add to Bookmarks"), the pickers, empty pages, Settings and the messages all use the two words now; "Smart playlists" are "Smart collections". Nothing of yours changes: the same songs, the same lists, the same addresses. What another product calls its own keeps its name: your playlists on TIDAL or Spotify, an M3U playlist file, Roon's favourites.
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21
