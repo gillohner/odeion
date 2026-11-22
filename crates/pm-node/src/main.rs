@@ -199,19 +199,14 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     // First, so a port in use stops the start at once and says why (another node running)
     let listener = pm_api::bind(&cfg.api.listen).await?;
     // The data folder is this node's while it runs: `odeiond restore` looks for this hold, and
-    // holds it itself while it replaces the database. Someone else has it: a restore that is
-    // about to finish, or the node this one replaces, still on its way out; a few seconds are
-    // given for that before the database is opened. A second node on the same folder (another
-    // port) is not refused, it is told; and whoever starts without the hold keeps asking for it,
-    // so that a restore is refused as soon as this node is the only one left.
-    let mut data_dir_hold = library::lock_data_dir(&cfg.data_dir);
-    for _ in 0..20 {
-        if !matches!(data_dir_hold, Ok(None)) {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        data_dir_hold = library::lock_data_dir(&cfg.data_dir);
-    }
+    // holds it itself while it replaces the database. Someone else has it: a restore, which is
+    // waited out (a node that opened the database meanwhile would have it moved away under
+    // it), or the node this one replaces, still on its way out, which gets a few seconds; all
+    // before the database is opened. A second node on the same folder (another port) is not
+    // refused, it is told; and whoever starts without the hold keeps asking for it, so that a
+    // restore is refused as soon as this node is the only one left.
+    let data_dir_hold =
+        library::wait_for_data_dir(&cfg.data_dir, library::HOLD_PATIENCE, library::RESTORE_PATIENCE).await;
     let _data_dir_hold = match data_dir_hold {
         Ok(Some(hold)) => Some(hold),
         Ok(None) => {

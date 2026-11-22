@@ -41,6 +41,62 @@ pub fn lock_data_dir(data_dir: &Path) -> std::io::Result<Option<DataDirLock>> {
     }
 }
 
+/// While `restore` works it holds the data folder and leaves this mark in it (`node.restoring`),
+/// so that a node started meanwhile can tell a restore, which it waits out, from another node.
+struct Restoring(PathBuf);
+
+impl Restoring {
+    fn path(data_dir: &Path) -> PathBuf {
+        data_dir.join("node.restoring")
+    }
+
+    fn begin(data_dir: &Path) -> Self {
+        let path = Self::path(data_dir);
+        let _ = std::fs::write(&path, b"");
+        Self(path)
+    }
+}
+
+impl Drop for Restoring {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// How long a starting node waits for the data folder when someone else holds it: the node it
+/// replaces, still on its way out.
+pub const HOLD_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+/// The same while a restore is at work (its mark `node.restoring` is there): it may take
+/// minutes on a large library, and a node that opened the database in that time would have it
+/// moved away under it.
+pub const RESTORE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Take the hold on the data folder for a starting node ([`lock_data_dir`]), waiting for
+/// whoever has it: `patience` for another node, `restore_patience` while a restore's mark is
+/// there. `Ok(None)` when that time is over and someone still holds it.
+pub async fn wait_for_data_dir(
+    data_dir: &Path,
+    patience: std::time::Duration,
+    restore_patience: std::time::Duration,
+) -> std::io::Result<Option<DataDirLock>> {
+    let started = std::time::Instant::now();
+    let mut said = false;
+    loop {
+        if let Some(hold) = lock_data_dir(data_dir)? {
+            return Ok(Some(hold));
+        }
+        let restoring = Restoring::path(data_dir).exists();
+        if started.elapsed() >= if restoring { restore_patience } else { patience } {
+            return Ok(None);
+        }
+        if restoring && !said {
+            tracing::info!(data_dir = %data_dir.display(), "a restore is replacing the library: waiting for it");
+            said = true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// The work folders `backup` makes in the data folder: `backup-work-<pid>`.
 const WORK_PREFIX: &str = "backup-work-";
 
@@ -182,6 +238,9 @@ fn write_staged(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// `library.db.bak`, without its WAL files), and nothing it stores would be in the restored one.
 pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
+    // The mark first and the hold second, so that the hold is let go first at the end: a node
+    // that waits sees the mark for as long as the hold is taken (also when the restore fails)
+    let _restoring = Restoring::begin(&cfg.data_dir);
     let _hold = match lock_data_dir(&cfg.data_dir) {
         Ok(Some(hold)) => Some(hold),
         Ok(None) => anyhow::bail!(
@@ -874,5 +933,56 @@ mod tests {
         );
         // The restore let go of it again
         assert!(lock_data_dir(&cfg.data_dir).unwrap().is_some());
+    }
+
+    /// A starting node waits for the data folder: a short time for another node that holds it,
+    /// as long as it takes while a restore is at work, and it gets the hold when that one is
+    /// done. The restore's mark is gone when the restore is over, however it ended.
+    #[tokio::test]
+    async fn a_starting_node_waits_for_a_restore_and_not_for_another_node() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let (short, long) = (Duration::from_millis(300), Duration::from_secs(30));
+        // Nobody holds it: at once
+        drop(
+            wait_for_data_dir(&data, short, long)
+                .await
+                .unwrap()
+                .expect("free"),
+        );
+        // Another node holds it: the short time, then none
+        let other = lock_data_dir(&data).unwrap().unwrap();
+        let asked = Instant::now();
+        assert!(wait_for_data_dir(&data, short, long).await.unwrap().is_none());
+        assert!(asked.elapsed() >= short && asked.elapsed() < Duration::from_secs(10));
+        // A restore holds it and is at work past the short time: waited out, then the hold
+        let mark = Restoring::begin(&data);
+        let asked = Instant::now();
+        let at_work = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            // (as `restore` ends: the hold first, then the mark)
+            drop(other);
+            drop(mark);
+        });
+        let hold = wait_for_data_dir(&data, short, long).await.unwrap();
+        assert!(hold.is_some(), "the hold, once the restore is done");
+        assert!(
+            asked.elapsed() >= Duration::from_millis(800),
+            "{:?}",
+            asked.elapsed()
+        );
+        at_work.await.unwrap();
+        assert!(!Restoring::path(&data).exists());
+        drop(hold);
+
+        // `restore` itself leaves no mark behind, done or failed
+        let cfg = NodeConfig {
+            data_dir: data.clone(),
+            ..Default::default()
+        };
+        assert!(restore(&cfg, &dir.path().join("no-such-backup")).is_err());
+        assert!(!Restoring::path(&data).exists());
+        assert!(lock_data_dir(&data).unwrap().is_some());
     }
 }
