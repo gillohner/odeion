@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **Bringing files from the homeserver no longer puts two files under one name.** Files there are stored by content, so two songs can share an original file name (a `01 Intro.flac` in two albums). A bring gave both that name in the folder: the second took the place of the first and the job counted both as done (the next bring fetched the missing one again). Now each file gets a name of its own: the original name, or the homeserver's name (which starts with the file's hash) when the original is taken by another file in the folder or by another file of the same bring, also when the names differ only in upper and lower case. A finished download is put in place only when no file has its name: a file that got there in the meantime stays, and the job reports that one as failed.
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21

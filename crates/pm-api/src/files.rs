@@ -486,6 +486,8 @@ async fn plan_bring(
         .files_of_sizes(&sizes)
         .map_err(|e| e.to_string())?;
     let mut have: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The local names this plan gives out
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (path, size, mtime) in candidates {
         let cached = s
             .library
@@ -527,21 +529,77 @@ async fn plan_bring(
             plan.present_bytes += size;
             continue;
         }
-        // Already brought (maybe not scanned yet): the same name and size in the folder
-        let mut local = original.clone();
-        match tokio::fs::metadata(plan.dest.join(&local)).await {
-            Ok(m) if m.len() == size => {
+        match local_name(&plan.dest, &original, &full, size, &mut taken).await {
+            Some(local) => plan.fetch.push((path, size, local)),
+            // Already brought (maybe not scanned yet)
+            None => {
                 plan.present += 1;
                 plan.present_bytes += size;
-                continue;
             }
-            // Another file under that name: keep the homeserver's full name instead
-            Ok(_) => local = full,
-            Err(_) => {}
         }
-        plan.fetch.push((path, size, local));
     }
     Ok(plan)
+}
+
+/// The name a file from the homeserver gets in `dest`, or `None` when the folder has it already
+/// (the same name and size). It is the file's `original` name, or the homeserver's `full` name
+/// (which starts with its hash) when the original name is another file's: one in the folder,
+/// or one this plan already brings (two albums each have a `01 Intro.flac`); when that one is
+/// another file's too, the full name with a number in front. `taken` holds the names the plan
+/// uses so far, in lower case: on a folder that ignores case, names that differ only in case
+/// are one file. No name is given to two files, and none that the folder has for another file.
+async fn local_name(
+    dest: &Path,
+    original: &str,
+    full: &str,
+    size: u64,
+    taken: &mut std::collections::HashSet<String>,
+) -> Option<String> {
+    let mut n = 0u32;
+    loop {
+        let name = match n {
+            0 => original.to_string(),
+            1 => full.to_string(),
+            n => format!("{n}-{full}"),
+        };
+        n += 1;
+        if taken.contains(&name.to_lowercase()) {
+            continue;
+        }
+        let at = dest.join(&name);
+        // (a link that leads nowhere has the name too)
+        if tokio::fs::symlink_metadata(&at).await.is_err() {
+            taken.insert(name.to_lowercase());
+            return Some(name);
+        }
+        if matches!(tokio::fs::metadata(&at).await, Ok(m) if m.is_file() && m.len() == size) {
+            return None;
+        }
+        // Another file under that name: the next one
+    }
+}
+
+/// Give a finished download (`part`) its name (`target`) without replacing a file that got that
+/// name since the plan was made: such a file stays, the download is dropped and the error says
+/// so (the next bring gives it another name).
+async fn place_new(part: &Path, target: &Path) -> std::io::Result<()> {
+    use std::io::ErrorKind::AlreadyExists;
+    let there = || {
+        std::io::Error::new(
+            AlreadyExists,
+            "a file of that name is there now; it was not replaced",
+        )
+    };
+    // A link is made only when the name is free, in one step
+    let placed = match tokio::fs::hard_link(part, target).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == AlreadyExists => Err(there()),
+        // A folder that has no links (FAT, some shares): look first, then rename
+        Err(_) if tokio::fs::symlink_metadata(target).await.is_ok() => Err(there()),
+        Err(_) => return tokio::fs::rename(part, target).await,
+    };
+    let _ = tokio::fs::remove_file(part).await;
+    placed
 }
 
 /// `POST /v1/pubky/files/mirror {dest?, dry_run?}`: bring the homeserver's files this node does
@@ -629,7 +687,7 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
                 .await;
             match r {
                 Ok(n) if n == size || size == 0 => {
-                    if let Err(e) = tokio::fs::rename(&part, &target).await {
+                    if let Err(e) = place_new(&part, &target).await {
                         let msg = format!("{local}: {e}");
                         set(&|j| {
                             j.failed += 1;
@@ -860,5 +918,81 @@ mod tests {
         let paths: Vec<&str> = wanted.iter().map(|(p, _, _)| p.as_str()).collect();
         assert_eq!(paths, ["/priv/pubky.music/files/0123456789abcdef-a.flac"]);
         assert_eq!((broken, unchecked), (1, 2));
+    }
+
+    /// Files from the homeserver that share an original name (a `01 Intro.flac` in two albums)
+    /// each get a name of their own in the folder, also when the names differ only in case; a
+    /// file that is in the folder under the name is never planned over, and one of the same
+    /// name and size counts as brought.
+    #[tokio::test]
+    async fn files_of_the_same_name_are_brought_under_names_of_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let mut taken = std::collections::HashSet::new();
+        let a = local_name(
+            d,
+            "01 Intro.flac",
+            "aaaaaaaaaaaaaaaa-01_Intro.flac",
+            10,
+            &mut taken,
+        )
+        .await;
+        let b = local_name(
+            d,
+            "01 Intro.flac",
+            "bbbbbbbbbbbbbbbb-01_Intro.flac",
+            20,
+            &mut taken,
+        )
+        .await;
+        let c = local_name(
+            d,
+            "01 INTRO.flac",
+            "cccccccccccccccc-01_INTRO.flac",
+            30,
+            &mut taken,
+        )
+        .await;
+        assert_eq!(a.as_deref(), Some("01 Intro.flac"));
+        assert_eq!(b.as_deref(), Some("bbbbbbbbbbbbbbbb-01_Intro.flac"));
+        assert_eq!(c.as_deref(), Some("cccccccccccccccc-01_INTRO.flac"));
+        // In the folder: another file under the original name, and this file under the full one
+        std::fs::write(d.join("Song.flac"), [0u8; 7]).unwrap();
+        std::fs::write(d.join("dddddddddddddddd-Song.flac"), [0u8; 9]).unwrap();
+        let mut taken = std::collections::HashSet::new();
+        assert_eq!(
+            local_name(d, "Song.flac", "dddddddddddddddd-Song.flac", 9, &mut taken).await,
+            None
+        );
+        assert_eq!(
+            local_name(d, "Song.flac", "eeeeeeeeeeeeeeee-Song.flac", 7, &mut taken).await,
+            None
+        );
+        // Both names are other files': a third name, and none of the three is given out twice
+        let f = local_name(d, "Song.flac", "dddddddddddddddd-Song.flac", 5, &mut taken).await;
+        let g = local_name(d, "Song.flac", "dddddddddddddddd-Song.flac", 6, &mut taken).await;
+        assert_eq!(f.as_deref(), Some("2-dddddddddddddddd-Song.flac"));
+        assert_eq!(g.as_deref(), Some("3-dddddddddddddddd-Song.flac"));
+        // A folder under the name is no copy of the file
+        std::fs::create_dir(d.join("Live.flac")).unwrap();
+        let h = local_name(d, "Live.flac", "ffffffffffffffff-Live.flac", 4096, &mut taken).await;
+        assert_eq!(h.as_deref(), Some("ffffffffffffffff-Live.flac"));
+    }
+
+    /// A finished download gets its name only when no file has it: a file that came to be
+    /// there since the plan stays as it is, and the download is dropped.
+    #[tokio::test]
+    async fn a_finished_download_does_not_replace_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (part, target) = (dir.path().join(".Song.flac.part"), dir.path().join("Song.flac"));
+        std::fs::write(&part, b"from the homeserver").unwrap();
+        place_new(&part, &target).await.unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"from the homeserver");
+        assert!(!part.exists());
+        std::fs::write(&part, b"another file of that name").unwrap();
+        let e = place_new(&part, &target).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&target).unwrap(), b"from the homeserver");
+        assert!(!part.exists(), "the download is dropped");
     }
 }
