@@ -6,7 +6,8 @@
 // stale); an unchanged answer leaves the results as drawn; a search that ended in an error is asked
 // for its library answer only (its error goes when that answer was the one missing or every source
 // had answered), unless it failed before the node named any source (a full search); a song removed
-// during that ask is not listed again by an answer read before the removal.
+// during that ask is not listed again by an answer read before the removal, unless Bring back (Your
+// library › Node library) put it back before that answer landed.
 // Real UI in Chromium, isolated responses (no node or external services).
 //   node tools/ui-search-library-change.js [repo] [screenshot directory]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -16,6 +17,7 @@ const path = require('node:path');
 const fx = require('./ui-fixture');
 const shots = path.resolve(process.argv[3] || '/tmp/search-library-change-shots');
 fs.mkdirSync(shots, { recursive: true });
+const SONG2 = 'Journey Home';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(page, predicate, label, arg) {
   const end = Date.now() + 7000;
@@ -33,11 +35,12 @@ async function setup(browser, width, opts = {}) {
   // The playlist's count as the node would say it now (bumped by a write or by the test);
   // sources: the sources the node names (one that never answers ends the search in an error)
   // (songGone: the song is out of the library, read when the ask comes in, before any hold)
-  const lib = { count: 2, asked: [], hold: null, sources: 'library', noLibrary: 0, breakAfter: 0, offline: 0, songGone: false };
+  // (song2: a second song of yours listed too, until song2Gone)
+  const lib = { count: 2, asked: [], hold: null, sources: 'library', noLibrary: 0, breakAfter: 0, offline: 0, songGone: false, song2: false, song2Gone: false };
   await context.route(/\/v1\/search\?/, async (route) => {
     const url = new URL(route.request().url());
     lib.asked.push({ q: url.searchParams.get('q'), scope: url.searchParams.get('in') });
-    const n = lib.count; const withSong = !lib.songGone;
+    const n = lib.count; const withSong = !lib.songGone; const withSong2 = lib.song2 && !lib.song2Gone;
     if (lib.hold) await lib.hold;
     // (offline: that many asks never reach the node, before it names any source)
     if (lib.offline > 0) { lib.offline -= 1; return route.abort('internetdisconnected').catch(() => {}); }
@@ -45,10 +48,11 @@ async function setup(browser, width, opts = {}) {
     if (lib.noLibrary > 0) { lib.noLibrary -= 1; return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': lib.sources }, body: '' }).catch(() => {}); }
     const hit = { kind: 'playlist', id: 'c1', title: 'Road songs', subtitle: `${n} songs · your playlist`, uri: 'playlist:c1', keys: ['playlist:c1'] };
     const song = { kind: 'song', id: 'lib-1', title: fx.track.title, subtitle: 'Sefa, Dr. Peacock', track_id: 1, uri: 'track:1', keys: ['track:1'] };
+    const song2 = { kind: 'song', id: 'lib-2', title: SONG2, subtitle: 'Sefa, Dr. Peacock', track_id: 2, uri: 'track:2', keys: ['track:2'] };
     // (breakAfter: that many asks' streams break after every source answered: a cut-off line)
     let broken = ''; if (lib.breakAfter > 0) { lib.breakAfter -= 1; broken = '{"source":"lib'; }
     // (.catch: an ask the app gave up on is gone by then)
-    return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': lib.sources }, body: JSON.stringify({ source: 'library', status: 'ok', hits: withSong ? [hit, song] : [hit], counts: [] }) + '\n' + broken }).catch(() => {});
+    return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': lib.sources }, body: JSON.stringify({ source: 'library', status: 'ok', hits: [hit, ...(withSong ? [song] : []), ...(withSong2 ? [song2] : [])], counts: [] }) + '\n' + broken }).catch(() => {});
   });
   let socket = null;
   await context.routeWebSocket(/\/v1\/events/, (ws) => {
@@ -354,18 +358,21 @@ async function offlineFirst(browser, width) {
 
 // A song removed from its row while the search's library answer is asked again (read before the
 // removal): that answer, landing after it, doesn't list the song again
-const songListed = (page) => page.evaluate((t) => [...document.querySelectorAll('#sresults .srow')].some((r) => r.innerText.includes(t)), fx.track.title);
+const songListed = (page, title = fx.track.title) => page.evaluate((t) => [...document.querySelectorAll('#sresults .srow')].some((r) => r.innerText.includes(t)), title);
+async function removeSong(page, lib, title = fx.track.title) {
+  const row = page.locator('#sresults .srow', { hasText: title }).first();
+  await row.locator('[data-smore]').click({ force: true });
+  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from library' }).click();
+  await page.locator('dialog[open] button', { hasText: /^Remove$/ }).click();
+  await until(page, () => /Removed from the library/.test(document.body.innerText), 'removed');
+  if (title === fx.track.title) lib.songGone = true; else lib.song2Gone = true;
+}
 async function removedWhileAsked(browser, width) {
   const { page, context, state, lib, changed } = await setup(browser, width);
   try {
     const held = await backWhileHeld(page, lib, changed, 4); // (that ask still has the song)
     assert.ok(await songListed(page), 'the song is listed');
-    const row = page.locator('#sresults .srow', { hasText: fx.track.title }).first();
-    await row.locator('[data-smore]').click({ force: true });
-    await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from library' }).click();
-    await page.locator('dialog[open] button', { hasText: /^Remove$/ }).click();
-    await until(page, () => /Removed from the library/.test(document.body.innerText), 'removed');
-    lib.songGone = true;
+    await removeSong(page, lib);
     await until(page, (t) => ![...document.querySelectorAll('#sresults .srow')].some((r) => r.innerText.includes(t)), 'the song leaves the results', fx.track.title);
     // The answer read before the removal lands; the one asked after it (the library changed during
     // the ask) is held, so only the older answer is drawn meanwhile
@@ -379,6 +386,61 @@ async function removedWhileAsked(browser, width) {
     release2(); lib.hold = null;
     await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone');
     assert.ok(!(await songListed(page)), 'nor the one after it');
+    assert.deepEqual(state.errors, []);
+  } finally { await context.close(); }
+}
+
+// The same, but the song is brought back (Your library › Node library › Bring back: the same song,
+// the same id) before that answer lands: the answer is not cut, so Back on the search lists the song
+// at once, while the next ask is still on its way (before, it stayed out until that ask was in).
+// Another song removed then and not brought back stays out (Bring back names a file: only that
+// file's song is back)
+const FILES = { 1: '/music/Sefa/Journey/01 Journey Through Time.flac', 2: '/music/Sefa/Journey/02 Journey Home.flac' };
+async function broughtBack(browser, width) {
+  const { page, context, state, lib, changed } = await setup(browser, width);
+  lib.song2 = true;
+  const restored = []; const hiddenFiles = new Set();
+  // A song's file as the node says it (none once it is out: its file is hidden, so 404), and Node
+  // library's list of files taken out
+  await context.route(/\/v1\/library\/tracks\/\d+$/, (route) => {
+    const id = Number(route.request().url().split('/').pop()); const f = FILES[id];
+    if (route.request().method() === 'DELETE') { hiddenFiles.add(f); return route.fulfill({ status: 204, body: '' }); }
+    if (hiddenFiles.has(f)) return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: `no track ${id}` }) });
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ...fx.track, id, file: { ...fx.track.file, path: f } }) });
+  });
+  await context.route(/\/v1\/library\/hidden$/, (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify([...hiddenFiles].reverse().map((p) => ({ path: p, hidden_at: Math.floor(Date.now() / 1000) - 5 }))) }));
+  await context.route(/\/v1\/library\/hidden\/restore$/, (route) => { const p = JSON.parse(route.request().postData()).path; restored.push(p); hiddenFiles.delete(p); if (p === FILES[1]) lib.songGone = false; return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ restored: true, scan_started: false, scan_queued: false }) }); });
+  try {
+    const held = await backWhileHeld(page, lib, changed, 4); // (that ask still has both songs)
+    assert.ok(await songListed(page) && await songListed(page, SONG2), 'both songs are listed');
+    await removeSong(page, lib);
+    await until(page, (t) => ![...document.querySelectorAll('#sresults .srow')].some((r) => r.innerText.includes(t)), 'the song leaves the results', fx.track.title);
+    await removeSong(page, lib, SONG2);
+    await until(page, (t) => ![...document.querySelectorAll('#sresults .srow')].some((r) => r.innerText.includes(t)), 'the other song leaves the results', SONG2);
+    await nav(page, 'library');
+    await until(page, () => !!document.querySelector('[data-libtab="node"]'), 'Your library');
+    await page.locator('[data-libtab="node"]').click();
+    await until(page, () => document.querySelectorAll('[data-unhide]').length === 2, 'both files listed as taken out');
+    await page.locator('.set-row', { hasText: '01 Journey Through Time.flac' }).locator('[data-unhide]').click();
+    await until(page, () => /reading it again|next scan/.test(document.body.innerText), 'brought back');
+    assert.deepEqual(restored, [FILES[1]], 'the first song\'s file was brought back on the node');
+    // The answer read before the removal lands while Your library is open (no new ask: the search
+    // isn't on screen); the ask Back starts is held
+    held.release();
+    await sleep(300);
+    const asked = lib.asked.length;
+    let release2; lib.hold = new Promise((r) => { release2 = r; });
+    for (let k = 0; k < 4 && !(await page.evaluate(() => history.state && history.state.v === 'search')); k += 1) await page.goBack();
+    await until(page, () => history.state && history.state.v === 'search' && !!document.querySelector('#sresults'), 'back on the search');
+    for (const end = Date.now() + 7000; lib.asked.length <= asked; await sleep(50)) if (Date.now() > end) throw new Error('Timed out: asked again after Back');
+    await countShown(page, 4);
+    await sleep(200);
+    await page.screenshot({ path: path.join(shots, `brought-back-${width}.png`) });
+    assert.ok(await songListed(page), `${width}: brought back before the answer landed, the song is listed again at once (${(await shown(page)).replace(/\s+/g, ' ')})`);
+    assert.ok(!(await songListed(page, SONG2)), `${width}: the other removed song, not brought back, stays out (${(await shown(page)).replace(/\s+/g, ' ')})`);
+    release2(); lib.hold = null;
+    await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone');
+    assert.ok(await songListed(page) && !(await songListed(page, SONG2)), `${width}: and after the next answer`);
     assert.deepEqual(state.errors, []);
   } finally { await context.close(); }
 }
@@ -398,8 +460,9 @@ async function removedWhileAsked(browser, width) {
       await erroredAfterAll(browser, width);
       await offlineFirst(browser, width);
       await removedWhileAsked(browser, width);
+      await broughtBack(browser, width);
       if (width === 360) await hung(browser, width);
-      console.log(`ok ${width}px: a playlist write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing, or when the stream broke after every answer); an offline one starts afresh; a song removed during the ask stays out`);
+      console.log(`ok ${width}px: a playlist write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing, or when the stream broke after every answer); an offline one starts afresh; a song removed during the ask stays out, unless brought back meanwhile`);
     }
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });
