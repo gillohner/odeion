@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **A history delete from a node whose clock runs ahead no longer makes the other nodes delete what they play afterwards.** When the listening history was deleted on a node whose clock ran ahead, the other nodes of the account took the delete with that time and went on deleting every new listen until it had passed. A delete dated ahead of the clock now counts as made when it arrives, once, and a node that already holds such a time sets it right at its next sync. Still open: while a node's own clock runs ahead, that node goes on removing from the homeserver the listens the others write, until its clock is right; the others keep their own copies.
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21
