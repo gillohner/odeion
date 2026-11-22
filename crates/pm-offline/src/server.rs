@@ -401,20 +401,22 @@ async fn unheart(State(s): State<Arc<Store>>, Query(h): Query<Heart>) -> Respons
 }
 
 /// The cached web UI: its files by name, every other path (the UI's own routes) the page. Only
-/// the known names are served; nothing from the path is joined to a folder.
+/// the known names are served; nothing from the path is joined to a folder. One of the UI's own
+/// files that is not kept yet (the last sync was with an older node or app) is a 404, not the
+/// page: a page sent as a script is an error in the page, a missing script is one it expects.
 async fn ui(State(s): State<Arc<Store>>, uri: Uri) -> Response {
     let asked = uri.path().trim_start_matches('/');
-    let name = crate::sync::UI_FILES
+    let known = crate::sync::UI_FILES
         .iter()
         .map(|(_, f)| *f)
-        .find(|f| *f == asked)
-        .unwrap_or("index.html");
+        .find(|f| *f == asked);
     let dir = s.ui_dir();
-    let file = dir.join(if dir.join(name).is_file() {
-        name
-    } else {
-        "index.html"
-    });
+    if let Some(name) = known.filter(|name| *name != "index.html") {
+        if !dir.join(name).is_file() {
+            return err(StatusCode::NOT_FOUND, "not on this device");
+        }
+    }
+    let file = dir.join(known.unwrap_or("index.html"));
     if !file.is_file() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
