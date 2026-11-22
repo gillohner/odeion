@@ -14,6 +14,7 @@
 
 use crate::playlists::{now_micros, store};
 use crate::types::SyncReport;
+use pm_library::posts::PostStamp;
 use pm_library::Library;
 use pm_pubky::homeserver::{HomeserverError, ListBounds, NodeHomeserver};
 use pm_pubky::schemas::post::{TYPE_ACTIVITY, TYPE_PLAYLIST, TYPE_REVIEW};
@@ -545,7 +546,9 @@ impl PubkySync {
                 }
                 report.pushed += 1;
             }
-            self.lib(library)?.mark_tag_synced(&row.id, now_micros())?;
+            // (as it was pushed: a tag removed or added again meanwhile stays to be pushed)
+            self.lib(library)?
+                .mark_tag_pushed(&row.id, row.deleted, now_micros())?;
         }
         let (known_tags, not_music) = {
             let lib = self.lib(library)?;
@@ -734,9 +737,10 @@ impl PubkySync {
                 MusicContent::Playlist(p) => p.updated_at,
                 other => other.created_micros(),
             };
-            let take = match lib.get_music_post(&id)? {
+            // (a tombstone is a row too: a post deleted here is not brought back by an older copy)
+            let take = match lib.music_post_stamp(&id)? {
                 None => true,
-                Some(row) => remote_updated > row.updated_at,
+                Some((updated_at, _, _)) => remote_updated > updated_at,
             };
             if take {
                 store(&lib, &post, &id, Visibility::Private).map_err(|e| SyncError::Store(e.message))?;
@@ -925,7 +929,9 @@ impl PubkySync {
                 }
                 report.pushed += 1;
             }
-            self.lib(library)?.mark_bookmark_synced(&row.id, now_micros())?;
+            // (as it was pushed: a bookmark removed or added again meanwhile stays to be pushed)
+            self.lib(library)?
+                .mark_bookmark_pushed(&row.id, row.deleted, now_micros())?;
         }
         Ok(removed)
     }
@@ -971,16 +977,13 @@ impl PubkySync {
                 found.retain(|id, _| heads.has_in(v1::Root::Priv, ns, id));
             }
             // What is new or newer than the node's copy, then fetched 8 at a time
-            let wanted: Vec<(String, v1::Head, bool)> = {
+            let wanted: Vec<(String, v1::Head, bool, Option<PostStamp>)> = {
                 let lib = self.lib(library)?;
                 let mut w = Vec::new();
                 for (id, (head, public)) in found {
-                    let take = match lib.get_music_post(&id)? {
-                        None => true,
-                        Some(row) => head.edited_micros() > row.updated_at.max(row.synced_at.unwrap_or(0)),
-                    };
-                    if take {
-                        w.push((id, head, public));
+                    let mine = lib.music_post_stamp(&id)?;
+                    if pull_takes(head.edited_micros(), mine) {
+                        w.push((id, head, public, mine));
                     }
                 }
                 w
@@ -994,7 +997,7 @@ impl PubkySync {
             use futures_util::StreamExt;
             let this = self;
             let fetched: Vec<Fetched> = futures_util::stream::iter(wanted)
-                .map(move |(id, head, public)| async move {
+                .map(move |(id, head, public, mine)| async move {
                     let r = if public {
                         this.homeserver
                             .get_bytes(&this.z32, &head.path, Visibility::Public, None)
@@ -1004,12 +1007,12 @@ impl PubkySync {
                             .get_bytes(&this.z32, &head.path, Visibility::Private, Some(&this.session))
                             .await
                     };
-                    (id, head, public, r)
+                    (id, head, public, mine, r)
                 })
                 .buffered(pm_pubky::homeserver::FETCH_AT_ONCE)
                 .collect()
                 .await;
-            for (id, head, public, bytes) in fetched {
+            for (id, head, public, mine, bytes) in fetched {
                 self.current()?;
                 let bytes = match bytes {
                     Ok(b) => b,
@@ -1054,6 +1057,11 @@ impl PubkySync {
                     Visibility::Private
                 };
                 let lib = self.lib(library)?;
+                // Chosen against the node's row as it was before the fetch: one edited or
+                // deleted since stays as it is (it is newer, and goes out with the next push)
+                if lib.music_post_stamp(&id)? != mine {
+                    continue;
+                }
                 store(&lib, &post, &id, visibility).map_err(|e| SyncError::Store(e.message))?;
                 lib.mark_music_post_synced(&id, now_micros())?;
                 report.pulled += 1;
@@ -1168,8 +1176,27 @@ impl PubkySync {
     }
 }
 
-/// One post the pull fetched: its id, head, whether it is public, and its bytes.
-type Fetched = (String, v1::Head, bool, Result<Vec<u8>, HomeserverError>);
+/// One post the pull fetched: its id, head, whether it is public, the node's row as it was when
+/// the post was chosen ([`pull_takes`]), and its bytes.
+type Fetched = (
+    String,
+    v1::Head,
+    bool,
+    Option<PostStamp>,
+    Result<Vec<u8>, HomeserverError>,
+);
+
+/// Whether a pull takes the homeserver's version of a post, edited at `remote_edited`, over the
+/// node's row `mine` (none: the node does not have the post). It does when that version is
+/// newer than the row's last edit and its last push. A delete that waits to be pushed is an
+/// edit like any other: the copy the homeserver still has does not bring the post back, a
+/// version written after the delete does.
+fn pull_takes(remote_edited: i64, mine: Option<PostStamp>) -> bool {
+    match mine {
+        None => true,
+        Some((updated_at, synced_at, _)) => remote_edited > updated_at.max(synced_at.unwrap_or(0)),
+    }
+}
 
 /// The newest version of every v1 post, per root (public or not) and namespace.
 #[derive(Default)]
@@ -1693,5 +1720,30 @@ mod tests {
             serde_json::json!({"name": "n", "api_url": "u", "token": fake, "version": "0", "updated_at": 1});
         let read: pm_pubky::homeserver::NodeRecord = serde_json::from_value(written).unwrap();
         assert_eq!(read.token, fake);
+    }
+
+    /// What the pull takes from the homeserver: a post the node has not, and a version newer
+    /// than the node's row; never the copy of a post that was edited or deleted here since.
+    #[test]
+    fn a_pull_does_not_take_what_is_older_than_the_nodes_row() {
+        assert!(pull_takes(10, None));
+        // (edit time, last push, tombstone)
+        assert!(
+            pull_takes(40, Some((10, Some(30), false))),
+            "written elsewhere since the push"
+        );
+        assert!(
+            !pull_takes(30, Some((10, Some(30), false))),
+            "the version this node pushed"
+        );
+        assert!(!pull_takes(30, Some((40, Some(30), false))), "edited here since");
+        assert!(!pull_takes(30, Some((40, None, false))));
+        // Deleted here at 50 and not pushed yet: the homeserver's copy does not bring it back
+        assert!(!pull_takes(30, Some((50, Some(30), true))));
+        assert!(!pull_takes(30, Some((50, None, true))));
+        assert!(
+            pull_takes(60, Some((50, Some(30), true))),
+            "written elsewhere after the delete"
+        );
     }
 }

@@ -1557,6 +1557,23 @@ impl Library {
         .map_err(Into::into)
     }
 
+    /// Record a successful push of a bookmark as it was read for the push (`removal`: its
+    /// tombstone, pushed as a delete), only if it is still that. One removed while its write was
+    /// on the way stays a tombstone to push; one added again while its delete was on the way
+    /// stays to be written. `true` when recorded (a pushed tombstone is purged).
+    pub fn mark_bookmark_pushed(&self, id: &str, removal: bool, at_micros: i64) -> Result<bool> {
+        let conn = self.lock();
+        let n = if removal {
+            conn.execute("DELETE FROM bookmarks WHERE id = ?1 AND deleted = 1", params![id])?
+        } else {
+            conn.execute(
+                "UPDATE bookmarks SET synced_at = ?2 WHERE id = ?1 AND deleted = 0",
+                params![id, at_micros],
+            )?
+        };
+        Ok(n > 0)
+    }
+
     /// Live bookmarks, newest first.
     pub fn list_bookmarks(&self) -> Result<Vec<BookmarkRow>> {
         let conn = self.lock();
@@ -2176,6 +2193,22 @@ impl Library {
             params![id, at_micros],
         )?;
         Ok(())
+    }
+
+    /// Record a successful push of a tag as it was read for the push (`removal`: its tombstone,
+    /// pushed as a delete), only if it is still that ([`Self::mark_bookmark_pushed`]). `true`
+    /// when recorded (a pushed tombstone is purged).
+    pub fn mark_tag_pushed(&self, id: &str, removal: bool, at_micros: i64) -> Result<bool> {
+        let conn = self.lock();
+        let n = if removal {
+            conn.execute("DELETE FROM tags WHERE id = ?1 AND deleted = 1", params![id])?
+        } else {
+            conn.execute(
+                "UPDATE tags SET synced_at = ?2 WHERE id = ?1 AND deleted = 0",
+                params![id, at_micros],
+            )?
+        };
+        Ok(n > 0)
     }
 
     /// Every tag id the node holds, removed ones included (a sync skips downloading these).
@@ -5745,6 +5778,52 @@ mod tag_tests {
             lib.tag_by_id("t1").unwrap().is_none(),
             "pushed tombstones are purged"
         );
+    }
+
+    /// A change made while a push was on the way is not lost: the push is recorded only for
+    /// the bookmark or tag as it was read for it.
+    #[test]
+    fn a_push_is_recorded_only_for_what_was_pushed() {
+        let lib = Library::open_in_memory().unwrap();
+        let uri = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        // Written, and removed while the write was on the way: the removal stays to be pushed
+        lib.add_bookmark("b1", uri, 1_000).unwrap();
+        assert!(lib.remove_bookmark(uri).unwrap());
+        assert!(!lib.mark_bookmark_pushed("b1", false, 2_000).unwrap());
+        let pending = lib.unsynced_bookmarks().unwrap();
+        assert!(pending.len() == 1 && pending[0].deleted, "{pending:?}");
+        // Its delete pushed, and added again while that was on the way: the add stays to be pushed
+        lib.add_bookmark("b1", uri, 3_000).unwrap();
+        assert!(!lib.mark_bookmark_pushed("b1", true, 4_000).unwrap());
+        let pending = lib.unsynced_bookmarks().unwrap();
+        assert!(pending.len() == 1 && !pending[0].deleted, "{pending:?}");
+        // Nothing changed meanwhile: recorded; a tombstone is purged
+        assert!(lib.mark_bookmark_pushed("b1", false, 5_000).unwrap());
+        assert!(lib.unsynced_bookmarks().unwrap().is_empty());
+        assert!(lib.remove_bookmark(uri).unwrap());
+        assert!(lib.mark_bookmark_pushed("b1", true, 6_000).unwrap());
+        assert!(lib.bookmark_by_uri(uri).unwrap().is_none());
+
+        lib.add_tag("t1", uri, "disco", 1_000).unwrap();
+        assert!(lib.remove_tag(uri, "disco").unwrap());
+        assert!(!lib.mark_tag_pushed("t1", false, 2_000).unwrap());
+        assert!(lib
+            .unsynced_tags()
+            .unwrap()
+            .iter()
+            .any(|t| t.id == "t1" && t.deleted));
+        lib.add_tag("t1", uri, "disco", 3_000).unwrap();
+        assert!(!lib.mark_tag_pushed("t1", true, 4_000).unwrap());
+        assert!(lib
+            .unsynced_tags()
+            .unwrap()
+            .iter()
+            .any(|t| t.id == "t1" && !t.deleted));
+        assert!(lib.mark_tag_pushed("t1", false, 5_000).unwrap());
+        assert!(lib.unsynced_tags().unwrap().is_empty());
+        assert!(lib.remove_tag(uri, "disco").unwrap());
+        assert!(lib.mark_tag_pushed("t1", true, 6_000).unwrap());
+        assert!(lib.tag_by_id("t1").unwrap().is_none());
     }
 }
 

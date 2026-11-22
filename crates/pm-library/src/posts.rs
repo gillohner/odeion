@@ -24,6 +24,10 @@ pub struct MusicPostRow {
     pub deleted: bool,
 }
 
+/// What decides whether the homeserver's version of a post replaces the node's row: the row's
+/// edit time, its last push, and whether it is a tombstone (a delete that waits to be pushed).
+pub type PostStamp = (i64, Option<i64>, bool);
+
 fn row(r: &Row<'_>) -> rusqlite::Result<MusicPostRow> {
     Ok(MusicPostRow {
         id: r.get(0)?,
@@ -60,6 +64,20 @@ impl Library {
             ],
         )?;
         Ok(())
+    }
+
+    /// The [`PostStamp`] of the row for `id`, a tombstone's too; `None` when the node has no row.
+    /// A pull reads it when it chooses what to fetch and again before it stores what it
+    /// fetched: a row that changed in between (an edit, a delete) is not written over.
+    pub fn music_post_stamp(&self, id: &str) -> Result<Option<PostStamp>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT updated_at, synced_at, deleted FROM music_posts WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
+            )
+            .optional()?)
     }
 
     pub fn get_music_post(&self, id: &str) -> Result<Option<MusicPostRow>> {
@@ -352,5 +370,26 @@ mod tests {
         assert_eq!(lib.delete_music_posts_of_kind(kind, 99).unwrap(), 2);
         assert!(lib.music_posts_page(kind, None, 10).unwrap().is_empty());
         assert!(lib.get_music_post("r").unwrap().is_some(), "other kinds stay");
+    }
+
+    /// A post's stamp is read for live rows and tombstones alike, and moves with every change.
+    #[test]
+    fn a_stamp_says_when_a_row_changed() {
+        let lib = Library::open_in_memory().unwrap();
+        assert_eq!(lib.music_post_stamp("a").unwrap(), None);
+        lib.upsert_music_post(&p("a", "pubky.music/playlist", 10))
+            .unwrap();
+        assert_eq!(lib.music_post_stamp("a").unwrap(), Some((10, None, false)));
+        lib.mark_music_post_synced("a", 30).unwrap();
+        let synced = lib.music_post_stamp("a").unwrap();
+        assert_eq!(synced, Some((10, Some(30), false)));
+        // An edit, then a delete: each is another stamp, and the tombstone is seen
+        lib.upsert_music_post(&p("a", "pubky.music/playlist", 40))
+            .unwrap();
+        let edited = lib.music_post_stamp("a").unwrap();
+        assert_eq!(edited, Some((40, None, false)));
+        assert!(lib.delete_music_post("a", 50).unwrap());
+        assert_eq!(lib.get_music_post("a").unwrap(), None);
+        assert_eq!(lib.music_post_stamp("a").unwrap(), Some((50, None, true)));
     }
 }
