@@ -77,17 +77,23 @@ fn parse_timestamp(tag: &str) -> Option<u64> {
         None => (last, ""),
     };
     let secs: u64 = secs.parse().ok()?;
+    // Digits only, so the first three are three bytes (a file's text is anything: `[ti:9.99€ x]`
+    // reads as minutes "ti", seconds 9 and a fraction that is no number)
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let frac_ms = match frac.len() {
         0 => 0,
         1 => frac.parse::<u64>().ok()? * 100,
         2 => frac.parse::<u64>().ok()? * 10,
         _ => frac[..3].parse::<u64>().ok()?,
     };
-    let mut ms = secs * 1000 + frac_ms;
+    // (numbers too long for a time are no time, not an overflow)
+    let mut ms = secs.checked_mul(1000)?.checked_add(frac_ms)?;
     let mins: u64 = parts.pop()?.parse().ok()?;
-    ms += mins * 60_000;
+    ms = ms.checked_add(mins.checked_mul(60_000)?)?;
     if let Some(h) = parts.pop() {
-        ms += h.parse::<u64>().ok()? * 3_600_000;
+        ms = ms.checked_add(h.parse::<u64>().ok()?.checked_mul(3_600_000)?)?;
     }
     Some(ms)
 }
@@ -103,10 +109,31 @@ pub fn sidecar_mtime(audio: &Path) -> Option<i64> {
         .map(|d| d.as_secs() as i64)
 }
 
+/// The longest sidecar that is read (a long song's synchronised lyrics are a few tens of KB).
+pub const SIDECAR_MAX_BYTES: u64 = 1024 * 1024;
+
 /// The `.lrc` file next to `audio` (same stem), if there is one.
+///
+/// Only a lyrics file is read: a regular file of at most [`SIDECAR_MAX_BYTES`]. A link is
+/// followed only to another `.lrc` file (a library made of links to another disk).
 pub fn sidecar(audio: &Path) -> Option<String> {
-    let lrc = audio.with_extension("lrc");
-    let text = std::fs::read(&lrc).ok()?;
+    use std::io::Read;
+    let mut lrc = audio.with_extension("lrc");
+    if std::fs::symlink_metadata(&lrc).ok()?.file_type().is_symlink() {
+        lrc = std::fs::canonicalize(&lrc).ok()?;
+        let named_lrc = lrc.extension().is_some_and(|e| e.eq_ignore_ascii_case("lrc"));
+        if !named_lrc {
+            return None;
+        }
+    }
+    let file = std::fs::File::open(&lrc).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > SIDECAR_MAX_BYTES {
+        return None;
+    }
+    let mut text = Vec::new();
+    // (the limit again: the length was the file's a moment ago)
+    file.take(SIDECAR_MAX_BYTES).read_to_end(&mut text).ok()?;
     let text = String::from_utf8_lossy(&text).into_owned();
     (!text.trim().is_empty()).then_some(text)
 }
@@ -148,6 +175,34 @@ mod tests {
         assert_eq!(parse_timestamp("ab:cd"), None);
     }
 
+    /// A file's text is anything: a tag that only looks like a time is no time, and never a
+    /// panic (the fraction was cut at its third byte, inside a character; long numbers overflowed).
+    #[test]
+    fn text_that_only_looks_like_a_time_is_not_one() {
+        for tag in [
+            "ti:9.99€ Song",
+            "00:12.34é",
+            "00:01.€",
+            "00:01.1é",
+            "00:01.+12",
+            "00:99999999999999999999",
+            "18446744073709551615:00",
+            "18446744073709551:00:00",
+            "307445734561825861:00",
+            "00:18446744073709552",
+        ] {
+            assert_eq!(parse_timestamp(tag), None, "{tag}");
+        }
+        let (lines, synced) =
+            parse("[ti:9.99€ Song]\n[00:12.34é]La\n[00:01.500]Da\n[00:99999999999999999999]x");
+        assert!(synced);
+        assert_eq!(
+            lines.iter().map(|l| (l.ms, l.text.as_str())).collect::<Vec<_>>(),
+            [(Some(1500), "Da")],
+            "the other lines carry no time, so a synchronised text leaves them out"
+        );
+    }
+
     #[test]
     fn sidecar_next_to_the_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -155,5 +210,51 @@ mod tests {
         assert!(sidecar(&audio).is_none());
         std::fs::write(dir.path().join("a.lrc"), "[00:00.00]x").unwrap();
         assert_eq!(sidecar(&audio).as_deref(), Some("[00:00.00]x"));
+    }
+
+    /// Only a lyrics file is read as a sidecar: a regular file no longer than lyrics are, also
+    /// behind a link, which is followed only to another `.lrc` file.
+    #[cfg(unix)]
+    #[test]
+    fn a_sidecar_is_a_lyrics_file_and_nothing_else() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir(&music).unwrap();
+        let other = dir.path().join("notes.txt");
+        std::fs::write(&other, "not lyrics").unwrap();
+
+        // A link to a file that is no .lrc
+        symlink(&other, music.join("a.lrc")).unwrap();
+        assert_eq!(sidecar(&music.join("a.flac")), None);
+        // A link to something that is no file
+        symlink("/dev/zero", music.join("b.lrc")).unwrap();
+        assert_eq!(sidecar(&music.join("b.flac")), None);
+        // A link that leads nowhere, a folder, a file longer than lyrics are
+        symlink(dir.path().join("gone.lrc"), music.join("c.lrc")).unwrap();
+        assert_eq!(sidecar(&music.join("c.flac")), None);
+        std::fs::create_dir(music.join("d.lrc")).unwrap();
+        assert_eq!(sidecar(&music.join("d.flac")), None);
+        std::fs::write(music.join("e.lrc"), vec![b'x'; SIDECAR_MAX_BYTES as usize + 1]).unwrap();
+        assert_eq!(sidecar(&music.join("e.flac")), None);
+        std::fs::write(music.join("f.lrc"), vec![b'x'; SIDECAR_MAX_BYTES as usize]).unwrap();
+        assert_eq!(
+            sidecar(&music.join("f.flac")).map(|t| t.len()),
+            Some(SIDECAR_MAX_BYTES as usize)
+        );
+
+        // A library of links to another disk: a link to a lyrics file is read, also through a
+        // linked folder
+        let disk = dir.path().join("disk");
+        std::fs::create_dir(&disk).unwrap();
+        std::fs::write(disk.join("song.LRC"), "[00:01.00]linked").unwrap();
+        symlink(disk.join("song.LRC"), music.join("g.lrc")).unwrap();
+        assert_eq!(
+            sidecar(&music.join("g.flac")).as_deref(),
+            Some("[00:01.00]linked")
+        );
+        symlink(&disk, music.join("album")).unwrap();
+        std::fs::write(disk.join("two.lrc"), "two").unwrap();
+        assert_eq!(sidecar(&music.join("album/two.flac")).as_deref(), Some("two"));
     }
 }
