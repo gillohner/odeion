@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **Writing IDs or artists into a file no longer rewrites its audio in place.** A FLAC file whose tags fit its padding is changed in place, as before (only the tag bytes are written). When they need more room, and for every MP3, the node now writes a new file next to the original (the same audio, checked for its full length) and puts it in the original's place only when it is complete, so a write that stops half-way (the share went away, the node was stopped) leaves the original as it was. An MP3 whose tag says it is longer than it is, so that writing it would cut into the audio, is left alone and reported. WAV and AIFF files are written as before.
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21
