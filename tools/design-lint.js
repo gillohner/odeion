@@ -17,6 +17,15 @@ const css = fs.readdirSync(DIR).filter((f) => f.endsWith('.css')).map((f) => fs.
 const problems = [];
 const where = (file, src, idx) => `${file}:${src.slice(0, idx).split('\n').length}`;
 
+// Spacing, layers and font weights stand on their tokens: padding, margin and gap take a step of
+// the spacing scale (--sp-*), z-index a named layer (--z-*), font-weight a weight of the scale
+// (--fw-*), wherever the value has a token (tools/refactor/tokens.js: its table says what is on the
+// scale, its --write moves plain values onto it).
+{
+  const appCss = path.join(DIR, 'app.css');
+  if (fs.existsSync(appCss)) problems.push(...require('./refactor/tokens.js').check(fs.readFileSync(appCss, 'utf8')).problems);
+}
+
 // The component set a button may belong to.
 const BUTTON_CLASSES = ['btn', 'set-tab', 'np-artbtn', 'chip', 'icon-btn', 'chiplink', 'chipx', 'half', 'back', 'tile', 'link', 'nav-item', 'pop-item', 'tab', 'seg', 'row-btn', 'list-row', 'toast-x', 'close', 'crumb', 'zone-btn', 'out-btn', 'play-btn', 'sbtn', 'mini', 'qbtn', 'rowplay', 'idmark', 'card', 'quality', 'connbar-retry', 'lnk', 'upstreams', 'jobchip', 'faces', 'bnav', 'az', 'ptag', 'np-dockbtn', 'np-stab', 'np-grab'];
 // Classes set only by the browser or third parties, never styled by us.
