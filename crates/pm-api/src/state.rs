@@ -119,6 +119,8 @@ pub struct NodeState {
     snapcast: Mutex<Option<String>>,
     /// Offer AirPlay 1 receivers (`[outputs] airplay`).
     airplay: std::sync::atomic::AtomicBool,
+    /// A proxy on this machine forwards to the node ([`Self::set_behind_proxy`]).
+    behind_proxy: std::sync::atomic::AtomicBool,
     /// MPD servers to play to (`[outputs] mpd`).
     mpd: Mutex<Vec<pm_out_mpd::Server>>,
     /// Offer BluOS players (`[outputs] bluos`).
@@ -493,6 +495,7 @@ impl NodeState {
             gena: Default::default(),
             snapcast: Default::default(),
             airplay: Default::default(),
+            behind_proxy: Default::default(),
             mpd: Default::default(),
             bluos: Default::default(),
             bluos_players: Default::default(),
@@ -1971,6 +1974,17 @@ impl NodeState {
             new.push(id);
         }
         new
+    }
+
+    /// `[api] behind_proxy`: a reverse proxy or tunnel on this machine forwards to the node, so
+    /// a request from this machine is not a local one ([`crate::peer::direct`],
+    /// [`crate::peer::lan_peer`]).
+    pub fn set_behind_proxy(&self, on: bool) {
+        self.behind_proxy.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_behind_proxy(&self) -> bool {
+        self.behind_proxy.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn set_airplay(&self, on: bool) {

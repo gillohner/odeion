@@ -236,8 +236,13 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         &env_or("PM_LASTFM_API_KEY", &cfg.lastfm.api_key),
         &env_or("PM_LASTFM_API_SECRET", &cfg.lastfm.api_secret),
     );
-    let (token, source) = api_token::resolve(&cfg.api.token, &cfg.api.listen, &cfg.data_dir)
-        .map_err(|e| anyhow::anyhow!("API token: {e}"))?;
+    let (token, source) = api_token::resolve(
+        &cfg.api.token,
+        &cfg.api.listen,
+        cfg.api.behind_proxy,
+        &cfg.data_dir,
+    )
+    .map_err(|e| anyhow::anyhow!("API token: {e}"))?;
     match &source {
         api_token::Source::File(path) => tracing::info!(
             listen = %cfg.api.listen,
@@ -382,6 +387,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         state.set_snapcast(Some(cfg.outputs.snapcast.trim().to_string()));
     }
     state.set_airplay(cfg.outputs.airplay);
+    state.set_behind_proxy(cfg.api.behind_proxy);
     state.set_bluos(cfg.outputs.bluos);
     state.set_mpd(&cfg.outputs.mpd);
     {

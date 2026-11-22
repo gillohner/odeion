@@ -956,7 +956,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 // A renderer's volume events (GENA NOTIFY), to the token the node handed it; LAN only
                 .route(
                     "/v1/upnp/events/{token}",
-                    axum::routing::any(upnp_events::notify).layer(middleware::from_fn(peer::lan_only)),
+                    axum::routing::any(upnp_events::notify)
+                        .layer(middleware::from_fn_with_state(state.clone(), peer::lan_only)),
                 )
                 // Album covers for TV screens, with that cover's key.
                 .route("/v1/art/{id}", get(keyed_cover))
@@ -971,7 +972,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
             state
                 .renderer
                 .get()
-                .map(|r| r.router().layer(middleware::from_fn(peer::lan_only)))
+                .map(|r| {
+                    r.router()
+                        .layer(middleware::from_fn_with_state(state.clone(), peer::lan_only))
+                })
                 .unwrap_or_default(),
         )
         .layer(middleware::from_fn_with_state(

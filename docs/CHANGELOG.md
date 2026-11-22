@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **New setting for a node behind a reverse proxy on the same machine: `[api] behind_proxy = true`.** A request from the machine itself then no longer counts as local: the node always has a token (it makes one when the config sets none, also when it listens on 127.0.0.1 only), and the routes that take no token answer the local network's devices only. Needed with a proxy that adds no forwarding header (a bare nginx `proxy_pass`); the remote-access guide says which proxies add one.
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21
