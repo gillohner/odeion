@@ -504,15 +504,19 @@ impl Queue {
             self.fisher_yates(start, seed);
         } else {
             let current_id = self.current().map(|c| c.id);
-            let mut rest = std::mem::take(&mut self.items);
+            let rest = std::mem::take(&mut self.items);
             let mut back = Vec::with_capacity(rest.len());
+            // (each item taken from its place by id, in one pass over each list)
+            let place: std::collections::HashMap<u64, usize> =
+                rest.iter().enumerate().map(|(i, it)| (it.id, i)).collect();
+            let mut rest: Vec<Option<QueueItem>> = rest.into_iter().map(Some).collect();
             for id in self.order.drain(..) {
-                if let Some(i) = rest.iter().position(|it| it.id == id) {
-                    back.push(rest.remove(i));
+                if let Some(it) = place.get(&id).and_then(|i| rest[*i].take()) {
+                    back.push(it);
                 }
             }
             // Anything the original order doesn't name (it can't happen; kept all the same)
-            back.append(&mut rest);
+            back.extend(rest.into_iter().flatten());
             self.items = back;
             self.current = current_id.and_then(|cid| self.position_of(cid));
             self.shuffle = false;
@@ -545,7 +549,15 @@ impl Queue {
         if !self.shuffle {
             return None;
         }
-        Some(self.order.iter().filter_map(|id| self.position_of(*id)).collect())
+        // (one pass over each list: a look per id would be a pass over the queue per item)
+        let place: std::collections::HashMap<u64, usize> =
+            self.items.iter().enumerate().map(|(i, it)| (it.id, i)).collect();
+        Some(
+            self.order
+                .iter()
+                .filter_map(|id| place.get(id).copied())
+                .collect(),
+        )
     }
 
     /// Shuffle on again from a saved queue, with [`Self::shuffle_order`]'s indexes as the
@@ -1000,7 +1012,12 @@ mod tests {
         let ids = q.add(three(), Insert::Next);
         assert_eq!(ids.len(), 2, "the first two fit");
         assert_eq!(q.len(), MAX_QUEUE_ITEMS);
-        assert_eq!(q.order.len(), MAX_QUEUE_ITEMS);
+        // (the saved order of a full queue is worked out in one pass, not one per item)
+        let order = q.shuffle_order().unwrap();
+        assert_eq!(order.len(), MAX_QUEUE_ITEMS);
+        let mut seen = order.clone();
+        seen.sort_unstable();
+        assert!(seen.iter().enumerate().all(|(i, p)| *p == i), "every place once");
         assert_eq!(q.items()[1].uri, "n0");
         assert_eq!(q.items()[2].uri, "n1");
         let v = q.version();
@@ -1014,5 +1031,11 @@ mod tests {
         assert!(q.remove(ids[0]));
         assert_eq!(q.add(three(), Insert::End).len(), 1);
         assert_eq!(q.len(), MAX_QUEUE_ITEMS);
+        // Shuffle off again: the original order, with what was added where it was added
+        assert!(q.set_shuffle(false, 0));
+        let first: Vec<&str> = q.items().iter().take(3).map(|i| i.uri.as_str()).collect();
+        assert_eq!(first, ["t0", "n1", "t1"]);
+        assert_eq!(q.items().last().unwrap().uri, "n0");
+        assert_eq!((q.len(), q.current_index()), (MAX_QUEUE_ITEMS, Some(0)));
     }
 }
