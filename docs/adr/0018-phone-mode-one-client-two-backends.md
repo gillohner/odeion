@@ -59,7 +59,8 @@ from a node.
   (`pm_appdata::files`). Their canonical URL comes from their tags (recording MBID, else ISRC), as on a
   node: a bookmark or a listen of one points at it. A setting copies them to
   `/priv/pubky.music/files/`, where a node finds them, on a task of its own, found there by content
-  hash. The setting is on by default only when the person's homeserver is the one installed with their
+  hash, and counted as copied once the homeserver holds all of it (a short copy is sent again). The
+  setting is on by default only when the person's homeserver is the one installed with their
   node (`node.json`'s `bundled_homeserver`).
 
 ## Consequences
@@ -70,7 +71,10 @@ from a node.
   are not phone capabilities yet, and the page hides them there.
 - The phone holds streaming sign-ins. They sit in a file that only the app can read (Android's Auto
   Backup may still copy the app's storage: a follow-up), and the key keeps
-  other apps on the phone out.
+  other apps on the phone out. A sign-ins file or vault sync record that can't be read is never taken
+  for an empty one (that would be a sign-out the vault sync carries out, or a first sync): it stays as
+  it is, and phone mode doesn't start (the sign-ins) or doesn't sync with the vault (the record) until
+  it reads.
 - A TIDAL song is fetched once into the app's cache (the newest 3 are kept). It is sent to the player as
   it arrives when the fetch takes longer than 12 s, and a fetch that nobody reads for 5 s stops.
 - The built-in TIDAL clients ship inside the APK, masked as they are in the node's binaries.

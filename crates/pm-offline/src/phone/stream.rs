@@ -371,6 +371,7 @@ pub(crate) async fn qobuz(State(p): State<Arc<Phone>>, Path(id): Path<String>) -
         &p.qobuz_http,
         &url,
         QOBUZ_ANSWER_FOR,
+        QOBUZ_STALL_FOR,
         pm_sources::qobuz::content_type_for(format),
     )
     .await
@@ -380,28 +381,30 @@ pub(crate) async fn qobuz(State(p): State<Arc<Phone>>, Path(id): Path<String>) -
 const QOBUZ_CONNECT_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long it may take to start answering.
 const QOBUZ_ANSWER_FOR: std::time::Duration = std::time::Duration::from_secs(30);
-/// How long the track may stop coming before the relay ends (the player then asks again).
+/// How long the relay waits for more of the track before it ends (the player then asks again).
 const QOBUZ_STALL_FOR: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The client Qobuz tracks are relayed with: a time limit on the connection and on each wait for
-/// more of the track, none on the whole (a track takes as long as it takes).
+/// The client Qobuz tracks are relayed with: a time limit on the connection (the answer and each
+/// wait for more of the track are limited in [`relay`]; none on the whole track).
 pub(crate) fn qobuz_client() -> reqwest::Result<reqwest::Client> {
-    client_within(QOBUZ_CONNECT_FOR, QOBUZ_STALL_FOR)
+    client_within(QOBUZ_CONNECT_FOR)
 }
 
-fn client_within(
-    connect: std::time::Duration,
-    stall: std::time::Duration,
-) -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(connect)
-        .read_timeout(stall)
-        .build()
+fn client_within(connect: std::time::Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder().connect_timeout(connect).build()
 }
 
-/// The track at `url`, relayed as it comes: an error answer when the host doesn't answer within
-/// `answer_for` (a host that takes the connection and never answers never holds the page).
-async fn relay(client: &reqwest::Client, url: &str, answer_for: std::time::Duration, mime: &str) -> Response {
+/// The track at `url`, relayed as it comes: an error answer when the host doesn't start answering
+/// within `answer_for`, and the relay ends when more of the track doesn't come within `stall_for`
+/// of being asked for. (Only while it waits on the host: a player that pauses, or has enough for
+/// now, reads on later with no limit. reqwest's own `read_timeout` would count that time too.)
+async fn relay(
+    client: &reqwest::Client,
+    url: &str,
+    answer_for: std::time::Duration,
+    stall_for: std::time::Duration,
+    mime: &str,
+) -> Response {
     let resp = match tokio::time::timeout(answer_for, client.get(url).send()).await {
         Ok(Ok(r)) if r.status().is_success() => r,
         Ok(Ok(r)) => {
@@ -427,7 +430,21 @@ async fn relay(client: &reqwest::Client, url: &str, answer_for: std::time::Durat
     if let Some(n) = len {
         out = out.header(header::CONTENT_LENGTH, n);
     }
-    out.body(Body::from_stream(resp.bytes_stream()))
+    // Each wait for more starts when the player asks for more
+    let track = futures_util::stream::unfold(Some(resp.bytes_stream()), move |rest| async move {
+        use futures_util::StreamExt;
+        let mut rest = rest?;
+        match tokio::time::timeout(stall_for, rest.next()).await {
+            Ok(Some(Ok(b))) => Some((Ok(b), Some(rest))),
+            Ok(Some(Err(e))) => Some((Err(std::io::Error::other(e.without_url())), None)),
+            Ok(None) => None,
+            Err(_) => Some((
+                Err(std::io::Error::other("Qobuz: the stream stopped coming")),
+                None,
+            )),
+        }
+    });
+    out.body(Body::from_stream(track))
         .unwrap_or_else(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "the stream can't be sent"))
         .into_response()
 }
@@ -464,23 +481,21 @@ mod tests {
 
     #[tokio::test]
     async fn a_qobuz_host_that_never_answers_never_holds_the_page() {
+        use futures_util::StreamExt;
         let short = std::time::Duration::from_millis(300);
-        // Takes the connection, never answers: ended by the limit on the answer, or on a stall
+        let c = client_within(short).unwrap();
+        // Takes the connection, never answers
         let url = host(b"").await;
-        for (answer, stall) in [(short, short * 10), (short * 10, short)] {
-            let c = client_within(short, stall).unwrap();
-            let r = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                relay(&c, &url, answer, "audio/flac"),
-            )
-            .await
-            .expect("the request ends by itself");
-            assert_eq!(r.status(), StatusCode::GATEWAY_TIMEOUT);
-        }
-        let c = client_within(short, short).unwrap();
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            relay(&c, &url, short, short, "audio/flac"),
+        )
+        .await
+        .expect("the request ends by itself");
+        assert_eq!(r.status(), StatusCode::GATEWAY_TIMEOUT);
         // Answers, sends a little of the track, then stops: the relay ends (the player asks again)
         let url = host(b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\n\r\nfLaC").await;
-        let r = relay(&c, &url, short, "audio/flac").await;
+        let r = relay(&c, &url, short, short, "audio/flac").await;
         assert_eq!(r.status(), StatusCode::OK);
         let body = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -489,6 +504,16 @@ mod tests {
         .await
         .expect("the relay ends by itself");
         assert!(body.is_err(), "cut short, not whole");
+        // The whole track sent, the player pausing longer than the limit between reads: whole
+        let url = host(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\nfLaC....").await;
+        let r = relay(&c, &url, short, short, "audio/flac").await;
+        let mut track = r.into_body().into_data_stream();
+        let mut got = Vec::new();
+        while let Some(b) = track.next().await {
+            got.extend_from_slice(&b.expect("not cut while the player paused"));
+            tokio::time::sleep(short * 3).await;
+        }
+        assert_eq!(got, b"fLaC....");
     }
 
     #[test]
