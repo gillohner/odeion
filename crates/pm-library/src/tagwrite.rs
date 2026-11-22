@@ -182,7 +182,8 @@ pub fn preview(path: &Path, f: &Fixes) -> Result<Vec<Change>, WriteError> {
 }
 
 /// Write `f` into the file at `path`, after saving a backup under `backup_dir` (only the keys
-/// it touches; the audio is never rewritten). Returns the backup's path.
+/// it touches; the audio is never written in place: a file is changed in its tag bytes only, or
+/// replaced by a complete copy). Returns the backup's path.
 pub fn write_fixes(path: &Path, f: &Fixes, backup_dir: &Path) -> Result<PathBuf, WriteError> {
     write_with(path, f, None, backup_dir)
 }
@@ -358,10 +359,36 @@ fn rewrite_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".odeion-write-{hash:016x}"))
 }
 
+/// Give a new file, which belongs to `now` (user, group), the owner and group the file it
+/// replaces `was` of, through `chown`. Both, where the node may (it runs as root, or the file is
+/// its own); else the group alone, which a member of that group may set: the owner then becomes
+/// the node's user, and those who reached the file through its group still do. When not even
+/// the group can be kept, that is an error and the file is not replaced.
+#[cfg(unix)]
+fn keep_owner(
+    now: (u32, u32),
+    was: (u32, u32),
+    chown: impl Fn(Option<u32>, Option<u32>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if now == was || chown(Some(was.0), Some(was.1)).is_ok() || now.1 == was.1 {
+        return Ok(());
+    }
+    chown(None, Some(was.1)).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "a new file in its place could not be given the file's group, so it is not replaced ({e})"
+            ),
+        )
+    })
+}
+
 /// Replace the file at `path` by what `write` puts into a new file next to it. The original is
 /// touched only by the last step, a rename, after `write` succeeded and the new file reached the
 /// disk; when anything fails before that, the new file is removed and the original is as it was.
-/// A link is followed: the file it names is the one replaced, and the link stays a link.
+/// The new file gets the original's mode, and its owner and group as far as the node may set
+/// them ([`keep_owner`]). A link is followed: the file it names is the one replaced, and the
+/// link stays a link.
 fn replace_file(
     path: &Path,
     write: impl FnOnce(&mut std::fs::File) -> Result<(), WriteError>,
@@ -381,7 +408,17 @@ fn replace_file(
             .map_err(|e| failed(&new, e))?;
         write(&mut file)?;
         file.sync_all().map_err(|e| failed(&new, e))?;
-        // As the original was: readable by the same people
+        // As the original was: its owner and group (the group at least, or it is not replaced:
+        // the people who reach the file through either must still reach it), then its mode
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let made = file.metadata().map_err(|e| failed(&new, e))?;
+            keep_owner((made.uid(), made.gid()), (meta.uid(), meta.gid()), |uid, gid| {
+                std::os::unix::fs::fchown(&file, uid, gid)
+            })
+            .map_err(|e| failed(path, e))?;
+        }
         std::fs::set_permissions(&new, meta.permissions()).map_err(|e| failed(&new, e))?;
         std::fs::rename(&new, path).map_err(|e| failed(path, e))?;
         // The rename itself on the disk (not every filesystem lets a folder be synced)
@@ -575,6 +612,8 @@ const MAX_CHUNKS: u32 = 10_000;
 struct TagChunk {
     /// Where the write starts: at the tag chunk the file has, or at its end.
     at: u64,
+    /// The file has a tag chunk there (it is written over), or none (one is added).
+    replaces: bool,
     /// A new chunk after a last chunk of odd length whose pad byte is missing: that byte first.
     pad_first: bool,
     /// The chunk's name as the file has it (`ID3 ` for a new one).
@@ -585,12 +624,15 @@ struct TagChunk {
 
 /// Find the place of a WAV or AIFF file's tag chunk, or why the tag is not written.
 ///
-/// The chunks are walked as the reader of these files (the `id3` crate) walks them: inside the
-/// length the file's header gives, to the first chunk named `ID3 `. Every chunk must lie inside
-/// the file and the chunks must end where the file does. With a tag chunk, what follows it is
-/// written again behind the new tag, so none of that may be the audio (`data`, `SSND`) and it
-/// must be small. Without one, the new chunk goes after the last chunk. Nothing in front of
-/// that place is written but the length in the file's header, and the audio is in front of it.
+/// Every chunk must lie inside the file and the chunks must end where the file does. The length
+/// in the file's header is not what decides that (a write that was cut can leave it too large
+/// or too small, and it is written anew); it decides only which tag chunk the reader of these
+/// files (the `id3` crate) reaches: the first chunk named `ID3 ` inside that length. One beyond
+/// it is not the tag the reader reads, and such a file is not written. With a tag chunk, what
+/// follows it is written again behind the new tag, so none of that may be the audio (`data`,
+/// `SSND`) and it must be small. Without one, the new chunk goes after the last chunk. Nothing
+/// in front of that place is written but the length in the file's header, and the audio is in
+/// front of it.
 fn tag_chunk_place(
     file: &mut std::fs::File,
     len: u64,
@@ -610,62 +652,51 @@ fn tag_chunk_place(
     let mut header = [0u8; 8];
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut header)?;
-    // (the root's length counts its four-letter kind, which is not a chunk)
-    let Some(end) = number(&header[4..]).checked_sub(4) else {
+    // Where the reader stops looking for a tag chunk (the header's length counts the file's
+    // four-letter kind, which is not a chunk; a length too small for that kind is no file)
+    let Some(reach) = number(&header[4..]).checked_sub(4) else {
         return Ok(Err(ENDS));
     };
-    // The chunk at `at`: its header, when all of the chunk is inside the file (and the file is
-    // not made of chunks without end)
-    let mut chunks = 0;
-    let mut chunk = |at: u64| -> std::io::Result<Option<([u8; 4], u64)>> {
+    let (mut at, mut chunks, mut tag) = (12u64, 0u32, None);
+    while at < len {
         chunks += 1;
-        if at.saturating_add(8) > len || chunks > MAX_CHUNKS {
-            return Ok(None);
+        if at + 8 > len || chunks > MAX_CHUNKS {
+            return Ok(Err(ENDS));
         }
-        let mut header = [0u8; 8];
         file.seek(SeekFrom::Start(at))?;
         file.read_exact(&mut header)?;
+        let name = [header[0], header[1], header[2], header[3]];
         let size = number(&header[4..]);
-        Ok((at + 8 + size <= len).then_some(([header[0], header[1], header[2], header[3]], size)))
-    };
-    let (mut at, mut walked) = (12u64, 0u64);
-    let mut tag = None;
-    while walked < end {
-        let Some((name, size)) = chunk(at)? else {
+        if at + 8 + size > len {
             return Ok(Err(ENDS));
-        };
-        if name.eq_ignore_ascii_case(b"ID3 ") {
-            tag = Some((name, size));
-            break;
         }
-        at += 8 + size + size % 2;
-        walked = at;
-    }
-    let Some((name, size)) = tag else {
-        // None: after the last chunk, which ends where the file does (its pad byte may be missing)
-        return Ok(match at.checked_sub(len) {
-            Some(pad @ (0 | 1)) => Ok(TagChunk {
-                at: len,
-                pad_first: pad == 1,
-                name: *b"ID3 ",
-                after: Vec::new(),
-            }),
-            _ => Err(ENDS),
-        });
-    };
-    let mut next = at + 8 + size + size % 2;
-    let after_from = next.min(len);
-    while next < len {
-        let Some((name, size)) = chunk(next)? else {
-            return Ok(Err(ENDS));
-        };
-        if name.eq_ignore_ascii_case(audio) {
+        if tag.is_none() && name.eq_ignore_ascii_case(b"ID3 ") {
+            // (the reader looks at the first chunk, and at each one that starts inside the length)
+            let reached = if at == 12 { reach > 0 } else { at < reach };
+            if !reached {
+                return Ok(Err(
+                    "its tag chunk lies beyond the length the file's header gives; not written",
+                ));
+            }
+            tag = Some((at, name, size));
+        } else if tag.is_some() && name.eq_ignore_ascii_case(audio) {
             return Ok(Err(
                 "its tag is stored in front of the audio; writing it would move the audio",
             ));
         }
-        next += 8 + size + size % 2;
+        at += 8 + size + size % 2;
     }
+    let Some((tag_at, name, size)) = tag else {
+        // None: after the last chunk (whose pad byte may be missing)
+        return Ok(Ok(TagChunk {
+            at: len,
+            replaces: false,
+            pad_first: at > len,
+            name: *b"ID3 ",
+            after: Vec::new(),
+        }));
+    };
+    let after_from = (tag_at + 8 + size + size % 2).min(len);
     if len - after_from > MAX_AFTER_TAG {
         return Ok(Err(
             "too much is stored after its tag to write it again; not written",
@@ -675,7 +706,8 @@ fn tag_chunk_place(
     file.seek(SeekFrom::Start(after_from))?;
     file.read_exact(&mut after)?;
     Ok(Ok(TagChunk {
-        at,
+        at: tag_at,
+        replaces: true,
         pad_first: false,
         name,
         after,
@@ -683,8 +715,17 @@ fn tag_chunk_place(
 }
 
 /// Write the encoded `tag` as the file's tag chunk at `place`, then what followed the old one,
-/// and set the file's length and the length in its header. Only bytes from `place.at` on and
-/// those four are written.
+/// and set the length in the file's header and the file's length. Only those four bytes and
+/// bytes from `place.at` on are written.
+///
+/// Over a tag chunk the file has, the header's length goes first: a write cut after it leaves
+/// the chunks as they were, ending where the file ends, which [`tag_chunk_place`] takes whatever
+/// the header says, so the next write, or the undo, finds its place. A new tag chunk goes first
+/// and the header's length after it (a reader that met a length beyond the end of the file
+/// would stop with an error): a write cut between the two leaves a whole chunk the header does
+/// not count yet, which readers do not see and which is not written over. A write cut inside
+/// the chunk bytes can leave the tag chunk and what followed it unreadable. In every case the
+/// audio is in front of what is written.
 fn write_tag_chunk(
     file: &mut std::fs::File,
     place: &TagChunk,
@@ -710,15 +751,22 @@ fn write_tag_chunk(
     bytes.extend(&place.after);
     let new_len = place.at + bytes.len() as u64;
     // (before anything is written)
-    let root = u32::try_from(new_len - 8).map_err(|_| too_long())?;
-    file.seek(SeekFrom::Start(place.at))?;
-    file.write_all(&bytes)?;
-    file.set_len(new_len)?;
-    // (on the disk before the header's length counts them)
-    file.sync_data()?;
-    file.seek(SeekFrom::Start(4))?;
-    file.write_all(&number(root))?;
-    file.sync_data()
+    let root = number(u32::try_from(new_len - 8).map_err(|_| too_long())?);
+    let mut write_at = |at: u64, bytes: &[u8]| {
+        file.seek(SeekFrom::Start(at))?;
+        file.write_all(bytes)?;
+        if at != 4 {
+            file.set_len(new_len)?;
+        }
+        file.sync_data()
+    };
+    if place.replaces {
+        write_at(4, &root)?;
+        write_at(place.at, &bytes)
+    } else {
+        write_at(place.at, &bytes)?;
+        write_at(4, &root)
+    }
 }
 
 /// Save `tag` into the FLAC file at `path`. Tags that fit the file's metadata area replace
@@ -1779,8 +1827,19 @@ mod tests {
             // taken back: the tag chunk grows and shrinks
             write_fixes(&f, &short, &dir.path().join("backups")).unwrap();
             let first = check("first");
+            // As a write over this tag chunk that was cut after its first step leaves the file:
+            // the chunks as they are, the length in the header that of another file (longer
+            // here, shorter below). The next write finds its place and sets the length right
+            let set_header = |length: usize| {
+                let mut now = std::fs::read(&f).unwrap();
+                now[4..8].copy_from_slice(&(length as u32).to_le_bytes());
+                std::fs::write(&f, now).unwrap();
+            };
+            set_header(first - 8 + 5_000);
             let bpath = write_fixes(&f, &long, &dir.path().join("backups")).unwrap();
-            assert!(check("longer") > first + 4_000);
+            let longer = check("longer");
+            assert!(longer > first + 4_000);
+            set_header(longer - 8 - 200);
             let b: Backup = serde_json::from_slice(&std::fs::read(&bpath).unwrap()).unwrap();
             restore(&b).unwrap();
             assert_eq!(check("shorter"), first);
@@ -1825,8 +1884,14 @@ mod tests {
         }
         let riff = endless.len() as u32 - 8;
         endless[4..8].copy_from_slice(&riff.to_le_bytes());
+        // A tag chunk the length in the header does not count (as a write that added one and
+        // was cut before its last step leaves it): readers do not see it; it is not written over
+        let mut beyond = wav_of(&[fmt.clone(), data.clone(), tag_chunk.clone()]);
+        let counted = (4 + fmt.len() + data.len()) as u32;
+        beyond[4..8].copy_from_slice(&counted.to_le_bytes());
         for (name, bytes) in [
             ("front.wav", in_front),
+            ("beyond.wav", beyond),
             ("upper.wav", upper),
             ("endless.wav", endless),
             ("trailing.wav", trailing),
@@ -1938,5 +2003,55 @@ mod tests {
         std::fs::write(&f, &bytes).unwrap();
         assert!(write_ids(&f, &ids(), &dir.path().join("backups")).is_err());
         assert_eq!(std::fs::read(&f).unwrap(), bytes);
+    }
+
+    /// A file that takes another's place gets its owner and group where that can be done, the
+    /// group at least; when not even the group can be kept, the file is not replaced.
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_file_keeps_its_owner_and_group() {
+        use std::cell::RefCell;
+        use std::os::unix::fs::MetadataExt;
+        let denied = || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let asked = RefCell::new(Vec::new());
+        // Nothing to do; both set; the owner refused and the group set; the group as it is;
+        // nothing can be set
+        assert!(keep_owner((7, 8), (7, 8), |_, _| unreachable!()).is_ok());
+        let both = |uid, gid| {
+            asked.borrow_mut().push((uid, gid));
+            Ok(())
+        };
+        assert!(keep_owner((7, 8), (1, 2), both).is_ok());
+        let group_only = |uid: Option<u32>, gid| {
+            asked.borrow_mut().push((uid, gid));
+            if uid.is_some() {
+                denied()
+            } else {
+                Ok(())
+            }
+        };
+        assert!(keep_owner((7, 8), (1, 2), group_only).is_ok());
+        assert_eq!(
+            *asked.borrow(),
+            [(Some(1), Some(2)), (Some(1), Some(2)), (None, Some(2))]
+        );
+        assert!(keep_owner((7, 2), (1, 2), |_, _| denied()).is_ok());
+        let e = keep_owner((7, 8), (1, 2), |_, _| denied()).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(e.to_string().contains("not replaced"), "{e}");
+
+        // Through a write, for whoever runs this: the file is this user's own, so both stay;
+        // as root (a container), a file given to another user and group stays theirs
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.mp3");
+        let mut audio: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        audio[..2].copy_from_slice(&[0xFF, 0xFB]);
+        std::fs::write(&f, &audio).unwrap();
+        let _ = std::os::unix::fs::chown(&f, Some(12_345), Some(23_456));
+        let before = std::fs::metadata(&f).unwrap();
+        write_ids(&f, &ids(), &dir.path().join("backups")).unwrap();
+        let after = std::fs::metadata(&f).unwrap();
+        assert_ne!(after.ino(), before.ino(), "a new file took its place");
+        assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
     }
 }
