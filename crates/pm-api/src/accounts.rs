@@ -742,142 +742,13 @@ fn broken_zone_list(why: String) -> ApiError {
     )
 }
 
-/// Routes a listener may never use (reads included): the owner's settings and data.
-const OWNER_ONLY: &[&str] = &[
-    // The owner's listen history (under /me, which a listener may otherwise use)
-    "/me/listens",
-    "/people",
-    "/vault",
-    "/party",
-    "/remote",
-    "/homeserver",
-    "/node",
-    "/pubky",
-    "/backup",
-    "/storage",
-    "/library/webdav",
-    "/library/uploads",
-    "/library/imports",
-    "/library/folders",
-    "/library/tree",
-    "/library/scan",
-    "/library/tag-fixes",
-    "/outputs",
-];
-
-/// What a listener may read: the shared library, public catalogues and directories, their
-/// zones, who they are and their own bookmarks (bookmarks.rs answers each person's own).
-/// Everything else (the owner's bookmarks, playlists, tags, reviews, history, podcast
-/// subscriptions and streaming accounts) stays the owner's.
-const LISTENER_READS: &[&str] = &[
-    "/me",
-    "/bookmarks",
-    // The same, by its older name (the page and the offline app's sync still use it)
-    "/favourites",
-    "/events",
-    "/info",
-    "/status",
-    "/health",
-    "/library/albums",
-    "/library/artists",
-    "/library/tracks",
-    "/library/genres",
-    "/library/search",
-    "/library/stats",
-    "/lyrics",
-    "/search",
-    "/item",
-    "/catalog/search",
-    "/discover",
-    "/shared",
-    "/profiles",
-    "/mb",
-    "/radio/countries",
-    "/radio/tags",
-    "/radio/search",
-    "/radio/curated",
-    "/podcasts/search",
-    "/zones",
-    "/devices",
-    "/presence",
-];
-
-/// A listener's own streaming sign-ins and plays (TASK-per-person-service-accounts): each of these
-/// acts on the caller's own account, reads included; the apps and clients behind them stay the
-/// owner's (the handlers refuse those fields, and [`LISTENER_OWN_EXCEPTIONS`] those routes).
-const LISTENER_OWN: &[&str] = &[
-    // Their own problem reports (feedback.rs keeps each person to theirs)
-    "/feedback",
-    // Usage insights: their own choice, aliases and events (usage.rs checks the person itself)
-    "/usage",
-    "/play-order",
-    "/sources/tidal/signin",
-    "/sources/qobuz/signin",
-    "/sources/spotify/signin",
-    "/sources/tidal/login",
-    "/sources/tidal/status",
-    "/sources/tidal/session",
-    "/sources/tidal/callback",
-    "/sources/tidal/unofficial",
-    "/sources/tidal/stream",
-    "/sources/qobuz/unofficial",
-    "/sources/qobuz/stream",
-    "/sources/spotify/login",
-    "/sources/spotify/status",
-    "/sources/spotify/session",
-    "/sources/spotify/callback",
-    "/sources/spotify/devices",
-    "/sources/spotify/play",
-];
-
-/// Inside [`LISTENER_OWN`], what goes on under every source policy: plays, streams and the play order.
-const LISTENER_OWN_ALWAYS: &[&str] = &[
-    // Problem reports aren't a sign-in either: a listener reports and sees their own whatever
-    // plays through whose sign-ins (feedback.rs keeps each person to theirs)
-    "/feedback",
-    // Usage insights aren't a sign-in: a listener's own choice, Stop for me and Clear mine work
-    // whatever plays through whose sign-ins (usage.rs checks the person)
-    "/usage",
-    "/play-order",
-    "/sources/tidal/stream",
-    "/sources/qobuz/stream",
-    "/sources/spotify/devices",
-    "/sources/spotify/play",
-];
-
-/// Inside [`LISTENER_OWN`], a listener's own sign-in state, which they may still read (GET) when the
-/// node plays through its own sign-ins.
-const LISTENER_OWN_STATUS: &[&str] = &[
-    "/sources/tidal/signin",
-    "/sources/qobuz/signin",
-    "/sources/spotify/signin",
-    "/sources/tidal/status",
-    "/sources/spotify/status",
-    "/sources/tidal/session",
-    "/sources/spotify/session",
-    "/sources/tidal/unofficial",
-    "/sources/qobuz/unofficial",
-];
-
 /// Why a listener can't sign in to their own service under [`SourcePolicy::Node`].
 pub const NODE_SOURCES_ONLY: &str =
     "this node plays everyone's music through its own sign-ins (its owner chose so in Settings)";
 
-/// Inside [`LISTENER_OWN`], still the owner's: checking the node's TIDAL device client.
-const LISTENER_OWN_EXCEPTIONS: &[&str] = &["/sources/tidal/unofficial/client"];
-
-/// Inside [`LISTENER_READS`], still the owner's: identification candidates and suggestions.
-const LISTENER_READ_EXCEPTIONS: &[&str] = &["/candidates", "/suggestions"];
-
-fn under(path: &str, prefixes: &[&str]) -> bool {
-    prefixes
-        .iter()
-        .any(|p| path == *p || path.starts_with(&format!("{p}/")))
-}
-
 /// Whether a listener may use this zone: the owner's list, or every zone when none is set; none
 /// while the list can't be read.
-fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
+pub(crate) fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
     match listener_zones(s) {
         Err(_) => Some("the owner's zone list can't be read"),
         // A listen-along group is open when every zone it plays for is (presence.rs)
@@ -904,70 +775,15 @@ pub fn may_use_zone(s: &NodeState, c: &Caller, zone: &str) -> bool {
     }
 }
 
-/// Whether a listener may make this request. `None` = yes; `Some(why)` = no.
+/// Whether a listener may make this request, by its path (`/v1/zones/kitchen/queue`). `None` =
+/// yes; `Some(why)` = no. The router asks [`crate::access::decide`] with the route it matched;
+/// this is the same answer for callers that hold a path.
 pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'static str> {
-    // Inside the `/v1` router the prefix is gone; take either
-    let path = path.strip_prefix("/v1").unwrap_or(path);
-    if under(path, OWNER_ONLY) {
-        return Some("that is the owner's");
-    }
-    // Their own streaming accounts
-    if under(path, LISTENER_OWN) {
-        if under(path, LISTENER_OWN_EXCEPTIONS) {
-            return Some("that is the owner's");
-        }
-        // The node plays through its own sign-ins: a listener can't sign in to their own (what
-        // they had stays; reads of their own status, plays and streams go on)
-        if !under(path, LISTENER_OWN_ALWAYS)
-            && !(*method == Method::GET && LISTENER_OWN_STATUS.contains(&path))
-            // Signing out of their own stays possible
-            && !(*method == Method::DELETE && LISTENER_OWN_STATUS.contains(&path))
-            && source_policy(&s.library.lock().expect("library poisoned")) == SourcePolicy::Node
-        {
-            return Some(NODE_SOURCES_ONLY);
-        }
-        return None;
-    }
-    // Their own collections, on their own homeserver (personal_collections.rs answers each
-    // person's); the rest of /collections and /playlists stays the owner's
-    if crate::personal_collections::is_own_route(method, path) {
-        return None;
-    }
-    if *method == Method::GET || *method == Method::HEAD {
-        if !under(path, LISTENER_READS) || LISTENER_READ_EXCEPTIONS.iter().any(|x| path.contains(x)) {
-            return Some("that is the owner's");
-        }
-        // A zone's state and queue: only the zones open to listeners (the list itself is fine)
-        if let Some(rest) = path.strip_prefix("/zones/") {
-            return zone_refusal(s, rest.split('/').next().unwrap_or(rest));
-        }
-        return None;
-    }
-    // Playing on a zone the owner allows: its queue, transport, volume and the like
-    if let Some(rest) = path.strip_prefix("/zones/") {
-        let (zone, what) = rest.split_once('/').unwrap_or((rest, ""));
-        if what.is_empty() || what.starts_with("dsp") || what == "crossfade" {
-            return Some("only the owner adds, removes or tunes zones");
-        }
-        return zone_refusal(s, zone);
-    }
-    // The page asks who is signed in, and a listener may sign out
-    if path == "/me" || path.starts_with("/me/") {
-        return None;
-    }
-    // Their own phones and laptops and what those keep offline (devices.rs checks the owner)
-    if path.starts_with("/devices/") {
-        return None;
-    }
-    // Listening along (presence.rs checks the zones)
-    if path == "/presence/along" {
-        return None;
-    }
-    // Their own bookmarks, on their own homeserver (bookmarks.rs answers each person's)
-    if path == "/bookmarks" || path == "/favourites" {
-        return None;
-    }
-    Some("that is the owner's: a listener's own are their bookmarks and collections")
+    let listener = Caller {
+        role: Role::Listener,
+        key: None,
+    };
+    crate::access::decide_path(s, &listener, method, path)
 }
 
 /// The request's caller, from its token: the API token or an owner's browser session is the

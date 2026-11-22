@@ -129,8 +129,8 @@ pub fn who(c: &Caller) -> Option<String> {
     }
 }
 
-/// The zone a request plays on, when it is one that makes the caller the zone's listener
-/// (queueing, transport, loading, radio); `None` for anything else.
+/// The zone segment of a request that makes the caller the zone's listener (queueing, transport,
+/// loading, radio), from its path or the route the router matched; `None` for anything else.
 pub fn zone_written(method: &axum::http::Method, path: &str) -> Option<String> {
     if *method == axum::http::Method::GET || *method == axum::http::Method::HEAD {
         return None;
