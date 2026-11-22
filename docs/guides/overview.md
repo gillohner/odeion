@@ -212,7 +212,8 @@ Every release has a `SHA256SUMS` file to check downloads against.
 
 - Build and run from source, every config option and all deployment shapes:
   [docs/deploy.md](../deploy.md).
-- HTTP and WebSocket API: [docs/api.md](../api.md). Connection and discovery:
+- HTTP and WebSocket API: [docs/api.md](../api.md). Who can do what:
+  [docs/access.md](../access.md). Connection and discovery:
   [docs/CONNECTION.md](../CONNECTION.md). Zones and outputs: [docs/ZONES.md](../ZONES.md).
 - Design decisions: [docs/adr/](../adr/). Releases: [docs/RELEASING.md](../RELEASING.md).
   The app: [crates/pm-desktop/README.md](../../crates/pm-desktop/README.md).

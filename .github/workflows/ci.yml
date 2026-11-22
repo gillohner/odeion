@@ -51,7 +51,9 @@ jobs:
           files=$(git diff --name-only "$BASE" "$GITHUB_SHA")
           code=$(printf '%s\n' "$files" | grep -Ev '^(docs/|NOTICE$|LICENSE$)|\.md$' | grep -c . || true)
           echo "$(printf '%s\n' "$files" | grep -c . || true) files changed, $code outside the docs"
-          if [ "$code" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
+          # docs/access.md is read by a Rust test (pm-api access::tests): a change to it alone runs the code jobs
+          held=$(printf '%s\n' "$files" | grep -cx 'docs/access\.md' || true)
+          if [ "$code" -gt 0 ] || [ "$held" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
           image=$(printf '%s\n' "$files" | grep -Ec '^(Dockerfile|\.dockerignore|Cargo\.(toml|lock)|crates/[^/]+/Cargo\.toml|rust-toolchain(\.toml)?|deploy/docker/|tools/release/|\.github/workflows/)' || true)
           if [ "$EVENT" = push ] || [ "$image" -gt 0 ]; then echo "docker=true" >> "$GITHUB_OUTPUT"; else echo "docker=false" >> "$GITHUB_OUTPUT"; fi
           echo "$image files the image is built from"
