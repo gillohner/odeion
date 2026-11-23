@@ -1022,7 +1022,7 @@ pub(crate) async fn put(
 
 /// The media URL of a track: its document, the transcoding to play, then the URL behind it.
 fn stream_url_blocking(
-    library: &std::sync::Mutex<pm_library::Library>,
+    library: &pm_library::LibraryLock,
     id: &str,
     who: &crate::accounts::Who,
 ) -> Result<(String, Pick), StreamError> {
@@ -1115,7 +1115,7 @@ async fn stream_url(s: &NodeState, id: &str) -> Result<(String, Pick), StreamErr
 }
 
 /// Record how the source did: a failure of the mode itself switches it off.
-pub fn record<T>(library: &std::sync::Mutex<pm_library::Library>, r: &Result<T, StreamError>) {
+pub fn record<T>(library: &pm_library::LibraryLock, r: &Result<T, StreamError>) {
     let Ok(lib) = library.lock() else { return };
     let mut st = load(&lib);
     match r {
@@ -1142,7 +1142,7 @@ pub fn record<T>(library: &std::sync::Mutex<pm_library::Library>, r: &Result<T, 
 
 /// A `soundcloud:track:<id>` for a zone: progressive MP3 as any HTTP source, HLS read back to back.
 pub(crate) fn open_track_blocking(
-    library: &std::sync::Mutex<pm_library::Library>,
+    library: &pm_library::LibraryLock,
     id: &str,
     who: &crate::accounts::Who,
 ) -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::SourceError> {

@@ -66,9 +66,23 @@ pub fn lan_peer(req: &Request, behind_proxy: bool) -> Option<IpAddr> {
     lan.then_some(ip)
 }
 
-/// Layer for the renderer routes: LAN peers only, and the handlers learn who asked.
-pub async fn lan_only(State(s): State<Arc<NodeState>>, mut req: Request, next: Next) -> Response {
-    let Some(ip) = lan_peer(&req, s.is_behind_proxy()) else {
+/// `[api] behind_proxy`, as [`mark_behind_proxy`] puts it on every request: for layers that are
+/// built without the node's state ([`lan_only`] on the open routes).
+#[derive(Debug, Clone, Copy)]
+pub struct BehindProxy(pub bool);
+
+/// Outermost layer of the API: puts [`BehindProxy`] on the request for the layers inside it.
+pub async fn mark_behind_proxy(State(s): State<Arc<NodeState>>, mut req: Request, next: Next) -> Response {
+    req.extensions_mut().insert(BehindProxy(s.is_behind_proxy()));
+    next.run(req).await
+}
+
+/// Layer for the renderer routes: LAN peers only, and the handlers learn who asked. Under
+/// [`mark_behind_proxy`] (`router` puts it outside every route); without it `behind_proxy`
+/// counts as off.
+pub async fn lan_only(mut req: Request, next: Next) -> Response {
+    let behind_proxy = req.extensions().get::<BehindProxy>().is_some_and(|b| b.0);
+    let Some(ip) = lan_peer(&req, behind_proxy) else {
         return (
             StatusCode::FORBIDDEN,
             "the renderer answers on the local network only",
@@ -649,5 +663,57 @@ mod tests {
         assert_eq!(ask().await, StatusCode::UNAUTHORIZED);
         s.set_behind_proxy(false);
         assert_eq!(ask().await, StatusCode::OK);
+    }
+
+    /// The open routes' LAN-only layer is built without the node's state; it still follows
+    /// `[api] behind_proxy`, which the API's outermost layer puts on each request: a renderer's
+    /// event from this machine is refused behind a proxy, and reaches the handler otherwise.
+    #[tokio::test]
+    async fn the_open_routes_lan_check_follows_behind_proxy() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lib.sqlite");
+        let s = NodeState::new(
+            crate::NodeSettings {
+                name: "t".into(),
+                version: "0".into(),
+                db_path: db.clone(),
+                scan_folders: vec![],
+                art_dir: dir.path().join("art"),
+                mirror_dir: dir.path().join("homeserver"),
+                pipeline: pm_audio::PipelineConfig::default(),
+                token: Some("s3cret".into()),
+                subsonic_user: "pubky".into(),
+                pubky: Default::default(),
+                public_url: "http://127.0.0.1:7788".into(),
+                upnp: false,
+                cast: false,
+                slimproto_port: 0,
+                session_secret_path: None,
+                tidal: Default::default(),
+                spotify: Default::default(),
+                acoustid_key: String::new(),
+                jamendo: Default::default(),
+            },
+            pm_library::Library::open(&db).unwrap(),
+            pm_zones::OutputRegistry::new(),
+        );
+        let app = crate::router(s.clone());
+        let notify = || {
+            let app = app.clone();
+            async move {
+                let mut r = axum::http::Request::builder()
+                    .method("NOTIFY")
+                    .uri("/v1/upnp/events/no-such-token")
+                    .body(Body::empty())
+                    .unwrap();
+                r.extensions_mut()
+                    .insert(ConnectInfo("127.0.0.1:50000".parse::<SocketAddr>().unwrap()));
+                app.oneshot(r).await.unwrap().status()
+            }
+        };
+        assert_ne!(notify().await, StatusCode::FORBIDDEN, "reaches the handler");
+        s.set_behind_proxy(true);
+        assert_eq!(notify().await, StatusCode::FORBIDDEN);
     }
 }

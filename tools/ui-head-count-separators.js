@@ -51,7 +51,7 @@ const head = (page) => page.evaluate(() => {
         ['/tracks', 'Songs', '12,840'],
         ['/albums', 'Albums', '1,200'],
         ['/artists', 'Artists', '1,500'],
-        ['/albums', 'Albums (Favourites on)', '0 of 1,200', { fav: true }],
+        ['/albums', 'Albums (Bookmarks on)', '0 of 1,200', { fav: true }],
       ];
       for (const [p, title, want, opts] of PAGES) {
         const what = `${at} ${title}`;
@@ -86,7 +86,7 @@ const head = (page) => page.evaluate(() => {
       }
       // A small count is as before
       {
-        const what = `${at} Playlists`;
+        const what = `${at} Collections`;
         const { page, context, state } = await open('/playlists', { collections: [fx.summary] });
         try {
           const ok = await page.waitForFunction(() => document.querySelector('#main .page-head h2 .count'), null, { timeout: 8000 }).then(() => true, () => false);

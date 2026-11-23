@@ -25,7 +25,7 @@ const REDIRECT = 'https://node.example/spotify/callback';
 const spotifySi = (o = {}) => ({
   source: 'spotify', chosen: null, in_use: o.inUse || null, line: 'Not signed in', imports: [], places: [],
   ways: [
-    way('app', 'Your own Spotify app', 'Official API: Connect control of your Spotify devices, your library and playlists. Set up a free developer app first (two minutes, below).', { recommended: true, action: o.configured ? 'browser' : 'setup' }),
+    way('app', 'Your own Spotify app', 'Official API: Connect control of your Spotify devices, your library and collections. Set up a free developer app first (two minutes, below).', { recommended: true, action: o.configured ? 'browser' : 'setup' }),
     way('librespot', 'librespot, picked in a Spotify app on this network', 'Unofficial: librespot appears as a speaker in your Spotify apps.', { available: !!o.librespot, reason: 'Install librespot first (the Spotify tab says how).' }),
     way('librespot-file', 'librespot with a credentials.json you pick', 'The credentials.json another librespot saved after its sign-in.', { action: 'import', available: !!o.librespot, reason: 'Install librespot first (the Spotify tab says how).' }),
   ],

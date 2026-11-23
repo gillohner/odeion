@@ -128,7 +128,7 @@ async function playlist(browser, width, android) {
     await page.evaluate(() => document.querySelector('#main [data-back]').click());
     await page.waitForTimeout(400);
     const ended = await page.evaluate(() => ({ bars: document.querySelectorAll('.selbar').length, selecting: document.querySelectorAll('.selecting').length }));
-    check(ended.bars === 0 && ended.selecting === 0, `${at}: Back to Playlists ends Select (${ended.bars} bar)`);
+    check(ended.bars === 0 && ended.selecting === 0, `${at}: Back to Collections ends Select (${ended.bars} bar)`);
     const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     check(over <= 0, `${at}: nothing runs past the screen (${over})`);
     check(!state.errors.length, `${at}: no page errors (${state.errors.join('; ')})`);

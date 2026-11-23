@@ -44,7 +44,7 @@ const extras = { body: { collections: [], related: [], concerts: [], similar: []
     const at = `${width}px`;
     await fx.go(page, '/');
     check(await titled(page, 'Odeion'), `${at}: Home's tab says just Odeion (got "${await page.title()}")`);
-    for (const [url, want] of [['/tracks', 'Songs · Odeion'], ['/playlists', 'Playlists · Odeion'], ['/queue', 'Queue · Odeion'], ['/settings', 'Settings · Odeion'], ['/search?q=song', 'Results for “song” · Odeion'], ['/search', 'Search · Odeion'], ['/smart/s1', 'Late night · Odeion']]) {
+    for (const [url, want] of [['/tracks', 'Songs · Odeion'], ['/playlists', 'Collections · Odeion'], ['/queue', 'Queue · Odeion'], ['/settings', 'Settings · Odeion'], ['/search?q=song', 'Results for “song” · Odeion'], ['/search', 'Search · Odeion'], ['/smart/s1', 'Late night · Odeion']]) {
       await fx.go(page, url);
       check(await titled(page, want), `${at}: ${url} names its tab "${want}" (got "${await page.title()}")`);
     }
@@ -73,15 +73,15 @@ const extras = { body: { collections: [], related: [], concerts: [], similar: []
 
     // A playlist, then its song (whose page fails): the song's tab isn't named after the playlist
     await fx.go(page, '/playlist/c1');
-    check(await titled(page, 'Music and notes · Odeion'), `${at}: a playlist's tab says its name (got "${await page.title()}")`);
+    check(await titled(page, 'Music and notes · Odeion'), `${at}: a collection's tab says its name (got "${await page.title()}")`);
     await page.locator('#main a[data-ssong="0"]').click();
     await page.waitForURL(/\/song\/lib-1$/);
     const failedShown = await page.waitForFunction(() => /Not found/.test(document.querySelector('#main').textContent), null, { timeout: 4000 }).then(() => true, () => false);
     // (watched for a while after it draws: the title set after the draw too)
     const seen = new Set(); for (let k = 0; k < 6; k++) { seen.add(await page.title()); await page.waitForTimeout(100); }
-    check(failedShown && seen.size === 1 && seen.has('Odeion'), `${at}: a page that failed to load isn't named after the playlist before it (got ${[...seen].map((t) => `"${t}"`).join(', ')})`);
+    check(failedShown && seen.size === 1 && seen.has('Odeion'), `${at}: a page that failed to load isn't named after the collection before it (got ${[...seen].map((t) => `"${t}"`).join(', ')})`);
     await page.goBack();
-    check(await titled(page, 'Music and notes · Odeion'), `${at}: Back gives the playlist's title again (got "${await page.title()}")`);
+    check(await titled(page, 'Music and notes · Odeion'), `${at}: Back gives the collection's title again (got "${await page.title()}")`);
 
     // An artist's View all albums: whose albums, not the library's Albums; the album opened from it
     // says the same on its Back (shown on a phone; at these widths the breadcrumb stands in for it)

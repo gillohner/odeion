@@ -35,7 +35,7 @@ const streamed = (order) => {
 streamed([101, 102, 103]);
 const PAGES = [
   { at: '/album/lib-7', name: 'Album', rows: '.srow[data-srow]', nth: 1, want: '2', next: '3' },
-  { at: '/playlist/c1', name: 'Playlist', rows: '#plsongs .srow[data-srow]:not([data-card])', nth: 0, want: '1' },
+  { at: '/playlist/c1', name: 'Collection', rows: '#plsongs .srow[data-srow]:not([data-card])', nth: 0, want: '1' },
   { at: '/playlist/c9', name: 'Streamed', rows: '#plsongs .srow[data-srow]:not([data-card])', nth: 0, want: 's101', next: 's102' },
 ];
 
