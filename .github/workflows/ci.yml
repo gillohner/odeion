@@ -385,7 +385,9 @@ jobs:
       - name: the node's CI image
         run: |
           cp target/debug/odeiond deploy/docker/entrypoint.sh deploy/bundle/ci/
-          docker build -q --build-arg APT_MIRROR="${APT_FALLBACK_MIRROR:-}" -t pubky-music-node:ci deploy/bundle/ci
+          # Plain progress, so a stall shows its step. Without a fallback mirror the container's apt
+          # uses the Azure Ubuntu mirror, not the plain-HTTP archive hosts.
+          docker build --progress=plain --build-arg APT_MIRROR="${APT_FALLBACK_MIRROR:-http://azure.archive.ubuntu.com/ubuntu}" -t pubky-music-node:ci deploy/bundle/ci
           # The image carries ffmpeg with the encoders downloads use
           docker run --rm --entrypoint ffmpeg pubky-music-node:ci -hide_banner -encoders | grep -E ' aac | libmp3lame | libopus ' | wc -l | grep -qx 3
       - name: docker compose up
