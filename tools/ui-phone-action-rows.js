@@ -33,7 +33,7 @@ const row = (page, scope) => page.evaluate(([scope, icons]) => {
   return { buttons: r, rows: r.some((b) => b.top > first + 20) ? 2 : 1, sw: document.documentElement.scrollWidth, vw: innerWidth };
 }, [scope, ICONS]);
 // The playlist hero's eyebrow as shown (its visible words and line count) and the sharing note's words
-const eyebrow = (page) => page.evaluate(() => { const e = document.querySelector('#main > .hero .eyebrow'); const n = document.querySelector('#main > .hero .actions + p.muted'); const lh = parseFloat(getComputedStyle(e).lineHeight) || parseFloat(getComputedStyle(e).fontSize) * 1.2; return { text: e.innerText.trim().replace(/\s+/g, ' ').replace(/^PLAYLIST/, 'Playlist'), lines: Math.round(e.getBoundingClientRect().height / lh), note: n ? n.textContent.trim() : '' }; });
+const eyebrow = (page) => page.evaluate(() => { const e = document.querySelector('#main > .hero .eyebrow'); const n = document.querySelector('#main > .hero .actions + p.muted'); const lh = parseFloat(getComputedStyle(e).lineHeight) || parseFloat(getComputedStyle(e).fontSize) * 1.2; return { text: e.innerText.trim().replace(/\s+/g, ' ').replace(/^COLLECTION/, 'Collection'), lines: Math.round(e.getBoundingClientRect().height / lh), note: n ? n.textContent.trim() : '' }; });
 const fmt = (r) => r.buttons.map((b) => `${b.id || b.text}:${b.w.toFixed(0)}×${b.h.toFixed(0)}`).join(' ');
 
 async function phone(browser, width, android) {
@@ -45,7 +45,7 @@ async function phone(browser, width, android) {
   // A playlist: Play, Shuffle, Play on…, Share on Pubky and ⋯, all 44 px, on one row
   await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plsongs .srow'); await page.waitForTimeout(300);
   const pl = await row(page, '#main > .hero');
-  check(pl.buttons.length === 5 && pl.buttons.every((b) => b.h >= 44), `${at}: a playlist's five buttons are 44 px tall (${fmt(pl)})`);
+  check(pl.buttons.length === 5 && pl.buttons.every((b) => b.h >= 44), `${at}: a collection's five buttons are 44 px tall (${fmt(pl)})`);
   check(pl.buttons.filter((b) => b.icon).length === 3 && pl.buttons.filter((b) => b.icon).every((b) => b.w >= 44), `${at}: its icon buttons (Play on…, Share, ⋯) are 44 px wide`);
   check(pl.rows === 1 && pl.sw <= pl.vw, `${at}: they stay on one row, ⋯ included (${pl.rows} rows, page ${pl.sw} of ${pl.vw})`);
   const shuf = pl.buttons.find((b) => b.id === 'plshuffle');
@@ -60,19 +60,19 @@ async function phone(browser, width, android) {
   await page.setViewportSize({ width, height: width === 360 ? 640 : 732 }); await page.waitForTimeout(200);
   const hd = await page.evaluate(() => { const b = (q) => { const e = document.querySelector(q); if (!e) return null; const r = e.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, w: r.width }; }; const s = document.querySelector('#plsongs .srow'); return { art: b('#main > .hero > .art'), h1: b('#main > .hero h1'), eyebrow: b('#main > .hero .eyebrow'), sub: b('#main > .hero .sub'), play: b('#plplay'), note: b('#main > .hero .actions + p.muted'), main: b('#main'), song: s && b('#plsongs .srow'), songName: s && s.querySelector('.name').textContent.trim() }; });
   const beside = hd.art && [hd.eyebrow, hd.h1, hd.sub].every((e) => e && e.left >= hd.art.right + 8 && e.top < hd.art.bottom);
-  check(hd.art && Math.round(hd.art.w) === 112 && beside, `${at}: a playlist's header is compact, its kind, name and count beside its 112 px cover (cover ${hd.art && hd.art.w.toFixed(0)} px, name at x ${hd.h1 && hd.h1.left.toFixed(0)})`);
+  check(hd.art && Math.round(hd.art.w) === 112 && beside, `${at}: a collection's header is compact, its kind, name and count beside its 112 px cover (cover ${hd.art && hd.art.w.toFixed(0)} px, name at x ${hd.h1 && hd.h1.left.toFixed(0)})`);
   check(hd.play && hd.play.top >= hd.art.bottom && hd.note && Math.abs(hd.note.left - hd.art.left) < 1 && hd.note.top > hd.play.bottom, `${at}: Play's row and the sharing note sit under the cover, full width`);
   check(hd.song && hd.song.top < hd.main.bottom, `${at}: its first song ("${hd.songName}") starts on the first screen (y ${hd.song && hd.song.top.toFixed(0)}, visible to ${hd.main.bottom.toFixed(0)})`);
   // The kind alone beside the cover, on one line: where it is kept and who sees it is said once, by the sharing
   // note under the buttons (the eyebrow said "PLAYLIST · PRIVATE · ON THIS NODE" on two lines, and the note again)
   const eb = await eyebrow(page);
-  check(eb.text === 'Playlist' && eb.lines === 1, `${at}: a playlist's eyebrow is "Playlist" on one line ("${eb.text}", ${eb.lines} lines)`);
+  check(eb.text === 'Collection' && eb.lines === 1, `${at}: a collection's eyebrow is "Collection" on one line ("${eb.text}", ${eb.lines} lines)`);
   check(/^Private on this node/.test(eb.note), `${at}: the sharing note under the buttons says where it is ("${eb.note}")`);
   await page.screenshot({ path: path.join(SHOTS, `playlist-header-${android ? 'android' : 'browser'}-${width}.png`) });
   await page.setViewportSize({ width, height: 900 }); await page.waitForTimeout(100);
   // still one tap: ⋯ opens the playlist's menu
   await page.locator('#plmore').tap(); await page.waitForTimeout(200);
-  check(await page.locator('.popover.menu:not([hidden])').count() === 1, `${at}: one tap on ⋯ opens the playlist's menu`);
+  check(await page.locator('.popover.menu:not([hidden])').count() === 1, `${at}: one tap on ⋯ opens the collection's menu`);
   await page.keyboard.press('Escape');
 
   // A public playlist (no Pubky sign-in here, so no Copy link): Make private takes Share's place, the
@@ -81,9 +81,9 @@ async function phone(browser, width, android) {
   state.fixtures['/playlists/c1'] = { body: { ...fx.detail, summary: pub } }; state.collections = [pub];
   await fx.go(page, '/playlists'); await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plunshare'); await page.waitForTimeout(300);
   const pp = await row(page, '#main > .hero');
-  check(pp.buttons.length === 5 && pp.buttons.every((b) => b.h >= 44) && pp.rows === 1, `${at}: a public playlist's row too (${fmt(pp)}, ${pp.rows} rows)`);
+  check(pp.buttons.length === 5 && pp.buttons.every((b) => b.h >= 44) && pp.rows === 1, `${at}: a public collection's row too (${fmt(pp)}, ${pp.rows} rows)`);
   const peb = await eyebrow(page);
-  check(peb.text === 'Playlist' && peb.lines === 1 && /^Public/.test(peb.note), `${at}: a public playlist's eyebrow is "Playlist" too, its note says public ("${peb.text}"; "${peb.note}")`);
+  check(peb.text === 'Collection' && peb.lines === 1 && /^Public/.test(peb.note), `${at}: a public collection's eyebrow is "Collection" too, its note says public ("${peb.text}"; "${peb.note}")`);
   delete state.fixtures['/playlists/c1']; state.collections = [fx.summary];
 
   // An album keeps its 48 px row
@@ -140,10 +140,10 @@ async function narrow(browser, width, android, k, zoom) {
   const r = await row(page, '#main > .hero');
   const look = await page.evaluate(() => { const ic = (id) => getComputedStyle(document.querySelector(`#${id} > .ic`)).display !== 'none'; return { fs: parseFloat(getComputedStyle(document.querySelector('#plplay')).fontSize), gap: parseFloat(getComputedStyle(document.querySelector('#main > .hero .actions')).columnGap), play: ic('plplay'), shuffle: ic('plshuffle'), pad: parseFloat(getComputedStyle(document.querySelector('#plplay')).paddingLeft), shufPad: parseFloat(getComputedStyle(document.querySelector('#plshuffle')).paddingLeft) }; });
   check(Math.abs(look.fs - 14 * k) < 0.1, `${at}: Play's words are ${look.fs.toFixed(1)} px (the scaled size held)`);
-  check(r.buttons.length === 5 && r.rows === 1 && r.sw <= r.vw, `${at}: a playlist's five buttons stay on one row, ⋯ included (${fmt(r)}, ${r.rows} rows, page ${r.sw} of ${r.vw})`);
+  check(r.buttons.length === 5 && r.rows === 1 && r.sw <= r.vw, `${at}: a collection's five buttons stay on one row, ⋯ included (${fmt(r)}, ${r.rows} rows, page ${r.sw} of ${r.vw})`);
   check(r.buttons.every((b) => b.h >= 44 && b.w >= 44), `${at}: every button is still a 44 px tap`);
   const neb = await eyebrow(page);
-  check(neb.text === 'Playlist' && neb.lines === 1, `${at}: the eyebrow is still "Playlist" on one line ("${neb.text}", ${neb.lines} lines)`);
+  check(neb.text === 'Collection' && neb.lines === 1, `${at}: the eyebrow is still "Collection" on one line ("${neb.text}", ${neb.lines} lines)`);
   check(r.buttons.find((b) => b.id === 'plplay').text === 'Play' && r.buttons.find((b) => b.id === 'plshuffle').text === 'Shuffle', `${at}: Play and Shuffle keep their words`);
   // what gives way, in order: [the row's gap, Play's icon shown, Shuffle's icon shown]; Play's and Shuffle's
   // sides follow the gap. The normal font size at 360/412 px is the row as before.
@@ -154,7 +154,7 @@ async function narrow(browser, width, android, k, zoom) {
   if (k !== 1.15) await page.locator('#main > .hero').screenshot({ path: path.join(SHOTS, `playlist-row-${android ? 'android' : 'browser'}-${width}-${Math.round(k * 100)}${zoom ? '-textzoom' : ''}.png`) });
   // still one tap: ⋯ opens the playlist's menu
   await page.locator('#plmore').tap(); await page.waitForTimeout(200);
-  check(await page.locator('.popover.menu:not([hidden])').count() === 1, `${at}: one tap on ⋯ opens the playlist's menu`);
+  check(await page.locator('.popover.menu:not([hidden])').count() === 1, `${at}: one tap on ⋯ opens the collection's menu`);
   await context.close();
 }
 
@@ -247,11 +247,11 @@ async function bookmarked(browser, width, android) {
   check(eq === '12px', `${at}: a bookmarked song playing keeps its 12 px bars before the title (${eq})`);
   // ⋯ → Remove from favourites: the mark goes
   await page.locator('#tracklist .track').nth(2).locator('[data-act="more"]').tap();
-  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from favourites' }).tap();
+  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from Bookmarks' }).tap();
   await page.waitForFunction(() => !document.querySelectorAll('#tracklist .track')[2].querySelector('.heart.on'), null, { timeout: 5000 }).catch(() => {});
   await page.waitForTimeout(200);
   m = await marks(page, '#tracklist .track', '.title');
-  check(!m[2].shown, `${at}: ⋯ → Remove from favourites takes its heart away (${m.map((x) => `${x.name}:${x.shown}`).join(' ')})`);
+  check(!m[2].shown, `${at}: ⋯ → Remove from Bookmarks takes its heart away (${m.map((x) => `${x.name}:${x.shown}`).join(' ')})`);
   check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
   await context.close();
 }
@@ -300,11 +300,11 @@ async function playingBars(browser, width, mobile) {
     state.collections = [fx.summary];
     await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plsongs .srow'); await page.waitForTimeout(300);
     const d = await row(page, '#main > .hero');
-    check(d.buttons.length >= 5 && d.buttons.every((b) => b.h < 44) && d.rows === 1, `desktop 1280: a playlist's row is unchanged (${fmt(d)})`);
+    check(d.buttons.length >= 5 && d.buttons.every((b) => b.h < 44) && d.rows === 1, `desktop 1280: a collection's row is unchanged (${fmt(d)})`);
     const dart = await page.evaluate(() => { const a = document.querySelector('#main > .hero > .art').getBoundingClientRect(); const h = document.querySelector('#main > .hero h1').getBoundingClientRect(); return { w: a.width, beside: h.left > a.right }; });
-    check(dart.w === 220 && dart.beside, `desktop 1280: a playlist's header keeps its 220 px cover beside the words (${dart.w} px)`);
+    check(dart.w === 220 && dart.beside, `desktop 1280: a collection's header keeps its 220 px cover beside the words (${dart.w} px)`);
     const deb = await eyebrow(page);
-    check(deb.text === 'Playlist' && /^Private on this node/.test(deb.note), `desktop 1280: a playlist's eyebrow is "Playlist" there too, its note says where ("${deb.text}"; "${deb.note}")`);
+    check(deb.text === 'Collection' && /^Private on this node/.test(deb.note), `desktop 1280: a collection's eyebrow is "Collection" there too, its note says where ("${deb.text}"; "${deb.note}")`);
     await fx.go(page, '/library/import'); await page.waitForSelector('#roonfav'); await page.waitForTimeout(300);
     const dh = await page.evaluate(() => [...document.querySelectorAll('#main label.check:has(#roonfav, #roonpl, #roontags)')].map((l) => l.getBoundingClientRect().height));
     check(dh.length === 3 && dh.every((h) => h < 30), `desktop 1280: Roon's options stay lines of text (${dh.map((h) => h.toFixed(0)).join(' ')})`);

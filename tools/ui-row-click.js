@@ -21,7 +21,7 @@ const check = (cond, msg) => { if (cond) { ok++; console.log(`ok   ${msg}`); } e
 const path0 = (page) => new URL(page.url()).pathname;
 const PAGES = [
   { at: '/tracks', name: 'Songs', ready: '.tracks[data-list="all"] .track', nth: 1, next: true },
-  { at: '/favourites', name: 'Favourites', ready: '.tracks[data-list="fav"] .track', nth: 0, opts: { favs: [fx.SONG] } },
+  { at: '/favourites', name: 'Bookmarks', ready: '.tracks[data-list="fav"] .track', nth: 0, opts: { favs: [fx.SONG] } },
 ];
 
 // Each time the app's player is given a song's file (a fixture's play() is a no-op), by track id
@@ -54,7 +54,7 @@ async function desktop(browser, width) {
       await fx.go(page, pg.at);
       const row = page.locator(pg.ready).nth(pg.nth); await row.waitFor(); await page.waitForTimeout(400); await reset(page);
       const want = await row.getAttribute('data-tid');
-      check(await row.evaluate((r) => getComputedStyle(r).cursor) === 'pointer', `${label}: the row shows a pointer, as a playlist's song row does`);
+      check(await row.evaluate((r) => getComputedStyle(r).cursor) === 'pointer', `${label}: the row shows a pointer, as a collection's song row does`);
       // one click on the row's length plays from that row, and stays on the page
       await row.locator('.dur').click(); await page.waitForTimeout(500);
       check(JSON.stringify(await starts(page)) === JSON.stringify([want]), `${label}: a click on the row plays that song (${JSON.stringify(await starts(page))}, want [${want}])`);

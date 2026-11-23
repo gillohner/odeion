@@ -10,7 +10,7 @@ use pm_model::AudioFormat;
 use pm_model::{Album, Artist, AudioFile, Confidence, Isrc, Mbid, MusicUri, SampleKind, Track, TrackId, Upc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -37,6 +37,34 @@ const MIGRATIONS: &[(i64, &str)] = &[
 
 pub struct Library {
     conn: Mutex<Connection>,
+    /// Answers about the whole library, kept until the database changes ([`Summaries`]).
+    summaries: Mutex<Summaries>,
+    /// Counts the times the database was replaced whole ([`Library::restore_from`]), which
+    /// neither of SQLite's own change counters sees.
+    replaced: std::sync::atomic::AtomicU64,
+    /// How often a summary was worked out rather than taken from [`Summaries`] (tests).
+    #[cfg(test)]
+    summary_builds: std::sync::atomic::AtomicU64,
+}
+
+/// The database's content as far as this connection can tell: `PRAGMA data_version` (moves when
+/// another connection commits), `total_changes` (rows this connection wrote) and
+/// [`Library::replaced`].
+type DbState = (i64, u64, u64);
+
+/// What every page asks about the whole library: its counts, its artists and genres, and which
+/// tracks are copies of one song. Each reads every track (0.1 s at 50,000 tracks, with the
+/// connection held), and a page load asks for several, so they are kept until the database
+/// changes ([`DbState`]). Only committed states are kept: inside an open transaction
+/// ([`Library::begin_batch`]) they are worked out each time.
+#[derive(Default)]
+struct Summaries {
+    at: Option<DbState>,
+    reps: Option<Arc<std::collections::HashMap<i64, i64>>>,
+    stats: Option<LibraryStats>,
+    artists: Option<Arc<Vec<ArtistSummary>>>,
+    unknown_artist: Option<Option<ArtistSummary>>,
+    genres: Option<Arc<Vec<GenreSummary>>>,
 }
 
 /// How far ahead of the node a device's clock may run for [`Library::record_play_at`] to keep a
@@ -506,6 +534,10 @@ impl Library {
         )?;
         let lib = Library {
             conn: Mutex::new(conn),
+            summaries: Mutex::default(),
+            replaced: Default::default(),
+            #[cfg(test)]
+            summary_builds: Default::default(),
         };
         lib.migrate()?;
         lib.tidy_file_name_titles()?;
@@ -673,6 +705,62 @@ impl Library {
 
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The state a summary may be kept for, or `None` inside an open transaction (its writes
+    /// may still be rolled back, which no counter shows).
+    fn db_state(&self, conn: &Connection) -> Result<Option<DbState>> {
+        if !conn.is_autocommit() {
+            return Ok(None);
+        }
+        let version: i64 = conn.pragma_query_value(None, "data_version", |r| r.get(0))?;
+        let replaced = self.replaced.load(std::sync::atomic::Ordering::Acquire);
+        Ok(Some((version, conn.total_changes(), replaced)))
+    }
+
+    /// One of the [`Summaries`]: the kept answer when the database is as it was, else `make`'s,
+    /// which is kept unless the database changed while it was worked out.
+    fn summary<T: Clone>(
+        &self,
+        conn: &Connection,
+        slot: fn(&mut Summaries) -> &mut Option<T>,
+        make: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        let Some(state) = self.db_state(conn)? else {
+            return make(conn);
+        };
+        {
+            let mut kept = self.summaries.lock().unwrap_or_else(|p| p.into_inner());
+            if kept.at != Some(state) {
+                *kept = Summaries {
+                    at: Some(state),
+                    ..Default::default()
+                };
+            }
+            if let Some(v) = slot(&mut kept) {
+                return Ok(v.clone());
+            }
+        }
+        #[cfg(test)]
+        self.summary_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let v = make(conn)?;
+        if self.db_state(conn)? == Some(state) {
+            let mut kept = self.summaries.lock().unwrap_or_else(|p| p.into_inner());
+            if kept.at == Some(state) {
+                *slot(&mut kept) = Some(v.clone());
+            }
+        }
+        Ok(v)
+    }
+
+    /// Which song each present track is ([`song_reps`]) over the whole library.
+    fn all_song_reps(&self, conn: &Connection) -> Result<Arc<std::collections::HashMap<i64, i64>>> {
+        self.summary(
+            conn,
+            |s| &mut s.reps,
+            |conn| Ok(Arc::new(song_reps(&song_rows(conn, "ORDER BY t.id", [])?))),
+        )
     }
 
     /// Start grouping writes into one commit (a scan writes thousands of rows; one commit per
@@ -1179,7 +1267,7 @@ impl Library {
     pub fn track_ids_by_hash_prefix(&self) -> Result<std::collections::HashMap<String, TrackId>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT substr(h.blake3, 1, 16), f.track_id FROM file_hashes h JOIN files f ON f.path = h.path AND f.missing = 0",
+            "SELECT substr(h.blake3, 1, 16), f.track_id FROM file_hashes h JOIN files f ON f.path = h.path AND +f.missing = 0",
         )?;
         let mut out = std::collections::HashMap::new();
         for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
@@ -1247,7 +1335,7 @@ impl Library {
     /// homeserver's private files to the songs they are: `name -> track id`.
     pub fn track_ids_by_file_name(&self) -> Result<std::collections::HashMap<String, TrackId>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT path, track_id FROM files WHERE missing = 0")?;
+        let mut stmt = conn.prepare("SELECT path, track_id FROM files WHERE +missing = 0")?;
         let mut out = std::collections::HashMap::new();
         for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
             let (path, id) = row?;
@@ -1281,7 +1369,7 @@ impl Library {
         let conn = self.lock();
         let filter = match focus {
             Some(f) => format!(
-                " AND EXISTS (SELECT 1 FROM tracks t JOIN files f ON f.track_id = t.id WHERE t.album_id = albums.id AND f.missing = 0 AND {})",
+                " AND EXISTS (SELECT 1 FROM tracks t JOIN files f ON f.track_id = t.id WHERE t.album_id = albums.id AND +f.missing = 0 AND {})",
                 f.predicate()
             ),
             None => format!(" AND {ALBUM_PRESENT}"),
@@ -1302,7 +1390,7 @@ impl Library {
             "SELECT t.album_id, f.container, f.sample_kind, f.rate_hz, f.bits,
                     MAX(f.rate_hz * 100 + f.bits)
              FROM files f JOIN tracks t ON t.id = f.track_id
-             WHERE t.album_id IS NOT NULL AND f.missing = 0
+             WHERE t.album_id IS NOT NULL AND +f.missing = 0
              GROUP BY t.album_id ORDER BY t.album_id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1354,7 +1442,19 @@ impl Library {
     /// Every artist with how many albums and tracks they appear on, by name.
     pub fn list_artists(&self) -> Result<Vec<ArtistSummary>> {
         let conn = self.lock();
-        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        Ok(self.artists(&conn)?.as_ref().clone())
+    }
+
+    fn artists(&self, conn: &Connection) -> Result<Arc<Vec<ArtistSummary>>> {
+        self.summary(
+            conn,
+            |s| &mut s.artists,
+            |conn| self.read_artists(conn).map(Arc::new),
+        )
+    }
+
+    fn read_artists(&self, conn: &Connection) -> Result<Vec<ArtistSummary>> {
+        let reps = self.all_song_reps(conn)?;
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT a.id, a.name, a.mbid, t.id, t.album_id
              FROM artists a
@@ -1397,14 +1497,23 @@ impl Library {
     }
 
     pub fn get_artist(&self, id: i64) -> Result<Option<ArtistSummary>> {
-        Ok(self.list_artists()?.into_iter().find(|a| a.id == id))
+        let conn = self.lock();
+        Ok(self.artists(&conn)?.iter().find(|a| a.id == id).cloned())
     }
 
     /// Songs with no artist at all, shown as "Unknown artist" (second review: they were in no
     /// artist's list). `None` when every song has one.
     pub fn unknown_artist(&self) -> Result<Option<ArtistSummary>> {
         let conn = self.lock();
-        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        self.summary(
+            &conn,
+            |s| &mut s.unknown_artist,
+            |conn| self.read_unknown_artist(conn),
+        )
+    }
+
+    fn read_unknown_artist(&self, conn: &Connection) -> Result<Option<ArtistSummary>> {
+        let reps = self.all_song_reps(conn)?;
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT t.id, t.album_id FROM tracks t
              WHERE NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id) AND {TRACK_PRESENT}"
@@ -1490,7 +1599,7 @@ impl Library {
     pub fn random_tracks(&self, limit: u32) -> Result<Vec<Track>> {
         let conn = self.lock();
         // Songs drawn, not files: a song kept in two copies is no likelier than one kept once
-        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        let reps = self.all_song_reps(&conn)?;
         let songs: std::collections::BTreeSet<i64> = reps.values().copied().collect();
         let list = format!(
             "[{}]",
@@ -1743,7 +1852,10 @@ impl Library {
     pub fn restore_from(&self, path: &Path) -> Result<()> {
         {
             let mut conn = self.lock();
-            conn.restore(rusqlite::MAIN_DB, path, None::<fn(rusqlite::backup::Progress)>)?;
+            let restored = conn.restore(rusqlite::MAIN_DB, path, None::<fn(rusqlite::backup::Progress)>);
+            // Counted whether it went in or stopped part-way: what was kept is of the old content
+            self.replaced.fetch_add(1, std::sync::atomic::Ordering::Release);
+            restored?;
         }
         if let Err(e) = self.migrate() {
             tracing::error!("after a restore, the schema pass failed: {e}");
@@ -1816,7 +1928,7 @@ impl Library {
             .prepare(
                 "SELECT al.id, MIN(f.path) FROM albums al
                  JOIN tracks t ON t.album_id = al.id
-                 JOIN files f ON f.track_id = t.id AND f.missing = 0
+                 JOIN files f ON f.track_id = t.id AND +f.missing = 0
                  LEFT JOIN album_art aa ON aa.album_id = al.id
                  WHERE aa.album_id IS NULL GROUP BY al.id",
             )?
@@ -1845,7 +1957,7 @@ impl Library {
             .prepare(
                 "SELECT f.path, f.size_bytes, substr(h.blake3, 1, 16) FROM files f
                  LEFT JOIN file_hashes h ON h.path = f.path AND h.size_bytes = f.size_bytes
-                 WHERE f.missing = 0 AND f.path >= ?1 AND f.path < ?2 ORDER BY f.path",
+                 WHERE +f.missing = 0 AND f.path >= ?1 AND f.path < ?2 ORDER BY f.path",
             )?
             .query_map(params![prefix, upper], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?))
@@ -1867,7 +1979,7 @@ impl Library {
                 "SELECT f.path, al.id, al.title FROM files f
                  JOIN tracks t ON t.id = f.track_id
                  JOIN albums al ON al.id = t.album_id
-                 WHERE f.missing = 0 AND f.path LIKE ?1 ESCAPE '\\'",
+                 WHERE +f.missing = 0 AND f.path LIKE ?1 ESCAPE '\\'",
             )?
             .query_map(params![format!("{}%", like_escape(&prefix))], |r| {
                 Ok((PathBuf::from(r.get::<_, String>(0)?), r.get(1)?, r.get(2)?))
@@ -1931,7 +2043,7 @@ impl Library {
         let conn = self.lock();
         let mut st = conn.prepare(
             "SELECT t.id, f.path, f.size_bytes, f.mtime_unix FROM tracks t
-             JOIN files f ON f.track_id = t.id AND f.missing = 0 AND f.sample_kind = 'pcm'
+             JOIN files f ON f.track_id = t.id AND +f.missing = 0 AND f.sample_kind = 'pcm'
              LEFT JOIN track_loudness l ON l.track_id = t.id
              WHERE t.replaygain_track_gain_db IS NULL
                AND f.path NOT LIKE '%://%'
@@ -2031,7 +2143,7 @@ impl Library {
         )?;
         let todo: i64 = conn.query_row(
             "SELECT COUNT(*) FROM tracks t
-             JOIN files f ON f.track_id = t.id AND f.missing = 0 AND f.sample_kind = 'pcm'
+             JOIN files f ON f.track_id = t.id AND +f.missing = 0 AND f.sample_kind = 'pcm'
              LEFT JOIN track_loudness l ON l.track_id = t.id
              WHERE t.replaygain_track_gain_db IS NULL AND f.path NOT LIKE '%://%'
                AND (l.track_id IS NULL OR l.size_bytes != f.size_bytes OR l.mtime_unix != f.mtime_unix)",
@@ -2046,7 +2158,19 @@ impl Library {
     /// Every genre with track and album counts, by name.
     pub fn list_genres(&self) -> Result<Vec<GenreSummary>> {
         let conn = self.lock();
-        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        Ok(self.genres(&conn)?.as_ref().clone())
+    }
+
+    fn genres(&self, conn: &Connection) -> Result<Arc<Vec<GenreSummary>>> {
+        self.summary(
+            conn,
+            |s| &mut s.genres,
+            |conn| self.read_genres(conn).map(Arc::new),
+        )
+    }
+
+    fn read_genres(&self, conn: &Connection) -> Result<Vec<GenreSummary>> {
+        let reps = self.all_song_reps(conn)?;
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT g.id, g.name, t.id, t.album_id
              FROM genres g JOIN track_genres tg ON tg.genre_id = g.id JOIN tracks t ON t.id = tg.track_id
@@ -2083,14 +2207,17 @@ impl Library {
     }
 
     pub fn get_genre(&self, id: i64) -> Result<Option<GenreSummary>> {
-        Ok(self.list_genres()?.into_iter().find(|g| g.id == id))
+        let conn = self.lock();
+        Ok(self.genres(&conn)?.iter().find(|g| g.id == id).cloned())
     }
 
     pub fn genre_by_name(&self, name: &str) -> Result<Option<GenreSummary>> {
+        let conn = self.lock();
         Ok(self
-            .list_genres()?
-            .into_iter()
-            .find(|g| g.name.eq_ignore_ascii_case(name.trim())))
+            .genres(&conn)?
+            .iter()
+            .find(|g| g.name.eq_ignore_ascii_case(name.trim()))
+            .cloned())
     }
 
     /// Albums with at least one track of the genre, by artist then title.
@@ -2293,7 +2420,7 @@ impl Library {
     pub fn tracks_by_file_name(&self, name: &str) -> Result<Vec<Track>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
-            "{TRACK_SELECT} WHERE fi.path LIKE ?1 ESCAPE '\\' AND fi.missing = 0 LIMIT 20"
+            "{TRACK_SELECT} WHERE fi.path LIKE ?1 ESCAPE '\\' AND +fi.missing = 0 LIMIT 20"
         ))?;
         let escaped = name.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let raws: Vec<RawTrack> = stmt
@@ -2708,7 +2835,7 @@ impl Library {
         let ids: Vec<i64> = {
             let conn = self.lock();
             let mut stmt = conn.prepare(
-                "SELECT ta.track_id FROM track_artists ta JOIN files f ON f.track_id = ta.track_id AND f.missing = 0
+                "SELECT ta.track_id FROM track_artists ta JOIN files f ON f.track_id = ta.track_id AND +f.missing = 0
                  GROUP BY ta.track_id HAVING COUNT(*) > 1 ORDER BY ta.track_id",
             )?;
             let v = stmt
@@ -2969,7 +3096,7 @@ impl Library {
     pub fn suggested_track_paths(&self) -> Result<Vec<(i64, String)>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT t.id, f.path FROM tracks t JOIN files f ON f.track_id = t.id AND f.missing = 0
+            "SELECT t.id, f.path FROM tracks t JOIN files f ON f.track_id = t.id AND +f.missing = 0
              WHERE t.canonical_uri IS NULL AND EXISTS (SELECT 1 FROM identify_suggestions s WHERE s.track_id = t.id)
                AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped')
              ORDER BY t.id",
@@ -3411,7 +3538,7 @@ impl Library {
     pub fn input_generations(&self) -> Result<std::collections::HashMap<i64, String>> {
         let ids: Vec<(i64, String)> = {
             let conn = self.lock();
-            let mut stmt = conn.prepare("SELECT track_id, path FROM files WHERE missing = 0")?;
+            let mut stmt = conn.prepare("SELECT track_id, path FROM files WHERE +missing = 0")?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<std::result::Result<_, _>>()?;
@@ -3593,7 +3720,7 @@ impl Library {
             let (open, state, present, offered, turned_down): (Option<bool>, Option<String>, bool, bool, bool) = conn.query_row(
                 "SELECT (SELECT canonical_uri IS NULL FROM tracks WHERE id = ?1),
                         (SELECT state FROM identify_state WHERE track_id = ?1),
-                        EXISTS (SELECT 1 FROM files f WHERE f.track_id = ?1 AND f.missing = 0),
+                        EXISTS (SELECT 1 FROM files f WHERE f.track_id = ?1 AND +f.missing = 0),
                         EXISTS (SELECT 1 FROM identify_suggestions o WHERE o.track_id = ?1 AND o.recording_mbid = ?2),
                         EXISTS (SELECT 1 FROM identify_rejections WHERE track_id = ?1)",
                 params![track, rec],
@@ -3921,7 +4048,7 @@ impl Library {
     /// Library files present on disk whose size is one of `sizes`: (path, size, mtime).
     pub fn files_of_sizes(&self, sizes: &std::collections::HashSet<u64>) -> Result<Vec<(PathBuf, u64, i64)>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT path, size_bytes, mtime_unix FROM files WHERE missing = 0")?;
+        let mut stmt = conn.prepare("SELECT path, size_bytes, mtime_unix FROM files WHERE +missing = 0")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 PathBuf::from(r.get::<_, String>(0)?),
@@ -4017,21 +4144,25 @@ impl Library {
 
     pub fn stats(&self) -> Result<LibraryStats> {
         let conn = self.lock();
+        self.summary(&conn, |s| &mut s.stats, |conn| self.read_stats(conn))
+    }
+
+    fn read_stats(&self, conn: &Connection) -> Result<LibraryStats> {
         let count =
             |sql: &str| -> Result<u64> { Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64) };
         Ok(LibraryStats {
             // Songs and albums the lists show: copies of a song once, gone files left out
             tracks: {
-                let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+                let reps = self.all_song_reps(conn)?;
                 reps.values().collect::<std::collections::HashSet<_>>().len() as u64
             },
             albums: count(&format!("SELECT COUNT(*) FROM albums WHERE {ALBUM_PRESENT}"))?,
             artists: count(&format!(
                 "SELECT COUNT(DISTINCT ta.artist_id) FROM track_artists ta JOIN tracks t ON t.id = ta.track_id WHERE {TRACK_PRESENT}"
             ))?,
-            files: count("SELECT COUNT(*) FROM files WHERE missing = 0")?,
+            files: count("SELECT COUNT(*) FROM files WHERE +missing = 0")?,
             missing_files: count("SELECT COUNT(*) FROM files WHERE missing = 1")?,
-            total_duration_ms: count("SELECT COALESCE(SUM(duration_ms), 0) FROM files WHERE missing = 0")?,
+            total_duration_ms: count("SELECT COALESCE(SUM(duration_ms), 0) FROM files WHERE +missing = 0")?,
         })
     }
 
@@ -4043,8 +4174,24 @@ impl Library {
         Ok(())
     }
 
-    /// Forget a library folder: its files, the tracks that lived only there,
+    /// Whether `path` is a folder this library was given ([`Self::add_folder`]) or scanned as a
+    /// root ([`Self::begin_scan`]): what a request may ask [`Self::remove_folder`] to forget.
+    /// A slash at the end makes no difference, on either side: a folder from the config is
+    /// stored as it is written there.
+    pub fn is_root(&self, path: &Path) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "SELECT EXISTS (SELECT 1 FROM folders WHERE rtrim(path, '/') = rtrim(?1, '/'))
+                 OR EXISTS (SELECT 1 FROM scans WHERE rtrim(root, '/') = rtrim(?1, '/'))",
+            params![path.to_string_lossy()],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Forget a library folder: its files, the tracks that lived only there (with their plays),
     /// and the albums and artists left empty. Returns `(files, tracks)` removed.
+    ///
+    /// Everything under `root` goes, whatever `root` is: a caller that takes the path from
+    /// outside checks it with [`Self::is_root`] first.
     pub fn remove_folder(&self, root: &Path) -> Result<(u64, u64)> {
         let mut conn = self.lock();
         let tx = conn.savepoint()?;
@@ -4090,7 +4237,11 @@ impl Library {
             "DELETE FROM genres WHERE id NOT IN (SELECT DISTINCT genre_id FROM track_genres)",
             [],
         )?;
-        tx.execute("DELETE FROM folders WHERE path = ?1", params![root_s])?;
+        // (with or without a slash at the end, as the files above)
+        tx.execute(
+            "DELETE FROM folders WHERE rtrim(path, '/') = rtrim(?1, '/')",
+            params![root_s],
+        )?;
         tx.commit()?;
         Ok((files, tracks))
     }
@@ -4115,7 +4266,7 @@ impl Library {
         }
         let conn = self.lock();
         Ok(conn.query_row(
-            "SELECT COUNT(DISTINCT track_id), COALESCE(SUM(size_bytes), 0) FROM files WHERE missing = 0 AND path LIKE ?1 ESCAPE '\\'",
+            "SELECT COUNT(DISTINCT track_id), COALESCE(SUM(size_bytes), 0) FROM files WHERE +missing = 0 AND path LIKE ?1 ESCAPE '\\'",
             params![format!("{}%", like_escape(&prefix))],
             |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
         )?)
@@ -4176,7 +4327,7 @@ impl Library {
             prefix.push(std::path::MAIN_SEPARATOR);
         }
         let n = self.lock().execute(
-            "UPDATE files SET missing = 1 WHERE missing = 0 AND path LIKE ?1 ESCAPE '\\' AND (last_seen_scan_id IS NULL OR last_seen_scan_id <> ?2)",
+            "UPDATE files SET missing = 1 WHERE +missing = 0 AND path LIKE ?1 ESCAPE '\\' AND (last_seen_scan_id IS NULL OR last_seen_scan_id <> ?2)",
             params![format!("{}%", like_escape(&prefix)), scan_id],
         )?;
         Ok(n as u64)
@@ -4332,6 +4483,65 @@ fn originals_of(t: &Track) -> (String, String, Option<String>, Option<String>) {
     )
 }
 
+/// The library as the node's tasks and threads share it: one holder at a time, like a mutex.
+/// A plain `Mutex` stays poisoned after a panic in one holder, and every later
+/// `lock().expect(..)` then panics too, so one bad call (a file's tag a parser trips over) would
+/// stop every request and every track change until the node is restarted. Here `lock` always
+/// succeeds: after a panic the next holder gets the library with whatever transaction the panic
+/// left open rolled back, and the panic is logged. The results keep the mutex's own types, so
+/// callers read as before.
+pub struct LibraryLock(Mutex<Library>);
+
+impl LibraryLock {
+    pub fn new(library: Library) -> Self {
+        Self(Mutex::new(library))
+    }
+
+    /// Wait for the library. Always `Ok` (see the type).
+    pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Library>> {
+        Ok(match self.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => self.after_panic(poisoned.into_inner()),
+        })
+    }
+
+    /// The library if nobody holds it now; else `WouldBlock`.
+    pub fn try_lock(&self) -> std::sync::TryLockResult<std::sync::MutexGuard<'_, Library>> {
+        match self.0.try_lock() {
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(self.after_panic(poisoned.into_inner())),
+            other => other,
+        }
+    }
+
+    fn after_panic<'a>(
+        &'a self,
+        guard: std::sync::MutexGuard<'a, Library>,
+    ) -> std::sync::MutexGuard<'a, Library> {
+        self.0.clear_poison();
+        let rolled_back = guard.end_open_transaction();
+        tracing::error!(
+            rolled_back,
+            "a call panicked while it held the library; the library is in use again"
+        );
+        guard
+    }
+}
+
+impl Library {
+    /// Roll back a transaction left open on this connection (by a call that panicked in the
+    /// middle of one). Whether there was one.
+    fn end_open_transaction(&self) -> bool {
+        let conn = self.lock();
+        if conn.is_autocommit() {
+            return false;
+        }
+        if let Err(e) = conn.execute_batch("ROLLBACK") {
+            tracing::error!("a transaction left open by a panic could not be rolled back: {e}");
+        }
+        true
+    }
+}
+
 /// Run `f` holding the write lock from its start (`BEGIN IMMEDIATE`, waiting for another writer
 /// through the busy handler), unless a batch already holds it. A transaction that reads first
 /// and writes later asks for the lock only at its first write, and in WAL mode that write fails
@@ -4342,7 +4552,19 @@ fn immediately<T>(conn: &mut Connection, f: impl FnOnce(&mut Connection) -> Resu
     if began {
         conn.execute_batch("BEGIN IMMEDIATE")?;
     }
-    let r = f(conn);
+    // (should `f` panic: the transaction must not stay open on the connection, where every later
+    // write would join it and never be committed)
+    struct RollBack<'a>(&'a mut Connection, bool);
+    impl Drop for RollBack<'_> {
+        fn drop(&mut self) {
+            if self.1 && std::thread::panicking() && !self.0.is_autocommit() {
+                let _ = self.0.execute_batch("ROLLBACK");
+            }
+        }
+    }
+    let guard = RollBack(conn, began);
+    let r = f(&mut *guard.0);
+    let conn = &mut *guard.0;
     if began {
         let end = match &r {
             Ok(_) => conn.execute_batch("COMMIT"),
@@ -4480,7 +4702,7 @@ fn answer_names(conn: &Connection, track: i64, recording: &str) -> Result<bool> 
         .query_row(
             "SELECT fp.lookup_json FROM files f JOIN identify_file_keys k ON k.path = f.path
                JOIN fingerprints fp ON fp.file_key = k.file_key
-             WHERE f.track_id = ?1 AND f.missing = 0 AND fp.lookup_json IS NOT NULL LIMIT 1",
+             WHERE f.track_id = ?1 AND +f.missing = 0 AND fp.lookup_json IS NOT NULL LIMIT 1",
             params![track],
             |r| r.get(0),
         )
@@ -4537,7 +4759,7 @@ fn identify_input_of(conn: &Connection, track: i64, path: &str) -> Result<Option
 fn identify_input_by_track(conn: &Connection, track: i64) -> Result<Option<String>> {
     let path: Option<String> = conn
         .query_row(
-            "SELECT path FROM files WHERE track_id = ?1 AND missing = 0 ORDER BY rowid LIMIT 1",
+            "SELECT path FROM files WHERE track_id = ?1 AND +missing = 0 ORDER BY rowid LIMIT 1",
             params![track],
             |r| r.get(0),
         )
@@ -4688,6 +4910,12 @@ const TRACK_SELECT: &str = "SELECT t.id, t.title, t.album_id, t.track_no, t.disc
     FROM tracks t
     JOIN files fi ON fi.track_id = t.id AND NOT EXISTS (SELECT 1 FROM hidden_files h WHERE h.path = fi.path)
     LEFT JOIN albums al ON al.id = t.album_id";
+
+// Every "the file is there" test in this file is written `+missing = 0`: the `+` keeps SQLite
+// from choosing the index on `files.missing` for it. Nearly every file is present, so that
+// index narrows nothing, and a query that reaches for it reads every file where it could have
+// gone straight to a track's or a folder's (the test `presence_checks_never_go_through_the_
+// missing_index` reads this file for one without it).
 
 /// A track (aliased `t`) has a present file.
 const TRACK_PRESENT: &str = "EXISTS (SELECT 1 FROM files pf WHERE pf.track_id = t.id AND +pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path))";
@@ -5428,6 +5656,68 @@ mod tests {
         assert!(formats.iter().any(|f| f.label == "24/96 FLAC" && f.hi_res));
     }
 
+    /// Every lookup that also asks "is the file there" must not be planned through the index on
+    /// `files.missing`: it holds every file of the library, so one song's or one folder's lookup
+    /// read them all (an album Focus nothing matched took 20 s at 50,000 songs, each of a few
+    /// lookups Identify makes per song 4-12 ms). The `+` in `+missing = 0` rules that index out.
+    #[test]
+    fn presence_checks_never_go_through_the_missing_index() {
+        let source = include_str!("db.rs");
+        // Up to the first test module (the attribute at the start of a line, then a module)
+        let first_test_module = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
+            .iter()
+            .filter_map(|start| source.find(start))
+            .min()
+            .unwrap();
+        let code = &source[..first_test_module];
+        let mut checks = 0;
+        for (n, line) in code.lines().enumerate() {
+            for (at, _) in line.match_indices("missing = 0") {
+                let before = &line[..at];
+                // (`UPDATE files SET .. missing = 0` sets it)
+                if before.contains("SET ") && !before.contains("WHERE") {
+                    continue;
+                }
+                let column = before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.');
+                assert!(column.ends_with('+'), "db.rs:{}: `{}`", n + 1, line.trim());
+                checks += 1;
+            }
+        }
+        assert!(checks > 20, "{checks}");
+
+        // And what the planner does with them: no step of these reads `files_missing`
+        let lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&sample_track("/music/a/one.flac", "One"))
+            .unwrap();
+        let conn = lib.lock();
+        let plan = |sql: &str| -> String {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let steps: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(|s| s.unwrap())
+                .collect();
+            steps.join("; ")
+        };
+        let unhinted = plan("SELECT path FROM files WHERE track_id = 1 AND missing = 0");
+        assert!(
+            unhinted.contains("files_missing"),
+            "the trap is still there: {unhinted}"
+        );
+        for sql in [
+            "SELECT path FROM files WHERE track_id = 1 AND +missing = 0".to_string(),
+            "SELECT path FROM files f WHERE +f.missing = 0 AND f.path >= '/music/a/' AND f.path < '/music/a0'"
+                .to_string(),
+            format!(
+                "SELECT id FROM albums WHERE id > 0 AND EXISTS (SELECT 1 FROM tracks t JOIN files f ON f.track_id = t.id WHERE t.album_id = albums.id AND +f.missing = 0 AND {}) ORDER BY id LIMIT 60",
+                Focus::Dsd.predicate()
+            ),
+        ] {
+            let steps = plan(&sql);
+            assert!(!steps.contains("files_missing"), "{sql}: {steps}");
+        }
+    }
+
     #[test]
     fn backup_is_a_usable_copy() {
         let dir = tempfile::tempdir().unwrap();
@@ -5836,6 +6126,72 @@ mod tag_tests {
         assert!(lib.mark_tag_pushed("t1", true, 6_000).unwrap());
         assert!(lib.tag_by_id("t1").unwrap().is_none());
     }
+
+    /// A call that panics while it holds the shared library does not lock everyone else out:
+    /// the next holder gets it, with the transaction the panic left open rolled back.
+    #[test]
+    fn the_shared_library_is_usable_after_a_holder_panicked() {
+        let shared = std::sync::Arc::new(LibraryLock::new(Library::open_in_memory().unwrap()));
+        shared.lock().unwrap().set_setting("kept", "1").unwrap();
+        let held = shared.clone();
+        let panicked = std::thread::spawn(move || {
+            let lib = held.lock().unwrap();
+            lib.lock().execute_batch("BEGIN IMMEDIATE").unwrap();
+            lib.set_setting("half", "written").unwrap();
+            panic!("a parser tripped over a file's tag");
+        })
+        .join();
+        assert!(panicked.is_err());
+        // As every caller takes it
+        let lib = shared.lock().expect("library poisoned");
+        assert_eq!(lib.get_setting("kept").unwrap().as_deref(), Some("1"));
+        assert_eq!(lib.get_setting("half").unwrap(), None, "rolled back");
+        assert!(lib.lock().is_autocommit());
+        lib.set_setting("after", "2").unwrap();
+        drop(lib);
+        assert!(shared.try_lock().is_ok());
+        let held = shared.lock().unwrap();
+        assert!(matches!(
+            shared.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        // And again: a second panic is no different
+        let again = shared.clone();
+        assert!(std::thread::spawn(move || {
+            let _lib = again.try_lock().unwrap();
+            panic!("again");
+        })
+        .join()
+        .is_err());
+        assert_eq!(
+            shared
+                .try_lock()
+                .unwrap()
+                .get_setting("after")
+                .unwrap()
+                .as_deref(),
+            Some("2")
+        );
+    }
+
+    /// A write that panics inside its transaction leaves none open on the connection, where
+    /// every later write would join it and never be committed.
+    #[test]
+    fn a_panic_inside_a_write_leaves_no_transaction_open() {
+        let lib = Library::open_in_memory().unwrap();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            immediately(&mut lib.lock(), |conn| -> Result<()> {
+                conn.execute("INSERT INTO settings(key, value) VALUES ('half', 'written')", [])?;
+                panic!("in the middle of a write");
+            })
+        }));
+        assert!(r.is_err());
+        assert!(lib.lock().is_autocommit());
+        assert_eq!(lib.get_setting("half").unwrap(), None);
+        lib.set_setting("after", "1").unwrap();
+        assert_eq!(lib.get_setting("after").unwrap().as_deref(), Some("1"));
+    }
 }
 
 #[cfg(test)]
@@ -5877,6 +6233,35 @@ mod folder_tests {
         let (files, _) = lib.remove_folder(Path::new("/m/a_other")).unwrap();
         assert_eq!(files, 0);
         assert!(lib.get_track(a).unwrap().is_some());
+    }
+
+    /// A root is a folder the library was given or one it scanned; nothing else is, also not
+    /// what lies above or below one.
+    #[test]
+    fn only_added_and_scanned_folders_are_roots() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.add_folder(Path::new("/m/a")).unwrap();
+        lib.begin_scan(Path::new("/srv/music")).unwrap();
+        lib.upsert_track(&sample_track("/m/a/x/one.flac", "One")).unwrap();
+        for root in ["/m/a", "/srv/music", "/m/a/", "/srv/music/"] {
+            assert!(lib.is_root(Path::new(root)).unwrap(), "{root}");
+        }
+        for other in ["", "/", "//", "/m", "/m/a/x", "/srv", "/m/%", "/m/_"] {
+            assert!(!lib.is_root(Path::new(other)).unwrap(), "{other:?}");
+        }
+        // A folder stored with a slash at the end is the same folder, and goes from the list
+        // whichever way it is named
+        lib.add_folder(Path::new("/m/b/")).unwrap();
+        lib.upsert_track(&sample_track("/m/b/two.flac", "Two")).unwrap();
+        assert!(lib.is_root(Path::new("/m/b")).unwrap());
+        assert!(lib.is_root(Path::new("/m/b/")).unwrap());
+        assert_eq!(lib.remove_folder(Path::new("/m/b")).unwrap().0, 1);
+        assert!(!lib.is_root(Path::new("/m/b/")).unwrap());
+        assert!(lib
+            .list_folders()
+            .unwrap()
+            .iter()
+            .all(|(p, _)| p.as_path() != Path::new("/m/b")));
     }
 }
 
@@ -7508,5 +7893,155 @@ mod identify_tests {
         assert_eq!(lib.suggestions_for(a).unwrap().len(), 1);
         let c = lib.identity_counts().unwrap();
         assert_eq!((c.suggested, c.skipped), (2, 0));
+    }
+
+    /// A song of its own album, artist and genre (`n` tells them apart).
+    fn summary_track(n: u32) -> Track {
+        let mut t = sample_track(&format!("/m/a{n}/1.flac"), &format!("Song {n}"));
+        t.artists[0] = Artist {
+            id: None,
+            name: format!("Artist {n}"),
+            mbid: None,
+        };
+        let album = t.album.as_mut().unwrap();
+        album.title = format!("Album {n}");
+        album.release_mbid = None;
+        t.genres = vec![format!("Genre {n}")];
+        t.recording_mbid = None;
+        t.isrc = None;
+        t.canonical = None;
+        t
+    }
+
+    fn summary_builds(lib: &Library) -> u64 {
+        lib.summary_builds.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The counts, artists and genres of the whole library are worked out once and then kept:
+    /// every page asks for them, and each reads every track.
+    #[test]
+    fn whole_library_summaries_are_read_once_until_the_library_changes() {
+        let lib = Library::open_in_memory().unwrap();
+        for n in 0..3 {
+            lib.upsert_track(&summary_track(n)).unwrap();
+        }
+        let ask = |lib: &Library| {
+            let artists = lib.list_artists().unwrap();
+            (
+                lib.stats().unwrap(),
+                lib.get_artist(artists[0].id).unwrap(),
+                artists,
+                lib.unknown_artist().unwrap(),
+                lib.list_genres().unwrap(),
+                lib.genre_by_name("genre 1").unwrap().map(|g| g.tracks),
+                lib.random_tracks(10).unwrap().len(),
+            )
+        };
+        let first = ask(&lib);
+        assert_eq!(first.0.tracks, 3);
+        assert_eq!(
+            (first.2.len(), first.4.len(), first.5, first.6),
+            (3, 3, Some(1), 3)
+        );
+        let built = summary_builds(&lib);
+        for _ in 0..5 {
+            assert_eq!(ask(&lib), first);
+        }
+        assert_eq!(summary_builds(&lib), built, "asked again, nothing is read again");
+
+        // A write through this library shows at once
+        let added = lib.upsert_track(&summary_track(3)).unwrap();
+        let second = ask(&lib);
+        assert_eq!(second.0.tracks, 4);
+        assert_eq!((second.2.len(), second.4.len()), (4, 4));
+        // So does a song taken out of the library (its file then counts as missing; what is
+        // listed is as before it was added), and one put back
+        assert!(lib.hide_track(added).unwrap());
+        let hidden = ask(&lib);
+        assert_eq!(
+            hidden.0,
+            LibraryStats {
+                missing_files: 1,
+                ..first.0.clone()
+            }
+        );
+        assert_eq!(
+            (&hidden.1, &hidden.2, &hidden.3, &hidden.4, hidden.5, hidden.6),
+            (&first.1, &first.2, &first.3, &first.4, first.5, first.6)
+        );
+        assert!(lib.unhide("/m/a3/1.flac").unwrap());
+        assert_eq!(ask(&lib), second);
+        // And a song without an artist
+        let mut nameless = summary_track(4);
+        nameless.artists.clear();
+        lib.upsert_track(&nameless).unwrap();
+        assert_eq!(lib.unknown_artist().unwrap().map(|a| a.tracks), Some(1));
+        assert_eq!(lib.stats().unwrap().tracks, 5);
+    }
+
+    /// A scan writes from a connection of its own: what this one kept must not outlive that.
+    #[test]
+    fn whole_library_summaries_follow_another_connections_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let lib = Library::open(&path).unwrap();
+        let other = Library::open(&path).unwrap();
+        lib.upsert_track(&summary_track(0)).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 1);
+        assert_eq!(lib.list_artists().unwrap().len(), 1);
+        assert_eq!(other.stats().unwrap().tracks, 1);
+
+        other.upsert_track(&summary_track(1)).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 2);
+        assert_eq!(lib.list_artists().unwrap().len(), 2);
+        assert_eq!(lib.list_genres().unwrap().len(), 2);
+
+        // A batch of the other's is not seen until it is committed, then at once
+        other.begin_batch().unwrap();
+        other.upsert_track(&summary_track(2)).unwrap();
+        assert_eq!(other.stats().unwrap().tracks, 3, "the batch sees its own writes");
+        assert_eq!(lib.stats().unwrap().tracks, 2);
+        other.commit_batch().unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 3);
+        assert_eq!(other.stats().unwrap().tracks, 3);
+    }
+
+    /// Inside an open transaction nothing is kept: its writes may still be undone.
+    #[test]
+    fn whole_library_summaries_of_an_undone_batch_are_not_kept() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&summary_track(0)).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 1);
+        lib.begin_batch().unwrap();
+        lib.upsert_track(&summary_track(1)).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 2);
+        assert_eq!(lib.list_artists().unwrap().len(), 2);
+        lib.lock().execute_batch("ROLLBACK").unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 1);
+        assert_eq!(lib.list_artists().unwrap().len(), 1);
+        assert_eq!(lib.list_genres().unwrap().len(), 1);
+    }
+
+    /// A restore replaces the database under the connection: the summaries are the copy's.
+    #[test]
+    fn whole_library_summaries_are_the_restored_librarys() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("copy.db");
+        {
+            let source = Library::open_in_memory().unwrap();
+            for n in 0..2 {
+                source.upsert_track(&summary_track(n)).unwrap();
+            }
+            source.backup_to(&copy).unwrap();
+        }
+        let lib = Library::open(&dir.path().join("library.db")).unwrap();
+        lib.upsert_track(&summary_track(7)).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 1);
+        assert_eq!(lib.list_artists().unwrap()[0].name, "Artist 7");
+        lib.restore_from(&copy).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 2);
+        let names: Vec<String> = lib.list_artists().unwrap().into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["Artist 0", "Artist 1"]);
+        assert_eq!(lib.list_genres().unwrap().len(), 2);
     }
 }

@@ -23,7 +23,7 @@ STEWARD-UX-RESPONSIVE.md step 1. **Approved by the owner on 2026-10-26, as drawn
 - **Settings:** four groups, by where each setting is saved (STEWARD-SETTINGS-GROUPS.md). Each group header says where in one line:
   - **You:** saved on your homeserver, so it follows you to every node and device. My accounts, My library and sharing, Home, layout and appearance, playback quality.
   - **This phone:** only on this device. The USB DAC and bit-perfect, Downloads and cache.
-  - **This node (admin):** for everyone on this node. Service apps, People, Library folders, zones and outputs, Remote access and updates.
+  - **This node (admin):** for everyone on this node. Service apps, People & access (who can use the node, what they can do, the browsers and apps signed in, the password for apps), Library folders, zones and outputs, Remote access and updates.
   - **This homeserver (admin, only when the node runs its own):** sign-ups and invites, users, quotas, storage, domain.
   - Every setting sits in exactly one group. Where a node default and your own choice both exist (playback quality), the node group holds the default and You holds the override; each row says which applies. In the desktop layout (tablets too) the groups are the left pane.
 

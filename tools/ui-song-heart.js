@@ -61,7 +61,7 @@ async function mouse(browser) {
     await page.waitForSelector(HEART);
     const before = await shown(page, HEART);
     assert.equal(before.there, true, 'a song row has a heart');
-    assert.equal(before.opacity, 0, `not a favourite and not hovered: the heart is out of the way (opacity ${before.opacity})`);
+    assert.equal(before.opacity, 0, `not bookmarked and not hovered: the heart is out of the way (opacity ${before.opacity})`);
     await page.screenshot({ path: path.join(shots, 'album-1280-nohover.png') });
 
     await page.locator(ROW).first().hover();
@@ -69,8 +69,8 @@ async function mouse(browser) {
     const hov = await shown(page, HEART);
     assert.ok(hov.w >= 28 && hov.h >= 28, `the heart is a real target (${hov.w}x${hov.h})`);
     let h = await heartState(page);
-    assert.deepEqual([h.on, h.icon, h.title], [false, 'heart', 'Add to favourites'], `an outline heart before saving (${JSON.stringify(h)})`);
-    assert.equal(h.label, `Add ${fx.track.title} to favourites`, 'a screen reader hears which song');
+    assert.deepEqual([h.on, h.icon, h.title], [false, 'heart', 'Add to Bookmarks'], `an outline heart before saving (${JSON.stringify(h)})`);
+    assert.equal(h.label, `Add ${fx.track.title} to Bookmarks`, 'a screen reader hears which song');
     assert.equal(h.pressed, 'false', 'and that the heart is a toggle, off (as Now Playing\'s heart says)');
     assert.equal(h.next, true, 'the heart sits right before the row\'s ⋯, as on Songs');
     await page.screenshot({ path: path.join(shots, 'album-1280-hover.png') });
@@ -84,11 +84,11 @@ async function mouse(browser) {
     assert.equal(puts.length, 1, 'one click, one save');
     assert.deepEqual(JSON.parse(puts[0].body), { track_id: 1 }, 'saved by its library track');
     h = await heartState(page);
-    assert.deepEqual([h.on, h.icon, h.title], [true, 'heart-fill', 'Remove from favourites'], `filled and relabelled (${JSON.stringify(h)})`);
-    assert.equal(h.label, `Remove ${fx.track.title} from favourites`);
+    assert.deepEqual([h.on, h.icon, h.title], [true, 'heart-fill', 'Remove from Bookmarks'], `filled and relabelled (${JSON.stringify(h)})`);
+    assert.equal(h.label, `Remove ${fx.track.title} from Bookmarks`);
     assert.equal(h.pressed, 'true', 'a screen reader hears it is on now');
     assert.equal(await page.evaluate((s) => document.querySelector(s).dataset.probe, ROW), 'same-node', 'the list was not redrawn under you');
-    assert.equal(await shown(page, HEART).then((x) => x.opacity), 1, 'a favourite keeps its heart');
+    assert.equal(await shown(page, HEART).then((x) => x.opacity), 1, 'bookmarked keeps its heart');
 
     // The heart is not the row: pressing it must not start the song (nothing playing, no row marked
     // as the current one, and the queue was never asked to change)
@@ -101,7 +101,7 @@ async function mouse(browser) {
     await page.click(`${ROW} [data-smore]`);
     await page.waitForSelector('.popover.menu:not([hidden]) .pop-item');
     let labels = await menuLabels(page);
-    assert.ok(labels.includes('Remove from favourites') && !labels.includes('Add to favourites'), `the ⋯ menu agrees (${labels.join(' · ')})`);
+    assert.ok(labels.includes('Remove from Bookmarks') && !labels.includes('Add to Bookmarks'), `the ⋯ menu agrees (${labels.join(' · ')})`);
     await closeMenu(page);
 
     // Clicking it again takes it back out
@@ -112,11 +112,11 @@ async function mouse(browser) {
     assert.equal(dels.length, 1, 'one click, one removal');
     assert.equal(dels[0].q, '?track_id=1', `removed by the same key (${dels[0].q})`);
     h = await heartState(page);
-    assert.deepEqual([h.on, h.pressed, h.title], [false, 'false', 'Add to favourites'], 'an outline again, and off');
+    assert.deepEqual([h.on, h.pressed, h.title], [false, 'false', 'Add to Bookmarks'], 'an outline again, and off');
     await page.click(`${ROW} [data-smore]`);
     await page.waitForSelector('.popover.menu:not([hidden]) .pop-item');
     labels = await menuLabels(page);
-    assert.ok(labels.includes('Add to favourites') && !labels.includes('Remove from favourites'), `the ⋯ menu agrees again (${labels.join(' · ')})`);
+    assert.ok(labels.includes('Add to Bookmarks') && !labels.includes('Remove from Bookmarks'), `the ⋯ menu agrees again (${labels.join(' · ')})`);
     await closeMenu(page);
 
     // From the keyboard: Enter saves and the heart keeps focus, so Tab carries on down the row
@@ -147,11 +147,11 @@ async function already(browser, width, touch, key) {
     await page.waitForSelector(HEART);
     await page.waitForFunction((s) => document.querySelector(s).classList.contains('on'), HEART, { timeout: 4000 });
     const s = await shown(page, HEART);
-    assert.notEqual(s.display, 'none', `${width}${touch ? ' touch' : ''}: a favourite's heart is there without hover`);
-    assert.equal(s.opacity, 1, `${width}${touch ? ' touch' : ''}: a favourite's heart is shown without hover (opacity ${s.opacity})`);
+    assert.notEqual(s.display, 'none', `${width}${touch ? ' touch' : ''}: bookmarked's heart is there without hover`);
+    assert.equal(s.opacity, 1, `${width}${touch ? ' touch' : ''}: bookmarked's heart is shown without hover (opacity ${s.opacity})`);
     if (touch) assert.ok(s.w >= 40 && s.h >= 40, `${width} touch: the heart is a 40 px target (${s.w}x${s.h})`);
     const h = await heartState(page);
-    assert.deepEqual([h.on, h.icon, h.title], [true, 'heart-fill', 'Remove from favourites'], `${width}: filled, and it says what pressing it does`);
+    assert.deepEqual([h.on, h.icon, h.title], [true, 'heart-fill', 'Remove from Bookmarks'], `${width}: filled, and it says what pressing it does`);
     assert.equal(h.pressed, 'true', `${width}: drawn on, it says so to a screen reader too`);
     await page.screenshot({ path: path.join(shots, `album-${width}${touch ? '-touch' : ''}-favourite.png`) });
     await fx.cleanCopy(page);
@@ -185,7 +185,7 @@ async function selecting(browser) {
     await fx.go(page, '/album/lib-7');
     await page.waitForSelector(HEART);
     await page.waitForFunction((s) => document.querySelector(s).classList.contains('on'), HEART, { timeout: 4000 });
-    assert.notEqual((await shown(page, HEART)).display, 'none', '700 px: a favourite shows its heart');
+    assert.notEqual((await shown(page, HEART)).display, 'none', '700 px: bookmarked shows its heart');
     await page.click('#isongs [data-selstart]');
     await page.waitForSelector(`${ROW} .selbox`);
     assert.equal((await shown(page, HEART)).display, 'none', '700 px, picking songs: the heart stands aside');
@@ -238,8 +238,8 @@ async function late(browser) {
     await page.screenshot({ path: path.join(shots, 'album-1280-late-waiting.png') });
     await page.waitForFunction((s) => document.querySelector(s).classList.contains('on'), HEART, { timeout: 6000 });
     const h = await heartState(page);
-    assert.deepEqual([h.on, h.icon, h.title], [true, 'heart-fill', 'Remove from favourites'], 'the heart fills in once they are in');
-    assert.equal(h.label, `Remove ${fx.track.title} from favourites`, 'and a screen reader hears the new state');
+    assert.deepEqual([h.on, h.icon, h.title], [true, 'heart-fill', 'Remove from Bookmarks'], 'the heart fills in once they are in');
+    assert.equal(h.label, `Remove ${fx.track.title} from Bookmarks`, 'and a screen reader hears the new state');
     assert.equal(await page.evaluate((s) => document.querySelector(s).dataset.probe, ROW), 'same-node', 'only the hearts were painted again, not the list');
     await page.screenshot({ path: path.join(shots, 'album-1280-late-filled.png') });
     await fx.cleanCopy(page);
@@ -297,14 +297,14 @@ async function elsewhere(browser) {
     await fx.go(page, '/album/lib-7');
     await page.waitForSelector(`${ROW}:nth-child(2) [data-sfav]`);
     const H1 = `${ROW}:nth-child(1) [data-sfav]`; const H2 = `${ROW}:nth-child(2) [data-sfav]`;
-    assert.equal(node.asks.filter((m) => m === 'GET').length, 1, 'the first favourites answer is still on its way');
+    assert.equal(node.asks.filter((m) => m === 'GET').length, 1, 'the first bookmarks answer is still on its way');
     await page.evaluate((s) => { document.querySelector(s).dataset.probe = 'same-node'; }, ROW);
     await page.locator(ROW).first().hover();
     await page.click(H1);
     await page.waitForFunction((s) => document.querySelector(s).classList.contains('on'), H1, { timeout: 4000 });
     await page.waitForFunction((s) => document.querySelector(s).classList.contains('on'), H2, { timeout: 2000 }).catch(() => {});
     const two = await heartState(page, H2);
-    assert.deepEqual([two.on, two.icon, two.label], [true, 'heart-fill', `Remove ${fx.track.title} from favourites`], `the same song's other row turns over at once (${JSON.stringify(two)})`);
+    assert.deepEqual([two.on, two.icon, two.label], [true, 'heart-fill', `Remove ${fx.track.title} from Bookmarks`], `the same song's other row turns over at once (${JSON.stringify(two)})`);
     await page.screenshot({ path: path.join(shots, 'album-1280-two-rows-saved.png') });
     // The old answer (no bookmarks) lands now, after the save
     node.release();
@@ -316,7 +316,7 @@ async function elsewhere(browser) {
     await page.click(`${ROW}:nth-child(2) [data-smore]`);
     await page.waitForSelector('.popover.menu:not([hidden]) .pop-item');
     const labels = await menuLabels(page);
-    assert.ok(labels.includes('Remove from favourites'), `the other row's ⋯ menu agrees (${labels.join(' · ')})`);
+    assert.ok(labels.includes('Remove from Bookmarks'), `the other row's ⋯ menu agrees (${labels.join(' · ')})`);
     await closeMenu(page);
     assert.equal(await page.evaluate((s) => document.querySelector(s).dataset.probe, ROW), 'same-node', 'only the hearts were painted, not the list');
     // Taken out from the second row: the first turns back too
@@ -325,7 +325,7 @@ async function elsewhere(browser) {
     await page.waitForFunction((s) => !document.querySelector(s).classList.contains('on'), H1, { timeout: 4000 });
     await fx.cleanCopy(page);
     assert.deepEqual(state.errors, []);
-    ok('1280 px: a song in two rows turns over in both, and a slow first favourites answer does not undo the save');
+    ok('1280 px: a song in two rows turns over in both, and a slow first bookmarks answer does not undo the save');
   } finally { await context.close(); }
 }
 
@@ -340,19 +340,19 @@ async function songsRow(browser) {
     await page.waitForSelector(T, { state: 'attached' });
     await page.waitForTimeout(300);
     let h = await heartState(page, T);
-    assert.deepEqual([h.on, h.pressed, h.label], [false, 'false', `Add ${fx.track.title} to favourites`], `the Songs heart says which song, and that it is off (${JSON.stringify(h)})`);
+    assert.deepEqual([h.on, h.pressed, h.label], [false, 'false', `Add ${fx.track.title} to Bookmarks`], `the Songs heart says which song, and that it is off (${JSON.stringify(h)})`);
     await page.evaluate((s) => { document.querySelector(s).closest('.track').dataset.probe = 'same-node'; }, T);
     node.release();
     await page.waitForFunction((s) => document.querySelector(s).classList.contains('on'), T, { timeout: 4000 }).catch(() => {});
     h = await heartState(page, T);
-    assert.deepEqual([h.on, h.pressed, h.icon, h.label], [true, 'true', 'heart-fill', `Remove ${fx.track.title} from favourites`], `it fills in, pressed, once they are in (${JSON.stringify(h)})`);
+    assert.deepEqual([h.on, h.pressed, h.icon, h.label], [true, 'true', 'heart-fill', `Remove ${fx.track.title} from Bookmarks`], `it fills in, pressed, once they are in (${JSON.stringify(h)})`);
     assert.equal(await page.evaluate((s) => document.querySelector(s).closest('.track').dataset.probe, T), 'same-node', 'the row was not drawn again');
     await page.locator('.track').first().hover();
     await page.click(T);
     await page.waitForFunction((s) => !document.querySelector(s).classList.contains('on'), T, { timeout: 4000 });
     assert.deepEqual(node.asks.filter((m) => m !== 'GET'), ['DELETE'], 'one click, one removal');
     h = await heartState(page, T);
-    assert.deepEqual([h.pressed, h.label], ['false', `Add ${fx.track.title} to favourites`], 'off again after its own press');
+    assert.deepEqual([h.pressed, h.label], ['false', `Add ${fx.track.title} to Bookmarks`], 'off again after its own press');
     await page.screenshot({ path: path.join(shots, 'songs-1280-late.png') });
     await fx.cleanCopy(page);
     assert.deepEqual(state.errors, []);
@@ -378,7 +378,7 @@ async function nowPlaying(browser) {
     node.release();
     await page.waitForFunction(() => document.querySelector('#npfav')?.classList.contains('on'), null, { timeout: 4000 }).catch(() => {});
     let h = await np();
-    assert.deepEqual([h.on, h.pressed, h.label], [true, 'true', 'In favourites'], `Now Playing's heart fills in once they are in (${JSON.stringify(h)})`);
+    assert.deepEqual([h.on, h.pressed, h.label], [true, 'true', 'In Bookmarks'], `Now Playing's heart fills in once they are in (${JSON.stringify(h)})`);
     // Its own press: out, then in again, one request each
     await page.click('#npfav');
     await page.waitForFunction(() => !document.querySelector('#npfav')?.classList.contains('on'), null, { timeout: 4000 });
@@ -386,7 +386,7 @@ async function nowPlaying(browser) {
     await page.waitForFunction(() => document.querySelector('#npfav')?.classList.contains('on'), null, { timeout: 4000 });
     await page.waitForTimeout(300);
     h = await np();
-    assert.equal(h.on, true, 'pressed twice: in favourites again');
+    assert.equal(h.on, true, 'pressed twice: in Bookmarks again');
     assert.deepEqual(node.asks.filter((m) => m !== 'GET'), ['DELETE', 'PUT'], 'one request per press');
     await page.screenshot({ path: path.join(shots, 'nowplaying-1280-late.png') });
     await fx.cleanCopy(page);
@@ -420,18 +420,18 @@ async function sourceItem(browser, width) {
     await page.waitForSelector('#aheart');
     const read = () => page.evaluate(() => { const b = document.querySelector('#aheart'); return { pressed: b.getAttribute('aria-pressed'), text: b.textContent.trim() }; });
     let h = await read();
-    assert.deepEqual(h, { pressed: 'false', text: 'Favourite' }, `${width} source page: not a favourite, said as not pressed (${JSON.stringify(h)})`);
+    assert.deepEqual(h, { pressed: 'false', text: 'Bookmark' }, `${width} source page: not bookmarked, said as not pressed (${JSON.stringify(h)})`);
     await page.click('#aheart');
-    await page.waitForFunction(() => document.querySelector('#aheart') && document.querySelector('#aheart').textContent.trim() === 'Favourited');
+    await page.waitForFunction(() => document.querySelector('#aheart') && document.querySelector('#aheart').textContent.trim() === 'Bookmarked');
     h = await read();
-    assert.deepEqual(h, { pressed: 'true', text: 'Favourited' }, `${width} source page: pressed once, a favourite and said as pressed (${JSON.stringify(h)})`);
+    assert.deepEqual(h, { pressed: 'true', text: 'Bookmarked' }, `${width} source page: pressed once, bookmarked and said as pressed (${JSON.stringify(h)})`);
     await page.screenshot({ path: path.join(shots, `source-item-${width}.png`) });
     await page.click('#aheart');
-    await page.waitForFunction(() => document.querySelector('#aheart') && document.querySelector('#aheart').textContent.trim() === 'Favourite');
+    await page.waitForFunction(() => document.querySelector('#aheart') && document.querySelector('#aheart').textContent.trim() === 'Bookmark');
     h = await read();
     assert.equal(h.pressed, 'false', `${width} source page: pressed again, not pressed (${JSON.stringify(h)})`);
     assert.deepEqual(state.errors, []);
-    ok(`${width} px: a service's own page says its Favourite button is pressed or not`);
+    ok(`${width} px: a service's own page says its Bookmark button is pressed or not`);
   } finally { await page.context().close(); }
 }
 
