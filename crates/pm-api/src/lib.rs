@@ -92,6 +92,7 @@ pub mod qobuz;
 pub mod quality;
 pub mod radio;
 pub mod radio_sources;
+pub(crate) mod relay;
 pub mod releases;
 pub mod remote;
 pub mod reviews;

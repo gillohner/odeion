@@ -386,16 +386,16 @@ async fn relay(
     fallback_type: &str,
 ) -> Result<axum::response::Response, ApiError> {
     let srv = server(s)?;
-    let resp = s
-        .http_client()
-        .get(url)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            auth_header(&srv.device_id, Some(&srv.token)),
-        )
-        .send()
-        .await
-        .map_err(|e| upstream(e.without_url()))?;
+    let rb = s.http_client().get(url).header(
+        reqwest::header::AUTHORIZATION,
+        auth_header(&srv.device_id, Some(&srv.token)),
+    );
+    // A picture as before; audio is relayed as it arrives, with no total limit
+    let resp = if fallback_type.starts_with("image/") {
+        rb.send().await.map_err(|e| upstream(e.without_url()))?
+    } else {
+        crate::relay::send(rb).await.map_err(upstream)?
+    };
     if !resp.status().is_success() {
         return Err(if resp.status() == StatusCode::NOT_FOUND {
             ApiError::not_found("Jellyfin has no such item")
@@ -425,7 +425,7 @@ async fn relay(
     if let Some(n) = resp.content_length() {
         out = out.header(axum::http::header::CONTENT_LENGTH, n);
     }
-    out.body(axum::body::Body::from_stream(resp.bytes_stream()))
+    out.body(crate::relay::body(resp))
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 

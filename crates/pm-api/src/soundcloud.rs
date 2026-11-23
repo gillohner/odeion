@@ -1192,16 +1192,13 @@ pub(crate) async fn stream(
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=600");
     let body = match p.kind {
         Kind::Progressive => {
-            let resp = s
-                .http_client()
-                .get(&url)
-                .send()
+            let resp = crate::relay::send(s.http_client().get(&url))
                 .await
-                .map_err(|e| upstream(e.without_url()))?;
+                .map_err(upstream)?;
             if !resp.status().is_success() {
                 return Err(upstream(format!("stream answered {}", resp.status())));
             }
-            axum::body::Body::from_stream(resp.bytes_stream())
+            crate::relay::body(resp)
         }
         Kind::HlsMp3 | Kind::HlsAac => {
             let mut reader = tokio::task::spawn_blocking(move || {

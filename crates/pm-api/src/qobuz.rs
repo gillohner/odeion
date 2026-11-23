@@ -1545,12 +1545,9 @@ pub(crate) async fn stream(
         StreamError::Track(m) => ApiError::not_found(m),
         StreamError::Unavailable(m) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, m),
     })?;
-    let resp = s
-        .http_client()
-        .get(&url)
-        .send()
+    let resp = crate::relay::send(s.http_client().get(&url))
         .await
-        .map_err(|e| upstream(e.without_url()))?;
+        .map_err(upstream)?;
     if !resp.status().is_success() {
         return Err(upstream(format!("stream answered {}", resp.status())));
     }
@@ -1561,7 +1558,7 @@ pub(crate) async fn stream(
     if let Some(n) = len {
         out = out.header(axum::http::header::CONTENT_LENGTH, n);
     }
-    out.body(axum::body::Body::from_stream(resp.bytes_stream()))
+    out.body(crate::relay::body(resp))
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
