@@ -2530,9 +2530,10 @@ impl Library {
     }
 
     /// [`Self::resolve_import`] for a playlist file in `base`: a relative line is first the
-    /// library file at that place (`..` worked out), then matched as that place (a playlist
-    /// from another disk: a file in folders named as the playlist's is taken first), then as
-    /// written, so a playlist kept elsewhere (Downloads) needs no folder of its name.
+    /// library file at that place (`..` worked out); then by file name as that place (a
+    /// playlist from another disk: a file in folders named as the playlist's comes first) and
+    /// as written; then by title as that place and as written, so a playlist kept elsewhere
+    /// (Downloads) needs no folder of its name.
     pub fn resolve_import_in(&self, t: &ImportedTrack, base: Option<&Path>) -> Result<Option<Track>> {
         if let (Some(base), Some(p)) = (base, t.path.as_deref().and_then(crate::import::local_path)) {
             if p.is_relative() {
@@ -2542,9 +2543,9 @@ impl Library {
                         return Ok(Some(track));
                     }
                 }
-                // As that place, by file name only: the two-folder rule and, for a line without
-                // an artist, the nearest-folder rule see the playlist's folders (a title search
-                // here would put a folder's name before a file's); nothing found, as written
+                // The two-folder rule and, for a line without an artist, the nearest-folder rule
+                // see the playlist's folders; the only file of the line's name, its title
+                // agreeing, comes before a song of that title in a folder of the playlist's name
                 if let Some(path) = at.to_str() {
                     let placed = ImportedTrack {
                         path: Some(path.to_owned()),
@@ -2552,6 +2553,16 @@ impl Library {
                     };
                     if let Some(track) = self.resolve_import_by(&placed, false)? {
                         return Ok(Some(track));
+                    }
+                    if let Some(track) = self.resolve_import_by(t, false)? {
+                        return Ok(Some(track));
+                    }
+                    // By title in the playlist's folder (a library whose files were renamed);
+                    // with an artist named the folder decides nothing, as written below
+                    if entry_artist(t.artist.as_deref()).is_empty() {
+                        if let Some(track) = self.resolve_import_by(&placed, true)? {
+                            return Ok(Some(track));
+                        }
                     }
                 }
             }
@@ -8801,5 +8812,15 @@ mod identify_tests {
             .as_deref(),
             Some(only)
         );
+        // No file of the line's name (the library's were renamed): the title in the playlist's
+        // folder, each way round
+        let renamed = entry("Intro", None, Some("Intro.flac"), None);
+        for (folder, want) in [("/old/Artist B/Second", b), ("/old/Artist A/First", a)] {
+            assert_eq!(
+                path_of(lib.resolve_import_in(&renamed, Some(Path::new(folder))).unwrap()).as_deref(),
+                Some(want),
+                "renamed, {folder}"
+            );
+        }
     }
 }
