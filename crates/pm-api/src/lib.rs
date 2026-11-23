@@ -19207,6 +19207,16 @@ exec sleep 300
             v.as_array().unwrap().iter().any(|p| p["id"] == "tidal"),
             "the owner's TIDAL is checked: {v}"
         );
+        // What the owner signed in to, their homeserver and the token note are the owner's to
+        // see: a listener gets the parts that change what they can do here, before and after
+        let (st, again, _) = send_as(&app, "GET", "/v1/health", Some(&ben_tok), &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{again}");
+        for seen in [&first, &again] {
+            assert!(
+                seen.as_array().unwrap().iter().all(|p| p["id"] == "pinakes"),
+                "a listener's health: {seen}"
+            );
+        }
     }
 
     /// Home sections are cached per person: what plays in full on a card depends on their own
