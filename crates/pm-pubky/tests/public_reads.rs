@@ -73,13 +73,20 @@ async fn redirecting_homeserver(
     (port, cert.cert.pem(), hits, handle)
 }
 
-#[tokio::test]
-async fn a_homeserver_cannot_redirect_the_node_into_its_own_network() {
+/// A node on the public network, and someone whose homeserver record names a server at
+/// `https://localhost:<port>` (by an ICANN name) that redirects every request to a second local
+/// server. Returns the node, that person, and the two servers' hit counters.
+async fn node_and_redirecting_user() -> (
+    NodeHomeserver,
+    Keypair,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    axum_server::Handle<std::net::SocketAddr>,
+) {
     let (second, second_hits) = second_server().await;
     let (port, pem, homeserver_hits, server) =
         redirecting_homeserver(format!("http://127.0.0.1:{second}/stolen")).await;
 
-    // Someone whose homeserver record names that server by an ICANN name
     let (user, homeserver) = (Keypair::random(), Keypair::random());
     let mut target = SVCB::new(1, "localhost".try_into().unwrap());
     target.set_port(port);
@@ -109,6 +116,12 @@ async fn a_homeserver_cannot_redirect_the_node_into_its_own_network() {
         Pubky::with_client(builder.build().unwrap()),
         pm_pubky::Network::Mainnet,
     );
+    (node, user, second_hits, homeserver_hits, server)
+}
+
+#[tokio::test]
+async fn a_homeserver_cannot_redirect_the_node_into_its_own_network() {
+    let (node, user, second_hits, homeserver_hits, server) = node_and_redirecting_user().await;
 
     let read = node
         .get_bytes(
@@ -128,6 +141,38 @@ async fn a_homeserver_cannot_redirect_the_node_into_its_own_network() {
         homeserver_hits.load(Ordering::SeqCst),
         0,
         "a homeserver at a local address is not reached for someone else's data"
+    );
+    server.shutdown();
+}
+
+/// The node's signed-in owner may keep their homeserver on their own network: reads of their
+/// own public data keep the SDK's path also where no session is passed (sync, comments).
+#[tokio::test]
+async fn the_owners_own_public_data_keeps_the_sdk_path() {
+    let (node, user, _second_hits, homeserver_hits, server) = node_and_redirecting_user().await;
+    let z32 = user.public_key().to_z32();
+    let owner = pm_pubky::homeserver::PublicKey::try_from(z32.as_str()).unwrap();
+
+    node.set_owner(Some(owner));
+    let _ = node
+        .get_bytes(&z32, "/pub/pubky.app/profile.json", Visibility::Public, None)
+        .await;
+    let reached = homeserver_hits.load(Ordering::SeqCst);
+    assert!(reached > 0, "the owner's own homeserver was not reached");
+
+    // Signed out: the same person is someone else again
+    node.set_owner(None);
+    let read = node
+        .get_bytes(&z32, "/pub/pubky.app/profile.json", Visibility::Public, None)
+        .await;
+    assert!(
+        read.is_err(),
+        "read through the redirect after sign-out: {read:?}"
+    );
+    assert_eq!(
+        homeserver_hits.load(Ordering::SeqCst),
+        reached,
+        "a homeserver at a local address is reached after the owner signed out"
     );
     server.shutdown();
 }

@@ -2295,6 +2295,14 @@ impl NodeState {
             if let Some(old) = current.as_ref() {
                 old.retire();
             }
+            // The owner's own public data keeps the SDK's path also where no session is passed
+            // (their homeserver may sit on their own network); the previous owner's does not
+            if let Some(old) = current.as_ref() {
+                old.homeserver().set_owner(None);
+            }
+            if let Some(new) = sync.as_ref() {
+                new.homeserver().set_owner(Some(new.session().public_key()));
+            }
             std::mem::replace(&mut *current, sync)
         });
         // A pass of the old session still running writes nothing more, to the library or to its

@@ -450,6 +450,9 @@ pub struct NodeHomeserver {
     /// On the public network, reads of other people's public data go through these clients:
     /// no redirect followed, no local address reached ([`crate::public_reads`]).
     public: Option<PublicReads>,
+    /// The node's signed-in owner: their own public data is read through the SDK, also by
+    /// calls that pass no session (sync, comments, tag moves). Clones share it.
+    owner: std::sync::Arc<std::sync::RwLock<Option<PublicKey>>>,
 }
 
 /// Pubky clients built in this process: each one starts its own DHT node and keeps its own
@@ -486,7 +489,14 @@ impl NodeHomeserver {
             network,
             auth_relay: None,
             public,
+            owner: Default::default(),
         }
+    }
+
+    /// The node's signed-in owner (`None` after sign-out): reads of their own public data keep
+    /// the SDK's path, as with their session.
+    pub fn set_owner(&self, owner: Option<PublicKey>) {
+        *self.owner.write().expect("owner lock") = owner;
     }
 
     /// Let reads of other people's data from `homeserver` (z32) reach local addresses: the
@@ -499,11 +509,17 @@ impl NodeHomeserver {
     }
 
     /// The clients for a public read of `user`'s data: `None` on a testnet, and for the
-    /// signed-in person's own data (their homeserver is theirs to trust).
+    /// signed-in person's own data, by their session or as the node's owner ([`Self::set_owner`]):
+    /// their homeserver is theirs to trust.
     fn public_reads_for(&self, user: &PublicKey, session: Option<&PubkySession>) -> Option<&PublicReads> {
-        self.public
-            .as_ref()
-            .filter(|_| !session.is_some_and(|s| s.public_key() == *user))
+        if session.is_some_and(|s| s.public_key() == *user) || self.is_owner(user) {
+            return None;
+        }
+        self.public.as_ref()
+    }
+
+    fn is_owner(&self, user: &PublicKey) -> bool {
+        self.owner.read().expect("owner lock").as_ref() == Some(user)
     }
 
     /// Ring sign-ins and sign-ups started here go through the relay inbox `inbox` (e.g.
