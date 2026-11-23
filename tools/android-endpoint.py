@@ -224,9 +224,10 @@ def api(method, path, body=None):
     return json.loads(raw) if raw else None
 
 
-class AppNotResponding(RuntimeError):
+class AppNotResponding(Exception):
     """The app's own "isn't responding" dialog is on the screen: a failure at once, not something
-    to wait behind."""
+    to wait behind. Not a RuntimeError, so the `except RuntimeError` fallbacks (type again, tap
+    another control, "no Pause showing") let it through instead of going on behind the dialog."""
 
 
 def until(what, fn, timeout=60, every=1.0):
@@ -672,7 +673,7 @@ def media_controls(zid, track):
         return s if re.search(r"volumeType=(?:2\b|REMOTE)", s) else None
     try:
         until("the session on the network zone, with its own volume (remote)", remote, timeout=20)
-    except RuntimeError:
+    except (RuntimeError, AppNotResponding):
         diagnose("network-zone")
         raise
     before = stream_music()
@@ -1316,7 +1317,7 @@ def run(node):
         def page_diagnosis():
             """What the app shows, and whether the node still answers the runner."""
             try:
-                nodes = "\n".join(ui_nodes()).replace(TOKEN, "[redacted]")
+                nodes = "\n".join(ui_nodes(evidence=True)).replace(TOKEN, "[redacted]")
                 (out / "connect-failure-ui.txt").write_text(nodes)
                 # Keep the error at the bottom of the form, which the old 300-character prefix
                 # cut off. The full, redacted accessibility dump is retained in the artifact.
@@ -1343,6 +1344,8 @@ def run(node):
                     got = until(what, ready, timeout=90, every=3)
                 except RuntimeError as e:
                     raise RuntimeError(f"{e}; {page_diagnosis()}") from None
+                except AppNotResponding as e:
+                    raise AppNotResponding(f"{e}; {page_diagnosis()}") from None
                 if got == "page":
                     return
                 kills = system_kills()
