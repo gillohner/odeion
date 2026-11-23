@@ -230,12 +230,17 @@ async fn rest(
     body: String,
 ) -> Response {
     // Last value wins in the map (what clients expect for `v`, `c`, `f`); every
-    // `id` is also kept in order for calls that take several (jukebox add).
+    // `id` is also kept in order for calls that take several (jukebox add), and so is every
+    // value of the parameters a playlist call repeats ([`REPEATED`]).
     let mut params = Params::new();
     let mut ids = Vec::new();
     for (k, v) in url::form_urlencoded::parse(raw_query.as_deref().unwrap_or("").as_bytes()) {
         if k == "id" {
             ids.push(v.to_string());
+        }
+        if REPEATED.contains(&k.as_ref()) {
+            add_repeated(&mut params, &k, &v);
+            continue;
         }
         params.insert(k.into_owned(), v.into_owned());
     }
@@ -247,6 +252,10 @@ async fn rest(
         for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
             if k == "id" {
                 ids.push(v.to_string());
+            }
+            if REPEATED.contains(&k.as_ref()) {
+                add_repeated(&mut params, &k, &v);
+                continue;
             }
             params.entry(k.into_owned()).or_insert(v.into_owned());
         }
@@ -485,7 +494,8 @@ fn playlist_json(lib: &Library, row: &MusicPostRow, p: &Playlist, with_entries: 
         "comment": p.description,
         "songCount": tracks.len(),
         "duration": duration,
-        "public": false,
+        // (shared on Pubky or not; a client that sends this back with an edit changes nothing)
+        "public": row.visibility == "public",
         "owner": "pubky",
         "created": iso(p.created_at / 1_000_000),
         "changed": iso(p.updated_at / 1_000_000),
@@ -528,9 +538,33 @@ fn save_playlist(lib: &Library, id: &str, mut p: Playlist, visibility: Visibilit
     Ok(())
 }
 
+/// The parameters a client sends once per value (`songId=1&songId=2`, as the Subsonic API
+/// describes them): every value counts, in the order sent.
+const REPEATED: [&str; 3] = ["songId", "songIdToAdd", "songIndexToRemove"];
+
+/// Keep one more value of a [`REPEATED`] parameter: the values are numbers, so they are kept as
+/// the comma list [`multi`] reads.
+fn add_repeated(params: &mut Params, key: &str, value: &str) {
+    let all = params.entry(key.to_string()).or_default();
+    if !all.is_empty() {
+        all.push(',');
+    }
+    all.push_str(value);
+}
+
+/// What a stored playlist is: shared on Pubky or not. An edit keeps it, unless it says
+/// `public=false` (`updatePlaylist`).
+fn visibility_of(row: &MusicPostRow) -> Visibility {
+    if row.visibility == "public" {
+        Visibility::Public
+    } else {
+        Visibility::Private
+    }
+}
+
 fn multi(p: &Params, key: &str) -> Vec<String> {
-    // axum's Query keeps the last duplicate; clients that send several
-    // `songId=` also work with a comma list, which we accept too.
+    // Every value of a repeated parameter ([`add_repeated`]); a comma list in one value is
+    // taken too.
     p.get(key)
         .map(|v| {
             v.split(',')
@@ -1313,13 +1347,30 @@ async fn dispatch(
             let (items, local) = items_for_song_ids(&lib, &songs)?;
             if let Some(pid) = p.get("playlistId") {
                 // Subsonic semantics: createPlaylist with playlistId replaces the item list.
+                // That is the list the client was given: what it was never shown (an item that
+                // is no song of this library, such as one from a streaming service) stays, after
+                // the new songs.
                 let (row, mut pl) = load_playlist(&lib, pid)?;
+                let shown = playlist_entries(&lib, &row.id, &pl);
+                let old_local = playlists::local_ids(&lib, &row.id);
+                let mut items = items;
+                let mut local = local;
+                for (k, item) in pl.items.iter().enumerate() {
+                    if !shown.iter().any(|(e, _)| matches!(e, Entry::Item(i) if *i == k)) {
+                        items.push(item.clone());
+                    }
+                }
+                for (k, id) in old_local.iter().enumerate() {
+                    if !shown.iter().any(|(e, _)| matches!(e, Entry::Local(i) if *i == k)) {
+                        local.push(*id);
+                    }
+                }
                 pl.items = items;
                 playlists::set_local_ids(&lib, &row.id, &local).map_err(|e| SubErr::new(0, e.message))?;
                 if let Some(n) = p.get("name") {
                     pl.name = n.clone();
                 }
-                save_playlist(&lib, &row.id, pl, Visibility::Private)?;
+                save_playlist(&lib, &row.id, pl, visibility_of(&row))?;
                 let (row, pl) = load_playlist(&lib, pid)?;
                 m.insert("playlist".into(), playlist_json(&lib, &row, &pl, true));
             } else {
@@ -1378,7 +1429,14 @@ async fn dispatch(
             pl.items.extend(add);
             local.extend(add_local);
             playlists::set_local_ids(&lib, &row.id, &local).map_err(|e| SubErr::new(0, e.message))?;
-            save_playlist(&lib, &row.id, pl, Visibility::Private)?;
+            // `public=false` takes a shared playlist back. `public=true` does not share one: to
+            // a Subsonic client the word means "the other accounts of this server may see it",
+            // and sharing here publishes the playlist on Pubky, which is asked for in the app.
+            let visibility = match p.get("public") {
+                Some(v) if v.trim().eq_ignore_ascii_case("false") => Visibility::Private,
+                _ => visibility_of(&row),
+            };
+            save_playlist(&lib, &row.id, pl, visibility)?;
             drop(lib);
             s.notify_library();
         }
