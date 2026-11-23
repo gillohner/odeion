@@ -2054,13 +2054,17 @@ async fn delete_zone(
     Path(id): Path<String>,
     axum::Extension(caller): axum::Extension<accounts::Caller>,
 ) -> Result<StatusCode, ApiError> {
-    // An app password ungroups (`access::Capability::ZoneGroup`): a group of speakers, not a
-    // speaker's own zone or someone's listen-along group
-    if caller.role == accounts::Role::App && (!id.starts_with("group:") || presence::is_along(&s, &id)) {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "An app password ungroups speakers; it doesn't remove a zone.",
-        ));
+    // An app password ungroups (`access::Capability::ZoneGroup`): a zone on a group of speakers
+    // (an output that is no one speaker), not a speaker's own zone or someone's listen-along group
+    if caller.role == accounts::Role::App {
+        let out = zone_of(&s, &id)?.output().id();
+        let group = out.0.starts_with("group:") || s.outputs.get(&out).is_none();
+        if !group || presence::is_along(&s, &id) {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "An app password ungroups speakers; it doesn't remove a zone.",
+            ));
+        }
     }
     // A listen-along group ends as when its host ends it: the music goes back, not lost
     if presence::delete_group(&s, &id).await? {
@@ -28413,13 +28417,61 @@ exec sleep 300
         )
         .await;
         assert_eq!(st, StatusCode::FORBIDDEN);
-        // Ungrouping, yes; removing a speaker's own zone, no
+        // Removing a speaker's own zone, no; grouping two speakers and ungrouping them, yes
         let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/zones/{zid}"), mine, &[], None).await;
         assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
         assert!(
             s.zones.get(&pm_zones::ZoneId::new(&zid)).is_some(),
             "the zone is still there"
         );
+        let a: Arc<dyn Output> = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        let b: Arc<dyn Output> = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }));
+        let (aid, bid) = (a.id(), b.id());
+        s.outputs.register(a);
+        s.outputs.register(b);
+        let (st, pair, _) = send_as(
+            &app,
+            "POST",
+            "/v1/zones",
+            mine,
+            &[],
+            Some(serde_json::json!({"name": "Kitchen + Den", "outputs": [aid.0, bid.0]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{pair}");
+        let pid = pair["id"].as_str().unwrap().to_string();
+        assert!(!pid.starts_with("group:"), "a zone's id is its name's: {pid}");
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/zones/{pid}"), mine, &[], None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+        assert!(s.zones.get(&pm_zones::ZoneId::new(&pid)).is_none());
+        // Making a collection public is the owner's (it is posted under their name)
+        for uri in ["/v1/collections/x/visibility", "/v1/playlists/x/visibility"] {
+            let (st, v, _) = send_as(
+                &app,
+                "PUT",
+                uri,
+                mine,
+                &[],
+                Some(serde_json::json!({"public": true})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{uri}: {v}");
+        }
+        // The live Spotify item is that exact link, nothing after it
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            &queue,
+            mine,
+            &[],
+            Some(serde_json::json!({"items": [{"uri": "librespot:connect/../etc/hosts"}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
 
         // Subsonic: the password, plain, hex or as a salted md5; not for a scan
         let rest = |q: String| {

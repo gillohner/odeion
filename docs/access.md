@@ -34,7 +34,7 @@ proxy that marks what it forwards (a forwarding header).
 | `zone_list` | the list of zones (each caller sees the ones they may use) | yes | yes | yes | |
 | `zone_use` | a zone's queue, transport, volume, sleep timer | yes | on the zones the owner opened | every zone | |
 | `collections` | their bookmarks and collections, and the order they play in | yes | yes | yes | |
-| `own` | their own preferences, devices, presence, problem reports, sign-ins on this node | yes | yes | | |
+| `own` | their own preferences, devices, presence, problem reports, sign-ins on this node, making a collection public | yes | yes | | |
 | `own_play` | play with their own streaming sign-ins | yes | yes | yes | |
 | `own_sign_in_state` | see their own streaming sign-ins, sign out of them | yes | yes | | |
 | `own_sign_in` | sign in to their own TIDAL, Qobuz or Spotify | yes | unless the node plays everyone through its own sign-ins | | |
@@ -95,7 +95,8 @@ library and the owner's collections, all as the owner's (`app` in the table abov
 settings, people, the library, the API token or anyone's sign-ins, and its answers never show the
 API token or another password. Its queue takes library songs, the services' tracks and web links,
 on the home network too (spoken announcements), never a file path or a loopback address. It
-ungroups a group of speakers, but doesn't remove a speaker's own zone or someone's listen-along group.
+ungroups a group of speakers, but doesn't remove a speaker's own zone or someone's listen-along group,
+and it doesn't make a collection public.
 
 - `GET /v1/node/app-passwords` lists them (name, made, last used: never the password);
   `DELETE /v1/node/app-passwords/{id}` removes one, and that app alone stops at once. An app that

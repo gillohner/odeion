@@ -212,7 +212,8 @@ pub(crate) async fn search(
     axum::Extension(c): axum::Extension<crate::accounts::Caller>,
     Query(p): Query<SearchParams>,
 ) -> Response {
-    let owner = c.role == crate::accounts::Role::Owner;
+    // (an app password searches as the owner's: their collections too)
+    let owner = crate::accounts::Who::of(&c) == crate::accounts::Who::Owner;
     let q = query_with_tags(&p);
     let scope = p.scope.clone().unwrap_or_default();
     let limit = p.limit.unwrap_or(20).clamp(1, 50);

@@ -1491,6 +1491,14 @@ pub const APP_FETCH: FetchLimit = FetchLimit {
 /// files go in as library songs. The URI is trimmed: the one checked is the one queued.
 pub fn check_app_item(it: &mut pm_zones::QueueItem) -> Result<(), ApiError> {
     it.uri = it.uri.trim().to_string();
+    // (the live Spotify item is that exact link: one with more after it would be taken for a file)
+    let live = crate::librespot::LIVE_URI;
+    if it.uri.starts_with(live) && it.uri != live {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "That is no link the node plays.",
+        ));
+    }
     if is_service_track(&it.uri) {
         return Ok(());
     }
