@@ -285,11 +285,13 @@ pub async fn serve_remote(state: Arc<NodeState>) -> std::io::Result<SocketAddr> 
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let addr = listener.local_addr()?;
     let app = crate::router(state).layer(axum::Extension(Remote));
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await {
-            tracing::warn!("the remote-access listener stopped: {e}");
-        }
-    });
+    // A header timer and a connection limit (conns.rs): the tunnel brings callers from anywhere
+    tokio::spawn(crate::conns::serve(
+        listener,
+        app,
+        crate::conns::Limits::default(),
+        std::future::pending(),
+    ));
     Ok(addr)
 }
 

@@ -18,6 +18,7 @@ pub mod art;
 pub mod artist_info;
 mod assets;
 pub mod audius;
+mod conns;
 pub mod copy_guard;
 pub mod copy_jobs;
 pub mod renderer;
@@ -1049,22 +1050,17 @@ pub(crate) async fn serve_router_until(
     stop: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let (told, mut was_told) = tokio::sync::watch::channel(false);
-    // Peer addresses: the renderer answers LAN peers only (peer.rs)
-    let served = std::future::IntoFuture::into_future(
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .with_graceful_shutdown({
-            let state = state.clone();
-            async move {
-                stop.await;
-                // Every listener of this node, not only this one, stops taking requests
-                state.begin_stop();
-                let _ = told.send(true);
-            }
-        }),
-    );
+    // Peer addresses (the renderer answers LAN peers only, peer.rs), a header timer and a
+    // connection limit (conns.rs)
+    let served = conns::serve(listener, app, conns::Limits::default(), {
+        let state = state.clone();
+        async move {
+            stop.await;
+            // Every listener of this node, not only this one, stops taking requests
+            state.begin_stop();
+            let _ = told.send(true);
+        }
+    });
     let grace_over = async move {
         // (an error: `stop` never resolved and the server ended by itself)
         if was_told.wait_for(|t| *t).await.is_ok() {
@@ -1076,12 +1072,11 @@ pub(crate) async fn serve_router_until(
     // Done when this listener's connections are, and no request is being answered on another
     // of the node's listeners either (remote access has its own): those get the same time
     let all_done = async {
-        let served = served.await;
+        served.await;
         state.requests_done().await;
-        served
     };
     tokio::select! {
-        r = all_done => r?,
+        () = all_done => {}
         () = grace_over => {
             state.end_requests();
             tracing::info!("requests not answered within the grace period were ended; open streams end with the node");

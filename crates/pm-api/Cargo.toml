@@ -60,6 +60,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = "0.1"
+# The API listeners' own loop (conns.rs): hyper's header timer and a connection limit, which
+# axum::serve does not set
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+tower = { version = "0.5", features = ["util"] }
 bytes = { workspace = true }
 # The web UI's files go out gzipped (assets.rs); already in the tree (zip, reqwest)
 flate2 = "1"
@@ -88,7 +93,6 @@ tempfile = "3"
 pm-endpoint = { workspace = true }
 id3 = { workspace = true }
 hound = { workspace = true }
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # A local HTTP relay for the Ring sign-ins of the bundle tests (the one pubky's own tests run),
 # without its SQLite persistence (that would be a second libsqlite3)

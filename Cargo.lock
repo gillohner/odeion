@@ -3848,6 +3848,8 @@ dependencies = [
  "hound",
  "http-body-util",
  "http-relay",
+ "hyper",
+ "hyper-util",
  "id3",
  "libc",
  "md-5",
