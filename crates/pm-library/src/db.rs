@@ -4067,6 +4067,27 @@ impl Library {
             .map_err(Into::into)
     }
 
+    /// A cache kept in settings, one row per thing asked (`{"at": <unix seconds>, ...}` each):
+    /// rows under `prefix` stamped before `before` go (a row that is not such JSON counts as
+    /// stamped 0), then all but the `keep` newest of the rest. Answers how many went.
+    pub fn prune_stamped_settings(&self, prefix: &str, before: i64, keep: usize) -> Result<usize> {
+        const AT: &str =
+            "(CASE WHEN json_valid(value) THEN coalesce(json_extract(value, '$.at'), 0) ELSE 0 END)";
+        let conn = self.lock();
+        let old = conn.execute(
+            &format!("DELETE FROM settings WHERE substr(key, 1, length(?1)) = ?1 AND {AT} < ?2"),
+            rusqlite::params![prefix, before],
+        )?;
+        let over = conn.execute(
+            &format!(
+                "DELETE FROM settings WHERE key IN (SELECT key FROM settings \
+                 WHERE substr(key, 1, length(?1)) = ?1 ORDER BY {AT} DESC, key LIMIT -1 OFFSET ?2)"
+            ),
+            rusqlite::params![prefix, keep as i64],
+        )?;
+        Ok(old + over)
+    }
+
     // ----- album art -----------------------------------------------------
 
     pub fn album_art(&self, album_id: i64) -> Result<Option<AlbumArt>> {
@@ -5472,6 +5493,37 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::{sample_track, MB};
     use super::*;
+
+    #[test]
+    fn a_stamped_cache_in_settings_loses_old_rows_and_keeps_the_newest() {
+        let lib = Library::open_in_memory().unwrap();
+        for (k, at) in [("c.a", 100), ("c.b", 200), ("c.c", 300), ("c.d", 400)] {
+            lib.set_setting(k, &format!(r#"{{"at":{at},"text":"x"}}"#))
+                .unwrap();
+        }
+        lib.set_setting("c.broken", "not json").unwrap();
+        lib.set_setting("c.nostamp", "{}").unwrap();
+        lib.set_setting("cx.other", r#"{"at":1}"#).unwrap();
+        lib.set_setting("other", r#"{"at":1}"#).unwrap();
+        // Before 150: a, the broken row and the one without a stamp
+        assert_eq!(lib.prune_stamped_settings("c.", 150, 10).unwrap(), 3);
+        let left = |lib: &Library| -> Vec<String> {
+            lib.settings_with_prefix("c")
+                .unwrap()
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        };
+        assert_eq!(left(&lib), ["c.b", "c.c", "c.d", "cx.other"]);
+        // The two newest stay
+        assert_eq!(lib.prune_stamped_settings("c.", 0, 2).unwrap(), 1);
+        assert_eq!(left(&lib), ["c.c", "c.d", "cx.other"]);
+        assert!(lib.get_setting("other").unwrap().is_some());
+        // A prefix with LIKE's wildcards in it is taken as it is
+        lib.set_setting("c_x", r#"{"at":1}"#).unwrap();
+        assert_eq!(lib.prune_stamped_settings("c_", 150, 10).unwrap(), 1);
+        assert_eq!(left(&lib), ["c.c", "c.d", "cx.other"]);
+    }
 
     #[test]
     fn a_settings_size_is_its_bytes_without_reading_it() {

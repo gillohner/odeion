@@ -11,6 +11,45 @@ use serde::Deserialize;
 use std::sync::{Arc, OnceLock, RwLock};
 
 const KEEP_SECS: i64 = 7 * 86_400;
+/// The most answers kept; the oldest go first.
+const KEEP_ROWS: usize = 20_000;
+/// The longest title, artist or album asked about (bytes). Anyone who may read the library can
+/// ask, and each new question is a row and a request to LRCLIB under the node's contact.
+const FIELD_MAX: usize = 300;
+const PREFIX: &str = "lyrics.lrclib.";
+
+/// Whether a song's fields are something to ask about: both names there, none too long.
+fn askable(title: &str, artist: &str, album: Option<&str>) -> bool {
+    !title.is_empty()
+        && !artist.is_empty()
+        && title.len() <= FIELD_MAX
+        && artist.len() <= FIELD_MAX
+        && album.is_none_or(|a| a.len() <= FIELD_MAX)
+}
+
+/// Old answers go, at most once an hour: rows older than [`KEEP_SECS`] (they would be asked
+/// again anyway), then all but the [`KEEP_ROWS`] newest.
+fn prune(s: &NodeState) {
+    static LAST: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    let now = pm_library::db::now_unix();
+    let last = LAST.load(std::sync::atomic::Ordering::Relaxed);
+    if now - last < 3600
+        || LAST
+            .compare_exchange(
+                last,
+                now,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+    {
+        return;
+    }
+    let lib = s.library.lock().expect("library poisoned");
+    if let Err(e) = lib.prune_stamped_settings(PREFIX, now - KEEP_SECS, KEEP_ROWS) {
+        tracing::warn!(error = %e, "lyrics answers kept: not pruned");
+    }
+}
 
 fn base() -> &'static RwLock<String> {
     static B: OnceLock<RwLock<String>> = OnceLock::new();
@@ -24,7 +63,7 @@ pub fn set_base(url: &str) {
 
 fn key(title: &str, artist: &str, duration_s: u64) -> String {
     let n = |x: &str| x.trim().to_lowercase();
-    format!("lyrics.lrclib.{}|{}|{}", n(artist), n(title), duration_s)
+    format!("{PREFIX}{}|{}|{}", n(artist), n(title), duration_s)
 }
 
 /// LRCLIB's lyrics for a song: `(text, synced)`, or none. Cached either way.
@@ -38,7 +77,8 @@ pub(crate) async fn find(
     let title = title.trim();
     let artist = artist.trim();
     // Outside services hear who asks (the contact in the User-Agent); none set, none asked
-    if title.is_empty() || artist.is_empty() || s.contact().is_empty() {
+    let album = album.map(str::trim).filter(|a| !a.is_empty());
+    if !askable(title, artist, album) || s.contact().is_empty() {
         return None;
     }
     let secs = duration_ms.map(|d| (d + 500) / 1000).unwrap_or(0);
@@ -60,7 +100,7 @@ pub(crate) async fn find(
         }
     }
     let mut q: Vec<(&str, String)> = vec![("track_name", title.into()), ("artist_name", artist.into())];
-    if let Some(a) = album.map(str::trim).filter(|a| !a.is_empty()) {
+    if let Some(a) = album {
         q.push(("album_name", a.into()));
     }
     if secs > 0 {
@@ -96,6 +136,7 @@ pub(crate) async fn find(
         })
         .to_string(),
     );
+    prune(s);
     found
 }
 
@@ -122,4 +163,22 @@ pub(crate) async fn get(State(s): State<Arc<NodeState>>, Query(q): Query<LyricsQ
         text,
         lines,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_songs_with_names_of_a_sane_length_are_asked_about() {
+        assert!(askable("Song", "Artist", None));
+        assert!(askable("Song", "Artist", Some("Album")));
+        assert!(!askable("", "Artist", None));
+        assert!(!askable("Song", "", None));
+        let long = "x".repeat(FIELD_MAX + 1);
+        assert!(!askable(&long, "Artist", None));
+        assert!(!askable("Song", &long, None));
+        assert!(!askable("Song", "Artist", Some(&long)));
+        assert!(askable(&"x".repeat(FIELD_MAX), "Artist", None));
+    }
 }
