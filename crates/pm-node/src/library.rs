@@ -340,9 +340,9 @@ pub fn import_playlist(cfg: &NodeConfig, file: &Path, name: Option<&str>) -> any
 
     let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     let format = detect_format(file.to_str(), &bytes).context("cannot tell the playlist format")?;
-    // Lines as written: a relative one is looked up at the playlist's folder first, then matched
-    // as that place (a file in folders named as the playlist's), then by its own folders
-    // (resolve_import_in)
+    // Lines as written: a relative one is looked up at the playlist's folder first, then by file
+    // name as that place (a file in folders named as the playlist's) and as written, then by
+    // title in the playlist's folder (no artist named), then as written (resolve_import_in)
     let list = parse(&bytes, format, None)?;
     // The playlist's folder, also for a bare file name given on the command line
     let folder = std::path::absolute(file)
