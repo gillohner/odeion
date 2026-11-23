@@ -503,7 +503,8 @@ async fn fill_session(s: &NodeState, mut sess: Session) -> Session {
         .await
     {
         if let Ok(v) = r.json::<Value>().await {
-            sess.user_id = v["userId"].as_i64().map(|u| u.to_string()).or(sess.user_id);
+            // (a number or text, read one way: `answer_account`)
+            sess.user_id = answer_account(&serde_json::json!({"user_id": v["userId"]})).or(sess.user_id);
             if let Some(c) = v["countryCode"].as_str() {
                 sess.country = c.to_string();
             }

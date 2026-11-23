@@ -279,15 +279,26 @@ async fn token_request(s: &NodeState, form: &[(&str, &str)]) -> Result<Value, Ap
     let status = resp.status();
     let v: Value = resp.json().await.map_err(upstream)?;
     if !status.is_success() {
-        return Err(upstream(format!(
-            "token endpoint {status}: {}",
-            v["error_description"]
-                .as_str()
-                .or(v["error"].as_str())
-                .unwrap_or("")
-        )));
+        return Err(upstream(token_refusal(status, &v)));
     }
     Ok(v)
+}
+
+/// What Spotify's token endpoint said when it refused: its status, its error code
+/// (`invalid_grant`, `invalid_client`, …) and its words.
+fn token_refusal(status: reqwest::StatusCode, v: &Value) -> String {
+    let said: Vec<&str> = [v["error"].as_str(), v["error_description"].as_str()]
+        .into_iter()
+        .flatten()
+        .filter(|x| !x.is_empty())
+        .collect();
+    format!("token endpoint {status}: {}", said.join(": "))
+}
+
+/// Spotify refused a renewal for good: the sign-in itself was revoked (`invalid_grant`). A wrong
+/// app (`invalid_client`), a rate limit or anything else may pass.
+fn refused_for_good(e: &ApiError) -> bool {
+    e.message.contains("token endpoint ") && e.message.contains("invalid_grant")
 }
 
 /// Client-credentials token for catalogue search without a user.
@@ -375,15 +386,8 @@ async fn account_known(s: &NodeState, holder: &Who) -> Kept {
     let token = match user_token(s, holder).await {
         Ok(Some(token)) => token,
         Ok(None) => return Kept::Dead,
-        // (Spotify's own refusal of the renewal, as `token_request` says it: 400 invalid_grant or
-        // 401; a 429 or 408 passes and is asked again)
-        Err(e)
-            if ["token endpoint 400", "token endpoint 401"]
-                .iter()
-                .any(|r| e.message.contains(r)) =>
-        {
-            return Kept::Dead
-        }
+        // (Spotify revoked the sign-in; anything else, a wrong app or a rate limit, is asked again)
+        Err(e) if refused_for_good(&e) => return Kept::Dead,
         Err(_) => return Kept::NotNow,
     };
     let Some(mut u) = load_user(s, holder) else {
@@ -1853,5 +1857,40 @@ impl crate::signin::SignInSource for SpotifySignIn {
         }
         crate::librespot::set_enabled_bg(s, true);
         Ok(WAY_LIBRESPOT_FILE)
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    /// Only a revoked sign-in counts as refused for good: a wrong app or a rate limit doesn't.
+    #[test]
+    fn only_a_revoked_renewal_is_refused_for_good() {
+        let said = |status: u16, v: serde_json::Value| {
+            upstream(token_refusal(reqwest::StatusCode::from_u16(status).unwrap(), &v))
+        };
+        let revoked = said(
+            400,
+            serde_json::json!({"error": "invalid_grant", "error_description": "Refresh token revoked"}),
+        );
+        assert!(
+            revoked.message.contains("Refresh token revoked"),
+            "{}",
+            revoked.message
+        );
+        assert!(refused_for_good(&revoked));
+        for (status, v) in [
+            (
+                400,
+                serde_json::json!({"error": "invalid_client", "error_description": "Invalid client"}),
+            ),
+            (401, serde_json::json!({"error": "invalid_client"})),
+            (429, serde_json::json!({})),
+            (503, serde_json::json!({"error": "server_error"})),
+        ] {
+            assert!(!refused_for_good(&said(status, v.clone())), "{status} {v}");
+        }
+        assert!(!refused_for_good(&upstream("connection refused")));
     }
 }
