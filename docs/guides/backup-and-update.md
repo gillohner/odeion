@@ -19,7 +19,11 @@ database, its key and your Pubky account's files. `backup.sh` below does all of 
 - With a passphrase the sign-ins are included, encrypted. Nothing opens them without the
   passphrase, so keep it somewhere safe.
 
-The file holds the node's library only, never a homeserver.
+The file holds the node's library only, never a homeserver. It never holds who is logged in to
+the node: after a restore from Settings on a running node everyone stays logged in or out as they
+were. Where the library file itself is put back (a new machine, the bundle's `restore.sh`, going
+back to the previous version below), everyone logs in again: you with Pubky Ring or the API
+token, the people you added with Pubky Ring.
 
 **Every day or week, to a folder:** in the same place, pick a folder on the node, how often and
 how many to keep. Best on another disk or a NAS. In Docker the folder must be inside the
@@ -187,7 +191,8 @@ docker compose start music
 ```
 
 Then restore that backup's `node/library.pmbackup` in **Settings › Backup › Choose a backup file**
-with the passphrase from `node/passphrase`: it puts the sign-ins back. Anything you changed after
+with the passphrase from `node/passphrase`: it puts the sign-ins back. Everyone logs in to the
+node again afterwards (the library file holds no log-ins). Anything you changed after
 that backup is gone (the newer library stays next to it as `library.db.newer`). A homeserver that won't start after `git pull`: go back to the bundle you had
 with `git checkout <the commit in the backup's config/git-commit>` and `docker compose up -d`. If
 it still fails, [ask for help](troubleshooting.md#still-stuck) before removing anything; the
