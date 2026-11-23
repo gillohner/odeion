@@ -263,6 +263,21 @@ pub(crate) async fn write_whole(to: &std::path::Path, bytes: &[u8]) -> std::io::
     written
 }
 
+/// Remove the part files a node that stopped mid-write left in the art folder (see
+/// [`write_whole`]: each is named after its process, so a later run never writes over it). Run
+/// at start, before anything fetches a picture.
+pub(crate) fn sweep_parts(art_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(art_dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let is_part = e.file_name().to_str().is_some_and(|n| n.ends_with(".part"));
+        if is_part && e.file_type().is_ok_and(|t| t.is_file()) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Every picture and relayed file the node serves says it is only that: the browser never guesses
 /// another type, and nothing in it runs when it is opened on its own (in a tab).
 pub(crate) const PASSIVE_CSP: &str = "default-src 'none'; sandbox";
@@ -555,5 +570,20 @@ mod tests {
             ["caa-7.jpg", "caa-8.jpg"],
             "no part file left after a failed rename"
         );
+        // A node that stopped between write and rename: its part files go at the next start
+        std::fs::write(dir.path().join("caa-9.jpg.4242-0.part"), b"half").unwrap();
+        std::fs::write(dir.path().join("artist-3.part"), b"half").unwrap();
+        super::sweep_parts(dir.path());
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["caa-7.jpg", "caa-8.jpg"],
+            "part files swept, pictures kept"
+        );
+        assert!(dir.path().join("caa-8.jpg/inside").exists());
     }
 }

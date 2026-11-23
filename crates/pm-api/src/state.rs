@@ -486,6 +486,7 @@ impl NodeState {
             },
             Err(_) => None,
         };
+        crate::art::sweep_parts(&settings.art_dir);
         let node = Arc::new(Self {
             node_id,
             remote: Default::default(),
