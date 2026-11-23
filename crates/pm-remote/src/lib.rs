@@ -31,8 +31,9 @@ pub const ALPN: &[u8] = b"pubky-music/http/1";
 /// `conns::MAX_CONNECTIONS`), so a piped stream never waits in its queue, where nothing times it.
 pub const MAX_STREAMS: usize = 256;
 
-/// Streams one controller's connection pipes at once, so one caller cannot hold every place of
-/// [`MAX_STREAMS`] (an app uses a few: its requests, the event stream, audio).
+/// Streams one controller's connection pipes at once, so one connection cannot hold every place of
+/// [`MAX_STREAMS`] (an app uses a few: its requests, the event stream, audio). A caller with
+/// several keys can open several connections.
 pub const MAX_STREAMS_PER_CONNECTION: usize = 64;
 
 /// Which relays an endpoint uses.

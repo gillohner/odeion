@@ -5,8 +5,8 @@
 //! limit; the library, the art and the audio need theirs too). Here every connection has
 //! [`HEADER_TIMEOUT`] for each request's headers (also between requests on a kept-alive
 //! connection) and a listener holds at most [`MAX_CONNECTIONS`]; more wait in the system's
-//! queue until one closes. One address holds at most [`MAX_PER_PEER`] of them, so one host cannot
-//! take them all; loopback is not counted (a proxy or tunnel on this machine, remote access's
+//! queue until one closes. One address holds at most [`MAX_PER_PEER`] of them (a host with
+//! several addresses, as IPv6 gives, can hold more); loopback is not counted (a proxy or tunnel on this machine, remote access's
 //! own listener, which its tunnel limits itself). HTTP/1 only: HTTP/2 without TLS (which no app or page of ours speaks;
 //! a browser uses HTTP/2 only over TLS, through a proxy that talks HTTP/1 to the node) would wait
 //! for a silent connection's first bytes with no limit, and has no header limit of its own.
