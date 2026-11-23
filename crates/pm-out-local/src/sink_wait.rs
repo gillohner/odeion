@@ -41,8 +41,8 @@ const STEP: Duration = Duration::from_millis(5);
 
 /// How long a write waits for room while the stream takes no audio at all before the output counts
 /// as stopped. A write waits while about a second is queued, so a stream that plays frees room well
-/// within it; one whose device went away without saying so (or whose audio thread hangs) never does, and
-/// the zone would hold its commands (Stop, Pause, Next) for good.
+/// within it; one whose device went away without saying so (its callback simply stops) never
+/// does, and the zone would hold its commands (Stop, Pause, Next) for good.
 pub const STALL: Duration = Duration::from_secs(10);
 
 /// Wait until `room()` (or `stopped()`); a `gone()` error ends the wait at once, and so does a
@@ -232,10 +232,10 @@ mod tests {
         let taken = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let room = Arc::new(AtomicBool::new(false));
         let (t, r2) = (taken.clone(), room.clone());
-        // Takes a little every 20 ms for 600 ms (longer than the 250 ms stall), then there is room
+        // Takes a little every 50 ms for 1.5 s (longer than the 1 s stall), then there is room
         std::thread::spawn(move || {
             for _ in 0..30 {
-                std::thread::sleep(Duration::from_millis(20));
+                std::thread::sleep(Duration::from_millis(50));
                 t.fetch_add(1, Ordering::SeqCst);
             }
             r2.store(true, Ordering::SeqCst);
@@ -246,11 +246,11 @@ mod tests {
             || false,
             || None,
             || taken.load(Ordering::SeqCst),
-            Duration::from_millis(250),
+            Duration::from_secs(1),
             stalled,
         );
         assert!(r.is_ok(), "{r:?}");
-        assert!(started.elapsed() >= Duration::from_millis(500));
+        assert!(started.elapsed() >= Duration::from_millis(1200));
     }
 
     /// A machine that sleeps mid-song: the time asleep is not a stall (the stream had no chance to
