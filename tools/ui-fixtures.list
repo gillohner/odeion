@@ -181,3 +181,4 @@ ui-bar-ticks.js bar-ticks-shots
 ui-failed-reads.js failed-reads-shots
 ui-long-list.js long-list-shots
 ui-busy-forms.js busy-forms-shots
+ui-tokens.js tokens-shots
