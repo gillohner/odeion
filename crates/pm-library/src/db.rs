@@ -5510,10 +5510,12 @@ fn match_key(s: &str) -> String {
 }
 
 /// The artist an imported entry names, trimmed: empty when it names none, or no one ("Various
-/// Artists" on a compilation's row, as the library's album artists are read).
+/// Artists" on a compilation's row, as the library's album artists are read; "?" or "-").
 fn entry_artist(a: Option<&str>) -> &str {
     let a = a.unwrap_or("").trim();
-    if matches!(artist_key(a).as_str(), "variousartists" | "va") {
+    // One mark ("?", "-") is how some apps write an unknown artist
+    let placeholder = a.chars().count() == 1 && match_key(a).is_empty();
+    if placeholder || matches!(artist_key(a).as_str(), "variousartists" | "va") {
         ""
     } else {
         a
@@ -8633,6 +8635,9 @@ mod identify_tests {
         assert!(!by_artist(&duo, "Sefa Cyclon"));
         assert_eq!(entry_artist(Some(" VA ")), "");
         assert_eq!(entry_artist(Some(" !!! ")), "!!!");
+        assert_eq!(entry_artist(Some(" ? ")), "");
+        assert_eq!(entry_artist(Some("-")), "");
+        assert_eq!(entry_artist(Some("X")), "X");
     }
 
     /// A row naming "Various Artists" (a Roon row whose album artist stands in for its artist)
