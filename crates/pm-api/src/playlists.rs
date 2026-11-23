@@ -206,20 +206,56 @@ pub(crate) fn library_track_ids(lib: &Library, id: &str) -> Result<Vec<i64>, Api
 }
 
 /// Library tracks as playlist items, and the ids of those without a canonical identity: those
-/// stay in the playlist on this node only (constraint 4: never in social data).
-pub(crate) fn split_tracks(lib: &Library, ids: &[i64]) -> Result<(Vec<PlaylistItem>, Vec<i64>), ApiError> {
-    let mut items = Vec::with_capacity(ids.len());
-    let mut local = Vec::new();
+/// stay in the playlist on this node only (constraint 4: never in social data). For a caller that
+/// holds the library already; [`split_tracks`] looks them up in turns.
+pub(crate) fn split_tracks_held(
+    lib: &Library,
+    ids: &[i64],
+) -> Result<(Vec<PlaylistItem>, Vec<i64>), ApiError> {
+    let (mut items, mut local) = (Vec::with_capacity(ids.len()), Vec::new());
     for id in ids {
-        let t = lib
-            .get_track(TrackId(*id))?
-            .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
-        match t.publishable_uri() {
-            Some(u) => items.push(PlaylistItem::new(u)),
-            None => local.push(*id),
-        }
+        split_one(lib, *id, &mut items, &mut local)?;
     }
     Ok((items, local))
+}
+
+/// [`split_tracks_held`] looked up in turns off the request thread ([`crate::in_turns`]), before
+/// the playlist is read, so a long list does not hold every other library request.
+pub(crate) async fn split_tracks(
+    s: &NodeState,
+    ids: Vec<i64>,
+) -> Result<(Vec<PlaylistItem>, Vec<i64>), ApiError> {
+    if ids.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    crate::in_turns_off_thread(s.library.clone(), "playlist", move |lib| {
+        let (mut items, mut local) = (Vec::with_capacity(ids.len()), Vec::new());
+        crate::in_turns(
+            lib,
+            &ids,
+            crate::LOOKUP_TURN,
+            || {},
+            |lib, id| split_one(lib, id, &mut items, &mut local),
+        )?;
+        Ok((items, local))
+    })
+    .await?
+}
+
+fn split_one(
+    lib: &Library,
+    id: i64,
+    items: &mut Vec<PlaylistItem>,
+    local: &mut Vec<i64>,
+) -> Result<(), ApiError> {
+    let t = lib
+        .get_track(TrackId(id))?
+        .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
+    match t.publishable_uri() {
+        Some(u) => items.push(PlaylistItem::new(u)),
+        None => local.push(id),
+    }
+    Ok(())
 }
 
 // ---- songs kept on this node only (mn-infra: Music Assistant could not add an untagged song) ----
@@ -427,13 +463,13 @@ pub(crate) async fn create(
     State(s): State<Arc<NodeState>>,
     Json(body): Json<CreatePlaylist>,
 ) -> ApiResult<PlaylistDetail> {
-    let lib = s.library.lock().expect("library poisoned");
     let mut items = parse_uris(&body.uris)?;
     for (it, src) in items.iter_mut().zip(&body.sources) {
         it.source = src.clone();
     }
-    let (more, local) = split_tracks(&lib, &body.track_ids)?;
+    let (more, local) = split_tracks(&s, body.track_ids).await?;
     items.extend(more);
+    let lib = s.library.lock().expect("library poisoned");
     let mut playlist = Playlist::new(body.name, body.description, body.image, items);
     playlist.layout = match &body.layout {
         Some(l) => checked_layout(l)?,
@@ -612,11 +648,11 @@ pub(crate) async fn add_items(
     Path(id): Path<String>,
     Json(body): Json<AddPlaylistItems>,
 ) -> ApiResult<PlaylistDetail> {
+    let mut items = parse_uris(&body.uris)?;
+    let (more, local) = split_tracks(&s, body.track_ids).await?;
+    items.extend(more);
     let lib = s.library.lock().expect("library poisoned");
     let (row, mut p) = load(&lib, &id)?;
-    let mut items = parse_uris(&body.uris)?;
-    let (more, local) = split_tracks(&lib, &body.track_ids)?;
-    items.extend(more);
     if items.is_empty() && local.is_empty() {
         return Err(ApiError::bad_request("nothing to add"));
     }

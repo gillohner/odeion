@@ -2024,3 +2024,78 @@ async fn search_says_a_playlists_new_count_right_after_an_edit() {
     let (_, a) = call(&app, "GET", "/v1/search?q=late%20night&in=library", None).await;
     assert_eq!(found(&a), (false, Some("1 song · your playlist".into())));
 }
+
+/// A playlist made of more songs than one lookup turn (the library is let go every 500 songs)
+/// keeps the order sent, published and node-only songs each in theirs; an add naming a song that
+/// is not there changes nothing.
+#[tokio::test]
+async fn a_long_list_of_songs_keeps_its_order_across_lookup_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_for(dir.path(), "turns", None, None);
+    let db = settings.db_path.clone();
+    let s = NodeState::new(settings, Library::open(&db).unwrap(), OutputRegistry::new());
+    let app = router(s.clone());
+    // Even songs identified (published), odd ones not (kept on this node)
+    let ids: Vec<i64> = {
+        let lib = s.library.lock().unwrap();
+        (0..1001)
+            .map(|i| {
+                let mut t: pm_model::Track = serde_json::from_value(serde_json::json!({
+                    "id": null, "title": format!("Song {i}"),
+                    "artists": [{"id": null, "name": "Artist", "mbid": null}],
+                    "album": null, "track_no": null, "disc_no": null, "duration_ms": 1000,
+                    "file": {"path": format!("/music/{i}.flac"), "size_bytes": 1, "mtime_unix": 1,
+                             "container": "flac",
+                             "format": serde_json::to_value(pm_model::AudioFormat::pcm(44_100, 16, 2)).unwrap(),
+                             "duration_ms": 1000},
+                    "recording_mbid": null, "isrc": null, "acoustid": null, "canonical": null,
+                    "replaygain_track_gain_db": null, "replaygain_album_gain_db": null}))
+                .unwrap();
+                if i % 2 == 0 {
+                    let mbid = pm_model::Mbid::parse(&format!("00000000-0000-4000-8000-{i:012}")).unwrap();
+                    t.canonical = Some((pm_model::MusicUri::recording(mbid), pm_model::Confidence::TaggedMbid));
+                }
+                lib.upsert_track(&t).unwrap().0
+            })
+            .collect()
+    };
+    let (st, pl) = call(
+        &app,
+        "POST",
+        "/v1/playlists",
+        Some(serde_json::json!({"name": "Long", "track_ids": ids})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{pl}");
+    let id = pl["summary"]["id"].as_str().unwrap().to_string();
+    assert_eq!(pl["summary"]["items"], 1001);
+    let published: Vec<String> = pl["playlist"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["uri"].as_str().unwrap().to_string())
+        .collect();
+    let want: Vec<String> = (0..1001)
+        .step_by(2)
+        .map(|i| format!("https://musicbrainz.org/recording/00000000-0000-4000-8000-{i:012}"))
+        .collect();
+    assert_eq!(published, want);
+    let local: Vec<i64> = pl["local_tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(local, ids.iter().skip(1).step_by(2).copied().collect::<Vec<_>>());
+    // One song that is not there: 404, nothing added
+    let (st, e) = call(
+        &app,
+        "POST",
+        &format!("/v1/playlists/{id}/items"),
+        Some(serde_json::json!({"track_ids": [ids[0], ids[1], 99_999_999]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{e}");
+    let (_, pl) = call(&app, "GET", &format!("/v1/playlists/{id}"), None).await;
+    assert_eq!(pl["summary"]["items"], 1001, "{}", pl["summary"]);
+}

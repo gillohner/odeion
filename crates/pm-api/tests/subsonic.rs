@@ -790,4 +790,34 @@ async fn a_jukebox_list_set_with_shuffle_on_plays_shuffled() {
         sent,
         "shuffle off: the order sent"
     );
+    // The queue's limit is checked before any song is looked up: a full queue refuses an add
+    // (here of a song that does not exist: the answer is the limit, not "unknown song")
+    zone.enqueue(
+        (0..pm_zones::MAX_QUEUE_ITEMS - sent.len())
+            .map(|i| pm_zones::QueueItem::new(format!("https://radio.example/{i}")))
+            .collect(),
+        pm_zones::Insert::End,
+    );
+    assert_eq!(zone.queue_len(), pm_zones::MAX_QUEUE_ITEMS);
+    let r = call(
+        &app,
+        &format!("/rest/jukeboxControl?action=add&id=999999999&{auth}"),
+    )
+    .await;
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at most 100000 items"),
+        "{r}"
+    );
+    assert_eq!(
+        zone.queue_len(),
+        pm_zones::MAX_QUEUE_ITEMS,
+        "the queue is not touched"
+    );
+    // A set replaces the queue, so what it holds does not count
+    let r = call(&app, &format!("/rest/jukeboxControl?action=set{ids}&{auth}")).await;
+    assert_eq!(r["status"], "ok", "{r}");
+    assert_eq!(zone.queue_len(), sent.len());
 }

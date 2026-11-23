@@ -1150,7 +1150,7 @@ fn checked(id: &str, p: Playlist) -> Result<Playlist, ApiError> {
 /// Library songs as collection items; a song not identified yet can't be in a listener's
 /// collection (node-only songs are the owner's).
 fn identified_tracks(lib: &Library, ids: &[i64]) -> Result<Vec<pm_pubky::PlaylistItem>, ApiError> {
-    let (items, local) = playlists::split_tracks(lib, ids)?;
+    let (items, local) = playlists::split_tracks_held(lib, ids)?;
     if !local.is_empty() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

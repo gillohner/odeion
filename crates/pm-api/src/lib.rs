@@ -2012,17 +2012,12 @@ async fn enqueue(
         )));
     }
     let mut items = Vec::with_capacity(asked);
-    let (lib, ids) = (s.library.clone(), body.track_ids);
+    let ids = body.track_ids;
     items.extend(
-        tokio::task::spawn_blocking(move || queue_items_of(&lib, &ids, LOOKUP_TURN, || {}))
-            .await
-            .map_err(|e| {
-                tracing::error!("queue lookup: {e}");
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "the songs could not be looked up",
-                )
-            })??,
+        in_turns_off_thread(s.library.clone(), "queue", move |lib| {
+            queue_items_of(lib, &ids, LOOKUP_TURN, || {})
+        })
+        .await??,
     );
     for mut it in body.items {
         it.uri = it.uri.trim().to_string();
@@ -2076,19 +2071,20 @@ async fn enqueue(
     Ok(Json(Enqueued { ids }))
 }
 
-/// How many songs [`queue_items_of`] looks up per hold of the library.
-const LOOKUP_TURN: usize = 500;
+/// How many songs [`in_turns`] looks up per hold of the library.
+pub(crate) const LOOKUP_TURN: usize = 500;
 
-/// Queue items for library songs, in the order asked; 404 for an id that is no song. The library
-/// is held for `per_turn` songs at a time and let go in between (`between` runs then), so a queue
-/// of 50,000 songs does not hold every other library request until all are looked up.
-fn queue_items_of(
+/// `each` for every id, in order, with the library held for `per_turn` ids at a time and let go
+/// in between (`between` runs then), so a list of 50,000 songs (a queue, a playlist, a Subsonic
+/// app's jukebox) does not hold every other library request until all are looked up. The first
+/// error ends it. Blocking: run it in `spawn_blocking`.
+pub(crate) fn in_turns<E>(
     lib: &pm_library::LibraryLock,
     ids: &[i64],
     per_turn: usize,
     mut between: impl FnMut(),
-) -> Result<Vec<QueueItem>, ApiError> {
-    let mut items = Vec::with_capacity(ids.len());
+    mut each: impl FnMut(&Library, i64) -> Result<(), E>,
+) -> Result<(), E> {
     for (i, turn) in ids.chunks(per_turn.max(1)).enumerate() {
         if i > 0 {
             // The library's mutex is not fair: taken again at once, a request that waits for it
@@ -2097,17 +2093,48 @@ fn queue_items_of(
         }
         {
             let lib = lib.lock().expect("library poisoned");
-            for tid in turn {
-                let track = lib
-                    .get_track(TrackId(*tid))?
-                    .ok_or_else(|| ApiError::not_found(format!("no track {tid}")))?;
-                if let Some(item) = NodeSources::item_for(&track) {
-                    items.push(item);
-                }
+            for id in turn {
+                each(&lib, *id)?;
             }
         }
         between();
     }
+    Ok(())
+}
+
+/// [`in_turns`] in `spawn_blocking`; a lookup that panicked is a 500 with a fixed text (`what`
+/// names the list in the log).
+pub(crate) async fn in_turns_off_thread<T: Send + 'static, E: Send + 'static>(
+    lib: Arc<pm_library::LibraryLock>,
+    what: &'static str,
+    job: impl FnOnce(&pm_library::LibraryLock) -> Result<T, E> + Send + 'static,
+) -> Result<Result<T, E>, ApiError> {
+    tokio::task::spawn_blocking(move || job(&lib)).await.map_err(|e| {
+        tracing::error!("{what} lookup: {e}");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the songs could not be looked up",
+        )
+    })
+}
+
+/// Queue items for library songs, in the order asked; 404 for an id that is no song.
+fn queue_items_of(
+    lib: &pm_library::LibraryLock,
+    ids: &[i64],
+    per_turn: usize,
+    between: impl FnMut(),
+) -> Result<Vec<QueueItem>, ApiError> {
+    let mut items = Vec::with_capacity(ids.len());
+    in_turns(lib, ids, per_turn, between, |lib, tid| {
+        let track = lib
+            .get_track(TrackId(tid))?
+            .ok_or_else(|| ApiError::not_found(format!("no track {tid}")))?;
+        if let Some(item) = NodeSources::item_for(&track) {
+            items.push(item);
+        }
+        Ok(())
+    })?;
     Ok(items)
 }
 

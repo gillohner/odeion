@@ -7,6 +7,7 @@ Newest first. Dates are when the change landed on `main`.
 ### 2026-11-23
 
 - **Playing a long list no longer holds up the rest of the node.** Queuing songs by id (Play on a list, Play all) looked every song up in one hold of the library, on the thread that answers requests: with 50,000 songs every other library request waited about 1.5 s (measured on a debug build). The songs are now looked up 500 at a time, away from that thread, and the library is let go between turns.
+- **Adding a long list to a playlist, or to a Subsonic app's jukebox, no longer holds up the rest of the node.** Making a playlist from songs, adding songs to one, and a Subsonic app's jukebox `set`/`add` look the songs up as the queue does now: 500 at a time, away from the request thread. A jukebox `add` to a queue that would pass its 100,000 items is refused before anything is looked up, as Play is.
 
 ### 2026-11-22
 

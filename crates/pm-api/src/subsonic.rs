@@ -516,7 +516,7 @@ fn items_for_song_ids(lib: &Library, ids: &[String]) -> Result<(Vec<PlaylistItem
         }
         nums.push(id);
     }
-    playlists::split_tracks(lib, &nums).map_err(|e| SubErr::new(0, e.message))
+    playlists::split_tracks_held(lib, &nums).map_err(|e| SubErr::new(0, e.message))
 }
 
 fn save_playlist(lib: &Library, id: &str, mut p: Playlist, visibility: Visibility) -> Result<(), SubErr> {
@@ -605,22 +605,48 @@ async fn dispatch(
                 "get" => playlist = true,
                 "status" => {}
                 "set" | "add" => {
-                    let items: Vec<QueueItem> = {
-                        let lib = s.library.lock().expect("library poisoned");
-                        let mut items = Vec::new();
-                        for id in ids {
-                            let tid = parse_id(id, "")
-                                .ok_or_else(|| SubErr::new(70, format!("unknown song {id}")))?;
-                            let t = lib
-                                .get_track(TrackId(tid))
-                                .map_err(|e| SubErr::new(0, e.to_string()))?
-                                .ok_or_else(|| SubErr::new(70, format!("unknown song {id}")))?;
-                            if let Some(it) = NodeSources::item_for(&t) {
-                                items.push(it);
-                            }
-                        }
-                        items
-                    };
+                    let tids = ids
+                        .iter()
+                        .map(|id| {
+                            parse_id(id, "").ok_or_else(|| SubErr::new(70, format!("unknown song {id}")))
+                        })
+                        .collect::<Result<Vec<i64>, SubErr>>()?;
+                    // The queue's limit before anything is looked up, as the queue route does
+                    let has = if action == "add" { zone.queue_len() } else { 0 };
+                    if has + tids.len() > pm_zones::MAX_QUEUE_ITEMS {
+                        return Err(SubErr::new(
+                            0,
+                            format!(
+                                "a queue holds at most {} items (this one has {has}, {} more were sent)",
+                                pm_zones::MAX_QUEUE_ITEMS,
+                                tids.len()
+                            ),
+                        ));
+                    }
+                    // In turns off the request thread, so a long list does not hold the library
+                    let items: Vec<QueueItem> =
+                        crate::in_turns_off_thread(s.library.clone(), "jukebox", move |lib| {
+                            let mut items = Vec::with_capacity(tids.len());
+                            crate::in_turns(
+                                lib,
+                                &tids,
+                                crate::LOOKUP_TURN,
+                                || {},
+                                |lib, tid| {
+                                    let t = lib
+                                        .get_track(TrackId(tid))
+                                        .map_err(|e| SubErr::new(0, e.to_string()))?
+                                        .ok_or_else(|| SubErr::new(70, format!("unknown song {tid}")))?;
+                                    if let Some(it) = NodeSources::item_for(&t) {
+                                        items.push(it);
+                                    }
+                                    Ok(())
+                                },
+                            )?;
+                            Ok::<_, SubErr>(items)
+                        })
+                        .await
+                        .map_err(|e| SubErr::new(0, e.message))??;
                     if action == "set" {
                         zone.stop();
                         zone.clear();
