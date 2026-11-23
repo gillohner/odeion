@@ -652,8 +652,8 @@ mod tests {
         );
     }
 
-    /// Two clients (as the node's call sites are) still ask one at a time, a second apart, and a
-    /// 503 holds back both.
+    /// Two clients (as the node's call sites are) still ask one at a time, `min_interval` (300 ms
+    /// here) apart, and a 503 holds back both.
     #[tokio::test]
     async fn every_client_shares_one_gate_per_host_and_a_503_holds_back_all() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -716,8 +716,8 @@ mod tests {
             at[1] - at[0]
         );
         // A turn is spaced from the start of the last one in the client; the server stamps a
-        // request when it reads it, so one sent a little faster than the last can arrive up to a
-        // few ms early (a missing gate would leave ~50 ms here)
+        // request when it reads it, so one sent a little faster than the last can arrive early:
+        // 20 ms of arrival jitter allowed (a missing gate would leave ~50 ms here)
         for w in at[1..].windows(2) {
             assert!(w[1] - w[0] >= Duration::from_millis(280), "{:?}", w[1] - w[0]);
         }
