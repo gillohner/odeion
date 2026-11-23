@@ -4231,6 +4231,7 @@ name = "pm-pubky"
 version = "0.2.4"
 dependencies = [
  "axum",
+ "axum-server",
  "base32",
  "blake3",
  "bytes",
@@ -4243,7 +4244,9 @@ dependencies = [
  "pubky-music-specs",
  "pubky-noise",
  "pubky-social-specs",
+ "rcgen",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
