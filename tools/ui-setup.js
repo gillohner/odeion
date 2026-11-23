@@ -136,18 +136,23 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await box('slim:00:04:20:00:00:01').isDisabled(), 'squeezelite players are not offered with them');
     await c.close();
 
-    // ---- About: tokens ----
+    // ---- People & access: Log out and the password for apps (the API token); About points there ----
     c = await ctx(); p = await c.newPage();
-    await p.goto(BASE + '/settings/about');
-    await p.waitForSelector('#logout');
+    await p.goto(BASE + '/settings/people');
+    await p.waitForSelector('#peoplebox #logout');
     check((await p.textContent('#logout')).trim() === 'Log out', 'this browser has Log out');
-    check(!(await p.$('#tokennew')) && /Set in the node’s config/.test(await p.textContent('#main')) && await p.locator('#main a[href*="troubleshooting.md"]').count() === 1, 'a config token: changed in the config, with the guide');
+    check(await p.locator('#set-about #logout, #set-about #tokennew').count() === 0 && await p.locator('#set-about [data-settab="people"]').count() === 1, 'About has one row that opens People & access');
+    check(!(await p.$('#tokennew')) && /Set in the node’s config/.test(await p.textContent('#peoplebox')) && await p.locator('#main a[href*="troubleshooting.md"]').count() === 1, 'a config token: changed in the config, with the guide');
+    // (the node here keeps its own token: what the page asks with the made-up new one goes on with the
+    // real one, as it would on a node that had made it; the page reads its lists again after the change)
+    await p.route(/\/v1\//, (r) => { const h = r.request().headers(); return h.authorization === `Bearer ${'f'.repeat(64)}` ? r.continue({ headers: { ...h, authorization: `Bearer ${TOKEN}` } }) : r.fallback(); });
     await p.route(/\/v1\/node\/settings$/, async (r) => { if (r.request().method() !== 'GET') return r.continue(); const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, token_replaceable: true } }); });
     let rotated = 0; await p.route(/\/v1\/node\/token$/, (r) => { rotated++; return r.fulfill({ json: { token: 'f'.repeat(64) } }); });
-    await p.goto(BASE + '/settings/about');
-    await p.click('#tokennew');
+    await p.goto(BASE + '/settings/people');
+    await p.click('#peoplebox #tokennew');
     await p.click('dialog .choice');
     check(await visible(p, '#tokenout code'), 'the new token is shown');
+    check(await visible(p, '#tokendone') && await visible(p, '#peoplebox #logout'), 'the screen stays, with its lists read again');
     check(rotated === 1 && (await p.textContent('#tokenout code')) === 'f'.repeat(64), 'once, as the node made it');
     check(await p.evaluate(() => localStorage.getItem('pm.token')) === 'f'.repeat(64), 'this browser uses it');
     await Promise.all([p.waitForNavigation({ timeout: 10000 }).catch(() => null), p.click('#tokendone')]);
@@ -826,8 +831,9 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await cc.close();
     }
     // A listener: My music only, no edit controls
+    // (the node's own answer is the owner's, `can` included: a person's list goes with the role)
     c = await ctx(); p = await c.newPage();
-    await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });
+    await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null, can: ['artwork', 'session', 'library', 'zone_list', 'zone_use', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in'] } }); });
     await p.goto(BASE + '/library'); await p.waitForSelector('#main [data-libtab]');
     check(JSON.stringify(await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()))) === '["My music"]' && !(await p.$('#libadd')), 'a listener gets My music only, without Add music');
     await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');

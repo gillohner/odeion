@@ -102,12 +102,13 @@ docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http
   the operator is you; tell anyone you invite.
 - `GET /v1/homeserver/bundled` shows the homeserver as the node sees it: version, key, users,
   disk used, unused invites.
-- **People:** Settings › People (`/v1/people`) invites someone and picks what they get:
-  - **Homeserver only:** a Pubky account here with a storage quota.
-  - **Homeserver + music:** the same, plus this node's music service.
-  - **Music only:** someone whose account is elsewhere, added by their public key.
+- **People:** Settings › People & access (`/v1/people`) adds someone and picks what they get:
+  - **Homeserver account only:** a Pubky account here, with a storage limit if you set one.
+  - **Homeserver account and music:** the same, plus this node's music.
+  - **Music only:** someone whose account is elsewhere, added by their public key; the page then
+    says what to send them (this node's address, log in with Pubky Ring).
 
-  A homeserver invite is a Pubky Ring link and QR (`direct_signup`, which needs a recent Ring; older ones can type the code). Per person you set the quota, turn their homeserver account off (that blocks writes; they can still read and delete) and take away music access. The tab also shows how much each person stores and which zones listeners may play on.
+  A homeserver invite is a Pubky Ring link and QR (`direct_signup`, which needs a recent Ring; older ones can type the code). Per person you rename them, set the storage limit, switch their homeserver account off (that blocks writes; they can still read and delete), switch music off or on, sign their browsers and apps out, and remove them. The screen also shows how much each person stores, the zones the people you add can play on, whose TIDAL, Qobuz and Spotify sign-ins they play with, the browsers and apps signed in as you, and the password for apps (the API token).
 - **Adding music** (Library → Add music): upload files from the browser (resumable), copy a
   folder on the machine into the homeserver, or keep using folders in place (mounts and shares as
   before). Uploads and copies go into your homeserver's private storage. The node mounts the
@@ -192,8 +193,8 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
    ```
 
    Open the web UI, enter the token, and in Settings › Accounts choose **Create account here**:
-   Pubky Ring creates your account on this homeserver and signs the node in. Invite others in
-   Settings › People.
+   Pubky Ring creates your account on this homeserver and signs the node in. Add others in
+   Settings › People & access.
 
 - **What listens where:** the node on 7788 and Pubky TLS on 6287 on the network; the homeserver's
   plain HTTP (6286) and admin API (6288) on 127.0.0.1 only. The homeserver stops on SIGINT (the

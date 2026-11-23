@@ -117,7 +117,8 @@ then connect them to it. Umbrel isn't supported right now.
    - Sign the node in to Pubky (see [Pubky](#pubky) above).
    - Add an email address or website in **Settings › Discover** to turn on Discover.
    - Connect streaming services under **Sources**, and internet radio under **Radio**.
-   - Invite people, or start a party link for guests, in **Settings › People**.
+   - Add people, choose what they can do, or start a party link for guests, in
+     **Settings › People & access**.
 
 ## Away from home
 
