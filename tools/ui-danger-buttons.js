@@ -45,9 +45,10 @@ const isRed = (page, sel) => page.evaluate((s) => { const c = document.createEle
 const colours = (page, sel) => page.evaluate((s) => { const el = document.querySelector(s); if (!el) return null; const cs = getComputedStyle(el); return { color: cs.color, background: cs.backgroundColor, cls: el.className }; }, sel);
 
 (async () => {
-  // Every confirmation that asks about deleting, removing, forgetting, ending or replacing
+  // Every confirmation that asks about deleting, removing, forgetting, ending, signing someone out
+  // ("Sign <name> out everywhere?" too), switching someone's music off or replacing
   const app = fs.readFileSync(path.join(ROOT, 'crates/pm-api/static/app.js'), 'utf8');
-  const asks = [...app.matchAll(/choiceDialog\(\{ title: (['`])((?:Delete|Remove|Forget|Clear|End|Disconnect|Sign out|Log out|Make a new (?:token|password))[^'`]*)\1/g)];
+  const asks = [...app.matchAll(/choiceDialog\(\{ title: (['`])((?:Delete|Remove|Forget|Clear|End|Disconnect|Sign\b[^'`]*?\bout|Switch music off|Log out|Make a new (?:token|password))[^'`]*)\1/g)];
   const plain = asks.filter((m) => !app.slice(m.index, app.indexOf('})', m.index)).includes('danger: true')).map((m) => m[2]);
   // (the usage panel asks through the page's dialog: its fourth argument is the destructive mark)
   const usage = fs.readFileSync(path.join(ROOT, 'crates/pm-api/static/usage.js'), 'utf8');

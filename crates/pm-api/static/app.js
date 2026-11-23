@@ -11193,7 +11193,7 @@
               const on = b.dataset.to === 'on';
               // Off: the node refuses their sign-ins from now on (their pages go back to Log in) and forgets
               // their registered devices and what those keep for offline. Nothing here promises more.
-              if (!on && !(await choiceDialog({ title: `Switch music off for ${who(p)}?`, text: `They can’t ${p.access === 'music' ? 'use this node' : 'play music here'} until you switch it back on. Their browsers and apps go back to Log in, and the node forgets their devices and what those keep for offline.${p.access === 'music' ? '' : ' Their homeserver account is not touched.'}`, choices: [{ label: 'Switch music off', value: true, primary: true }] }))) return;
+              if (!on && !(await choiceDialog({ title: `Switch music off for ${who(p)}?`, text: `They can’t ${p.access === 'music' ? 'use this node' : 'play music here'} until you switch it back on. Their browsers and apps go back to Log in, and the node forgets their devices and what those keep for offline.${p.access === 'music' ? '' : ' Their homeserver account is not touched.'}`, choices: [{ label: 'Switch music off', value: true, primary: true, danger: true }] }))) return;
               await change(p, { music: on }, on ? `Music is on for ${who(p)}` : `Music is off for ${who(p)}`);
             });
             $$('[data-phs]', box).forEach((b) => b.onclick = async () => {
@@ -11245,7 +11245,7 @@
             });
             $$('[data-psi-all]', box).forEach((b) => b.onclick = async () => {
               const p = personOf(b.dataset.psiAll); if (!p) return;
-              const go = await choiceDialog({ title: `Sign ${who(p)} out everywhere?`, text: 'Each of their browsers and apps has to log in again with Pubky Ring. What they can do here stays as it is.', choices: [{ label: 'Sign out everywhere', value: true, primary: true }] });
+              const go = await choiceDialog({ title: `Sign ${who(p)} out everywhere?`, text: 'Each of their browsers and apps has to log in again with Pubky Ring. What they can do here stays as it is.', choices: [{ label: 'Sign out everywhere', value: true, primary: true, danger: true }] });
               if (!go) return;
               try { const d = await api('DELETE', `/people/${encodeURIComponent(p.key)}/sign-ins`); toast(`Signed ${who(p)} out${d && d.ended === 1 ? ' of one browser or app' : d && d.ended != null ? ` of ${d.ended} browsers or apps` : ' everywhere'}`); } catch (e) { toast(e.message, 'error'); }
               await loadPeople({ focus: [`rename:${p.key}`] });
