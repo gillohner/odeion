@@ -2394,19 +2394,9 @@ impl Library {
 
     /// The library track for a title and (optional) artist: the first search
     /// hit whose title matches, by that artist when one is given.
+    /// A song that names no artist is taken too; another artist's song of the same title (a
+    /// cover, a namesake) is no match. Names compare as [`match_key`] folds them.
     pub fn find_by_title_artist(&self, title: &str, artist: Option<&str>) -> Result<Option<Track>> {
-        self.find_by_title_artist_len(title, artist, None)
-    }
-
-    /// [`Self::find_by_title_artist`]; a hit by another name for the artist is taken only when
-    /// it has no artist or its length is within [`IMPORT_LENGTH_SLACK_MS`] of `duration_ms`.
-    /// Another artist's song of the same title (a cover, a namesake) is no match.
-    fn find_by_title_artist_len(
-        &self,
-        title: &str,
-        artist: Option<&str>,
-        duration_ms: Option<u64>,
-    ) -> Result<Option<Track>> {
         let title = title.trim();
         if title.is_empty() {
             return Ok(None);
@@ -2423,7 +2413,7 @@ impl Library {
                 .iter()
                 .any(|t| same_title(&t.title, title) && by_artist(t, artist))
         {
-            // Added to the first search's hits: one of them may be the song by another name
+            // Added to the first search's hits: one of them may be a song without an artist
             for t in self.search_tracks(title, 20)? {
                 if !hits.iter().any(|h| h.id == t.id) {
                     hits.push(t);
@@ -2434,11 +2424,7 @@ impl Library {
             .iter()
             .find(|t| same_title(&t.title, title) && (artist.is_empty() || by_artist(t, artist)));
         Ok(named
-            .or_else(|| {
-                hits.iter().find(|t| {
-                    same_title(&t.title, title) && (no_artist(t) || same_length(track_length(t), duration_ms))
-                })
-            })
+            .or_else(|| hits.iter().find(|t| same_title(&t.title, title) && no_artist(t)))
             .cloned())
     }
 
@@ -2479,7 +2465,7 @@ impl Library {
                 }
             }
         }
-        self.find_by_title_artist_len(&t.title, t.artist.as_deref(), t.duration_ms)
+        self.find_by_title_artist(&t.title, t.artist.as_deref())
     }
 
     /// Record that `track` started playing on `zone`; returns the entry id.
@@ -5452,8 +5438,8 @@ fn row_to_album(r: &Row<'_>) -> rusqlite::Result<Result<Album>> {
     })())
 }
 
-/// Two lengths closer than this are taken as one recording when an imported entry names its
-/// artist differently from the library (a spelling, an accent).
+/// Two lengths closer than this are taken as one recording when an imported entry writes its
+/// title differently from the library's tags.
 const IMPORT_LENGTH_SLACK_MS: u64 = 2_000;
 
 /// A name folded for matching names written by other apps: lower case, letters and digits only,
@@ -5462,7 +5448,39 @@ fn match_key(s: &str) -> String {
     let s = s.trim().to_lowercase().replace(['&', '+'], " and ");
     let s = s.trim_start();
     let s = s.strip_prefix("the ").unwrap_or(s);
-    s.chars().filter(|c| c.is_alphanumeric()).collect()
+    let mut key = String::with_capacity(s.len());
+    for c in s.chars().filter(|c| c.is_alphanumeric()) {
+        match unaccented(c) {
+            Some(plain) => key.push_str(plain),
+            None => key.push(c),
+        }
+    }
+    key
+}
+
+/// A lower-case Latin letter with a mark, as the plain letter(s) apps that drop marks write.
+fn unaccented(c: char) -> Option<&'static str> {
+    Some(match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+        'ç' | 'ć' | 'č' => "c",
+        'ď' | 'đ' => "d",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ė' | 'ę' | 'ě' => "e",
+        'ğ' => "g",
+        'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ı' => "i",
+        'ł' | 'ľ' => "l",
+        'ñ' | 'ń' | 'ň' => "n",
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ő' => "o",
+        'ř' => "r",
+        'ś' | 'š' | 'ş' => "s",
+        'ť' | 'ţ' => "t",
+        'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ů' | 'ű' => "u",
+        'ý' | 'ÿ' => "y",
+        'ź' | 'ż' | 'ž' => "z",
+        'ß' => "ss",
+        'æ' => "ae",
+        'œ' => "oe",
+        _ => return None,
+    })
 }
 
 /// The same title, ignoring case, spaces and punctuation (a title of punctuation only must be
@@ -5532,13 +5550,11 @@ fn folders(p: &Path) -> Vec<&std::ffi::OsStr> {
 }
 
 /// A library file of the entry's file name is the entry's song: its title (or, where tags and
-/// the other app disagree on it, its length) agrees with the entry, and so does its artist (or,
-/// for a name written another way, title and length both).
+/// the other app disagree on it, its length) agrees with the entry, and so does its artist.
 fn agrees(h: &Track, t: &ImportedTrack) -> bool {
     let len = same_length(track_length(h), t.duration_ms);
-    let title = same_title(&h.title, &t.title);
     let artist = t.artist.as_deref().map(str::trim).unwrap_or("");
-    (title || len) && (artist.is_empty() || no_artist(h) || by_artist(h, artist) || (title && len))
+    (same_title(&h.title, &t.title) || len) && (artist.is_empty() || no_artist(h) || by_artist(h, artist))
 }
 
 #[cfg(test)]
@@ -8166,30 +8182,27 @@ mod identify_tests {
             Some("/m/cash/Hurt.flac")
         );
 
-        // An accent the other app leaves out: the same length makes it the same recording.
+        // An accent the other app leaves out is the same name; a length never overrides a name.
         lib.upsert_track(&import_test_track("/m/b/Halo.flac", "Halo", Some("Beyoncé"), 261))
             .unwrap();
+        for artist in ["Beyonce", "BEYONCÉ"] {
+            assert_eq!(
+                path_of(
+                    lib.resolve_import(&entry("Halo", Some(artist), None, None))
+                        .unwrap()
+                )
+                .as_deref(),
+                Some("/m/b/Halo.flac"),
+                "{artist}"
+            );
+        }
         assert_eq!(
             path_of(
-                lib.resolve_import(&entry("Halo", Some("Beyonce"), None, Some(262)))
-                    .unwrap()
-            )
-            .as_deref(),
-            Some("/m/b/Halo.flac")
-        );
-        assert_eq!(
-            path_of(
-                lib.resolve_import(&entry("Halo", Some("Beyonce"), None, Some(300)))
-                    .unwrap()
-            ),
-            None
-        );
-        assert_eq!(
-            path_of(
-                lib.resolve_import(&entry("Halo", Some("Beyonce"), None, Some(0)))
+                lib.resolve_import(&entry("Halo", Some("Depeche Mode"), None, Some(262)))
                     .unwrap()
             ),
-            None
+            None,
+            "another band's Halo of the same length"
         );
         // A song without an artist has nothing to disagree with.
         lib.upsert_track(&import_test_track("/m/x/Lonely.flac", "Lonely", None, 100))
