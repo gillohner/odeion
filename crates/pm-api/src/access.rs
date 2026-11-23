@@ -1176,6 +1176,47 @@ mod tests {
         assert!(decide_path(&s, &LISTENER, &Method::OPTIONS, "/v1/library/albums").is_some());
     }
 
+    /// `docs/access.md` says what the code does: one row per capability, in the enum's order,
+    /// and each role's column is filled exactly where [`Role::has`] says yes.
+    #[test]
+    fn the_access_doc_matches_the_roles() {
+        let doc = include_str!("../../../docs/access.md");
+        let rows: Vec<Vec<&str>> = doc
+            .lines()
+            .skip_while(|l| *l != "## What each role can do")
+            .skip(1)
+            .take_while(|l| !l.starts_with("## "))
+            .filter(|l| l.starts_with("| `"))
+            .map(|l| l.trim_matches('|').split('|').map(str::trim).collect())
+            .collect();
+        let named: Vec<&str> = rows.iter().map(|r| r[0].trim_matches('`')).collect();
+        let caps: Vec<String> = Capability::ALL
+            .iter()
+            .map(|c| serde_json::to_value(c).unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            named, caps,
+            "docs/access.md lists the capabilities of access.rs, in its order"
+        );
+        for (row, cap) in rows.iter().zip(Capability::ALL) {
+            assert_eq!(
+                row.len(),
+                5,
+                "{cap:?}: capability, what it covers, owner, listener, guest"
+            );
+            for (cell, role) in row[2..].iter().zip([Role::Owner, Role::Listener, Role::Guest]) {
+                assert_eq!(!cell.is_empty(), role.has(*cap), "{cap:?} for {role:?}: `{cell}`");
+            }
+        }
+        // And it names every route that takes no sign-in
+        for (path, _) in OPEN {
+            assert!(
+                doc.contains(&format!("`{path}`")),
+                "docs/access.md doesn't name {path}"
+            );
+        }
+    }
+
     /// The routes that take no sign-in are the listed ones ([`OPEN`]): one added without a line
     /// there fails here, as a `/v1` route without a capability does.
     #[test]
