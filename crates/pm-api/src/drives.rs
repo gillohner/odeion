@@ -518,20 +518,34 @@ impl Read for RangeReader {
 }
 
 /// A drive's answer read whole, `max` bytes at most: refused when it says or turns out to be
-/// bigger. A read error names no address (OneDrive's download address carries its own sign-in).
-fn read_capped(resp: reqwest::blocking::Response, max: u64) -> std::io::Result<Vec<u8>> {
+/// bigger. The buffer grows by doubling but never past `max + 1` bytes, so `max` bounds the
+/// memory too. A read error names no address (OneDrive's download address carries its own sign-in).
+fn read_capped(mut resp: reqwest::blocking::Response, max: u64) -> std::io::Result<Vec<u8>> {
     let too_big = || std::io::Error::other(format!("the drive sent more than the {max} bytes asked for"));
-    if resp.content_length().is_some_and(|n| n > max) {
+    let said = resp.content_length();
+    if said.is_some_and(|n| n > max) {
         return Err(too_big());
     }
-    let mut buf = Vec::new();
-    resp.take(max.saturating_add(1))
-        .read_to_end(&mut buf)
-        .map_err(|e| std::io::Error::new(e.kind(), "the drive's answer broke off"))?;
-    if buf.len() as u64 > max {
-        return Err(too_big());
+    let limit = usize::try_from(max.saturating_add(1)).unwrap_or(usize::MAX);
+    let first = said.map_or(CHUNK, |n| n.saturating_add(1));
+    let mut buf = Vec::with_capacity(usize::try_from(first).unwrap_or(usize::MAX).min(limit));
+    let mut part = [0u8; 32 * 1024];
+    loop {
+        let n = match resp.read(&mut part) {
+            Ok(0) => return Ok(buf),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(std::io::Error::new(e.kind(), "the drive's answer broke off")),
+        };
+        if (buf.len() + n) as u64 > max {
+            return Err(too_big());
+        }
+        if buf.capacity() - buf.len() < n {
+            let want = buf.capacity().saturating_mul(2).max(buf.len() + n).min(limit);
+            buf.reserve_exact(want - buf.len());
+        }
+        buf.extend_from_slice(&part[..n]);
     }
-    Ok(buf)
 }
 
 impl Seek for RangeReader {
@@ -725,10 +739,11 @@ fn take_started(
     pending: &mut HashMap<String, Started>,
     nonce: &str,
     p: Provider,
+    now: std::time::Instant,
 ) -> Result<Started, ApiError> {
     let started = pending
         .remove(nonce)
-        .filter(|s| s.at.elapsed() < crate::tidal::SIGN_IN_FOR)
+        .filter(|s| now.saturating_duration_since(s.at) < crate::tidal::SIGN_IN_FOR)
         .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in: start again"))?;
     if started.provider != p {
         return Err(ApiError::bad_request("that sign-in was for another drive"));
@@ -859,7 +874,12 @@ async fn finish_login(s: &Arc<NodeState>, provider: &str, q: CallbackQuery) -> R
     let nonce = crate::project_apps::state_nonce(&state).to_string();
     let Started {
         verifier, redirect, ..
-    } = take_started(&mut pending().lock().expect("pending"), &nonce, p)?;
+    } = take_started(
+        &mut pending().lock().expect("pending"),
+        &nonce,
+        p,
+        std::time::Instant::now(),
+    )?;
     let s2 = s.clone();
     let account = tokio::task::spawn_blocking(move || -> Result<Account, String> {
         let d = s2.drives.read().map_err(|_| "drives")?;
@@ -1213,18 +1233,24 @@ mod tests {
         let mut m = HashMap::new();
         keep_started(&mut m, "a".into(), started(now));
         assert!(
-            take_started(&mut m, "a", Provider::Onedrive).is_err(),
+            take_started(&mut m, "a", Provider::Onedrive, now).is_err(),
             "another drive's"
         );
-        assert!(take_started(&mut m, "a", Provider::Google).is_err(), "taken once");
+        assert!(
+            take_started(&mut m, "a", Provider::Google, now).is_err(),
+            "taken once"
+        );
         keep_started(&mut m, "b".into(), started(now));
-        assert_eq!(take_started(&mut m, "b", Provider::Google).unwrap().verifier, "v");
-        // Past its time
-        let old = now
-            .checked_sub(SIGN_IN_FOR + Duration::from_secs(1))
-            .expect("a monotonic clock older than ten minutes");
-        keep_started(&mut m, "late".into(), started(old));
-        let e = take_started(&mut m, "late", Provider::Google)
+        assert_eq!(
+            take_started(&mut m, "b", Provider::Google, now).unwrap().verifier,
+            "v"
+        );
+        // In time up to its last second, then past it
+        keep_started(&mut m, "in time".into(), started(now));
+        let last = now + SIGN_IN_FOR - Duration::from_secs(1);
+        assert!(take_started(&mut m, "in time", Provider::Google, last).is_ok());
+        keep_started(&mut m, "late".into(), started(now));
+        let e = take_started(&mut m, "late", Provider::Google, now + SIGN_IN_FOR)
             .err()
             .expect("refused");
         assert!(e.message.contains("expired"), "{}", e.message);
@@ -1285,6 +1311,13 @@ mod tests {
         let mut r = reader(serve("200 OK", vec![7; 1000], None), 1000);
         assert_eq!(r.read(&mut out).unwrap(), 16);
         assert_eq!(r.buf.len(), 1000);
+        // Room for at most one byte past what was asked for, however it grew
+        assert!(r.buf.capacity() <= 1001, "{} bytes held", r.buf.capacity());
+        // Past the first room (one chunk) the buffer doubles, but not past the limit
+        let mut r = reader(serve("200 OK", vec![7; 300_000], None), 300_000);
+        assert_eq!(r.read(&mut out).unwrap(), 16);
+        assert_eq!(r.buf.len(), 300_000);
+        assert!(r.buf.capacity() <= 300_001, "{} bytes held", r.buf.capacity());
         // More than the range (one chunk), said or as it comes
         let more = vec![7; CHUNK as usize + 1];
         refused(reader(
