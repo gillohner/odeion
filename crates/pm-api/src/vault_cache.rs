@@ -10,8 +10,8 @@
 //!   "Sign out everywhere" starts at revision 1);
 //! - signing out of a source on the node removes it from the vault; a sign-in removed from the
 //!   vault elsewhere is moved aside on the node (`vault.signed_out.<key>`, never in a backup);
-//!   a vault whose device list doesn't name the node any more (its files gone, a new homeserver)
-//!   is a new vault, so the node's sign-ins go back in instead;
+//!   a vault that lost its files (no device list, none of the sign-ins the node synced with it)
+//!   gets the node's sign-ins back instead;
 //! - two different copies meeting for the first time are a conflict when they are for different
 //!   accounts: both stay as they are, and the report names it (`POST /v1/vault/sync {service,
 //!   take}` settles it); copies of one account are one sign-in refreshed on two sides.
@@ -1693,8 +1693,8 @@ pub async fn pass(
         if !still() {
             return Err(VaultStoreError::Replaced);
         }
-        // Before registering again, which would make a lost vault look like this node's
-        forget_a_lost_vault(s, &vault, still).await?;
+        // Before registering again, which writes a new device list
+        a_lost_vault(s, &vault, still).await?;
         vault.touch(&s.name).await?;
         if !still() {
             return Err(VaultStoreError::Replaced);
@@ -1710,39 +1710,65 @@ pub async fn pass(
     Ok(r)
 }
 
-/// A vault that doesn't name this node any more (its files are gone, or the session's homeserver
-/// is a new one) isn't the vault this node synced with: the node's records of it go, so its
-/// sign-ins go back in as at a first sync. Kept, a record says "synced, and gone from the vault
-/// since", which reads as signed out elsewhere: every sign-in would go aside, and the vault stay
-/// empty. A sign-out everywhere this node has seen is in its marks and still applies.
-async fn forget_a_lost_vault(
+/// A vault that has lost its files (a homeserver restored from an older copy, a new homeserver):
+/// no device list, and none of the sign-ins this node synced with it. Each record of those then
+/// reads as a sign-in "signed out elsewhere", and every one would go aside while the vault stays
+/// empty. They become conflict records instead (nothing else in them changes), and a conflict
+/// gone from the vault goes back in, as long as no sign-out everywhere came since. Checked
+/// before the node registers again, which writes a new list. A list that is there, or one of
+/// those sign-ins still in the vault, is no lost vault: a sign-in gone from it was signed out.
+/// A copy the node took unsigned keeps its record (the node never signs it as its own).
+async fn a_lost_vault(
     s: &NodeState,
     vault: &Vault<'_>,
     still: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), VaultStoreError> {
-    if vault.names_me().await? {
+    if vault.has_device_list().await? {
         return Ok(());
     }
     let owner = vault.owner().to_string();
     let client = vault.client_key().to_hex();
+    let records: Vec<(&'static str, Synced)> = {
+        let lib = s.library.lock().expect("library poisoned");
+        let mut v = Vec::new();
+        for b in BRIDGES {
+            if let Some(x) = last_synced(&lib, b.service, &owner, &client).map_err(local_error)? {
+                v.push((b.service, x));
+            }
+        }
+        v
+    };
+    for (service, _) in &records {
+        if vault.envelope(service).await?.is_some() {
+            return Ok(());
+        }
+    }
     let lib = s.library.lock().expect("library poisoned");
     if !still() {
         return Err(VaultStoreError::Replaced);
     }
-    let mut forgotten = Vec::new();
-    for b in BRIDGES {
-        if last_synced(&lib, b.service, &owner, &client)
-            .map_err(local_error)?
-            .is_some()
-        {
-            lib.delete_setting(&synced_key(b.service)).map_err(local_error)?;
-            forgotten.push(b.service);
+    let mut back = Vec::new();
+    for (service, mut x) in records {
+        if x.conflict || x.from_unsigned {
+            continue;
         }
+        // Still the record read above (no pass runs meanwhile; this is the check)
+        if last_synced(&lib, service, &owner, &client)
+            .map_err(local_error)?
+            .as_ref()
+            != Some(&x)
+        {
+            continue;
+        }
+        x.conflict = true;
+        let v = serde_json::to_string(&x).map_err(local_error)?;
+        lib.set_setting(&synced_key(service), &v).map_err(local_error)?;
+        back.push(service);
     }
-    if !forgotten.is_empty() {
+    if !back.is_empty() {
         tracing::warn!(
-            ?forgotten,
-            "vault: the device list doesn't name this node (the vault's files are gone, or the homeserver is new): its sign-ins go back in"
+            ?back,
+            "vault: no device list and none of the sign-ins synced with it (lost files, or a new homeserver): they go back in"
         );
     }
     Ok(())

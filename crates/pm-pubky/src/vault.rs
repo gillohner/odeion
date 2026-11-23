@@ -1444,14 +1444,14 @@ impl Vault<'_> {
         r
     }
 
-    /// Whether the device list names this client, listed or signed out; `false` also when there
-    /// is no list. A list drops an entry only by moving it to `revoked`, so a client it named once
-    /// and names no more is looking at a vault whose files are gone, or at a new homeserver.
-    pub async fn names_me(&self) -> Result<bool> {
-        let ix = self.index().await?;
-        let me = self.client_key();
-        let grant = self.my_grant().await;
-        Ok(ix.clients.iter().any(|e| e.client_key == me) || ix.is_revoked(&me, grant.as_deref()))
+    /// Whether the vault has a device list at all. No client removes `index.json` (a sign-out
+    /// marks it, a signed-out device moves to `revoked`), so a vault without one has lost its
+    /// files, or is on a new homeserver.
+    pub async fn has_device_list(&self) -> Result<bool> {
+        Ok(self
+            .read_bytes(spec::INDEX_PATH, spec::MAX_INDEX_BYTES)
+            .await?
+            .is_some())
     }
 
     /// Register when this node isn't listed (or its proof no longer verifies), or once a day to
