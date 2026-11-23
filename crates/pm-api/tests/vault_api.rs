@@ -1263,7 +1263,8 @@ async fn a_replaced_settings_backup_adopts_no_history_delete() {
 
 /// The settings backup checks the session after it has the library: a replacement made while it
 /// waited for the lock (another task held it) is seen, and the old identity's history delete is
-/// not adopted, so the node's listens stay.
+/// not adopted, so the node's listens stay. The lock it waits for here is its first one (the
+/// "copy taken in" lookup); the later one, where the delete is adopted, checks the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replacement_while_the_backup_waits_for_the_library_adopts_nothing() {
     let Some(mut ids) = identities_with_sessions(1, &["node.pubky.music"]).await else {
