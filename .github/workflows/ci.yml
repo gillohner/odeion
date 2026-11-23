@@ -592,14 +592,17 @@ jobs:
         run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true; tail -n 30 /tmp/pwa/out/node.log || true
 
   # The UI pages checked against fixtures in a real Chromium (tools/ui-fixture.js: the app's own
-  # files, no node, no build), split over seven runners; every page is in exactly one of them.
-  # The pages that take a minute or more have a fixed runner (a number after the page in
-  # tools/ui-fixtures.list), so new pages added to the list cannot shift them all onto one runner;
-  # the others go round robin. Each runner has about 15 minutes of pages, plus the Playwright
-  # install (usually under a minute). The list is a file of its own, so a new page changes no
-  # workflow (a workflow change also runs the `docker` job).
+  # files, no node, no build), split over three runners that each run three pages at a time; every
+  # page is in exactly one of them. The pages mostly wait (for timers, frames, the fixture's
+  # delays), so three side by side take a third of the time on the same runner: measured on #791
+  # with all 167 pages, twice, no page failed, 40 runner-minutes against 115 for seven runners
+  # with one page at a time. The pages that take a minute or more have a fixed runner (a number
+  # after the page in tools/ui-fixtures.list), spread by their measured times, and start first;
+  # the others go round robin. Each runner takes about 12 minutes, plus the Playwright install.
+  # The list is a file of its own, so a new page changes no workflow (a workflow change also runs
+  # the `docker` job).
   ui-fixtures:
-    name: ui-fixtures (${{ matrix.shard }}/7)
+    name: ui-fixtures (${{ matrix.shard }}/3)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -607,7 +610,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -628,7 +631,7 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ strategy.job-total }}
-        run: cd /tmp/pw && node "$GITHUB_WORKSPACE/tools/ui-fixtures-run.js" --shard "$SHARD/$SHARDS" < /dev/null
+        run: cd /tmp/pw && node "$GITHUB_WORKSPACE/tools/ui-fixtures-run.js" --shard "$SHARD/$SHARDS" --jobs 3 < /dev/null
       # feedback.js on a test page, the node mocked: text stays text, a draft is its sign-in's,
       # only ticked details are sent. It takes <token> <mock> <shots>, not the list's <repo> <shots>
       - name: problem reports (Help "?", the report dialog and My reports; mocked node)
