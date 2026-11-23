@@ -562,7 +562,8 @@ async fn local_name(
             1 => full.to_string(),
             n => format!("{n}-{full}"),
         };
-        n += 1;
+        // (names run out only after 4 billion tries: then no name)
+        n = n.checked_add(1)?;
         if taken.contains(&name.to_lowercase()) {
             continue;
         }
@@ -581,6 +582,9 @@ async fn local_name(
     }
 }
 
+/// The folder in a bring's destination its part files are written in, by number.
+const PARTS_DIR: &str = ".odeion-bring-parts";
+
 /// Give a finished download (`part`) its name (`target`) without replacing a file that got that
 /// name since the plan was made: such a file stays, the download is dropped and the error says
 /// so (the next bring gives it another name).
@@ -596,9 +600,33 @@ async fn place_new(part: &Path, target: &Path) -> std::io::Result<()> {
     let placed = match tokio::fs::hard_link(part, target).await {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == AlreadyExists => Err(there()),
-        // A folder that has no links (FAT, some shares): look first, then rename
-        Err(_) if tokio::fs::symlink_metadata(target).await.is_ok() => Err(there()),
-        Err(_) => return tokio::fs::rename(part, target).await,
+        // A folder that has no links (FAT, some shares): a copy into a file made only when the
+        // name is free (also one step), never a rename, which would replace a file that
+        // appeared since. What a failed copy made is this bring's own and goes
+        Err(_) => {
+            let made = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(target)
+                .await;
+            match made {
+                Err(e) if e.kind() == AlreadyExists => Err(there()),
+                Err(e) => Err(e),
+                Ok(mut out) => {
+                    let copied = async {
+                        let mut from = tokio::fs::File::open(part).await?;
+                        tokio::io::copy(&mut from, &mut out).await?;
+                        out.sync_all().await
+                    }
+                    .await;
+                    if copied.is_err() {
+                        drop(out);
+                        let _ = tokio::fs::remove_file(target).await;
+                    }
+                    copied
+                }
+            }
+        }
     };
     let _ = tokio::fs::remove_file(part).await;
     placed
@@ -671,13 +699,31 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
             return;
         }
         let mut fetched = 0usize;
+        // Part files: `.odeion-bring-parts/<n>.part` in the destination. What an earlier bring
+        // left there (the node stopped) goes first; a part that is a link to a song already in
+        // place is only a second name for it
+        let parts = dest.join(PARTS_DIR);
+        if let Ok(mut rd) = tokio::fs::read_dir(&parts).await {
+            while let Ok(Some(e)) = rd.next_entry().await {
+                if e.file_name().to_string_lossy().ends_with(".part") {
+                    let _ = tokio::fs::remove_file(e.path()).await;
+                }
+            }
+        }
+        if let Err(e) = tokio::fs::create_dir_all(&parts).await {
+            let msg = format!("{}: {e}", parts.display());
+            set(&|j| j.errors.push(msg.clone().into()));
+        }
+        let mut fetched_parts = 0u64;
         for (remote, size, local) in plan.fetch {
             if is_cancelled(&s, &id) {
                 break;
             }
             set(&|j| j.current = Some(local.clone()));
             let target = dest.join(&local);
-            let part = dest.join(format!(".{local}.part"));
+            // In a folder of its own, by number: never the name of a file this bring places
+            fetched_parts += 1;
+            let part = parts.join(format!("{fetched_parts}.part"));
             // A part file an earlier bring left may still be one file with a song it put in
             // place (the node stopped between the two steps): never written into, removed
             let _ = tokio::fs::remove_file(&part).await;
@@ -719,6 +765,8 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
                 }
             }
         }
+        // (gone when empty: nothing of an unfinished part is left in it)
+        let _ = tokio::fs::remove_dir(&parts).await;
         // Into the library: a folder outside the library folders becomes one
         if fetched > 0 {
             let inside = s
@@ -986,6 +1034,22 @@ mod tests {
         std::fs::create_dir(d.join("Live.flac")).unwrap();
         let h = local_name(d, "Live.flac", "ffffffffffffffff-Live.flac", 4096, &mut taken).await;
         assert_eq!(h.as_deref(), Some("ffffffffffffffff-Live.flac"));
+    }
+
+    /// Where no link can be made (here: the part is a folder, which takes no hard link), the
+    /// download is copied into a file made only when the name is free; a copy that fails leaves
+    /// no file of that name behind.
+    #[tokio::test]
+    async fn without_links_a_failed_copy_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (part, target) = (dir.path().join("1.part"), dir.path().join("Song.flac"));
+        std::fs::create_dir(&part).unwrap();
+        assert!(place_new(&part, &target).await.is_err());
+        assert!(!target.exists(), "what the failed copy made is gone");
+        // A file of that name there: kept, never replaced
+        std::fs::write(&target, b"the owner's").unwrap();
+        let e = place_new(&part, &target).await.unwrap_err();
+        assert_eq!(std::fs::read(&target).unwrap(), b"the owner's", "{e}");
     }
 
     /// A finished download gets its name only when no file has it: a file that came to be
