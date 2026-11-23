@@ -80,6 +80,8 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 /// Also the files jobs this node is running or keeps for its next start (copies to the
 /// homeserver, bringing files here, uploads it left half written): a restored backup never starts
 /// one nobody asked for, and the node's own carry on (#237 review, M2).
+/// And the program a transcode runs (`downloads.ffmpeg`): a path on this machine, which a backup
+/// from elsewhere (or one made to look like one) must not choose.
 const NODE_OWN: &[&str] = &[
     "stream.secret",
     "node.id",
@@ -96,6 +98,7 @@ const NODE_OWN: &[&str] = &[
     crate::copy_jobs::JOBS_KEY,
     crate::files::BRING_RESUME_KEY,
     crate::copy_guard::IN_FLIGHT_KEY,
+    crate::downloads::FFMPEG_SETTING,
 ];
 const SCHEDULE_KEY: &str = "backup.schedule";
 /// The passphrase arrives in this header, never in a URL (URLs end up in logs).
@@ -1562,5 +1565,34 @@ mod tests {
             staged2.get_setting(&listener).unwrap().as_deref(),
             Some("from-the-copy")
         );
+    }
+
+    /// The program a transcode runs is this node's: a backup carries none, and restoring one that
+    /// names one (an older backup, or one made by hand) keeps the node's own, or none.
+    #[test]
+    fn a_backup_never_chooses_the_program_a_transcode_runs() {
+        let key = crate::downloads::FFMPEG_SETTING;
+        let copy = Library::open_in_memory().unwrap();
+        copy.set_setting(key, "/usr/bin/ffmpeg").unwrap();
+        scrub_plain_copy(&copy).unwrap();
+        assert_eq!(copy.get_setting(key).unwrap(), None, "a backup carries none");
+
+        let here = Library::open_in_memory().unwrap();
+        let staged = Library::open_in_memory().unwrap();
+        staged.set_setting(key, "/tmp/from-the-backup").unwrap();
+        keep_this_nodes(&here, &staged).unwrap();
+        assert_eq!(staged.get_setting(key).unwrap(), None, "none here: none after");
+        here.set_setting(key, "/opt/ffmpeg/bin/ffmpeg").unwrap();
+        staged.set_setting(key, "/tmp/from-the-backup").unwrap();
+        keep_this_nodes(&here, &staged).unwrap();
+        assert_eq!(
+            staged.get_setting(key).unwrap().as_deref(),
+            Some("/opt/ffmpeg/bin/ffmpeg"),
+            "the node's own stays"
+        );
+        // A restore with no node to keep anything from
+        staged.set_setting(key, "/tmp/from-the-backup").unwrap();
+        forget_node_own(&staged).unwrap();
+        assert_eq!(staged.get_setting(key).unwrap(), None);
     }
 }

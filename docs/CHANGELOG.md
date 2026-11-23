@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **The program a transcode runs stays this node's own across a restore.** The `downloads.ffmpeg` setting names the ffmpeg program on the node's machine. It went into backups and came back with a restore, so restoring a backup from another machine could point it at a path that does not exist there, or at another program. It is now left out of backups, and a restore keeps the node's own setting (or none), as it already did for the node's id and stream key.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.
