@@ -84,8 +84,10 @@ The node tells a forwarded request from a local one by the headers a proxy adds
 Traefik, Apache and `cloudflared` add one by themselves. nginx does not: a bare
 `proxy_pass http://127.0.0.1:7788;` sends nothing that tells the node the request came from
 outside, and a node that listens on 127.0.0.1 without a token would answer it as the owner.
-With `behind_proxy = true` a request from the machine itself no longer counts as local: the
-node always has a token (it makes one in `<data folder>/api-token` when the config sets none),
-and the few routes that take no token answer devices on your network only. Setting the headers
+With `behind_proxy = true` a request from the machine itself (127.0.0.1, ::1) no longer counts
+as local: the node always has a token (it makes one in `<data folder>/api-token` when the config
+sets none), and the few routes that take no token answer other devices on your network only, not
+apps on this machine. Point the proxy at `127.0.0.1` or `localhost`, not at the machine's own
+network address: a request from that address still counts as one from your network. Setting the headers
 in nginx as well is still right: `proxy_set_header X-Forwarded-For $remote_addr;` and
 `proxy_set_header X-Forwarded-Host $host;`.
