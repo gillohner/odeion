@@ -495,6 +495,9 @@ fn schema_to_upgrade(path: &Path) -> Option<(i64, Connection)> {
     (found < known).then_some((found, conn))
 }
 
+/// A part file of [`keep_copy_of`] unchanged for this long was left by a stop.
+const PART_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// [`Library::keep_copy`] on a connection: `VACUUM INTO` a private part file beside `copy`,
 /// written to disk, then renamed over `copy`.
 fn keep_copy_of(conn: &Connection, copy: &Path) -> Result<()> {
@@ -505,11 +508,6 @@ fn keep_copy_of(conn: &Connection, copy: &Path) -> Result<()> {
         let path = path.to_path_buf();
         move |source| LibraryError::Io { path, source }
     };
-    // A part left by a stop in the middle of an earlier copy
-    match std::fs::remove_file(&part) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io(&part)(e)),
-        _ => {}
-    }
     // Empty and the node's user's alone before SQLite writes to it (it holds sign-ins)
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create_new(true);
@@ -518,7 +516,27 @@ fn keep_copy_of(conn: &Connection, copy: &Path) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o600);
     }
-    drop(o.open(&part).map_err(io(&part))?);
+    match o.open(&part) {
+        Ok(f) => drop(f),
+        // A part that has not changed for a while was left by a stop in the middle of a copy;
+        // a newer one is another process's copy (two starting at once), left to it
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let stale = std::fs::metadata(&part)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > PART_STALE_AFTER);
+            if !stale {
+                return Err(io(&part)(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "another copy is being made",
+                )));
+            }
+            std::fs::remove_file(&part).map_err(io(&part))?;
+            drop(o.open(&part).map_err(io(&part))?);
+        }
+        Err(e) => return Err(io(&part)(e)),
+    }
     let made = (|| -> Result<()> {
         conn.execute("VACUUM INTO ?1", params![part.to_string_lossy()])?;
         std::fs::File::open(&part)
@@ -1790,11 +1808,17 @@ impl Library {
                     );
                     made = Some((copy, found));
                 }
-                Err(e) => tracing::warn!(
-                    from = found,
-                    to = known,
-                    "no copy of the library could be kept before upgrading its schema: {e}"
-                ),
+                Err(e) => {
+                    // An older copy is from before an earlier upgrade: taken for this one's, it
+                    // would bring back a library months old
+                    let older = copy.exists() && std::fs::remove_file(&copy).is_ok();
+                    tracing::warn!(
+                        from = found,
+                        to = known,
+                        older_copy_removed = older,
+                        "no copy of the library could be kept before upgrading its schema: {e}"
+                    );
+                }
             }
         }
         match (Self::open(path), made) {
@@ -7593,6 +7617,22 @@ mod keep_copy_tests {
         part.push(".part");
         let part = PathBuf::from(part);
         std::fs::write(&part, b"half").unwrap();
+        // Another process's (fresh): left to it, and no copy is made by this one. A copy from
+        // an earlier upgrade goes then: it would pass for this one's
+        std::fs::write(&copy, b"from an earlier upgrade").unwrap();
+        drop(Library::open_node_library(&path).unwrap());
+        assert!(!copy.exists() && part.exists());
+        for name in ["library.db", "library.db-wal", "library.db-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(name));
+        }
+        old_library(&path);
+        // Unchanged for longer than a copy takes: a stop's, replaced
+        std::fs::File::options()
+            .write(true)
+            .open(&part)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - PART_STALE_AFTER * 2)
+            .unwrap();
         let lib = Library::open_node_library(&path).unwrap();
         let known = MIGRATIONS.last().unwrap().0;
         assert_eq!(lib.schema_version().unwrap(), known);

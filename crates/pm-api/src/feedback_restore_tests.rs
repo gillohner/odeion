@@ -271,6 +271,7 @@ async fn a_restore_keeps_the_library_it_replaces() {
         Some("in the backup")
     );
     let kept = dir.path().join("library.db.bak");
+    assert!(!dir.path().join("library.db.bak.next").exists(), "put in place");
     assert!(
         report
             .notes

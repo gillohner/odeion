@@ -898,20 +898,32 @@ async fn restore_locked(
         drop(copy);
         fail_before_swap_for_tests(s)?;
         // The library as it is stays beside it until the next restore, under the name the
-        // stopped-node restore uses: a restore of the wrong file can be undone. Without that
-        // copy the library is not replaced
+        // stopped-node restore uses: a restore of the wrong file can be undone (the library; the
+        // sign-in files a sealed backup puts back are not kept). Without that copy the library
+        // is not replaced, and the copy takes the older one's place only once the swap is done
         let before = s.db_path.with_extension("db.bak");
-        lib.keep_copy(&before).map_err(|e| {
+        let next = s.db_path.with_extension("db.bak.next");
+        lib.keep_copy(&next).map_err(|e| {
             BackupError::Io(std::io::Error::other(format!(
                 "no copy of the library as it is could be kept ({e}), so the library was not replaced: free some space, or restore with the node stopped (odeiond restore)"
             )))
         })?;
-        report.notes.push(format!(
-            "The library from before this restore is kept as {} until the next restore.",
-            before.display()
-        ));
         // The one step that changes the live library (SQLite's backup API: all or nothing)
-        lib.restore_from(&staged)?;
+        if let Err(e) = lib.restore_from(&staged) {
+            let _ = std::fs::remove_file(&next);
+            return Err(e.into());
+        }
+        match std::fs::rename(&next, &before) {
+            Ok(()) => report.notes.push(format!(
+                "The library from before this restore is kept as {} until the next restore.",
+                before.display()
+            )),
+            Err(e) => report.notes.push(format!(
+                "The library from before this restore is kept as {} ({e} as {}).",
+                next.display(),
+                before.display()
+            )),
+        }
         Ok(())
     })();
     drop(roster);

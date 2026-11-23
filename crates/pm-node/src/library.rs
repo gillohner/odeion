@@ -184,7 +184,8 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
         // node to keep them from, none of the backup's own settings goes in either (an older backup
         // still holds them, its ended sessions among them)
         let here = if db.exists() {
-            match Library::open(&db) {
+            // (a newer binary's restore upgrades it: with the copy a start would keep)
+            match Library::open_node_library(&db) {
                 Ok(here) => Some(here),
                 Err(e) => {
                     println!(

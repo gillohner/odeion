@@ -20,7 +20,8 @@ database, its key and your Pubky account's files. `backup.sh` below does all of 
   passphrase, so keep it somewhere safe.
 - A restore keeps the library it replaces in the data folder as `library.db.bak` until the next
   restore, so restoring the wrong file can be undone (stop the node, then
-  `odeiond restore <data folder>/library.db.bak`). When there is no room for that copy, the
+  `odeiond restore <data folder>/library.db.bak`). That is the library only: the sign-ins a
+  passphrase-locked backup puts back (Pubky, remote access, the API token) stay as restored. When there is no room for that copy, the
   library is not replaced and the restore says so.
 
 The file holds the node's library only, never a homeserver.
@@ -182,7 +183,10 @@ library a newer version changed ("this library was opened by a newer version of 
 A node that upgrades the library's database keeps the file as it was first, beside it, as
 `library.db.before-upgrade` (from the latest upgrade only). It holds everything the library held
 then, sign-ins included, so it can go back in place of the backup's `library.db`, and the
-`.pmbackup` step below is not needed. Anything changed since the upgrade is lost. With the bundle:
+`.pmbackup` step below is not needed. Anything changed since the upgrade is lost, and sign-ins
+ended since (a browser, a listener, an API token replaced) work again: end them again in
+**Settings › People & access**. A node that could not make the copy at an upgrade removes an older
+one, so the file is always from the latest upgrade. With the bundle:
 
 ```sh
 cd ~/pubky-music-node/deploy/bundle
