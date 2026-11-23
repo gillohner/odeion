@@ -1774,16 +1774,20 @@ impl Library {
     /// undone. A copy that cannot be made (a full disk) is logged and the upgrade goes on, as
     /// it did before there was one: a node that does not start is no safer.
     pub fn open_node_library(path: &Path) -> Result<Self> {
+        let mut made = None;
         if let Some((found, conn)) = schema_to_upgrade(path) {
             let copy = Self::before_upgrade_path(path);
             let known = MIGRATIONS.last().map_or(0, |(v, _)| *v);
             match keep_copy_of(&conn, &copy) {
-                Ok(()) => tracing::info!(
-                    from = found,
-                    to = known,
-                    copy = %copy.display(),
-                    "kept a copy of the library before upgrading its schema"
-                ),
+                Ok(()) => {
+                    tracing::info!(
+                        from = found,
+                        to = known,
+                        copy = %copy.display(),
+                        "kept a copy of the library before upgrading its schema"
+                    );
+                    made = Some(copy);
+                }
                 Err(e) => tracing::warn!(
                     from = found,
                     to = known,
@@ -1791,7 +1795,16 @@ impl Library {
                 ),
             }
         }
-        Self::open(path)
+        match (Self::open(path), made) {
+            // The copy may have taken the room the upgrade needed (each migration is one
+            // transaction, so the library is as it was): without it, as before there was one
+            (Err(e), Some(copy)) => {
+                tracing::warn!("the library did not open after its copy was made ({e}): trying again without the copy");
+                let _ = std::fs::remove_file(&copy);
+                Self::open(path)
+            }
+            (opened, _) => opened,
+        }
     }
 
     /// Rewrite the database file in place and fold the write-ahead log into it: afterwards the

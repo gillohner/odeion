@@ -21,7 +21,7 @@ database, its key and your Pubky account's files. `backup.sh` below does all of 
 - A restore keeps the library it replaces in the data folder as `library.db.bak` until the next
   restore, so restoring the wrong file can be undone (stop the node, then
   `odeiond restore <data folder>/library.db.bak`). When there is no room for that copy, the
-  restore changes nothing and says so.
+  library is not replaced and the restore says so.
 
 The file holds the node's library only, never a homeserver.
 
@@ -180,8 +180,19 @@ When the newer version changed the library's database (its CHANGELOG entry says 
 library from the backup you made before updating; versions after 0.2.0 refuse to start on a
 library a newer version changed ("this library was opened by a newer version of Odeion").
 A node that upgrades the library's database keeps the file as it was first, beside it, as
-`library.db.before-upgrade` (from the latest upgrade only): with nothing changed since, that file
-can go back instead of the backup's `library.db`, by the same steps. With the bundle:
+`library.db.before-upgrade` (from the latest upgrade only). It holds everything the library held
+then, sign-ins included, so it can go back in place of the backup's `library.db`, and the
+`.pmbackup` step below is not needed. Anything changed since the upgrade is lost. With the bundle:
+
+```sh
+cd ~/pubky-music-node/deploy/bundle
+docker compose stop music
+docker run --rm -v pubky-music_music-node:/v alpine:3.22 sh -c \
+  'cp /v/library.db /v/library.db.newer && cp /v/library.db.before-upgrade /v/library.db && rm -f /v/library.db-wal /v/library.db-shm && chown "$(stat -c %u:%g /v)" /v/library.db'
+docker compose start music
+```
+
+From a backup instead, with the bundle:
 
 ```sh
 cd ~/pubky-music-node/deploy/bundle

@@ -899,11 +899,11 @@ async fn restore_locked(
         fail_before_swap_for_tests(s)?;
         // The library as it is stays beside it until the next restore, under the name the
         // stopped-node restore uses: a restore of the wrong file can be undone. Without that
-        // copy nothing is replaced
+        // copy the library is not replaced
         let before = s.db_path.with_extension("db.bak");
         lib.keep_copy(&before).map_err(|e| {
             BackupError::Io(std::io::Error::other(format!(
-                "no copy of the library as it is could be kept ({e}), so nothing was changed: free some space, or restore with the node stopped (odeiond restore)"
+                "no copy of the library as it is could be kept ({e}), so the library was not replaced: free some space, or restore with the node stopped (odeiond restore)"
             )))
         })?;
         report.notes.push(format!(
