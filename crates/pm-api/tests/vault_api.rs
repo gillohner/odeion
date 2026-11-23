@@ -1708,3 +1708,90 @@ async fn stale_storage_completions_preserve_replacement_status_and_quota() {
     assert!(st.error.is_none());
     assert!(st.last_saved_at.is_some());
 }
+
+/// A node signed in for the first time takes in the owner's settings copy before it writes its
+/// own over it. The first sync restores the copy: the contact the node derives from the identity
+/// at sign-in does not count as the owner's, so the node is still fresh and gets the copy's
+/// contact. A backup made before any restore adds the copy's settings to the node's instead of
+/// dropping them. After that the copy follows the node, deletions included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_node_takes_in_the_settings_copy_before_replacing_it() {
+    // Two people, so that the first node's background work never touches the second copy
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let second = ids.pop().unwrap().pop().unwrap();
+    let first = ids.pop().unwrap().pop().unwrap();
+    let homeserver = signing_in();
+    let old_copy = |smart: &str| {
+        json!({"version": 1, "saved_at": 1, "node": "the old node",
+            "contact": "https://example.org/old-node", "folders": [],
+            "settings": {smart: "{\"name\":\"kept\"}", "home.layout": "theirs"}})
+    };
+
+    // 1. A new node, signed in: its first sync brings the settings back
+    homeserver
+        .write_node_settings(&first, &old_copy("smart.0035WKVKQDHSM"))
+        .await
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), first.clone()));
+    n.set_sync(Some(sync.clone()));
+    assert!(n.contact().contains("pubky.app/profile/"), "derived at sign-in");
+    pm_api::sync::first_sync_in_background(&n, sync.clone());
+    let mut copy = Value::Null;
+    for _ in 0..600 {
+        copy = settings_copy(&homeserver, &first).await;
+        if copy["node"] == "Living room node" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(copy["node"], "Living room node", "the node's backup after its first sync: {copy}");
+    let setting = |n: &NodeState, k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
+    assert_eq!(
+        setting(&n, "smart.0035WKVKQDHSM").as_deref(),
+        Some("{\"name\":\"kept\"}")
+    );
+    assert_eq!(n.contact(), "https://example.org/old-node");
+    assert!(copy["settings"]["smart.0035WKVKQDHSM"].is_string(), "{copy}");
+
+    // 2. A node whose settings are backed up before any restore ran (a change made at once)
+    homeserver
+        .write_node_settings(&second, &old_copy("smart.0035WKVKQDHSN"))
+        .await
+        .unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let n2 = node(d2.path());
+    n2.library
+        .lock()
+        .unwrap()
+        .set_setting("home.layout", "mine")
+        .unwrap();
+    let sync2 = Arc::new(PubkySync::from_session(homeserver.clone(), second.clone()));
+    n2.set_sync(Some(sync2.clone()));
+    sync2.backup_settings(&n2).await;
+    let copy = settings_copy(&homeserver, &second).await;
+    assert!(copy["settings"]["smart.0035WKVKQDHSN"].is_string(), "dropped: {copy}");
+    assert_eq!(copy["settings"]["home.layout"], "mine", "the node's own wins: {copy}");
+    assert!(setting(&n2, "smart.0035WKVKQDHSN").is_some());
+    // Taken in once: a setting deleted here afterwards goes from the copy too
+    n2.library
+        .lock()
+        .unwrap()
+        .delete_setting("smart.0035WKVKQDHSN")
+        .unwrap();
+    sync2.backup_settings(&n2).await;
+    let copy = settings_copy(&homeserver, &second).await;
+    assert!(copy["settings"].get("smart.0035WKVKQDHSN").is_none(), "{copy}");
+}
+
+async fn settings_copy(homeserver: &NodeHomeserver, session: &pubky::PubkySession) -> Value {
+    homeserver
+        .read_node_settings(session)
+        .await
+        .unwrap()
+        .expect("a settings copy")
+}
