@@ -33,6 +33,8 @@ const ROOTS: &str = "drives.roots";
 const INDEX: &str = "drives.index.";
 const RESCAN_EVERY: Duration = Duration::from_secs(6 * 3600);
 const CHUNK: u64 = 256 * 1024;
+/// The most of a file a drive may send whole when it answers a range request with all of it (a 200).
+const WHOLE_MAX: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 200_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -491,14 +493,14 @@ impl Read for RangeReader {
                 .send()
                 .map_err(|e| std::io::Error::other(e.without_url().to_string()))?;
             let st = resp.status().as_u16();
-            let bytes = resp.bytes().map_err(|e| std::io::Error::other(e.to_string()))?;
             match st {
                 206 => {
-                    self.buf = bytes.to_vec();
+                    self.buf = read_capped(resp, end + 1 - self.pos)?;
                     self.buf_at = self.pos;
                 }
+                // No ranges: the whole file came, as listed
                 200 => {
-                    self.buf = bytes.to_vec();
+                    self.buf = read_capped(resp, self.len.min(WHOLE_MAX))?;
                     self.buf_at = 0;
                 }
                 st => return Err(std::io::Error::other(format!("the drive answered {st}"))),
@@ -513,6 +515,23 @@ impl Read for RangeReader {
         self.pos += n as u64;
         Ok(n)
     }
+}
+
+/// A drive's answer read whole, `max` bytes at most: refused when it says or turns out to be
+/// bigger. A read error names no address (OneDrive's download address carries its own sign-in).
+fn read_capped(resp: reqwest::blocking::Response, max: u64) -> std::io::Result<Vec<u8>> {
+    let too_big = || std::io::Error::other(format!("the drive sent more than the {max} bytes asked for"));
+    if resp.content_length().is_some_and(|n| n > max) {
+        return Err(too_big());
+    }
+    let mut buf = Vec::new();
+    resp.take(max.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| std::io::Error::new(e.kind(), "the drive's answer broke off"))?;
+    if buf.len() as u64 > max {
+        return Err(too_big());
+    }
+    Ok(buf)
 }
 
 impl Seek for RangeReader {
@@ -676,12 +695,45 @@ pub(crate) async fn fetch_file(s: &NodeState, key: &Path) -> std::io::Result<req
 
 // ---- signing in ----
 
-/// Pending sign-ins: nonce → (provider, PKCE verifier, redirect URI).
-type Pending = Mutex<HashMap<String, (Provider, String, String)>>;
+/// A started sign-in, kept under its nonce until its callback comes.
+struct Started {
+    provider: Provider,
+    /// Its PKCE verifier.
+    verifier: String,
+    /// The redirect URI it was started with.
+    redirect: String,
+    /// When it started: it waits [`crate::tidal::SIGN_IN_FOR`] at most.
+    at: std::time::Instant,
+}
+
+type Pending = Mutex<HashMap<String, Started>>;
 
 fn pending() -> &'static Pending {
     static P: std::sync::OnceLock<Pending> = std::sync::OnceLock::new();
     P.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Keep a started sign-in; those past their time go first, then the oldest while
+/// [`crate::tidal::SIGN_IN_MAX`] wait (as TIDAL's and Spotify's).
+fn keep_started(pending: &mut HashMap<String, Started>, nonce: String, started: Started) {
+    crate::tidal::make_room(pending, |p| p.at, started.at);
+    pending.insert(nonce, started);
+}
+
+/// The sign-in a callback comes back for: once, while it is in time, for the drive it named.
+fn take_started(
+    pending: &mut HashMap<String, Started>,
+    nonce: &str,
+    p: Provider,
+) -> Result<Started, ApiError> {
+    let started = pending
+        .remove(nonce)
+        .filter(|s| s.at.elapsed() < crate::tidal::SIGN_IN_FOR)
+        .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in: start again"))?;
+    if started.provider != p {
+        return Err(ApiError::bad_request("that sign-in was for another drive"));
+    }
+    Ok(started)
 }
 
 fn provider_of(name: &str) -> Result<Provider, ApiError> {
@@ -738,10 +790,16 @@ pub(crate) async fn login(
     } else {
         (callback.clone(), nonce.clone())
     };
-    pending()
-        .lock()
-        .expect("pending")
-        .insert(nonce, (p, verifier, redirect.clone()));
+    keep_started(
+        &mut pending().lock().expect("pending"),
+        nonce,
+        Started {
+            provider: p,
+            verifier,
+            redirect: redirect.clone(),
+            at: std::time::Instant::now(),
+        },
+    );
     let base = match p {
         Provider::Google => d.endpoints.google_auth.clone(),
         Provider::Onedrive => format!("{}/authorize", d.endpoints.ms_login),
@@ -799,14 +857,9 @@ async fn finish_login(s: &Arc<NodeState>, provider: &str, q: CallbackQuery) -> R
         return Err(ApiError::bad_request("missing code or state"));
     };
     let nonce = crate::project_apps::state_nonce(&state).to_string();
-    let (pp, verifier, redirect) = pending()
-        .lock()
-        .expect("pending")
-        .remove(&nonce)
-        .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in: start again"))?;
-    if pp != p {
-        return Err(ApiError::bad_request("that sign-in was for another drive"));
-    }
+    let Started {
+        verifier, redirect, ..
+    } = take_started(&mut pending().lock().expect("pending"), &nonce, p)?;
     let s2 = s.clone();
     let account = tokio::task::spawn_blocking(move || -> Result<Account, String> {
         let d = s2.drives.read().map_err(|_| "drives")?;
@@ -1143,5 +1196,109 @@ mod tests {
             content_url(&Endpoints::default(), Provider::Google, "f1"),
             "https://www.googleapis.com/drive/v3/files/f1?alt=media"
         );
+    }
+
+    /// A started sign-in is taken once, in time, for its own drive; at most SIGN_IN_MAX wait,
+    /// and the oldest go first.
+    #[test]
+    fn a_drive_sign_in_waits_its_time_and_has_a_limit() {
+        use crate::tidal::{SIGN_IN_FOR, SIGN_IN_MAX};
+        let now = std::time::Instant::now();
+        let started = |at| Started {
+            provider: Provider::Google,
+            verifier: "v".into(),
+            redirect: "r".into(),
+            at,
+        };
+        let mut m = HashMap::new();
+        keep_started(&mut m, "a".into(), started(now));
+        assert!(
+            take_started(&mut m, "a", Provider::Onedrive).is_err(),
+            "another drive's"
+        );
+        assert!(take_started(&mut m, "a", Provider::Google).is_err(), "taken once");
+        keep_started(&mut m, "b".into(), started(now));
+        assert_eq!(take_started(&mut m, "b", Provider::Google).unwrap().verifier, "v");
+        // Past its time
+        let old = now
+            .checked_sub(SIGN_IN_FOR + Duration::from_secs(1))
+            .expect("a monotonic clock older than ten minutes");
+        keep_started(&mut m, "late".into(), started(old));
+        let e = take_started(&mut m, "late", Provider::Google)
+            .err()
+            .expect("refused");
+        assert!(e.message.contains("expired"), "{}", e.message);
+        // Many started, none finished: the newest are kept
+        for n in 0..SIGN_IN_MAX + 10 {
+            keep_started(
+                &mut m,
+                format!("n{n}"),
+                started(now + Duration::from_millis(n as u64)),
+            );
+            assert!(m.len() <= SIGN_IN_MAX);
+        }
+        assert!(m.contains_key(&format!("n{}", SIGN_IN_MAX + 9)) && !m.contains_key("n0"));
+    }
+
+    /// A drive's answer is read up to what was asked for: a range answer longer than its range,
+    /// or a whole answer longer than the listed file (or than WHOLE_MAX), is refused, said or as
+    /// it comes, instead of read into memory.
+    #[test]
+    fn a_drive_read_takes_what_was_asked_for() {
+        use std::io::Write;
+        // Answers every request with `status` and `body`, and a Content-Length when `declared`
+        fn serve(status: &'static str, body: Vec<u8>, declared: Option<u64>) -> String {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = l.local_addr().unwrap();
+            std::thread::spawn(move || {
+                for c in l.incoming() {
+                    let Ok(mut c) = c else { return };
+                    let mut req = [0u8; 4096];
+                    let _ = c.read(&mut req);
+                    let length = declared
+                        .map(|n| format!("Content-Length: {n}\r\n"))
+                        .unwrap_or_default();
+                    let _ = c.write_all(
+                        format!("HTTP/1.1 {status}\r\n{length}Connection: close\r\n\r\n").as_bytes(),
+                    );
+                    let _ = c.write_all(&body);
+                }
+            });
+            format!("http://{addr}/f")
+        }
+        let reader = |url: String, len: u64| RangeReader {
+            url,
+            token: "t".into(),
+            len,
+            pos: 0,
+            buf: Vec::new(),
+            buf_at: 0,
+        };
+        let refused = |mut r: RangeReader| {
+            let e = r.read(&mut [0u8; 16]).expect_err("refused");
+            assert!(e.to_string().contains("more than"), "{e}");
+        };
+        let mut out = [0u8; 16];
+        // As asked: the range, and a whole file as listed
+        let mut r = reader(serve("206 Partial Content", vec![7; 1000], Some(1000)), 1000);
+        assert_eq!(r.read(&mut out).unwrap(), 16);
+        let mut r = reader(serve("200 OK", vec![7; 1000], None), 1000);
+        assert_eq!(r.read(&mut out).unwrap(), 16);
+        assert_eq!(r.buf.len(), 1000);
+        // More than the range (one chunk), said or as it comes
+        let more = vec![7; CHUNK as usize + 1];
+        refused(reader(
+            serve("206 Partial Content", more.clone(), Some(CHUNK + 1)),
+            10 * CHUNK,
+        ));
+        refused(reader(serve("206 Partial Content", more, None), 10 * CHUNK));
+        // A whole file longer than listed, said or as it comes
+        refused(reader(serve("200 OK", vec![7; 2000], Some(2000)), 1000));
+        refused(reader(serve("200 OK", vec![7; 2000], None), 1000));
+        // A whole file past WHOLE_MAX is not read, even when that is its listed size
+        refused(reader(
+            serve("200 OK", vec![7; 10], Some(WHOLE_MAX + 1)),
+            WHOLE_MAX + 1,
+        ));
     }
 }
