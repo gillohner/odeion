@@ -28034,8 +28034,8 @@ exec sleep 300
         knows.store(false, std::sync::atomic::Ordering::SeqCst);
         let to = sign_in().await;
         assert!(
-            to.contains("error") && to.contains("could+not+be+checked"),
-            "{to}"
+            to.contains("error") && to.contains("could+not+be+checked") && to.contains("the+owner%27s"),
+            "says whose: {to}"
         );
         assert!(row(&format!("person.{ben}.spotify.user")).is_none());
         let kept: serde_json::Value = serde_json::from_str(&row("spotify.user").unwrap()).unwrap();
@@ -28068,6 +28068,25 @@ exec sleep 300
         assert!(row(&format!("person.{ben}.spotify.user"))
             .unwrap()
             .contains("sp-1"));
+        // A kept sign-in that can't be renewed any more (run out, nothing to renew it with) plays
+        // nothing and holds no account: it doesn't stop anyone, even while Spotify can't be asked
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "spotify.user",
+                &serde_json::json!({"access_token": "old-at", "expires_at": 1, "scope": "x"}).to_string(),
+            )
+            .unwrap();
+        s.library
+            .lock()
+            .unwrap()
+            .delete_setting(&format!("person.{ben}.spotify.user"))
+            .unwrap();
+        knows.store(false, std::sync::atomic::Ordering::SeqCst);
+        let to = sign_in().await;
+        assert!(!to.contains("error"), "{to}");
+        assert!(row(&format!("person.{ben}.spotify.user")).is_some());
     }
 
     /// Radio goes on when the queue runs out, not after a Stop (its own file).

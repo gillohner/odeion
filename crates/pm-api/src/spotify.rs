@@ -353,51 +353,93 @@ async fn account_of_token(s: &NodeState, access_token: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether the account of `holder`'s kept sign-in is known: one kept without it (Spotify did
-/// not answer when it was made) asks Spotify now and keeps the answer. Nothing kept is known.
-async fn account_known(s: &NodeState, holder: &Who) -> bool {
+/// What is known of the account of a kept sign-in ([`account_known`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kept {
+    /// Its account is known, or nothing is kept.
+    Known,
+    /// It can't be renewed any more (no renewal kept, or Spotify refused it): it plays nothing,
+    /// so it holds no account.
+    Dead,
+    /// It could not be asked about now.
+    NotNow,
+}
+
+/// The account of `holder`'s kept sign-in: one kept without it (Spotify did not answer when it
+/// was made) asks Spotify now and keeps the answer.
+async fn account_known(s: &NodeState, holder: &Who) -> Kept {
     if load_user(s, holder).is_none_or(|u| names_account(&u)) {
-        return true;
+        return Kept::Known;
     }
     // (a renewal on the way asks too)
-    let Ok(Some(token)) = user_token(s, holder).await else {
-        return false;
+    let token = match user_token(s, holder).await {
+        Ok(Some(token)) => token,
+        Ok(None) => return Kept::Dead,
+        // (Spotify's own refusal of the renewal, as `token_request` says it)
+        Err(e) if e.message.contains("token endpoint 4") => return Kept::Dead,
+        Err(_) => return Kept::NotNow,
     };
     let Some(mut u) = load_user(s, holder) else {
-        return true;
+        return Kept::Known;
     };
     if names_account(&u) {
-        return true;
+        return Kept::Known;
     }
     let Some(account) = account_of_token(s, &token).await else {
-        return false;
+        return Kept::NotNow;
     };
     u.user_id = Some(account);
     let Some(key) = holder.setting(USER_KEY) else {
-        return false;
+        return Kept::NotNow;
     };
     // Only over the sign-in that was asked about
     let lib = s.library.lock().expect("library poisoned");
     let still = |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == token);
     // (not stored: changed meanwhile, or the write failed; it is asked again next time)
-    crate::vault_cache::store_refreshed(&lib, &key, still, &serde_json::to_string(&u).expect("serializes"))
+    if crate::vault_cache::store_refreshed(&lib, &key, still, &serde_json::to_string(&u).expect("serializes"))
+    {
+        Kept::Known
+    } else {
+        Kept::NotNow
+    }
 }
 
 /// Before someone other than the owner keeps a sign-in: every Spotify sign-in already kept on
 /// this node has to name its account, or the new one can't be held to "one account is one
-/// person's" (accounts.rs). One that still can't be asked about stops the sign-in, with what to do.
+/// person's" (accounts.rs). One that can't be renewed any more plays nothing and holds no
+/// account; one that can't be asked about now stops the sign-in, saying whose it is and what to do.
 async fn others_accounts_known(s: &NodeState, who: &Who) -> Result<(), ApiError> {
     let listed = crate::people::listed_keys(&s.library.lock().expect("library poisoned"))?;
     let holders = std::iter::once(Who::Owner).chain(listed.into_iter().map(Who::Listener));
     for holder in holders.filter(|h| h != who) {
-        if !account_known(s, &holder).await {
-            return Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "A Spotify sign-in kept on this node could not be checked (Spotify did not say whose account \
-                 it is), so yours was not kept. Try again; if it stays, the node's owner signs out of \
-                 Spotify and in again.",
-            ));
+        if account_known(s, &holder).await != Kept::NotNow {
+            continue;
         }
+        let (whose, fix) = match &holder {
+            Who::Listener(k) => {
+                let name = crate::people::load(s)
+                    .people
+                    .into_iter()
+                    .find(|p| p.key == *k)
+                    .and_then(|p| p.name)
+                    .unwrap_or_else(|| format!("{}…", k.chars().take(8).collect::<String>()));
+                (
+                    format!("{name}'s"),
+                    format!("{name} signs out of Spotify and in again in their Settings"),
+                )
+            }
+            _ => (
+                "the owner's".to_string(),
+                "the node's owner signs out of Spotify and in again".to_string(),
+            ),
+        };
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "A Spotify sign-in kept on this node ({whose}) could not be checked (Spotify did not say \
+                 whose account it is), so yours was not kept. Try again later; if it stays, {fix}."
+            ),
+        ));
     }
     Ok(())
 }
