@@ -183,3 +183,4 @@ ui-long-list.js long-list-shots
 ui-busy-forms.js busy-forms-shots
 ui-tokens.js tokens-shots
 ui-wording.js wording-shots
+ui-toasts.js toasts-shots

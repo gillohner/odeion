@@ -393,6 +393,8 @@ html:not([data-shell="phone"]) .lyric-lines { overscroll-behavior: contain; }
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { border-left-color: var(--bad); }
+/* ---- a message that waits for an answer ("Bringing them back…") shows that it does ---- */
+.toast.wait::before { content: ''; display: inline-block; box-sizing: border-box; width: 14px; height: 14px; margin-right: var(--sp-2); vertical-align: -2px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
 /* (the toast itself lets taps through; its Undo takes them) */
 .toast .toast-act { margin-left: var(--sp-2h); vertical-align: middle; pointer-events: auto; }
 .toast:not(.show) .toast-act { pointer-events: none; visibility: hidden; }

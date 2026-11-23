@@ -203,12 +203,42 @@
     vv.addEventListener('resize', kbMove); vv.addEventListener('scroll', kbMove);
   }
   document.addEventListener('focusin', (e) => { const a = e.target; if (a && a.matches && a.matches('input, textarea') && a.closest('.np-bsheet')) setTimeout(() => { if (document.activeElement === a) a.scrollIntoView({ block: 'center' }); }, 300); });
+  // The toast's element: in the page, or in the modal dialog that is open (a modal dialog and its
+  // backdrop are drawn over everything else on the page, so a message raised from one was under the
+  // backdrop). It comes back to the page when the dialog closes, also when the dialog is taken away
+  // in the same step.
+  const toastBox = document.getElementById('toast');
+  const toastEl = () => {
+    // (a browser that does not know :modal keeps the toast in the page, as before)
+    const open = [...document.querySelectorAll('dialog[open]')].filter((d) => { try { return d.matches(':modal'); } catch { return false; } }).pop() || null;
+    const host = open || document.body;
+    // (closed: to the dialog still open under it, else the page)
+    if (toastBox.parentElement !== host) { host.appendChild(toastBox); if (open) open.addEventListener('close', () => { if (toastBox.parentElement === open || !toastBox.isConnected) toastEl(); }, { once: true }); }
+    return toastBox;
+  };
   // `action` ({ label, run }): a button in the toast (Undo); the toast stays longer then. Returns that button
+  // An error stays readable and an Undo within reach: a plain message that comes in the first 2.5 s
+  // of an error or of a toast with a button waits for that time to be up, then shows (the newest
+  // one if several came). Before, it took their place at once: an error was gone milliseconds
+  // after it appeared when the page said something else next. One rule for every message, wherever
+  // it comes from; an error, a toast with a button or a progress message ('wait': the answer to a
+  // press, "Moving to …") is shown at once, as before.
   const toast = (msg, kind = '', action = null) => {
-    const t = $('#toast');
+    const t = toastEl();
+    const until = toast.keep && t.classList.contains('show') ? toast.keep : 0;
+    if (!kind && !action && performance.now() < until) {
+      toast.next = msg; clearTimeout(toast.nextT);
+      toast.nextT = setTimeout(() => { if (toast.next === msg) { toast.next = null; toast.keep = 0; toast(msg); } }, until - performance.now());
+      return null;
+    }
+    toast.next = null; clearTimeout(toast.nextT);
+    toast.keep = kind === 'error' || action ? performance.now() + 2500 : 0;
+    // (an error interrupts a screen reader, as the errors written into the page do; the rest wait their turn)
+    t.setAttribute('role', kind === 'error' ? 'alert' : 'status'); t.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
     t.textContent = msg;
     let b = null;
-    const hide = () => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); };
+    // (gone: a plain message that waited for it shows now)
+    const hide = () => { t.classList.remove('show'); toast.keep = 0; toast.h = setTimeout(() => { t.textContent = ''; }, 400); const n = toast.next; if (n) { toast.next = null; clearTimeout(toast.nextT); toast(n); } };
     // (listeners, not on… properties: focusin and focusout have none; the next toast drops them)
     const unhook = () => { if (toast.ac) toast.ac.abort(); toast.ac = null; };
     if (action) { b = document.createElement('button'); b.className = 'btn sm toast-act'; b.textContent = action.label; b.onclick = () => { clearTimeout(toast.h); unhook(); b.remove(); hide(); Promise.resolve(action.run()).catch((e) => toast(e.message, 'error')); }; t.appendChild(b); }
@@ -233,9 +263,11 @@
   // replaced it meanwhile (before, it stayed its full 3.8 s: behind the next dialog, and on the page
   // the answer opened, over the phone's soft keyboard)
   const toastDone = (msg) => {
-    const t = $('#toast');
+    const t = toastBox;
+    if (toast.next === msg) { toast.next = null; clearTimeout(toast.nextT); return; } // (its answer came while it still waited)
     if (!t.classList.contains('show') || t.textContent !== msg) return;
-    clearTimeout(toast.h); t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400);
+    clearTimeout(toast.h); t.classList.remove('show'); toast.keep = 0; toast.h = setTimeout(() => { t.textContent = ''; }, 400);
+    const n = toast.next; if (n) { toast.next = null; clearTimeout(toast.nextT); toast(n); }
   };
   // A press whose button a redraw removed leaves the focus on the page: it goes to the toast's Undo
   // (keyboard and screen-reader users reach it there; the toast waits while it has the focus)
@@ -3707,7 +3739,7 @@
     // (the message goes when the node answers: the menu opened meanwhile is drawn again instead of a
     // toast, and the message stayed over it, saying it still moved)
     let said = '';
-    if (zonePop.hidden) { const tz0 = target === BROWSER ? { name: hereName() } : state.zones[target]; said = `Moving to ${(tz0 && tz0.name) || 'the zone'}…`; toast(said); }
+    if (zonePop.hidden) { const tz0 = target === BROWSER ? { name: hereName() } : state.zones[target]; said = `Moving to ${(tz0 && tz0.name) || 'the zone'}…`; toast(said, 'wait'); }
     let resume = null; // the browser, paused for the move: back on when the move fails
     const cur = currentZone(); const curTitle = cur && cur.now_playing ? cur.now_playing.item.title || '' : '';
     const wasPlaying = cur && cur.transport === 'playing';
@@ -4654,7 +4686,7 @@
     overlay.hidden = !open;
     document.body.classList.toggle('np-open', open);
     // (a toast on screen moves with the bars: Now playing hides the mini player and the tabs)
-    { const t = $('#toast'); if (t.classList.contains('show')) placeToast(t); }
+    { const t = toastBox; if (t.classList.contains('show')) placeToast(t); }
     // (what it covers is out of reach for Tab and screen readers while it is open: the side bar, the
     // page and the phone's tabs; a desktop's player bar is not under it and stays)
     $$('.shell > .sidebar, .shell > .content, .shell > .bottomnav').forEach((el) => { el.inert = open; });
@@ -8819,7 +8851,7 @@
               // after 30 s without an answer: Play all can be pressed again
               let loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true;
               const slow = setTimeout(() => toast(loading, 'wait'), 400);
-              const onPage = (n) => { const t = $('#toast'); const was = loading; loading = `Loading ${countOf(total, 'songs')}… ${fmtCount(n)} so far`; if (t.classList.contains('show') && t.textContent === was) toast(loading, 'wait'); };
+              const onPage = (n) => { const t = toastBox; const was = loading; loading = `Loading ${countOf(total, 'songs')}… ${fmtCount(n)} so far`; if (t.classList.contains('show') && t.textContent === was) toast(loading, 'wait'); };
               try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks, { onPage, wait: 30000 }), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
               clearTimeout(slow); toastDone(loading); sh.disabled = false;
             };
@@ -10364,7 +10396,7 @@
           // (for the zone the page was drawn for; one save at a time, a second tap while the first is
           // on its way made a second playlist, and one the node hasn't answered yet says so)
           const saveQueue = async (zid) => {
-            if (queueSaving) { toast('Still saving the queue as a collection…'); return; } queueSaving = true;
+            if (queueSaving) { toast('Still saving the queue as a collection…', 'wait'); return; } queueSaving = true;
             const body = zid === BROWSER ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: zid };
             try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); } finally { queueSaving = false; }
           };
