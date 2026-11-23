@@ -28392,25 +28392,29 @@ exec sleep 300
             .expect("queued as checked");
         assert_eq!(it.limit, Some(accounts::APP_FETCH));
         assert_eq!(it.by, None, "the owner's");
-        // A link on the node with the API token or another app's password in it (in a queue from
-        // before the node took them out on the way in): the owner reads it, an app never
-        let zone = s.zones.get(&pm_zones::ZoneId::new(&zid)).unwrap();
-        zone.enqueue(
-            vec![
-                pm_zones::QueueItem::new("/v1/library/tracks/1/file?token=s3cret"),
-                pm_zones::QueueItem::new(format!("/v1/library/tracks/2/file?token={sub_pw}")),
-            ],
-            pm_zones::Insert::End,
-        );
-        let (_, z, _) = send_as(&app, "GET", &format!("/v1/zones/{zid}"), owner, &[], None).await;
+        // An app's answers go through what people's do (file names, not the owner's folders; and
+        // no sign-in of the node's in a link, which accounts::KnownSet now names app passwords in)
+        let folder = dir.path().join("music").to_string_lossy().into_owned();
+        let (_, t, _) = send_as(&app, "GET", "/v1/library/tracks?limit=5", owner, &[], None).await;
         assert!(
-            z.to_string().contains("token=s3cret"),
-            "the owner's answer has it: {z}"
+            t.to_string().contains(&folder),
+            "the owner's answer names the folder: {t}"
+        );
+        let (_, t, _) = send_as(&app, "GET", "/v1/library/tracks?limit=5", mine, &[], None).await;
+        assert!(
+            t.to_string().contains("one.wav") && !t.to_string().contains(&folder),
+            "{t}"
         );
         let (_, z, _) = send_as(&app, "GET", &format!("/v1/zones/{zid}"), mine, &[], None).await;
-        assert!(z.to_string().contains("/v1/library/tracks/1/file"), "{z}");
-        assert!(!z.to_string().contains("s3cret"), "{z}");
-        assert!(!z.to_string().contains(&sub_pw), "{z}");
+        assert!(
+            !z.to_string().contains("s3cret") && !z.to_string().contains(&sub_pw),
+            "{z}"
+        );
+        let known = accounts::KnownTokens::lazy(&s);
+        assert!(
+            known.has(&sub_pw) && known.has("s3cret"),
+            "an app password is hidden like a sign-in"
+        );
         // The speakers, and grouping them: yes; adding a speaker by address or tuning one: no
         let (st, _, _) = send_as(
             &app,
@@ -28548,7 +28552,7 @@ exec sleep 300
         let songs = rest(format!("getRandomSongs?p={sub_pw}")).await;
         assert_eq!(songs["status"], "ok", "{songs}");
         assert!(
-            songs.to_string().contains("one.wav") || songs.to_string().contains("\"one\""),
+            songs.to_string().contains(r#""title":"One""#),
             "the song: {songs}"
         );
         assert!(!songs.to_string().contains("\"path\""), "{songs}");

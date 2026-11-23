@@ -128,7 +128,7 @@ impl Capability {
     /// Why a listener is refused a capability their role does not have.
     fn owners(self) -> &'static str {
         match self {
-            Capability::ZoneManage => "only the owner adds, removes or tunes zones",
+            Capability::ZoneManage | Capability::ZoneGroup => "only the owner adds, removes or tunes zones",
             Capability::OwnerMusic => {
                 "that is the owner's: a listener's own are their bookmarks and collections"
             }

@@ -266,7 +266,8 @@ async fn rest(
     match dispatch(&s, &method, &params, &ids, &headers).await {
         // An app password reads file names, not where the owner keeps files (as on /v1)
         Ok(Reply::Json(mut m)) if app => {
-            drop_paths(&mut m);
+            m.remove("path");
+            m.values_mut().for_each(drop_paths);
             envelope(fmt, "ok", m)
         }
         Ok(Reply::Json(m)) => envelope(fmt, "ok", m),
