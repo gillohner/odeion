@@ -379,15 +379,15 @@ async fn account_known(s: &NodeState, holder: &Who) -> bool {
     // Only over the sign-in that was asked about
     let lib = s.library.lock().expect("library poisoned");
     let still = |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == token);
-    crate::vault_cache::store_refreshed(&lib, &key, still, &serde_json::to_string(&u).expect("serializes"));
-    true
+    // (not stored: changed meanwhile, or the write failed; it is asked again next time)
+    crate::vault_cache::store_refreshed(&lib, &key, still, &serde_json::to_string(&u).expect("serializes"))
 }
 
 /// Before someone other than the owner keeps a sign-in: every Spotify sign-in already kept on
 /// this node has to name its account, or the new one can't be held to "one account is one
 /// person's" (accounts.rs). One that still can't be asked about stops the sign-in, with what to do.
 async fn others_accounts_known(s: &NodeState, who: &Who) -> Result<(), ApiError> {
-    let listed = crate::people::listed_keys(&s.library.lock().expect("library poisoned"));
+    let listed = crate::people::listed_keys(&s.library.lock().expect("library poisoned"))?;
     let holders = std::iter::once(Who::Owner).chain(listed.into_iter().map(Who::Listener));
     for holder in holders.filter(|h| h != who) {
         if !account_known(s, &holder).await {

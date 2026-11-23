@@ -492,7 +492,7 @@ impl Who {
             return Ok(());
         }
         let mut taken = holds(None)?;
-        for other in crate::people::listed_keys(lib) {
+        for other in crate::people::listed_keys(lib)? {
             if taken {
                 break;
             }

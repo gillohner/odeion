@@ -27895,8 +27895,9 @@ exec sleep 300
                 renewed(serde_json::json!({"user": {"userId": 9}})),
                 Ok(Some("9".to_string()))
             );
-            let why = renewed(serde_json::json!({"user_id": 1})).unwrap_err();
+            let (status, why) = renewed(serde_json::json!({"user_id": 1})).unwrap_err();
             assert!(why.contains("already signed in"), "{why}");
+            assert_eq!(status, StatusCode::CONFLICT, "only this ends the sign-in");
             // (an answer that names nobody next to its token: the token names the account)
             assert!(renewed(serde_json::json!({"access_token": jwt(r#"{"uid":1}"#)})).is_err());
             assert_eq!(
@@ -27916,6 +27917,23 @@ exec sleep 300
                     &kept
                 ),
                 Ok(Some("77".to_string()))
+            );
+        }
+        // A people list that can't be read stops the check, it doesn't pass it: not a conflict
+        // (that would end the sign-in), an error (the renewal is tried again)
+        {
+            let lib = s.library.lock().unwrap();
+            let people = lib.get_setting("people").unwrap().unwrap();
+            lib.set_setting("people", "{not a list").unwrap();
+            let (status, why) =
+                tidal_unofficial::renewed_for(&lib, &ben_who, &serde_json::json!({"user_id": 42}), &kept)
+                    .unwrap_err();
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{why}");
+            assert!(ben_who.account_free(&lib, "tidal.unofficial", "42").is_err());
+            lib.set_setting("people", &people).unwrap();
+            assert_eq!(
+                tidal_unofficial::renewed_for(&lib, &ben_who, &serde_json::json!({"user_id": 42}), &kept),
+                Ok(Some("42".to_string()))
             );
         }
         *imports::HOME_OVERRIDE.write().unwrap() = None;

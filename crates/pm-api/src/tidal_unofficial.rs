@@ -445,7 +445,7 @@ pub(crate) fn renewed_for(
     who: &Who,
     answer: &Value,
     kept: &Session,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, (StatusCode, String)> {
     // (TIDAL writes the id as a number; text is read too, and both the same way)
     let id = |v: &Value| match v {
         Value::Number(n) => crate::accounts::account_id(&n.to_string()),
@@ -461,7 +461,7 @@ pub(crate) fn renewed_for(
         Some(account) if was.as_deref() != Some(account.as_str()) => {
             if !who.is_owner() {
                 who.account_free(lib, STATE_KEY, &account)
-                    .map_err(|e| e.message)?;
+                    .map_err(|e| (e.status, e.message))?;
             }
             Ok(Some(account))
         }
@@ -1345,7 +1345,9 @@ fn token_blocking(
         match renewed_for(&lib, who, &v, &sess) {
             Ok(Some(account)) => fresh.user_id = Some(account),
             Ok(None) => {}
-            Err(why) => {
+            // (a store that can't be read now ends nothing: the renewal fails and is tried again)
+            Err((status, why)) if status != StatusCode::CONFLICT => return Err(FullError::Mode(why)),
+            Err((_, why)) => {
                 if st
                     .session
                     .as_ref()
