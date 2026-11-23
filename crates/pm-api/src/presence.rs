@@ -513,6 +513,16 @@ async fn end_group(s: &Arc<NodeState>, a: &Along) -> Result<ZoneState, ApiError>
     Ok(st)
 }
 
+/// Whether the zone `group` is a listen-along group.
+pub fn is_along(s: &NodeState, group: &str) -> bool {
+    s.presence
+        .along
+        .lock()
+        .expect("presence lock")
+        .iter()
+        .any(|a| a.group == group)
+}
+
 fn take_along(s: &NodeState, group: &str) -> Option<Along> {
     let mut all = s.presence.along.lock().expect("presence lock");
     let i = all.iter().position(|a| a.group == group)?;

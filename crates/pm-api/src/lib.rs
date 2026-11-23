@@ -2052,7 +2052,16 @@ async fn zone(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiRes
 async fn delete_zone(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    axum::Extension(caller): axum::Extension<accounts::Caller>,
 ) -> Result<StatusCode, ApiError> {
+    // An app password ungroups (`access::Capability::ZoneGroup`): a group of speakers, not a
+    // speaker's own zone or someone's listen-along group
+    if caller.role == accounts::Role::App && (!id.starts_with("group:") || presence::is_along(&s, &id)) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "An app password ungroups speakers; it doesn't remove a zone.",
+        ));
+    }
     // A listen-along group ends as when its host ends it: the music goes back, not lost
     if presence::delete_group(&s, &id).await? {
         return Ok(StatusCode::NO_CONTENT);
@@ -28203,9 +28212,29 @@ exec sleep 300
     #[tokio::test]
     async fn an_app_password_plays_and_browses_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("music")).unwrap();
+        write_wav(&dir.path().join("music/one.wav"), 4410);
         let s = state(dir.path(), Some("s3cret")).await;
         let app = router(s.clone());
         let owner = Some("s3cret");
+        // One song in the library
+        let (st, _, _) = send_as(
+            &app,
+            "POST",
+            "/v1/library/scan",
+            owner,
+            &[],
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        for _ in 0..500 {
+            if !s.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!s.is_scanning());
         // Old nodes have none: the list is empty, nothing else changes
         let (st, v, _) = send_as(&app, "GET", "/v1/node/app-passwords", owner, &[], None).await;
         assert_eq!((st, &v), (StatusCode::OK, &serde_json::json!([])));
@@ -28384,6 +28413,13 @@ exec sleep 300
         )
         .await;
         assert_eq!(st, StatusCode::FORBIDDEN);
+        // Ungrouping, yes; removing a speaker's own zone, no
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/zones/{zid}"), mine, &[], None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        assert!(
+            s.zones.get(&pm_zones::ZoneId::new(&zid)).is_some(),
+            "the zone is still there"
+        );
 
         // Subsonic: the password, plain, hex or as a salted md5; not for a scan
         let rest = |q: String| {
@@ -28412,7 +28448,16 @@ exec sleep 300
         // (its answers name no file on the node's disk)
         let songs = rest(format!("getRandomSongs?p={sub_pw}")).await;
         assert_eq!(songs["status"], "ok", "{songs}");
+        assert!(
+            songs.to_string().contains("one.wav") || songs.to_string().contains("\"one\""),
+            "the song: {songs}"
+        );
         assert!(!songs.to_string().contains("\"path\""), "{songs}");
+        let theirs = rest("getRandomSongs?p=s3cret".into()).await;
+        assert!(
+            theirs.to_string().contains("\"path\""),
+            "the owner's answer has it: {theirs}"
+        );
         assert_eq!(
             rest(format!("ping?p=enc:{}", hex::encode(&sub_pw))).await["status"],
             "ok"

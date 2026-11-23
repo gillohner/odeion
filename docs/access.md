@@ -94,7 +94,8 @@ node shows it once. With it the app plays, controls and groups zones, browses an
 library and the owner's collections, all as the owner's (`app` in the table above); it can't change
 settings, people, the library, the API token or anyone's sign-ins, and its answers never show the
 API token or another password. Its queue takes library songs, the services' tracks and web links,
-on the home network too (spoken announcements), never a file path or a loopback address.
+on the home network too (spoken announcements), never a file path or a loopback address. It
+ungroups a group of speakers, but doesn't remove a speaker's own zone or someone's listen-along group.
 
 - `GET /v1/node/app-passwords` lists them (name, made, last used: never the password);
   `DELETE /v1/node/app-passwords/{id}` removes one, and that app alone stops at once. An app that
