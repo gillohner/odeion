@@ -28188,9 +28188,12 @@ exec sleep 300
         }
         assert_eq!(cast_zones(&s), 1, "the Cast device got its zone without a rescan");
         let seen = passes.load(Ordering::SeqCst);
-        while passes.load(Ordering::SeqCst) < seen + 2 {
+        let mut waited = 0;
+        while passes.load(Ordering::SeqCst) < seen + 2 && waited < 200 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            waited += 1;
         }
+        assert!(passes.load(Ordering::SeqCst) >= seen + 2, "the watch goes on");
         assert_eq!(cast_zones(&s), 1, "found again: nothing more");
         assert_eq!(s.zones.list().len(), before + 1);
     }

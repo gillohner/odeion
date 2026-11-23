@@ -1961,15 +1961,22 @@ impl NodeState {
     /// mDNS discovery of Cast devices; each becomes an output playing
     /// through its own pull stream. Blocking; call from `spawn_blocking`.
     pub fn discover_cast(self: &Arc<Self>, timeout: std::time::Duration) -> Vec<OutputId> {
+        let found = self.find_cast(timeout);
+        self.register_cast(found)
+    }
+
+    /// The Cast devices an mDNS browse finds within `timeout` (none when Cast is off), not yet
+    /// registered ([`Self::register_cast`]). Blocking.
+    pub fn find_cast(&self, timeout: std::time::Duration) -> Vec<pm_out_cast::Device> {
         if !self.cast {
             return Vec::new();
         }
-        self.register_cast(pm_out_cast::discover(timeout))
+        pm_out_cast::discover(timeout)
     }
 
     /// Cast devices found: each one new gets an output and a zone (as a rescan does it: one
     /// already there is left as it is).
-    pub(crate) fn register_cast(self: &Arc<Self>, devices: Vec<pm_out_cast::Device>) -> Vec<OutputId> {
+    pub fn register_cast(self: &Arc<Self>, devices: Vec<pm_out_cast::Device>) -> Vec<OutputId> {
         let mut new = Vec::new();
         for d in devices {
             let name = format!(

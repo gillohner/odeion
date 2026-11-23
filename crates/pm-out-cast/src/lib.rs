@@ -84,6 +84,8 @@ pub fn discover(timeout: Duration) -> Vec<Device> {
         return Vec::new();
     };
     let Ok(rx) = daemon.browse(SERVICE_TYPE) else {
+        // (its thread runs until it is shut down; the watch browses every minute)
+        let _ = daemon.shutdown();
         return Vec::new();
     };
     let deadline = std::time::Instant::now() + timeout;

@@ -387,16 +387,22 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     {
         let st = state.clone();
         let found = tokio::task::spawn_blocking(move || {
-            // Cast beside the rest, so the start waits no longer for it
+            // Cast is looked for beside the rest, so the start waits no longer for it, and its
+            // zones are made after the others', so a speaker's zone id does not depend on which
+            // look ended first (two speakers of one name get `name` and `name-2`)
             let (mut found, cast) = std::thread::scope(|sc| {
-                let cast = sc.spawn(|| st.discover_cast(std::time::Duration::from_millis(1500)));
+                let cast = sc.spawn(|| st.find_cast(std::time::Duration::from_millis(1500)));
                 let mut found = st.discover_upnp(std::time::Duration::from_secs(3));
                 found.extend(st.discover_snapcast());
                 found.extend(st.discover_airplay(std::time::Duration::from_millis(1500)));
                 found.extend(st.discover_bluos(std::time::Duration::from_millis(1500)));
-                (found, cast.join().unwrap_or_default())
+                let cast = cast.join().unwrap_or_else(|_| {
+                    tracing::warn!("the look for Cast devices failed; a rescan looks again");
+                    Vec::new()
+                });
+                (found, cast)
             });
-            found.extend(cast);
+            found.extend(st.register_cast(cast));
             found.extend(st.discover_mpd());
             found.extend(st.restore_upnp_addresses());
             found.extend(st.restore_endpoint_addresses());
