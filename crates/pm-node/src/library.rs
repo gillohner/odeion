@@ -44,7 +44,9 @@ fn open_lock_file(path: &Path, write: bool) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NOFOLLOW);
+        // (non-blocking: a FIFO there would otherwise hold the open until someone reads it;
+        // on a plain file it changes nothing, and the lock is taken without waiting anyway)
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = opts.open(path).map_err(|e| {
         // O_NOFOLLOW on a link: ELOOP
@@ -102,19 +104,25 @@ pub fn lock_data_dir(data_dir: &Path) -> std::io::Result<Hold> {
             }
             (f, true)
         }
-        // Another user's file: reading it is enough to lock it, where the file system allows
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => (
-            open_lock_file(&path, false).map_err(|e| {
-                std::io::Error::new(
-                    e.kind(),
-                    format!(
+        // Another user's file: reading it is enough to lock it, where the file system allows.
+        // (A folder this user cannot write and no file yet: the error as it is)
+        Err(e)
+            if e.kind() == std::io::ErrorKind::PermissionDenied
+                && std::fs::symlink_metadata(&path).is_ok() =>
+        {
+            (
+                open_lock_file(&path, false).map_err(|e| {
+                    std::io::Error::new(
+                        e.kind(),
+                        format!(
                         "{} cannot be opened ({e}): it belongs to another user; give it to this one (chown)",
                         path.display()
                     ),
-                )
-            })?,
-            false,
-        ),
+                    )
+                })?,
+                false,
+            )
+        }
         Err(e) => return Err(e),
     };
     match file.try_lock() {
@@ -1121,5 +1129,27 @@ mod tests {
             assert!(!takes_no_locks(&Error::from_raw_os_error(libc::EBADF)));
         }
         assert!(!takes_no_locks(&Error::from(ErrorKind::PermissionDenied)));
+    }
+
+    /// A FIFO at `node.lock` (anyone who can write the data folder can make one) is refused at
+    /// once: the open does not wait for a reader, so neither a start nor a restore hangs.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_lock_file_is_refused_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let fifo = std::ffi::CString::new(data.join("node.lock").to_str().unwrap()).unwrap();
+        // SAFETY: a NUL-terminated path that lives through the call
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(lock_data_dir(&data).map(|_| ()).map_err(|e| e.to_string()));
+        });
+        let r = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the open waited for a reader");
+        // (no reader: opening a FIFO without blocking for writing fails at once, ENXIO)
+        assert!(r.is_err(), "{r:?}");
     }
 }
