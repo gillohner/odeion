@@ -31,8 +31,23 @@ pub fn rincon(r: &Renderer) -> String {
 }
 
 /// A Sonos AVTransport control URL from a player's description location (`http://ip:1400/…`).
-fn av_transport_at(location: &str) -> Option<String> {
+///
+/// The location comes from the topology the player reports, so only one where a Sonos player can
+/// be is taken (`None` otherwise, and the player's own AVTransport is used): `http`, and the
+/// player's own host (`player`, its description location) or a private address of the local
+/// network (10/8, 172.16/12, 192.168/16, IPv6 unique-local) at Sonos's port 1400. Not loopback,
+/// a cloud metadata address or any other host and port.
+fn av_transport_at(location: &str, player: &str) -> Option<String> {
     let u = url::Url::parse(location).ok()?;
+    let own = url::Url::parse(player).is_ok_and(|p| p.host() == u.host());
+    let lan = match u.host()? {
+        url::Host::Ipv4(v4) => v4.is_private(),
+        url::Host::Ipv6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
+        url::Host::Domain(_) => false,
+    };
+    if u.scheme() != "http" || !(own || lan && u.port_or_known_default() == Some(1400)) {
+        return None;
+    }
     Some(format!(
         "{}://{}:{}/MediaRenderer/AVTransport/Control",
         u.scheme(),
@@ -130,7 +145,7 @@ pub fn transport_target(player: &Renderer) -> String {
             .find(|g| g.members.iter().any(|(id, _)| *id == me))
             .filter(|g| g.coordinator != me)
             .and_then(|g| g.members.iter().find(|(id, _)| *id == g.coordinator))
-            .and_then(|(_, loc)| av_transport_at(loc))
+            .and_then(|(_, loc)| av_transport_at(loc, &player.location))
             .unwrap_or_else(|| player.av_transport.clone()),
         Err(e) => {
             tracing::debug!(player = %player.friendly_name, "Sonos topology unavailable: {e}");
@@ -521,10 +536,24 @@ mod tests {
         assert_eq!(g[0].coordinator, "RINCON_AAA01400");
         assert_eq!(g[0].members.len(), 2);
         assert_eq!(g[0].members[1].0, "RINCON_BBB01400");
+        let me = "http://192.168.1.11:1400/xml/device_description.xml";
         assert_eq!(
-            av_transport_at(&g[0].members[0].1).as_deref(),
+            av_transport_at(&g[0].members[0].1, me).as_deref(),
             Some("http://192.168.1.10:1400/MediaRenderer/AVTransport/Control")
         );
+        // A coordinator where no Sonos player can be: the player's own transport instead
+        for loc in [
+            "http://127.0.0.1:7788/v1/x",
+            "http://169.254.169.254/latest/",
+            "http://192.168.1.10:8080/x",
+            "https://192.168.1.10:1400/x",
+            "http://8.8.8.8:1400/x",
+            "http://sonos.local:1400/x",
+        ] {
+            assert_eq!(av_transport_at(loc, me), None, "{loc}");
+        }
+        // The player's own host, on another port (a test's fake, a player that says so)
+        assert!(av_transport_at("http://192.168.1.11:1401/x", me).is_some());
         // Escaped inside the SOAP answer, as Sonos sends it.
         let escaped = STATE
             .replace('<', "&lt;")

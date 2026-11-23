@@ -47,6 +47,8 @@ pub fn call(
         sc.spawn(move || -> Result<String, UpnpError> {
             let client = reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(8))
+                // A redirect would send this POST, body and all, wherever the device says
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?;
             let resp = client
                 .post(&url)

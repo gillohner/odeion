@@ -117,7 +117,7 @@ pub fn describe_within(location: &str, timeout: Duration) -> Result<Option<Rende
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let xml = client.get(location).send()?.error_for_status()?.text()?;
+    let xml = described(client.get(location).send()?, location)?;
     parse_description(location, &xml)
 }
 
@@ -336,6 +336,7 @@ fn linn_by_mac(ip: std::net::IpAddr, mac: &str, serial: Option<&str>) -> Result<
             sc.spawn(|| {
                 let client = reqwest::blocking::Client::builder()
                     .timeout(Duration::from_secs(4))
+                    .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .expect("client");
                 loop {
@@ -419,6 +420,7 @@ fn tcp_fallback_on(ip: std::net::IpAddr, ports: &[u16]) -> Option<Result<Rendere
 fn linked_description(url: &str) -> Option<Renderer> {
     let text = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .ok()?
         .get(url)
@@ -433,7 +435,12 @@ fn linked_description(url: &str) -> Option<Renderer> {
         .filter(|t| t.ends_with(".xml"))
         .take(20)
     {
-        if let Ok(full) = base.join(cand) {
+        // Links to the device's own descriptions only (the page is the device's to write)
+        if let Ok(full) =
+            base.join(cand)
+                .map_err(|_| ())
+                .and_then(|f| if same_host(&base, &f) { Ok(f) } else { Err(()) })
+        {
             if let Ok(Some(r)) = describe(full.as_str()) {
                 return Some(r);
             }
@@ -593,10 +600,36 @@ fn location_from(location: &str, from: std::net::IpAddr) -> bool {
     matches!(u.scheme(), "http" | "https") && plain(host) == plain(from)
 }
 
+/// A description answer's text; anything but a success (a redirect, which is not followed, or
+/// an error) is an error.
+fn described(resp: reqwest::blocking::Response, location: &str) -> Result<String, UpnpError> {
+    if !resp.status().is_success() {
+        return Err(UpnpError::Other(format!(
+            "{location} answered {} to the description request",
+            resp.status()
+        )));
+    }
+    Ok(resp.text()?)
+}
+
 /// Whether `url` is on the host of `base` (any port): a description's service URLs, and the
 /// `URLBase` it names, stay on the device that served it.
 fn same_host(base: &url::Url, url: &url::Url) -> bool {
-    matches!(url.scheme(), "http" | "https") && url.host() == base.host()
+    // An IPv4 address written as IPv4-mapped IPv6 is the same host
+    let ip = |u: &url::Url| match u.host() {
+        Some(url::Host::Ipv4(v4)) => Some(std::net::IpAddr::V4(v4)),
+        Some(url::Host::Ipv6(v6)) => Some(
+            v6.to_ipv4_mapped()
+                .map_or(std::net::IpAddr::V6(v6), std::net::IpAddr::V4),
+        ),
+        _ => None,
+    };
+    matches!(url.scheme(), "http" | "https")
+        && match (ip(base), ip(url)) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => url.host() == base.host(),
+            _ => false,
+        }
 }
 
 fn header(resp: &str, name: &str) -> Option<String> {
@@ -614,7 +647,7 @@ pub fn describe(location: &str) -> Result<Option<Renderer>, UpnpError> {
         // A device serves its own description; a redirect could send the node anywhere
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let xml = client.get(location).send()?.error_for_status()?.text()?;
+    let xml = described(client.get(location).send()?, location)?;
     parse_description(location, &xml)
 }
 
@@ -1013,5 +1046,43 @@ mod tests {
         assert!(parse_description(loc, &desc("", "http://10.0.0.9/av", "/rc"))
             .unwrap()
             .is_none());
+    }
+
+    /// A description fetch never follows a redirect: the second listener gets no request.
+    #[test]
+    fn a_description_is_not_fetched_through_a_redirect() {
+        use std::io::{Read, Write};
+        let elsewhere = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let there = elsewhere.local_addr().unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        let device = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let here = device.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for mut c in device.incoming().flatten().take(2) {
+                let mut buf = [0u8; 1024];
+                let _ = c.read(&mut buf);
+                let _ = write!(
+                    c,
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{there}/d.xml\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            }
+        });
+        let loc = format!("http://{here}/d.xml");
+        assert!(describe(&loc).is_err());
+        assert!(describe_within(&loc, Duration::from_secs(2)).is_err());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(elsewhere.accept().is_err(), "the redirect was followed");
+    }
+
+    /// Hosts are compared as addresses: an IPv4 address in its IPv6-mapped form is the same host.
+    #[test]
+    fn a_mapped_location_keeps_its_ipv4_service_urls() {
+        let base = url::Url::parse("http://[::ffff:192.168.1.20]:49152/d.xml").unwrap();
+        let control = url::Url::parse("http://192.168.1.20:1400/av").unwrap();
+        assert!(same_host(&base, &control));
+        assert!(!same_host(
+            &base,
+            &url::Url::parse("http://192.168.1.21/av").unwrap()
+        ));
     }
 }

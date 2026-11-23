@@ -37,6 +37,8 @@ const ASK_FOR: &str = "Second-300";
 fn client() -> Result<reqwest::blocking::Client, UpnpError> {
     Ok(reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
+        // A subscription goes to the device, never where a redirect says
+        .redirect(reqwest::redirect::Policy::none())
         .build()?)
 }
 
