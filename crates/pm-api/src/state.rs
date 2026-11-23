@@ -96,6 +96,9 @@ pub struct NodeState {
     /// The node's sign-ins as a queue's own check reads them (`accounts::known_tokens`): read
     /// without the library lock while they haven't changed.
     pub(crate) known_tokens: std::sync::RwLock<Option<crate::accounts::KnownCache>>,
+    /// The day each sign-in was last noted as used (`accounts::used_today`), by its hash: one
+    /// write a day per sign-in.
+    pub(crate) sign_ins_seen: Mutex<std::collections::HashMap<String, i64>>,
     pub name: String,
     /// Stable id of this node (a UUID kept in the library), for LAN discovery and controllers
     /// that remember a node across address changes.
@@ -177,8 +180,9 @@ pub struct NodeState {
         Option<Arc<dyn crate::copy_guard::Target>>,
         Option<Arc<dyn crate::copy_guard::Room>>,
     )>,
-    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`, for
-    /// a device of the owner's, the music access revision when it started).
+    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`,
+    /// what is signing in (an app of the owner's or a browser, and what it said it is), the music
+    /// access revision when it started).
     #[allow(clippy::type_complexity)]
     pub controller_logins: tokio::sync::Mutex<
         std::collections::HashMap<
@@ -187,7 +191,7 @@ pub struct NodeState {
                 pm_pubky::homeserver::LoginFlow,
                 std::time::Instant,
                 String,
-                bool,
+                crate::accounts::NewSignIn,
                 u64,
             ),
         >,
@@ -596,6 +600,7 @@ impl NodeState {
             return_page: std::sync::RwLock::new(crate::project_apps::RETURN_PAGE.to_string()),
             last_scan: Mutex::new(None),
             known_tokens: std::sync::RwLock::new(None),
+            sign_ins_seen: Mutex::new(Default::default()),
         });
         // A queue's links on the node lose their sign-in on the way in (pm_zones::node_link_path),
         // and a link under any other name loses the node's own sign-ins

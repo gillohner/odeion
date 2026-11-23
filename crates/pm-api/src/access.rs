@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 /// What a request needs to be allowed. One per route and method ([`ROUTES`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     // ---- everyone with any sign-in, a party guest included ----
@@ -230,6 +230,21 @@ pub fn decide(s: &NodeState, caller: &Caller, cap: Option<Capability>, at: &At<'
 /// The sources each person signs in to on their own. Every other source has one sign-in for the
 /// whole node, the owner's, or none: a new source is the owner's until it is named here.
 pub const PER_PERSON: &[&str] = &["tidal", "qobuz", "spotify"];
+
+/// What `caller` may do on this node now, for `GET /v1/me`: their role's capabilities, without
+/// [`Capability::OwnSignIn`] while the node plays everyone through its own sign-ins, and with
+/// [`Capability::PartyGuest`] only for a guest (those calls answer nobody else).
+/// [`Capability::ZoneUse`] is listed for a listener whatever zones are open: `/v1/me` names those.
+pub fn can(s: &NodeState, caller: &Caller) -> Vec<Capability> {
+    let node_only = caller.role == Role::Listener && node_sign_ins_only(s);
+    Capability::ALL
+        .iter()
+        .copied()
+        .filter(|cap| caller.role.has(*cap))
+        .filter(|cap| !(node_only && *cap == Capability::OwnSignIn))
+        .filter(|cap| *cap != Capability::PartyGuest || caller.role == Role::Guest)
+        .collect()
+}
 
 /// Whether the node plays everyone's music through its own sign-ins ([`SourcePolicy::Node`]).
 fn node_sign_ins_only(s: &NodeState) -> bool {
@@ -541,6 +556,9 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
     (
         Own,
         &[
+            (Get, "/me/sign-ins"),
+            (Delete, "/me/sign-ins"),
+            (Delete, "/me/sign-ins/{id}"),
             (Get, "/collections"),
             (Post, "/collections"),
             (Get, "/collections/{id}"),
@@ -911,6 +929,8 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
     (
         People,
         &[
+            (Delete, "/people/{key}/sign-ins"),
+            (Delete, "/people/{key}/sign-ins/{id}"),
             (Get, "/people/zones"),
             (Put, "/people/zones"),
             (Get, "/people"),
