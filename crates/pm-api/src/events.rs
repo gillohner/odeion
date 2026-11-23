@@ -40,7 +40,7 @@ use pm_zones::ZoneState;
 
 /// Event streams open at once on the node, at most.
 pub const MAX_STREAMS: usize = 512;
-/// Event streams one caller (the owner, one person, one party guest) has open at once, at most:
+/// Event streams one caller (the owner, one person) has open at once, at most:
 /// apps, tabs and integrations together.
 pub const MAX_STREAMS_EACH: usize = 64;
 
