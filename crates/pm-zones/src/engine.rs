@@ -316,7 +316,7 @@ impl Engine {
         self.emit(ZoneEvent::Error { message });
         if self.transport != Transport::Stopped {
             self.transport = Transport::Stopped;
-            self.emit(ZoneEvent::Stopped);
+            self.emit(ZoneEvent::Stopped { queue_ended: false });
         }
         self.dirty = true;
         self.publish();
@@ -456,7 +456,8 @@ impl Engine {
                 let next = self.queue.lock().expect("queue poisoned").after_skip();
                 match next {
                     Some(i) => self.start_index(i),
-                    None => self.stop(),
+                    // A skip past the last item is the end of the queue, as its playing out is
+                    None => self.stop_as(true),
                 }
             }
             Command::Previous => {
@@ -831,6 +832,11 @@ impl Engine {
 
     /// Stop now: discard buffered audio and close the sink.
     fn stop(&mut self) {
+        self.stop_as(false);
+    }
+
+    /// [`Self::stop`], saying whether the queue ran out ([`ZoneEvent::Stopped`]).
+    fn stop_as(&mut self, queue_ended: bool) {
         self.abort_current();
         self.sink_paused = false;
         if let Some(mut s) = self.sink.take() {
@@ -839,9 +845,20 @@ impl Engine {
         if self.transport != Transport::Stopped {
             self.transport = Transport::Stopped;
             self.output.now_playing(None);
-            self.emit(ZoneEvent::Stopped);
+            self.emit(ZoneEvent::Stopped { queue_ended });
         }
         self.dirty = true;
+    }
+
+    /// A Stop (also the one before a queue is replaced, cleared or moved to another zone) or a
+    /// Play of another item is waiting to be handled.
+    fn stop_or_play_waits(&mut self) -> bool {
+        while let Ok(c) = self.cmds.try_recv() {
+            self.deferred.push_back(c);
+        }
+        self.deferred
+            .iter()
+            .any(|(_, c)| matches!(c, Command::Stop | Command::Play(Some(_)) | Command::Shutdown))
     }
 
     /// Record `msg`, stop, and tell listeners.
@@ -1285,7 +1302,10 @@ impl Engine {
         self.transport = Transport::Stopped;
         self.dirty = true;
         self.output.now_playing(None);
-        self.emit(ZoneEvent::Stopped);
+        // A Stop that came while the tail played out (it is handled next and finds the zone
+        // stopped) still counts: this is then no end the queue reached by itself
+        let queue_ended = !self.stop_or_play_waits();
+        self.emit(ZoneEvent::Stopped { queue_ended });
     }
 
     // ---- crossfade ----

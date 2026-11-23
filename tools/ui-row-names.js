@@ -28,8 +28,8 @@ const fixtures = {
 
 // Each page: where it is, the row selector, and the buttons every row must name after its song
 const pages = [
-  { name: 'songs', url: '/tracks', row: '.main .track', buttons: [['[data-act="play"]', 'Play from here', (t) => `Play ${t}`], ['[data-act="next"]', 'Play next', (t) => `Play ${t} next`], ['[data-act="add"]', 'Add to queue', (t) => `Add ${t} to the queue`], ['[data-act="more"]', 'More', (t) => `More for ${t}`], ['[data-act="fav"]', 'Add to favourites', (t) => `Add ${t} to favourites`]] },
-  { name: 'album', url: '/album/lib-7', row: '.main .srow', buttons: [['[data-splay]', 'Play from here', (t) => `Play ${t}`], ['[data-smore]', 'More', (t) => `More for ${t}`], ['[data-sfav]', 'Add to favourites', (t) => `Add ${t} to favourites`]] },
+  { name: 'songs', url: '/tracks', row: '.main .track', buttons: [['[data-act="play"]', 'Play from here', (t) => `Play ${t}`], ['[data-act="next"]', 'Play next', (t) => `Play ${t} next`], ['[data-act="add"]', 'Add to queue', (t) => `Add ${t} to the queue`], ['[data-act="more"]', 'More', (t) => `More for ${t}`], ['[data-act="fav"]', 'Add to Bookmarks', (t) => `Add ${t} to Bookmarks`]] },
+  { name: 'album', url: '/album/lib-7', row: '.main .srow', buttons: [['[data-splay]', 'Play from here', (t) => `Play ${t}`], ['[data-smore]', 'More', (t) => `More for ${t}`], ['[data-sfav]', 'Add to Bookmarks', (t) => `Add ${t} to Bookmarks`]] },
 ];
 
 (async () => {
@@ -78,14 +78,14 @@ const pages = [
         await fx.go(page, '/playlist/c1');
         // (after the link's page has answered: the row then shows its title, Liner notes)
         const ok = await page.waitForFunction(() => [...document.querySelectorAll('.main .srow[data-card] .name')].some((n) => n.textContent.trim() === 'Liner notes'), null, { timeout: 8000 }).then(() => true, () => false);
-        check(ok, `${width} playlist: the link row is drawn`);
+        check(ok, `${width} collection: the link row is drawn`);
         if (ok) {
           const r = await page.$$eval('.main .srow', (rows) => rows.map((row) => ({ name: row.querySelector('.name')?.textContent.trim(), more: row.querySelector('[data-smore], [data-cmore]')?.getAttribute('aria-label') })));
-          check(r.length === 2 && r.every((x) => x.more === `More for ${x.name}`), `${width} playlist: the song's and the link's ⋯ are both "More for <its name>" (${r.map((x) => x.more).join(' / ')})`);
+          check(r.length === 2 && r.every((x) => x.more === `More for ${x.name}`), `${width} collection: the song's and the link's ⋯ are both "More for <its name>" (${r.map((x) => x.more).join(' / ')})`);
           const open = await page.$eval('.main .srow[data-card] a[target="_blank"]', (a) => a.getAttribute('aria-label')).catch(() => null);
-          check(open === 'Open Liner notes (new tab)', `${width} playlist: the link's Open says its title too (${open})`);
+          check(open === 'Open Liner notes (new tab)', `${width} collection: the link's Open says its title too (${open})`);
         }
-        check(!state.errors.length, `${width} playlist: no page errors (${state.errors.join(' | ')})`);
+        check(!state.errors.length, `${width} collection: no page errors (${state.errors.join(' | ')})`);
       } finally { await context.close(); }
       // The Queue: a row's Play from here (it showed the row's number, so it was read as "2"), its
       // grip, Move up, Move down and Remove named after the song too; the short tooltips stay
@@ -136,20 +136,20 @@ const pages = [
         try {
           await fx.go(page, '/playlist/c1');
           const ok = await page.waitForFunction(() => [...document.querySelectorAll('.main .srow[data-card] .name')].some((n) => n.textContent.trim() === 'Liner notes'), null, { timeout: 8000 }).then(() => true, () => false);
-          check(ok, `${width} playlist rows: drawn, with the link's title`);
+          check(ok, `${width} collection rows: drawn, with the link's title`);
           if (ok) {
             const r = await page.$$eval('#plsongs .srow', (rows) => rows.map((row) => ({ name: row.querySelector('.name').textContent.trim(), up: row.querySelector('[data-pup]')?.getAttribute('aria-label'), down: row.querySelector('[data-pdown]')?.getAttribute('aria-label'), rm: row.querySelector('[data-rm]')?.getAttribute('aria-label'), tips: ['[data-pup]', '[data-pdown]', '[data-rm]'].map((s) => row.querySelector(s)?.getAttribute('title')).join('|') })));
-            check(r.length === 2, `${width} playlist rows: a song and a link (${r.length})`);
+            check(r.length === 2, `${width} collection rows: a song and a link (${r.length})`);
             for (const x of r) {
-              check(x.up === `Move ${x.name} up` && x.down === `Move ${x.name} down`, `${width} playlist rows: "${x.name}" has Move ${x.name} up / down (${x.up} / ${x.down})`);
-              check(x.rm === `Remove ${x.name} from this playlist`, `${width} playlist rows: "${x.name}" has Remove ${x.name} from this playlist (${x.rm})`);
-              check(x.tips === 'Move up|Move down|Remove', `${width} playlist rows: "${x.name}"'s tooltips unchanged (${x.tips})`);
+              check(x.up === `Move ${x.name} up` && x.down === `Move ${x.name} down`, `${width} collection rows: "${x.name}" has Move ${x.name} up / down (${x.up} / ${x.down})`);
+              check(x.rm === `Remove ${x.name} from this collection`, `${width} collection rows: "${x.name}" has Remove ${x.name} from this collection (${x.rm})`);
+              check(x.tips === 'Move up|Move down|Remove', `${width} collection rows: "${x.name}"'s tooltips unchanged (${x.tips})`);
               // (and what the browser computes: one button so named, on this row)
-              const c = await page.getByRole('button', { name: `Remove ${x.name} from this playlist`, exact: true }).count();
-              check(c === 1, `${width} playlist rows: exactly one button is named "Remove ${x.name} from this playlist" (${c})`);
+              const c = await page.getByRole('button', { name: `Remove ${x.name} from this collection`, exact: true }).count();
+              check(c === 1, `${width} collection rows: exactly one button is named "Remove ${x.name} from this collection" (${c})`);
             }
           }
-          check(!state.errors.length, `${width} playlist rows: no page errors (${state.errors.join(' | ')})`);
+          check(!state.errors.length, `${width} collection rows: no page errors (${state.errors.join(' | ')})`);
         } finally { await context.close(); }
       }
     }

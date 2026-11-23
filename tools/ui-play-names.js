@@ -39,7 +39,7 @@ const lists = [
     collections: names.map((name, i) => ({ ...fx.summary, id: `c${i + 1}`, name })),
     fixtures: { '/playlists/c2': { body: { ...fx.detail, summary: { ...fx.summary, id: 'c2', name: names[1] }, playlist: { ...fx.detail.playlist, id: 'c2', name: names[1] } } } },
     buttons: [['[data-plplay]', 'Play', (n) => `Play ${n}`]],
-    press: { name: `Play ${names[1]}`, did: async (page, state) => { for (let i = 0; i < 40; i++) { if (state.hits.some((h) => h.v.startsWith('/playlists/c2'))) return true; await new Promise((r) => setTimeout(r, 50)); } return false; }, what: 'plays that playlist (asks for c2)' },
+    press: { name: `Play ${names[1]}`, did: async (page, state) => { for (let i = 0; i < 40; i++) { if (state.hits.some((h) => h.v.startsWith('/playlists/c2'))) return true; await new Promise((r) => setTimeout(r, 50)); } return false; }, what: 'plays that collection (asks for c2)' },
   },
   {
     name: 'radio', url: '/radio', row: '.main [data-st-row]', names,
@@ -105,15 +105,15 @@ const lists = [
           await fx.go(page, '/favourites');
           const b = page.getByRole('button', { name: 'More for Untitled on bandcamp', exact: true });
           const found = await b.waitFor({ timeout: 8000 }).then(() => true, () => false);
-          check(found, `${width} favourites untitled: its ⋯ is named "More for Untitled on bandcamp"`);
+          check(found, `${width} bookmarks untitled: its ⋯ is named "More for Untitled on bandcamp"`);
           if (found) {
             await b.click();
             const head = await page.waitForFunction(() => { const m = document.querySelector('.popover.menu:not([hidden]) .pop-title'); return m && m.textContent; }, null, { timeout: 3000 }).then((h) => h.jsonValue(), () => null);
-            check(head === 'Untitled on bandcamp', `${width} favourites untitled: its menu is headed "Untitled on bandcamp", like the row (${head})`);
+            check(head === 'Untitled on bandcamp', `${width} bookmarks untitled: its menu is headed "Untitled on bandcamp", like the row (${head})`);
             await page.screenshot({ path: path.join(SHOTS, `favourites-untitled-menu-${width}.png`) });
             await page.keyboard.press('Escape');
           }
-          check(!state.errors.length, `${width} favourites untitled: no page errors (${state.errors.join(' | ')})`);
+          check(!state.errors.length, `${width} bookmarks untitled: no page errors (${state.errors.join(' | ')})`);
         } finally { await context.close(); }
       }
     }

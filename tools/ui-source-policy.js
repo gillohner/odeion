@@ -1,6 +1,7 @@
 // Settings: whose TIDAL, Qobuz and Spotify sign-ins people play with (TASK-source-policy-node-or-own).
-// The owner picks it on This node › Service apps ("Sources for everyone"); a listener sees which
-// sign-ins they play with, and under "Each person chooses" switches between the node's and their own.
+// The owner picks it on This node › People & access ("Whose music services they play with"), with
+// the rest of what the people they add can do; Service apps keeps one row that points there. A listener sees
+// which sign-ins they play with, and under "Each person chooses" switches between the node's and their own.
 // Fixture only (no node): node tools/ui-source-policy.js <repo> <screenshots dir>
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -19,14 +20,28 @@ const puts = (state, v) => state.hits.filter((h) => h.v === v && h.m === 'PUT').
       // The owner: the three choices, today's ("own") marked, a click saves the node's setting
       {
         const { context, page, state } = await create(browser, width, {
-          fixtures: { '/node/settings': { body: { contact: '', discovery: false, token_replaceable: true, sources_policy: 'own' } }, '/node/apps': { body: [] } },
+          fixtures: {
+            '/node/settings': { body: { contact: '', discovery: false, token_replaceable: true, sources_policy: 'own' } }, '/node/apps': { body: [] },
+            '/people': { body: { owner: null, people: [], invites: [], homeserver: {} } }, '/people/zones': { body: { zones: [] } }, '/party': { body: [] }, '/me/sign-ins': { body: [] },
+          },
         });
+        // Service apps no longer holds the choice: one row there opens People & access
         await go(page, '/settings/apps');
-        const chips = page.locator('[data-srcpolicy]');
+        const pointer = page.locator('#set-apps [data-settab="people"]');
+        await pointer.waitFor();
+        assert.equal(await page.locator('#set-apps [data-srcpolicy]').count(), 0, 'the choice is not on Service apps');
+        assert.match(await page.locator('#set-apps .set-row', { has: page.locator('[data-settab="people"]') }).innerText(), /Whose music services they play with/);
+        await pointer.click();
+        const group = page.locator('#peoplebox .set-group', { hasText: 'Whose music services they play with' });
+        await group.waitFor();
+        // (on a phone the screen's sections fold)
+        if (await group.evaluate((g) => g.matches('details'))) await group.evaluate((g) => { g.open = true; });
+        const chips = group.locator('[data-srcpolicy]');
         await chips.first().waitFor();
         assert.equal(await chips.count(), 3, 'three choices');
-        assert.equal(await page.locator('[data-srcpolicy="own"]').getAttribute('aria-checked'), 'true', 'today\'s choice is marked');
-        assert.match(await page.locator('.set-group', { hasText: 'Sources for everyone' }).innerText(), /keeps every sign-in/);
+        assert.equal(await page.locator('[data-srcpolicy]').count(), 3, 'in one place only');
+        assert.equal(await group.locator('[data-srcpolicy="own"]').getAttribute('aria-checked'), 'true', 'today\'s choice is marked');
+        assert.match(await group.innerText(), /keeps every sign-in/);
         await cleanCopy(page);
         await page.screenshot({ path: path.join(OUT, `owner-${width}.png`), fullPage: false });
         await page.locator('[data-srcpolicy="choice"]').click();

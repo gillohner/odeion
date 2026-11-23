@@ -20,7 +20,7 @@ use pm_pubky::schemas::post::{TYPE_ACTIVITY, TYPE_PLAYLIST, TYPE_REVIEW};
 use pm_pubky::{v1, Bookmark, MusicContent, MusicPost, Network, Visibility};
 use pubky::PubkySession;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -249,7 +249,7 @@ impl PubkySync {
     /// The library for a write by this pass, once this session is still the node's.
     fn lib<'a>(
         &self,
-        library: &'a Arc<Mutex<Library>>,
+        library: &'a Arc<pm_library::LibraryLock>,
     ) -> Result<std::sync::MutexGuard<'a, Library>, SyncError> {
         // The lock first, then the check: a replacement made while this waited for the lock is
         // seen here, not only one made before it
@@ -384,7 +384,7 @@ impl PubkySync {
     /// One sync. A session the homeserver refuses (an old approval) ends with the plain
     /// [`RESIGN_NOTICE`] in the report and [`Self::needs_resign`] set, never a raw 403; the
     /// unsynced objects stay queued.
-    pub async fn sync(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
+    pub async fn sync(&self, library: &Arc<pm_library::LibraryLock>) -> Result<SyncReport, SyncError> {
         let _one_at_a_time = self.pass.lock().await;
         {
             let lib = self.lib(library)?;
@@ -451,7 +451,7 @@ impl PubkySync {
         });
     }
 
-    async fn sync_once(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
+    async fn sync_once(&self, library: &Arc<pm_library::LibraryLock>) -> Result<SyncReport, SyncError> {
         let mut report = SyncReport::default();
         let owner = v1::PubkyId::try_from(raw_key(&self.z32))
             .map_err(|e| SyncError::Store(format!("signed-in key: {e}")))?;
@@ -700,7 +700,7 @@ impl PubkySync {
     /// migration has run on this node.
     async fn pull_legacy(
         &self,
-        library: &Arc<Mutex<Library>>,
+        library: &Arc<pm_library::LibraryLock>,
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
         let remote_favs = self
@@ -750,7 +750,7 @@ impl PubkySync {
     /// Push every unsynced post as its v1 object; tombstones delete every copy.
     async fn push_posts(
         &self,
-        library: &Arc<Mutex<Library>>,
+        library: &Arc<pm_library::LibraryLock>,
         owner: &v1::PubkyId,
         heads: &mut Heads,
         report: &mut SyncReport,
@@ -869,7 +869,7 @@ impl PubkySync {
     /// them back from the listing taken before.
     async fn push_bookmarks(
         &self,
-        library: &Arc<Mutex<Library>>,
+        library: &Arc<pm_library::LibraryLock>,
         report: &mut SyncReport,
     ) -> Result<HashSet<String>, SyncError> {
         let mut removed = HashSet::new();
@@ -937,7 +937,7 @@ impl PubkySync {
     /// before the history was deleted are deleted, not imported.
     async fn pull_v1(
         &self,
-        library: &Arc<Mutex<Library>>,
+        library: &Arc<pm_library::LibraryLock>,
         heads: &Heads,
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {

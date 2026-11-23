@@ -207,6 +207,26 @@ pub fn reports_of(s: &NodeState, key: &str) -> Option<String> {
         .and_then(|p| p.reports)
 }
 
+/// The stored roster, for a change to it: empty when none is stored yet, an error when what is
+/// stored can't be read (a damaged setting, or one a newer version wrote). Unlike [`load`], never
+/// an empty roster in its place: a change built on that would store a list without everyone the
+/// unread one holds.
+fn load_for_change(s: &NodeState) -> Result<Roster, ApiError> {
+    let stored = s.library.lock().expect("library poisoned").get_setting(SETTING)?;
+    let Some(json) = stored else {
+        return Ok(Roster::default());
+    };
+    serde_json::from_str(&json).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "the people list can't be read, so it is left as it is (a newer version may have \
+                 written it: update the node, or restore a backup): {e}"
+            ),
+        )
+    })
+}
+
 fn store(s: &NodeState, r: &Roster) -> Result<(), ApiError> {
     s.library
         .lock()
@@ -223,7 +243,7 @@ async fn update<T>(
     f: impl FnOnce(&mut Roster) -> Result<T, ApiError>,
 ) -> Result<(T, Roster), ApiError> {
     let _one = s.roster.lock().await;
-    let mut r = load(s);
+    let mut r = load_for_change(s)?;
     let before = r.clone();
     let out = f(&mut r)?;
     if r != before {
@@ -397,7 +417,8 @@ async fn used_tokens(s: &NodeState) -> Result<Vec<(String, String)>, ApiError> {
 /// then added to the roster as it is by then.
 async fn reconcile(s: &NodeState) -> Result<Roster, ApiError> {
     let started = access_started(s);
-    let r = load(s);
+    // (Checked: a list that can't be read is said, never shown or changed as an empty one)
+    let r = load_for_change(s)?;
     if r.invites.iter().all(|i| i.token.is_none()) || s.bundled_homeserver().is_none() {
         return Ok(r);
     }
@@ -456,6 +477,9 @@ pub struct PersonView {
     pub storage_quota_mb: Option<Value>,
     /// Devices signed in to the music service with their own token.
     pub sessions: usize,
+    /// Those sign-ins, newest first (`DELETE /v1/people/{key}/sign-ins/{id}` ends one).
+    #[serde(default)]
+    pub sign_ins: Vec<crate::accounts::SignIn>,
     /// Bytes their files take on the bundled homeserver, counted in its files folder when the node
     /// has it (`[homeserver] files_dir`); `None` otherwise.
     pub used_bytes: Option<u64>,
@@ -562,8 +586,11 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<PeopleVie
         } else {
             None
         };
+        let sign_ins = crate::accounts::sign_ins(&s, &crate::accounts::Whose::Person(p.key.clone()), None)
+            .unwrap_or_default();
         people.push(PersonView {
             sessions: crate::accounts::sessions_of(&s, &p.key),
+            sign_ins,
             person: p,
             storage_quota_mb: quota,
             used_bytes,
@@ -713,7 +740,7 @@ pub(crate) async fn change(
     let started = access_started(&s);
     // An already listed person's revocation (Music off) needn't wait for a homeserver invite
     // lookup. Every other change first turns used invites into people, as it always has.
-    let mut r = load(&s);
+    let mut r = load_for_change(&s)?;
     if b.music != Some(false) || !r.people.iter().any(|p| p.key == key) {
         r = reconcile(&s).await?;
     }
@@ -793,6 +820,30 @@ pub(crate) async fn change(
         s.usage.revoke_listener(&out.key);
     }
     Ok(Json(out))
+}
+
+/// `DELETE /v1/people/{key}/sign-ins/{id}`: end one sign-in of a person's (as `GET /v1/people`
+/// lists them). Its token stops working at once; their other sign-ins and their music access stay.
+pub(crate) async fn end_sign_in(
+    State(s): State<Arc<NodeState>>,
+    Path((key, id)): Path<(String, String)>,
+) -> ApiResult<Value> {
+    let whose = crate::accounts::Whose::Person(valid_key(&key)?);
+    if !crate::accounts::end_sign_in(&s, &whose, &id)? {
+        return Err(ApiError::not_found("no such sign-in"));
+    }
+    Ok(Json(serde_json::json!({"ended": 1})))
+}
+
+/// `DELETE /v1/people/{key}/sign-ins`: end every sign-in of a person's. They keep music access
+/// and can log in again with Pubky Ring.
+pub(crate) async fn end_sign_ins(
+    State(s): State<Arc<NodeState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Value> {
+    let whose = crate::accounts::Whose::Person(valid_key(&key)?);
+    let ended = crate::accounts::end_sign_ins(&s, &whose, None)?;
+    Ok(Json(serde_json::json!({"ended": ended})))
 }
 
 /// `DELETE /v1/people/{key}`: remove a person. Everything the node keeps for them goes: their own

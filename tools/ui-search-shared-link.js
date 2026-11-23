@@ -42,11 +42,11 @@ const EDITS = ['0035WKVKQDHST', '0035WKVKQDHSV', '0035WKVKQDHSW', '0035WKVKQDHSX
 const NOTPL_LINK = `pubky://${KEY}/pub/social/v1/posts/${NOTPL}`;
 const fixtures = {
   [`/shared/${KEY}/playlists/${ID}`]: { body: shared }, [`/shared/${KEY}/playlists`]: { body: [] },
-  [`/shared/${KEY}/playlists/${NOTPL}`]: { status: 422, body: { error: 'that post is not a playlist this node can read' } },
-  [`/shared/${KEY}/playlists/${GONE}`]: { status: 404, body: { error: 'no shared playlist with that id (it may be private again)' } },
-  [`/shared/${KEY}/playlists/${SLOW}`]: { status: 422, body: { error: 'that post is not a playlist this node can read' } },
-  [`/shared/${KEY}/playlists/${OVER}`]: { status: 422, body: { error: 'that post is not a playlist this node can read' } },
-  ...Object.fromEntries(EDITS.map((e) => [`/shared/${KEY}/playlists/${e}`, { status: 422, body: { error: 'that post is not a playlist this node can read' } }])),
+  [`/shared/${KEY}/playlists/${NOTPL}`]: { status: 422, body: { error: 'that post is not a collection this node can read' } },
+  [`/shared/${KEY}/playlists/${GONE}`]: { status: 404, body: { error: 'no shared collection with that id (it may be private again)' } },
+  [`/shared/${KEY}/playlists/${SLOW}`]: { status: 422, body: { error: 'that post is not a collection this node can read' } },
+  [`/shared/${KEY}/playlists/${OVER}`]: { status: 422, body: { error: 'that post is not a collection this node can read' } },
+  ...Object.fromEntries(EDITS.map((e) => [`/shared/${KEY}/playlists/${e}`, { status: 422, body: { error: 'that post is not a collection this node can read' } }])),
   [`/shared/${KEY}/playlists/${DOWN}`]: { status: 502, body: { error: 'the homeserver doesn’t answer' } },
 };
 // (the post that is no playlist and answers late: the box emptied meanwhile)
@@ -74,7 +74,7 @@ async function run(browser, width, { phone, android }) {
     for (const [label, text] of [['pubky:// link', LINK], ['link without pubky://', `${KEY}/pub/social/v1/posts/${ID}`], ['link with pubky prefix and a trailing slash', `pubky${KEY}/pub/social/v1/posts/${ID}/`], ['link with the key in capitals', `pubky://${KEY.toUpperCase()}/pub/social/v1/posts/${ID}`]]) {
       const before = searched(state);
       await paste(page, text);
-      check(await until(() => where(page) === `/shared/${KEY}/${ID}`), `${tag}: a pasted ${label} opens the shared playlist (at ${where(page)})`);
+      check(await until(() => where(page) === `/shared/${KEY}/${ID}`), `${tag}: a pasted ${label} opens the shared collection (at ${where(page)})`);
       check(await until(async () => (await page.locator('#main h1').textContent().catch(() => '')) === 'Night drives'), `${tag}: its name shows`);
       check(searched(state) === before, `${tag}: nothing is searched for the ${label}`);
       const back = ((await page.locator('#main .back').first().textContent().catch(() => '')) || '').trim();
@@ -104,13 +104,13 @@ async function run(browser, width, { phone, android }) {
     {
       const n = searched(state); const d0 = await depth();
       await paste(page, NOTPL_LINK);
-      check(await until(() => state.hits.some((h) => h.v === `/shared/${KEY}/playlists/${NOTPL}`)), `${tag}: a post link that is no playlist is asked for first`);
+      check(await until(() => state.hits.some((h) => h.v === `/shared/${KEY}/playlists/${NOTPL}`)), `${tag}: a post link that is no collection is asked for first`);
       check(await until(() => searched(state) > n && where(page) === '/search'), `${tag}: then it is searched as text (at ${where(page)})`);
       const q = new URL(page.url()).searchParams.get('q');
       check(q === NOTPL_LINK, `${tag}: the search is for the link (${q})`);
       check(await page.locator('#search').inputValue() === NOTPL_LINK, `${tag}: the box still holds the link`);
       await sleep(300); await page.screenshot({ path: path.join(shots, `${width}${android ? '-android' : ''}${phone ? '-phone' : ''}-pasted-post-link.png`) });
-      check(!(await page.locator('#main .notice').count()), `${tag}: no "not a playlist" error is left on screen`);
+      check(!(await page.locator('#main .notice').count()), `${tag}: no "not a collection" error is left on screen`);
       check(await depth() === d0 + 1, `${tag}: the shared page left no entry of its own (${d0} → ${await depth()})`);
       // Enter there (or the link again): the search, in the same entry, the post not asked again
       const asked = state.hits.filter((h) => h.v === `/shared/${KEY}/playlists/${NOTPL}`).length;
@@ -118,7 +118,7 @@ async function run(browser, width, { phone, android }) {
       await sleep(500);
       check(new URL(page.url()).searchParams.get('q') === NOTPL_LINK, `${tag}: Enter on those results keeps them (q ${new URL(page.url()).searchParams.get('q')})`);
       check(await depth() === d0 + 1 && where(page) === '/search', `${tag}: in the same entry (depth ${await depth()}, at ${where(page)})`);
-      check(state.hits.filter((h) => h.v === `/shared/${KEY}/playlists/${NOTPL}`).length === asked, `${tag}: the post known to be no playlist is not asked for again`);
+      check(state.hits.filter((h) => h.v === `/shared/${KEY}/playlists/${NOTPL}`).length === asked, `${tag}: the post known to be no collection is not asked for again`);
       await page.goBack();
       const home = phone ? '/search' : '/tracks';
       check(await until(() => where(page) === home && !new URL(page.url()).search), `${tag}: Back goes where search was opened from (at ${where(page)}${new URL(page.url()).search})`);
@@ -142,7 +142,7 @@ async function run(browser, width, { phone, android }) {
       check(await depth() === 0, `${tag}: in the reload's own entry (depth ${await depth()})`);
       // and a reload of a playlist link's search opens the playlist in its place
       await fx.go(page, `/search?q=${encodeURIComponent(LINK)}`);
-      check(await until(() => where(page) === `/shared/${KEY}/${ID}`), `${tag}: a reload of a playlist link's search opens the playlist (at ${where(page)})`);
+      check(await until(() => where(page) === `/shared/${KEY}/${ID}`), `${tag}: a reload of a collection link's search opens the collection (at ${where(page)})`);
       check(await depth() === 0, `${tag}: in the reload's own entry (depth ${await depth()})`);
     }
     // The box emptied while such a post is still being read: the link is not searched
@@ -155,14 +155,14 @@ async function run(browser, width, { phone, android }) {
       await sleep(1800);
       check(searched(state) === n, `${tag}: the box emptied before the post answered: nothing searched`);
       if (phone) check(where(page) === '/search' && !new URL(page.url()).search, `${tag}: and the phone shows the Search tab's empty page (at ${where(page)}${new URL(page.url()).search})`);
-      else check(where(page) === `/shared/${KEY}/${SLOW}` && /not a playlist/.test((await page.locator('#main .notice').textContent().catch(() => '')) || ''), `${tag}: and the page says the post is no playlist (at ${where(page)})`);
+      else check(where(page) === `/shared/${KEY}/${SLOW}` && /not a collection/.test((await page.locator('#main .notice').textContent().catch(() => '')) || ''), `${tag}: and the page says the post is no collection (at ${where(page)})`);
     }
     // A playlist made private again still says so on its page (not searched)
     await fresh();
     {
       const n = searched(state);
       await paste(page, `pubky://${KEY}/pub/social/v1/posts/${GONE}`);
-      check(await until(() => where(page) === `/shared/${KEY}/${GONE}`), `${tag}: a playlist made private again opens its page (at ${where(page)})`);
+      check(await until(() => where(page) === `/shared/${KEY}/${GONE}`), `${tag}: a collection made private again opens its page (at ${where(page)})`);
       check(await until(async () => /private again/.test((await page.locator('#main .notice').textContent().catch(() => '')) || '')), `${tag}: which says it is gone`);
       await sleep(400);
       check(searched(state) === n && where(page) === `/shared/${KEY}/${GONE}`, `${tag}: and nothing is searched`);
@@ -173,7 +173,7 @@ async function run(browser, width, { phone, android }) {
     {
       const n = searched(state);
       await paste(page, `pubky://${KEY}/pub/social/v1/posts/${DOWN}`);
-      check(await until(() => where(page) === `/shared/${KEY}/${DOWN}`), `${tag}: a playlist whose homeserver doesn't answer opens its page (at ${where(page)})`);
+      check(await until(() => where(page) === `/shared/${KEY}/${DOWN}`), `${tag}: a collection whose homeserver doesn't answer opens its page (at ${where(page)})`);
       check(await until(async () => /doesn’t answer/.test((await page.locator('#main .notice').textContent().catch(() => '')) || '')), `${tag}: which says the homeserver doesn't answer`);
       await sleep(400);
       check(searched(state) === n && where(page) === `/shared/${KEY}/${DOWN}`, `${tag}: and nothing is searched (at ${where(page)})`);
@@ -196,7 +196,7 @@ async function run(browser, width, { phone, android }) {
       // Forward onto the post's page left behind: it says the post is no playlist, and stays (no Back again)
       const nf = searched(state);
       await page.goForward();
-      check(await until(async () => where(page) === `/shared/${KEY}/${OVER}` && /not a playlist/.test((await page.locator('#main .notice').textContent().catch(() => '')) || '')), `${tag}: Forward onto the post's page says it is no playlist (at ${where(page)})`);
+      check(await until(async () => where(page) === `/shared/${KEY}/${OVER}` && /not a collection/.test((await page.locator('#main .notice').textContent().catch(() => '')) || '')), `${tag}: Forward onto the post's page says it is no collection (at ${where(page)})`);
       await sleep(800);
       check(where(page) === `/shared/${KEY}/${OVER}` && searched(state) === nf, `${tag}: and stays there, nothing searched (at ${where(page)})`);
       await page.goBack();
@@ -244,7 +244,7 @@ async function run(browser, width, { phone, android }) {
       if (typed === 'Sefa') check(await page.locator('#search').inputValue() === 'Sefa', `${tag}: ${label}: the box keeps what was typed`);
       // (the typing's own search waiting 250 ms is not run as well: once for the new text, nothing for a link, key or empty box)
       check(searched(state) === n + (typed === 'Sefa' ? 1 : 0) && (typed !== 'Sefa' || searchedFor(state, 'Sefa') === nSefa + 1), `${tag}: ${label}: searched once for new text, never for a link, key or empty box (${searched(state) - n})`);
-      if (typed === LINK) check(await until(async () => (await page.locator('#main h1').textContent().catch(() => '')) === 'Night drives'), `${tag}: ${label}: the playlist shows`);
+      if (typed === LINK) check(await until(async () => (await page.locator('#main h1').textContent().catch(() => '')) === 'Night drives'), `${tag}: ${label}: the collection shows`);
       if (escape && phone) return;
       if (back !== 0) {
         // (no Back came in 3 s: the post's own entry took it, the search under it is still there; the app's
@@ -268,7 +268,7 @@ async function run(browser, width, { phone, android }) {
     };
     const cases = [
       { label: 'a new search during Back', typed: 'Sefa' }, { label: 'a Pubky key during Back', typed: `pubky://${KEY}` }, { label: 'the box emptied during Back', typed: '' },
-      { label: 'a playlist link during Back', typed: LINK }, { label: 'Escape during Back', typed: '', escape: true },
+      { label: 'a collection link during Back', typed: LINK }, { label: 'Escape during Back', typed: '', escape: true },
       { label: 'a new search, Back after 3.5 s', typed: 'Sefa', back: 3500 }, { label: 'the box emptied, Back after 3.5 s', typed: '', back: 3500 },
       { label: 'a new search, no Back', typed: 'Sefa', back: null }, { label: 'the box emptied, no Back', typed: '', back: null },
     ];
@@ -303,7 +303,7 @@ async function run(browser, width, { phone, android }) {
       check(at() === '/albums' && await depth() === d0 + 2, `${tag}: and stays, the Back landing after it undone (at ${at()}, depth ${d0} → ${await depth()})`);
       check(searched(state) === n, `${tag}: nothing searched there later (${searched(state) - n})`);
       await page.goBack();
-      check(await until(async () => where(page) === `/shared/${KEY}/${EDITS[12]}` && /not a playlist/.test((await page.locator('#main .notice').textContent().catch(() => '')) || '')), `${tag}: Back from it: the post's page, no playlist (at ${at()})`);
+      check(await until(async () => where(page) === `/shared/${KEY}/${EDITS[12]}` && /not a collection/.test((await page.locator('#main .notice').textContent().catch(() => '')) || '')), `${tag}: Back from it: the post's page, no collection (at ${at()})`);
       await sleep(800);
       check(where(page) === `/shared/${KEY}/${EDITS[12]}` && searched(state) === n, `${tag}: and stays, nothing decided again (at ${at()})`);
     }
@@ -407,7 +407,7 @@ async function run(browser, width, { phone, android }) {
       await overNight();
       await arm({ t: LINK, ms: null });
       await paste(page, postLink(18)); await asked(18);
-      check(await until(async () => where(page) === `/shared/${KEY}/${ID}` && (await page.locator('#main h1').textContent().catch(() => '')) === 'Night drives', 4500), `${tag}: no Back, a playlist link typed: the playlist shows (at ${at()})`);
+      check(await until(async () => where(page) === `/shared/${KEY}/${ID}` && (await page.locator('#main h1').textContent().catch(() => '')) === 'Night drives', 4500), `${tag}: no Back, a collection link typed: the collection shows (at ${at()})`);
       await page.locator('#main .back').first().click();
       check(await until(() => at() === '/search?q=Night'), `${tag}: its ‹ Back at once goes to the search under it (at ${at()})`);
     }
@@ -488,7 +488,7 @@ async function run(browser, width, { phone, android }) {
       await paste(page, LINK);
       await until(() => where(page) === `/shared/${KEY}/${ID}`);
       await page.goBack();
-      check(await until(() => where(page) === '/search' && !new URL(page.url()).search), `${tag}: Back from the playlist goes to the Search tab (at ${where(page)})`);
+      check(await until(() => where(page) === '/search' && !new URL(page.url()).search), `${tag}: Back from the collection goes to the Search tab (at ${where(page)})`);
       const d1 = await depth(); const at = page.url();
       check(await page.locator('#search').inputValue() === LINK, `${tag}: the box there still holds the link (${await page.locator('#search').inputValue()})`);
       await page.locator('#search').focus();

@@ -909,6 +909,42 @@ async fn a_device_signs_in_once_and_keeps_it_over_browser_log_outs() {
     assert_eq!(out["ended"], false, "{out}");
     let (st, _) = call_auth(&app, "GET", "/v1/me", &device, None).await;
     assert_eq!(st, StatusCode::OK);
+    // The owner's sign-ins as the device sees them: itself marked, a second browser beside it
+    let v = ring_sign_in(&app, &owner).await;
+    let browser = v["token"].as_str().unwrap().to_string();
+    let (st, mine) = call_auth(&app, "GET", "/v1/me/sign-ins", &device, None).await;
+    assert_eq!(st, StatusCode::OK, "{mine}");
+    let rows = mine.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{mine}");
+    let this: Vec<_> = rows.iter().filter(|x| x["current"] == true).collect();
+    assert_eq!(this.len(), 1, "{mine}");
+    assert_eq!(this[0]["kind"], "app", "{mine}");
+    assert!(this[0]["last_used"].is_i64(), "used today: {mine}");
+    assert!(
+        rows.iter()
+            .any(|x| x["kind"] == "browser" && x["current"] == false),
+        "{mine}"
+    );
+    // The browser sees itself as the current one
+    let (_, theirs) = call_auth(&app, "GET", "/v1/me/sign-ins", &browser, None).await;
+    let this: Vec<_> = theirs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["current"] == true)
+        .collect();
+    assert_eq!(
+        (this.len(), this[0]["kind"].as_str()),
+        (1, Some("browser")),
+        "{theirs}"
+    );
+    // "All others" from the device ends the browser, in the other list, and keeps the device
+    let (st, out) = call_auth(&app, "DELETE", "/v1/me/sign-ins", &device, None).await;
+    assert_eq!((st, out["ended"].as_u64()), (StatusCode::OK, Some(1)), "{out}");
+    let (st, _) = call_auth(&app, "GET", "/v1/me", &browser, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "the browser was signed out");
+    let (st, _) = call_auth(&app, "GET", "/v1/me", &device, None).await;
+    assert_eq!(st, StatusCode::OK, "the one asking stays");
     // Make a new token signs every device out
     let (st, made) = call_auth(&app, "POST", "/v1/node/token", API, None).await;
     assert_eq!(st, StatusCode::OK, "{made}");
