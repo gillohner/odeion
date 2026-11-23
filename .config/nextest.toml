@@ -1,0 +1,12 @@
+# cargo-nextest settings (CI runs `cargo nextest run --workspace --profile ci`).
+# Each test runs in its own process, so a test cannot see what another test left in a
+# process-wide cache or lock.
+
+[profile.ci]
+# Report every failing test, not only the first.
+fail-fast = false
+# No retries: a flaky test should fail the run, as with cargo test.
+retries = 0
+# Name tests that run long; they are not stopped.
+slow-timeout = { period = "60s" }
+failure-output = "immediate-final"
