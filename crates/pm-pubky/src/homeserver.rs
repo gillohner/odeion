@@ -14,6 +14,7 @@
 //! behind the `json` feature.
 
 use crate::config::Network;
+use crate::public_reads::PublicReads;
 use crate::schemas::{Activity, Bookmark, MusicPost, Playlist, Review, Visibility};
 use pubky::Pubky;
 pub use pubky::PubkySession;
@@ -106,7 +107,7 @@ pub const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60
 /// A response's body, refused unread when it says it is over `max` bytes and given up as soon
 /// as more than `max` arrive (a body need not say its length), or when nothing arrives for
 /// `stall` ([`STALL_TIMEOUT`]).
-async fn read_capped(
+pub(crate) async fn read_capped(
     mut resp: reqwest::Response,
     max: usize,
     stall: std::time::Duration,
@@ -386,6 +387,11 @@ async fn list_page_within(
     max: usize,
 ) -> Result<Option<Page<String>>, HomeserverError> {
     let resp = request.send().await.map_err(pubky::Error::from)?;
+    list_page_of(resp, max).await
+}
+
+/// [`list_page_within`] for an answer already in.
+async fn list_page_of(resp: reqwest::Response, max: usize) -> Result<Option<Page<String>>, HomeserverError> {
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
@@ -419,6 +425,16 @@ fn parse_list_page(body: &[u8]) -> Result<Page<String>, HomeserverError> {
     Ok(page)
 }
 
+/// An answer that isn't a success, as the SDK's error for it (a 404 is [`is_not_found`]).
+fn server_status(resp: reqwest::Response) -> Result<reqwest::Response, HomeserverError> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let message = status.canonical_reason().unwrap_or("Unknown Error").to_string();
+    Err(pubky::Error::from(pubky::errors::RequestError::Server { status, message }).into())
+}
+
 /// Why a write stopped: the caller's session was replaced by another sign-in meanwhile.
 pub const REPLACED: &str = "another sign-in replaced this session";
 
@@ -431,6 +447,9 @@ pub struct NodeHomeserver {
     /// The relay inbox Ring sign-ins go through; `None`: pubky's public relay. Tests that run
     /// against a real homeserver bring a local relay, so a slow public relay can't fail them.
     auth_relay: Option<url::Url>,
+    /// On the public network, reads of other people's public data go through these clients:
+    /// no redirect followed, no local address reached ([`crate::public_reads`]).
+    public: Option<PublicReads>,
 }
 
 /// Pubky clients built in this process: each one starts its own DHT node and keeps its own
@@ -451,11 +470,7 @@ impl NodeHomeserver {
             Network::Mainnet => Pubky::new()?,
             Network::Testnet => Pubky::testnet()?,
         };
-        Ok(Self {
-            pubky,
-            network,
-            auth_relay: None,
-        })
+        Ok(Self::from_pubky_on(pubky, network))
     }
 
     /// Wrap a client the caller configured (timeouts, testnet host), on the public network.
@@ -465,11 +480,30 @@ impl NodeHomeserver {
 
     /// Wrap a client the caller configured, saying which network it is on.
     pub fn from_pubky_on(pubky: Pubky, network: Network) -> Self {
+        let public = (network == Network::Mainnet).then(|| PublicReads::new(pubky.client().pkarr()));
         Self {
             pubky,
             network,
             auth_relay: None,
+            public,
         }
+    }
+
+    /// Let reads of other people's data from `homeserver` (z32) reach local addresses: the
+    /// node's bundled homeserver, whose record names one by design. Redirects are still never
+    /// followed. Clones share the list.
+    pub fn allow_local_homeserver(&self, homeserver: &str) {
+        if let Some(p) = &self.public {
+            p.allow_local_homeserver(homeserver);
+        }
+    }
+
+    /// The clients for a public read of `user`'s data: `None` on a testnet, and for the
+    /// signed-in person's own data (their homeserver is theirs to trust).
+    fn public_reads_for(&self, user: &PublicKey, session: Option<&PubkySession>) -> Option<&PublicReads> {
+        self.public
+            .as_ref()
+            .filter(|_| !session.is_some_and(|s| s.public_key() == *user))
     }
 
     /// Ring sign-ins and sign-ups started here go through the relay inbox `inbox` (e.g.
@@ -852,7 +886,19 @@ impl NodeHomeserver {
         } else {
             None
         };
+        let reads = match visibility {
+            Visibility::Public => self.public_reads_for(user, session),
+            Visibility::Private => None,
+        };
         list_within(bounds, dir, |cursor| async move {
+            if let Some(reads) = reads {
+                return within(OBJECT_TIMEOUT, async {
+                    let url = list_url(user.clone(), dir, shallow, bounds.newest_first, cursor.as_deref())?;
+                    let resp = reads.get(&self.pubky, user, dir, url.query()).await?;
+                    list_page_of(resp, capped.unwrap_or(usize::MAX)).await
+                })
+                .await;
+            }
             if let Some(max) = capped {
                 return within(OBJECT_TIMEOUT, async {
                     let (client, owner, bearer) = match (visibility, session) {
@@ -922,7 +968,10 @@ impl NodeHomeserver {
     ) -> Result<Vec<u8>, HomeserverError> {
         within(OBJECT_TIMEOUT, async {
             let resp = match (visibility, session) {
-                (Visibility::Public, _) => self.pubky.public_storage().get((user, path)).await?,
+                (Visibility::Public, _) => match self.public_reads_for(user, session) {
+                    Some(reads) => server_status(reads.get(&self.pubky, user, path, None).await?)?,
+                    None => self.pubky.public_storage().get((user, path)).await?,
+                },
                 (Visibility::Private, Some(session)) => session.storage().get(path).await?,
                 (Visibility::Private, None) => return Err(HomeserverError::NeedsSession),
             };

@@ -54,6 +54,40 @@ pub(crate) fn endpoint(s: &NodeState) -> Result<AdminEndpoint, ApiError> {
     })
 }
 
+/// The bundled homeserver's key, from its admin `/info`. Its record names a local address by
+/// design, so reads of Pubky data from it may reach local addresses from then on (they never
+/// may for other homeservers: `pm_pubky::public_reads`).
+pub(crate) async fn key(s: &NodeState) -> Result<String, ApiError> {
+    let info = admin(s, reqwest::Method::GET, "/info", None).await?;
+    let key = info["public_key"]
+        .as_str()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| unreachable("no public key in /info"))?
+        .to_string();
+    if let Ok(h) = s.homeserver() {
+        h.allow_local_homeserver(&key);
+    }
+    Ok(key)
+}
+
+/// Learn the bundled homeserver's key ([`key`]) at start; it may still be starting, so this
+/// tries again every 15 s for ten minutes. Any later admin call learns it too.
+pub fn spawn_learn_key(s: &Arc<NodeState>) {
+    let s = s.clone();
+    tokio::spawn(async move {
+        for _ in 0..40 {
+            match key(&s).await {
+                Ok(k) => {
+                    tracing::debug!(homeserver = %k, "bundled homeserver key known");
+                    return;
+                }
+                Err(e) => tracing::debug!("bundled homeserver key not known yet: {}", e.message),
+            }
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+    });
+}
+
 fn unreachable(e: impl std::fmt::Display) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, format!("the bundled homeserver: {e}"))
 }
@@ -222,12 +256,7 @@ pub(crate) async fn owner_signup(State(s): State<Arc<NodeState>>) -> ApiResult<c
             ),
         ));
     }
-    let info = admin(&s, reqwest::Method::GET, "/info", None).await?;
-    let hs = info["public_key"]
-        .as_str()
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| unreachable("no public key in /info"))?
-        .to_string();
+    let hs = key(&s).await?;
     let token = owner_token(&s).await?;
     let client = s
         .homeserver()
