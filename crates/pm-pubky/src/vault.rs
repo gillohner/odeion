@@ -1444,6 +1444,16 @@ impl Vault<'_> {
         r
     }
 
+    /// Whether the device list names this client, listed or signed out; `false` also when there
+    /// is no list. A list drops an entry only by moving it to `revoked`, so a client it named once
+    /// and names no more is looking at a vault whose files are gone, or at a new homeserver.
+    pub async fn names_me(&self) -> Result<bool> {
+        let ix = self.index().await?;
+        let me = self.client_key();
+        let grant = self.my_grant().await;
+        Ok(ix.clients.iter().any(|e| e.client_key == me) || ix.is_revoked(&me, grant.as_deref()))
+    }
+
     /// Register when this node isn't listed (or its proof no longer verifies), or once a day to
     /// keep `last_used_at` current.
     pub async fn touch(&self, name: &str) -> Result<()> {

@@ -1708,3 +1708,89 @@ async fn stale_storage_completions_preserve_replacement_status_and_quota() {
     assert!(st.error.is_none());
     assert!(st.last_saved_at.is_some());
 }
+
+/// A vault whose files are gone (a homeserver restored from an older copy, or a new homeserver)
+/// is a new vault to the node: its sign-ins go back in, not aside as "signed out elsewhere",
+/// also when another device made the new device list first. A sign-in removed from a vault that
+/// still names the node is still signed out elsewhere.
+#[tokio::test]
+async fn a_lost_vault_gets_the_nodes_sign_ins_back() {
+    use pm_appdata::vault::{blob_path, INDEX_PATH};
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let info = admin_call(&a, reqwest::Method::GET, "/info", None).await;
+    let hs = PublicKey::try_from(info["public_key"].as_str().unwrap()).unwrap();
+    let token = admin_call(
+        &a,
+        reqwest::Method::POST,
+        "/generate_signup_token",
+        Some(json!({"storage_quota_mb": "unlimited"})),
+    )
+    .await;
+    let signer = pubky().signer(Keypair::random());
+    signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
+    let homeserver = signing_in();
+    let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (n1, n2) = (node(d1.path()), node(d2.path()));
+    for (n, id) in [(&n1, "living-room.pubky.music"), (&n2, "kitchen.pubky.music")] {
+        let flow = homeserver.start_login(id).unwrap();
+        signer.approve_auth(flow.url()).await.unwrap();
+        let session = flow.await_approval().await.unwrap();
+        *n.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(client(), session)));
+    }
+    let (a1, a2) = (router(n1.clone()), router(n2.clone()));
+    let tidal = r#"{"access_token":"at-1","refresh_token":"rt-1","expires_at":1000,"user_id":"7","country":"CH"}"#;
+    let jamendo = r#"{"access_token":"jam-1","refresh_token":"jam-r","expires_at":5000,"name":"Gil"}"#;
+    let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
+    let get = |n: &NodeState, k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
+    set(&n1, "tidal.user", tidal);
+    set(&n1, "jamendo.user", jamendo);
+    let (st, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["migrated"], json!(["tidal", "jamendo"]), "{r}");
+    let (s1, k1) = node_vault_parts(&n1);
+    let storage = s1.session().storage();
+    let paths = [
+        INDEX_PATH.to_string(),
+        blob_path("tidal").unwrap(),
+        blob_path("jamendo").unwrap(),
+    ];
+    let lose_the_vault = || async {
+        for p in &paths {
+            storage.delete(p.as_str()).await.unwrap();
+        }
+    };
+
+    // The vault's files are gone: both sign-ins go back in, and stay on the node
+    lose_the_vault().await;
+    let (st, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["signed_out"], json!([]), "nothing goes aside: {r}");
+    assert_eq!(r["migrated"], json!(["tidal", "jamendo"]), "{r}");
+    assert_eq!(get(&n1, "tidal.user").as_deref(), Some(tidal));
+    assert_eq!(get(&n1, "jamendo.user").as_deref(), Some(jamendo));
+    let v1 = Vault::new(s1.session(), &k1);
+    assert!(v1.read("tidal").await.unwrap().is_some(), "back in the vault");
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["migrated"], json!([]), "once: {r}");
+    assert_eq!(r["signed_out"], json!([]), "{r}");
+
+    // Gone again, and another device makes the new device list first: still a new vault to
+    // node 1, which isn't in it
+    lose_the_vault().await;
+    let (st, r) = call(&a2, "POST", "/v1/vault/register").await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["signed_out"], json!([]), "nothing goes aside: {r}");
+    assert_eq!(r["migrated"], json!(["tidal", "jamendo"]), "{r}");
+    assert_eq!(get(&n1, "tidal.user").as_deref(), Some(tidal));
+
+    // Removed from a vault that still names node 1: signed out elsewhere, as before
+    storage.delete(paths[1].as_str()).await.unwrap();
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["signed_out"], json!(["tidal"]), "{r}");
+    assert_eq!(get(&n1, "tidal.user"), None);
+    assert_eq!(get(&n1, "jamendo.user").as_deref(), Some(jamendo));
+}
