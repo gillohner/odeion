@@ -189,6 +189,23 @@ fn named_host(h: &HeaderMap, uri: &axum::http::Uri) -> Result<Option<Named>, ()>
     }
 }
 
+/// Whether a renderer's GENA NOTIFY names the node as the node told it to: as
+/// [`renderer_host`] allows, or by the host of `callback_base` (the node's `public_url`, which
+/// starts every CALLBACK URL the node hands out). A page on another site whose name was made to
+/// resolve to the node names its own host and is refused.
+pub fn gena_host(h: &HeaderMap, uri: &axum::http::Uri, callback_base: &str) -> bool {
+    if renderer_host(h, uri) {
+        return true;
+    }
+    let Ok(Some(host)) = named_host(h, uri) else {
+        return false;
+    };
+    url::Url::parse(callback_base)
+        .ok()
+        .and_then(|u| u.host_str().map(|n| n.trim_end_matches('.').to_ascii_lowercase()))
+        .is_some_and(|n| n == host.name.trim_end_matches('.'))
+}
+
 /// A name that only ever means this machine: `localhost`, 127.0.0.0/8, `::1`. (Not other
 /// `*.localhost` names: those go through a resolver.)
 fn is_loopback_name(name: &str) -> bool {

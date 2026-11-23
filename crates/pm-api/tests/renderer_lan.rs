@@ -165,4 +165,11 @@ async fn other_sites_never_reach_the_renderer_through_a_browser() {
         post_status(&notify, &[("sec-fetch-site", "cross-site")]).await,
         403
     );
+    // ... and refuses a rebound name too; by the node's address it gets as far as the method
+    assert_eq!(
+        post_status(&notify, &rebound[2..]).await,
+        403,
+        "GENA, DNS rebinding"
+    );
+    assert_eq!(post_status(&notify, &[]).await, 405);
 }
