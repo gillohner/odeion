@@ -1063,12 +1063,10 @@ async fn run_download(
         .map_err(|e| e.to_string())?;
     let file_url =
         stat_result(&stat).ok_or("Bandcamp didn't hand out the file (its download step changed)")?;
-    let resp = s
-        .http_client()
-        .get(&file_url)
-        .send()
+    // A whole album: no total limit of the node's client, only one between pieces
+    let resp = crate::relay::send(s.http_client().get(&file_url))
         .await
-        .map_err(|e| format!("Bandcamp: {}", e.without_url()))?;
+        .map_err(|e| format!("Bandcamp: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("the file answered {}", resp.status()));
     }
@@ -1080,7 +1078,10 @@ async fn run_download(
     let mut f = tokio::fs::File::create(&part).await.map_err(|e| e.to_string())?;
     let mut got = 0u64;
     let mut body = resp.bytes_stream();
-    while let Some(chunk) = body.next().await {
+    while let Some(chunk) = tokio::time::timeout(crate::relay::RELAY_IDLE, body.next())
+        .await
+        .map_err(|_| "Bandcamp: the download stopped".to_string())?
+    {
         let chunk = chunk.map_err(|e| format!("Bandcamp: {}", e.without_url()))?;
         f.write_all(&chunk).await.map_err(|e| e.to_string())?;
         got += chunk.len() as u64;

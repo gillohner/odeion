@@ -10,16 +10,16 @@ use std::time::Duration;
 pub(crate) const RELAY_MAX: Duration = Duration::from_secs(6 * 3600);
 /// The longest wait for the answer's headers, and between two pieces of its body while the
 /// player is reading.
-pub(crate) const RELAY_IDLE: Duration = if cfg!(test) {
-    Duration::from_millis(500)
-} else {
-    Duration::from_secs(30)
-};
+pub(crate) const RELAY_IDLE: Duration = Duration::from_secs(30);
 
 /// Send a request whose answer is relayed as it arrives: no total limit of the node's client,
 /// the headers within [`RELAY_IDLE`]. The error has no URL in it (it may carry a token).
 pub(crate) async fn send(rb: reqwest::RequestBuilder) -> Result<reqwest::Response, String> {
-    match tokio::time::timeout(RELAY_IDLE, rb.timeout(RELAY_MAX).send()).await {
+    send_within(rb, RELAY_IDLE).await
+}
+
+async fn send_within(rb: reqwest::RequestBuilder, idle: Duration) -> Result<reqwest::Response, String> {
+    match tokio::time::timeout(idle, rb.timeout(RELAY_MAX).send()).await {
         Ok(Ok(r)) => Ok(r),
         Ok(Err(e)) => Err(e.without_url().to_string()),
         Err(_) => Err("no answer".into()),
@@ -29,9 +29,13 @@ pub(crate) async fn send(rb: reqwest::RequestBuilder) -> Result<reqwest::Respons
 /// The answer's body for the player, piece by piece, ending with an error when the source sends
 /// nothing for [`RELAY_IDLE`] while it is read.
 pub(crate) fn body(resp: reqwest::Response) -> axum::body::Body {
+    body_within(resp, RELAY_IDLE)
+}
+
+fn body_within(resp: reqwest::Response, idle: Duration) -> axum::body::Body {
     let pieces = futures_util::stream::unfold(Some(Box::pin(resp.bytes_stream())), |s| async move {
         let mut s = s?;
-        match tokio::time::timeout(RELAY_IDLE, s.next()).await {
+        match tokio::time::timeout(idle, s.next()).await {
             Ok(Some(Ok(b))) => Some((Ok(b), Some(s))),
             Ok(Some(Err(e))) => Some((Err(std::io::Error::other(e.without_url())), None)),
             Ok(None) => None,
@@ -85,8 +89,13 @@ mod tests {
             .build()
             .unwrap();
         let url = slow_source(5, Duration::from_millis(250)).await;
-        let resp = send(client.get(&url)).await.unwrap();
-        let got = body(resp).collect().await.expect("the whole body").to_bytes();
+        let idle = Duration::from_millis(500);
+        let resp = send_within(client.get(&url), idle).await.unwrap();
+        let got = body_within(resp, idle)
+            .collect()
+            .await
+            .expect("the whole body")
+            .to_bytes();
         assert_eq!(&got[..], b"xxxxx");
     }
 
@@ -94,10 +103,11 @@ mod tests {
     #[tokio::test]
     async fn a_relay_ends_when_the_source_goes_quiet() {
         let client = reqwest::Client::new();
-        let url = slow_source(2, RELAY_IDLE * 3).await;
-        let resp = send(client.get(&url)).await.unwrap();
+        let idle = Duration::from_millis(500);
+        let url = slow_source(2, idle * 3).await;
+        let resp = send_within(client.get(&url), idle).await.unwrap();
         let t = std::time::Instant::now();
-        assert!(body(resp).collect().await.is_err());
-        assert!(t.elapsed() < RELAY_IDLE * 3, "{:?}", t.elapsed());
+        assert!(body_within(resp, idle).collect().await.is_err());
+        assert!(t.elapsed() < idle * 3, "{:?}", t.elapsed());
     }
 }
