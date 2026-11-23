@@ -28139,4 +28139,25 @@ exec sleep 300
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
     }
+
+    /// A file that was not on the homeserver when a copy listed it, but is there whole by the
+    /// time the copy reaches it (another node of the owner, an upload), is not sent again: an
+    /// upload that failed over it would be removed as half written, and the good copy with it.
+    #[tokio::test]
+    async fn a_copy_checks_a_file_written_since_its_listing_before_sending() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, _app, _src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let disk = roomy();
+        let remote = "/pub/pubky.app/files/music/abcd-song.flac";
+        hs.sizes.lock().unwrap().insert(remote.into(), 5);
+        let mut present = std::collections::HashMap::new();
+        let sent = files::send_one(&s, &*hs, &*disk, &mut present, remote, b"12345".to_vec()).await;
+        assert!(matches!(sent, Ok(false)), "the good copy there counts");
+        assert!(hs.uploads.lock().unwrap().is_empty(), "nothing sent over it");
+        // Not there: sent
+        let other = "/pub/pubky.app/files/music/ef01-other.flac";
+        let sent = files::send_one(&s, &*hs, &*disk, &mut present, other, b"123".to_vec()).await;
+        assert!(matches!(sent, Ok(true)));
+        assert_eq!(*hs.uploads.lock().unwrap(), [other.to_string()]);
+    }
 }
