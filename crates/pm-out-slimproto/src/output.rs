@@ -9,6 +9,16 @@ use pm_zones::outputs::PullOutput;
 use pm_zones::{AudioSink, BufferLevel, Output, OutputId, SinkError};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// How long one write to a player may take. A player that stays connected and reads nothing
+/// would otherwise hold the connection's lock, and with it the zone's commands, until the
+/// system gave up (minutes). The connection is closed then; the player connects again.
+const WRITE_LIMIT: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    Duration::from_secs(5)
+};
 
 /// The last `STAT` we saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -62,6 +72,7 @@ pub(crate) struct Link {
 impl Link {
     /// A new connection replaces the old one; returns its number for `detach`.
     pub(crate) fn attach(&self, stream: TcpStream) -> u64 {
+        let _ = stream.set_write_timeout(Some(WRITE_LIMIT));
         let g = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         *self.conn.lock().expect("conn") = Some((g, stream));
         g
@@ -87,10 +98,25 @@ impl Link {
         let mut c = self.conn.lock().expect("conn");
         match c.as_mut() {
             Some((cur, w)) if *cur == g => {
-                write_frame(w, b"strm", &strm(b't', b'0', 16, 44_100, 2, 0, timestamp_ms, "")).is_ok()
+                let sent = write_frame(w, b"strm", &strm(b't', b'0', 16, 44_100, 2, 0, timestamp_ms, ""));
+                Self::sent(&mut c, sent).is_ok()
             }
             _ => false,
         }
+    }
+
+    /// After a failed write (a part of a frame may be out) the connection is no use: it is
+    /// closed, so the player's reader ends and the player connects again.
+    fn sent(
+        c: &mut std::sync::MutexGuard<'_, Option<(u64, TcpStream)>>,
+        r: std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        if r.is_err() {
+            if let Some((_, w)) = c.take() {
+                let _ = w.shutdown(std::net::Shutdown::Both);
+            }
+        }
+        r
     }
 
     fn send(&self, op: &[u8; 4], data: &[u8]) -> std::io::Result<()> {
@@ -101,7 +127,8 @@ impl Link {
                 "player disconnected",
             ));
         };
-        write_frame(w, op, data)
+        let r = write_frame(w, op, data);
+        Self::sent(&mut c, r)
     }
 
     fn status(&self) -> PlayerStatus {
@@ -740,5 +767,38 @@ mod tests {
         out.set_volume(Volume::Db(0.0)).await.unwrap();
         let (op, _) = next_frame(&mut again).unwrap();
         assert_eq!(&op, b"audg");
+    }
+
+    /// A player that stays connected and reads nothing holds a write no longer than the limit:
+    /// the write fails, the connection is closed, and the next command fails at once.
+    #[test]
+    fn a_player_that_reads_nothing_does_not_hold_commands() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let player = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+        let link = Arc::new(Link::default());
+        link.attach(server_side);
+        // The socket buffers fill, then a write waits: how long the failing one took
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = link.clone();
+        std::thread::spawn(move || {
+            let big = vec![0u8; 60_000];
+            loop {
+                let t = std::time::Instant::now();
+                if writer.send(b"test", &big).is_err() {
+                    let _ = tx.send(t.elapsed());
+                    return;
+                }
+            }
+        });
+        let took = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("a write that never ends: no write limit");
+        assert!(took < WRITE_LIMIT * 4, "{took:?}");
+        assert!(!link.connected(), "the connection is closed");
+        let t = std::time::Instant::now();
+        assert!(link.send(b"test", b"x").is_err());
+        assert!(t.elapsed() < Duration::from_millis(50));
+        drop(player);
     }
 }

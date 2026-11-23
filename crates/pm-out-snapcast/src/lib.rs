@@ -26,6 +26,22 @@ pub const CONTROL_PORT: u16 = 1705;
 /// How far the sink may run ahead of the music.
 const AHEAD: Duration = Duration::from_millis(250);
 
+/// How long one write of audio to snapserver may take. The stream is paced, so a write that
+/// waits longer means snapserver stopped reading: the write fails and the zone stops with an
+/// error, instead of holding its commands (Stop, Next) until the system gives up (minutes).
+const WRITE_LIMIT: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    Duration::from_secs(5)
+};
+
+/// The audio connection snapserver made: blocking, no delay, and a write limit.
+fn stream_socket(conn: &TcpStream) {
+    let _ = conn.set_nonblocking(false);
+    let _ = conn.set_nodelay(true);
+    let _ = conn.set_write_timeout(Some(WRITE_LIMIT));
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SnapError {
     #[error("snapserver at {0}: {1}")]
@@ -510,8 +526,7 @@ fn open_stream(server: &str, group: &str, stream: &str, fmt: AudioFormat) -> Res
             }
         }
     };
-    let _ = conn.set_nonblocking(false);
-    let _ = conn.set_nodelay(true);
+    stream_socket(&conn);
     // Remember what the group played, to give it back.
     let previous = c
         .call("Server.GetStatus", Value::Null)
@@ -945,5 +960,30 @@ mod tests {
         let addr = std::env::var("SNAPSERVER").unwrap_or_else(|_| "127.0.0.1".into());
         let groups = discover(&addr).unwrap();
         assert!(!groups.is_empty());
+    }
+
+    /// A snapserver that stops reading the stream holds a write no longer than the limit.
+    #[test]
+    fn a_stream_nobody_reads_fails_within_the_write_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut conn, _) = listener.accept().unwrap();
+        stream_socket(&conn);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let big = vec![0u8; 60_000];
+            loop {
+                let t = Instant::now();
+                if conn.write_all(&big).is_err() {
+                    let _ = tx.send(t.elapsed());
+                    return;
+                }
+            }
+        });
+        let took = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("a write that never ends: no write limit");
+        assert!(took < WRITE_LIMIT * 4, "{took:?}");
+        drop(server);
     }
 }
