@@ -528,7 +528,7 @@ pub(crate) fn open_live() -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::So
 
 // ---- the process -------------------------------------------------------------------------------
 
-fn record_health(lib: &Arc<Mutex<pm_library::Library>>, ok: bool, detail: String) {
+fn record_health(lib: &Arc<pm_library::LibraryLock>, ok: bool, detail: String) {
     let lib = lib.lock().expect("library poisoned");
     let mut st = load(&lib);
     st.health = Some(Health {

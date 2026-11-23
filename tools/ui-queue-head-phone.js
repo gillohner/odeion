@@ -69,11 +69,11 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
           await page.screenshot({ path: path.join(shots, `after-queue-${w}${android ? '-android' : ''}.png`) });
           await page.click('#qmenu');
           await until(async () => (await menu(page)).includes('Clear queue'), `the ⋯ menu opens (${await menu(page)})`);
-          assert.equal(await menu(page), `# Queue | Save as playlist | Clear queue | # Move to | ${android ? 'Living room | This phone' : 'This browser | Living room'}`, 'the ⋯ menu');
+          assert.equal(await menu(page), `# Queue | Save as collection | Clear queue | # Move to | ${android ? 'Living room | This phone' : 'This browser | Living room'}`, 'the ⋯ menu');
           await page.screenshot({ path: path.join(shots, `after-queue-menu-${w}${android ? '-android' : ''}.png`) });
           // Save as playlist: the zone's queue, as the button did
-          await page.locator('[data-mi]', { hasText: 'Save as playlist' }).click();
-          await until(async () => hit(state, 'POST', /^\/playlists\/from-queue$/), 'Save as playlist asks the node');
+          await page.locator('[data-mi]', { hasText: 'Save as collection' }).click();
+          await until(async () => hit(state, 'POST', /^\/playlists\/from-queue$/), 'Save as collection asks the node');
           const save = state.hits.find((x) => x.v === '/playlists/from-queue');
           assert.deepEqual(JSON.parse(save.body), { zone: 'z1' }, 'saved from the zone');
           await until(async () => page.evaluate(() => /Saved “Queue · kitchen”/.test(document.body.innerText)), 'the toast says it was saved');
@@ -96,7 +96,7 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
         assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
     });
-    await check('360: a listener\'s ⋯ has Clear queue and Move to, not Save as playlist', async () => {
+    await check('360: a listener\'s ⋯ has Clear queue and Move to, not Save as collection', async () => {
       const { page, context, state } = await zoneQueue(browser, 360, { role: 'listener' });
       try {
         const h = await head(page);
@@ -107,16 +107,16 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
         assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
     });
-    await check('360: this browser\'s queue: Shuffle and ⋯ (Save as playlist, Move to)', async () => {
+    await check('360: this browser\'s queue: Shuffle and ⋯ (Save as collection, Move to)', async () => {
       const { page, context, state } = await zoneQueue(browser, 360, { browser: true });
       try {
         const h = await head(page);
         assert.equal(h.ids, 'qshuffle,qmenu', 'visible head buttons');
         await page.click('#qmenu');
-        await until(async () => (await menu(page)).includes('Save as playlist'), `the ⋯ menu opens (${await menu(page)})`);
+        await until(async () => (await menu(page)).includes('Save as collection'), `the ⋯ menu opens (${await menu(page)})`);
         const m = await menu(page);
         assert.ok(!m.includes('Clear queue'), `no Clear in this browser (${m})`);
-        assert.match(m, /^# Queue \| Save as playlist \| # Move to \| .*Kitchen/, 'the ⋯ menu');
+        assert.match(m, /^# Queue \| Save as collection \| # Move to \| .*Kitchen/, 'the ⋯ menu');
         await page.screenshot({ path: path.join(shots, 'after-queue-browser-menu-360.png') });
         assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
@@ -133,13 +133,13 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
         assert.deepEqual(state.errors, [], 'no page errors');
       } finally { await context.close(); }
     });
-    await check('360: by keyboard, ⋯ › Save as playlist leaves the focus on the ⋯', async () => {
+    await check('360: by keyboard, ⋯ › Save as collection leaves the focus on the ⋯', async () => {
       const { page, context, state } = await zoneQueue(browser, 360);
       try {
         await page.focus('#qmenu'); await page.keyboard.press('Enter');
-        const item = page.locator('[data-mi]', { hasText: 'Save as playlist' }).first();
+        const item = page.locator('[data-mi]', { hasText: 'Save as collection' }).first();
         await item.waitFor(); await item.focus(); await page.keyboard.press('Enter');
-        await until(async () => hit(state, 'POST', /^\/playlists\/from-queue$/), 'Save as playlist asks the node');
+        await until(async () => hit(state, 'POST', /^\/playlists\/from-queue$/), 'Save as collection asks the node');
         await sleep(300);
         assert.equal(await page.evaluate(() => document.activeElement && (document.activeElement.id || document.activeElement.tagName)), 'qmenu', 'focus');
         assert.deepEqual(state.errors, [], 'no page errors');
@@ -164,7 +164,7 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
       run.ws.send(JSON.stringify({ type: 'zone_removed', seq: 1, zone: 'z9' })); // (another zone: asks /presence again)
       await until(async () => run.page.evaluate(() => /Living room/.test(document.querySelector('.page-head') ? document.querySelector('.page-head').textContent : '')), 'the page follows to the Living room');
     };
-    for (const what of ['Clear queue', 'Save as playlist', 'This browser']) {
+    for (const what of ['Clear queue', 'Save as collection', 'This browser']) {
       await check(`360: ⋯ › ${what} after the page followed to another device does nothing to that device's queue`, async () => {
         const run = await zoneQueue(browser, 360); const { page, context, state } = run;
         try {
@@ -185,18 +185,18 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
     }
     // (the node's POST is shared while on its way; the list of playlists read after it was not: a tap
     // then made a second playlist)
-    await check('360: a second Save as playlist while the first is finishing makes no second playlist', async () => {
+    await check('360: a second Save as collection while the first is finishing makes no second collection', async () => {
       const run = await zoneQueue(browser, 360); const { page, context, state } = run;
       try {
         let release; const held = new Promise((r) => { release = r; }); let asked = false;
         await context.route(/\/v1\/playlists$/, async (r) => { if (r.request().method() !== 'GET' || !hit(state, 'POST', /^\/playlists\/from-queue$/)) return r.fallback(); asked = true; await held; return r.fulfill({ status: 200, contentType: 'application/json', body: '[]' }); });
         await page.click('#qmenu');
-        await until(async () => (await menu(page)).includes('Save as playlist'), `the ⋯ menu opens (${await menu(page)})`);
-        await page.locator('[data-mi]', { hasText: 'Save as playlist' }).click();
-        await until(async () => asked, 'the first save reads the playlists again');
+        await until(async () => (await menu(page)).includes('Save as collection'), `the ⋯ menu opens (${await menu(page)})`);
+        await page.locator('[data-mi]', { hasText: 'Save as collection' }).click();
+        await until(async () => asked, 'the first save reads the collections again');
         // (the ⋯ is busy: it doesn't open; were it to, its Save as playlist is pressed again)
         await page.click('#qmenu'); await sleep(200);
-        if ((await menu(page)).includes('Save as playlist')) await page.locator('[data-mi]', { hasText: 'Save as playlist' }).click();
+        if ((await menu(page)).includes('Save as collection')) await page.locator('[data-mi]', { hasText: 'Save as collection' }).click();
         await sleep(300); release(); await sleep(500);
         assert.equal(state.hits.filter((h) => h.m === 'POST' && h.v === '/playlists/from-queue').length, 1, 'saves sent');
         assert.deepEqual(state.errors, [], 'no page errors');
@@ -218,7 +218,7 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
     };
     const stale = [
       [1280, 'Clear', async (page) => page.click('#qclear')],
-      [1280, 'Save as playlist', async (page) => page.click('#qsave')],
+      [1280, 'Save as collection', async (page) => page.click('#qsave')],
       [1280, 'Move to…', async (page) => page.click('#qtransfer')],
       [1280, 'Move to › This browser (the menu opened before)', async (page) => page.locator('[data-mi]', { hasText: 'This browser' }).click(), async (page) => { await page.click('#qtransfer'); await until(async () => (await menu(page)).includes('This browser'), 'the Move to menu opens'); }],
       [1280, 'Radio', async (page) => page.click('#qradio')],
@@ -302,7 +302,7 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
         } finally { await context.close(); }
       });
     }
-    await check('1280: Save as playlist while the first is still on its way says so (after the page was drawn again)', async () => {
+    await check('1280: Save as collection while the first is still on its way says so (after the page was drawn again)', async () => {
       const run = await zoneQueue(browser, 1280); const { page, context, state } = run;
       try {
         let release; const held = new Promise((r) => { release = r; }); let asked = false;
@@ -314,7 +314,7 @@ const hit = (state, m, re) => state.hits.some((h) => h.m === m && re.test(h.v));
         await page.click('#qradio');
         await until(async () => page.evaluate(() => { const b = document.querySelector('#qsave'); return b && !b.getAttribute('aria-busy') && /Radio on: similar/.test(document.body.innerText); }), 'the page is drawn again');
         await page.click('#qsave');
-        await until(async () => page.evaluate(() => /Still saving the queue as a playlist/.test(document.body.innerText)), 'the second tap says the first is still saving');
+        await until(async () => page.evaluate(() => /Still saving the queue as a collection/.test(document.body.innerText)), 'the second tap says the first is still saving');
         release(); await sleep(400);
         assert.equal(state.hits.filter((h) => h.m === 'POST' && h.v === '/playlists/from-queue').length, 1, 'saves sent');
         assert.deepEqual(state.errors, [], 'no page errors');

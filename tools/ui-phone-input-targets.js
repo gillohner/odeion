@@ -48,10 +48,10 @@ async function phone(browser, width, android) {
   await page.screenshot({ path: path.join(SHOTS, `${width}${android ? '-android' : ''}-songs.png`) });
   // Add to playlist…'s search field, in a dialog
   await page.locator('#tracklist .track:first-child [data-act="more"]').click({ force: true });
-  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Add to playlist…' }).click();
+  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Add to collection…' }).click();
   await page.waitForSelector('dialog #ppq');
   const q = await box(page, 'dialog #ppq');
-  check(q.h >= 44, `${at} Add to playlist…: its search field is a 44 px tap (${q.h.toFixed(1)})`);
+  check(q.h >= 44, `${at} Add to collection…: its search field is a 44 px tap (${q.h.toFixed(1)})`);
   await page.screenshot({ path: path.join(SHOTS, `${width}${android ? '-android' : ''}-add-to-playlist.png`) });
   await page.keyboard.press('Escape');
   for (const [route, sel, what] of [['/settings/library', '#folderadd', 'Settings › Library: Folder to add'], ['/settings/playback', '#rendaddr', 'Settings › Playback: Renderer address']]) {

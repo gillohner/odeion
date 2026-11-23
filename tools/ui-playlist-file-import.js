@@ -69,7 +69,7 @@ const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Dat
           // 2. The new playlist opens, with what matched said once in a toast. One click: the choice itself.
           const opened = await until(() => page.evaluate(() => location.pathname === '/playlist/c1' && /Music and notes/.test(document.querySelector('#main h1')?.textContent || '')));
           const t = await page.evaluate(() => document.querySelector('#toast')?.textContent || '');
-          check(opened, `${tag}: the new playlist opens once it is imported (now ${new URL(page.url()).pathname})`);
+          check(opened, `${tag}: the new collection opens once it is imported (now ${new URL(page.url()).pathname})`);
           check(/Imported “Music and notes”: 1 of 3 matched · 1 kept as link · not matched: Lost song/.test(t), `${tag}: a toast says what matched ("${t}")`);
           check(sent === 1, `${tag}: the file is sent once (${sent})`);
           await page.screenshot({ path: path.join(SHOTS, `opened-${pl.at.replace(/\//g, '_')}-${width}.png`) });
@@ -98,10 +98,10 @@ const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Dat
           await until(() => page.evaluate(() => location.pathname === '/tracks'), 2000);
           await sleep(1500);
           const away = await page.evaluate(() => ({ path: location.pathname, toast: document.querySelector('#toast')?.textContent || '', open: [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent) }));
-          check(away.path === '/tracks' && /Imported “Music and notes”/.test(away.toast) && away.open.includes('Open playlist'), `${tag}: someone who moved on stays on ${away.path}; the toast says it is in, with ${JSON.stringify(away.open)}`);
-          if (away.open.includes('Open playlist')) {
+          check(away.path === '/tracks' && /Imported “Music and notes”/.test(away.toast) && away.open.includes('Open collection'), `${tag}: someone who moved on stays on ${away.path}; the toast says it is in, with ${JSON.stringify(away.open)}`);
+          if (away.open.includes('Open collection')) {
             await page.click('#toast .toast-act');
-            check(await until(() => page.evaluate(() => location.pathname === '/playlist/c1')), `${tag}: the toast's Open opens the new playlist`);
+            check(await until(() => page.evaluate(() => location.pathname === '/playlist/c1')), `${tag}: the toast's Open opens the new collection`);
           }
           // 5. Typing in the page meanwhile (Playlists' name box): stay; the toast offers Open playlist.
           if (pl.at === '/playlists') {
@@ -110,21 +110,21 @@ const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Dat
             await page.locator('#plname').fill('Road');
             await sleep(1300);
             const typing = await page.evaluate(() => ({ path: location.pathname, name: document.querySelector('#plname')?.value, open: [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent) }));
-            check(typing.path === '/playlists' && typing.name === 'Road' && typing.open.includes('Open playlist'), `${tag}: someone typing a name meanwhile stays (${typing.path}, "${typing.name}"), with ${JSON.stringify(typing.open)}`);
+            check(typing.path === '/playlists' && typing.name === 'Road' && typing.open.includes('Open collection'), `${tag}: someone typing a name meanwhile stays (${typing.path}, "${typing.name}"), with ${JSON.stringify(typing.open)}`);
             // 6. A name typed and left (the box lost the keyboard): stay, the name is kept.
             await fx.go(page, pl.at); await page.waitForSelector(pl.input, { state: 'attached' });
             net.wait = 900; await page.locator(pl.input).setInputFiles(FILE); await sleep(200);
             await page.locator('#plname').fill('Road'); await page.evaluate(() => document.activeElement && document.activeElement.blur());
             await sleep(1300);
             const leftName = await page.evaluate(() => ({ path: location.pathname, name: document.querySelector('#plname')?.value, focus: document.activeElement === document.body, open: [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent) }));
-            check(leftName.path === '/playlists' && leftName.name === 'Road' && leftName.focus && leftName.open.includes('Open playlist'), `${tag}: a name typed and left meanwhile keeps them there (${leftName.path}, "${leftName.name}"), with ${JSON.stringify(leftName.open)}`);
+            check(leftName.path === '/playlists' && leftName.name === 'Road' && leftName.focus && leftName.open.includes('Open collection'), `${tag}: a name typed and left meanwhile keeps them there (${leftName.path}, "${leftName.name}"), with ${JSON.stringify(leftName.open)}`);
             // 7. Create pressed meanwhile (the page is drawn again, the box empty): stay; the toast offers Open playlist.
             await fx.go(page, pl.at); await page.waitForSelector(pl.input, { state: 'attached' });
             net.wait = 900; await page.locator(pl.input).setInputFiles(FILE); await sleep(200);
             await page.locator('#plname').fill('Road'); await page.click('#plcreate');
             await sleep(1300);
             const created = await page.evaluate(() => ({ path: location.pathname, name: document.querySelector('#plname')?.value, open: [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent) }));
-            check(created.path === '/playlists' && created.name === '' && created.open.includes('Open playlist'), `${tag}: Create pressed meanwhile keeps them there (${created.path}, box "${created.name}"), with ${JSON.stringify(created.open)}`);
+            check(created.path === '/playlists' && created.name === '' && created.open.includes('Open collection'), `${tag}: Create pressed meanwhile keeps them there (${created.path}, box "${created.name}"), with ${JSON.stringify(created.open)}`);
           } else {
             // 6. A Move from Roon check started meanwhile: stay, with its results; the toast offers Open playlist.
             await fx.go(page, pl.at); await page.waitForSelector(pl.input, { state: 'attached' });
@@ -133,12 +133,12 @@ const until = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Dat
             await page.evaluate(() => document.activeElement && document.activeElement.blur());
             await sleep(1300);
             const moved = await page.evaluate(() => ({ path: location.pathname, roon: document.querySelector('#roonout')?.textContent || '', open: [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent) }));
-            check(roon === r0 + 1 && moved.path === pl.at && /2 of 3 matched this library/.test(moved.roon) && moved.open.includes('Open playlist'), `${tag}: a Move from Roon check started meanwhile keeps them there with its results (${moved.path}, ${roon - r0} checks), with ${JSON.stringify(moved.open)}`);
+            check(roon === r0 + 1 && moved.path === pl.at && /2 of 3 matched this library/.test(moved.roon) && moved.open.includes('Open collection'), `${tag}: a Move from Roon check started meanwhile keeps them there with its results (${moved.path}, ${roon - r0} checks), with ${JSON.stringify(moved.open)}`);
             // 7. Nothing else done, the keyboard on the page's body: the new playlist still opens.
             await fx.go(page, pl.at); await page.waitForSelector(pl.input, { state: 'attached' });
             net.wait = 600; await page.locator(pl.input).setInputFiles(FILE); await sleep(100);
             await page.evaluate(() => document.activeElement && document.activeElement.blur());
-            check(await until(() => page.evaluate(() => location.pathname === '/playlist/c1')), `${tag}: with nothing else started, the new playlist opens`);
+            check(await until(() => page.evaluate(() => location.pathname === '/playlist/c1')), `${tag}: with nothing else started, the new collection opens`);
           }
           check(!state.errors.length, `${tag}: no page errors (${state.errors.join('; ')})`);
         } finally { await context.close(); }

@@ -102,7 +102,7 @@ async function browserRun(browser, width, opts = {}) {
       };
       const pick = async (label) => { await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: label }).first().tap(); };
       const m1 = await menuOf(0);
-      check(!!m1 && m1.title === 'First' && m1.items.join('|') === 'Play next|Add to queue|Add to playlist…', `${tag}: song 1's ⋯ is its menu: Play next, Add to queue, Add to playlist… ${JSON.stringify(m1)}`);
+      check(!!m1 && m1.title === 'First' && m1.items.join('|') === 'Play next|Add to queue|Add to collection…', `${tag}: song 1's ⋯ is its menu: Play next, Add to queue, Add to collection… ${JSON.stringify(m1)}`);
       if (width < 600) await page.screenshot({ path: path.join(SHOTS, `phone-menu-${width}.png`) });
       if (m1) {
         await pick('Add to queue');
@@ -117,7 +117,7 @@ async function browserRun(browser, width, opts = {}) {
         check(q3 && q3.join() === 'Second,Third,Third,First', `${tag}: song 3's ⋯ › Play next puts it right after the song playing (${JSON.stringify(q3)})`);
       } else check(false, `${tag}: song 3's ⋯ › Play next (no ⋯)`);
       if (await menuOf(1)) {
-        await pick('Add to playlist');
+        await pick('Add to collection');
         await page.waitForSelector('dialog [data-ppi]', { timeout: 2000 }).catch(() => {});
         const n0 = state.hits.length;
         const pl = page.locator('dialog [data-ppi]', { hasText: 'Road trip' });
@@ -126,8 +126,8 @@ async function browserRun(browser, width, opts = {}) {
         for (let k = 0; k < 40 && !state.hits.slice(n0).some((h) => h.m === 'POST' && h.v === '/playlists/p1/items'); k++) await page.waitForTimeout(50);
         const post = state.hits.slice(n0).find((h) => h.m === 'POST' && h.v === '/playlists/p1/items');
         const body = post ? JSON.parse(post.body || '{}') : {};
-        check(!!post && JSON.stringify(body.uris) === JSON.stringify([tracks[1].url]), `${tag}: song 2's ⋯ › Add to playlist… › Road trip adds that one song by its address (${post ? post.body : 'no POST'})`);
-      } else check(false, `${tag}: song 2's ⋯ › Add to playlist… (no ⋯)`);
+        check(!!post && JSON.stringify(body.uris) === JSON.stringify([tracks[1].url]), `${tag}: song 2's ⋯ › Add to collection… › Road trip adds that one song by its address (${post ? post.body : 'no POST'})`);
+      } else check(false, `${tag}: song 2's ⋯ › Add to collection… (no ⋯)`);
       // A swipe right on a row is Play next, as on a library song row (the browser's own touch input)
       const cdp = await context.newCDPSession(page);
       const rb = await row(page, 0).boundingBox();
@@ -220,7 +220,7 @@ async function nodeRun(browser, width) {
     if (await row(page, 1).locator('[data-amore1]').count()) await row(page, 1).locator('[data-amore1]').click();
     await page.waitForSelector('.popover.menu:not([hidden]) .pop-item', { timeout: 2000 }).catch(() => {});
     const items = await page.evaluate(() => [...document.querySelectorAll('.popover.menu:not([hidden]) .pop-item')].map((b) => b.textContent.trim()));
-    check(items.join('|') === 'Play next|Add to queue|Add to playlist…', `${tag}: song 2's ⋯ is the service song's menu, not a library song's (${JSON.stringify(items)})`);
+    check(items.join('|') === 'Play next|Add to queue|Add to collection…', `${tag}: song 2's ⋯ is the service song's menu, not a library song's (${JSON.stringify(items)})`);
     if (items.length) await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Play next' }).click();
     for (let k = 0; k < 40 && !state.hits.slice(n1).some((h) => h.m === 'POST' && h.v === '/zones/z1/queue'); k++) await page.waitForTimeout(50);
     const qp = state.hits.slice(n1).find((h) => h.m === 'POST' && h.v === '/zones/z1/queue'); const qb = qp ? JSON.parse(qp.body || '{}') : {};
@@ -261,9 +261,9 @@ async function phoneModeRun(browser, width) {
     await page.waitForTimeout(600);
     const after = await page.evaluate(() => ({ dialog: !!document.querySelector('dialog[open]'), toasts: [...document.querySelectorAll('.toast')].map((t) => t.textContent.trim()) }));
     const pl = state.hits.slice(n0).filter((h) => h.v.startsWith('/playlists'));
-    check(!after.dialog && pl.length === 0, `${tag}: a swipe left on song 2 opens no playlist dialog and asks no /playlists (${after.dialog ? 'dialog open' : 'no dialog'}, ${pl.map((h) => h.m + ' ' + h.v).join(', ') || 'no request'})`);
+    check(!after.dialog && pl.length === 0, `${tag}: a swipe left on song 2 opens no collection dialog and asks no /playlists (${after.dialog ? 'dialog open' : 'no dialog'}, ${pl.map((h) => h.m + ' ' + h.v).join(', ') || 'no request'})`);
     // (the swipe did reach the row's ⋯: it says so, as a shared song row in phone mode does)
-    check(after.toasts.some((t) => /Add to playlist isn.t available for this row/.test(t)), `${tag}: and says "Add to playlist isn't available for this row" (${JSON.stringify(after.toasts)})`);
+    check(after.toasts.some((t) => /Add to collection isn.t available for this row/.test(t)), `${tag}: and says "Add to collection isn't available for this row" (${JSON.stringify(after.toasts)})`);
     check(state.errors.length === 0, `${tag}: no page errors ${JSON.stringify(state.errors)}`);
   } finally { await context.close(); }
 }

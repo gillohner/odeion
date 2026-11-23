@@ -65,10 +65,10 @@ const cases = [
           check(got.chips === c.chips, `${at}: source chips ${got.chips ? 'shown' : 'not shown'} (want ${c.chips ? 'shown' : 'not shown'})`);
           check(!/\b2 · 1 in this library\b/.test(got.text), `${at}: the link is not counted as a second song`);
           check(c.note.test(got.note), `${at}: the note under the buttons still says who sees it and where (${JSON.stringify(got.note)})`);
-          check(/^playlist$/i.test(got.eyebrow.trim()) && got.eyebrowLines === 1, `${at}: the line above the name is the kind alone, on one line (${JSON.stringify(got.eyebrow.trim())}, ${got.eyebrowLines} lines)`);
+          check(/^collection$/i.test(got.eyebrow.trim()) && got.eyebrowLines === 1, `${at}: the line above the name is the kind alone, on one line (${JSON.stringify(got.eyebrow.trim())}, ${got.eyebrowLines} lines)`);
           check(!/\b(private|public|homeserver|this node)\b/i.test(got.eyebrow), `${at}: who sees it and where is not said again above the name`);
           check(got.air >= 6, `${at}: the note has air under the buttons (${got.air == null ? 'no note' : got.air.toFixed(1) + ' px'})`);
-          if (c.name === 'public-synced') check(!/\(private\)/.test(got.text), `${at}: a shared playlist is never called private`);
+          if (c.name === 'public-synced') check(!/\(private\)/.test(got.text), `${at}: a shared collection is never called private`);
           let copy = null; try { await fx.cleanCopy(page); } catch (e) { copy = e.message; }
           check(!copy, `${at}: clean copy, no horizontal overflow ${copy || ''}`);
           check(!state.errors.length, `${at}: no page errors ${state.errors.join(' ')}`);

@@ -20,8 +20,8 @@ works today. To install it, start from the [README](../../README.md#get-started)
   TIDAL, Qobuz, Spotify, Deezer, the Internet Archive, Audius, Jamendo, SoundCloud, Bandcamp,
   YouTube, and your own Jellyfin, Plex, Subsonic or Audiobookshelf server. What each one needs:
   [Streaming services](../STREAMING-PROVIDERS.md).
-- **Pubky** is your identity and your storage. You sign in with the Pubky Ring app. Playlists,
-  favourites, tags and listening history are written to your Pubky homeserver and follow you to a
+- **Pubky** is your identity and your storage. You sign in with the Pubky Ring app. Collections,
+  bookmarks, tags and listening history are written to your Pubky homeserver and follow you to a
   new node, and the app uses it to find and reach your node from anywhere.
 - **Pinakes** is a public index of the links people share on Pubky. Odeion asks it what people on
   Pubky play and tag, which public collections hold a song, and where else a song or album can be
@@ -38,19 +38,19 @@ you hold and your data lives on a homeserver you choose. For Odeion you need:
 - **A homeserver for your account**, one of these:
   - **The node's own homeserver.** The USB-stick installer sets one up by default, and with Docker
     the bundle in [`deploy/bundle/`](../../deploy/bundle/) runs one next to the node. Your
-    account, your playlists and any music files you copy there stay on your own machine. On the
+    account, your collections and any music files you copy there stay on your own machine. On the
     first start, **Settings › My accounts** offers **Create your Pubky account on this node’s
     homeserver**.
   - **An existing homeserver**, the one your Pubky account already uses. Sign the node in with
     **Settings › My accounts › Sign in with Pubky** and approve in Pubky Ring.
 
 With Pubky you get: logging in with Pubky Ring instead of a token, inviting other people to your
-node (each with their own sign-in), playlists, favourites, tags and history kept in your account,
-public tags and shared playlists, and the Odeion app reaching the node away from home without any
+node (each with their own sign-in), collections, bookmarks, tags and history kept in your account,
+public tags and shared collections, and the Odeion app reaching the node away from home without any
 router setup.
 
 Without Pubky, the node still does all the music: library, speakers, streaming services, radio,
-Subsonic apps and backups. You log in with the node's API token, playlists stay on the node, and
+Subsonic apps and backups. You log in with the node's API token, collections stay on the node, and
 for access away from home you use Tailscale or a Cloudflare Tunnel ([Remote access](remote-access.md)).
 
 ## Pinakes
@@ -65,9 +65,9 @@ These parts come from Pinakes:
 - The **Pubky** results in search.
 - **In collections** on song, album and artist pages: public collections that hold them.
 - **Tagged alike on Pubky** under Similar.
-- Part of the **Also on** links (the rest come from MusicBrainz), which also tell a playlist
+- Part of the **Also on** links (the rest come from MusicBrainz), which also tell a collection
   where else a song can play from.
-- Titles and covers for web links kept in a playlist.
+- Titles and covers for web links kept in a collection.
 - Podcast search (when Pinakes has nothing, the node asks Apple's podcast directory).
 
 Pinakes, MusicBrainz and Wikipedia each ask every app for a way to reach whoever runs it. So the
@@ -133,7 +133,7 @@ use Tailscale or a Cloudflare Tunnel. Don't forward port 7788 to the internet. S
   stick installs Debian's security updates by itself; Odeion is updated with a few commands on its
   console ([guide](install-iso.md#updating-odeion)). The desktop and Android app ask when a new
   version is out.
-- **Back up:** **Settings › Backup** makes one file with your library data, playlists, favourites,
+- **Back up:** **Settings › Backup** makes one file with your library data, collections, bookmarks,
   history and settings (never your music files), and can do it every day or week. With the node's
   own homeserver, `deploy/bundle/backup.sh` backs up the node and the homeserver together.
 
@@ -152,13 +152,13 @@ the code.
   settings, internet radio. Bit-perfect by default, and the signal path shows every change made to
   the sound.
 - Streaming sources, the desktop and Android app, Subsonic apps, Home Assistant.
-- Pubky sign-in with Pubky Ring, playlists and favourites in your account, the bundle with its own
+- Pubky sign-in with Pubky Ring, collections and bookmarks in your account, the bundle with its own
   homeserver, remote access through the app.
 - The Odeion name and logo, and the web page as an installable app.
 - The USB-stick installer for an Odeion box.
 - Each person signs in to their own TIDAL, Qobuz and Spotify; the node's owner chooses whose
   sign-ins people play with.
-- People you invite keep their own bookmarks and playlists on their own homeserver.
+- People you invite keep their own bookmarks and collections on their own homeserver.
 - TIDAL in lossless and hi-res with **Sign in with TIDAL**; Qobuz with just email and password.
 - Android app: keeps playing in the background, updates itself, and plays bit-perfect to a USB DAC
   (Android 14 and later, or with its own USB driver on older phones). The USB DAC modes are still
@@ -179,7 +179,7 @@ the code.
   `ghcr.io/gillohner/pubky-music-node` for installs from before the rename.
 - Android: the phone plays in the app itself, also away from home, with the phone's media
   controls and volume keys.
-- Android: picking songs, albums and playlists to keep on the phone from their ⋯ menu, a storage
+- Android: picking songs, albums and collections to keep on the phone from their ⋯ menu, a storage
   screen, and playing them through the app's own player with no network.
 - Simpler sign-in pages for streaming services.
 - Usage insights, the browser part: the notice, its Settings pages and the recording (off unless

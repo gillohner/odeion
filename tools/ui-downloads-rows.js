@@ -48,7 +48,7 @@ const rowBtn = async (p, list, nth, act) => { const r = `[data-list="${list}"] .
     // Play next on the Favourites row: right after the playing song
     await rowBtn(p, 'fav', 1, 'next');
     q = await queueTitles(p, ['Bright Morning', 'Cold River', 'Cold River', 'Amber Lights']);
-    check(JSON.stringify(q) === JSON.stringify(['Bright Morning', 'Cold River', 'Cold River', 'Amber Lights']), `${at}: Favourites › Play next puts Cold River right after the playing song (${JSON.stringify(q)})`);
+    check(JSON.stringify(q) === JSON.stringify(['Bright Morning', 'Cold River', 'Cold River', 'Amber Lights']), `${at}: Bookmarks › Play next puts Cold River right after the playing song (${JSON.stringify(q)})`);
 
     // The heart (kept here and sent to the node when it is back; ⋯ is hidden offline)
     await rowBtn(p, 'all', 1, 'fav');

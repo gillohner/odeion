@@ -1121,7 +1121,7 @@ pub enum FullError {
 }
 
 fn token_blocking(
-    library: &std::sync::Mutex<pm_library::Library>,
+    library: &pm_library::LibraryLock,
     auth: &str,
     client: &reqwest::blocking::Client,
     who: &Who,
@@ -1390,7 +1390,7 @@ fn read_answer(v: &Value, asked: &str) -> Result<(Answer, Media), FullError> {
 /// not signed in (use the official path). AAC where HI_RES_LOSSLESS was asked for is asked once
 /// more as LOSSLESS before it is played; one line in the log says what TIDAL answered.
 pub fn open_blocking(
-    library: &std::sync::Mutex<pm_library::Library>,
+    library: &pm_library::LibraryLock,
     ep: &crate::tidal::TidalEndpoints,
     id: &str,
     who: &Who,
@@ -1460,11 +1460,7 @@ pub fn open_blocking(
 
 /// Record how the mode did: a failure of the mode itself switches it off (the page says why;
 /// Retry switches it on again).
-pub fn record(
-    library: &std::sync::Mutex<pm_library::Library>,
-    who: &Who,
-    r: &Result<Option<FullStream>, FullError>,
-) {
+pub fn record(library: &pm_library::LibraryLock, who: &Who, r: &Result<Option<FullStream>, FullError>) {
     let Ok(lib) = library.lock() else { return };
     let mut st = load(&lib, who);
     match r {
