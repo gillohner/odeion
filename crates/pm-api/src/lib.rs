@@ -10423,7 +10423,10 @@ mod tests {
             ));
             r
         };
-        assert_eq!(status(get().body(Body::empty()).unwrap()).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            status(get().body(Body::empty()).unwrap()).await,
+            StatusCode::FORBIDDEN
+        );
         assert_eq!(status(from("203.0.113.5")).await, StatusCode::FORBIDDEN);
         let mut proxied = from("127.0.0.1");
         proxied
@@ -10435,7 +10438,10 @@ mod tests {
         assert_eq!(status(tunnel).await, StatusCode::FORBIDDEN);
         // From this machine and the local network it goes on to its own checks (no contact yet)
         assert_eq!(status(from("127.0.0.1")).await, StatusCode::PRECONDITION_FAILED);
-        assert_eq!(status(from("192.168.1.30")).await, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            status(from("192.168.1.30")).await,
+            StatusCode::PRECONDITION_FAILED
+        );
     }
 
     #[tokio::test]
@@ -10500,10 +10506,12 @@ mod tests {
         let get_ = |path: &'static str| {
             let app = app.clone();
             async move {
-                app.oneshot(mb_from_lan(Request::builder().uri(path).body(Body::empty()).unwrap()))
-                    .await
-                    .unwrap()
-                    .status()
+                app.oneshot(mb_from_lan(
+                    Request::builder().uri(path).body(Body::empty()).unwrap(),
+                ))
+                .await
+                .unwrap()
+                .status()
             }
         };
         assert_eq!(get_("/mb/ws/2/big").await, StatusCode::BAD_GATEWAY);
