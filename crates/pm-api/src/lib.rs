@@ -27901,6 +27901,30 @@ exec sleep 300
             assert_eq!(status, StatusCode::CONFLICT, "the same account, checked now");
         }
         owner_is("1");
+        // Someone signs in with account 5 and TIDAL vouches for it: the paste that only claimed it
+        // ends, and says why
+        let anna_who = accounts::Who::Listener(anna.to_string());
+        tidal_unofficial::update(&s, &anna_who, |st| {
+            st.session = Some(tidal_unofficial::Session {
+                access_token: names_5.clone(),
+                user_id: Some("5".into()),
+                expires_at: 4_000_000_000,
+                ..Default::default()
+            })
+        });
+        assert_eq!(
+            tidal_unofficial::load(&s.library.lock().unwrap(), &anna_who)
+                .session
+                .and_then(|x| x.user_id)
+                .as_deref(),
+            Some("5")
+        );
+        assert!(bens().is_none(), "Ben's claim ended");
+        let health = tidal_unofficial::load(&s.library.lock().unwrap(), &ben_who)
+            .health
+            .unwrap();
+        assert!(health.detail.contains("someone else"), "{}", health.detail);
+        tidal_unofficial::update(&s, &anna_who, |st| st.session = None);
         // (the steps below are a sign-in a renewal has named: confirmed)
         let kept = tidal_unofficial::Session {
             unconfirmed: false,

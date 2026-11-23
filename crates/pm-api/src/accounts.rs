@@ -367,9 +367,11 @@ impl Who {
             }
         }
         // A sign-in at a service: only an account that is nobody else's here
+        let mut tidal_account = None;
         if let Some((service, _)) = ACCOUNT_KEYS.iter().find(|(_, keys)| keys.contains(&base)) {
             if let Some(account) = value.and_then(|v| account_of(v, *service == TIDAL)) {
                 self.account_free(lib, base, &account)?;
+                tidal_account = (*service == TIDAL).then_some(account);
             }
         }
         match value {
@@ -377,6 +379,10 @@ impl Who {
             None => {
                 lib.delete_setting(&key)?;
             }
+        }
+        // The account is someone's here now: a pasted sign-in that only claimed it ends
+        if let Some(account) = tidal_account {
+            crate::tidal_unofficial::end_claims_on(lib, self, &account)?;
         }
         Ok(())
     }

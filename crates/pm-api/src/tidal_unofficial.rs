@@ -440,6 +440,42 @@ pub(crate) async fn held_to_its_person(
     Ok(sess)
 }
 
+/// Ends every unconfirmed pasted sign-in (`Session::unconfirmed`) of someone other than `me` that
+/// claims `account`: a sign-in TIDAL vouched for holds it now. Its health line says why. Written
+/// directly, not through `Who::put` (nothing is added that needs checking).
+pub(crate) fn end_claims_on(lib: &pm_library::Library, me: &Who, account: &str) -> Result<(), ApiError> {
+    let listed = crate::people::listed_keys(lib)?;
+    let holders = std::iter::once(Who::Owner).chain(listed.into_iter().map(Who::Listener));
+    for who in holders.filter(|w| w.own() != me.own()) {
+        let mut st = load(lib, &who);
+        let claims = st.session.as_ref().is_some_and(|c| {
+            c.unconfirmed
+                && c.user_id
+                    .as_deref()
+                    .and_then(crate::accounts::account_id)
+                    .as_deref()
+                    == Some(account)
+        });
+        if !claims {
+            continue;
+        }
+        st.session = None;
+        st.health = Some(Health {
+            ok: false,
+            detail: "This TIDAL account was signed in on this node by someone else, with TIDAL's own \
+                     confirmation. Sign in with your own account."
+                .into(),
+            at: now(),
+            lossy: false,
+        });
+        let Some(key) = who.setting(STATE_KEY) else {
+            continue;
+        };
+        lib.set_setting(&key, &serde_json::to_string(&st).expect("state serializes"))?;
+    }
+    Ok(())
+}
+
 /// The account a TIDAL token answer names (`user_id`, or `user.userId`), a number or text, read
 /// one way (`accounts::account_id`). Renewals read theirs the same way ([`renewed_for`]).
 pub(crate) fn answer_account(v: &Value) -> Option<String> {
