@@ -57,6 +57,9 @@ below it. Tests may (dev-dependencies): `pm-api`'s use `pm-web` and `pm-endpoint
   `docs/APP-DATA.md` (`pm-appdata` checks every app path against it), `docs/access.md` (`pm-api`
   checks it against the access table), and Markdown below the top level outside `docs/`
   (`pubky-music-specs` reads every file of its crate, its README too). Main runs everything.
+- `pm-api`'s unit tests are one file per area in `crates/pm-api/src/tests/` (zones, sign-in ways,
+  each large service, copies, scrobblers, ...), declared inside `mod tests` in `lib.rs`, which
+  keeps the helpers they share. A new test goes at the end of its area's file.
 - A page checked against fixtures is a script `tools/ui-<name>.js`, listed in
   `tools/ui-fixtures.list` (CI runs only listed pages and refuses an unlisted one);
   `tools/ui-fixture.js` serves the UI's files from the source tree, so these need no node.
