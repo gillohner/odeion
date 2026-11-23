@@ -1795,4 +1795,6 @@ async fn a_lost_vault_gets_the_nodes_sign_ins_back() {
     assert_eq!(r["signed_out"], json!([]), "{r}");
     assert_eq!(r["pushed"], json!([]), "{r}");
     assert_eq!(get(&n1, "jamendo.user").as_deref(), Some(jamendo));
+    let record: Value = serde_json::from_str(&get(&n1, "vault.synced.jamendo").unwrap()).unwrap();
+    assert_eq!(record.get("lost"), None, "not taken for a lost vault: {record}");
 }
