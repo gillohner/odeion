@@ -4237,10 +4237,11 @@ impl Library {
 
     pub fn file_by_path(&self, path: &Path) -> Result<Option<FileRow>> {
         let conn = self.lock();
-        Ok(conn
-            .prepare_cached(
-                "SELECT id, track_id, path, size_bytes, mtime_unix, missing FROM files WHERE path = ?1",
-            )?
+        // A rescan asks this for every file: the statement is prepared once per connection
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, track_id, path, size_bytes, mtime_unix, missing FROM files WHERE path = ?1",
+        )?;
+        let row = stmt
             .query_row(params![path.to_string_lossy()], |r| {
                 Ok(FileRow {
                     id: r.get(0)?,
@@ -4251,7 +4252,8 @@ impl Library {
                     missing: r.get::<_, i64>(5)? != 0,
                 })
             })
-            .optional()?)
+            .optional()?;
+        Ok(row)
     }
 
     pub fn begin_scan(&self, root: &Path) -> Result<i64> {

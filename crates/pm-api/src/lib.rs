@@ -28139,4 +28139,33 @@ exec sleep 300
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_folder_change_during_a_scan_is_scanned_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let s = state(dir.path(), None).await;
+        // Another scan holds the slot when the change comes
+        assert!(s.begin_scan());
+        let _watcher = crate::watch::spawn(
+            s.clone(),
+            vec![music.clone()],
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap();
+        let song = music.join("new.wav");
+        write_wav(&song, 4410);
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        assert!(s.library.lock().unwrap().file_by_path(&song).unwrap().is_none());
+        s.end_scan();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while s.library.lock().unwrap().file_by_path(&song).unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the change was not scanned after the running scan"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
 }

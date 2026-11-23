@@ -8,7 +8,8 @@
 //! size+mtime check re-indexes anything that changed afterwards anyway.
 //!
 //! Only the library folders the changes are in are rescanned: a rescan looks
-//! at every file of a folder, which over a network share takes long.
+//! at every file of a folder, which over a network share takes long. Changes
+//! that meet a running scan wait for it to end.
 
 use crate::state::NodeState;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -28,12 +29,10 @@ pub fn spawn(
     quiet: Duration,
 ) -> notify::Result<RecommendedWatcher> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PathBuf>>();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| match res {
-        Ok(ev) if ev.kind.is_create() || ev.kind.is_modify() || ev.kind.is_remove() => {
-            let _ = tx.send(ev.paths);
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+        if let Some(paths) = changed_paths(res) {
+            let _ = tx.send(paths);
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!("folder watch: {e}"),
     })?;
     for f in &folders {
         match watcher.watch(f, RecursiveMode::Recursive) {
@@ -45,23 +44,47 @@ pub fn spawn(
         while let Some(first) = rx.recv().await {
             let mut changed = Changed::default();
             changed.add(first);
-            // Drain until quiet.
             loop {
-                match tokio::time::timeout(quiet, rx.recv()).await {
-                    Ok(Some(paths)) => changed.add(paths),
-                    Ok(None) => return,
-                    Err(_) => break,
+                // Drain until quiet.
+                loop {
+                    match tokio::time::timeout(quiet, rx.recv()).await {
+                        Ok(Some(paths)) => changed.add(paths),
+                        Ok(None) => return,
+                        Err(_) => break,
+                    }
                 }
-            }
-            let roots = changed.roots(state.all_folders());
-            match state.start_scan(roots) {
-                Ok(true) => tracing::info!("folder change: rescanning"),
-                Ok(false) => tracing::debug!("folder change: scan already running"),
-                Err(e) => tracing::warn!("folder change: {e}"),
+                match state.start_scan(changed.roots(state.all_folders())) {
+                    Ok(true) => tracing::info!("folder change: rescanning"),
+                    // Another scan runs (the start's, one asked for, an earlier change's), and it
+                    // may not cover these folders or may have passed the changed files: the
+                    // changes are kept, with what comes meanwhile, and tried again after a quiet
+                    // period
+                    Ok(false) => {
+                        tracing::debug!("folder change: a scan is running; trying again after it");
+                        continue;
+                    }
+                    Err(e) => tracing::warn!("folder change: {e}"),
+                }
+                break;
             }
         }
     });
     Ok(watcher)
+}
+
+/// What a watch event asks to rescan: its paths for a change, no paths (every folder) when
+/// events were lost (the system's event queue overflowed) or the watch reported an error, and
+/// nothing for events that change no file (a file read or opened).
+fn changed_paths(res: notify::Result<Event>) -> Option<Vec<PathBuf>> {
+    match res {
+        Ok(ev) if ev.need_rescan() => Some(Vec::new()),
+        Ok(ev) if ev.kind.is_create() || ev.kind.is_modify() || ev.kind.is_remove() => Some(ev.paths),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!("folder watch: {e}");
+            Some(Vec::new())
+        }
+    }
 }
 
 /// The paths changed in one quiet period.
@@ -130,15 +153,40 @@ mod tests {
             vec![PathBuf::from("/music/rock"), PathBuf::from("/nas/share")]
         );
         // The folder itself (removed, renamed)
-        assert_eq!(changed(&["/music/rock"]).roots(folders()), vec![PathBuf::from("/music/rock")]);
+        assert_eq!(
+            changed(&["/music/rock"]).roots(folders()),
+            vec![PathBuf::from("/music/rock")]
+        );
         // A name that only starts like a folder is not in it
         assert_eq!(changed(&["/music/rockabilly/x.mp3"]).roots(folders()), folders());
     }
 
     #[test]
+    fn lost_events_and_errors_rescan_every_folder() {
+        use notify::event::{AccessKind, CreateKind, EventKind, Flag};
+        let created = Event::new(EventKind::Create(CreateKind::File)).add_path("/music/jazz/a.flac".into());
+        assert_eq!(
+            changed_paths(Ok(created)),
+            Some(vec![PathBuf::from("/music/jazz/a.flac")])
+        );
+        // The system dropped events: they may have been anywhere
+        let lost = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        assert_eq!(changed_paths(Ok(lost)), Some(Vec::new()));
+        assert_eq!(
+            changed_paths(Err(notify::Error::generic("queue overflow"))),
+            Some(Vec::new())
+        );
+        let read = Event::new(EventKind::Access(AccessKind::Read)).add_path("/music/jazz/a.flac".into());
+        assert_eq!(changed_paths(Ok(read)), None);
+    }
+
+    #[test]
     fn unknown_changes_rescan_every_folder() {
         // A path outside every folder (another form of it)
-        assert_eq!(changed(&["/private/music/jazz/a.flac"]).roots(folders()), folders());
+        assert_eq!(
+            changed(&["/private/music/jazz/a.flac"]).roots(folders()),
+            folders()
+        );
         // An event without a path
         let mut c = changed(&["/music/jazz/a.flac"]);
         c.add(Vec::new());
