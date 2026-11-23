@@ -2397,29 +2397,30 @@ impl Library {
     /// A song that names no artist is taken too; another artist's song of the same title (a
     /// cover, a namesake) is no match. Names compare as [`match_key`] folds them.
     pub fn find_by_title_artist(&self, title: &str, artist: Option<&str>) -> Result<Option<Track>> {
-        self.find_by_title_artist_except(title, artist, &[])
+        self.find_by_title_artist_where(title, artist, &[], &|_| true)
     }
 
     /// [`Self::find_by_title_artist`] never taking a track of `except` (ones already looked at
-    /// and turned down).
-    fn find_by_title_artist_except(
+    /// and turned down), and only one `keep` takes.
+    fn find_by_title_artist_where(
         &self,
         title: &str,
         artist: Option<&str>,
         except: &[Option<TrackId>],
+        keep: &dyn Fn(&Track) -> bool,
     ) -> Result<Option<Track>> {
         let title = title.trim();
         if title.is_empty() {
             return Ok(None);
         }
-        let artist = entry_artist(artist);
+        let artist = artist.unwrap_or("").trim();
         let q = if artist.is_empty() {
             title.to_string()
         } else {
             format!("{title} {artist}")
         };
         let mut hits = self.search_tracks(&q, 20)?;
-        hits.retain(|t| !except.contains(&t.id));
+        hits.retain(|t| !except.contains(&t.id) && keep(t));
         if !artist.is_empty()
             && !hits
                 .iter()
@@ -2427,7 +2428,7 @@ impl Library {
         {
             // Added to the first search's hits: one of them may be a song without an artist
             for t in self.search_tracks(title, 20)? {
-                if !hits.iter().any(|h| h.id == t.id) && !except.contains(&t.id) {
+                if !hits.iter().any(|h| h.id == t.id) && !except.contains(&t.id) && keep(&t) {
                     hits.push(t);
                 }
             }
@@ -2504,9 +2505,12 @@ impl Library {
                 turned_down.extend(hits.iter().map(|h| h.id));
             }
         }
-        let found = self.find_by_title_artist_except(&t.title, t.artist.as_deref(), &turned_down)?;
-        // The title search too: without an artist, a line that names a folder needs it here
-        Ok(found.filter(|h| (named || near(h)) && on_album(h)))
+        // The title search too: without an artist, a line that names a folder needs it here; the
+        // first song that passes is taken, not the first of the title
+        let artist = Some(entry_artist(t.artist.as_deref())).filter(|a| !a.is_empty());
+        self.find_by_title_artist_where(&t.title, artist, &turned_down, &|h| {
+            (named || near(h)) && on_album(h)
+        })
     }
 
     /// [`Self::resolve_import`] for a playlist file in `base`: a relative line is first the
@@ -8613,11 +8617,11 @@ mod identify_tests {
             .find_by_title_artist("Heart of Hearts", Some("!!!"))
             .unwrap()
             .is_some());
-        // A compilation's row naming "Various Artists" names no one: matched by its title
+        // Outside imports (Subsonic getLyrics) "Various Artists" is a name: not anyone's song
         assert!(lib
             .find_by_title_artist("Heart of Hearts", Some("Various Artists"))
             .unwrap()
-            .is_some());
+            .is_none());
         // A song with no artist of its own whose album artist is a pair: either of them names it
         let mut duo = import_test_track("/m/duo/Song.flac", "Song", None, 100);
         duo.album = sample_track("/m/duo/x.flac", "x").album;
@@ -8662,5 +8666,23 @@ mod identify_tests {
         // A row that names an artist is matched as before
         let named = entry("Intro", Some("Band"), None, None);
         assert!(lib.resolve_import(&named).unwrap().is_some());
+        // With the compilation's own "Intro" found after Band's, the row takes the compilation's
+        let mut comp = import_test_track("/m/va/Intro.flac", "Intro", Some("Somebody"), 100);
+        comp.album = sample_track("/m/va/x.flac", "x").album;
+        if let Some(a) = comp.album.as_mut() {
+            a.title = "Summer Hits".into();
+            a.album_artist = Some("Various Artists".into());
+        }
+        lib.upsert_track(&comp).unwrap();
+        assert_eq!(
+            lib.search_tracks("Intro", 20).unwrap()[0].file.path,
+            std::path::Path::new("/m/b/Intro.flac"),
+            "Band's is the first hit"
+        );
+        row.album = Some("Summer Hits".into());
+        assert_eq!(
+            path_of(lib.resolve_import(&row).unwrap()).as_deref(),
+            Some("/m/va/Intro.flac")
+        );
     }
 }

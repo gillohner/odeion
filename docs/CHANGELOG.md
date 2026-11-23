@@ -6,7 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-23
 
-- **Imported songs land on the right artist's song.** A playlist import, a Roon export (with its bookmarks and tags), a play reported by an app and a Subsonic app's lyrics request matched a line by its title when no song of that title and artist was found, so "Hurt" by Johnny Cash could land on Nine Inch Nails' "Hurt"; and a line naming a file took the library's only file of that name wherever it was. Now a line that names an artist matches only that artist's song (names compared without case, accents, punctuation or a leading "the"; a credit naming several artists matches any of them; "Various Artists" names no one), and a file of the same name in another place is taken only when its folders, or its title and artist, agree. A line that matches nothing is listed in the import's report instead.
+- **Imported songs land on the right artist's song.** A playlist import, a Roon export (with its bookmarks and tags), a play reported by an app and a Subsonic app's lyrics request matched a line by its title when no song of that title and artist was found, so "Hurt" by Johnny Cash could land on Nine Inch Nails' "Hurt"; and a line naming a file took the library's only file of that name wherever it was. Now a line that names an artist matches only that artist's song (names compared without case, accents, punctuation or a leading "the"; a credit naming several artists matches any of them; an import's line naming "Various Artists" takes a song of its own album only), and a file of the same name in another place is taken only when its folders, or its title and artist, agree. A line that matches nothing is listed in the import's report instead.
 
 ### 2026-11-22
 
