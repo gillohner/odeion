@@ -41,7 +41,8 @@ and outputs › Group outputs** and press **Create group**:
 - **Chromecast:** a speaker group made in the Google Home app shows up as one speaker.
 
 A speaker of a group that is switched off, or that goes away while the group plays, is left out and
-the others play on; it joins again when the group starts after a Stop.
+the others play on; it joins again when the group starts again (after a Stop, or with a song in
+another format).
 
 ## A Raspberry Pi with a DAC (squeezelite)
 
