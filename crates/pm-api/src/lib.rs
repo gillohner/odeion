@@ -28038,11 +28038,38 @@ exec sleep 300
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let knows = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // How the token endpoint answers a renewal: 0 as usual, 1 refused while another renewal
+        // replaces the kept refresh token (Spotify rotates it), 2 refused (revoked)
+        let renewal = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let node: Arc<std::sync::OnceLock<Arc<NodeState>>> = Arc::new(std::sync::OnceLock::new());
         let mock = Router::new()
             .route(
                 "/api/token",
-                post(|| async {
-                    Json(serde_json::json!({"access_token": "new-at", "refresh_token": "r", "expires_in": 3600, "scope": "x"}))
+                post({
+                    let (renewal, node) = (renewal.clone(), node.clone());
+                    move |body: String| {
+                        let (renewal, node) = (renewal.clone(), node.clone());
+                        async move {
+                            let mode = renewal.load(std::sync::atomic::Ordering::SeqCst);
+                            if body.contains("grant_type=refresh_token") && mode > 0 {
+                                if mode == 1 {
+                                    let s = node.get().unwrap();
+                                    s.library.lock().unwrap().set_setting(
+                                        "spotify.user",
+                                        &serde_json::json!({"access_token": "owner-at-2", "refresh_token": "r-new", "expires_at": pm_library::db::now_unix() + 3600, "scope": "x"}).to_string(),
+                                    ).unwrap();
+                                }
+                                return (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(serde_json::json!({"error": "invalid_grant", "error_description": "Invalid refresh token"})),
+                                );
+                            }
+                            (
+                                StatusCode::OK,
+                                Json(serde_json::json!({"access_token": "new-at", "refresh_token": "r", "expires_in": 3600, "scope": "x"})),
+                            )
+                        }
+                    }
                 }),
             )
             .route(
@@ -28067,6 +28094,7 @@ exec sleep 300
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
         let dir = tempfile::tempdir().unwrap();
         let (s, _anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let _ = node.set(s.clone());
         {
             let mut ep = s.spotify.write().unwrap();
             (ep.api_base, ep.accounts_base) = (base.clone(), base.clone());
@@ -28176,6 +28204,34 @@ exec sleep 300
         let to = sign_in().await;
         assert!(!to.contains("error"), "{to}");
         assert!(row(&format!("person.{ben}.spotify.user")).is_some());
+        // A renewal refused because another renewal replaced the refresh token meanwhile is not a
+        // revoked sign-in: Ben's is not kept (asked again later); one Spotify refuses for good is
+        let stale = serde_json::json!({"access_token": "owner-old", "refresh_token": "r-old", "expires_at": 1, "scope": "x"}).to_string();
+        let again = |mode: u8| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting("spotify.user", &stale)
+                .unwrap();
+            s.library
+                .lock()
+                .unwrap()
+                .delete_setting(&format!("person.{ben}.spotify.user"))
+                .unwrap();
+            renewal.store(mode, std::sync::atomic::Ordering::SeqCst);
+        };
+        again(1);
+        let to = sign_in().await;
+        assert!(
+            to.contains("error") && to.contains("could+not+be+checked"),
+            "{to}"
+        );
+        assert!(row(&format!("person.{ben}.spotify.user")).is_none());
+        again(2);
+        let to = sign_in().await;
+        assert!(!to.contains("error"), "revoked: {to}");
+        assert!(row(&format!("person.{ben}.spotify.user")).is_some());
+        renewal.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Radio goes on when the queue runs out, not after a Stop (its own file).

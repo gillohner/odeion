@@ -379,15 +379,28 @@ enum Kept {
 /// The account of `holder`'s kept sign-in: one kept without it (Spotify did not answer when it
 /// was made) asks Spotify now and keeps the answer.
 async fn account_known(s: &NodeState, holder: &Who) -> Kept {
-    if load_user(s, holder).is_none_or(|u| names_account(&u)) {
+    let Some(kept) = load_user(s, holder) else {
+        return Kept::Known;
+    };
+    if names_account(&kept) {
         return Kept::Known;
     }
     // (a renewal on the way asks too)
     let token = match user_token(s, holder).await {
         Ok(Some(token)) => token,
         Ok(None) => return Kept::Dead,
-        // (Spotify revoked the sign-in; anything else, a wrong app or a rate limit, is asked again)
-        Err(e) if refused_for_good(&e) => return Kept::Dead,
+        // Spotify revoked the sign-in; anything else, a wrong app or a rate limit, is asked again.
+        // (A renewal refused because another one renewed it meanwhile, its refresh token changed
+        // since: that sign-in lives on, and is asked about again)
+        Err(e) if refused_for_good(&e) => {
+            let renewed_meanwhile =
+                load_user(s, holder).is_none_or(|now| now.refresh_token != kept.refresh_token);
+            return if renewed_meanwhile {
+                Kept::NotNow
+            } else {
+                Kept::Dead
+            };
+        }
         Err(_) => return Kept::NotNow,
     };
     let Some(mut u) = load_user(s, holder) else {
