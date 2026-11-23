@@ -331,7 +331,7 @@ fn tail_detail(tail: &[String]) -> String {
     }
 }
 
-fn record_health(lib: &Arc<std::sync::Mutex<pm_library::Library>>, ok: bool, detail: String) {
+fn record_health(lib: &Arc<pm_library::LibraryLock>, ok: bool, detail: String) {
     let lib = lib.lock().expect("library poisoned");
     let mut st = load(&lib);
     st.health = Some(Health {
@@ -395,7 +395,7 @@ fn watch(
     name: String,
     pipewire: String,
     dir: PathBuf,
-    lib: Arc<std::sync::Mutex<pm_library::Library>>,
+    lib: Arc<pm_library::LibraryLock>,
 ) {
     use std::io::BufRead;
     let mut failures = 0u32;

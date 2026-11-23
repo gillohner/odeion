@@ -91,7 +91,7 @@ const QUIET = { body: { section: 'trending-songs', items: [], tags: [], note: 'N
         await page.locator('#h-played .tile').first().waitFor().catch(() => {});
         check(await page.locator('#h-played .tile').count() === 1 && await page.locator('#h-added .tile').count() === 1, `${at}: Try again draws Recently played and Recently added`);
         check(asked('/library/home') === lib1 + 1, `${at}: …asking the library once (${asked('/library/home') - lib1})`);
-        check(await page.locator('#h-played [data-hretry], #h-added [data-hretry]').count() === 0 && await page.locator('#h-forgotten').count() === 0, `${at}: …with no Try again left, and Forgotten favourites (none) gone`);
+        check(await page.locator('#h-played [data-hretry], #h-added [data-hretry]').count() === 0 && await page.locator('#h-forgotten').count() === 0, `${at}: …with no Try again left, and Forgotten bookmarks (none) gone`);
         check(asked('/home/trending-songs') === trend0 && asked('/home/trending-albums') === alb0, `${at}: the Pubky rows are not asked again`);
         if (!mobile) check(await focused('#h-played'), `${at}: answered, the keyboard is on the Recently played row`);
 

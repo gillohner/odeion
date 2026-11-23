@@ -21,7 +21,7 @@ const PAGES = [
   ['/albums', 'Albums', /No albums yet/, { fixtures: { '/library/albums': { body: [album] } } }, '1'],
   ['/artists', 'Artists', /No artists yet/, { fixtures: { '/library/artists': { body: fx.artists.map((a) => ({ ...a, albums: 1, tracks: 1 })) } } }, '2'],
   ['/tracks', 'Songs', /No songs yet/, {}, '1'],
-  ['/playlists', 'Playlists', /No playlists yet/, { collections: [fx.summary] }, '1'],
+  ['/playlists', 'Collections', /No collections yet/, { collections: [fx.summary] }, '1'],
   // Albums with Favourites kept on (it is remembered on this device): "0 of 0" said it too
   ['/albums', 'Albums', /No albums yet/, { fixtures: { '/library/albums': { body: [album] } } }, '0 of 1', true],
 ];
@@ -32,7 +32,7 @@ const PAGES = [
     for (const w of [1280, 1024, 768]) {
       for (const [p, title, none, some, want, favOn] of PAGES) {
         for (const empty of [true, false]) {
-          const what = `${w} ${title}${favOn ? ' (Favourites on)' : ''} ${empty ? 'empty' : 'with something'}`;
+          const what = `${w} ${title}${favOn ? ' (Bookmarks on)' : ''} ${empty ? 'empty' : 'with something'}`;
           const { page, context, state } = await fx.create(browser, w, empty ? { tracks: [] } : some);
           if (favOn) await context.addInitScript(() => localStorage.setItem('pm.list.albums', JSON.stringify({ fav: true })));
           try {

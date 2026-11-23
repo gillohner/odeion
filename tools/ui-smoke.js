@@ -115,7 +115,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const plBefore = await (await fetch(BASE + '/v1/playlists', { headers: { authorization: 'Bearer ' + TOKEN } })).json();
     save.click(); await sleep(600);
     const plAfter = await (await fetch(BASE + '/v1/playlists', { headers: { authorization: 'Bearer ' + TOKEN } })).json();
-    console.log('save queue as playlist: playlists', plBefore.length, '->', plAfter.length);
+    console.log('save queue as collection: collections', plBefore.length, '->', plAfter.length);
     for (const p of plAfter) if (!plBefore.some((b) => b.id === p.id)) await fetch(BASE + '/v1/playlists/' + encodeURIComponent(p.id), { method: 'DELETE', headers: { authorization: 'Bearer ' + TOKEN } });
   } else errors.push('no save-as-playlist button on the queue page');
   if (w.document.querySelectorAll('.list.queue .list-row').length !== before) errors.push('shuffle changed the queue length');
@@ -130,7 +130,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // Track ⋯ menu opens with "Add to playlist…" (one picker, not every playlist; UX review #3).
   w.document.querySelector('.nav-item[data-view="tracks"]').click(); await sleep(800);
   const more = w.document.querySelector('.track [data-act="more"]');
-  if (more) { more.click(); await sleep(400); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('track menu:', items.join(' | ')); if (!items.includes('Play next') || !items.includes('Add to playlist…')) errors.push('track menu incomplete'); w.document.body.click(); }
+  if (more) { more.click(); await sleep(400); const items = [...w.document.querySelectorAll('.popover.menu .pop-item span')].map((e) => e.textContent); console.log('track menu:', items.join(' | ')); if (!items.includes('Play next') || !items.includes('Add to collection…')) errors.push('track menu incomplete'); w.document.body.click(); }
   // Discover: the chart tabs render; with a contact set the rows carry site badges and a details menu.
   // Home replaces Discover: its sections render (each on its own).
   w.document.querySelector('.nav-item[data-view="home"]').click(); await sleep(5000);

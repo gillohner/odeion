@@ -113,20 +113,11 @@ pub fn guest_of(s: &NodeState, token: &str) -> Option<(Party, usize)> {
     })
 }
 
-/// Whether a guest may make this request: only the party routes and covers.
+/// Whether a party guest may make this request, by its path. `None` = yes; `Some(why)` = no. The
+/// router asks [`crate::access::decide`] with the route it matched; this is the same answer for
+/// callers that hold a path: the party's own calls and album covers, nothing else.
 pub fn guest_refusal(method: &axum::http::Method, path: &str) -> Option<&'static str> {
-    let path = path.strip_prefix("/v1").unwrap_or(path);
-    if path == "/party/guest" || path.starts_with("/party/guest/") {
-        return None;
-    }
-    let is_cover = path
-        .strip_prefix("/library/albums/")
-        .and_then(|r| r.strip_suffix("/cover"))
-        .is_some_and(|id| id.parse::<i64>().is_ok());
-    if is_cover && (*method == axum::http::Method::GET || *method == axum::http::Method::HEAD) {
-        return None;
-    }
-    Some("a party guest can only add songs to the party")
+    crate::access::guest_refusal(method, path)
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
@@ -610,7 +601,6 @@ mod tests {
             "/v1/zones",
             "/v1/library/tracks",
             "/v1/library/albums/12",
-            "/v1/library/albums/x/cover",
             "/v1/party/guests",
             "/v1/settings",
         ] {

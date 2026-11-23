@@ -71,23 +71,23 @@ async function run(browser, width) {
 
   const lib = await openMenu(page, 1, phone);
   await page.screenshot({ path: path.join(shots, `queue-menu-${width}.png`) });
-  for (const want of ['Add to playlist…', 'Add to favourites', 'Go to album']) check(lib.includes(want), `${width}: a library song's ⋯ has ${want} (${lib.join(' | ')})`);
+  for (const want of ['Add to collection…', 'Add to Bookmarks', 'Go to album']) check(lib.includes(want), `${width}: a library song's ⋯ has ${want} (${lib.join(' | ')})`);
   check(phone === (lib[0] === 'Move up'), `${width}: Move up is ${phone ? 'first in' : 'not in'} the ⋯`);
   check(lib.includes('Remove from queue') === phone, `${width}: Remove from queue is ${phone ? '' : 'not '}in the ⋯`);
 
   // Add to playlist… › the playlist: that song goes in by its track id
-  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Add to playlist…' }).click();
+  await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Add to collection…' }).click();
   await page.locator('dialog [data-ppi="0"]').click();
   await page.waitForTimeout(300);
   const add = state.hits.find((h) => h.m === 'POST' && h.v === '/playlists/c1/items');
-  check(add && JSON.parse(add.body).track_ids?.join(',') === '2', `${width}: Add to playlist sends Song 2 (${add && add.body})`);
+  check(add && JSON.parse(add.body).track_ids?.join(',') === '2', `${width}: Add to collection sends Song 2 (${add && add.body})`);
 
   const streamed = await openMenu(page, 3, phone);
-  check(streamed.includes('Go to song page') && !streamed.includes('Add to playlist…'), `${width}: a streamed song's ⋯ has Go to song page (${streamed.join(' | ')})`);
+  check(streamed.includes('Go to song page') && !streamed.includes('Add to collection…'), `${width}: a streamed song's ⋯ has Go to song page (${streamed.join(' | ')})`);
   await close(page);
 
   const unknown = await openMenu(page, 2, phone);
-  check(unknown.includes('Go to song page') && !unknown.includes('Add to playlist…'), `${width}: a library song the node didn't answer for still has a menu: Go to song page (${unknown.join(' | ')})`);
+  check(unknown.includes('Go to song page') && !unknown.includes('Add to collection…'), `${width}: a library song the node didn't answer for still has a menu: Go to song page (${unknown.join(' | ')})`);
   await close(page);
 
   // Two ⋯ tapped quickly: Song 2's still reads (its versions held), Song 3's opens at once; Song 2's
@@ -139,7 +139,7 @@ async function run(browser, width) {
     go(); hold = null;
     await page.locator('.popover.menu:not([hidden]) .pop-item').first().waitFor({ timeout: 2500 }).catch(() => {});
     const its = await menuItems(page);
-    check(await title(page) === 'Song 2' && its.includes('Add to playlist…'), `${width}: a ⋯ whose queue was drawn again while its menu read opens the song's menu (${await title(page)}: ${its.join(' | ')})`);
+    check(await title(page) === 'Song 2' && its.includes('Add to collection…'), `${width}: a ⋯ whose queue was drawn again while its menu read opens the song's menu (${await title(page)}: ${its.join(' | ')})`);
     check(!its.includes('Move up') && its.includes('Move down') === phone, `${width}: with Move up / Move down for where the song is now (${its.join(' | ')})`);
     if (!phone) check(await atMore(0), `${width}: at the song's new ⋯`);
     await page.screenshot({ path: path.join(shots, `queue-menu-redrawn-${width}.png`) });
