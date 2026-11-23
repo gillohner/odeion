@@ -1380,11 +1380,7 @@ fn refresh_failed(f: auto::Fail) -> StreamError {
 /// New app values after Qobuz refused `old`'s: another refresh's if one came first, else the web
 /// player's candidates (at most one look per [`DISCOVERY_EVERY`]) and the first secret that works.
 /// Ends within [`DEADLINE`], waiting for the lock included.
-async fn refresh_app(
-    library: &std::sync::Mutex<pm_library::Library>,
-    old: &App,
-    token: &str,
-) -> Result<App, StreamError> {
+async fn refresh_app(library: &pm_library::LibraryLock, old: &App, token: &str) -> Result<App, StreamError> {
     let refresh = async {
         let _guard = APP_LOCK.lock().await;
         if let Some(current) = {
@@ -1421,7 +1417,7 @@ fn ask_file_url_blocking(app: &App, token: &str, id: &str, format: u32) -> Resul
 
 /// The stream URL of a track (the audio thread).
 pub fn file_url_blocking(
-    library: &std::sync::Mutex<pm_library::Library>,
+    library: &pm_library::LibraryLock,
     id: &str,
     who: &Who,
 ) -> Result<String, StreamError> {
@@ -1484,7 +1480,7 @@ async fn file_url(s: &NodeState, who: &Who, id: &str, format: u32) -> Result<Str
 }
 
 /// Record how the source did: a failure of the mode itself switches it off.
-pub fn record(library: &std::sync::Mutex<pm_library::Library>, who: &Who, r: &Result<String, StreamError>) {
+pub fn record(library: &pm_library::LibraryLock, who: &Who, r: &Result<String, StreamError>) {
     let Ok(lib) = library.lock() else { return };
     let mut st = load(&lib, who);
     match r {
@@ -1511,7 +1507,7 @@ pub fn record(library: &std::sync::Mutex<pm_library::Library>, who: &Who, r: &Re
 
 /// A `qobuz:track:<id>` for a zone.
 pub(crate) fn open_track_blocking(
-    library: &std::sync::Mutex<pm_library::Library>,
+    library: &pm_library::LibraryLock,
     id: &str,
     who: &Who,
 ) -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::SourceError> {

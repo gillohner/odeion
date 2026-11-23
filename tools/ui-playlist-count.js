@@ -32,26 +32,26 @@ const rows = (page, sel) => page.$$eval(sel, (rs) => Object.fromEntries(rs.map((
         // The Playlists page
         await fx.go(page, '/playlists');
         await page.waitForSelector('[data-pl="m1"]');
-        check(await rows(page, '[data-pl]'), want, `${tag} Playlists page counts`);
+        check(await rows(page, '[data-pl]'), want, `${tag} Collections page counts`);
         await page.screenshot({ path: path.join(shots, `${tag}-playlists.png`) });
         // A song's ⋯ › Add to playlist…
         await fx.go(page, '/tracks');
         await page.locator('button[aria-label^="More for"]').first().click();
-        await page.getByText('Add to playlist…').click();
+        await page.getByText('Add to collection…').click();
         await page.waitForSelector('#pplist [data-ppi]');
         const picked = await rows(page, '#pplist [data-ppi]');
-        check(picked, want, `${tag} Add to playlist picker counts`);
+        check(picked, want, `${tag} Add to collection picker counts`);
         await page.screenshot({ path: path.join(shots, `${tag}-picker.png`) });
         await page.locator('[data-ppclose]').click();
         // Someone's shared playlists
         await fx.go(page, `/shared/${KEY}`);
         await page.waitForSelector('[data-shpl]');
-        check(await rows(page, '[data-shpl]'), wantShared, `${tag} shared playlists counts`);
+        check(await rows(page, '[data-shpl]'), wantShared, `${tag} shared collections counts`);
         await page.screenshot({ path: path.join(shots, `${tag}-shared.png`) });
         // Their profile's Playlists they share
         await fx.go(page, `/person/${KEY}`);
         await page.waitForSelector('[data-pshared]');
-        check(await rows(page, '[data-pshared]'), wantShared, `${tag} profile's shared playlists counts`);
+        check(await rows(page, '[data-pshared]'), wantShared, `${tag} profile's shared collections counts`);
         await page.screenshot({ path: path.join(shots, `${tag}-profile.png`) });
         await fx.cleanCopy(page);
         check(state.errors, [], `${tag} no page errors`);

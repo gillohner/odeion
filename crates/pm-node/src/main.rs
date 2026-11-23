@@ -708,6 +708,28 @@ async fn upload(cfg: &NodeConfig, files: &[PathBuf]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A panic anywhere (a request, a background task, a zone's thread) is written to the node's log
+/// with where it happened, before the default report on stderr: a task that died of one is
+/// otherwise only missed, never seen.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let what = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic".into());
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        let thread = std::thread::current();
+        tracing::error!(thread = thread.name().unwrap_or("unnamed"), %at, "panic: {what}");
+        default(info);
+    }));
+}
+
 fn main() -> anyhow::Result<()> {
     // First, while this is the only thread: ODEION_ settings onto the PM_ names the code reads
     let env_compat = pm_model::brand::apply_env_compat();
@@ -718,6 +740,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run(env_compat: pm_model::brand::EnvPlan) -> anyhow::Result<()> {
+    log_panics();
     pm_out_local::quiet_alsa_lib();
     let mut filter = tracing_subscriber::EnvFilter::from_default_env();
     // Symphonia warns about harmless things in many files (junk bytes before a frame, ID3

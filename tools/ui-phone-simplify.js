@@ -313,7 +313,7 @@ const overflow = (page) => page.evaluate(() => {
     // a playlist page keeps its own header (the album layout is for the item pages)
     await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plsongs .srow'); await sleep(400);
     const pl = await page.evaluate(() => { const hero = document.querySelector('#main > .hero'); const kids = [...hero.querySelectorAll(':scope > div:not(.art) > *')].map((e) => Math.round(e.getBoundingClientRect().width)); return { item: hero.classList.contains('item-hero'), min: Math.min(...kids.filter((x) => x > 0)), sw: document.documentElement.scrollWidth, vw: innerWidth }; });
-    check(!pl.item && pl.min > 150 && pl.sw <= pl.vw, `${at}: a playlist's header is laid out as before (narrowest part ${pl.min} px, page ${pl.sw} of ${pl.vw})`);
+    check(!pl.item && pl.min > 150 && pl.sw <= pl.vw, `${at}: a collection's header is laid out as before (narrowest part ${pl.min} px, page ${pl.sw} of ${pl.vw})`);
     await context.close();
   }
   // ---- nothing playing: Now playing still names the zone and opens Play to and Sound ----

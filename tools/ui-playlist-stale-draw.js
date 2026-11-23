@@ -86,12 +86,12 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         for (let i = 0; i < 50 && !socket; i++) await sleep(100);
         check(!!socket, `${width}: events connected`);
         const first = await order();
-        check(JSON.stringify(first) === '["Alpha","Xylo","Bravo","Alpha"]', `${width}: the playlist shows as the server has it (${first})`);
+        check(JSON.stringify(first) === '["Alpha","Xylo","Bravo","Alpha"]', `${width}: the collection shows as the server has it (${first})`);
         // The first redraw's read is held; meanwhile another device moves the last Alpha up to second place
         const release = gate('c1');
         const asked = asks.length;
         socket.send(JSON.stringify({ type: 'library_changed' }));
-        check(await until(async () => asks.slice(asked).includes('c1'), 2000), `${width}: a library change reads the playlist again`);
+        check(await until(async () => asks.slice(asked).includes('c1'), 2000), `${width}: a library change reads the collection again`);
         lists.c1 = ['A', 'A', 'X', 'B'];
         socket.send(JSON.stringify({ type: 'library_changed' }));
         await until(async () => JSON.stringify(await order()) === '["Alpha","Alpha","Xylo","Bravo"]', 3000);
@@ -117,14 +117,14 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         await page.waitForSelector('#main [data-pl="c3"]');
         const at = asks.length;
         await page.click('#main [data-pl="c3"] .name');
-        check(await until(async () => asks.slice(at).includes('c3') && asks.slice(at).includes('c3/play-from'), 2000), `${width}: the first playlist is asked for`);
+        check(await until(async () => asks.slice(at).includes('c3') && asks.slice(at).includes('c3/play-from'), 2000), `${width}: the first collection is asked for`);
         await sleep(100);
         await page.evaluate(() => { const st = { v: 'playlist', arg: 'c2' }; history.pushState(st, '', '/playlist/c2'); dispatchEvent(new PopStateEvent('popstate', { state: st })); });
         await until(async () => (await title()) === 'Quiet hours', 3000);
-        check((await title()) === 'Quiet hours', `${width}: the second playlist opens ("${await title()}")`);
+        check((await title()) === 'Quiet hours', `${width}: the second collection opens ("${await title()}")`);
         await sleep(1600); // past the first one's 1.2 s wait
         const t2 = await title(); const o2 = await order();
-        check(t2 === 'Quiet hours' && JSON.stringify(o2) === '["Charlie"]', `${width}: the first playlist never draws under the second's address ("${t2}", ${o2}, ${await page.evaluate(() => location.pathname)})`);
+        check(t2 === 'Quiet hours' && JSON.stringify(o2) === '["Charlie"]', `${width}: the first collection never draws under the second's address ("${t2}", ${o2}, ${await page.evaluate(() => location.pathname)})`);
         releasePf(); await sleep(400);
         check((await title()) === 'Quiet hours', `${width}: its late sources don't draw it either ("${await title()}")`);
         await page.screenshot({ path: path.join(SHOTS, `other-playlist-${width}.png`) });
@@ -133,7 +133,7 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         const releaseFail = gate('c2', true);
         const asked3 = asks.length;
         socket.send(JSON.stringify({ type: 'library_changed' }));
-        check(await until(async () => asks.slice(asked3).includes('c2'), 2000), `${width}: the playlist is read again`);
+        check(await until(async () => asks.slice(asked3).includes('c2'), 2000), `${width}: the collection is read again`);
         lists.c2 = ['C', 'A'];
         socket.send(JSON.stringify({ type: 'library_changed' }));
         await until(async () => JSON.stringify(await order()) === '["Charlie","Alpha"]', 3000);
@@ -145,7 +145,7 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         // streamed song, a redraw asks for it again rather than naming each row after the old order
         await page.evaluate(() => { const st = { v: 'playlist', arg: 'c4' }; history.pushState(st, '', '/playlist/c4'); dispatchEvent(new PopStateEvent('popstate', { state: st })); });
         await until(async () => JSON.stringify(await order()) === '["Papa","Quebec","Alpha"]', 3000);
-        check(JSON.stringify(await order()) === '["Papa","Quebec","Alpha"]', `${width}: the streamed playlist shows as the server has it (${await order()})`);
+        check(JSON.stringify(await order()) === '["Papa","Quebec","Alpha"]', `${width}: the streamed collection shows as the server has it (${await order()})`);
         lists.c4 = ['Q', 'P', 'A'];
         const asked4 = asks.length;
         socket.send(JSON.stringify({ type: 'library_changed' }));
@@ -170,7 +170,7 @@ const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/jso
         const asked5b = asks.length;
         await goPl('c4');
         await until(async () => JSON.stringify(await order()) === '["Quebec","Papa","Alpha"]' && (await page.locator('#plsongs .srcchip.wait').count()) === 0, 3000);
-        check(asks.slice(asked5b).includes('c4/play-from'), `${width}: opened again after another playlist, where its songs play is asked (${asks.slice(asked5b)})`);
+        check(asks.slice(asked5b).includes('c4/play-from'), `${width}: opened again after another collection, where its songs play is asked (${asks.slice(asked5b)})`);
         const releasePf5 = gate('c4/play-from');
         lists.c4 = ['A', 'Q', 'P'];
         const asked6 = asks.length;
