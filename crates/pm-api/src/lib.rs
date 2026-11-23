@@ -3159,7 +3159,13 @@ async fn remove_folder(
     State(s): State<Arc<NodeState>>,
     Query(req): Query<FolderRequest>,
 ) -> ApiResult<FoldersChanged> {
-    let path = std::path::PathBuf::from(req.path.trim());
+    // The path as it was sent: a folder from the config is stored as it is written there, with a
+    // slash at the end or without (`is_root` and `remove_folder` take either spelling)
+    let raw = req.path.trim();
+    if raw.is_empty() {
+        return Err(ApiError::bad_request("path is required"));
+    }
+    let path = std::path::PathBuf::from(raw);
     if s.is_config_folder(&path) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -3168,6 +3174,14 @@ async fn remove_folder(
                 path.display()
             ),
         ));
+    }
+    // Songs are forgotten by path, with their plays: only a folder the library was given (or
+    // scanned as one) is taken, never a path above the folders or outside them
+    if !s.library.lock().expect("library poisoned").is_root(&path)? {
+        return Err(ApiError::not_found(format!(
+            "{} is not one of the library's folders",
+            path.display()
+        )));
     }
     if s.is_scanning() {
         return Err(ApiError::new(
@@ -4218,6 +4232,113 @@ mod tests {
         assert_eq!(r["folders"], serde_json::json!([[music.to_string_lossy(), true]]));
         let (_, tracks) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
         assert!(tracks["tracks"].as_array().unwrap().is_empty());
+    }
+
+    /// Only one of the library's folders can be forgotten: songs go by path, with their plays,
+    /// so a path that is not a folder of the library (none, `/`, one above or inside a folder)
+    /// is refused and nothing changes.
+    #[tokio::test]
+    async fn only_one_of_the_librarys_folders_can_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("music")).unwrap();
+        let extra = dir.path().join("extra");
+        std::fs::create_dir_all(extra.join("album")).unwrap();
+        write_wav(&extra.join("album/one.wav"), 4410);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/library/folders",
+            Some(serde_json::json!({"path": extra.to_string_lossy()})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        for _ in 0..500 {
+            if !s.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // The folder as the node names it
+        let added = r["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f[0].as_str())
+            .find(|p| p.ends_with("extra"))
+            .unwrap_or_else(|| panic!("no added folder: {r}"))
+            .to_string();
+        let (_, tracks) = call(&app, "GET", "/v1/library/tracks?limit=10", None).await;
+        let id = tracks["tracks"][0]["id"].as_i64().unwrap();
+        s.library
+            .lock()
+            .unwrap()
+            .record_play(pm_model::TrackId(id), None)
+            .unwrap();
+        let kept = |s: &Arc<NodeState>| {
+            let lib = s.library.lock().unwrap();
+            (lib.stats().unwrap().tracks, lib.history(10).unwrap().len())
+        };
+        let above = std::path::Path::new(&added)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        for (path, want) in [
+            ("".to_string(), StatusCode::BAD_REQUEST),
+            ("%20".to_string(), StatusCode::BAD_REQUEST),
+            ("//".to_string(), StatusCode::NOT_FOUND),
+            ("/".to_string(), StatusCode::NOT_FOUND),
+            (above, StatusCode::NOT_FOUND),
+            (format!("{added}/album"), StatusCode::NOT_FOUND),
+            ("/nope".to_string(), StatusCode::NOT_FOUND),
+        ] {
+            let (st, r) = call(&app, "DELETE", &format!("/v1/library/folders?path={path}"), None).await;
+            assert_eq!(st, want, "{path:?}: {r}");
+            assert_eq!(kept(&s), (1, 1), "after {path:?}");
+        }
+        // The folder itself, also written with a slash at the end
+        let (st, r) = call(
+            &app,
+            "DELETE",
+            &format!("/v1/library/folders?path={added}/"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["removed_tracks"], 1);
+        assert!(!r["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f[0] == added.as_str()));
+        assert_eq!(kept(&s).0, 0);
+
+        // A folder stored with a slash at the end (as a config may write it) goes whichever way
+        // it is asked for, and is no longer listed: it would be scanned back in otherwise
+        for asked in ["", "/"] {
+            let stored = format!("{}/", extra.to_string_lossy());
+            s.library
+                .lock()
+                .unwrap()
+                .add_folder(std::path::Path::new(&stored))
+                .unwrap();
+            let listed = |s: &Arc<NodeState>| {
+                s.library
+                    .lock()
+                    .unwrap()
+                    .list_folders()
+                    .unwrap()
+                    .iter()
+                    .any(|(p, _)| p.to_string_lossy() == stored.as_str())
+            };
+            assert!(listed(&s));
+            let path = format!("{}{asked}", extra.to_string_lossy());
+            let (st, r) = call(&app, "DELETE", &format!("/v1/library/folders?path={path}"), None).await;
+            assert_eq!(st, StatusCode::OK, "{path}: {r}");
+            assert!(!listed(&s), "{path}: still listed");
+        }
     }
 
     /// A zone's queue is saved on every change and comes back after a restart.
