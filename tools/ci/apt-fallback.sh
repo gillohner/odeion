@@ -18,7 +18,8 @@ if [ "$(dpkg --print-architecture)" = amd64 ]; then
   hosts="azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com"
   path=ubuntu
   pattern='https?://([a-z0-9.-]+\.)?(archive|security)\.ubuntu\.com/ubuntu'
-  mirrors="http://mirrors.edge.kernel.org/ubuntu http://mirror.leaseweb.net/ubuntu http://mirrors.ocf.berkeley.edu/ubuntu"
+  # The Azure Ubuntu mirror first when it answers, then third-party mirrors
+  mirrors="http://azure.archive.ubuntu.com/ubuntu http://mirrors.edge.kernel.org/ubuntu http://mirror.leaseweb.net/ubuntu http://mirrors.ocf.berkeley.edu/ubuntu"
 else
   hosts="ports.ubuntu.com"
   path=ubuntu-ports
