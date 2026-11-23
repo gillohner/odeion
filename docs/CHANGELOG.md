@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **Apps can ask for the queue only when it changes.** A playing zone's state goes to every open app about four times a second, and each one carried the whole queue: with 1,000 songs queued that was about 270 KiB a second per open app, nearly all of it the same queue again. An app that opens `/v1/events?zone_queue=changed` gets a zone's queue only when it changed (its `queue_version`), and keeps the one it has otherwise: about 2 KiB a second with the same 1,000 songs. Apps that do not ask get every message as before.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.

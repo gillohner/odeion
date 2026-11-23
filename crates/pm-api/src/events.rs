@@ -196,7 +196,87 @@ pub(crate) async fn events_ws(
         Err(e) => return e.into_response(),
     };
     let token = crate::bearer(&headers, &q);
-    ws.on_upgrade(move |socket| event_stream(socket, s, c, token))
+    // `?zone_queue=changed`: zone messages carry the queue only when it changed (see SentQueues)
+    let queues = SentQueues::new(q.get("zone_queue").is_some_and(|v| v == "changed"));
+    ws.on_upgrade(move |socket| event_stream(socket, s, c, token, queues))
+}
+
+/// For a controller that asked for the queue only when it changed (`?zone_queue=changed`): what
+/// this socket last sent of each zone's queue, as `(queue_version, items)`. Every change of a
+/// queue bumps its version, so a zone message whose queue has the version last sent goes out
+/// without `queue`, and the controller keeps the one it has. A zone state goes out four times a
+/// second while it plays; with a long queue nearly all of it is the queue (a 1,000-song queue
+/// is about 68 KB a message). Snapshots always carry every queue.
+#[derive(Default)]
+struct SentQueues(Option<std::collections::HashMap<String, (u64, usize)>>);
+
+impl SentQueues {
+    fn new(on_change: bool) -> Self {
+        Self(on_change.then(Default::default))
+    }
+
+    /// A snapshot is going out: it carries every queue it holds, and only those zones.
+    fn snapshot(&mut self, zones: &[ZoneState]) {
+        if let Some(sent) = &mut self.0 {
+            sent.clear();
+            sent.extend(
+                zones
+                    .iter()
+                    .map(|z| (z.id.0.clone(), (z.queue_version, z.queue.len()))),
+            );
+        }
+    }
+
+    /// An event is going out to this socket: whether it may go without its zone's queue (a zone
+    /// state whose queue was sent as it is). Notes what it carries.
+    fn same_queue(&mut self, ev: &ApiEvent) -> bool {
+        let Some(sent) = &mut self.0 else {
+            return false;
+        };
+        match ev {
+            ApiEvent::Zone { state } => {
+                let now = (state.queue_version, state.queue.len());
+                sent.insert(state.id.0.clone(), now) == Some(now)
+            }
+            ApiEvent::ZoneRemoved { zone } => {
+                sent.remove(&zone.0);
+                false
+            }
+            ApiEvent::Snapshot { zones } => {
+                self.snapshot(zones);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// An event this socket may not see: a zone closed to it gets its whole queue again if it
+    /// opens again.
+    fn hidden(&mut self, ev: &ApiEvent) {
+        if let (
+            Some(sent),
+            ApiEvent::Zone {
+                state: ZoneState { id, .. },
+            }
+            | ApiEvent::ZoneRemoved { zone: id },
+        ) = (&mut self.0, ev)
+        {
+            sent.remove(&id.0);
+        }
+    }
+}
+
+/// A zone message without its queue: `queue` is left out (not sent empty).
+fn without_queue(seq: u64, event: ApiEvent, hide: Hide<'_>) -> serde_json::Value {
+    let mut event = event;
+    if let ApiEvent::Zone { state } = &mut event {
+        state.queue = Vec::new();
+    }
+    let mut v = as_seen_by(hide, &EventMsg { seq, event: &event });
+    if let Some(state) = v.get_mut("state").and_then(|s| s.as_object_mut()) {
+        state.remove("queue");
+    }
+    v
 }
 
 fn snapshot(s: &NodeState, c: &Caller, seq: u64) -> SnapshotMsg {
@@ -233,7 +313,13 @@ pub(crate) fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<Api
     }
 }
 
-async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Option<String>) {
+async fn event_stream(
+    socket: WebSocket,
+    s: Arc<NodeState>,
+    c: Caller,
+    token: Option<String>,
+    mut queues: SentQueues,
+) {
     let _watching = s.events.watch();
     let (mut tx, mut rx) = socket.split();
     let (mut events, seq) = s.events.subscribe_at();
@@ -250,7 +336,9 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Op
             &known_fn as &(dyn Fn(&str) -> bool + Sync),
         )
     });
-    if send_for(&mut tx, hide, &snapshot(&s, &c, seq)).await.is_err() {
+    let snap = snapshot(&s, &c, seq);
+    queues.snapshot(&snap.zones);
+    if send_for(&mut tx, hide, &snap).await.is_err() {
         return;
     }
     let mut ping = tokio::time::interval(SERVER_PING);
@@ -291,8 +379,14 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Op
                 }
                 Ok(ev) => {
                     let sent = match for_caller(&s, &c, &ev.event) {
+                        Some(event) if queues.same_queue(&event) => {
+                            send_json(&mut tx, &without_queue(ev.seq, event, hide)).await
+                        }
                         Some(event) => send_for(&mut tx, hide, &EventMsg { seq: ev.seq, event: &event }).await,
-                        None => send_json(&mut tx, &serde_json::json!({"seq": ev.seq, "type": "hidden"})).await,
+                        None => {
+                            queues.hidden(&ev.event);
+                            send_json(&mut tx, &serde_json::json!({"seq": ev.seq, "type": "hidden"})).await
+                        }
                     };
                     if sent.is_err() {
                         break;
@@ -302,7 +396,9 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Op
                     tracing::debug!(n, "event stream lagged; resending snapshot");
                     let (fresh, seq) = s.events.subscribe_at();
                     events = fresh;
-                    if send_for(&mut tx, hide, &snapshot(&s, &c, seq)).await.is_err() {
+                    let snap = snapshot(&s, &c, seq);
+                    queues.snapshot(&snap.zones);
+                    if send_for(&mut tx, hide, &snap).await.is_err() {
                         break;
                     }
                 }
@@ -323,7 +419,9 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Op
                         Ok(ClientMsg::Resync) => {
                             let (fresh, seq) = s.events.subscribe_at();
                             events = fresh;
-                            if send_for(&mut tx, hide, &snapshot(&s, &c, seq)).await.is_err() {
+                            let snap = snapshot(&s, &c, seq);
+                            queues.snapshot(&snap.zones);
+                            if send_for(&mut tx, hide, &snap).await.is_err() {
                                 break;
                             }
                         }
@@ -572,5 +670,78 @@ mod tests {
             v,
             serde_json::json!({"seq": 9, "type": "outputs_changed", "output": "net:192.168.1.20:7790/cpal:Speaker or headphones"})
         );
+    }
+
+    fn zone(id: &str, version: u64, items: usize) -> ZoneState {
+        let queue: Vec<_> = (0..items)
+            .map(|i| serde_json::json!({"id": i + 1, "uri": format!("track:{i}")}))
+            .collect();
+        serde_json::from_value(serde_json::json!({"id": id, "name": id, "output": "null",
+            "transport": "playing", "queue": queue, "queue_version": version, "repeat": "off", "acked": 0}))
+        .unwrap()
+    }
+
+    /// `?zone_queue=changed`: a zone state whose queue went out as it is goes without it.
+    #[test]
+    fn the_queue_is_left_out_only_when_this_socket_sent_it_as_it_is() {
+        // Off (no parameter): never left out
+        let mut off = SentQueues::new(false);
+        let k = ApiEvent::Zone {
+            state: zone("k", 1, 2),
+        };
+        assert!(!off.same_queue(&k) && !off.same_queue(&k));
+
+        let mut on = SentQueues::new(true);
+        on.snapshot(&[zone("k", 1, 2)]);
+        assert!(on.same_queue(&k), "the snapshot sent it");
+        assert!(
+            !on.same_queue(&ApiEvent::Zone {
+                state: zone("k", 2, 2)
+            }),
+            "a new version"
+        );
+        assert!(on.same_queue(&ApiEvent::Zone {
+            state: zone("k", 2, 2)
+        }));
+        assert!(
+            !on.same_queue(&ApiEvent::Zone {
+                state: zone("j", 2, 2)
+            }),
+            "another zone"
+        );
+        // Removed, or closed to this listener: its next state carries the queue
+        let removed = ApiEvent::ZoneRemoved {
+            zone: pm_zones::ZoneId("k".into()),
+        };
+        assert!(!on.same_queue(&removed));
+        assert!(!on.same_queue(&ApiEvent::Zone {
+            state: zone("k", 2, 2)
+        }));
+        on.hidden(&ApiEvent::Zone {
+            state: zone("k", 2, 2),
+        });
+        assert!(!on.same_queue(&ApiEvent::Zone {
+            state: zone("k", 2, 2)
+        }));
+        // A snapshot without the zone forgets it
+        on.snapshot(&[]);
+        assert!(!on.same_queue(&ApiEvent::Zone {
+            state: zone("j", 2, 2)
+        }));
+    }
+
+    #[test]
+    fn a_zone_message_without_its_queue_leaves_the_field_out() {
+        let v = without_queue(
+            4,
+            ApiEvent::Zone {
+                state: zone("k", 3, 5),
+            },
+            None,
+        );
+        assert_eq!((v["seq"].as_u64(), v["type"].as_str()), (Some(4), Some("zone")));
+        assert_eq!(v["state"]["queue_version"], 3);
+        assert!(v["state"].get("queue").is_none(), "{v}");
+        assert!(v["state"].get("queue_index").is_some(), "{v}");
     }
 }
