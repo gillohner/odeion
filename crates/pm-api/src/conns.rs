@@ -22,9 +22,10 @@ use std::time::Duration;
 use tokio::sync::{watch, Semaphore};
 use tower::ServiceExt;
 
-/// How long a connection has to send a request's headers. Browsers close a kept-alive
-/// connection they do not use well before this; an open event stream or audio being sent is a
-/// request already read, so it is not cut.
+/// How long a connection has to send a request's headers, also the next request's on a kept-alive
+/// connection: an idle one is closed after this (browsers keep theirs longer and open a new one;
+/// a request sent just as it closes fails like any request on a closed connection). An open event
+/// stream or audio being sent is a request already read, so it is not cut.
 pub const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Connections one listener holds at once. A household's apps, players and pages use a few

@@ -31,6 +31,10 @@ pub const ALPN: &[u8] = b"pubky-music/http/1";
 /// `conns::MAX_CONNECTIONS`), so a piped stream never waits in its queue, where nothing times it.
 pub const MAX_STREAMS: usize = 256;
 
+/// Streams one controller's connection pipes at once, so one caller cannot hold every place of
+/// [`MAX_STREAMS`] (an app uses a few: its requests, the event stream, audio).
+pub const MAX_STREAMS_PER_CONNECTION: usize = 64;
+
 /// Which relays an endpoint uses.
 #[derive(Debug, Clone, Default)]
 pub enum Relays {
@@ -109,15 +113,17 @@ pub struct NodeTunnel {
 
 impl NodeTunnel {
     pub async fn start(key: SecretKey, relays: &Relays, target: SocketAddr) -> anyhow::Result<Self> {
-        Self::start_with(key, relays, target, MAX_STREAMS).await
+        Self::start_with(key, relays, target, MAX_STREAMS, MAX_STREAMS_PER_CONNECTION).await
     }
 
-    /// [`Self::start`] piping at most `max_streams` streams at once.
+    /// [`Self::start`] piping at most `max_streams` streams at once, `per_connection` of them
+    /// from one controller's connection.
     async fn start_with(
         key: SecretKey,
         relays: &Relays,
         target: SocketAddr,
         max_streams: usize,
+        per_connection: usize,
     ) -> anyhow::Result<Self> {
         let endpoint = bind(Some(key), relays, vec![ALPN.to_vec()]).await?;
         let ep = endpoint.clone();
@@ -134,7 +140,7 @@ impl NodeTunnel {
                         Err(e) => return tracing::debug!("tunnel connection refused: {e}"),
                     };
                     tracing::info!(peer = %conn.remote_id().fmt_short(), "remote controller connected");
-                    serve_connection(conn, target, streams).await;
+                    serve_connection(conn, target, streams, per_connection).await;
                 });
             }
         });
@@ -164,19 +170,49 @@ impl NodeTunnel {
     }
 }
 
-async fn serve_connection(conn: Connection, target: SocketAddr, streams: Arc<tokio::sync::Semaphore>) {
+async fn serve_connection(
+    conn: Connection,
+    target: SocketAddr,
+    streams: Arc<tokio::sync::Semaphore>,
+    per_connection: usize,
+) {
+    let own = Arc::new(tokio::sync::Semaphore::new(per_connection));
     while let Ok((send, recv)) = conn.accept_bi().await {
-        // A place first ([`MAX_STREAMS`]); held until the stream's pipe is done
+        // A place of this connection's share, then one of the node's ([`MAX_STREAMS`]); both
+        // held until the stream's pipe is done
+        let Ok(own_place) = own.clone().acquire_owned().await else {
+            return;
+        };
         let Ok(place) = streams.clone().acquire_owned().await else {
             return;
         };
         tokio::spawn(async move {
-            let _place = place;
+            let _places = (own_place, place);
             match TcpStream::connect(target).await {
-                Ok(tcp) => pipe(tcp, send, recv).await,
+                Ok(tcp) => pipe_to_api(tcp, send, recv).await,
                 Err(e) => tracing::warn!(%target, "tunnel cannot reach the node's API: {e}"),
             }
         });
+    }
+}
+
+/// [`pipe`] at the node's end: once the API has closed its side nothing more can reach it, so the
+/// stream ends there, also when the caller never finishes its own side (its place is free again).
+async fn pipe_to_api(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream) {
+    let _ = tcp.set_nodelay(true);
+    let (mut r, mut w) = tcp.into_split();
+    let up = async {
+        let _ = tokio::io::copy(&mut recv, &mut w).await;
+        let _ = w.shutdown().await;
+    };
+    let down = async {
+        let _ = tokio::io::copy(&mut r, &mut send).await;
+        let _ = send.finish();
+    };
+    tokio::pin!(up, down);
+    tokio::select! {
+        () = &mut up => down.await,
+        () = &mut down => {}
     }
 }
 
@@ -309,7 +345,7 @@ mod tests {
     async fn the_tunnel_pipes_at_most_its_limit_of_streams() {
         let api = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let target = api.local_addr().unwrap();
-        let server = NodeTunnel::start_with(SecretKey::generate(), &Relays::Off, target, 2)
+        let server = NodeTunnel::start_with(SecretKey::generate(), &Relays::Off, target, 2, 64)
             .await
             .unwrap();
         let client = ClientTunnel::start(server.addr(), &Relays::Off).await.unwrap();
@@ -337,15 +373,14 @@ mod tests {
                 .is_err(),
             "a third stream reached the API past a limit of two"
         );
-        // One pipe ends at both of its sides: its place is free, and the waiting stream gets through
-        let (done, api_side) = piped.remove(0);
-        drop(api_side);
-        local.retain(|(letter, _)| *letter != done);
+        // The API closes one pipe's side (the caller keeps its own open): its place is free, and the
+        // waiting stream gets through
         let waiting = local
             .iter()
             .map(|(l, _)| *l)
             .find(|l| piped.iter().all(|(p, _)| p != l))
             .unwrap();
+        drop(piped.remove(0));
         let (mut third, _) = tokio::time::timeout(Duration::from_secs(10), api.accept())
             .await
             .expect("the waiting stream got through once a place was free")
@@ -354,6 +389,48 @@ mod tests {
         third.read_exact(&mut b).await.unwrap();
         assert_eq!(b[0], waiting);
         client.close().await;
+        server.close().await;
+    }
+
+    /// One controller's connection gets at most its share of streams; another controller still
+    /// gets through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_connection_takes_at_most_its_share() {
+        let api = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let target = api.local_addr().unwrap();
+        let server = NodeTunnel::start_with(SecretKey::generate(), &Relays::Off, target, 10, 1)
+            .await
+            .unwrap();
+        let first = ClientTunnel::start(server.addr(), &Relays::Off).await.unwrap();
+        first.connect().await.unwrap();
+        let mut a = TcpStream::connect(first.local_addr()).await.unwrap();
+        a.write_all(b"a").await.unwrap();
+        let (mut piped, _) = tokio::time::timeout(Duration::from_secs(10), api.accept())
+            .await
+            .expect("the first stream reaches the API")
+            .unwrap();
+        let mut byte = [0u8; 1];
+        piped.read_exact(&mut byte).await.unwrap();
+        let mut b = TcpStream::connect(first.local_addr()).await.unwrap();
+        b.write_all(b"b").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(700), api.accept())
+                .await
+                .is_err(),
+            "a second stream of one connection got past its share of one"
+        );
+        let second = ClientTunnel::start(server.addr(), &Relays::Off).await.unwrap();
+        second.connect().await.unwrap();
+        let mut c = TcpStream::connect(second.local_addr()).await.unwrap();
+        c.write_all(b"c").await.unwrap();
+        let (mut other, _) = tokio::time::timeout(Duration::from_secs(10), api.accept())
+            .await
+            .expect("another controller gets through")
+            .unwrap();
+        other.read_exact(&mut byte).await.unwrap();
+        assert_eq!(&byte, b"c");
+        first.close().await;
+        second.close().await;
         server.close().await;
     }
 }
