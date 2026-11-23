@@ -20,6 +20,10 @@ let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 const until = async (fn, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await fn()) return true; await sleep(50); } return false; };
+// A song row draws its insides only once the browser has seen it near the screen (content-visibility:
+// auto on .track): a click the moment the list appears lands on the row, not on its ⋯. So wait until
+// the ⋯ is drawn and is what a click there hits.
+const moreDrawn = (sel) => { const b = document.querySelector(sel); if (!b || !b.checkVisibility({ contentVisibilityAuto: true })) return false; const r = b.getBoundingClientRect(); const e = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return !!e && b.contains(e); };
 // (until a count stays the same for 400 ms, at most `ms`: false when it still grew then, so a
 // read repeated for good fails the check rather than hanging the job)
 const settled = (count, ms = 5000) => until(async () => { const was = count(); await sleep(400); return was === count(); }, ms);
@@ -71,6 +75,7 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
       const offersCopy = () => page.locator(MENU).getByText(COPY, { exact: false }).count().then((n) => n > 0);
       const closeMenu = async () => { await page.keyboard.press('Escape'); await until(async () => !(await menuOpen()), 2000); };
       const ROW_MORE = '#tracklist .track:first-child [data-act="more"]';
+      const clickMore = async () => { await until(() => page.evaluate(moreDrawn, ROW_MORE), 5000); await page.click(ROW_MORE, { force: true }); };
       try {
         // 1. An album page asks first too: no answer, it draws after 15 s (before: never)
         await fx.go(page, '/album/lib-7');
@@ -82,7 +87,7 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         // 2. On Songs, a row's ⋯ asks again (nothing was kept), waits, then opens after 15 s
         await page.evaluate(() => { const st = { v: 'tracks' }; history.pushState(st, '', '/tracks'); dispatchEvent(new PopStateEvent('popstate', { state: st })); });
         await page.waitForSelector('#tracklist .track');
-        await page.click(ROW_MORE, { force: true });
+        await clickMore();
         await until(async () => asks.length > 1, 2000); await sleep(400);
         check(asks.length === 2 && !(await menuOpen()), `${width}: the row's ⋯ asks again and waits (${asks.length} asked)`);
         await page.clock.fastForward(16000);
@@ -92,13 +97,13 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         await page.screenshot({ path: path.join(SHOTS, `menu-after-wait-${width}.png`) });
         if (opened) await closeMenu();
         // 3. The next ⋯ asks again and gets its answer at once
-        await page.click(ROW_MORE, { force: true });
+        await clickMore();
         const again = await until(async () => (await menuOpen()) && (await offersCopy()), 3000);
         check(asks.length === 3 && again, `${width}: the next ⋯ asks again and offers the homeserver copy (${asks.length} asked)`);
         if (await menuOpen()) await closeMenu();
         // 4. The two earlier questions answering late (no session) don't undo the newer answer
         late(); await sleep(400);
-        await page.click(ROW_MORE, { force: true });
+        await clickMore();
         await until(menuOpen, 3000); await sleep(200);
         check((await offersCopy()) && asks.length === 3, `${width}: the late earlier answers leave the newer one (${asks.length} asked, copy offered ${await offersCopy()})`);
         await page.screenshot({ path: path.join(SHOTS, `menu-after-late-${width}.png`) });
@@ -162,13 +167,13 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         await page.evaluate(() => { const st = { v: 'tracks' }; history.pushState(st, '', '/tracks'); dispatchEvent(new PopStateEvent('popstate', { state: st })); });
         await page.waitForSelector('#tracklist .track');
         const a8 = asks.length;
-        await page.click(ROW_MORE, { force: true });
+        await clickMore();
         await until(async () => asks.length > a8, 2000);
         await page.clock.fastForward(16000);
         check(await until(menuOpen, 3000) && !(await offersCopy()), `${width}: no answer in 15 s: the ⋯ opens without the homeserver copy`);
         await closeMenu();
         const b8 = asks.length;
-        await page.click(ROW_MORE, { force: true });
+        await clickMore();
         await until(async () => asks.length > b8, 2000);
         answer(a8, SESSION); await sleep(300);
         await page.clock.fastForward(16000);

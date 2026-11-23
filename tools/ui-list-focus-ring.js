@@ -14,6 +14,10 @@ const SHOTS = path.resolve(process.argv[3] || path.join(process.env.TMPDIR || '/
 fs.mkdirSync(SHOTS, { recursive: true });
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
+// A song row draws its insides only once the browser has seen it near the screen (content-visibility:
+// auto on .track): a click the moment the list appears lands on the row, not on its ⋯. So wait until
+// the ⋯ is drawn and is what a click there hits.
+const moreDrawn = (sel) => { const b = document.querySelector(sel); if (!b || !b.checkVisibility({ contentVisibilityAuto: true })) return false; const r = b.getBoundingClientRect(); const e = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return !!e && b.contains(e); };
 
 const A = [{ id: 11, name: 'Sefa' }, { id: 22, name: 'Dr. Peacock' }, { id: 33, name: 'Angerfist' }];
 const collections = Array.from({ length: 12 }, (_, i) => ({ ...fx.summary, id: `c${i + 1}`, name: `Collection ${i + 1}` }));
@@ -119,6 +123,7 @@ async function expectRing(page, sel, what, shot) {
     await expectRing(page, '.main .list .list-row.clickable', `${w} Collections, first row`, `playlists-${w}`);
     // Add to playlist (a scrolling picker): New playlist, then a playlist
     await fx.go(page, '/tracks');
+    await page.waitForFunction(moreDrawn, '#tracklist .track:first-child [data-act="more"]', { timeout: 5000 }).catch(() => {});
     await page.click('#tracklist .track:first-child [data-act="more"]', { force: true });
     await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Add to collection…' }).click();
     await page.waitForSelector('dialog #pplist [data-ppi="1"]');
