@@ -28153,7 +28153,7 @@ exec sleep 300
         };
         // Without a token every caller is the owner
         let mut held: Vec<_> = (0..events::MAX_STREAMS_EACH)
-            .map(|_| s.events.take_place("Owner:").unwrap())
+            .map(|_| s.events.take_place("Owner:", true).unwrap())
             .collect();
         assert_eq!(open().await, StatusCode::SERVICE_UNAVAILABLE);
         held.pop();
@@ -28164,9 +28164,9 @@ exec sleep 300
         // The refused request's place was not kept: one more is free after the one taken back
         held.push(
             s.events
-                .take_place("Owner:")
+                .take_place("Owner:", true)
                 .expect("the request gave its place back"),
         );
-        assert!(s.events.take_place("Owner:").is_none());
+        assert!(s.events.take_place("Owner:", true).is_none());
     }
 }

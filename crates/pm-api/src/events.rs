@@ -148,15 +148,17 @@ impl EventBus {
         self.inner.first_watcher.notified().await;
     }
 
-    /// A place for one more event stream of `who`: `None` when the node has [`MAX_STREAMS`] open,
-    /// or `who` has [`MAX_STREAMS_EACH`].
-    pub fn take_place(&self, who: &str) -> Option<StreamPlace> {
-        self.take_place_within(who, MAX_STREAMS, MAX_STREAMS_EACH)
+    /// A place for one more event stream of `who`: `None` when `who` has [`MAX_STREAMS_EACH`]
+    /// open, or (for anyone but the owner, so listeners can't shut the owner out) the node has
+    /// [`MAX_STREAMS`].
+    pub fn take_place(&self, who: &str, owner: bool) -> Option<StreamPlace> {
+        self.take_place_within(who, owner, MAX_STREAMS, MAX_STREAMS_EACH)
     }
 
-    fn take_place_within(&self, who: &str, all: usize, each: usize) -> Option<StreamPlace> {
+    fn take_place_within(&self, who: &str, owner: bool, all: usize, each: usize) -> Option<StreamPlace> {
         let mut places = self.inner.places.lock().unwrap_or_else(|e| e.into_inner());
-        if places.values().sum::<usize>() >= all || places.get(who).copied().unwrap_or(0) >= each {
+        let full = !owner && places.values().sum::<usize>() >= all;
+        if full || places.get(who).copied().unwrap_or(0) >= each {
             return None;
         }
         *places.entry(who.to_string()).or_default() += 1;
@@ -242,7 +244,8 @@ pub(crate) async fn events_ws(
     }
     // A place before the upgrade: an upgraded socket leaves the listener's connection count
     let who = format!("{:?}:{}", c.role, c.key.as_deref().unwrap_or(""));
-    let Some(place) = s.events.take_place(&who) else {
+    let owner = c.role == crate::accounts::Role::Owner;
+    let Some(place) = s.events.take_place(&who, owner) else {
         tracing::warn!(role = ?c.role, "event stream refused: too many open");
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -643,15 +646,15 @@ mod tests {
     fn event_streams_have_places_per_caller_and_in_all() {
         let bus = EventBus::new(8);
         let mut a: Vec<StreamPlace> = (0..MAX_STREAMS_EACH)
-            .map(|_| bus.take_place("Listener:a").expect("a place"))
+            .map(|_| bus.take_place("Listener:a", false).expect("a place"))
             .collect();
-        assert!(bus.take_place("Listener:a").is_none(), "a has its share");
+        assert!(bus.take_place("Listener:a", false).is_none(), "a has its share");
         let b = bus
-            .take_place("Listener:b")
+            .take_place("Listener:b", false)
             .expect("another caller still gets one");
         a.pop();
         let again = bus
-            .take_place("Listener:a")
+            .take_place("Listener:a", false)
             .expect("a closed stream gives its place back");
         drop((a, b, again));
         assert!(
@@ -660,13 +663,25 @@ mod tests {
         );
         // The node's total, with small numbers
         let held: Vec<StreamPlace> = (0..3)
-            .map(|i| bus.take_place_within(&format!("Listener:{i}"), 3, 2).unwrap())
+            .map(|i| {
+                bus.take_place_within(&format!("Listener:{i}"), false, 3, 2)
+                    .unwrap()
+            })
             .collect();
         assert!(
-            bus.take_place_within("Owner:", 3, 2).is_none(),
+            bus.take_place_within("Listener:x", false, 3, 2).is_none(),
             "the node is full"
         );
-        drop(held);
-        assert!(bus.take_place_within("Owner:", 3, 2).is_some());
+        // The owner is not held to the node's total, only to their own share
+        let o1 = bus
+            .take_place_within("Owner:", true, 3, 2)
+            .expect("the owner past the total");
+        let o2 = bus.take_place_within("Owner:", true, 3, 2).unwrap();
+        assert!(
+            bus.take_place_within("Owner:", true, 3, 2).is_none(),
+            "the owner's share"
+        );
+        drop((held, o1, o2));
+        assert!(bus.take_place_within("Listener:x", false, 3, 2).is_some());
     }
 }
