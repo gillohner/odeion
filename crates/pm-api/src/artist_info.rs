@@ -435,7 +435,7 @@ async fn download(http: &reqwest::Client, url: &str, to: &std::path::Path) -> bo
     if !is_image {
         return false;
     }
-    let Ok(bytes) = resp.bytes().await else {
+    let Ok(bytes) = crate::capped::bytes(resp, crate::art::RELAYED_PICTURE_MAX).await else {
         return false;
     };
     if bytes.is_empty()

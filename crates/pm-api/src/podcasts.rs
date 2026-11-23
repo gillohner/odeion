@@ -311,6 +311,13 @@ fn bad_gateway(m: String) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, m)
 }
 
+/// The most a feed may be: the longest real ones, thousands of episodes with show notes, are a
+/// few MiB.
+const FEED_MAX: usize = 32 << 20;
+
+/// The most a directory's search answer may be.
+const SEARCH_MAX: usize = 8 << 20;
+
 pub(crate) async fn fetch_feed(s: &NodeState, url: &str) -> Result<Feed, ApiError> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(ApiError::bad_request(
@@ -327,7 +334,9 @@ pub(crate) async fn fetch_feed(s: &NodeState, url: &str) -> Result<Feed, ApiErro
     if !resp.status().is_success() {
         return Err(bad_gateway(format!("feed answered {}", resp.status())));
     }
-    let text = resp.text().await.map_err(|e| bad_gateway(format!("feed: {e}")))?;
+    let text = crate::capped::text(resp, FEED_MAX)
+        .await
+        .map_err(|e| bad_gateway(format!("feed: {e}")))?;
     let mut f = parse_feed(url, &text).map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     f.refreshed = now();
     Ok(f)
@@ -492,7 +501,10 @@ async fn get_json(s: &NodeState, url: &str, q: &[(&str, String)]) -> Result<serd
     if !resp.status().is_success() {
         return Err(bad_gateway(format!("{url} answered {}", resp.status())));
     }
-    resp.json().await.map_err(|e| bad_gateway(format!("{url}: {e}")))
+    let body = crate::capped::bytes(resp, SEARCH_MAX)
+        .await
+        .map_err(|e| bad_gateway(format!("{url}: {e}")))?;
+    serde_json::from_slice(&body).map_err(|e| bad_gateway(format!("{url}: {e}")))
 }
 
 /// Shows matching `term`: Pinakes first (it keeps the Podcast Index key), then iTunes Search.
@@ -1133,5 +1145,38 @@ mod tests {
         );
         assert_eq!(parse_duration("45:30"), Some(2_730_000));
         assert_eq!(parse_duration(""), None);
+    }
+
+    /// A server on a free port that answers every connection with `answer` and closes.
+    fn serve_once(answer: String) -> String {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/feed.xml", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { return };
+                let mut req = [0u8; 4096];
+                let _ = c.read(&mut req);
+                let _ = c.write_all(answer.as_bytes());
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_feed_longer_than_the_limit_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = crate::tests::state(dir.path(), Some("fixture-owner")).await;
+        let url = serve_once(format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            FEED_MAX + 1
+        ));
+        let e = fetch_feed(&s, &url).await.unwrap_err();
+        assert_eq!(e.status, StatusCode::BAD_GATEWAY);
+        assert!(e.message.contains("longer than 32768 KiB"), "{}", e.message);
+        // A feed within it is read as before
+        let url = serve_once(format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{FEED}"));
+        let f = fetch_feed(&s, &url).await.unwrap();
+        assert_eq!(f.title, "Test & Show");
     }
 }

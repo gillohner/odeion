@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 const DIRECTORY: &str = "https://all.api.radio-browser.info/json/stations/search";
 const SETTING: &str = "radio.stations";
+/// The most one directory answer may be.
+const DIRECTORY_MAX: usize = 8 << 20;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
 pub struct Station {
@@ -189,8 +191,7 @@ pub(crate) async fn search(
             format!("radio directory answered {}", resp.status()),
         ));
     }
-    let text = resp
-        .text()
+    let text = crate::capped::text(resp, DIRECTORY_MAX)
         .await
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("radio directory: {e}")))?;
     let stations = parse_directory(&text)
