@@ -340,7 +340,12 @@ pub(crate) async fn picture_file(
     let has_it = asked
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag));
+        .is_some_and(|v| {
+            // Compared weakly, as If-None-Match is: a W/ from a cache on the way still names it
+            v.split(',')
+                .map(str::trim)
+                .any(|t| t == "*" || t.trim_start_matches("W/") == etag)
+        });
     if has_it {
         let cache = HeaderValue::from_static(cache);
         return Ok((
@@ -360,7 +365,8 @@ pub(crate) async fn picture_file(
     head.truncate(got);
     let mime = pm_library::image_type(&head)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "not a picture"))?;
-    // (the length it had when it was opened: a file that grows meanwhile is not read on)
+    // (the length it had when it was opened: a file that grows meanwhile is not read on; one that
+    // someone shortens or rewrites in place meanwhile ends short of it, and the browser asks again)
     let rest = len.saturating_sub(got as u64);
     let first = futures_util::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(head))]);
     // (a read error is the last part: the stream ends there)
@@ -519,6 +525,18 @@ mod tests {
         assert_eq!(resp.status(), 304);
         assert_eq!(resp.headers()["etag"], etag);
         assert!(resp.into_body().collect().await.unwrap().to_bytes().is_empty());
+        // Weakly compared, as If-None-Match is; '*' names any picture there is
+        let weak = format!("\"other\", W/{}", etag.to_str().unwrap());
+        again.insert("if-none-match", weak.parse().unwrap());
+        assert_eq!(
+            picture_file(&path, "private", &again).await.unwrap().status(),
+            304
+        );
+        again.insert("if-none-match", "*".parse().unwrap());
+        assert_eq!(
+            picture_file(&path, "private", &again).await.unwrap().status(),
+            304
+        );
         again.insert("if-none-match", "\"other\", W/\"x\"".parse().unwrap());
         let resp = picture_file(&path, "private", &again).await.unwrap();
         assert_eq!(resp.status(), 200);
@@ -634,9 +652,9 @@ mod tests {
         assert!(dir.path().join("caa-8.jpg/inside").exists());
     }
 
-    /// One answer from a server on a free local port: `len` picture bytes, with or without a
-    /// Content-Length (without it the body ends when the server closes).
-    async fn one_picture_server(len: usize, with_length: bool) -> String {
+    /// One answer from a server on a free local port: `len` picture bytes, with the Content-Length
+    /// `said` or none (then the body ends when the server closes).
+    async fn one_picture_server(len: usize, said: Option<usize>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -645,8 +663,8 @@ mod tests {
             let mut asked = [0u8; 4096];
             let _ = sock.read(&mut asked).await;
             let mut head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nConnection: close\r\n".to_string();
-            if with_length {
-                head.push_str(&format!("Content-Length: {len}\r\n"));
+            if let Some(said) = said {
+                head.push_str(&format!("Content-Length: {said}\r\n"));
             }
             head.push_str("\r\n");
             if sock.write_all(head.as_bytes()).await.is_err() {
@@ -673,24 +691,25 @@ mod tests {
             let client = client.clone();
             async move { client.get(url).send().await.unwrap() }
         };
-        let url = one_picture_server(1000, true).await;
+        let url = one_picture_server(1000, Some(1000)).await;
         assert_eq!(
             picture_body(get(url).await).await.ok().map(|b| b.len()),
             Some(1000)
         );
-        let url = one_picture_server(RELAYED_PICTURE_MAX, false).await;
+        let url = one_picture_server(RELAYED_PICTURE_MAX, None).await;
         assert_eq!(
             picture_body(get(url).await).await.ok().map(|b| b.len()),
             Some(RELAYED_PICTURE_MAX),
             "the limit itself is a picture"
         );
-        // Too large by what it says, and by what it sends without saying
-        let url = one_picture_server(RELAYED_PICTURE_MAX + 1, true).await;
+        // Too large by what it says (refused before any of it is read: it sends 10 bytes only),
+        // and by what it sends without saying
+        let url = one_picture_server(10, Some(RELAYED_PICTURE_MAX + 1)).await;
         assert!(matches!(
             picture_body(get(url).await).await,
             Err(PictureBody::TooLarge)
         ));
-        let url = one_picture_server(RELAYED_PICTURE_MAX + 1, false).await;
+        let url = one_picture_server(RELAYED_PICTURE_MAX + 1, None).await;
         assert!(matches!(
             picture_body(get(url).await).await,
             Err(PictureBody::TooLarge)
