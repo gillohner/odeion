@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **A button that deletes looks like one.** When Odeion asks before it deletes a collection, a comment or a file on your homeserver, removes a song from the library or every download, clears usage events, or makes a new token, the button that goes ahead is now filled with the warning red instead of the accent colour that Save and Play have. A collection's own Delete button and Remove in the selection bar are red at rest, not only under the pointer. Nothing about what the buttons do has changed.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.
