@@ -221,7 +221,7 @@ async fn download(
         if !mime.starts_with("image/") {
             return None;
         }
-        let bytes = match resp.bytes().await {
+        let bytes = match picture_body(resp).await {
             Ok(b) if !b.is_empty() => b,
             _ => return None,
         };
@@ -325,7 +325,17 @@ pub(crate) async fn picture_file(
         .ok()
         .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
         .unwrap_or_default();
-    let etag = format!("\"{len:x}-{:x}.{:x}\"", changed.as_secs(), changed.subsec_nanos());
+    // The file itself too: a picture put in its place keeps neither (write_whole renames a new
+    // file in), even when its length and change time are the old one's (cp -p, rsync -t)
+    #[cfg(unix)]
+    let file_id = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let file_id = 0u64;
+    let etag = format!(
+        "\"{len:x}-{:x}.{:x}-{file_id:x}\"",
+        changed.as_secs(),
+        changed.subsec_nanos()
+    );
     let etag = HeaderValue::from_str(&etag).map_err(std::io::Error::other)?;
     let has_it = asked
         .get(header::IF_NONE_MATCH)
@@ -385,31 +395,50 @@ pub(crate) async fn picture_file(
 /// The most a relayed picture may be.
 const RELAYED_PICTURE_MAX: usize = 16 << 20;
 
+/// Why [`picture_body`] gave no picture.
+pub(crate) enum PictureBody {
+    /// Larger than [`RELAYED_PICTURE_MAX`], by its Content-Length or as it came
+    TooLarge,
+    /// The body could not be read
+    Failed(reqwest::Error),
+}
+
+/// The body of a picture another server sends, read up to [`RELAYED_PICTURE_MAX`] (no cover is
+/// larger), so a server that sends without end never fills the node's memory.
+pub(crate) async fn picture_body(resp: reqwest::Response) -> Result<Vec<u8>, PictureBody> {
+    use futures_util::StreamExt;
+    if resp
+        .content_length()
+        .is_some_and(|n| n > RELAYED_PICTURE_MAX as u64)
+    {
+        return Err(PictureBody::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    let mut body = resp.bytes_stream();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(PictureBody::Failed)?;
+        if bytes.len() + chunk.len() > RELAYED_PICTURE_MAX {
+            return Err(PictureBody::TooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 /// A picture another server sent, answered as [`picture`] does: by its bytes, whatever type the
 /// server gave it, and none at all when it is no picture (or larger than any cover).
 pub(crate) async fn relayed_picture(
     resp: reqwest::Response,
     cache: &str,
 ) -> Result<axum::response::Response, crate::ApiError> {
-    use futures_util::StreamExt;
-    let too_big = || crate::ApiError::not_found("that picture is too large");
-    if resp
-        .content_length()
-        .is_some_and(|n| n as usize > RELAYED_PICTURE_MAX)
-    {
-        return Err(too_big());
+    match picture_body(resp).await {
+        Ok(bytes) => picture(bytes, cache),
+        Err(PictureBody::TooLarge) => Err(crate::ApiError::not_found("that picture is too large")),
+        Err(PictureBody::Failed(e)) => Err(crate::ApiError::new(
+            axum::http::StatusCode::BAD_GATEWAY,
+            e.to_string(),
+        )),
     }
-    let mut bytes = Vec::new();
-    let mut body = resp.bytes_stream();
-    while let Some(chunk) = body.next().await {
-        let chunk =
-            chunk.map_err(|e| crate::ApiError::new(axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
-        if bytes.len() + chunk.len() > RELAYED_PICTURE_MAX {
-            return Err(too_big());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    picture(bytes, cache)
 }
 
 /// The type to relay a file from another server as: what it said when that is audio, video or a
@@ -500,6 +529,24 @@ mod tests {
         let resp = picture_file(&path, "private", &again).await.unwrap();
         assert_eq!(resp.status(), 200);
         assert_ne!(resp.headers()["etag"], etag);
+        // Another picture put in its place with the same length and change time (cp -p): still
+        // another ETag
+        let etag = resp.headers()["etag"].clone();
+        let when = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let other = dir.path().join("other.jpg");
+        let mut swapped = bytes.clone();
+        swapped[10] ^= 0xFF;
+        std::fs::write(&other, &swapped).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        std::fs::rename(&other, &path).unwrap();
+        again.insert("if-none-match", etag.clone());
+        let resp = picture_file(&path, "private", &again).await.unwrap();
+        assert_eq!(resp.status(), 200, "same length and change time, another file");
         // A picture shorter than the bytes its type is read from
         let tiny = dir.path().join("tiny.gif");
         std::fs::write(&tiny, b"GIF89a").unwrap();
@@ -585,5 +632,68 @@ mod tests {
             "part files swept, pictures kept"
         );
         assert!(dir.path().join("caa-8.jpg/inside").exists());
+    }
+
+    /// One answer from a server on a free local port: `len` picture bytes, with or without a
+    /// Content-Length (without it the body ends when the server closes).
+    async fn one_picture_server(len: usize, with_length: bool) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut asked = [0u8; 4096];
+            let _ = sock.read(&mut asked).await;
+            let mut head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nConnection: close\r\n".to_string();
+            if with_length {
+                head.push_str(&format!("Content-Length: {len}\r\n"));
+            }
+            head.push_str("\r\n");
+            if sock.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let part = vec![7u8; 64 * 1024];
+            let mut left = len;
+            while left > 0 {
+                let n = left.min(part.len());
+                if sock.write_all(&part[..n]).await.is_err() {
+                    return;
+                }
+                left -= n;
+            }
+        });
+        format!("http://{addr}/p.png")
+    }
+
+    #[tokio::test]
+    async fn a_picture_body_is_read_up_to_its_limit() {
+        use super::{picture_body, PictureBody, RELAYED_PICTURE_MAX};
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let get = |url: String| {
+            let client = client.clone();
+            async move { client.get(url).send().await.unwrap() }
+        };
+        let url = one_picture_server(1000, true).await;
+        assert_eq!(
+            picture_body(get(url).await).await.ok().map(|b| b.len()),
+            Some(1000)
+        );
+        let url = one_picture_server(RELAYED_PICTURE_MAX, false).await;
+        assert_eq!(
+            picture_body(get(url).await).await.ok().map(|b| b.len()),
+            Some(RELAYED_PICTURE_MAX),
+            "the limit itself is a picture"
+        );
+        // Too large by what it says, and by what it sends without saying
+        let url = one_picture_server(RELAYED_PICTURE_MAX + 1, true).await;
+        assert!(matches!(
+            picture_body(get(url).await).await,
+            Err(PictureBody::TooLarge)
+        ));
+        let url = one_picture_server(RELAYED_PICTURE_MAX + 1, false).await;
+        assert!(matches!(
+            picture_body(get(url).await).await,
+            Err(PictureBody::TooLarge)
+        ));
     }
 }

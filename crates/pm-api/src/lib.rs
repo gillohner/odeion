@@ -2831,7 +2831,7 @@ async fn artist_image(
                 .flatten();
             let got = match matched {
                 Some(url) => match s.http_client().get(&url).send().await {
-                    Ok(r) if r.status().is_success() => r.bytes().await.ok(),
+                    Ok(r) if r.status().is_success() => art::picture_body(r).await.ok(),
                     _ => None,
                 },
                 None => None,
