@@ -2397,15 +2397,18 @@ impl Library {
     /// A song that names no artist is taken too; another artist's song of the same title (a
     /// cover, a namesake) is no match. Names compare as [`match_key`] folds them.
     pub fn find_by_title_artist(&self, title: &str, artist: Option<&str>) -> Result<Option<Track>> {
-        self.find_by_title_artist_where(title, artist, &[], &|_| true)
+        self.find_by_title_artist_where(title, artist, None, &[], &|_| true)
     }
 
     /// [`Self::find_by_title_artist`] never taking a track of `except` (ones already looked at
     /// and turned down), and only one `keep` takes.
+    /// `album`: searched for with the title when no artist is named (a "Various Artists" row,
+    /// whose song a common title would otherwise rank past the search's first 20).
     fn find_by_title_artist_where(
         &self,
         title: &str,
         artist: Option<&str>,
+        album: Option<&str>,
         except: &[Option<TrackId>],
         keep: &dyn Fn(&Track) -> bool,
     ) -> Result<Option<Track>> {
@@ -2414,19 +2417,23 @@ impl Library {
             return Ok(None);
         }
         let artist = artist.unwrap_or("").trim();
-        let q = if artist.is_empty() {
-            title.to_string()
-        } else {
+        let album = album.unwrap_or("").trim();
+        let q = if !artist.is_empty() {
             format!("{title} {artist}")
+        } else if !album.is_empty() {
+            format!("{title} {album}")
+        } else {
+            title.to_string()
         };
         let mut hits = self.search_tracks(&q, 20)?;
         hits.retain(|t| !except.contains(&t.id) && keep(t));
-        if !artist.is_empty()
+        if q != title
             && !hits
                 .iter()
-                .any(|t| same_title(&t.title, title) && by_artist(t, artist))
+                .any(|t| same_title(&t.title, title) && (artist.is_empty() || by_artist(t, artist)))
         {
-            // Added to the first search's hits: one of them may be a song without an artist
+            // Added to the first search's hits: one of them may be a song without an artist (or
+            // on an album whose name the search reads otherwise)
             for t in self.search_tracks(title, 20)? {
                 if !hits.iter().any(|h| h.id == t.id) && !except.contains(&t.id) && keep(&t) {
                     hits.push(t);
@@ -2508,7 +2515,8 @@ impl Library {
         // The title search too: without an artist, a line that names a folder needs it here; the
         // first song that passes is taken, not the first of the title
         let artist = Some(entry_artist(t.artist.as_deref())).filter(|a| !a.is_empty());
-        self.find_by_title_artist_where(&t.title, artist, &turned_down, &|h| {
+        let album = t.album.as_deref().filter(|_| various);
+        self.find_by_title_artist_where(&t.title, artist, album, &turned_down, &|h| {
             (named || near(h)) && on_album(h)
         })
     }
@@ -8688,5 +8696,45 @@ mod identify_tests {
             path_of(lib.resolve_import(&row).unwrap()),
             Some(second.file.path.to_string_lossy().into_owned())
         );
+    }
+
+    /// A "Various Artists" row finds the song of its album also when its title is common: the
+    /// album is part of the search, so 30 other "Intro"s ranking first do not hide it.
+    #[test]
+    fn a_various_artists_row_finds_its_song_past_the_first_twenty_of_its_title() {
+        let lib = Library::open_in_memory().unwrap();
+        for i in 0..30 {
+            let mut t = import_test_track(
+                &format!("/m/{i}/Intro.flac"),
+                "Intro",
+                Some(&format!("Act {i}")),
+                100,
+            );
+            t.album = sample_track(&format!("/m/{i}/x.flac"), "x").album;
+            if let Some(a) = t.album.as_mut() {
+                a.title = format!("Collection {i}");
+                a.album_artist = Some("Various Artists".into());
+            }
+            lib.upsert_track(&t).unwrap();
+        }
+        // An album whose "Intro" the title search alone does not reach (whichever that is)
+        let first: Vec<String> = lib
+            .search_tracks("Intro", 20)
+            .unwrap()
+            .into_iter()
+            .filter_map(|t| t.album.map(|a| a.title))
+            .collect();
+        assert_eq!(first.len(), 20);
+        let past = (0..30)
+            .map(|i| format!("Collection {i}"))
+            .find(|a| !first.contains(a))
+            .unwrap();
+        let mut row = entry("Intro", Some("Various Artists"), None, None);
+        row.album = Some(past.clone());
+        let got = lib.resolve_import(&row).unwrap();
+        assert_eq!(got.and_then(|t| t.album).map(|a| a.title), Some(past));
+        // An album the library does not have still finds nothing
+        row.album = Some("Collection 99".into());
+        assert!(lib.resolve_import(&row).unwrap().is_none());
     }
 }
