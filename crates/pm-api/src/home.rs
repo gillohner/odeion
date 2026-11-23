@@ -69,7 +69,7 @@ fn cache() -> &'static Mutex<HashMap<String, (Instant, HomeSection)>> {
 
 /// Cache one section; the cache holds at most [`SECTIONS_MAX`].
 fn keep(cache: &mut HashMap<String, (Instant, HomeSection)>, key: String, section: HomeSection) {
-    crate::capped::insert(cache, key, section, SECTIONS_MAX, TTL);
+    crate::bounded_cache::insert(cache, key, section, SECTIONS_MAX, TTL);
 }
 
 /// The Home sections, in page order.

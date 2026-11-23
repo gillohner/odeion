@@ -194,7 +194,7 @@ fn keep_answer(s: &NodeState, key: (String, String), a: SourceAnswer, epoch: u64
     if is_library(&key.1) && s.search_library_epoch.load(Ordering::SeqCst) != epoch {
         return;
     }
-    crate::capped::insert(&mut cache, key, a, CACHE_MAX, CACHE_TTL);
+    crate::bounded_cache::insert(&mut cache, key, a, CACHE_MAX, CACHE_TTL);
 }
 
 /// How many answers are kept at most. Search as you type asks once per keystroke and source and

@@ -118,7 +118,7 @@ fn cache() -> &'static Cache {
 
 /// Cache one answer; the cache holds at most [`ANSWERS_MAX`].
 fn keep(cache: &mut HashMap<CacheKey, (Instant, Vec<NetworkItem>)>, key: CacheKey, items: Vec<NetworkItem>) {
-    crate::capped::insert(cache, key, items, ANSWERS_MAX, FALLBACK_KEPT);
+    crate::bounded_cache::insert(cache, key, items, ANSWERS_MAX, FALLBACK_KEPT);
 }
 
 /// Make every cached answer `by` older (tests: an answer past its time).

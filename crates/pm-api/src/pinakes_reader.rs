@@ -75,7 +75,7 @@ impl PinakesReader {
         if cache.len() >= CARDS_MAX && !cache.contains_key(uri) {
             cache.retain(|_, (at, c)| matches!(c, Card::Found(_)) || at.elapsed() < retry);
         }
-        crate::capped::insert(&mut cache, uri.to_string(), card.clone(), CARDS_MAX, FOUND_TTL);
+        crate::bounded_cache::insert(&mut cache, uri.to_string(), card.clone(), CARDS_MAX, FOUND_TTL);
     }
 
     /// Wait for the next resolve slot.

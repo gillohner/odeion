@@ -96,7 +96,7 @@ fn profiles() -> &'static ProfileCache {
 
 /// Cache one profile; the cache holds at most [`PROFILES_MAX`].
 fn keep(cache: &mut HashMap<String, (Instant, Option<UserView>)>, id: String, v: Option<UserView>) {
-    crate::capped::insert(cache, id, v, PROFILES_MAX, PROFILE_TTL);
+    crate::bounded_cache::insert(cache, id, v, PROFILES_MAX, PROFILE_TTL);
 }
 
 fn me(s: &NodeState) -> Option<String> {
