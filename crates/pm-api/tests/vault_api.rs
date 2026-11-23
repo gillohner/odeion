@@ -1776,6 +1776,9 @@ async fn a_new_node_takes_in_the_settings_copy_before_replacing_it() {
     let copy = settings_copy(&homeserver, &second).await;
     assert!(copy["settings"]["smart.0035WKVKQDHSN"].is_string(), "dropped: {copy}");
     assert_eq!(copy["settings"]["home.layout"], "mine", "the node's own wins: {copy}");
+    // Still fresh then (no folders, the derived contact): the copy's contact is taken in, not
+    // written over
+    assert_eq!(copy["contact"], "https://example.org/old-node", "{copy}");
     assert!(setting(&n2, "smart.0035WKVKQDHSN").is_some());
     // Taken in once: a setting deleted here afterwards goes from the copy too
     n2.library

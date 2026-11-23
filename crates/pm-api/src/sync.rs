@@ -1423,38 +1423,53 @@ impl PubkySync {
     /// Snapshot the owner's settings into the private folder (after every
     /// sync and every change the API makes). Best effort; errors are logged.
     ///
-    /// The copy is replaced whole, so this node takes in what an existing copy holds first
-    /// ([`COPY_TAKEN_IN`]), once per identity: the settings this node does not have, by the rule
-    /// of [`PubkySync::restore_settings`]. Until then a copy that cannot be read is left as it is.
-    pub async fn backup_settings(&self, s: &crate::state::NodeState) {
+    /// The copy is replaced whole, so a node takes in what an existing copy holds first, once per
+    /// identity ([`COPY_TAKEN_IN`]): a fresh node all of it, as the restore at sign-in does
+    /// ([`PubkySync::restore_settings`]), another node the settings it does not have. Until then
+    /// a copy that could not be read is not replaced; one that does not parse is (nothing can
+    /// restore from it).
+    pub async fn backup_settings(&self, s: &Arc<crate::state::NodeState>) {
         // One read: a history delete another node made since this one last synced is adopted
         // first, so this copy doesn't write over it
         let read = self.homeserver.read_node_settings(&self.session).await;
         // Tests stop here (the read done, nothing adopted) to replace the session meanwhile
         crate::test_hooks::pause(|| format!("sync.backup_after_read:{}", self.z32)).await;
+        let taken_in = match self.lib(&s.library) {
+            Ok(lib) => lib.get_setting(COPY_TAKEN_IN).ok().flatten().as_deref() == Some(self.z32()),
+            Err(_) => return,
+        };
+        let copy = match read {
+            Ok(Some(v)) => match serde_json::from_value::<SettingsBackup>(v) {
+                Ok(copy) => Some(copy),
+                Err(e) => {
+                    tracing::warn!("the settings copy on the homeserver does not parse ({e}): replaced");
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(e) if !taken_in => {
+                tracing::warn!("the settings copy on the homeserver could not be read ({e}): not replaced yet");
+                return;
+            }
+            Err(_) => None,
+        };
+        if !taken_in {
+            if let Some(copy) = &copy {
+                // A fresh node: the whole copy, folders and contact too, as at sign-in
+                match self.take_in_copy(s, copy, true) {
+                    Ok(Some(r)) => tracing::info!(?r, "settings restored from the homeserver before backing them up"),
+                    Ok(None) => {}
+                    Err(SyncError::Replaced) => return,
+                    Err(e) => tracing::warn!("settings restore before the backup failed: {e}"),
+                }
+            }
+        }
         // That read was the old identity's when another sign-in replaced this one meanwhile:
         // its history delete is not this node's to adopt (nor to write into the new identity's
         // copy)
         let backup = {
             let Ok(lib) = self.lib(&s.library) else {
                 return;
-            };
-            let taken_in = lib.get_setting(COPY_TAKEN_IN).ok().flatten().as_deref() == Some(self.z32());
-            let copy = match read {
-                Ok(Some(v)) => match serde_json::from_value::<SettingsBackup>(v) {
-                    Ok(copy) => Some(copy),
-                    Err(e) if !taken_in => {
-                        tracing::warn!("the settings copy on the homeserver cannot be read ({e}): left as it is");
-                        return;
-                    }
-                    Err(_) => None,
-                },
-                Ok(None) => None,
-                Err(e) if !taken_in => {
-                    tracing::warn!("the settings copy on the homeserver could not be read ({e}): not replaced yet");
-                    return;
-                }
-                Err(_) => None,
             };
             if let Some(theirs) = copy
                 .as_ref()
@@ -1466,6 +1481,7 @@ impl PubkySync {
                 }
             }
             if !taken_in {
+                // Not fresh: the settings it does not have (folders and contact stay its own)
                 if let Some(copy) = &copy {
                     let n = take_in_settings(&lib, &copy.settings);
                     if n > 0 {
@@ -1516,6 +1532,16 @@ impl PubkySync {
         };
         let backup: SettingsBackup =
             serde_json::from_value(v).map_err(|e| SyncError::Store(format!("settings backup: {e}")))?;
+        self.take_in_copy(s, &backup, only_if_fresh)
+    }
+
+    /// [`PubkySync::restore_settings`] once the copy is read.
+    fn take_in_copy(
+        &self,
+        s: &Arc<crate::state::NodeState>,
+        backup: &SettingsBackup,
+        only_if_fresh: bool,
+    ) -> Result<Option<SettingsRestored>, SyncError> {
         // The contact `set_sync` derives from the identity when none was set is not one the
         // owner chose: it neither makes the node less fresh nor keeps the copy's contact out
         let derived = crate::state::profile_url(self.z32());
@@ -1587,8 +1613,8 @@ impl PubkySync {
 
 /// The identity (z32) whose settings copy on the homeserver this node has taken in: set by a
 /// settings restore or by the first backup that took in the copy's settings, so the backups
-/// after it may replace the copy. Never carried by a backup file ([`crate::backup`]): a node
-/// restored from another one's backup takes the copy in again.
+/// after it may replace the copy. A restore of a backup file deletes it ([`crate::backup`]), so
+/// the copy is taken in again before the restored settings replace it.
 pub const COPY_TAKEN_IN: &str = "pubky.settings_copy_taken_in";
 
 /// The settings of a copy this node does not have (missing or empty here), of those it backs
@@ -1761,6 +1787,7 @@ mod tests {
             ("smart.0035WKVKQDHSM", "{}"),
             ("smart.empty", "{\"name\":\"x\"}"),
             ("tidal.user", "a sign-in"),
+            ("smart.session", "a sign-in under a prefix the copy carries"),
             ("not.backed.up", "x"),
         ]
         .into_iter()
@@ -1772,6 +1799,7 @@ mod tests {
         assert_eq!(get("smart.0035WKVKQDHSM").as_deref(), Some("{}"));
         assert_eq!(get("smart.empty").as_deref(), Some("{\"name\":\"x\"}"));
         assert_eq!(get("tidal.user"), None);
+        assert_eq!(get("smart.session"), None);
         assert_eq!(get("not.backed.up"), None);
         // Again: nothing left to take in
         assert_eq!(take_in_settings(&lib, &copy), 0);
