@@ -71,7 +71,7 @@ pub(crate) fn body(resp: reqwest::Response) -> axum::body::Body {
 }
 
 fn body_within(resp: reqwest::Response, idle: Duration) -> axum::body::Body {
-    let pieces = futures_util::stream::unfold(Some(Box::pin(resp.bytes_stream())), |s| async move {
+    let pieces = futures_util::stream::unfold(Some(Box::pin(resp.bytes_stream())), move |s| async move {
         let mut s = s?;
         match tokio::time::timeout(idle, s.next()).await {
             Ok(Some(Ok(b))) => Some((Ok(b), Some(s))),
