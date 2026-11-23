@@ -665,12 +665,20 @@ async fn dispatch(
                     }
                     if action == "set" {
                         zone.stop();
-                        zone.clear();
+                        if items.is_empty() {
+                            zone.clear();
+                        }
                     }
                     if !items.is_empty() {
-                        // All or none, under the queue's lock (a Play since the check above)
+                        // All or none, under the queue's lock (a Play since the check above);
+                        // a set clears in that same hold
                         let sent = items.len();
-                        if zone.enqueue_whole(items, Insert::End).is_none() {
+                        let whole = if action == "set" {
+                            zone.replace_whole(items, Insert::End)
+                        } else {
+                            zone.enqueue_whole(items, Insert::End)
+                        };
+                        if whole.is_none() {
                             return Err(SubErr::new(
                                 0,
                                 format!(

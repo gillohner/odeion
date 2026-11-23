@@ -332,10 +332,25 @@ impl Zone {
     /// added, when the queue has no room for every item (another request may have filled it
     /// since the caller looked).
     pub fn enqueue_whole(&self, items: Vec<QueueItem>, at: Insert) -> Option<Vec<u64>> {
+        self.add_whole(items, at, false)
+    }
+
+    /// The queue cleared and `items` added in one hold of the queue's lock, so nothing another
+    /// request adds in between is kept, and a replacement that fits is never refused for it.
+    /// `None`, with the queue as it was, only when `items` alone pass the limit.
+    pub fn replace_whole(&self, items: Vec<QueueItem>, at: Insert) -> Option<Vec<u64>> {
+        self.add_whole(items, at, true)
+    }
+
+    fn add_whole(&self, items: Vec<QueueItem>, at: Insert, replace: bool) -> Option<Vec<u64>> {
         let ids = {
             let mut q = self.queue.lock().expect("queue poisoned");
-            if q.len() + items.len() > crate::queue::MAX_QUEUE_ITEMS {
+            let has = if replace { 0 } else { q.len() };
+            if has + items.len() > crate::queue::MAX_QUEUE_ITEMS {
                 return None;
+            }
+            if replace {
+                q.clear();
             }
             q.add(items, at)
         };

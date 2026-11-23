@@ -3143,4 +3143,17 @@ async fn enqueue_whole_adds_all_or_nothing() {
     assert_eq!(ids.len(), 2);
     assert_eq!(r.zone.queue_len(), max);
     assert_eq!(r.zone.enqueue_whole(many(1), Insert::Next), None);
+
+    // A replacement clears and adds in one hold: a full queue does not refuse it, and what
+    // was there is gone; one that alone passes the limit leaves the queue as it was
+    assert_eq!(r.zone.replace_whole(many(max + 1), Insert::End), None);
+    assert_eq!(r.zone.queue_len(), max, "a refused replacement clears nothing");
+    let ids = r
+        .zone
+        .replace_whole(many(3), Insert::End)
+        .expect("three replace a full queue");
+    assert_eq!(ids.len(), 3);
+    assert_eq!(r.zone.queue_len(), 3);
+    let left: Vec<u64> = r.zone.queue().iter().map(|it| it.id).collect();
+    assert_eq!(left, ids, "only the replacement is left");
 }

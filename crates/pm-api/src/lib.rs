@@ -2047,17 +2047,20 @@ async fn enqueue(
     for it in &mut items {
         it.by = by.clone();
     }
-    if body.replace {
-        zone.stop();
-        zone.clear();
-    }
     let at = match body.at {
         QueueAt::End => Insert::End,
         QueueAt::Next => Insert::Next,
     };
-    // All or none, under the queue's lock: a Play since the check above may have filled it
+    // All or none, under the queue's lock: a Play since the check above may have filled it.
+    // A replacement clears in that same hold, so what another request adds meanwhile goes too
     let sent = items.len();
-    let Some(ids) = zone.enqueue_whole(items, at) else {
+    let whole = if body.replace {
+        zone.stop();
+        zone.replace_whole(items, at)
+    } else {
+        zone.enqueue_whole(items, at)
+    };
+    let Some(ids) = whole else {
         return Err(ApiError::bad_request(format!(
             "a queue holds at most {} items (this one has {}, {sent} more were sent)",
             pm_zones::MAX_QUEUE_ITEMS,
