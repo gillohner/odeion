@@ -81,6 +81,8 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 const NODE_OWN: &[&str] = &[
     "stream.secret",
     "node.id",
+    // For which identity this node took in the settings copy on the homeserver (sync.rs)
+    crate::sync::COPY_TAKEN_IN,
     // Restoring an older backup must not revive a delayed pre-disconnect sender.
     "listenbrainz.send_generation",
     SCHEDULE_KEY,
@@ -386,7 +388,6 @@ pub fn forget_node_own(staged: &Library) -> Result<(), pm_library::LibraryError>
     for key in NODE_OWN {
         staged.delete_setting(key)?;
     }
-    staged.delete_setting(crate::sync::COPY_TAKEN_IN)?;
     crate::people::restore_report_memberships(staged, None)
 }
 
@@ -399,9 +400,6 @@ pub fn keep_this_nodes(here: &Library, staged: &Library) -> Result<(), pm_librar
             }
         }
     }
-    // The restored settings are not what the homeserver's copy was taken in for: taken in again
-    // before the next backup replaces it (sync.rs)
-    staged.delete_setting(crate::sync::COPY_TAKEN_IN)?;
     // Sign-ins: the owner's and each listener's own, where the copy has none (a plain one has none)
     for (key, _) in SECRET_SETTINGS {
         if staged.get_setting(key)?.is_none() {
@@ -846,9 +844,6 @@ async fn restore_locked(
                 }
             }
         }
-        // The homeserver's settings copy is taken in again before the next backup replaces it
-        // (sync.rs): it was taken in for the library being replaced, not for this one
-        copy.delete_setting(crate::sync::COPY_TAKEN_IN)?;
         for (key, name) in SECRET_SETTINGS {
             match secrets.as_ref().and_then(|x| x.settings.get(*key)) {
                 Some(v) => {

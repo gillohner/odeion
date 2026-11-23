@@ -1749,7 +1749,10 @@ async fn a_new_node_takes_in_the_settings_copy_before_replacing_it() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert_eq!(copy["node"], "Living room node", "the node's backup after its first sync: {copy}");
+    assert_eq!(
+        copy["node"], "Living room node",
+        "the node's backup after its first sync: {copy}"
+    );
     let setting = |n: &NodeState, k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
     assert_eq!(
         setting(&n, "smart.0035WKVKQDHSM").as_deref(),
@@ -1757,6 +1760,14 @@ async fn a_new_node_takes_in_the_settings_copy_before_replacing_it() {
     );
     assert_eq!(n.contact(), "https://example.org/old-node");
     assert!(copy["settings"]["smart.0035WKVKQDHSM"].is_string(), "{copy}");
+    // Taken in: with no folders and the derived contact again, the node is not "fresh" at its
+    // next start or sign-in (what it removed since would come back)
+    n.set_contact(&format!("https://pubky.app/profile/{}", sync.z32()))
+        .unwrap();
+    assert!(
+        sync.restore_settings(&n, true).await.unwrap().is_none(),
+        "restored again"
+    );
 
     // 2. A node whose settings are backed up before any restore ran (a change made at once)
     homeserver
@@ -1774,8 +1785,14 @@ async fn a_new_node_takes_in_the_settings_copy_before_replacing_it() {
     n2.set_sync(Some(sync2.clone()));
     sync2.backup_settings(&n2).await;
     let copy = settings_copy(&homeserver, &second).await;
-    assert!(copy["settings"]["smart.0035WKVKQDHSN"].is_string(), "dropped: {copy}");
-    assert_eq!(copy["settings"]["home.layout"], "mine", "the node's own wins: {copy}");
+    assert!(
+        copy["settings"]["smart.0035WKVKQDHSN"].is_string(),
+        "dropped: {copy}"
+    );
+    assert_eq!(
+        copy["settings"]["home.layout"], "mine",
+        "the node's own wins: {copy}"
+    );
     // Still fresh then (no folders, the derived contact): the copy's contact is taken in, not
     // written over
     assert_eq!(copy["contact"], "https://example.org/old-node", "{copy}");

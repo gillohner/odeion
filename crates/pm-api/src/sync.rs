@@ -1448,7 +1448,9 @@ impl PubkySync {
             },
             Ok(None) => None,
             Err(e) if !taken_in => {
-                tracing::warn!("the settings copy on the homeserver could not be read ({e}): not replaced yet");
+                tracing::warn!(
+                    "the settings copy on the homeserver could not be read ({e}): not replaced yet"
+                );
                 return;
             }
             Err(_) => None,
@@ -1457,7 +1459,9 @@ impl PubkySync {
             if let Some(copy) = &copy {
                 // A fresh node: the whole copy, folders and contact too, as at sign-in
                 match self.take_in_copy(s, copy, true) {
-                    Ok(Some(r)) => tracing::info!(?r, "settings restored from the homeserver before backing them up"),
+                    Ok(Some(r)) => {
+                        tracing::info!(?r, "settings restored from the homeserver before backing them up")
+                    }
                     Ok(None) => {}
                     Err(SyncError::Replaced) => return,
                     Err(e) => tracing::warn!("settings restore before the backup failed: {e}"),
@@ -1544,16 +1548,22 @@ impl PubkySync {
     ) -> Result<Option<SettingsRestored>, SyncError> {
         // The contact `set_sync` derives from the identity when none was set is not one the
         // owner chose: it neither makes the node less fresh nor keeps the copy's contact out
-        let derived = crate::state::profile_url(self.z32());
+        // (any identity's: one signed in before this one left its own)
+        let derived = crate::state::profile_url("");
         let contact_unset = || {
             let c = s.contact();
-            c.trim().is_empty() || c.trim() == derived
+            c.trim().is_empty() || c.trim().starts_with(&derived)
         };
-        let fresh = {
+        let (fresh, taken_in) = {
             let lib = self.lib(&s.library)?;
-            lib.list_folders().map(|f| f.is_empty()).unwrap_or(true) && contact_unset()
+            (
+                lib.list_folders().map(|f| f.is_empty()).unwrap_or(true) && contact_unset(),
+                lib.get_setting(COPY_TAKEN_IN).ok().flatten().as_deref() == Some(self.z32()),
+            )
         };
-        if only_if_fresh && !fresh {
+        // Once taken in, a node without folders is not fresh again at every start or sign-in:
+        // folders and a contact removed since would come back
+        if only_if_fresh && (!fresh || taken_in) {
             return Ok(None);
         }
         let mut out = SettingsRestored {
@@ -1613,8 +1623,10 @@ impl PubkySync {
 
 /// The identity (z32) whose settings copy on the homeserver this node has taken in: set by a
 /// settings restore or by the first backup that took in the copy's settings, so the backups
-/// after it may replace the copy. A restore of a backup file deletes it ([`crate::backup`]), so
-/// the copy is taken in again before the restored settings replace it.
+/// after it may replace the copy. One of the node's own settings in a backup file
+/// ([`crate::backup`]): a restore keeps the node's value, so the restored settings replace the
+/// copy of the identity it was taken in for (a restore is meant to bring them back), and a node
+/// whose identity the restore changed takes the new identity's copy in first.
 pub const COPY_TAKEN_IN: &str = "pubky.settings_copy_taken_in";
 
 /// The settings of a copy this node does not have (missing or empty here), of those it backs
