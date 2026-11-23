@@ -2412,7 +2412,7 @@ impl Library {
         if title.is_empty() {
             return Ok(None);
         }
-        let artist = artist.unwrap_or("").trim();
+        let artist = entry_artist(artist);
         let q = if artist.is_empty() {
             title.to_string()
         } else {
@@ -2456,7 +2456,7 @@ impl Library {
                 .as_ref()
                 .is_none_or(|f| nearest_folder(&h.file.path).as_ref() == Some(f))
         };
-        let named = t.artist.as_deref().is_some_and(|a| !a.trim().is_empty());
+        let named = !entry_artist(t.artist.as_deref()).is_empty();
         // Files of the entry's name looked at and turned down: the title search does not take them
         let mut turned_down: Vec<Option<TrackId>> = Vec::new();
         if let Some(p) = path {
@@ -2472,7 +2472,7 @@ impl Library {
                         let mut same = self.tracks_by_file_name(&format!("{up}/{near}/{name}"))?;
                         // Its tags may say anything, but not another artist than the entry names
                         // (generic folders: "Unknown Artist/Unknown Album")
-                        let artist = t.artist.as_deref().map(str::trim).unwrap_or("");
+                        let artist = entry_artist(t.artist.as_deref());
                         if same.len() == 1
                             && (artist.is_empty() || no_artist(&same[0]) || by_artist(&same[0], artist))
                         {
@@ -5498,6 +5498,17 @@ fn match_key(s: &str) -> String {
     fold(s.strip_prefix("the ").unwrap_or(&s))
 }
 
+/// The artist an imported entry names, trimmed: empty when it names none, or no one ("Various
+/// Artists" on a compilation's row, as the library's album artists are read).
+fn entry_artist(a: Option<&str>) -> &str {
+    let a = a.unwrap_or("").trim();
+    if matches!(artist_key(a).as_str(), "variousartists" | "va") {
+        ""
+    } else {
+        a
+    }
+}
+
 /// An artist's name for matching: [`match_key`], or for a name of punctuation only ("!!!") the
 /// name itself in lower case, so it names someone.
 fn artist_key(s: &str) -> String {
@@ -5565,11 +5576,14 @@ fn by_artist(t: &Track, artist: &str) -> bool {
     let mut wanted = vec![artist_key(artist)];
     wanted.extend(crate::credits::split_credit(artist).iter().map(|a| artist_key(a)));
     wanted.retain(|k| !k.is_empty());
+    // The album artist whole and split too: the library splits only the songs' credits
     let album_artist = own_album_artist(t);
+    let album_pieces = album_artist.map(crate::credits::split_credit).unwrap_or_default();
     t.artists
         .iter()
         .map(|a| a.name.as_str())
         .chain(album_artist)
+        .chain(album_pieces.iter().map(String::as_str))
         .map(artist_key)
         .any(|have| !have.is_empty() && wanted.contains(&have))
 }
@@ -5639,7 +5653,7 @@ fn folders(p: &Path) -> Vec<&std::ffi::OsStr> {
 /// the other app disagree on it, its length) agrees with the entry, and so does its artist.
 fn agrees(h: &Track, t: &ImportedTrack) -> bool {
     let len = same_length(track_length(h), t.duration_ms);
-    let artist = t.artist.as_deref().map(str::trim).unwrap_or("");
+    let artist = entry_artist(t.artist.as_deref());
     (same_title(&h.title, &t.title) || len) && (artist.is_empty() || no_artist(h) || by_artist(h, artist))
 }
 
@@ -8592,5 +8606,21 @@ mod identify_tests {
             .find_by_title_artist("Heart of Hearts", Some("!!!"))
             .unwrap()
             .is_some());
+        // A compilation's row naming "Various Artists" names no one: matched by its title
+        assert!(lib
+            .find_by_title_artist("Heart of Hearts", Some("Various Artists"))
+            .unwrap()
+            .is_some());
+        // A song with no artist of its own whose album artist is a pair: either of them names it
+        let mut duo = import_test_track("/m/duo/Song.flac", "Song", None, 100);
+        duo.album = sample_track("/m/duo/x.flac", "x").album;
+        if let Some(a) = duo.album.as_mut() {
+            a.album_artist = Some("Sefa & Cyclon".into());
+        }
+        assert!(by_artist(&duo, "Sefa & Cyclon"));
+        assert!(by_artist(&duo, "Cyclon"));
+        assert!(!by_artist(&duo, "Sefa Cyclon"));
+        assert_eq!(entry_artist(Some(" VA ")), "");
+        assert_eq!(entry_artist(Some(" !!! ")), "!!!");
     }
 }
