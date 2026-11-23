@@ -68,7 +68,13 @@ impl PinakesReader {
     }
 
     fn remember(&self, uri: &str, card: &Card) {
+        let retry = *self.retry_after.lock().expect("reader retry");
         let mut cache = self.cache.lock().expect("reader cache");
+        // A pending or unknown card is past its time after `retry`, not after FOUND_TTL: those
+        // go first, so a run of links that do not resolve does not push found cards out
+        if cache.len() >= CARDS_MAX && !cache.contains_key(uri) {
+            cache.retain(|_, (at, c)| matches!(c, Card::Found(_)) || at.elapsed() < retry);
+        }
         crate::capped::insert(&mut cache, uri.to_string(), card.clone(), CARDS_MAX, FOUND_TTL);
     }
 
@@ -289,5 +295,20 @@ mod tests {
         assert!(r
             .cached(&format!("https://example.org/{}", CARDS_MAX + 99))
             .is_some());
+    }
+
+    /// When the cache is full, unknown cards past the retry time go before any other card.
+    #[test]
+    fn unknown_cards_past_their_retry_go_first() {
+        let r = PinakesReader::default();
+        for n in 0..CARDS_MAX {
+            r.remember(&format!("https://example.org/{n}"), &Card::Unknown);
+        }
+        // All past the retry time (20 s), none past FOUND_TTL
+        for (at, _) in r.cache.lock().expect("reader cache").values_mut() {
+            *at = at.checked_sub(RETRY_AFTER * 2).unwrap_or(*at);
+        }
+        r.remember("https://example.org/new", &Card::Unknown);
+        assert_eq!(r.cache.lock().expect("reader cache").len(), 1);
     }
 }

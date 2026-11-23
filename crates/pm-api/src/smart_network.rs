@@ -23,6 +23,9 @@ pub const REACHES: [&str; 4] = ["me", "following", "friends", "all"];
 const CACHE: Duration = Duration::from_secs(300);
 /// How many answers are kept at most (one per set of rules and viewer).
 const ANSWERS_MAX: usize = 256;
+/// An answer past [`CACHE`] is still the fallback when Pinakes does not answer; a full cache
+/// drops those older than this first, then the older half.
+const FALLBACK_KEPT: Duration = Duration::from_secs(86_400);
 /// Most taggers named per item.
 const TAGGERS_SHOWN: usize = 5;
 
@@ -115,7 +118,7 @@ fn cache() -> &'static Cache {
 
 /// Cache one answer; the cache holds at most [`ANSWERS_MAX`].
 fn keep(cache: &mut HashMap<CacheKey, (Instant, Vec<NetworkItem>)>, key: CacheKey, items: Vec<NetworkItem>) {
-    crate::capped::insert(cache, key, items, ANSWERS_MAX, CACHE);
+    crate::capped::insert(cache, key, items, ANSWERS_MAX, FALLBACK_KEPT);
 }
 
 /// Make every cached answer `by` older (tests: an answer past its time).
@@ -198,7 +201,8 @@ pub(crate) async fn network(s: &Arc<NodeState>, r: &Rules) -> Result<Vec<Network
     let found = match d.pinakes().search(&query).await {
         Ok(f) => f,
         Err(e) => {
-            // What it said last time (however old) beats nothing: the playlist doesn't empty
+            // What it said last time, while it is kept (FALLBACK_KEPT), beats nothing: the
+            // playlist doesn't empty
             let last = cache().lock().expect("network cache").get(&key).cloned();
             return Err(match last {
                 Some((at, items)) => NoAnswer {
@@ -624,5 +628,14 @@ mod tests {
             assert!(cache.len() <= ANSWERS_MAX);
         }
         assert!(cache.contains_key(&key(ANSWERS_MAX + 99)));
+        // Answers past CACHE are fallbacks: a full cache of them keeps the newer half
+        let mut cache = std::collections::HashMap::new();
+        let made = std::time::Instant::now();
+        for n in 0..ANSWERS_MAX {
+            let at = made.checked_sub(super::CACHE * 2 + std::time::Duration::from_secs(n as u64));
+            cache.insert(key(n), (at.unwrap_or(made), Vec::new()));
+        }
+        keep(&mut cache, key(ANSWERS_MAX), Vec::new());
+        assert!(cache.len() > ANSWERS_MAX / 3, "{} kept", cache.len());
     }
 }
