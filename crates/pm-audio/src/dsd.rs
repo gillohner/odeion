@@ -407,9 +407,9 @@ fn read_id3_at<R: Read + Seek>(r: &mut R, offset: u64) -> std::io::Result<Vec<u8
     Ok(out)
 }
 
-/// Writers, for tests and tooling.
-#[cfg(any(test, feature = "testutil"))]
-pub mod write {
+/// DSF and DFF writers for this crate's tests.
+#[cfg(test)]
+mod write {
     use super::*;
     use std::io::Write;
 

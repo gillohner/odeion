@@ -14,7 +14,7 @@
 //! behind the `json` feature.
 
 use crate::config::Network;
-use crate::schemas::{Activity, Bookmark, MusicPost, Playlist, Review, Visibility};
+use crate::schemas::{Bookmark, MusicPost, Visibility};
 use pubky::Pubky;
 pub use pubky::PubkySession;
 /// A Pubky key (a person's or a homeserver's), for callers that don't depend on `pubky` themselves.
@@ -1135,51 +1135,6 @@ impl NodeHomeserver {
         Ok((moved, kept))
     }
 
-    /// Another user's public playlists.
-    pub async fn read_playlists_of(
-        &self,
-        user_z32: &str,
-    ) -> Result<Vec<(String, Playlist)>, HomeserverError> {
-        Ok(self
-            .read_music_posts(user_z32, Visibility::Public, None, ListBounds::SHARED)
-            .await?
-            .into_iter()
-            .filter_map(|(p, post)| post.as_playlist().cloned().map(|pl| (p, pl)))
-            .collect())
-    }
-
-    /// The signed-in user's private playlists.
-    pub async fn read_private_playlists(
-        &self,
-        session: &PubkySession,
-    ) -> Result<Vec<(String, Playlist)>, HomeserverError> {
-        let me = session.public_key().to_string();
-        Ok(self
-            .read_music_posts(&me, Visibility::Private, Some(session), ListBounds::OWNER)
-            .await?
-            .into_iter()
-            .filter_map(|(p, post)| post.as_playlist().cloned().map(|pl| (p, pl)))
-            .collect())
-    }
-
-    pub async fn read_reviews_of(&self, user_z32: &str) -> Result<Vec<(String, Review)>, HomeserverError> {
-        Ok(self
-            .read_music_posts(user_z32, Visibility::Public, None, ListBounds::SHARED)
-            .await?
-            .into_iter()
-            .filter_map(|(p, post)| post.as_review().cloned().map(|r| (p, r)))
-            .collect())
-    }
-
-    pub async fn read_activity_of(&self, user_z32: &str) -> Result<Vec<(String, Activity)>, HomeserverError> {
-        Ok(self
-            .read_music_posts(user_z32, Visibility::Public, None, ListBounds::SHARED)
-            .await?
-            .into_iter()
-            .filter_map(|(p, post)| post.as_activity().cloned().map(|a| (p, a)))
-            .collect())
-    }
-
     /// Write any object to its session-relative path (`Meta::path`).
     pub async fn write_object<T: Serialize + Sync + ?Sized>(
         &self,
@@ -1189,16 +1144,6 @@ impl NodeHomeserver {
     ) -> Result<(), HomeserverError> {
         session.storage().put_json(path, object).await?;
         Ok(())
-    }
-
-    /// Write a music post where its `Meta` says (private or public folder).
-    pub async fn write_post(
-        &self,
-        session: &PubkySession,
-        post: &MusicPost,
-        meta: &crate::schemas::Meta,
-    ) -> Result<(), HomeserverError> {
-        self.write_object(session, &meta.path, &post.post).await
     }
 
     /// Delete an object the user wrote (remove a playlist, retract a review).

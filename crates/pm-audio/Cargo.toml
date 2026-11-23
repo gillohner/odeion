@@ -6,11 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[features]
-default = []
-# Test helpers (DSF/DFF writers) for other crates' tests.
-testutil = []
-
 [dependencies]
 pm-model = { workspace = true }
 pm-zones = { workspace = true }

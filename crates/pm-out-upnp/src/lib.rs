@@ -451,15 +451,8 @@ fn friendly_name_of(location: &str) -> Option<String> {
     Some(text[start..end].trim().to_string())
 }
 
-/// Raw SSDP: the LOCATION headers of every MediaRenderer that answers.
-pub fn ssdp_search(timeout: Duration) -> Result<Vec<String>, UpnpError> {
-    Ok(ssdp_search_usn(timeout)?
-        .into_iter()
-        .map(|(loc, _)| loc)
-        .collect())
-}
-
-/// [`ssdp_search`], each LOCATION with the UUID its USN names (`uuid:…::urn:…`), when it does.
+/// Raw SSDP: the LOCATION header of every MediaRenderer that answers, each with the UUID its USN
+/// names (`uuid:…::urn:…`), when it does.
 pub fn ssdp_search_usn(timeout: Duration) -> Result<Vec<(String, Option<String>)>, UpnpError> {
     let mx = search_mx(timeout);
     let msg = format!(

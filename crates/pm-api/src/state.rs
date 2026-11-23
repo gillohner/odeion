@@ -1212,15 +1212,10 @@ impl NodeState {
         true
     }
 
-    /// Start the Slimproto server (players connect to us) and the UDP discovery responder. Call
-    /// from inside the tokio runtime. Each connecting player becomes an output with a zone; its
-    /// pull stream is registered for the HTTP route.
-    pub fn start_slimproto(self: &Arc<Self>) -> std::io::Result<()> {
-        self.start_slimproto_on(None)
-    }
-
-    /// [`Self::start_slimproto`] on one address (`None`: all of them). On a loopback address the
-    /// discovery responder stays off: only players on this machine can connect.
+    /// Start the Slimproto server (players connect to us) and the UDP discovery responder on one
+    /// address (`None`: all of them). Call from inside the tokio runtime. Each connecting player
+    /// becomes an output with a zone; its pull stream is registered for the HTTP route. On a
+    /// loopback address the discovery responder stays off: only players on this machine can connect.
     pub fn start_slimproto_on(self: &Arc<Self>, bind: Option<std::net::IpAddr>) -> std::io::Result<()> {
         if self.slimproto_port == 0 {
             return Ok(());
