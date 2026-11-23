@@ -1788,9 +1788,11 @@ pub(crate) async fn a_lost_vault(
     for (service, _) in &records {
         match vault.envelope(service).await {
             Ok(None) => {}
-            // There, readable or not (its own failure is the pass's to report): no lost vault;
-            // not known (the homeserver didn't answer): nothing decided, the pass goes on
-            Ok(Some(_)) | Err(_) => return Ok(()),
+            // There, readable or not (its own failure is the pass's to report): no lost vault
+            Ok(Some(_)) | Err(VaultStoreError::Vault(_)) => return Ok(()),
+            // Not known (the homeserver didn't answer): the pass stops before it registers
+            // again, and the next one looks again
+            Err(e) => return Err(e),
         }
     }
     let lib = s.library.lock().expect("library poisoned");
