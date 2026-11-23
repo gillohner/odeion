@@ -8666,7 +8666,8 @@ mod identify_tests {
         // A row that names an artist is matched as before
         let named = entry("Intro", Some("Band"), None, None);
         assert!(lib.resolve_import(&named).unwrap().is_some());
-        // With the compilation's own "Intro" found after Band's, the row takes the compilation's
+        // With two songs of the title, the row takes the one on its album even when it is not
+        // the search's first hit (whichever ranks second)
         let mut comp = import_test_track("/m/va/Intro.flac", "Intro", Some("Somebody"), 100);
         comp.album = sample_track("/m/va/x.flac", "x").album;
         if let Some(a) = comp.album.as_mut() {
@@ -8674,15 +8675,13 @@ mod identify_tests {
             a.album_artist = Some("Various Artists".into());
         }
         lib.upsert_track(&comp).unwrap();
+        let hits = lib.search_tracks("Intro", 20).unwrap();
+        assert_eq!(hits.len(), 2);
+        let second = &hits[1];
+        row.album = second.album.as_ref().map(|a| a.title.clone());
         assert_eq!(
-            lib.search_tracks("Intro", 20).unwrap()[0].file.path,
-            std::path::Path::new("/m/b/Intro.flac"),
-            "Band's is the first hit"
-        );
-        row.album = Some("Summer Hits".into());
-        assert_eq!(
-            path_of(lib.resolve_import(&row).unwrap()).as_deref(),
-            Some("/m/va/Intro.flac")
+            path_of(lib.resolve_import(&row).unwrap()),
+            Some(second.file.path.to_string_lossy().into_owned())
         );
     }
 }
