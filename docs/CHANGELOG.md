@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **Dimmed text is readable.** Several things were made faint by fading them, which put their words under the contrast a reader needs (4.5 to 1): a song that cannot play in a collection (its artist line was at 2.2 to 1, 2.0 in the light theme), a source that is switched off, the count on a tag, a menu line that cannot be pressed, the note under a dialog's main choice, Match on a song row on a touch screen, and the second line of a ticked row while selecting. Their words are no longer faded: they are in the secondary text colour (the note under a choice in the button's own), only pictures and marks still fade, and a tag's count is lighter in weight, not fainter. The full-screen Now playing for a TV shows the cover behind the text more faintly, so the album, the times, the zone line and the way back read over a white cover as over a dark one (they were at 1.6 to 1.9 to 1 over a white cover). Buttons that cannot be pressed stay faded.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.

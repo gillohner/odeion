@@ -307,7 +307,7 @@ html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; 
   background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: var(--r-md); box-shadow: var(--shadow); padding: var(--sp-2); z-index: var(--z-popover);
 }
 .popover.menu { position: fixed; z-index: var(--z-menu); max-height: 60vh; }
-.pop-item:disabled { opacity: 0.5; cursor: default; }
+.pop-item:disabled { color: var(--muted); cursor: default; }
 .pop-title { font-size: var(--fs-xs); font-weight: var(--fw-semibold); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); padding: var(--sp-2) var(--sp-2h) var(--sp-1h); }
 .pop-item { width: 100%; display: flex; align-items: center; gap: var(--sp-2h); padding: 9px var(--sp-2h); border: 0; border-radius: var(--r-sm); background: none; cursor: pointer; text-align: left; color: var(--fg); }
 .pop-item:hover { background: var(--surface-3); }
@@ -908,7 +908,8 @@ html[data-shell="phone"] .reviewrow :is(#notesbtn, #notessave, #notescancel) { m
 .ptag.own { border-color: var(--tag-line); }
 .ptag:focus-visible, .ptag .chiplink:focus-visible, .ptag .chipx:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ptag-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ptag-n { flex: none; font-weight: var(--fw-medium); opacity: 0.5; }
+/* (the count: lighter than the label, not fainter; at half strength it was under 4:1 on every tag colour) */
+.ptag-n { flex: none; font-weight: var(--fw-regular); font-variant-numeric: tabular-nums; }
 .ptag .chiplink { gap: var(--sp-1h); height: 100%; min-width: 0; padding: 0; border-radius: 0; color: inherit; font-weight: inherit; }
 .ptag .chiplink:hover { background: none; color: inherit; }
 .ptag .chipx { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 100%; background: none; border: 0; padding: 0; color: inherit; opacity: 0.7; cursor: pointer; font: inherit; font-size: var(--fs-md); }
@@ -1015,7 +1016,7 @@ html[data-shell="phone"] .list-row > .plays a::after { content: ""; position: ab
 .idmark { margin-left: var(--sp-2); padding: 1px 7px; border-radius: var(--r-pill); border: 1px solid var(--line-strong); background: transparent; color: var(--muted); font-size: var(--fs-xs); line-height: 1.5; cursor: pointer; vertical-align: 1px; opacity: 0; transition: opacity var(--dur-fast); }
 .idmark:hover { color: var(--accent-strong); border-color: var(--accent); }
 .track:hover .idmark, .track:focus-within .idmark, .idmark:focus-visible { opacity: 1; }
-@media (hover: none) { .idmark { opacity: .8; } }
+@media (hover: none) { .idmark { opacity: 1; } }
 /* Identify: one bar, a segment per state (identified, to confirm, not found, not checked), no wider
    than the text beside it; the legend repeats the colours */
 .idbar { display: flex; gap: var(--sp-0h); height: 8px; max-width: 520px; border-radius: var(--r-pill); background: var(--surface-3); overflow: hidden; margin: var(--sp-1h) 0 var(--sp-2); }
@@ -1242,7 +1243,10 @@ html[data-shell="phone"] .wikilink::before { content: ''; position: absolute; in
 .srcchip.pinned { border-color: var(--accent); }
 .srcchip.pinned .ic { width: 12px; height: 12px; color: var(--accent-strong); }
 .srcchip.none { color: var(--muted); border-style: dashed; padding-left: var(--sp-2); }
-.list-row.unavail .grow, .list-row.unavail > .thumb, .list-row.unavail .thumbwrap, .list-row.unavail [data-splay] { opacity: 0.45; }
+/* A song that cannot play: its picture and Play fade; its words are in the secondary colour, which
+   still reads (faded to 0.45 the title was 4.0:1 and the artist 2.2:1) */
+.list-row.unavail > .thumb, .list-row.unavail .thumbwrap, .list-row.unavail [data-splay] { opacity: 0.45; }
+.list-row.unavail .grow .name, .list-row.unavail .grow .name .lnk:not(:hover) { color: var(--muted); }
 /* A collection item that doesn't play (a web page, a post): its card in the list (B3) */
 .card-row .card-thumb { display: grid; place-items: center; color: var(--muted); }
 .card-row .card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1266,7 +1270,8 @@ html[data-shell="phone"] .wikilink::before { content: ''; position: absolute; in
 .pop-item.on { color: var(--accent-strong); }
 .pop-item .pop-check { margin-left: auto; width: 16px; height: 16px; }
 .pop-note { display: block; font-size: var(--fs-xs); color: var(--muted); }
-.pop-item:disabled { opacity: 0.55; cursor: default; }
+.pop-item.on:disabled { background: none; color: var(--muted); }
+.pop-item:disabled .src-badge { opacity: 0.55; }
 @media (max-width: 600px) { .srcchip span { display: none; } .srcchip { padding: 3px; } }
 .srcchip.wait { padding: 5px 9px; }
 /* Phones: a playlist song's source chip is its badge alone, with ⋯ right beside it (whose reach
@@ -1320,7 +1325,7 @@ html[data-shell="phone"] :is(.track:has(.row-actions .heart.on) .title, .srow:ha
 .choices { display: flex; flex-direction: column; gap: var(--sp-2); }
 .btn.choice { flex-direction: column; align-items: flex-start; gap: var(--sp-0h); text-align: left; padding: var(--sp-3) var(--sp-3h); height: auto; white-space: normal; border-radius: var(--r-md); }
 .choice-label { font-weight: var(--fw-semibold); }
-.choice-note { font-size: var(--fs-xs); font-weight: var(--fw-regular); opacity: 0.8; }
+.choice-note { font-size: var(--fs-xs); font-weight: var(--fw-regular); }
 /* Item pages: the back button and the breadcrumb on one line, their text centred together; the
    gap under them belongs to the bar, not the button, and the two share a size and line height so
    their baselines meet (owner, 2026-10-31) */
@@ -1563,7 +1568,9 @@ code.path { font-size: var(--fs-sm); overflow-wrap: anywhere; }
 /* Sources: the Settings layout, one tab per service with its on/off switch (STEWARD-UX-SOURCES.md) */
 .src-tabrow { display: flex; align-items: center; gap: var(--sp-1h); min-width: 0; }
 .src-tabrow .set-tab { flex: 1 1 auto; min-width: 0; }
-.src-tabrow.off .set-tab { opacity: 0.55; }
+/* (switched off: the name in the secondary colour, the mark and the dot faded; the tab still opens) */
+.src-tabrow.off .set-tab:not(.on):not(:hover), .src-tabrow.off .set-tab:not(.on) .src-tsub { color: var(--muted); }
+.src-tabrow.off .set-tab :is(.src-mark, .src-dot) { opacity: 0.55; }
 .src-tname { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
 .src-t1, .src-tsub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .src-tsub { font-size: var(--fs-xs); color: var(--fg-2); font-weight: var(--fw-regular); }
@@ -2067,14 +2074,17 @@ html[data-shell="phone"] .listbar select.input { min-height: 44px; padding-top: 
 body.kiosk .sidebar, body.kiosk .topbar, body.kiosk .player, body.kiosk .bottomnav { display: none !important; }
 body.kiosk .shell { grid-template-columns: 1fr; grid-template-rows: 1fr; grid-template-areas: "content"; }
 body.kiosk .main { padding: 0; }
-.dash-home { position: absolute; top: 12px; left: 14px; z-index: var(--z-above-2); color: var(--muted); font-size: var(--fs-sm); text-decoration: none; padding: var(--sp-2) var(--sp-2h); border-radius: var(--r-sm); }
+.dash-home { position: absolute; top: 12px; left: 14px; z-index: var(--z-above-2); color: var(--fg-2); font-size: var(--fs-sm); text-decoration: none; padding: var(--sp-2) var(--sp-2h); border-radius: var(--r-sm); }
 .dash-home:hover, .dash-home:focus-visible { color: var(--fg); background: var(--surface-2); }
 .main > .dash-home + .dash { margin-top: 0; }
 /* The Log in heading takes the focus to be announced; it shows no ring for that (UX sweep A20) */
 #loginh:focus { outline: none; }
 .still-loading { margin: var(--sp-1h) 0 0; }
 .dash { position: relative; min-height: 100vh; overflow: hidden; display: flex; align-items: center; justify-content: center; background: var(--bg); }
-.dash-bg { position: absolute; inset: -40px; filter: blur(48px) saturate(1.2); opacity: 0.45; }
+/* The cover behind the text, faint enough that the lines over it read whatever its colours (at
+   0.45 a white cover left the album and the times at 1.8:1) */
+.dash-bg { position: absolute; inset: -40px; filter: blur(48px) saturate(1.4); opacity: 0.24; }
+.dash .muted, .dash .eyebrow { color: var(--fg-2); }
 .dash-bg .art { width: 100%; height: 100%; border-radius: 0; aspect-ratio: auto; }
 .dash-inner { position: relative; display: grid; grid-template-columns: minmax(200px, 42vh) minmax(0, 1fr); gap: 5vw; align-items: center; width: min(1400px, 90vw); }
 .dash-inner.empty { grid-template-columns: 1fr; text-align: center; }
@@ -2099,6 +2109,8 @@ html[data-shell="phone"] .selbar :is(.btn, .icon-btn) { min-height: 44px; min-wi
    bottom edge and 8 px to spare; a little more on phones, whose bar sits lower). */
 .main:has(.selecting) { padding-bottom: calc(32px + 14px + var(--selbar, 0px)); scroll-padding-bottom: calc(14px + 8px + var(--selbar, 0px)); }
 .selecting .srow:has(.selbox input:checked) { background: var(--accent-soft); }
+/* (on the tint the secondary colour falls under 4.5:1 on a card) */
+.selecting .srow:has(.selbox input:checked) :is(.sub, .muted, .vmark:not(:hover, :focus-visible)), .selecting .srow.unavail:has(.selbox input:checked) .grow .name, .selecting .srow.unavail:has(.selbox input:checked) .grow .name .lnk:not(:hover) { color: var(--fg-2); }
 /* (the source chip's "finding" placeholder too, so nothing spins and vanishes beside the ticks) */
 @media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow .srcchip.wait, .selecting .srow [data-sfav], .selecting .srow [data-smore] { display: none; } }
 /* One way back (UX review, sweep A17): phones have the back link only; the desktop layout (tablets
