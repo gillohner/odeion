@@ -2126,7 +2126,7 @@ fn queue_items_of(
     between: impl FnMut(),
 ) -> Result<Vec<QueueItem>, ApiError> {
     let mut items = Vec::with_capacity(ids.len());
-    in_turns(lib, ids, per_turn, between, |lib, tid| {
+    in_turns(lib, ids, per_turn, between, |lib, tid| -> Result<(), ApiError> {
         let track = lib
             .get_track(TrackId(tid))?
             .ok_or_else(|| ApiError::not_found(format!("no track {tid}")))?;

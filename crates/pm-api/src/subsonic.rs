@@ -633,7 +633,7 @@ async fn dispatch(
                                 &tids,
                                 crate::LOOKUP_TURN,
                                 || {},
-                                |lib, tid| {
+                                |lib, tid| -> Result<(), SubErr> {
                                     // The id as the app sent it ("007", not 7)
                                     let sent = &names[at];
                                     at += 1;
