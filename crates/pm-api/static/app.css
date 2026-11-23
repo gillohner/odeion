@@ -511,6 +511,9 @@ html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) .eyebrow 
 .filter-none:empty { margin: 0; }
 .notice { padding: 12px 14px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-2); }
 .notice.warn { border-color: rgba(232, 178, 74, 0.4); }
+/* ---- a read that failed (failedHtml in app.js): its Try again is the only way on, a full target on a phone ---- */
+html[data-shell="phone"] .notice[data-failed] .btn.sm { min-height: 44px; }
+.notice[data-failed] .btn { margin-block: 4px; } /* (under the words on a narrow page: not touching them) */
 /* A card's or note's sentence, then its button (My music's Sign in, the homeserver notes): not touching */
 .card > p + .btn, .notice > p + .btn { margin-top: 10px; }
 /* The Android app on an old System WebView (index.html's script): only CSS such a WebView knows, so no
