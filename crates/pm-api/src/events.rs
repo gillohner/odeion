@@ -19,7 +19,7 @@
 //!
 //! At most [`MAX_STREAMS`] streams are open at once, [`MAX_STREAMS_EACH`] of them per caller (the
 //! owner, one person, one party guest): past that the handshake is answered 503. An upgraded
-//! socket leaves the listener's connection count, so this is what bounds them.
+//! socket is not counted among the listener's HTTP connections, so this is what bounds them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
