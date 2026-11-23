@@ -1197,9 +1197,16 @@ pub fn prune(folder: &Path, keep: usize, tag: &str, just_made: &str) -> Vec<Stri
     removed
 }
 
+/// A backup file's name: `pubky-music-YYYY-MM-DD-HHMMSS-<tag>.pmbackup` for a scheduled one,
+/// without `-<tag>` for a download (`tag` empty).
 fn file_name(now: time::OffsetDateTime, tag: &str) -> String {
+    let tag = if tag.is_empty() {
+        String::new()
+    } else {
+        format!("-{tag}")
+    };
     format!(
-        "{FILE_PREFIX}{:04}-{:02}-{:02}-{:02}{:02}{:02}-{tag}{FILE_EXT}",
+        "{FILE_PREFIX}{:04}-{:02}-{:02}-{:02}{:02}{:02}{tag}{FILE_EXT}",
         now.year(),
         now.month() as u8,
         now.day(),
@@ -1271,9 +1278,15 @@ async fn run_held(s: &Arc<NodeState>) -> Result<String, String> {
             // node, a manual run during the timer's) never shares its half-written file
             let tmp = folder.join(format!(".{name}.{}.part", std::process::id()));
             let _ = std::fs::remove_file(&tmp);
-            write_private(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            // A part file a failed write leaves is removed (each run's has another name, so a
+            // share that keeps failing would fill with them)
+            let failed = |e: std::io::Error| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("{}: {e}", tmp.display())
+            };
+            write_private(&tmp, &bytes).map_err(failed)?;
             let placed = folder.join(&name);
-            std::fs::rename(&tmp, &placed).map_err(|e| e.to_string())?;
+            std::fs::rename(&tmp, &placed).map_err(failed)?;
             // Older backups are pruned only after this one reads back: one that does not goes,
             // and they stay
             if !reads_back(&placed, &bytes) {
@@ -1334,7 +1347,8 @@ fn passphrase_of(h: &HeaderMap) -> Option<String> {
 }
 
 fn download(bytes: Vec<u8>) -> Response {
-    let name = file_name(time::OffsetDateTime::now_utc());
+    // A download is nobody's scheduled backup: no node's tag, never pruned
+    let name = file_name(time::OffsetDateTime::now_utc(), "");
     (
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
@@ -1609,6 +1623,10 @@ mod tests {
             &file_name(time::OffsetDateTime::now_utc(), &tag),
             &tag
         ));
+        // A download's name has no tag and is nobody's scheduled backup
+        let download = file_name(time::OffsetDateTime::now_utc(), "");
+        assert!(!download.ends_with("-.pmbackup"), "{download}");
+        assert!(!scheduled_by(&download, &tag));
     }
 
     /// `reads_back` tells a file that holds what was written from a shorter, longer or other one.
