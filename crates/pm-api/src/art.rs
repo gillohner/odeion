@@ -318,13 +318,15 @@ pub(crate) async fn picture_file(
     // (the length it had when it was opened: a file that grows meanwhile is not read on)
     let rest = len.saturating_sub(got as u64);
     let first = futures_util::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(head))]);
+    // (a read error is the last part: the stream ends there)
     let after = futures_util::stream::unfold(
-        (file.take(rest), vec![0u8; PICTURE_CHUNK]),
-        |(mut r, mut buf)| async move {
+        Some((file.take(rest), vec![0u8; PICTURE_CHUNK])),
+        |state| async move {
+            let (mut r, mut buf) = state?;
             match r.read(&mut buf).await {
                 Ok(0) => None,
-                Ok(n) => Some((Ok(bytes::Bytes::copy_from_slice(&buf[..n])), (r, buf))),
-                Err(e) => Some((Err(e), (r, buf))),
+                Ok(n) => Some((Ok(bytes::Bytes::copy_from_slice(&buf[..n])), Some((r, buf)))),
+                Err(e) => Some((Err(e), None)),
             }
         },
     );
