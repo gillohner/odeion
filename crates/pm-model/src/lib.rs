@@ -16,6 +16,7 @@ pub mod brand;
 pub mod ids;
 pub mod library;
 pub mod path;
+pub mod text;
 
 pub use audio::{
     AudioFormat, DsdSupport, OutputCaps, QualityCeiling, SampleKind, Volume, VolumeKind, VolumeLevel,

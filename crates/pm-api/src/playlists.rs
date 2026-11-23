@@ -16,6 +16,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use pm_library::{Library, MusicPostRow};
+use pm_model::text::percent_decode;
 use pm_model::{MusicUri, Track, TrackId};
 use pm_pubky::schemas::post::TYPE_PLAYLIST;
 use pm_pubky::{ItemKind, MusicContent, MusicPost, Playlist, PlaylistItem, Visibility};
@@ -916,25 +917,6 @@ pub(crate) fn stream_item(uri: &str) -> Option<pm_zones::QueueItem> {
     Some(q)
 }
 
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        // (bytes, not a slice of the text: the two after a `%` may be half of a character)
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(hi), Some(lo)) = ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16)) {
-                out.push((hi * 16 + lo) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 #[cfg(test)]
 mod stream_item_tests {
     use super::stream_item;
@@ -951,16 +933,5 @@ mod stream_item_tests {
         assert!(
             stream_item("https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69").is_none()
         );
-    }
-
-    /// `%` followed by anything that is not two hex digits is kept as it is, also when the
-    /// bytes after it are part of a longer character (the text was cut inside it).
-    #[test]
-    fn percent_decoding_takes_any_text() {
-        assert_eq!(super::percent_decode("a%20b%2Fc"), "a b/c");
-        assert_eq!(super::percent_decode("%C3%A9t%c3%a9"), "été");
-        for kept in ["%aé", "%é1", "100%", "%2", "%zz", "%+f", "50%é", "%"] {
-            assert_eq!(super::percent_decode(kept), kept);
-        }
     }
 }

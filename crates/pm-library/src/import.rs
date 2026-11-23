@@ -8,6 +8,7 @@
 //! library by path, file name, then title and artist.
 
 use calamine::{DataType, Reader, Xlsx};
+use pm_model::text::percent_decode;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -190,28 +191,6 @@ fn resolve_entry(entry: &str, base: Option<&Path>) -> String {
         Some(b) if p.is_relative() => b.join(p).to_string_lossy().into_owned(),
         _ => entry.to_string(),
     }
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        // (bytes, not a slice of the text: the two after a `%` may be half of a character)
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (
-                (bytes[i + 1] as char).to_digit(16),
-                (bytes[i + 2] as char).to_digit(16),
-            ) {
-                out.push((hi * 16 + lo) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// `#EXTM3U` with `#EXTINF:<secs>,<Artist> - <Title>` lines; plain path lists work too.
@@ -665,17 +644,6 @@ mod tests {
             ("Just words", "Just words"),
         ] {
             assert_eq!(without_secrets(raw), clean, "{raw}");
-        }
-    }
-
-    /// `%` followed by anything that is not two hex digits is kept as it is, also when the
-    /// bytes after it are part of a longer character (the text was cut inside it).
-    #[test]
-    fn percent_decoding_takes_any_text() {
-        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
-        assert_eq!(percent_decode("%C3%A9t%c3%a9"), "été");
-        for kept in ["%aé", "%é1", "100%", "%2", "%zz", "%+f", "50%é", "%"] {
-            assert_eq!(percent_decode(kept), kept);
         }
     }
 }
