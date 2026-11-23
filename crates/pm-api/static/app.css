@@ -222,7 +222,7 @@ html { -webkit-tap-highlight-color: transparent; }
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-pill); padding: 0 var(--sp-3); height: 38px;
   transition: border-color var(--dur-base) var(--ease), background var(--dur-base) var(--ease);
 }
-.search:focus-within { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft); }
+.search:focus-within { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft); outline: 2px solid transparent; }
 .search .ic { color: var(--muted); width: 18px; height: 18px; }
 .search input { flex: 1; min-width: 0; background: none; border: 0; color: var(--fg); font: inherit; outline: none; }
 .search input::placeholder { color: var(--muted); }
@@ -408,7 +408,7 @@ html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44p
 .field { display: block; }
 .field span { display: block; font-size: var(--fs-xs); color: var(--muted); margin-bottom: var(--sp-1h); }
 .field input, .input { width: 100%; background: var(--surface); border: 1px solid var(--line-strong); color: var(--fg); padding: 9px var(--sp-3); border-radius: var(--r-sm); font: inherit; }
-.field input:focus, .input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+.field input:focus, .input:focus { border-color: var(--accent); outline: 2px solid transparent; box-shadow: 0 0 0 3px var(--accent-soft); }
 
 /* ---- buttons ---- */
 .btn {
@@ -785,7 +785,7 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; --dur-step: 0ms; }
-  * { transition: none !important; animation: none !important; }
+  * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   /* (the last cover would sit over the new one with its fade off) */
   .np-big .np-prev { display: none; }
 }
@@ -930,7 +930,7 @@ html[data-shell="phone"] .reviewrow :is(#notesbtn, #notessave, #notescancel) { m
 .tgroup > .muted.small { min-height: 32px; display: inline-flex; align-items: center; }
 .hnote { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1h) var(--sp-2h); margin: 0; }
 .taginput { background: var(--surface-2); border: 1px solid var(--line); color: var(--fg); border-radius: var(--r-pill); padding: 5px var(--sp-3); font: inherit; font-size: var(--fs-xs); width: 130px; }
-.taginput:focus { border-color: var(--accent); outline: none; }
+.taginput:focus { border-color: var(--accent); outline: 2px solid transparent; }
 .fmt { display: inline-block; margin-left: var(--sp-1h); padding: 0 5px; border-radius: var(--r-sm); font-size: var(--fs-xs); font-weight: var(--fw-semibold); letter-spacing: 0.02em; background: var(--surface-3); color: var(--fg-2); vertical-align: 1px; }
 .fmt.hi { background: var(--accent-soft); color: var(--accent-strong); }
 .fmt.lossy { color: var(--muted); }
@@ -2522,7 +2522,7 @@ html[data-shell="phone"] .btn.iconic { padding-left: var(--sp-2h); padding-right
 /* Mini player (phones): one surface on the tabs, the cover, the song with the whole width, one
    play/pause icon; the sound pill and the zone button live in Now playing. A 2 px progress line on top. */
 .mini-prog { display: none; }
-html[data-shell="phone"] .player { position: relative; display: flex; align-items: center; gap: var(--sp-1); padding: var(--sp-1h) var(--sp-1) var(--sp-1h) var(--sp-3); min-height: 60px; touch-action: none; overflow: hidden; }
+html[data-shell="phone"] .player { position: relative; display: flex; align-items: center; gap: var(--sp-1); padding: var(--sp-1h) var(--sp-1) var(--sp-1h) var(--sp-3); min-height: 60px; touch-action: pinch-zoom; overflow: hidden; }
 html[data-shell="phone"] .mini-prog { display: block; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--line); pointer-events: none; }
 html[data-shell="phone"] .mini-prog > span { display: block; height: 100%; width: var(--p, 0%); background: var(--accent); }
 html[data-shell="phone"] .player-now { flex: 1 1 auto; min-width: 0; margin: 0; padding: var(--sp-1) 0; gap: var(--sp-3); border-radius: 0; background: none; will-change: transform; }
@@ -2568,7 +2568,7 @@ html[data-shell="phone"] .player .np-art-wait .spin { width: 20px; height: 20px;
 
 /* Now playing on a phone: one screen that doesn't scroll (the free height goes to the cover), three
    buttons under the transport, and the sheet they open over it */
-.np2.compact { height: 100%; min-height: 0; display: flex; flex-direction: column; padding: var(--sp-1) var(--sp-4) calc(8px + env(safe-area-inset-bottom, 0px)); overflow: hidden; touch-action: none; }
+.np2.compact { height: 100%; min-height: 0; display: flex; flex-direction: column; padding: var(--sp-1) var(--sp-4) calc(8px + env(safe-area-inset-bottom, 0px)); overflow: hidden; touch-action: pinch-zoom; }
 .np2.compact .np-top { margin: 0 -8px var(--sp-1); flex: none; }
 .np2.compact .np-top .icon-btn { width: 48px; height: 48px; }
 .np2.compact .np-top .icon-btn .ic { width: 24px; height: 24px; }
@@ -2590,7 +2590,7 @@ html[data-shell="phone"] .player .np-art-wait .spin { width: 20px; height: 20px;
 .np2.compact .np-transport .icon-btn.play .ic { width: 30px; height: 30px; }
 .np2.compact .np-vol { margin: 0 auto; width: 100%; max-width: none; }
 /* (the sliders take their drags; the screen's swipes leave them alone) */
-.np2.compact input[type="range"] { touch-action: none; }
+.np2.compact input[type="range"] { touch-action: pinch-zoom; }
 .np-dock { display: none; }
 .np2.compact .np-dock { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-1); flex: none; margin: var(--sp-1) -8px 0; }
 .np-dockbtn { display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2); min-height: 48px; padding: 0 var(--sp-2); border: 0; border-radius: var(--r-pill); background: none; color: var(--fg-2); font: inherit; font-size: var(--fs-sm); font-weight: var(--fw-semibold); cursor: pointer; }
@@ -2607,7 +2607,7 @@ html[data-shell="phone"] .player .np-art-wait .spin { width: 20px; height: 20px;
 @keyframes bsheetup { from { transform: translateY(100%); } to { transform: none; } }
 @keyframes bsheetdown { to { transform: translateY(100%); } }
 @media (prefers-reduced-motion: reduce) { .np-bsheet.opening, .np-bsheet.closing { animation: none; } }
-.np-bsheet .np-sheet-head { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0 var(--sp-3); flex: none; border-bottom: 1px solid var(--line); touch-action: none; }
+.np-bsheet .np-sheet-head { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0 var(--sp-3); flex: none; border-bottom: 1px solid var(--line); touch-action: pinch-zoom; }
 .np-grab { display: flex; align-items: center; justify-content: center; height: 24px; width: 100%; padding: 0; border: 0; background: none; cursor: pointer; }
 .np-grab > span { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
 .np-grab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--r-sm); }
@@ -2884,3 +2884,25 @@ html[data-shell="phone"] .pa-fold { margin-top: 0; }
 html[data-shell="phone"] .pa-person { gap: var(--sp-1); }
 /* (the last group is not a fold: it keeps its distance from the folds above it) */
 .pa-box > .set-fold + .set-group:not(.set-fold) { margin-top: var(--sp-5); }
+
+/* ---- skip link ---- */
+/* The first Tab stop, out of sight until it has the focus: past the menu and the top bar to the page */
+.btn.skip { position: fixed; z-index: var(--z-progress); left: 8px; top: 8px; transform: translateY(-200%); }
+.btn.skip:focus-visible { transform: none; }
+/* (no page behind Log in or on the full-screen dashboard) */
+body.signedout .skip, body.kiosk .skip, body:has(> #nowplaying:not([hidden])) .skip { display: none; } /* (nor over Now playing: the page behind it takes no focus) */
+
+/* ---- placeholders ---- */
+/* (the browser's own grey, #757575, is about 3.9:1 on the dark theme's fields) */
+::placeholder { color: var(--muted); opacity: 1; }
+
+/* ---- forced colours (Windows High Contrast) ---- */
+/* The system paints its own colours over backgrounds and removes shadows: what is drawn only with
+   those (sliders, switches, the chosen item's fill, progress bars) gets a shape that stays */
+@media (forced-colors: active) {
+  input[type="range"], .switch { appearance: auto; -webkit-appearance: auto; }
+  .switch::after { display: none; }
+  .nav-item.on, .bnav.on, .chip.on, .set-tab.on, .pop-item.on, .az.on, .cpitem.on, .np-stab.on { outline: 2px solid Highlight; outline-offset: -2px; }
+  .jobbar, .sprog, .dash-progress, .mini-prog { border: 1px solid CanvasText; }
+  .jobbar span, .sprog > span, .dash-progress span, .mini-prog span { background: Highlight; forced-color-adjust: none; }
+}

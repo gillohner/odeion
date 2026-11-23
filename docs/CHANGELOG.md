@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **Screen readers, keyboards and system settings get what they need in more places.** A ⋯ menu is announced as a menu, with a name, and its button says whether it is open. Every dialog is announced by its heading, and a confirmation's question is read with it (before: "dialog, Delete, button"). The mini player's name is the song that plays, not just "Now playing", and Enter on its title or artist opens that page (it opened Now playing). The seek bars read as a time ("1:01 of 4:00", not "254"). The first Tab stop is "Skip to the page". With "reduce motion" set, the page no longer glides when it scrolls. In Windows High Contrast, fields keep their focus mark, the chosen menu item has an outline, and sliders and switches are visible. On a phone, two fingers can zoom Now playing and the mini player. Placeholder text in fields is easier to read in the dark theme (the browser's own grey was about 3.9:1 there).
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.
