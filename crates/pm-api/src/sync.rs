@@ -1379,6 +1379,9 @@ pub(crate) fn backed_up_settings(lib: &Library) -> std::collections::BTreeMap<St
     settings
 }
 
+/// The format of `/priv/pubky.music/settings.json` this version writes ([`SettingsBackup::version`]).
+const SETTINGS_FORMAT: u32 = 1;
+
 /// What `/priv/pubky.music/settings.json` holds.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct SettingsBackup {
@@ -1439,6 +1442,16 @@ impl PubkySync {
             Err(_) => return,
         };
         let copy = match read {
+            // A newer version's copy (its format is past this one's): left to the node that wrote
+            // it, as prefs.json is (`read_prefs`)
+            Ok(Some(v))
+                if v.get("version")
+                    .and_then(|n| n.as_u64())
+                    .is_some_and(|n| n > u64::from(SETTINGS_FORMAT)) =>
+            {
+                tracing::warn!("the settings copy on the homeserver is a newer version's: left as it is");
+                return;
+            }
             Ok(Some(v)) => match serde_json::from_value::<SettingsBackup>(v) {
                 Ok(copy) => Some(copy),
                 Err(e) => {
@@ -1511,7 +1524,7 @@ impl PubkySync {
             // loses them on the next sync
             let settings = backed_up_settings(&lib);
             SettingsBackup {
-                version: 1,
+                version: SETTINGS_FORMAT,
                 saved_at: pm_library::db::now_unix(),
                 node: s.name.clone(),
                 contact: s.contact(),
