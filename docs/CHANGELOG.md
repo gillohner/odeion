@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **Songs stays where you are when the library changes, and long lists load ahead of you.** When a scan ended or anyone edited a song or a collection, Songs emptied to its loading boxes, came back at the top with its first 300 songs, and lost what was typed in its filter. It is now drawn again in place: the same songs at the same scroll position, the filter with its text, caret and matches. While changes keep coming (an import sends one per file), Songs, Albums, Artists, Home and Bookmarks are drawn again about once a second at most instead of once per change, and a tab in the background draws nothing until you look at it again. Songs, Albums and Artists now fetch or draw their next part while the end of the list is still about a screen away; before, the next part only came once the end was on screen, so a fast scroll stopped at the end of each part. Albums and Artists also open about twice as fast on a big library (3,000 albums on a slowed-down phone: 0.75 s to 0.37 s), because sorting by name no longer sets up the language rules for every comparison.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.
