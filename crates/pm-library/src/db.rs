@@ -2444,7 +2444,12 @@ impl Library {
                 if let [near, up, ..] = folders(&p)[..] {
                     if let (Some(near), Some(up)) = (near.to_str(), up.to_str()) {
                         let mut same = self.tracks_by_file_name(&format!("{up}/{near}/{name}"))?;
-                        if same.len() == 1 {
+                        // Its tags may say anything, but not another artist than the entry names
+                        // (generic folders: "Unknown Artist/Unknown Album")
+                        let artist = t.artist.as_deref().map(str::trim).unwrap_or("");
+                        if same.len() == 1
+                            && (artist.is_empty() || no_artist(&same[0]) || by_artist(&same[0], artist))
+                        {
                             return Ok(same.pop());
                         }
                     }
@@ -5442,12 +5447,16 @@ fn row_to_album(r: &Row<'_>) -> rusqlite::Result<Result<Album>> {
 /// title differently from the library's tags.
 const IMPORT_LENGTH_SLACK_MS: u64 = 2_000;
 
-/// A name folded for matching names written by other apps: lower case, letters and digits only,
-/// "&" and "+" read as "and", without a leading "the".
+/// A name folded for matching names written by other apps: [`fold`], without a leading "the".
 fn match_key(s: &str) -> String {
+    let s = s.trim().to_lowercase();
+    fold(s.strip_prefix("the ").unwrap_or(&s))
+}
+
+/// Lower case, letters and digits only (Latin letters without their marks), "&" and "+" read as
+/// "and".
+fn fold(s: &str) -> String {
     let s = s.trim().to_lowercase().replace(['&', '+'], " and ");
-    let s = s.trim_start();
-    let s = s.strip_prefix("the ").unwrap_or(s);
     let mut key = String::with_capacity(s.len());
     for c in s.chars().filter(|c| c.is_alphanumeric()) {
         match unaccented(c) {
@@ -5484,9 +5493,9 @@ fn unaccented(c: char) -> Option<&'static str> {
 }
 
 /// The same title, ignoring case, spaces and punctuation (a title of punctuation only must be
-/// the same text).
+/// the same text); a leading "the" counts ("The End" is not "End").
 fn same_title(a: &str, b: &str) -> bool {
-    let (ka, kb) = (match_key(a), match_key(b));
+    let (ka, kb) = (fold(a), fold(b));
     if ka.is_empty() || kb.is_empty() {
         a.trim().to_lowercase() == b.trim().to_lowercase()
     } else {
@@ -8309,5 +8318,44 @@ mod identify_tests {
                 "{e:?}"
             );
         }
+    }
+
+    /// Folders named alike do not make another artist's file the entry's ("Unknown Artist/Unknown
+    /// Album" in two libraries), and a title's leading "the" counts.
+    #[test]
+    fn generic_folders_and_a_titles_the_do_not_make_a_match() {
+        let lib = Library::open_in_memory().unwrap();
+        let path_of = |t: Option<Track>| t.map(|t| t.file.path.to_string_lossy().into_owned());
+        let file = "/m/Unknown Artist/Unknown Album/01 Track 1.flac";
+        lib.upsert_track(&import_test_track(file, "Intro", Some("Artist A"), 60))
+            .unwrap();
+        let other = entry(
+            "Intro",
+            Some("Artist B"),
+            Some("/x/Unknown Artist/Unknown Album/01 Track 1.flac"),
+            None,
+        );
+        assert_eq!(path_of(lib.resolve_import(&other).unwrap()), None);
+        let same = entry(
+            "Whatever",
+            Some("artist a"),
+            Some("/x/Unknown Artist/Unknown Album/01 Track 1.flac"),
+            None,
+        );
+        assert_eq!(path_of(lib.resolve_import(&same).unwrap()).as_deref(), Some(file));
+        assert!(!same_title("The End", "End"));
+        assert!(same_title("the end!", "The End"));
+        let beatles = import_test_track("/m/b.flac", "B", Some("The Beatles"), 1);
+        assert!(by_artist(&beatles, "Beatles"));
+        lib.upsert_track(&import_test_track("/m/x/End.flac", "End", Some("X"), 100))
+            .unwrap();
+        assert_eq!(
+            path_of(lib.resolve_import(&entry("The End", None, None, None)).unwrap()),
+            None
+        );
+        assert_eq!(
+            path_of(lib.resolve_import(&entry("end", None, None, None)).unwrap()).as_deref(),
+            Some("/m/x/End.flac")
+        );
     }
 }
