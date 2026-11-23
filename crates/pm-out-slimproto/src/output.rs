@@ -11,7 +11,8 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// How long one write to a player may take. A player that stays connected and reads nothing
+/// How long one write to a player may go without progress (the limit is per system call, so
+/// a player that reads a little now and then is still let through slowly). A player that stays connected and reads nothing
 /// would otherwise hold the connection's lock, and with it the zone's commands, until the
 /// system gave up (minutes). The connection is closed then; the player connects again.
 const WRITE_LIMIT: Duration = if cfg!(test) {

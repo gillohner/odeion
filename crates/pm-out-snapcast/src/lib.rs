@@ -26,7 +26,7 @@ pub const CONTROL_PORT: u16 = 1705;
 /// How far the sink may run ahead of the music.
 const AHEAD: Duration = Duration::from_millis(250);
 
-/// How long one write of audio to snapserver may take. The stream is paced, so a write that
+/// How long one write of audio to snapserver may go without progress (per system call). The stream is paced, so a write that
 /// waits longer means snapserver stopped reading: the write fails and the zone stops with an
 /// error, instead of holding its commands (Stop, Next) until the system gives up (minutes).
 const WRITE_LIMIT: Duration = if cfg!(test) {
