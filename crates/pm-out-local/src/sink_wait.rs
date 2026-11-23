@@ -40,8 +40,8 @@ pub fn ends_stream(fault: StreamFault, dac_at_open: bool) -> bool {
 const STEP: Duration = Duration::from_millis(5);
 
 /// How long a write waits for room while the stream takes no audio at all before the output counts
-/// as stopped. The sink's queue holds half a second, so a stream that plays frees room well within
-/// it; one whose device went away without saying so (or whose audio thread hangs) never does, and
+/// as stopped. A write waits while about a second is queued, so a stream that plays frees room well
+/// within it; one whose device went away without saying so (or whose audio thread hangs) never does, and
 /// the zone would hold its commands (Stop, Pause, Next) for good.
 pub const STALL: Duration = Duration::from_secs(10);
 
@@ -57,6 +57,7 @@ pub fn wait_for_room(
     stalled: impl FnOnce() -> SinkError,
 ) -> Result<(), SinkError> {
     let mut last = (taken(), Instant::now());
+    let mut polled = Instant::now();
     while !room() {
         if stopped() {
             return Ok(());
@@ -65,15 +66,24 @@ pub fn wait_for_room(
             return Err(e);
         }
         let now = taken();
+        // A look that comes far later than its step: the machine slept (Windows counts that time
+        // in `Instant`), and the stream had no chance to take anything meanwhile
+        if polled.elapsed() >= ASLEEP {
+            last.1 = Instant::now();
+        }
         if now != last.0 {
             last = (now, Instant::now());
         } else if last.1.elapsed() >= stall {
             return Err(stalled());
         }
+        polled = Instant::now();
         std::thread::sleep(STEP);
     }
     Ok(())
 }
+
+/// A gap between two looks of [`wait_for_room`] this long is time asleep, not a stall.
+const ASLEEP: Duration = Duration::from_secs(1);
 
 /// A stream that ended by itself (its error callback said the device went away), with or without a
 /// USB DAC: the sink's writes end with Gone, so the zone pauses instead of waiting on it.
@@ -241,6 +251,30 @@ mod tests {
         );
         assert!(r.is_ok(), "{r:?}");
         assert!(started.elapsed() >= Duration::from_millis(250));
+    }
+
+    /// A machine that sleeps mid-song: the time asleep is not a stall (the stream had no chance to
+    /// play), so a stream that takes audio again on waking plays on.
+    #[test]
+    fn time_asleep_is_not_a_stall() {
+        let looks = std::sync::atomic::AtomicU32::new(0);
+        let started = Instant::now();
+        let r = wait_for_room(
+            // Room half a second after the sleep below
+            || started.elapsed() >= Duration::from_millis(2000),
+            || false,
+            || None,
+            || {
+                // The third look comes 1.5 s late, as after a sleep
+                if looks.fetch_add(1, Ordering::SeqCst) == 2 {
+                    std::thread::sleep(Duration::from_millis(1500));
+                }
+                0
+            },
+            Duration::from_millis(1200),
+            stalled,
+        );
+        assert!(r.is_ok(), "{r:?}");
     }
 
     #[test]
