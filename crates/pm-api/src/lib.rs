@@ -28139,4 +28139,34 @@ exec sleep 300
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
     }
+
+    /// A caller with every event-stream place of theirs taken is answered 503 before the
+    /// handshake; a place given back opens the way again.
+    #[tokio::test]
+    async fn an_event_stream_past_the_callers_places_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let open = || async {
+            let req = Request::builder().uri("/v1/events").body(Body::empty()).unwrap();
+            app.clone().oneshot(req).await.unwrap().status()
+        };
+        // Without a token every caller is the owner
+        let mut held: Vec<_> = (0..events::MAX_STREAMS_EACH)
+            .map(|_| s.events.take_place("Owner:").unwrap())
+            .collect();
+        assert_eq!(open().await, StatusCode::SERVICE_UNAVAILABLE);
+        held.pop();
+        // Past the place check (a test request can't be upgraded)
+        let st = open().await;
+        assert_ne!(st, StatusCode::SERVICE_UNAVAILABLE);
+        assert_ne!(st, StatusCode::FORBIDDEN);
+        // The refused request's place was not kept: one more is free after the one taken back
+        held.push(
+            s.events
+                .take_place("Owner:")
+                .expect("the request gave its place back"),
+        );
+        assert!(s.events.take_place("Owner:").is_none());
+    }
 }

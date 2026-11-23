@@ -16,6 +16,10 @@
 //! time. A controller that pings is dropped after [`IDLE_TIMEOUT`] without
 //! a message, so a half-open socket (a laptop that went to sleep) does not
 //! linger. The node also sends a WebSocket ping every [`SERVER_PING`].
+//!
+//! At most [`MAX_STREAMS`] streams are open at once, [`MAX_STREAMS_EACH`] of them per caller (the
+//! owner, one person, one party guest): past that the handshake is answered 503. An upgraded
+//! socket leaves the listener's connection count, so this is what bounds them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,6 +37,12 @@ use crate::accounts::{may_use_zone, Caller};
 use crate::state::NodeState;
 use crate::types::ApiEvent;
 use pm_zones::ZoneState;
+
+/// Event streams open at once on the node, at most.
+pub const MAX_STREAMS: usize = 512;
+/// Event streams one caller (the owner, one person, one party guest) has open at once, at most:
+/// apps, tabs and integrations together.
+pub const MAX_STREAMS_EACH: usize = 64;
 
 /// How often the node pings each socket.
 pub const SERVER_PING: Duration = Duration::from_secs(20);
@@ -66,6 +76,26 @@ struct Inner {
     watchers: std::sync::atomic::AtomicUsize,
     /// Woken when the first controller connects, so the volume poll reads at once.
     first_watcher: tokio::sync::Notify,
+    /// Open event streams by caller ([`EventBus::take_place`]).
+    places: Mutex<std::collections::HashMap<String, usize>>,
+}
+
+/// One event stream's place ([`EventBus::take_place`]), given back when dropped.
+pub struct StreamPlace {
+    inner: Arc<Inner>,
+    who: String,
+}
+
+impl Drop for StreamPlace {
+    fn drop(&mut self) {
+        let mut places = self.inner.places.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = places.get_mut(&self.who) {
+            *n -= 1;
+            if *n == 0 {
+                places.remove(&self.who);
+            }
+        }
+    }
 }
 
 /// Counts one connected controller while it lives.
@@ -88,6 +118,7 @@ impl EventBus {
                 boot: format!("{:016x}", rand::random::<u64>()),
                 watchers: std::sync::atomic::AtomicUsize::new(0),
                 first_watcher: tokio::sync::Notify::new(),
+                places: Mutex::new(std::collections::HashMap::new()),
             }),
         }
     }
@@ -115,6 +146,24 @@ impl EventBus {
     /// Resolves when a controller connects while none was.
     pub async fn first_watcher(&self) {
         self.inner.first_watcher.notified().await;
+    }
+
+    /// A place for one more event stream of `who`: `None` when the node has [`MAX_STREAMS`] open,
+    /// or `who` has [`MAX_STREAMS_EACH`].
+    pub fn take_place(&self, who: &str) -> Option<StreamPlace> {
+        self.take_place_within(who, MAX_STREAMS, MAX_STREAMS_EACH)
+    }
+
+    fn take_place_within(&self, who: &str, all: usize, each: usize) -> Option<StreamPlace> {
+        let mut places = self.inner.places.lock().unwrap_or_else(|e| e.into_inner());
+        if places.values().sum::<usize>() >= all || places.get(who).copied().unwrap_or(0) >= each {
+            return None;
+        }
+        *places.entry(who.to_string()).or_default() += 1;
+        Some(StreamPlace {
+            inner: self.inner.clone(),
+            who: who.to_string(),
+        })
     }
 
     /// Whether any controller is connected to `/v1/events`.
@@ -191,12 +240,26 @@ pub(crate) async fn events_ws(
         )
             .into_response();
     }
+    // A place before the upgrade: an upgraded socket leaves the listener's connection count
+    let who = format!("{:?}:{}", c.role, c.key.as_deref().unwrap_or(""));
+    let Some(place) = s.events.take_place(&who) else {
+        tracing::warn!(role = ?c.role, "event stream refused: too many open");
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, "30")],
+            "too many event streams are open: close some apps or tabs",
+        )
+            .into_response();
+    };
     let ws = match ws {
         Ok(ws) => ws,
         Err(e) => return e.into_response(),
     };
     let token = crate::bearer(&headers, &q);
-    ws.on_upgrade(move |socket| event_stream(socket, s, c, token))
+    ws.on_upgrade(move |socket| async move {
+        let _place = place;
+        event_stream(socket, s, c, token).await
+    })
 }
 
 fn snapshot(s: &NodeState, c: &Caller, seq: u64) -> SnapshotMsg {
@@ -572,5 +635,38 @@ mod tests {
             v,
             serde_json::json!({"seq": 9, "type": "outputs_changed", "output": "net:192.168.1.20:7790/cpal:Speaker or headphones"})
         );
+    }
+
+    /// Each caller has at most its share of event streams, the node at most its total; a closed
+    /// stream gives its place back.
+    #[test]
+    fn event_streams_have_places_per_caller_and_in_all() {
+        let bus = EventBus::new(8);
+        let mut a: Vec<StreamPlace> = (0..MAX_STREAMS_EACH)
+            .map(|_| bus.take_place("Listener:a").expect("a place"))
+            .collect();
+        assert!(bus.take_place("Listener:a").is_none(), "a has its share");
+        let b = bus
+            .take_place("Listener:b")
+            .expect("another caller still gets one");
+        a.pop();
+        let again = bus
+            .take_place("Listener:a")
+            .expect("a closed stream gives its place back");
+        drop((a, b, again));
+        assert!(
+            bus.inner.places.lock().unwrap().is_empty(),
+            "nothing left counted"
+        );
+        // The node's total, with small numbers
+        let held: Vec<StreamPlace> = (0..3)
+            .map(|i| bus.take_place_within(&format!("Listener:{i}"), 3, 2).unwrap())
+            .collect();
+        assert!(
+            bus.take_place_within("Owner:", 3, 2).is_none(),
+            "the node is full"
+        );
+        drop(held);
+        assert!(bus.take_place_within("Owner:", 3, 2).is_some());
     }
 }
