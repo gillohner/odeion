@@ -1175,6 +1175,7 @@ pub(crate) fn open_track_blocking(
 pub(crate) async fn stream(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     let id = numeric(&id)?.to_string();
     let r = stream_url(&s, &id).await;
@@ -1187,16 +1188,21 @@ pub(crate) async fn stream(
         Kind::Progressive | Kind::HlsMp3 => "audio/mpeg",
         Kind::HlsAac => "audio/mp4",
     };
-    let out = axum::response::Response::builder()
+    let mut out = axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, mime)
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=600");
     let body = match p.kind {
         Kind::Progressive => {
-            let resp = crate::relay::send(s.http_client().get(&url))
+            // A file: the player's range goes to it (HLS below is stitched, so no ranges)
+            let resp = crate::relay::send(crate::relay::ranged(s.http_client().get(&url), &headers))
                 .await
                 .map_err(upstream)?;
             if !resp.status().is_success() {
                 return Err(upstream(format!("stream answered {}", resp.status())));
+            }
+            out = crate::relay::range_head(&resp, out);
+            if let Some(n) = resp.content_length() {
+                out = out.header(axum::http::header::CONTENT_LENGTH, n);
             }
             crate::relay::body(resp)
         }

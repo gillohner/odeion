@@ -398,6 +398,7 @@ pub(crate) fn open_track_blocking(
 pub(crate) async fn stream(
     axum::extract::State(s): axum::extract::State<Arc<NodeState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     let id = numeric(&id)?.to_string();
     let t = by_id(&s, "/tracks/", &id, &[("audioformat", "mp32".into())]).await?;
@@ -405,14 +406,14 @@ pub(crate) async fn stream(
         .as_str()
         .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
         .ok_or_else(|| ApiError::not_found("Jamendo has no stream for this track"))?;
-    let resp = crate::relay::send(s.http_client().get(url))
+    let resp = crate::relay::send(crate::relay::ranged(s.http_client().get(url), &headers))
         .await
         .map_err(upstream)?;
     if !resp.status().is_success() {
         return Err(upstream(format!("stream answered {}", resp.status())));
     }
     let len = resp.content_length();
-    let mut out = axum::response::Response::builder()
+    let mut out = crate::relay::range_head(&resp, axum::response::Response::builder())
         .header(axum::http::header::CONTENT_TYPE, "audio/mpeg")
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=3600");
     if let Some(n) = len {

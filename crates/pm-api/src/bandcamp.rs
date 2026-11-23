@@ -577,6 +577,7 @@ pub(crate) fn open_track_blocking(
 pub(crate) async fn stream(
     State(s): State<Arc<NodeState>>,
     Path(key): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     ready(&s)?;
     let (band, kind, slug, n) =
@@ -590,13 +591,13 @@ pub(crate) async fn stream(
         Failure::Mode(m) => upstream(m),
         Failure::Item(m) => ApiError::not_found(m),
     })?;
-    let resp = crate::relay::send(s.http_client().get(&url))
+    let resp = crate::relay::send(crate::relay::ranged(s.http_client().get(&url), &headers))
         .await
         .map_err(upstream)?;
     if !resp.status().is_success() {
         return Err(upstream(format!("stream answered {}", resp.status())));
     }
-    let mut out = axum::response::Response::builder()
+    let mut out = crate::relay::range_head(&resp, axum::response::Response::builder())
         .header(axum::http::header::CONTENT_TYPE, "audio/mpeg")
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=300");
     if let Some(n) = resp.content_length() {

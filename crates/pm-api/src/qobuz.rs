@@ -1532,6 +1532,7 @@ pub(crate) async fn stream(
     State(s): State<Arc<NodeState>>,
     axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     let id = numeric(&id)?.to_string();
     // With the account the caller plays with (their own, or the node's under its source policy)
@@ -1545,14 +1546,14 @@ pub(crate) async fn stream(
         StreamError::Track(m) => ApiError::not_found(m),
         StreamError::Unavailable(m) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, m),
     })?;
-    let resp = crate::relay::send(s.http_client().get(&url))
+    let resp = crate::relay::send(crate::relay::ranged(s.http_client().get(&url), &headers))
         .await
         .map_err(upstream)?;
     if !resp.status().is_success() {
         return Err(upstream(format!("stream answered {}", resp.status())));
     }
     let len = resp.content_length();
-    let mut out = axum::response::Response::builder()
+    let mut out = crate::relay::range_head(&resp, axum::response::Response::builder())
         .header(axum::http::header::CONTENT_TYPE, content_type_for(format))
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=600");
     if let Some(n) = len {

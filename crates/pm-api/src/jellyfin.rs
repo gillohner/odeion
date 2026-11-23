@@ -384,6 +384,7 @@ async fn relay(
     s: &NodeState,
     url: String,
     fallback_type: &str,
+    player: Option<&axum::http::HeaderMap>,
 ) -> Result<axum::response::Response, ApiError> {
     let srv = server(s)?;
     let rb = s.http_client().get(url).header(
@@ -394,6 +395,10 @@ async fn relay(
     let resp = if fallback_type.starts_with("image/") {
         rb.send().await.map_err(|e| upstream(e.without_url()))?
     } else {
+        let rb = match player {
+            Some(h) => crate::relay::ranged(rb, h),
+            None => rb,
+        };
         crate::relay::send(rb).await.map_err(upstream)?
     };
     if !resp.status().is_success() {
@@ -414,7 +419,7 @@ async fn relay(
             .and_then(|v| v.to_str().ok()),
         fallback_type,
     );
-    let mut out = axum::response::Response::builder()
+    let mut out = crate::relay::range_head(&resp, axum::response::Response::builder())
         .header(axum::http::header::CONTENT_TYPE, ctype)
         .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(
@@ -433,10 +438,11 @@ async fn relay(
 pub(crate) async fn stream(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     let id = valid_id(&id)?.to_string();
     let srv = server(&s)?;
-    relay(&s, stream_url(&srv, &id), "audio/flac").await
+    relay(&s, stream_url(&srv, &id), "audio/flac", Some(&headers)).await
 }
 
 /// `GET /v1/sources/jellyfin/cover/{id}`.
@@ -450,7 +456,7 @@ pub(crate) async fn cover(
         "{}/Items/{id}/Images/Primary?maxHeight=600",
         srv.url.trim_end_matches('/')
     );
-    relay(&s, url, "image/jpeg").await
+    relay(&s, url, "image/jpeg", None).await
 }
 
 // ---- signing in ----

@@ -407,6 +407,7 @@ async fn relay(
     method: &str,
     params: &[(&str, &str)],
     fallback_type: &str,
+    player: Option<&axum::http::HeaderMap>,
 ) -> Result<axum::response::Response, ApiError> {
     let srv = server(s)?;
     let url = signed_url(&srv, method, params).map_err(upstream)?;
@@ -415,6 +416,10 @@ async fn relay(
     let resp = if fallback_type.starts_with("image/") {
         rb.send().await.map_err(|e| upstream(e.without_url()))?
     } else {
+        let rb = match player {
+            Some(h) => crate::relay::ranged(rb, h),
+            None => rb,
+        };
         crate::relay::send(rb).await.map_err(upstream)?
     };
     if !resp.status().is_success() {
@@ -438,7 +443,7 @@ async fn relay(
     }
     // Audio or video as the server said, else what was asked for
     let ctype = crate::art::safe_media_type(Some(&said), fallback_type);
-    let mut out = axum::response::Response::builder()
+    let mut out = crate::relay::range_head(&resp, axum::response::Response::builder())
         .header(axum::http::header::CONTENT_TYPE, ctype)
         .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(
@@ -458,10 +463,11 @@ async fn relay(
 pub(crate) async fn stream(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     let id = valid_id(&id)?.to_string();
     let mp3 = [("id", id.as_str()), ("format", "mp3"), ("maxBitRate", "320")];
-    match relay(&s, "stream", &mp3, "audio/mpeg").await {
+    match relay(&s, "stream", &mp3, "audio/mpeg", Some(&headers)).await {
         // A server that cannot transcode (no ffmpeg) refuses MP3: the original file then
         Err(e) if e.status == StatusCode::NOT_FOUND => {
             relay(
@@ -469,6 +475,7 @@ pub(crate) async fn stream(
                 "stream",
                 &[("id", id.as_str()), ("format", "raw")],
                 "audio/flac",
+                Some(&headers),
             )
             .await
         }
@@ -482,7 +489,14 @@ pub(crate) async fn cover(
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
     let id = valid_id(&id)?.to_string();
-    relay(&s, "getCoverArt", &[("id", &id), ("size", "600")], "image/jpeg").await
+    relay(
+        &s,
+        "getCoverArt",
+        &[("id", &id), ("size", "600")],
+        "image/jpeg",
+        None,
+    )
+    .await
 }
 
 // ---- connecting the server ----

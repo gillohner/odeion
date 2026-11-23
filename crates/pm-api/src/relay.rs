@@ -12,6 +12,36 @@ pub(crate) const RELAY_MAX: Duration = Duration::from_secs(6 * 3600);
 /// player is reading.
 pub(crate) const RELAY_IDLE: Duration = Duration::from_secs(30);
 
+/// The player's `Range` and `If-Range` on the request to the source, so a player can seek past
+/// what it has (a source that takes ranges answers 206).
+pub(crate) fn ranged(rb: reqwest::RequestBuilder, player: &axum::http::HeaderMap) -> reqwest::RequestBuilder {
+    let mut rb = rb;
+    for h in [axum::http::header::RANGE, axum::http::header::IF_RANGE] {
+        if let Some(v) = player.get(&h) {
+            rb = rb.header(h, v.clone());
+        }
+    }
+    rb
+}
+
+/// The source's status and range headers on the player's answer: a 206 with its
+/// `Content-Range`, and `Accept-Ranges` when the source says it takes ranges.
+pub(crate) fn range_head(
+    resp: &reqwest::Response,
+    out: axum::http::response::Builder,
+) -> axum::http::response::Builder {
+    let mut out = out.status(resp.status());
+    for h in [
+        axum::http::header::CONTENT_RANGE,
+        axum::http::header::ACCEPT_RANGES,
+    ] {
+        if let Some(v) = resp.headers().get(&h) {
+            out = out.header(h, v.clone());
+        }
+    }
+    out
+}
+
 /// Send a request whose answer is relayed as it arrives: no total limit of the node's client,
 /// the headers within [`RELAY_IDLE`]. The error has no URL in it (it may carry a token).
 pub(crate) async fn send(rb: reqwest::RequestBuilder) -> Result<reqwest::Response, String> {
@@ -109,5 +139,56 @@ mod tests {
         let t = std::time::Instant::now();
         assert!(body_within(resp, idle).collect().await.is_err());
         assert!(t.elapsed() < idle * 3, "{:?}", t.elapsed());
+    }
+
+    /// The player's range goes to the source, and the source's 206 with its range headers comes
+    /// back; a request without a range is passed on as before.
+    #[tokio::test]
+    async fn a_players_range_reaches_the_source_and_its_answer_comes_back() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = l.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                let _ = tx.send(req.clone());
+                let reply = if req.contains("range: bytes=6-") {
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 6-9/10\r\nAccept-Ranges: bytes\r\nContent-Length: 4\r\nConnection: close\r\n\r\n6789"
+                } else {
+                    "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789"
+                };
+                let _ = sock.write_all(reply.as_bytes()).await;
+            }
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/song");
+        let mut player = axum::http::HeaderMap::new();
+        player.insert(axum::http::header::RANGE, "bytes=6-".parse().unwrap());
+        let resp = send(ranged(client.get(&url), &player)).await.unwrap();
+        assert!(
+            rx.recv().await.unwrap().contains("range: bytes=6-"),
+            "the range went on"
+        );
+        let out = range_head(&resp, axum::http::Response::builder())
+            .body(body(resp))
+            .unwrap();
+        assert_eq!(out.status(), 206);
+        assert_eq!(out.headers()["content-range"], "bytes 6-9/10");
+        assert_eq!(out.headers()["accept-ranges"], "bytes");
+        let got = out.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&got[..], b"6789");
+        // No range: a whole answer
+        let resp = send(ranged(client.get(&url), &axum::http::HeaderMap::new()))
+            .await
+            .unwrap();
+        assert!(!rx.recv().await.unwrap().contains("range:"));
+        let out = range_head(&resp, axum::http::Response::builder())
+            .body(body(resp))
+            .unwrap();
+        assert_eq!(out.status(), 200);
+        assert!(out.headers().get("content-range").is_none());
     }
 }
