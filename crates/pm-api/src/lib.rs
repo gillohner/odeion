@@ -2840,7 +2840,7 @@ async fn artist_image(
                 return Err(ApiError::not_found(format!("no portrait for artist {id}")));
             };
             let _ = tokio::fs::create_dir_all(&s.art_dir).await;
-            tokio::fs::write(&path, &bytes)
+            art::write_whole(&path, &bytes)
                 .await
                 .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }

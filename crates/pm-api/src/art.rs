@@ -231,7 +231,7 @@ async fn download(
             return None;
         }
         let file = art_dir.join(format!("{prefix}-{album_id}.{}", ext_for(&mime)));
-        if tokio::fs::write(&file, &bytes).await.is_err() {
+        if write_whole(&file, &bytes).await.is_err() {
             return None;
         }
         Some(AlbumArt {
@@ -241,6 +241,26 @@ async fn download(
             source: source.into(),
         })
     }
+}
+
+/// Write `bytes` to `to` whole or not at all: into a part file of its own (two writers of one
+/// picture never share one), then renamed over `to`. A request that opened the old file keeps
+/// reading it to its end; one that opens it later gets the new one complete, never a file being
+/// written (which would reach the browser short of its Content-Length).
+pub(crate) async fn write_whole(to: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = to.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}-{n}.part", std::process::id()));
+    let part = to.with_file_name(name);
+    let written = match tokio::fs::write(&part, bytes).await {
+        Ok(()) => tokio::fs::rename(&part, to).await,
+        Err(e) => Err(e),
+    };
+    if written.is_err() {
+        let _ = tokio::fs::remove_file(&part).await;
+    }
+    written
 }
 
 /// Every picture and relayed file the node serves says it is only that: the browser never guesses
@@ -487,5 +507,53 @@ mod tests {
         }
         let (none, no_headers) = (dir.path().join("none.jpg"), axum::http::HeaderMap::new());
         assert!(picture_file(&none, "private", &no_headers).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_picture_is_replaced_whole_while_an_old_reader_reads_on() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("caa-7.jpg");
+        let old = vec![1u8; 64 * 1024];
+        std::fs::write(&path, &old).unwrap();
+        // A request already sending the old picture
+        let mut reader = std::fs::File::open(&path).unwrap();
+        // Two requests write the same missing picture at once
+        let (a, b) = (vec![2u8; 200 * 1024], vec![3u8; 100 * 1024]);
+        let (ra, rb) = tokio::join!(super::write_whole(&path, &a), super::write_whole(&path, &b));
+        ra.unwrap();
+        rb.unwrap();
+        let mut seen = Vec::new();
+        reader.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, old, "the old reader is not cut short or mixed");
+        let now = std::fs::read(&path).unwrap();
+        assert!(now == a || now == b, "one whole picture, {} bytes", now.len());
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("caa-7.jpg")],
+            "no part file left"
+        );
+        // A write that cannot happen leaves nothing behind either: no folder to write in, or a
+        // part file written whose rename fails (a folder stands at the picture's name)
+        let gone = dir.path().join("no-such-dir").join("x.jpg");
+        assert!(super::write_whole(&gone, &a).await.is_err());
+        let blocked = dir.path().join("caa-8.jpg");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("inside"), b"x").unwrap();
+        assert!(super::write_whole(&blocked, &a).await.is_err());
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["caa-7.jpg", "caa-8.jpg"],
+            "no part file left after a failed rename"
+        );
     }
 }

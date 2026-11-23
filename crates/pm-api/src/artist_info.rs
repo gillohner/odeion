@@ -446,8 +446,7 @@ async fn download(http: &reqwest::Client, url: &str, to: &std::path::Path) -> bo
         return false;
     }
     // Whole or not at all: a request served meanwhile never gets half a picture
-    let part = to.with_extension("part");
-    tokio::fs::write(&part, &bytes).await.is_ok() && tokio::fs::rename(&part, to).await.is_ok()
+    crate::art::write_whole(to, &bytes).await.is_ok()
 }
 
 #[cfg(test)]
