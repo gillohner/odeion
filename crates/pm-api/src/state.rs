@@ -718,16 +718,32 @@ impl NodeState {
                 if state.queue_version != saved_version {
                     // One look at the queue: the items and, while shuffled, their original
                     // order belong together (a change between two reads would save a wrong one)
-                    let Some(z) = shuffled.upgrade() else { break };
-                    let snap = z.queue_snapshot();
-                    drop(z);
-                    saved_version = snap.version;
-                    let saved = SavedQueue {
-                        items: snap.items,
-                        repeat: snap.repeat,
-                        radio: snap.radio,
-                        shuffle: snap.shuffle,
-                        order: snap.order,
+                    let saved = match shuffled.upgrade() {
+                        Some(z) => {
+                            let snap = z.queue_snapshot();
+                            drop(z);
+                            saved_version = snap.version;
+                            SavedQueue {
+                                items: snap.items,
+                                repeat: snap.repeat,
+                                radio: snap.radio,
+                                shuffle: snap.shuffle,
+                                order: snap.order,
+                            }
+                        }
+                        // Gone meanwhile (a group's queue is cleared just before it goes): what it
+                        // published last, in play order, so a zone of the same id later does not
+                        // get an older queue back
+                        None => {
+                            saved_version = state.queue_version;
+                            SavedQueue {
+                                items: state.queue.clone(),
+                                repeat: state.repeat,
+                                radio: state.radio,
+                                shuffle: false,
+                                order: Vec::new(),
+                            }
+                        }
                     };
                     if let Ok(json) = serde_json::to_string(&saved) {
                         let lib = library.lock().expect("library poisoned");

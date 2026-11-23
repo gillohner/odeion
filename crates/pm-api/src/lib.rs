@@ -28156,6 +28156,8 @@ exec sleep 300
         zone.wait_acked().await;
         let gone = Arc::downgrade(&zone);
         let id = zone.id().clone();
+        // Its queue cleared just before it goes (as a group's is): that is what stays saved
+        zone.clear();
         drop(zone);
         drop(s.remove_zone(&id));
         for _ in 0..100 {
@@ -28165,5 +28167,20 @@ exec sleep 300
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(gone.upgrade().is_none(), "something still holds the removed zone");
+        let saved_items = || {
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(&format!("queue.{}", id.0))
+                .unwrap()
+                .map(|j| serde_json::from_str::<serde_json::Value>(&j).unwrap()["items"].clone())
+        };
+        for _ in 0..100 {
+            if saved_items() == Some(serde_json::json!([])) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(saved_items(), Some(serde_json::json!([])), "the clear was saved");
     }
 }
