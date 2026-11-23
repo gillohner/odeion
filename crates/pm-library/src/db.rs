@@ -962,7 +962,7 @@ impl Library {
                 row_to_track_raw,
             )?
             .collect::<std::result::Result<_, _>>()?;
-        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+        finish_tracks(&conn, raws)
     }
 
     /// Tracks by id, `limit` from `offset` (clients that page by offset: Subsonic `search3`).
@@ -973,7 +973,7 @@ impl Library {
         let raws: Vec<RawTrack> = stmt
             .query_map(params![limit as i64, offset as i64], row_to_track_raw)?
             .collect::<std::result::Result<_, _>>()?;
-        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+        finish_tracks(&conn, raws)
     }
 
     /// Full-text search over title, artist and album.
@@ -990,7 +990,7 @@ impl Library {
         let raws: Vec<RawTrack> = stmt
             .query_map(params![q, limit as i64], row_to_track_raw)?
             .collect::<std::result::Result<_, _>>()?;
-        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+        finish_tracks(&conn, raws)
     }
 
     pub fn tracks_by_canonical(&self, uri: &MusicUri) -> Result<Vec<Track>> {
@@ -1014,7 +1014,7 @@ impl Library {
         let raws: Vec<RawTrack> = stmt
             .query_map(params![arg], row_to_track_raw)?
             .collect::<std::result::Result<_, _>>()?;
-        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+        finish_tracks(&conn, raws)
     }
 
     /// The owner's edit of a file's tags, if any.
@@ -2389,7 +2389,7 @@ impl Library {
         let raws: Vec<RawTrack> = stmt
             .query_map(params![format!("%/{escaped}")], row_to_track_raw)?
             .collect::<std::result::Result<_, _>>()?;
-        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+        finish_tracks(&conn, raws)
     }
 
     /// The library track for a title and (optional) artist: the first search
@@ -2527,16 +2527,20 @@ impl Library {
                 ))
             })?
             .collect::<std::result::Result<_, _>>()?;
-        rows.into_iter()
-            .map(|(raw, id, zone, played_at)| {
-                Ok(PlayEntry {
-                    id,
-                    track: finish_track(&conn, raw)?,
-                    zone,
-                    played_at,
-                })
+        let (raws, rest): (Vec<RawTrack>, Vec<_>) = rows
+            .into_iter()
+            .map(|(raw, id, zone, played_at)| (raw, (id, zone, played_at)))
+            .unzip();
+        Ok(finish_tracks(&conn, raws)?
+            .into_iter()
+            .zip(rest)
+            .map(|(track, (id, zone, played_at))| PlayEntry {
+                id,
+                track,
+                zone,
+                played_at,
             })
-            .collect()
+            .collect())
     }
 
     /// Plays before `before` (unix seconds; all when `None`), newest first, at most `limit`.
@@ -2557,16 +2561,20 @@ impl Library {
                 ))
             })?
             .collect::<std::result::Result<_, _>>()?;
-        rows.into_iter()
-            .map(|(raw, id, zone, played_at)| {
-                Ok(PlayEntry {
-                    id,
-                    track: finish_track(&conn, raw)?,
-                    zone,
-                    played_at,
-                })
+        let (raws, rest): (Vec<RawTrack>, Vec<_>) = rows
+            .into_iter()
+            .map(|(raw, id, zone, played_at)| (raw, (id, zone, played_at)))
+            .unzip();
+        Ok(finish_tracks(&conn, raws)?
+            .into_iter()
+            .zip(rest)
+            .map(|(track, (id, zone, played_at))| PlayEntry {
+                id,
+                track,
+                zone,
+                played_at,
             })
-            .collect()
+            .collect())
     }
 
     /// Every play since `since` (unix seconds; all when `None`), as `(track id, played_at)`: no
@@ -2603,15 +2611,17 @@ impl Library {
                 ))
             })?
             .collect::<std::result::Result<_, _>>()?;
-        rows.into_iter()
-            .map(|(raw, n, last)| {
-                Ok(PlayedTrack {
-                    track: finish_track(&conn, raw)?,
-                    plays: n.max(0) as u64,
-                    last_played_at: last,
-                })
+        let (raws, rest): (Vec<RawTrack>, Vec<_>) =
+            rows.into_iter().map(|(raw, n, last)| (raw, (n, last))).unzip();
+        Ok(finish_tracks(&conn, raws)?
+            .into_iter()
+            .zip(rest)
+            .map(|(track, (n, last))| PlayedTrack {
+                track,
+                plays: n.max(0) as u64,
+                last_played_at: last,
             })
-            .collect()
+            .collect())
     }
 
     /// Albums whose tracks played most recently, newest first.
@@ -5150,8 +5160,7 @@ fn songs_in_order(
         let raws: Vec<RawTrack> = stmt
             .query_map(params![list], row_to_track_raw)?
             .collect::<std::result::Result<_, _>>()?;
-        for raw in raws {
-            let t = finish_track(conn, raw)?;
+        for t in finish_tracks(conn, raws)? {
             if let Some(id) = t.id {
                 tracks.entry(id.0).or_insert(t);
             }
@@ -5286,7 +5295,8 @@ struct RawStrings {
     upc: Option<String>,
 }
 
-fn finish_track(conn: &Connection, raw: RawTrack) -> Result<Track> {
+/// A track read without its artists and genres: its typed fields checked.
+fn finish_fields(raw: RawTrack) -> Result<Track> {
     let RawTrack { mut track, strings } = raw;
     track.recording_mbid = opt_mbid(strings.recording_mbid, "recording_mbid")?;
     track.isrc = strings
@@ -5321,6 +5331,24 @@ fn finish_track(conn: &Connection, raw: RawTrack) -> Result<Track> {
             })
             .transpose()?;
     }
+    Ok(track)
+}
+
+/// Artists of one track, as `(id, name, mbid)` rows, in their order.
+fn artists_of(rows: Vec<(i64, String, Option<String>)>) -> Result<Vec<Artist>> {
+    rows.into_iter()
+        .map(|(aid, name, mbid)| {
+            Ok(Artist {
+                id: Some(aid),
+                name,
+                mbid: opt_mbid(mbid, "artists.mbid")?,
+            })
+        })
+        .collect()
+}
+
+fn finish_track(conn: &Connection, raw: RawTrack) -> Result<Track> {
+    let mut track = finish_fields(raw)?;
     let id = track.id.expect("loaded track has id").0;
     let mut stmt = conn.prepare_cached(
         "SELECT a.id, a.name, a.mbid FROM track_artists ta JOIN artists a ON a.id = ta.artist_id WHERE ta.track_id = ?1 ORDER BY ta.position",
@@ -5334,13 +5362,7 @@ fn finish_track(conn: &Connection, raw: RawTrack) -> Result<Track> {
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    for (aid, name, mbid) in artists {
-        track.artists.push(Artist {
-            id: Some(aid),
-            name,
-            mbid: opt_mbid(mbid, "artists.mbid")?,
-        });
-    }
+    track.artists = artists_of(artists)?;
     let mut stmt = conn.prepare_cached(
         "SELECT g.name FROM track_genres tg JOIN genres g ON g.id = tg.genre_id WHERE tg.track_id = ?1 ORDER BY g.name COLLATE NOCASE",
     )?;
@@ -5348,6 +5370,67 @@ fn finish_track(conn: &Connection, raw: RawTrack) -> Result<Track> {
         .query_map(params![id], |r| r.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(track)
+}
+
+/// [`finish_track`] for many tracks at once: their artists and genres in two queries per 500
+/// tracks instead of two per track (the same rows in the same order: positions are unique per
+/// track, genre names without regard to case). The tracks keep the order of `raws`, a track
+/// listed twice (a history) comes twice.
+fn finish_tracks(conn: &Connection, raws: Vec<RawTrack>) -> Result<Vec<Track>> {
+    use std::collections::HashMap;
+    if raws.len() < 2 {
+        return raws.into_iter().map(|raw| finish_track(conn, raw)).collect();
+    }
+    let mut ids: Vec<i64> = raws.iter().filter_map(|r| r.track.id.map(|i| i.0)).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    type ArtistRow = (i64, String, Option<String>);
+    let mut artists: HashMap<i64, Vec<ArtistRow>> = HashMap::new();
+    let mut genres: HashMap<i64, Vec<String>> = HashMap::new();
+    for chunk in ids.chunks(500) {
+        let list = format!(
+            "[{}]",
+            chunk.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+        );
+        let mut stmt = conn.prepare_cached(
+            "SELECT ta.track_id, a.id, a.name, a.mbid FROM track_artists ta JOIN artists a ON a.id = ta.artist_id \
+             WHERE ta.track_id IN (SELECT value FROM json_each(?1)) ORDER BY ta.track_id, ta.position",
+        )?;
+        let rows = stmt.query_map(params![list], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                (
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ),
+            ))
+        })?;
+        for row in rows {
+            let (track, a) = row?;
+            artists.entry(track).or_default().push(a);
+        }
+        let mut stmt = conn.prepare_cached(
+            "SELECT tg.track_id, g.name FROM track_genres tg JOIN genres g ON g.id = tg.genre_id \
+             WHERE tg.track_id IN (SELECT value FROM json_each(?1)) ORDER BY tg.track_id, g.name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![list], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (track, g) = row?;
+            genres.entry(track).or_default().push(g);
+        }
+    }
+    raws.into_iter()
+        .map(|raw| {
+            let mut track = finish_fields(raw)?;
+            let id = track.id.expect("loaded track has id").0;
+            track.artists = artists_of(artists.get(&id).cloned().unwrap_or_default())?;
+            track.genres = genres.get(&id).cloned().unwrap_or_default();
+            Ok(track)
+        })
+        .collect()
 }
 
 /// Fisher–Yates with a time-seeded xorshift; good enough for a radio shuffle.
@@ -5472,6 +5555,96 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::{sample_track, MB};
     use super::*;
+
+    /// Track lists read artists and genres for all their tracks at once: the same tracks, with
+    /// the same artists and genres in the same order, as reading each on its own; a track with
+    /// none, and one listed twice (a history), included. Over 500 tracks, so the reads come in
+    /// more than one part. Prints both times.
+    #[test]
+    fn track_lists_read_artists_and_genres_at_once_with_the_same_result() {
+        let lib = Library::open_in_memory().unwrap();
+        for i in 0..1_200 {
+            let mut t = sample_track(&format!("/m/{i:05}.flac"), &format!("Song {i}"));
+            match i % 4 {
+                0 => {
+                    t.artists.clear();
+                    t.genres.clear();
+                }
+                1 => {
+                    t.artists.push(Artist {
+                        id: None,
+                        name: format!("Guest {}", i % 7),
+                        mbid: None,
+                    });
+                    t.genres = vec!["rock".into(), "Ambient".into(), "jazz".into()];
+                }
+                2 => t.artists.insert(
+                    0,
+                    Artist {
+                        id: None,
+                        name: "First".into(),
+                        mbid: None,
+                    },
+                ),
+                _ => {}
+            }
+            let id = lib.upsert_track(&t).unwrap();
+            if i % 5 == 0 {
+                lib.record_play_at(id, Some("z"), 1_700_000_000 + i).unwrap();
+                lib.record_play_at(id, Some("z"), 1_700_100_000 + i).unwrap();
+            }
+        }
+        let conn = lib.lock();
+        let mut stmt = conn
+            .prepare(&format!("{} ORDER BY t.id", present_select()))
+            .unwrap();
+        let mut read = || -> Vec<RawTrack> {
+            stmt.query_map([], row_to_track_raw)
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        let mut raws = read();
+        // Listed twice
+        let again = read();
+        raws.extend(again.into_iter().take(3));
+        let n = raws.len();
+        let t = std::time::Instant::now();
+        let one_by_one: Vec<Track> = raws
+            .into_iter()
+            .map(|r| finish_track(&conn, r).unwrap())
+            .collect();
+        let before = t.elapsed();
+        let mut raws = read();
+        raws.extend(read().into_iter().take(3));
+        let t = std::time::Instant::now();
+        let at_once = finish_tracks(&conn, raws).unwrap();
+        let after = t.elapsed();
+        println!("{n} tracks: one by one {before:?}, at once {after:?}");
+        assert_eq!(at_once.len(), n);
+        assert_eq!(at_once, one_by_one);
+        assert!(at_once
+            .iter()
+            .any(|t| t.artists.is_empty() && t.genres.is_empty()));
+        assert!(at_once
+            .iter()
+            .any(|t| t.artists.len() == 2 && t.artists[0].name == "First"));
+        assert!(at_once.iter().any(|t| t.genres == ["Ambient", "jazz", "rock"]));
+        drop(stmt);
+        drop(conn);
+        // Through the lists: a history has each play, newest first
+        let h = lib.history(1_000).unwrap();
+        assert_eq!(h.len(), 480);
+        assert!(h.windows(2).all(|w| w[0].played_at >= w[1].played_at));
+        for e in &h {
+            assert_eq!(
+                Some(&e.track),
+                lib.get_track(e.track.id.unwrap()).unwrap().as_ref()
+            );
+        }
+        let top = lib.most_played_tracks(10).unwrap();
+        assert!(top.iter().all(|p| p.plays == 2));
+    }
 
     #[test]
     fn a_settings_size_is_its_bytes_without_reading_it() {
