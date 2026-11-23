@@ -594,6 +594,9 @@ pub(crate) async fn stream(
     let resp = crate::relay::send(crate::relay::ranged(s.http_client().get(&url), &headers))
         .await
         .map_err(upstream)?;
+    if let Some(past_end) = crate::relay::unsatisfiable(&resp) {
+        return Ok(past_end);
+    }
     if !resp.status().is_success() {
         return Err(upstream(format!("stream answered {}", resp.status())));
     }

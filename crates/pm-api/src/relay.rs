@@ -50,6 +50,22 @@ pub(crate) fn range_head(
     out
 }
 
+/// The source's 416 for a range past the end, passed to the player as it is with the
+/// `Content-Range` that names the file's length (each handler would answer it 502), so the
+/// player knows where the file ends.
+pub(crate) fn unsatisfiable(resp: &reqwest::Response) -> Option<axum::response::Response> {
+    if resp.status() != reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        return None;
+    }
+    let mut out = axum::response::Response::new(axum::body::Body::empty());
+    *out.status_mut() = axum::http::StatusCode::RANGE_NOT_SATISFIABLE;
+    if let Some(v) = resp.headers().get(axum::http::header::CONTENT_RANGE) {
+        out.headers_mut()
+            .insert(axum::http::header::CONTENT_RANGE, v.clone());
+    }
+    Some(out)
+}
+
 /// Send a request whose answer is relayed as it arrives: no total limit of the node's client,
 /// the headers within [`RELAY_IDLE`]. The error has no URL in it (it may carry a token).
 pub(crate) async fn send(rb: reqwest::RequestBuilder) -> Result<reqwest::Response, String> {
@@ -163,7 +179,9 @@ mod tests {
                 let n = sock.read(&mut buf).await.unwrap();
                 let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
                 let _ = tx.send(req.clone());
-                let reply = if req.contains("range: bytes=6-") {
+                let reply = if req.contains("range: bytes=20-") {
+                    "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */10\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else if req.contains("range: bytes=6-") {
                     "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 6-9/10\r\nAccept-Ranges: bytes\r\nContent-Length: 4\r\nConnection: close\r\n\r\n6789"
                 } else {
                     "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789"
@@ -201,7 +219,16 @@ mod tests {
         // A range of several parts is not passed on
         let mut several = axum::http::HeaderMap::new();
         several.insert(axum::http::header::RANGE, "bytes=0-1,5-6".parse().unwrap());
-        let _resp = send(ranged(client.get(&url), &several)).await.unwrap();
+        let whole = send(ranged(client.get(&url), &several)).await.unwrap();
         assert!(!rx.recv().await.unwrap().contains("range:"));
+        assert!(unsatisfiable(&whole).is_none(), "a 200 is not a 416");
+        // A range past the end: the source's 416 and its length go back to the player
+        let mut past = axum::http::HeaderMap::new();
+        past.insert(axum::http::header::RANGE, "bytes=20-".parse().unwrap());
+        let resp = send(ranged(client.get(&url), &past)).await.unwrap();
+        assert!(rx.recv().await.unwrap().contains("range: bytes=20-"));
+        let out = unsatisfiable(&resp).expect("a 416 for the player");
+        assert_eq!(out.status(), 416);
+        assert_eq!(out.headers()["content-range"], "bytes */10");
     }
 }

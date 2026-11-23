@@ -401,6 +401,9 @@ async fn relay(
         };
         crate::relay::send(rb).await.map_err(upstream)?
     };
+    if let Some(past_end) = crate::relay::unsatisfiable(&resp) {
+        return Ok(past_end);
+    }
     if !resp.status().is_success() {
         return Err(if resp.status() == StatusCode::NOT_FOUND {
             ApiError::not_found("Jellyfin has no such item")
