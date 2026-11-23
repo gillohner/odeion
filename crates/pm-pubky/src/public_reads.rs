@@ -10,7 +10,7 @@
 //! a name that changes its answer between two lookups can't get past it.
 //!
 //! The node's bundled homeserver is local by design: reads from it keep local addresses
-//! ([`PublicReads::allow_local_homeserver`]). Redirects are never followed.
+//! ([`crate::homeserver::NodeHomeserver::allow_local_homeserver`]). Redirects are never followed.
 
 use crate::homeserver::HomeserverError;
 use futures_util::StreamExt;

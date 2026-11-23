@@ -70,7 +70,7 @@ pub(crate) async fn key(s: &NodeState) -> Result<String, ApiError> {
     Ok(key)
 }
 
-/// Learn the bundled homeserver's key ([`key`]) at start; it may still be starting, so this
+/// Learn the bundled homeserver's key (`key`) at start; it may still be starting, so this
 /// tries again every 15 s for ten minutes. Any later admin call learns it too.
 pub fn spawn_learn_key(s: &Arc<NodeState>) {
     let s = s.clone();
