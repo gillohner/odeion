@@ -506,6 +506,12 @@ pub(crate) fn locate(book: &Book, at_ms: u64) -> (usize, u64) {
         .unwrap_or((0, 0))
 }
 
+/// Whether part `index` of a book of `parts` parts is in the queue the book becomes (a queue
+/// holds [`pm_zones::MAX_QUEUE_ITEMS`] items and no more). A book of none has no place to miss.
+fn place_fits(parts: usize, index: usize) -> bool {
+    parts == 0 || index < parts.min(pm_zones::MAX_QUEUE_ITEMS)
+}
+
 /// `POST /v1/sources/audiobookshelf/play {zone, item, restart?}`: the whole book into the zone,
 /// from where Audiobookshelf says you left off.
 pub(crate) async fn play(State(s): State<Arc<NodeState>>, Json(b): Json<PlayBook>) -> ApiResult<PlayStarted> {
@@ -535,6 +541,16 @@ pub(crate) async fn play(State(s): State<Arc<NodeState>>, Json(b): Json<PlayBook
         }
     };
     let (index, offset) = locate(&book, resume);
+    // A queue holds so many parts and no more: a place past them is refused before the zone's
+    // queue is touched (it would be cleared, and the place would not be in it)
+    if !place_fits(book.parts.len(), index) {
+        return Err(ApiError::bad_request(format!(
+            "this book's place is part {} of {}, and a queue holds {} parts at most",
+            index + 1,
+            book.parts.len(),
+            pm_zones::MAX_QUEUE_ITEMS
+        )));
+    }
     let title = str_of(&it["media"]["metadata"], "title");
     let items = book
         .parts
@@ -868,6 +884,17 @@ pub(crate) async fn disconnect(State(s): State<Arc<NodeState>>) -> ApiResult<Abs
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A place past what a queue holds is refused; one inside it, and an empty book, are not.
+    #[test]
+    fn a_place_past_the_queue_limit_does_not_fit() {
+        let max = pm_zones::MAX_QUEUE_ITEMS;
+        assert!(place_fits(0, 0));
+        assert!(place_fits(3, 2));
+        assert!(!place_fits(3, 3));
+        assert!(place_fits(max + 10, max - 1));
+        assert!(!place_fits(max + 10, max));
+    }
 
     fn item() -> Value {
         serde_json::json!({"id": "2fe18e1d-013a-432c-b12d-ea4739751c41", "mediaType": "book",

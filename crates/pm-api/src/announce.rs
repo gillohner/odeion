@@ -159,7 +159,7 @@ pub(crate) async fn announce(
         }
     }
     // (the clip and its chime go into the queue, which holds so many items and no more)
-    if zone.queue_len() + 2 > pm_zones::MAX_QUEUE_ITEMS {
+    if zone.queue_len() + usize::from(req.chime) + usize::from(uri.is_some()) > pm_zones::MAX_QUEUE_ITEMS {
         return Err(ApiError::bad_request(
             "this zone's queue is full: remove something from it first",
         ));
