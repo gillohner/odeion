@@ -1355,7 +1355,8 @@ impl NodeHomeserver {
         Ok(())
     }
 
-    /// Download a private file into `dest` as it arrives (no whole file in memory), no faster
+    /// Download a private file into a new file `dest` (an error when it is there) as it arrives
+    /// (no whole file in memory), no faster
     /// than `bytes_per_sec` when set; `progress` hears each chunk's size and returns `false` to
     /// stop (the partial file is removed). Returns the bytes written.
     pub async fn download_private_to(
@@ -1369,7 +1370,13 @@ impl NodeHomeserver {
         use tokio::io::AsyncWriteExt;
         let io = |e: std::io::Error| HomeserverError::Transport(format!("{}: {e}", dest.display()));
         let mut resp = within(STALL_TIMEOUT, async { Ok(session.storage().get(path).await?) }).await?;
-        let mut file = tokio::fs::File::create(dest).await.map_err(io)?;
+        // A new file only: never one that is there (or what a link there leads to)
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dest)
+            .await
+            .map_err(io)?;
         let start = tokio::time::Instant::now();
         let mut written: u64 = 0;
         // No limit on the whole download (a big file at a paced rate takes long), only on a stall
