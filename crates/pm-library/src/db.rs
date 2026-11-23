@@ -3568,8 +3568,8 @@ impl Library {
         immediately(&mut self.lock(), |conn| reject_on(conn, id))
     }
 
-    /// How identified the library is, in five statements:  the songs waiting for review, the open ones and how the identified ones
-    /// were identified are each one pass (one statement per count read the tracks 15 times).
+    /// How identified the library is, in five statements: the songs waiting for review, the
+    /// open ones and how the identified ones were identified are each one pass over the tracks.
     pub fn identity_counts(&self) -> Result<IdentityCounts> {
         let conn = self.lock();
         let n = |v: i64| v as u64;
