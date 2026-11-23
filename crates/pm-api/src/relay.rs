@@ -14,7 +14,9 @@ pub(crate) const RELAY_IDLE: Duration = Duration::from_secs(30);
 
 /// The player's `Range` and `If-Range` on the request to the source, so a player can seek past
 /// what it has (a source that takes ranges answers 206). Only a range of one part: several
-/// would come back as `multipart/byteranges` under an audio type (players ask for one).
+/// would come back as `multipart/byteranges` under an audio type (players ask for one). A part
+/// is asked for unencoded: a gzipped part can't be unpacked on its own, and its `Content-Range`
+/// would count the packed bytes.
 pub(crate) fn ranged(rb: reqwest::RequestBuilder, player: &axum::http::HeaderMap) -> reqwest::RequestBuilder {
     let one_part = player
         .get(axum::http::header::RANGE)
@@ -29,11 +31,13 @@ pub(crate) fn ranged(rb: reqwest::RequestBuilder, player: &axum::http::HeaderMap
             rb = rb.header(h, v.clone());
         }
     }
-    rb
+    rb.header(reqwest::header::ACCEPT_ENCODING, "identity")
 }
 
 /// The source's status and range headers on the player's answer: a 206 with its
-/// `Content-Range`, and `Accept-Ranges` when the source says it takes ranges.
+/// `Content-Range`, `Accept-Ranges` when the source says it takes ranges, and its `ETag` and
+/// `Last-Modified`, so a player's `If-Range` finds out when a seek would reach another file
+/// (a source that picks the file again for each request, at another quality).
 pub(crate) fn range_head(
     resp: &reqwest::Response,
     out: axum::http::response::Builder,
@@ -42,6 +46,8 @@ pub(crate) fn range_head(
     for h in [
         axum::http::header::CONTENT_RANGE,
         axum::http::header::ACCEPT_RANGES,
+        axum::http::header::ETAG,
+        axum::http::header::LAST_MODIFIED,
     ] {
         if let Some(v) = resp.headers().get(&h) {
             out = out.header(h, v.clone());
@@ -182,7 +188,7 @@ mod tests {
                 let reply = if req.contains("range: bytes=20-") {
                     "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */10\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 } else if req.contains("range: bytes=6-") {
-                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 6-9/10\r\nAccept-Ranges: bytes\r\nContent-Length: 4\r\nConnection: close\r\n\r\n6789"
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 6-9/10\r\nAccept-Ranges: bytes\r\nETag: \"v1\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\n6789"
                 } else {
                     "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789"
                 };
@@ -194,16 +200,16 @@ mod tests {
         let mut player = axum::http::HeaderMap::new();
         player.insert(axum::http::header::RANGE, "bytes=6-".parse().unwrap());
         let resp = send(ranged(client.get(&url), &player)).await.unwrap();
-        assert!(
-            rx.recv().await.unwrap().contains("range: bytes=6-"),
-            "the range went on"
-        );
+        let asked = rx.recv().await.unwrap();
+        assert!(asked.contains("range: bytes=6-"), "the range went on");
+        assert!(asked.contains("accept-encoding: identity"), "a part unencoded");
         let out = range_head(&resp, axum::http::Response::builder())
             .body(body(resp))
             .unwrap();
         assert_eq!(out.status(), 206);
         assert_eq!(out.headers()["content-range"], "bytes 6-9/10");
         assert_eq!(out.headers()["accept-ranges"], "bytes");
+        assert_eq!(out.headers()["etag"], "\"v1\"");
         let got = out.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&got[..], b"6789");
         // No range: a whole answer
