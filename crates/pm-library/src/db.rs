@@ -1934,15 +1934,10 @@ impl Library {
     /// a share's or a drive's key ending in `/`), by path: its size and the first 16 hex digits of
     /// its content hash when one is kept for that size. The range on the path uses its index.
     pub fn files_under(&self, prefix: &str) -> Result<Vec<(String, u64, Option<String>)>> {
-        let Some(last) = prefix.chars().last() else {
+        if prefix.is_empty() {
             return Ok(Vec::new());
-        };
-        // Every path with this prefix sorts before the prefix with its last character raised by one
-        let upper = format!(
-            "{}{}",
-            &prefix[..prefix.len() - last.len_utf8()],
-            char::from_u32(last as u32 + 1).unwrap_or(char::MAX)
-        );
+        }
+        let (_, upper) = under(prefix);
         let conn = self.lock();
         let v = conn
             .prepare(
@@ -4750,17 +4745,21 @@ fn recording_uri(mbid: &str) -> Result<MusicUri> {
     Ok(MusicUri::Recording { mbid })
 }
 
-/// The paths under a folder as a range of the `files.path` index: `(lo, hi)` for
-/// `path >= lo AND path < hi`, where `prefix` is the folder with its separator at the end. Exact
-/// and case-sensitive, as paths are (`LIKE` ignores the case of ASCII letters, so `/music/` also
-/// matched every path under `/Music/`), and the index is used.
+/// The paths that start with `prefix` (a folder with its separator at the end) as a range of
+/// the `files.path` index: `(lo, hi)` for `path >= lo AND path < hi`. Exact and case-sensitive,
+/// as paths are (`LIKE` ignores the case of ASCII letters, so `/music/` also matched every path
+/// under `/Music/`), and the index is used. Every such path sorts before the prefix with its
+/// last character raised by one; an empty prefix takes every path.
 fn under(prefix: &str) -> (String, String) {
-    let mut hi = prefix.as_bytes().to_vec();
-    // (the separator is ASCII: the next byte is still one character)
-    if let Some(last) = hi.last_mut() {
-        *last += 1;
-    }
-    (prefix.to_string(), String::from_utf8(hi).unwrap_or_default())
+    let Some(last) = prefix.chars().last() else {
+        return (String::new(), char::MAX.to_string());
+    };
+    let hi = format!(
+        "{}{}",
+        &prefix[..prefix.len() - last.len_utf8()],
+        char::from_u32(last as u32 + 1).unwrap_or(char::MAX)
+    );
+    (prefix.to_string(), hi)
 }
 
 /// Turn free text into an FTS5 query: each word a prefix term, ANDed.
