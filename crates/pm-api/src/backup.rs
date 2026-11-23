@@ -1180,13 +1180,16 @@ fn scheduled_by(name: &str, tag: &str) -> bool {
         })
 }
 
-/// Keep the newest `keep` scheduled backups of the node tagged `tag` in `folder`; returns the
-/// names removed. Another node's scheduled backups in the same folder, files downloaded from
-/// Settings and saved there, and anything else are never removed.
-pub fn prune(folder: &Path, keep: usize, tag: &str) -> Vec<String> {
+/// Keep the newest `keep` scheduled backups of the node tagged `tag` in `folder`, and always
+/// `just_made` (a clock set back gives it an older name); returns the names removed. Another
+/// node's scheduled backups in the same folder, files downloaded from Settings and saved there,
+/// and anything else are never removed.
+pub fn prune(folder: &Path, keep: usize, tag: &str, just_made: &str) -> Vec<String> {
     let mut removed = Vec::new();
-    let own = backups_in(folder).into_iter().filter(|n| scheduled_by(n, tag));
-    for name in own.skip(keep.max(1)) {
+    let own = backups_in(folder)
+        .into_iter()
+        .filter(|n| scheduled_by(n, tag) && n != just_made);
+    for name in own.skip(keep.max(1) - 1) {
         if std::fs::remove_file(folder.join(&name)).is_ok() {
             removed.push(name);
         }
@@ -1206,10 +1209,30 @@ fn file_name(now: time::OffsetDateTime, tag: &str) -> String {
     )
 }
 
-/// Whether the file at `path` holds exactly `bytes` (read back after it was written: a share or
-/// a full disk can take a write and keep less).
+/// Whether the file at `path` holds exactly `bytes`, read back in pieces (the backup is not
+/// held twice). The write's errors themselves come from the sync before the rename; this catches
+/// a file that ended up shorter or other than what was written (often served from a cache, so it
+/// is no proof that a share kept it).
 fn reads_back(path: &Path, bytes: &[u8]) -> bool {
-    std::fs::read(path).is_ok_and(|on_disk| on_disk == bytes)
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; 1 << 20];
+    let mut at = 0;
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => return at == bytes.len(),
+            Ok(n) => {
+                if bytes.get(at..at + n) != Some(&buf[..n]) {
+                    return false;
+                }
+                at += n;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Write one scheduled backup now (and prune). One at a time: a second run asked for while
@@ -1251,8 +1274,8 @@ async fn run_held(s: &Arc<NodeState>) -> Result<String, String> {
             write_private(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
             let placed = folder.join(&name);
             std::fs::rename(&tmp, &placed).map_err(|e| e.to_string())?;
-            // Older backups are pruned only after this one: one that did not reach the disk
-            // whole goes, and they stay
+            // Older backups are pruned only after this one reads back: one that does not goes,
+            // and they stay
             if !reads_back(&placed, &bytes) {
                 let _ = std::fs::remove_file(&placed);
                 return Err(format!(
@@ -1271,7 +1294,7 @@ async fn run_held(s: &Arc<NodeState>) -> Result<String, String> {
     }
     match &made {
         Ok(name) => {
-            let removed = prune(&folder, sch.keep as usize, &node_tag(&s.node_id));
+            let removed = prune(&folder, sch.keep as usize, &node_tag(&s.node_id), name);
             tracing::info!(file = %name, removed = removed.len(), "scheduled backup written");
         }
         Err(e) => tracing::warn!("scheduled backup failed: {e}"),
@@ -1553,8 +1576,11 @@ mod tests {
             write(format!("pubky-music-2026-09-0{d}-120000.pmbackup"));
         }
         write(format!("pubky-music-2026-08-01-120000-{tag}-copy.pmbackup"));
+        // A node without a tag never had scheduled files of its own: this one is nobody's
+        write("pubky-music-2026-07-01-120000-.pmbackup".to_string());
         std::fs::write(dir.path().join("notes.txt"), b"keep me").unwrap();
-        let removed = prune(dir.path(), 3, &tag);
+        let newest = format!("pubky-music-2026-10-05-120000-{tag}.pmbackup");
+        let removed = prune(dir.path(), 3, &tag, &newest);
         assert_eq!(
             removed,
             vec![
@@ -1563,25 +1589,43 @@ mod tests {
             ]
         );
         let left = backups_in(dir.path());
-        assert_eq!(left.len(), 3 + 5 + 5 + 1, "{left:?}");
+        assert_eq!(left.len(), 3 + 5 + 5 + 1 + 1, "{left:?}");
         assert!(left.contains(&format!("pubky-music-2026-10-03-120000-{tag}.pmbackup")));
         assert!(dir.path().join("notes.txt").exists());
         // No tag: nothing is this node's
-        assert!(prune(dir.path(), 1, "").is_empty());
+        assert!(prune(dir.path(), 1, "", "").is_empty());
+        // The file just made stays whatever its name says (a clock set back): keep 1 leaves it
+        let behind = format!("pubky-music-2026-01-01-120000-{tag}.pmbackup");
+        write(behind.clone());
+        assert_eq!(prune(dir.path(), 1, &tag, &behind).len(), 3);
+        assert_eq!(
+            backups_in(dir.path())
+                .iter()
+                .filter(|n| scheduled_by(n, &tag))
+                .collect::<Vec<_>>(),
+            vec![&behind]
+        );
         assert!(scheduled_by(
             &file_name(time::OffsetDateTime::now_utc(), &tag),
             &tag
         ));
     }
 
-    /// A backup that did not reach the disk as written is told apart.
+    /// `reads_back` tells a file that holds what was written from a shorter, longer or other one.
     #[test]
-    fn a_backup_is_read_back_before_older_ones_go() {
+    fn reads_back_tells_a_file_other_than_what_was_written() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("b.pmbackup");
-        std::fs::write(&path, b"whole").unwrap();
-        assert!(reads_back(&path, b"whole"));
-        assert!(!reads_back(&path, b"whole and more"));
+        let big: Vec<u8> = (0..(3 << 20) + 7).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &big).unwrap();
+        assert!(reads_back(&path, &big));
+        assert!(!reads_back(&path, &big[..big.len() - 1]));
+        let mut more = big.clone();
+        more.push(1);
+        assert!(!reads_back(&path, &more));
+        let mut other = big.clone();
+        other[(2 << 20) + 3] ^= 1;
+        assert!(!reads_back(&path, &other));
         assert!(!reads_back(&dir.path().join("none"), b""));
     }
 

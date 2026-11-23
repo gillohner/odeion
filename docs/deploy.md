@@ -410,7 +410,7 @@ everything needed to rebuild the node, never the audio:
 disk or a NAS) and keeps the newest N. Each file's name ends with the first 8 characters of the
 node's id (`pubky-music-<date>-<time>-<id>.pmbackup`), and only this node's scheduled files are
 ever removed: another node's in the same folder, and backups downloaded from Settings and saved
-there, stay. A new file is read back before any older one is removed. A passphrase saved there
+there, stay. A new file is synced to disk and read back before any older one is removed. A passphrase saved there
 stays on this node and is never put in a backup. `GET /v1/backup` serves a backup without sign-ins for a cron job.
 
 **Restore** on a new node: Home's Get started card links to it, or Settings → Backup and restore →
