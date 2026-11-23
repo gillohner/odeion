@@ -2334,7 +2334,8 @@ async fn transfer(
     from.clear();
     presence::played(&s, &body.to, &c);
     // The target is in the hands of whoever moved the music there, as the source is (listens.rs)
-    listens::zone_changed_by(&s, &body.to, c.role == accounts::Role::Owner);
+    // (an app password's are the owner's, as in `auth`)
+    listens::zone_changed_by(&s, &body.to, accounts::Who::of(&c) == accounts::Who::Owner);
     let moved = load_zone(
         &to,
         st.queue,

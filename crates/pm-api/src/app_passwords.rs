@@ -152,6 +152,19 @@ pub fn remove(s: &NodeState, id: &str) -> Result<bool, ApiError> {
     Ok(true)
 }
 
+/// Removes, with the library held, every app password among `found` (sign-ins found readable in
+/// a saved queue's links at start, `accounts::clean_saved_queues`); how many went.
+pub(crate) fn remove_found(lib: &pm_library::Library, found: &[String]) -> Result<usize, ApiError> {
+    let mut all = load(lib)?;
+    let before = all.len();
+    all.retain(|a| !found.contains(&a.password));
+    let gone = before - all.len();
+    if gone > 0 {
+        store(lib, &all)?;
+    }
+    Ok(gone)
+}
+
 /// The id of the app password `token` is, if it is one. Compared through hashes, which compare
 /// in constant time.
 pub fn of(s: &NodeState, token: &str) -> Option<String> {

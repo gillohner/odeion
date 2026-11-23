@@ -1786,6 +1786,8 @@ pub struct CleanedQueues {
     pub api_token_found: bool,
     /// Listeners' tokens that were in a saved queue and ended.
     pub listener_tokens_ended: usize,
+    /// App passwords that were in a saved queue and were removed.
+    pub app_passwords_ended: usize,
 }
 
 /// At start, before the zones restore their queues: every saved queue (`queue.*`) loses the
@@ -1904,6 +1906,15 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
             keys
         })?;
         out.listener_tokens_ended = listener_keys.len();
+    }
+    // An app password that was readable there goes too: the app needs a new one
+    let apps: Vec<String> = found
+        .iter()
+        .filter(|t| t.starts_with(crate::app_passwords::PREFIX))
+        .cloned()
+        .collect();
+    if !apps.is_empty() {
+        out.app_passwords_ended = crate::app_passwords::remove_found(&lib, &apps)?;
     }
     drop(lib);
     if out.owner_sessions_ended {
