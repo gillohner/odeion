@@ -2289,7 +2289,9 @@
   // the bar shows it rather than "Zone" and "Nothing playing" (owner's recording: a second shell
   // that swapped to the real one). index.html draws it before this script runs.
   const barKept = () => { try { return JSON.parse(localStorage.getItem('pm.bar') || 'null') || {}; } catch { return {}; } };
-  const barKeep = (part) => { const was = barKept(); const next = { ...was, ...part }; if (JSON.stringify(next) !== JSON.stringify(was)) { try { localStorage.setItem('pm.bar', JSON.stringify(next)); } catch { /* private window */ } } };
+  // (asked on every draw of the bar: the same words as last time read and write nothing)
+  const barKeptLast = {};
+  const barKeep = (part) => { const key = Object.keys(part).join(); const said = JSON.stringify(part); if (barKeptLast[key] === said) return; barKeptLast[key] = said; const was = barKept(); const next = { ...was, ...part }; if (JSON.stringify(next) !== JSON.stringify(was)) { try { localStorage.setItem('pm.bar', JSON.stringify(next)); } catch { /* private window */ } } };
   const renderZoneName = () => { const z = currentZone(); if (z && state.zonesSeen) barKeep({ zone: z.name }); const name = (!state.zonesSeen && !state.zonePicked && barKept().zone) || (z ? z.name : 'Zone'); $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); };
   // ---- One volume, one source (TASK-volume-one-source) ----
   // Every slider for a zone reads the same thing: the level the node read back from the output
@@ -2340,8 +2342,9 @@
     if (z.id === state.zone) $('.player').classList.toggle('novol', !r);
     if (!r) return;
     for (const el of volSliders(z)) if (el !== except) applyVol(el, r);
-    for (const t of $$(`[data-vollevel="${cssStr(z.id)}"]`)) t.textContent = levelText(r);
-    for (const b of $$(`[data-volmute="${cssStr(z.id)}"]`)) { b.setAttribute('aria-pressed', String(!!r.muted)); b.title = r.muted ? 'Unmute' : 'Mute'; }
+    // (asked on every event of the zone: the same level and mute as shown write nothing)
+    { const words = levelText(r); for (const t of $$(`[data-vollevel="${cssStr(z.id)}"]`)) if (t.textContent !== words) t.textContent = words; }
+    for (const b of $$(`[data-volmute="${cssStr(z.id)}"]`)) { const m = String(!!r.muted); if (b.getAttribute('aria-pressed') !== m) { b.setAttribute('aria-pressed', m); b.title = r.muted ? 'Unmute' : 'Mute'; } }
   };
   const setZoneVol = async (z, value, from) => {
     const r = zoneVolume(z); if (!r) return;
@@ -3436,9 +3439,13 @@
     if (browserShuffle()) shuffleFrom(items, shuffle ? 0 : 1);
     state.browserQueue = items; browserPlay(0, 0, true); renderModes();
   };
-  const renderModes = () => {
+  // (`ifChanged`: asked by the bar's draw, several times a second: nothing to do while both modes are
+  // as they were; whoever draws mode buttons anew (Now playing, the Queue page) asks without it)
+  let modesShown = '';
+  const renderModes = (ifChanged) => {
     const r = !isBrowser() && repeatPending.has(state.zone) ? repeatPending.get(state.zone).value : zoneRepeat();
     const sh = !isBrowser() && shufflePending.has(state.zone) ? shufflePending.get(state.zone).value : zoneShuffle();
+    { const now = `${r} ${sh}`; if (ifChanged && now === modesShown) return; modesShown = now; }
     const rWords = { off: 'Repeat: off', all: 'Repeat: the whole queue', one: 'Repeat: this song' }[r]; const sWords = `Shuffle: ${sh ? 'on' : 'off'}`;
     // (on: the accent and a dot under the icon, not colour alone; the state is in the label too)
     const mark = (b, on, words, ic) => { if (ic && b.dataset.ic !== ic) { b.innerHTML = icon(ic); b.dataset.ic = ic; } b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.setAttribute('aria-label', words); b.title = words; };
@@ -4332,14 +4339,30 @@
   };
   // The phone mini player's progress: a 2 px line on its top edge
   const miniProgress = (f) => { const el = $('#miniprog'); if (el) el.style.setProperty('--p', `${Math.max(0, Math.min(1, f || 0)) * 100}%`); };
+  // The bar is drawn on every event of its zone (four a second while it plays) and after most
+  // presses. Each part is written only when what it shows has changed (`put`: the last value written
+  // is kept on the element; only this function writes them), so between two songs the mini player's
+  // cover, title and artists stay the same elements (a keyboard's place on them stays too), and a tick
+  // writes the time and the seek bar and nothing else. The playing song's mark in the page's lists:
+  // here when the song changes, and as rows are drawn (the watch on the page, where `main` is).
+  const put = (el, key, val, write) => { if (!el || el[key] === val) return false; el[key] = val; write(val); return true; };
+  const putText = (el, s) => put(el, '_barText', s, (v) => { el.textContent = v; });
+  const putHtml = (el, s) => put(el, '_barHtml', s, (v) => { el.innerHTML = v; });
+  let markedUri = null;
   const renderBar = () => {
-    markPlaying(); renderModes(); if (state.view === 'dashboard') drawDashboard();
     const z = currentZone(); const np = z && z.now_playing;
+    { const cur = `${state.zone} ${np ? np.item.uri || '' : ''}`; if (cur !== markedUri) { markedUri = cur; markPlaying(); } }
+    renderModes(true); if (state.view === 'dashboard') drawDashboard();
     setSourceColour(np);
     const playing = z && z.transport === 'playing';
-    $('#toggle').innerHTML = icon(playing ? 'pause' : 'play');
-    $('#toggle').setAttribute('aria-label', playing ? 'Pause' : 'Play');
-    const q = $('#quality');
+    { const tg = $('#toggle'); if (put(tg, '_barIcon', playing ? 'pause' : 'play', (v) => { tg.innerHTML = icon(v); })) tg.setAttribute('aria-label', playing ? 'Pause' : 'Play'); }
+    const q = $('#quality'); const npEl = $('#np');
+    // (the pill's parts, each written when it changes)
+    const pill = (cls, src, words, dsp, short, label, title) => {
+      put(q, '_barCls', cls, (v) => { q.className = v; }); putHtml($('.qsrc', q), src); putText($('.qtext', q), words);
+      { const d = $('.qdsp', q); put(d, '_barHidden', !dsp, (v) => { d.hidden = v; }); }
+      putHtml($('.qshort', q), short); put(q, '_barLabel', label, (v) => { q.setAttribute('aria-label', v); }); put(q, '_barTitle', title, (v) => { q.title = v; });
+    };
     // Pressing play answers at once (owner, 2026-10-29): "Starting on <device>…" until the zone
     // plays, or what went wrong, for a few seconds
     const st = state.starting && state.starting.zone === state.zone ? state.starting : null;
@@ -4350,17 +4373,16 @@
     if (!np && !state.zonesSeen && !state.zonePicked && barKept().title && !waitHtml && !errHtml) {
       // The node hasn't said yet: the song the bar showed last stays (index.html drew it)
       const k = barKept();
-      $('#np').innerHTML = `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">${esc(k.title)}</div><div class="np-sub">${esc(k.sub || '')}</div></div>`;
+      putHtml(npEl, `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">${esc(k.title)}</div><div class="np-sub">${esc(k.sub || '')}</div></div>`);
       return;
     }
     if (z && state.zonesSeen) barKeep(np ? { title: np.item.title || '', sub: np.item.artist || '' } : { title: '', sub: '' });
     if (!np) {
       // A zone that stopped on an error says so here, until the next track starts (the node clears it)
       const err = z && z.transport === 'stopped' && z.error;
-      $('#np').innerHTML = waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`;
-      $('#pos').textContent = '0:00'; $('#dur').textContent = '0:00'; seek.value = 0; setFill(seek); miniProgress(0);
-      q.className = 'quality idle'; $('.qtext', q).textContent = '—'; $('.qsrc', q).innerHTML = ''; $('.qdsp', q).hidden = true; $('.qshort', q).innerHTML = `<span class="qdev">${esc(z ? z.name : '')}</span>`; q.title = 'Sound: where it plays from, how it gets to you, and DSP';
-      q.setAttribute('aria-label', `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`);
+      putHtml(npEl, waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`);
+      putText($('#pos'), '0:00'); putText($('#dur'), '0:00'); seek.value = 0; setFill(seek); miniProgress(0);
+      pill('quality idle', '', '—', false, `<span class="qdev">${esc(z ? z.name : '')}</span>`, `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`, 'Sound: where it plays from, how it gets to you, and DSP');
       syncQPanel();
       return;
     }
@@ -4368,15 +4390,21 @@
     const live = np.stream_title;
     const links = npLinksHtml(it, live, barPlain());
     // A track change cross-fades the mini player
-    const npEl = $('#np'); const wasUri = npEl.dataset.uri || ''; npEl.dataset.uri = it.uri || '';
+    const wasUri = npEl.dataset.uri || ''; if (wasUri !== (it.uri || '')) npEl.dataset.uri = it.uri || '';
     if (wasUri && wasUri !== (it.uri || '') && !waitHtml && !errHtml) { npEl.classList.remove('swap'); void npEl.offsetWidth; npEl.classList.add('swap'); clearTimeout(npEl.swapT); npEl.swapT = setTimeout(() => npEl.classList.remove('swap'), 500); }
-    $('#np').innerHTML = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
-    // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
-    // its title there); with a mouse the bar's title and artist are links of their own
-    if (!waitHtml && !errHtml && !barPlain()) bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
-    // Paused because its device went away (a USB DAC unplugged): said where the artist is
-    if (!waitHtml && !errHtml && z.transport === 'paused' && z.error) { const sub = $('#np .np-sub'); if (sub) sub.innerHTML = `<span class="warn-text" role="alert">${esc(z.error)}</span>`; }
-    $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
+    // (the same song, shown the same way, with the same word on a pause: the elements stay; a link
+    // whose artist could not be read yet is asked for again, as each draw did)
+    const npHtml = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
+    const pausedBy = !waitHtml && !errHtml && z.transport === 'paused' && z.error ? z.error : '';
+    const linked = !waitHtml && !errHtml && !barPlain();
+    if (put(npEl, '_barHtml', `${npHtml}\n${pausedBy}\n${linked}`, () => { npEl.innerHTML = npHtml; })) {
+      // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
+      // its title there); with a mouse the bar's title and artist are links of their own
+      if (linked) bindNpLinks(npEl, it, () => { if (!overlay.hidden) toggleNowPlaying(); });
+      // Paused because its device went away (a USB DAC unplugged): said where the artist is
+      if (pausedBy) { const sub = $('.np-sub', npEl); if (sub) sub.innerHTML = `<span class="warn-text" role="alert">${esc(pausedBy)}</span>`; }
+    } else if (linked && !pausedBy) hydrateArtistCredits(npEl);
+    putText($('#pos'), fmt(np.position_ms)); putText($('#dur'), fmt(np.duration_ms));
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     miniProgress(np.duration_ms ? np.position_ms / np.duration_ms : 0);
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
@@ -4384,17 +4412,13 @@
     const zp = zoneNp(z, np);
     const h = zp.signal_path ? headline(zp.signal_path) : null;
     const dsp = dspOn(np);
-    q.className = 'quality ' + (h ? 'q-' + h : '') + (dsp ? ' dsp' : '');
     const svc = npSvc(np); const svcName = svc === 'library' ? 'your library' : svc ? srcName(svc) : null;
-    $('.qsrc', q).innerHTML = svc ? svcIcon(svc) : '';
     const dv = deviceOf(z);
     const words = (np.signal_path || np.format ? pathSummary(zp) : playedBy()) + (dv ? ` → ${dacWordsFor(z)}` : '');
-    $('.qtext', q).textContent = words;
-    $('.qdsp', q).hidden = !dsp;
     const badge = np.output_format ? rateBits(np.output_format) : np.format ? (np.format.lossless ? 'Lossless' : np.format.codec || '') : '';
-    $('.qshort', q).innerHTML = `<span class="qdev">${esc(z.name)}</span>${badge ? `<span class="qbadge">${esc(badge)}</span>` : ''}`;
-    q.setAttribute('aria-label', `Sound: ${svcName ? `from ${svcName}, ` : ''}${words}${dsp ? ', DSP on' : ''}. Playing on ${z.name}. Open the sound panel`);
-    q.title = zp.signal_path ? zp.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : decodeNote();
+    pill('quality ' + (h ? 'q-' + h : '') + (dsp ? ' dsp' : ''), svc ? svcIcon(svc) : '', words, dsp, `<span class="qdev">${esc(z.name)}</span>${badge ? `<span class="qbadge">${esc(badge)}</span>` : ''}`,
+      `Sound: ${svcName ? `from ${svcName}, ` : ''}${words}${dsp ? ', DSP on' : ''}. Playing on ${z.name}. Open the sound panel`,
+      zp.signal_path ? zp.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : decodeNote());
     syncQPanel();
   };
   // ---- immediate feedback on play (owner, 2026-10-29) ----
@@ -5141,6 +5165,9 @@
 
   // ---- views ---------------------------------------------------------------
   const main = $('#main');
+  // Rows drawn after the song started (a page opened, more of a list read in) get the playing
+  // song's mark as they come, while it plays or is paused: asked once per change of the page
+  new MutationObserver((recs) => { if (recs.some((r) => [...r.addedNodes].some((n) => n.nodeType === 1))) markPlaying(); }).observe(main, { childList: true, subtree: true }); // (elements only: a time rewritten as text, the dashboard's, adds no row)
   // Another page opened: the page on screen stays where it is until the new one (or its skeleton)
   // replaces it, and the new one starts at its top. (Put at the top at once, the old page showed
   // its own top for a moment first.) The reset comes with that first draw, before the page's own
@@ -11779,8 +11806,11 @@
         if (ev.seq > link.seq) link.seq = ev.seq;
       }
       if (ev.type === 'zone_event' && ev.event && ev.event.type === 'error' && state.starting && ev.zone === state.starting.zone) startFail(ev.event.message, true);
+      // (another zone's event the bar has already heard of changes nothing it shows; the dashboard may be on that zone)
+      let barSame = false;
       if (ev.type === 'zone') {
         const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state; countEvent(ev.state.id);
+        barSame = !!old && ev.state.id !== state.zone && state.view !== 'dashboard';
         syncVolumeSliders(ev.state);
         if (state.starting && ev.state.id === state.starting.zone) {
           const fresh = state.starting.oldItem == null || (ev.state.now_playing && ev.state.now_playing.item.id !== state.starting.oldItem);
@@ -11811,7 +11841,7 @@
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
       else if (ev.type === 'outputs_changed') refreshOutputs(); // a phone's USB DAC came or went
       else if (ev.type === 'jobs') { if (isOwner()) { jobs.eventAt = Date.now(); onJobs(ev.jobs || ev); } } // the owner's jobs, as the polling
-      renderBar();
+      if (!barSame) renderBar();
       if (ev.type === 'zone' || ev.type === 'zone_removed') followZonePop();
     };
   };
