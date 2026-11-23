@@ -2397,6 +2397,17 @@ impl Library {
     /// A song that names no artist is taken too; another artist's song of the same title (a
     /// cover, a namesake) is no match. Names compare as [`match_key`] folds them.
     pub fn find_by_title_artist(&self, title: &str, artist: Option<&str>) -> Result<Option<Track>> {
+        self.find_by_title_artist_except(title, artist, &[])
+    }
+
+    /// [`Self::find_by_title_artist`] never taking a track of `except` (ones already looked at
+    /// and turned down).
+    fn find_by_title_artist_except(
+        &self,
+        title: &str,
+        artist: Option<&str>,
+        except: &[Option<TrackId>],
+    ) -> Result<Option<Track>> {
         let title = title.trim();
         if title.is_empty() {
             return Ok(None);
@@ -2408,6 +2419,7 @@ impl Library {
             format!("{title} {artist}")
         };
         let mut hits = self.search_tracks(&q, 20)?;
+        hits.retain(|t| !except.contains(&t.id));
         if !artist.is_empty()
             && !hits
                 .iter()
@@ -2415,7 +2427,7 @@ impl Library {
         {
             // Added to the first search's hits: one of them may be a song without an artist
             for t in self.search_tracks(title, 20)? {
-                if !hits.iter().any(|h| h.id == t.id) {
+                if !hits.iter().any(|h| h.id == t.id) && !except.contains(&t.id) {
                     hits.push(t);
                 }
             }
@@ -2434,6 +2446,8 @@ impl Library {
     /// one, in a folder named as the entry's nearest, and the entry is only a path; or when its
     /// title and artist agree with the entry's (without an artist: also that nearest folder).
     pub fn resolve_import(&self, t: &ImportedTrack) -> Result<Option<Track>> {
+        // Files of the entry's name looked at and turned down: the title search does not take them
+        let mut turned_down: Vec<Option<TrackId>> = Vec::new();
         if let Some(p) = t.path.as_deref().and_then(crate::import::local_path) {
             if let Some(row) = self.file_by_path(&p)? {
                 if let Some(track) = self.get_track(row.track_id)? {
@@ -2471,12 +2485,13 @@ impl Library {
                 if path_only && hits.len() == 1 && near(&hits[0]) {
                     return Ok(hits.pop());
                 }
-                if let Some(h) = hits.into_iter().find(|h| agrees(h, t) && (named || near(h))) {
-                    return Ok(Some(h));
+                if let Some(h) = hits.iter().find(|h| agrees(h, t) && (named || near(h))) {
+                    return Ok(Some(h.clone()));
                 }
+                turned_down.extend(hits.iter().map(|h| h.id));
             }
         }
-        self.find_by_title_artist(&t.title, t.artist.as_deref())
+        self.find_by_title_artist_except(&t.title, t.artist.as_deref(), &turned_down)
     }
 
     /// Record that `track` started playing on `zone`; returns the entry id.
