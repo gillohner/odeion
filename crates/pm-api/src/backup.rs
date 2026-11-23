@@ -904,9 +904,15 @@ async fn restore_locked(
         let before = s.db_path.with_extension("db.bak");
         let next = s.db_path.with_extension("db.bak.next");
         lib.keep_copy(&next).map_err(|e| {
-            BackupError::Io(std::io::Error::other(format!(
-                "no copy of the library as it is could be kept ({e}), so the library was not replaced: free some space, or restore with the node stopped (odeiond restore)"
-            )))
+            let busy = matches!(&e, pm_library::LibraryError::Io { source, .. }
+                if source.kind() == std::io::ErrorKind::AlreadyExists);
+            BackupError::Io(std::io::Error::other(if busy {
+                "another copy of the library is being made, so the library was not replaced: try again in a few minutes".to_string()
+            } else {
+                format!(
+                    "no copy of the library as it is could be kept ({e}), so the library was not replaced: free some space, or restore with the node stopped (odeiond restore)"
+                )
+            }))
         })?;
         // The one step that changes the live library (SQLite's backup API: all or nothing)
         if let Err(e) = lib.restore_from(&staged) {

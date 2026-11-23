@@ -495,9 +495,6 @@ fn schema_to_upgrade(path: &Path) -> Option<(i64, Connection)> {
     (found < known).then_some((found, conn))
 }
 
-/// A part file of [`keep_copy_of`] unchanged for this long was left by a stop.
-const PART_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
-
 /// [`Library::keep_copy`] on a connection: `VACUUM INTO` a private part file beside `copy`,
 /// written to disk, then renamed over `copy`.
 fn keep_copy_of(conn: &Connection, copy: &Path) -> Result<()> {
@@ -516,27 +513,38 @@ fn keep_copy_of(conn: &Connection, copy: &Path) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o600);
     }
-    match o.open(&part) {
-        Ok(f) => drop(f),
-        // A part that has not changed for a while was left by a stop in the middle of a copy;
-        // a newer one is another process's copy (two starting at once), left to it
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let stale = std::fs::metadata(&part)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age > PART_STALE_AFTER);
-            if !stale {
-                return Err(io(&part)(std::io::Error::new(
+    // One copy at a time to this name (two processes starting at once): a lock on a file of its
+    // own, held to the end, so a part file left by a stop is told apart from one being written.
+    // Where the file system has no locks, as before
+    let mut lock_name = copy.as_os_str().to_owned();
+    lock_name.push(".lock");
+    let lock_path = PathBuf::from(lock_name);
+    let _lock = {
+        let mut lo = std::fs::OpenOptions::new();
+        lo.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            lo.mode(0o600);
+        }
+        let f = lo.open(&lock_path).map_err(io(&lock_path))?;
+        match f.try_lock() {
+            Ok(()) => Some(f),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(io(copy)(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
                     "another copy is being made",
-                )));
+                )))
             }
-            std::fs::remove_file(&part).map_err(io(&part))?;
-            drop(o.open(&part).map_err(io(&part))?);
+            Err(std::fs::TryLockError::Error(_)) => None,
         }
-        Err(e) => return Err(io(&part)(e)),
+    };
+    // A part left by a stop in the middle of an earlier copy
+    match std::fs::remove_file(&part) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io(&part)(e)),
+        _ => {}
     }
+    drop(o.open(&part).map_err(io(&part))?);
     let made = (|| -> Result<()> {
         conn.execute("VACUUM INTO ?1", params![part.to_string_lossy()])?;
         std::fs::File::open(&part)
@@ -1810,8 +1818,11 @@ impl Library {
                 }
                 Err(e) => {
                     // An older copy is from before an earlier upgrade: taken for this one's, it
-                    // would bring back a library months old
-                    let older = copy.exists() && std::fs::remove_file(&copy).is_ok();
+                    // would bring back a library months old. Not when another process is making
+                    // this upgrade's copy right now (it puts its own in place)
+                    let another = matches!(&e, LibraryError::Io { source, .. }
+                        if source.kind() == std::io::ErrorKind::AlreadyExists);
+                    let older = !another && copy.exists() && std::fs::remove_file(&copy).is_ok();
                     tracing::warn!(
                         from = found,
                         to = known,
@@ -7617,22 +7628,33 @@ mod keep_copy_tests {
         part.push(".part");
         let part = PathBuf::from(part);
         std::fs::write(&part, b"half").unwrap();
-        // Another process's (fresh): left to it, and no copy is made by this one. A copy from
-        // an earlier upgrade goes then: it would pass for this one's
+        // While another process holds the copy's lock it makes this upgrade's copy: none is made
+        // here, and an older copy stays for it to replace
+        let lock = std::fs::File::create(dir.path().join("library.db.before-upgrade.lock")).unwrap();
+        lock.lock().unwrap();
         std::fs::write(&copy, b"from an earlier upgrade").unwrap();
-        drop(Library::open_node_library(&path).unwrap());
-        assert!(!copy.exists() && part.exists());
+        let other = Library::open_node_library(&path);
+        lock.unlock().unwrap();
+        drop(other.unwrap());
+        assert_eq!(std::fs::read(&copy).unwrap(), b"from an earlier upgrade");
+        assert!(part.exists());
+        // A copy that fails for another reason: the older copy goes (it would pass for this
+        // upgrade's). Here the part's name is a folder, which a stop never leaves
         for name in ["library.db", "library.db-wal", "library.db-shm"] {
             let _ = std::fs::remove_file(dir.path().join(name));
         }
         old_library(&path);
-        // Unchanged for longer than a copy takes: a stop's, replaced
-        std::fs::File::options()
-            .write(true)
-            .open(&part)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - PART_STALE_AFTER * 2)
-            .unwrap();
+        std::fs::remove_file(&part).unwrap();
+        std::fs::create_dir(&part).unwrap();
+        drop(Library::open_node_library(&path).unwrap());
+        assert!(!copy.exists());
+        std::fs::remove_dir(&part).unwrap();
+        // Left by a stop in the middle of a copy (no lock held): replaced
+        std::fs::write(&part, b"half").unwrap();
+        for name in ["library.db", "library.db-wal", "library.db-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(name));
+        }
+        old_library(&path);
         let lib = Library::open_node_library(&path).unwrap();
         let known = MIGRATIONS.last().unwrap().0;
         assert_eq!(lib.schema_version().unwrap(), known);

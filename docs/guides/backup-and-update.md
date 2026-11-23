@@ -186,7 +186,9 @@ then, sign-ins included, so it can go back in place of the backup's `library.db`
 `.pmbackup` step below is not needed. Anything changed since the upgrade is lost, and sign-ins
 ended since (a browser, a listener, an API token replaced) work again: end them again in
 **Settings › People & access**. A node that could not make the copy at an upgrade removes an older
-one, so the file is always from the latest upgrade. With the bundle:
+one, so the file is always from the latest upgrade. When `odeiond restore` of the newer version
+was the first thing to open the library after the update, the copy is the library from before
+that restore. With the bundle:
 
 ```sh
 cd ~/pubky-music-node/deploy/bundle
