@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **A change in one library folder rescans that folder only, and rescans take less time.** With folder watching on, a file added, changed or removed in one library folder made the node look at every file of every library folder again; with a large share in the library, a download landing in another folder meant a walk over the whole share. Now only the folders the changes are in are rescanned (all of them when a change cannot be placed, as before). Each file a rescan finds unchanged also costs less: the library's three lookups for it are prepared once per scan instead of once per file.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.

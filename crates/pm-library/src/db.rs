@@ -1298,13 +1298,11 @@ impl Library {
 
     /// Whether a file was taken out of the library.
     pub fn is_hidden(&self, path: &Path) -> Result<bool> {
+        // A rescan asks this twice per file: the statement is prepared once per connection
         Ok(self
             .lock()
-            .query_row(
-                "SELECT 1 FROM hidden_files WHERE path = ?1",
-                params![path.to_string_lossy()],
-                |_| Ok(()),
-            )
+            .prepare_cached("SELECT 1 FROM hidden_files WHERE path = ?1")?
+            .query_row(params![path.to_string_lossy()], |_| Ok(()))
             .optional()?
             .is_some())
     }
@@ -4240,20 +4238,19 @@ impl Library {
     pub fn file_by_path(&self, path: &Path) -> Result<Option<FileRow>> {
         let conn = self.lock();
         Ok(conn
-            .query_row(
+            .prepare_cached(
                 "SELECT id, track_id, path, size_bytes, mtime_unix, missing FROM files WHERE path = ?1",
-                params![path.to_string_lossy()],
-                |r| {
-                    Ok(FileRow {
-                        id: r.get(0)?,
-                        track_id: TrackId(r.get(1)?),
-                        path: PathBuf::from(r.get::<_, String>(2)?),
-                        size_bytes: r.get::<_, i64>(3)? as u64,
-                        mtime_unix: r.get(4)?,
-                        missing: r.get::<_, i64>(5)? != 0,
-                    })
-                },
-            )
+            )?
+            .query_row(params![path.to_string_lossy()], |r| {
+                Ok(FileRow {
+                    id: r.get(0)?,
+                    track_id: TrackId(r.get(1)?),
+                    path: PathBuf::from(r.get::<_, String>(2)?),
+                    size_bytes: r.get::<_, i64>(3)? as u64,
+                    mtime_unix: r.get(4)?,
+                    missing: r.get::<_, i64>(5)? != 0,
+                })
+            })
             .optional()?)
     }
 
@@ -4275,10 +4272,9 @@ impl Library {
     }
 
     pub fn mark_file_seen(&self, path: &Path, scan_id: i64) -> Result<()> {
-        self.lock().execute(
-            "UPDATE files SET last_seen_scan_id = ?2, missing = 0 WHERE path = ?1",
-            params![path.to_string_lossy(), scan_id],
-        )?;
+        self.lock()
+            .prepare_cached("UPDATE files SET last_seen_scan_id = ?2, missing = 0 WHERE path = ?1")?
+            .execute(params![path.to_string_lossy(), scan_id])?;
         Ok(())
     }
 
