@@ -853,7 +853,10 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
                     Do::Push
                 }
             }
-            // The vault lost its files since: this copy goes back in, unless the person signed
+            // A new sign-in here goes out (one older than the last sign-out everywhere went aside
+            // above); a refresh of the old one doesn't bring back what was signed out
+            Some(s) if !same_sign_in(m, s) => Do::Push,
+            // The vault lost its files since: the sign-in it had goes back in, unless the person signed
             // out everywhere since
             Some(s) if s.lost => {
                 if wipe.since_seen {
@@ -862,9 +865,6 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
                     Do::Push
                 }
             }
-            // A new sign-in here goes out (one older than the last sign-out everywhere went aside
-            // above); a refresh of the old one doesn't bring back what was signed out
-            Some(s) if !same_sign_in(m, s) => Do::Push,
             // Unchanged here and gone from the vault: signed out elsewhere. A distinct
             // lineage above is a new sign-in even when its credential bytes are identical.
             Some(s) if m.hash == s.hash => Do::MoveAside,
@@ -2211,8 +2211,30 @@ mod tests {
             ),
             Do::Push
         );
-        // ...unless the person signed out everywhere since
+        // ...unless the person signed out everywhere since (also a sign-in made after the last
+        // one this node knew of); a new sign-in made since goes out
         assert_eq!(decide(Some(&s), Some(&refreshed), None, &w(true)), Do::MoveAside);
+        let mut later = seen("h1", "7");
+        later.lineage = Some("200-L1".into());
+        later.lost = true;
+        assert_eq!(
+            decide(
+                Some(&later),
+                Some(&lin(side("h2", "7"), "200-L1")),
+                None,
+                &w(true)
+            ),
+            Do::MoveAside
+        );
+        assert_eq!(
+            decide(
+                Some(&later),
+                Some(&lin(side("h2", "7"), "300-L3")),
+                None,
+                &w(true)
+            ),
+            Do::Push
+        );
         // Signed out here meanwhile: the record goes
         assert_eq!(decide(Some(&s), None, None, &Wipe::default()), Do::Forget);
     }
