@@ -583,6 +583,9 @@ html[data-shell="phone"] .notice[data-failed] .btn.sm { min-height: 44px; }
 /* (a row that follows a finger shows its label in the gap it leaves, outside its own box: it is on
    screen then, and paints as it did) */
 .track.swiping { content-visibility: visible; }
+/* (the first screenful is drawn as it is put in: a tap in the frame after Songs or a filter put the
+   rows in landed on the row, not on its ⋯ or Play) */
+.track:nth-child(-n+24) { content-visibility: visible; }
 .track:hover, .track:focus-within { background: var(--surface-2); }
 /* A click on a library song row (or a service album's) plays from there, as on a playlist's (.list-row.clickable) */
 :is([data-list], .src-tracks) > .track { cursor: pointer; }

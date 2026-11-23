@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **A tap right as Songs fills in reaches the song's buttons.** Since song rows off screen are drawn only when they come near, a tap in the one frame after the rows were put in (opening Songs, typing a filter) landed on the row itself instead of its ⋯ or Play. The first 24 rows, a screenful, are drawn as soon as they are put in.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.
