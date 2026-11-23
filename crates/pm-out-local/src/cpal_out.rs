@@ -445,7 +445,11 @@ impl CpalSink {
     fn wait_for_room(&self, frames: u64) -> Result<(), SinkError> {
         let stall = crate::sink_wait::STALL;
         crate::sink_wait::wait_for_room(
-            || self.queued_frames() + frames <= self.capacity_frames * 2,
+            // An empty queue takes any block, also one longer than the queue
+            || {
+                let queued = self.queued_frames();
+                queued == 0 || queued + frames <= self.capacity_frames * 2
+            },
             || self.shared.stop.load(Ordering::Relaxed),
             || self.gone(),
             || self.shared.played.load(Ordering::Relaxed),

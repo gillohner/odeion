@@ -6,7 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-23
 
-- **A computer's sound output that stops taking audio pauses its zone instead of freezing it.** On the desktop app and an endpoint playing through the system's output (not a USB DAC on a phone), a sound device that went away mid-song, or a stream that stopped taking audio without saying so, left the zone waiting for it for good: Stop, Pause and Next did nothing until the app was restarted. Now the zone pauses where it was, as it already did when a phone's USB DAC was unplugged: at once when the system says the device went away, and after 10 seconds in which the output took no audio otherwise.
+- **A sound output that stops taking audio pauses its zone instead of freezing it.** On the desktop app, an endpoint, and a phone playing through its speaker or headphones (not through a USB DAC, which already paused), a sound device that went away mid-song (headphones unplugged, a USB sound card pulled), or a stream that stopped taking audio without saying so, left the zone waiting for it for good: Stop, Pause and Next did nothing until the app was restarted. Now the zone pauses where it was, as it already did when a phone's USB DAC was unplugged: at once when the system says the device went away, and after 10 seconds in which the output took no audio otherwise.
 
 ### 2026-11-22
 

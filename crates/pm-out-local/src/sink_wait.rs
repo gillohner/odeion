@@ -232,9 +232,9 @@ mod tests {
         let taken = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let room = Arc::new(AtomicBool::new(false));
         let (t, r2) = (taken.clone(), room.clone());
-        // Takes a little every 20 ms for 300 ms (longer than the 100 ms stall), then there is room
+        // Takes a little every 20 ms for 600 ms (longer than the 250 ms stall), then there is room
         std::thread::spawn(move || {
-            for _ in 0..15 {
+            for _ in 0..30 {
                 std::thread::sleep(Duration::from_millis(20));
                 t.fetch_add(1, Ordering::SeqCst);
             }
@@ -246,11 +246,11 @@ mod tests {
             || false,
             || None,
             || taken.load(Ordering::SeqCst),
-            Duration::from_millis(100),
+            Duration::from_millis(250),
             stalled,
         );
         assert!(r.is_ok(), "{r:?}");
-        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert!(started.elapsed() >= Duration::from_millis(500));
     }
 
     /// A machine that sleeps mid-song: the time asleep is not a stall (the stream had no chance to
