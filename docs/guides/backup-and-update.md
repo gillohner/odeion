@@ -188,7 +188,7 @@ then, sign-ins included, so it can go back in place of the backup's `library.db`
 cd ~/pubky-music-node/deploy/bundle
 docker compose stop music
 docker run --rm -v pubky-music_music-node:/v alpine:3.22 sh -c \
-  'cp /v/library.db /v/library.db.newer && cp /v/library.db.before-upgrade /v/library.db && rm -f /v/library.db-wal /v/library.db-shm && chown "$(stat -c %u:%g /v)" /v/library.db'
+  'cp -p /v/library.db /v/library.db.newer && cp /v/library.db.before-upgrade /v/library.db && rm -f /v/library.db-wal /v/library.db-shm && chown "$(stat -c %u:%g /v)" /v/library.db'
 docker compose start music
 ```
 

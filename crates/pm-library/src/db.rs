@@ -1786,7 +1786,7 @@ impl Library {
                         copy = %copy.display(),
                         "kept a copy of the library before upgrading its schema"
                     );
-                    made = Some(copy);
+                    made = Some((copy, found));
                 }
                 Err(e) => tracing::warn!(
                     from = found,
@@ -1796,9 +1796,13 @@ impl Library {
             }
         }
         match (Self::open(path), made) {
-            // The copy may have taken the room the upgrade needed (each migration is one
-            // transaction, so the library is as it was): without it, as before there was one
-            (Err(e), Some(copy)) => {
+            // The copy may have taken the room the upgrade needed. While the library is still at
+            // the version it was copied at (no migration went in), the copy holds nothing the
+            // library does not: without it, as before there was one. Once a migration went in,
+            // the copy is the only way back and stays
+            (Err(e), Some((copy, found)))
+                if schema_to_upgrade(path).map(|(v, _)| v) == Some(found) =>
+            {
                 tracing::warn!("the library did not open after its copy was made ({e}): trying again without the copy");
                 let _ = std::fs::remove_file(&copy);
                 Self::open(path)
@@ -7613,6 +7617,46 @@ mod keep_copy_tests {
         std::fs::remove_file(&copy).unwrap();
         drop(Library::open_node_library(&path).unwrap());
         assert!(!copy.exists());
+    }
+
+    /// A library at `version`, made by the migrations up to it, whose next-but-one or next
+    /// migration fails (`identify_state.rules` exists already: migration 19 adds it).
+    fn library_whose_upgrade_fails(path: &Path, version: i64) {
+        let conn = Connection::open(path).unwrap();
+        for (v, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= version) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_version(version, applied_at) VALUES (?1, 0)",
+                params![v],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("ALTER TABLE identify_state ADD COLUMN rules INTEGER")
+            .unwrap();
+    }
+
+    /// An upgrade that fails: once a migration went in, the copy from before it is kept (it is
+    /// the only way back); when none did, the library is as it was and the copy goes.
+    #[test]
+    fn a_failed_upgrade_keeps_the_copy_once_the_library_changed() {
+        assert_eq!(MIGRATIONS.last().unwrap().0, 19, "the test breaks migration 19");
+        let dir = tempfile::tempdir().unwrap();
+        // 17 -> 18 goes in, 19 fails
+        let path = dir.path().join("two.db");
+        library_whose_upgrade_fails(&path, 17);
+        assert!(Library::open_node_library(&path).is_err());
+        let copy = Library::before_upgrade_path(&path);
+        let kept: i64 = Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 17, "the copy from before 18 stays");
+        // 18 -> 19 fails: nothing went in
+        let path = dir.path().join("one.db");
+        library_whose_upgrade_fails(&path, 18);
+        assert!(Library::open_node_library(&path).is_err());
+        assert!(!Library::before_upgrade_path(&path).exists());
+        assert_eq!(schema_to_upgrade(&path).map(|(v, _)| v), Some(18));
     }
 
     /// `keep_copy` puts a whole copy in place of an older one and leaves no part file.
