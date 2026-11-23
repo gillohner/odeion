@@ -230,7 +230,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plplay'); await sleep(200);
         const n0 = sent.length;
         await page.click('#plplay');
-        check(await until(async () => sent.slice(n0).some((x) => x.v === '/playlists/c1/play')), `${T} a playlist's Play plays it on the zone`);
+        check(await until(async () => sent.slice(n0).some((x) => x.v === '/playlists/c1/play')), `${T} a collection's Play plays it on the zone`);
         const pl = sent.slice(n0).map((x) => `${x.m} ${x.v}${x.body && 'shuffle' in x.body ? ` ${x.body.shuffle}` : ''}`);
         check(pl.indexOf('PUT /zones/z1/shuffle false') >= 0 && pl.indexOf('PUT /zones/z1/shuffle false') < pl.indexOf('POST /playlists/c1/play'), `${T} …after turning shuffle off (${pl.join(', ')})`);
         // Tracks › Play all with the zone's shuffle on: like every page's Play, in order with shuffle off
@@ -310,7 +310,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         await page.click('#plplay'); await sleep(50);
         if (!(await page.locator('#shufflebtn').isVisible())) await openNp(page, w);
         await pressMode(page, 'shuffle');
-        check(await until(async () => sent.slice(n4).some((x) => x.v === '/playlists/c1/play') && sent.slice(n4).filter((x) => /\/shuffle$/.test(x.v) && x.m === 'PUT').length === 2, 10000), `${T} the Shuffle, the playlist's Play and the toggle go out`);
+        check(await until(async () => sent.slice(n4).some((x) => x.v === '/playlists/c1/play') && sent.slice(n4).filter((x) => /\/shuffle$/.test(x.v) && x.m === 'PUT').length === 2, 10000), `${T} the Shuffle, the collection's Play and the toggle go out`);
         const plOrder = sent.slice(n4).filter((x) => /\/(load|shuffle|play)$/.test(x.v) && x.m !== 'GET').map((x) => `${x.v.split('/').pop()}${x.body && 'shuffle' in x.body ? ':' + x.body.shuffle : ''}`);
         check(plOrder.join() === 'load:true,shuffle:false,play,shuffle:true', `${T} …in order, the toggle turning shuffle on after the Play turned it off (${plOrder.join(', ')})`);
         await closeNp(page);

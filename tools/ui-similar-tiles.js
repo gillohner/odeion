@@ -29,7 +29,7 @@ const related = [
   { kind: 'artist', title: 'Tagged Artist', uri: `${MB}/artist/${U.artist}`, page: `${MB}/artist/${U.artist}` },
   { kind: 'podcast', title: 'Tagged Podcast', uri: 'https://example.org/podcast', page: 'https://example.org/podcast' },
   { kind: 'other', title: 'A game', uri: 'https://example.org/game', page: 'https://example.org/game' },
-  { kind: 'playlist', title: 'Tagged Playlist', uri: 'https://example.org/playlist/9', page: 'https://example.org/playlist/9' },
+  { kind: 'playlist', title: 'Tagged Collection', uri: 'https://example.org/playlist/9', page: 'https://example.org/playlist/9' },
 ];
 const music = related.filter((it) => ['track', 'album', 'artist', 'podcast', 'playlist'].includes(it.kind));
 const SHOWN = music.map((it) => it.title);

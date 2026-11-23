@@ -257,7 +257,7 @@ fn resolve_with_cookies(bin: &Path, id: &str, cookies: Option<&Path>) -> Result<
     }
 }
 
-fn record(library: &std::sync::Mutex<pm_library::Library>, r: &Result<String, String>) {
+fn record(library: &pm_library::LibraryLock, r: &Result<String, String>) {
     let Ok(lib) = library.lock() else { return };
     let mut st = load(&lib);
     st.health = Some(Health {
@@ -273,7 +273,7 @@ fn record(library: &std::sync::Mutex<pm_library::Library>, r: &Result<String, St
 
 /// A `youtube:video:<id>` for a zone.
 pub(crate) fn open_blocking(
-    library: &std::sync::Mutex<pm_library::Library>,
+    library: &pm_library::LibraryLock,
     id: &str,
     who: &crate::accounts::Who,
 ) -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::SourceError> {

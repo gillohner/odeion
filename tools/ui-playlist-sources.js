@@ -20,7 +20,7 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
 (async () => {
   const lists = await api('GET', '/playlists');
   const pl = (lists || []).find((p) => p.items > 0);
-  if (!pl) { console.log('skip: no playlist with songs on this node'); return; }
+  if (!pl) { console.log('skip: no collection with songs on this node'); return; }
   const before = await api('GET', `/playlists/${pl.id}`);
   const pf0 = await api('GET', `/playlists/${pl.id}/play-from`); // warm the lookups
   const globalBefore = (await api('GET', '/play-order')).order;
@@ -70,7 +70,7 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
       for (const svc of ['tidal', 'spotify']) {
         await p.goto(`${BASE}/source/${svc}`); await p.waitForSelector(`[data-${svc[0]}pl]`, { timeout: 20000 }).catch(() => {});
         const btn = await p.$(`[data-${svc[0]}pl]`);
-        if (!btn) { console.log(`skip: no ${svc} playlists to import here`); continue; }
+        if (!btn) { console.log(`skip: no ${svc} collections to import here`); continue; }
         const before = (await api('GET', '/playlists')).length;
         await btn.click(); await p.waitForSelector('dialog[open] .choice', { timeout: 10000 }).catch(() => {});
         const choices = await p.$$eval('dialog[open] .choice-label', (e) => e.map((x) => x.textContent));

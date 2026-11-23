@@ -1,5 +1,7 @@
-// Settings › People on phones and tablets (UX sweep 2026-11-01, S1–S5; tablets have the desktop layout):
-// - Invite someone is three radio cards, one line each, and only the chosen one's details show;
+// Settings › People & access on phones and tablets (UX sweep 2026-11-01, S1–S5; tablets have the desktop layout;
+// the whole screen against fixtures: tools/ui-people-access.js):
+// - Add someone is three radio cards, one line each, and only the chosen one's details show;
+// - someone added by their key: the page says what to send them (this node's address, log in with Pubky Ring);
 // - the key field takes a paste or a scanned QR code in any spelling Pubky apps show, and says so at the field when it isn't a key;
 //   other clipboard text never lands in the field, and a browser that can't read QR codes turns the camera off and says so;
 // - on phones each section folds (its title still a heading), what was open stays open when the page reloads after an action,
@@ -56,9 +58,9 @@ const PEOPLE = { homeserver: { configured: true, reachable: true, version: '0.6.
       assert.equal(await box.locator('#pinvquota').isVisible(), false);
       assert.equal(await box.locator('#pinvkeyrow').isVisible(), true);
 
-      // S2: on phones the sections fold, Invite open while nobody is invited, Party shut
+      // S2: on phones the sections fold, Add someone open while nobody is added, Party shut
       if (phone) {
-        assert.equal(await box.locator('details[data-fold="invite"]').getAttribute('open'), '', 'Invite open');
+        assert.equal(await box.locator('details[data-fold="invite"]').getAttribute('open'), '', 'Add someone open');
         assert.equal(await box.locator('details[data-fold="party"][open]').count(), 0, 'Party shut');
         assert.equal(await box.locator('#ptgo').isVisible(), false);
         assert.equal(await page.getByRole('heading', { name: 'Party' }).count(), 1, 'a fold’s title is still a heading');
@@ -103,6 +105,17 @@ const PEOPLE = { homeserver: { configured: true, reachable: true, version: '0.6.
       await box.locator('#pinvname').fill('Bo');
       await box.locator('#pinvgo').click();
       await page.locator('#toast', { hasText: 'Added' }).waitFor();
+      await box.locator('#pinvout .pa-send').waitFor();
+      const told = await box.locator('#pinvout').innerText();
+      assert.match(told, /Bo can log in now\./);
+      if (/^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/i.test(new URL(BASE).hostname)) {
+        // The page is open at an address that only works on the node's own machine: nothing to copy
+        assert.match(told, /only works on the node’s own machine\.[\s\S]*the node’s address on your network/, 'what to send them, from a loopback address');
+        assert.equal(await box.locator('#pinvout [data-copylink]').count(), 0, 'no Copy for an address they can’t use');
+      } else {
+        assert.match(told, /Open http\S+ and log in with Pubky Ring\./, 'what to send them');
+        assert.equal(await box.locator('#pinvout [data-copylink]').count(), 1);
+      }
       assert.deepEqual(sent.shift(), { access: 'music', name: 'Bo', key: KEY2 });
       if (phone) {
         await page.waitForTimeout(300);

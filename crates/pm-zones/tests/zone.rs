@@ -490,7 +490,7 @@ fn kinds(evs: &[ZoneEvent]) -> Vec<String> {
             ZoneEvent::Paused { position_ms } => format!("pause:{position_ms}"),
             ZoneEvent::Resumed => "resume".into(),
             ZoneEvent::Seeked { position_ms } => format!("seek:{position_ms}"),
-            ZoneEvent::Stopped => "stopped".into(),
+            ZoneEvent::Stopped { .. } => "stopped".into(),
             ZoneEvent::QueueChanged => "queue".into(),
             ZoneEvent::StreamTitle { title } => format!("title:{title}"),
             ZoneEvent::Error { message } => format!("error:{message}"),
@@ -3083,4 +3083,48 @@ async fn a_replacement_never_reenables_shuffle_turned_off_by_another_controller(
             .collect::<Vec<_>>(),
         ["a", "b"]
     );
+}
+
+/// `Stopped` says whether the queue ran out: what plays on by itself after the last item (the
+/// node's radio) must not start again after a Stop.
+#[tokio::test]
+async fn stopped_says_whether_the_queue_ran_out() {
+    let stops = |evs: Vec<ZoneEvent>| -> Vec<bool> {
+        evs.into_iter()
+            .filter_map(|e| match e {
+                ZoneEvent::Stopped { queue_ended } => Some(queue_ended),
+                _ => None,
+            })
+            .collect()
+    };
+    // The last item played to its end
+    let mut r = rig(&[("a", RATE, 250)]);
+    r.gate.allow(1000);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.zone.wait_stopped().await;
+    assert_eq!(stops(drain_events(&mut r.events)), [true]);
+
+    // A Stop in the middle of an item
+    let mut r = rig(&[("a", RATE, 100_000)]);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(2);
+    r.gate.blocked().await;
+    r.zone.stop();
+    r.gate.allow(1000);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.queue.len(), 1);
+    assert_eq!(stops(drain_events(&mut r.events)), [false]);
+
+    // Next on the last item: the queue is over, as when it plays out
+    let mut r = rig(&[("a", RATE, 100_000)]);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(2);
+    r.gate.blocked().await;
+    r.zone.next();
+    r.gate.allow(1000);
+    r.zone.wait_stopped().await;
+    assert_eq!(stops(drain_events(&mut r.events)), [true]);
 }

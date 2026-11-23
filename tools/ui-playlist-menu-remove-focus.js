@@ -57,7 +57,7 @@ async function run(browser, width, android) {
     if (!(await until(menuOpen, 3000))) return false;
     for (let i = 0; i < 30; i++) {
       const at = await page.evaluate(() => (document.activeElement && document.activeElement.closest('.popover.menu') ? document.activeElement.textContent.trim() : ''));
-      if (at === 'Remove from playlist') { await page.keyboard.press('Enter'); return true; }
+      if (at === 'Remove from collection') { await page.keyboard.press('Enter'); return true; }
       await page.keyboard.press('ArrowDown');
     }
     await page.keyboard.press('Escape');
@@ -67,8 +67,8 @@ async function run(browser, width, android) {
     await fx.go(page, '/playlists');
     if (phone) {
       // 1. Keyboard, from the ⋯ menu: the focus goes on to the next song's ⋯
-      check(await open('m1', 'Alpha,Bravo,Charlie,Delta'), `${tag}: the playlist shows (${await order()})`);
-      check(await keyRemove('Bravo'), `${tag}: Bravo's ⋯ menu offers Remove from playlist from the keyboard`);
+      check(await open('m1', 'Alpha,Bravo,Charlie,Delta'), `${tag}: the collection shows (${await order()})`);
+      check(await keyRemove('Bravo'), `${tag}: Bravo's ⋯ menu offers Remove from collection from the keyboard`);
       await until(async () => (await order()) === 'Alpha,Charlie,Delta', 4000);
       await until(async () => (await focused()) === 'Charlie:smore', 2000);
       check(writes.join() === 'm1 DELETE 1' && (await order()) === 'Alpha,Charlie,Delta', `${tag}: Bravo is removed (${writes}; ${await order()})`);
@@ -80,17 +80,17 @@ async function run(browser, width, android) {
       check(/^Delta:/.test(afterTab), `${tag}: Tab then goes on to the song after it (${afterTab})`);
 
       // 2. The last song: the focus goes to the song before it
-      check(await open('m2', 'Alpha,Bravo,Charlie'), `${tag}: the second playlist shows (${await order()})`);
-      check(await keyRemove('Charlie'), `${tag}: Charlie's ⋯ menu offers Remove from playlist`);
+      check(await open('m2', 'Alpha,Bravo,Charlie'), `${tag}: the second collection shows (${await order()})`);
+      check(await keyRemove('Charlie'), `${tag}: Charlie's ⋯ menu offers Remove from collection`);
       await until(async () => (await order()) === 'Alpha,Bravo', 4000);
       await until(async () => (await focused()) === 'Bravo:smore', 2000);
       check((await focused()) === 'Bravo:smore', `${tag}: the last song removed: the focus goes to the song before it (${await focused()})`);
 
       // 3. A finger: tap ⋯, tap Remove from playlist: no focus moved onto another song's ⋯
-      check(await open('m3', 'Alpha,Bravo,Charlie'), `${tag}: the third playlist shows (${await order()})`);
+      check(await open('m3', 'Alpha,Bravo,Charlie'), `${tag}: the third collection shows (${await order()})`);
       await ctl('Alpha', '[data-smore]').click();
       await until(menuOpen, 3000);
-      await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from playlist' }).click();
+      await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from collection' }).click();
       await until(async () => (await order()) === 'Bravo,Charlie', 4000);
       await sleep(300);
       check((await order()) === 'Bravo,Charlie', `${tag}: a tap removes Alpha (${await order()})`);
@@ -98,7 +98,7 @@ async function run(browser, width, android) {
       check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${tag}: no sideways overflow`);
     } else {
       // Desktop: the × shows in the row; from the keyboard it goes on to the next song's × (as before)
-      check(await open('m1', 'Alpha,Bravo,Charlie,Delta'), `${tag}: the playlist shows (${await order()})`);
+      check(await open('m1', 'Alpha,Bravo,Charlie,Delta'), `${tag}: the collection shows (${await order()})`);
       await ctl('Bravo', '[data-rm]').focus();
       await page.keyboard.press('Enter');
       await until(async () => (await order()) === 'Alpha,Charlie,Delta', 4000);

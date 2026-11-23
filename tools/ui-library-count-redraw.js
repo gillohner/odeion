@@ -58,7 +58,7 @@ const cases = [
         try {
           await fx.go(page, c.url);
           const shown = await page.waitForSelector(c.listed ? '.main .track' : '.main .empty', { timeout: 8000 }).then(() => true, () => false);
-          check(shown, `${width} ${c.name}: the page shows ${c.listed ? 'its favourites' : 'its empty state'}`);
+          check(shown, `${width} ${c.name}: the page shows ${c.listed ? 'its bookmarks' : 'its empty state'}`);
           if (!shown) continue;
           for (let i = 0; i < 50 && !socket; i++) await sleep(100);
           check(!!socket, `${width} ${c.name}: events connected`);
@@ -78,8 +78,8 @@ const cases = [
           if (c.moved) { for (let i = 0; i < 40 && favHits() === f0; i++) await sleep(25); await sleep(50); await page.focus('#search'); }
           if (c.listed) {
             await sleep(1500);
-            check(favHits() - f0 === 1, `${width} ${c.name}: Favourites is fetched once for the change (${favHits() - f0})`);
-            check(await page.locator('.main .track').count() > 0 && !(await page.$('.main .empty')), `${width} ${c.name}: the favourites stay listed`);
+            check(favHits() - f0 === 1, `${width} ${c.name}: Bookmarks is fetched once for the change (${favHits() - f0})`);
+            check(await page.locator('.main .track').count() > 0 && !(await page.$('.main .empty')), `${width} ${c.name}: the bookmarks stay listed`);
             check(!state.errors.length, `${width} ${c.name}: no page errors (${state.errors.join(' | ')})`);
             continue;
           }
@@ -88,7 +88,7 @@ const cases = [
           await sleep(900); // the late /info is in, any redraw it causes is done
           const b1 = await buttons(page);
           check(got && JSON.stringify(b1) === want, `${width} ${c.name}: after the change: ${c.after.join(', ') || 'no button'} (${(b1 || []).join(', ')})`);
-          if (c.url === '/favourites') check(await page.evaluate(() => window.__sk) === 0, `${width} ${c.name}: Favourites is drawn again where it stands, no skeleton in between`);
+          if (c.url === '/favourites') check(await page.evaluate(() => window.__sk) === 0, `${width} ${c.name}: Bookmarks is drawn again where it stands, no skeleton in between`);
           if (keyed) {
             const at = await page.evaluate(() => { const a = document.activeElement; return a ? (a.id === 'search' ? '#search' : a.matches('.main .empty > .btn') ? a.textContent.trim() : a.tagName.toLowerCase()) : ''; });
             const wantAt = c.moved ? '#search' : c.after.length ? c.after[0] : null;
@@ -96,7 +96,7 @@ const cases = [
           }
           if (c.afterText) { const t = await text(page); check(t.startsWith(c.afterText), `${width} ${c.name}: it says "${c.afterText}…" (${t})`); }
           if (c.kept) check(await page.$eval('.main .empty', (b) => b.dataset.old === '1').catch(() => false), `${width} ${c.name}: the queue's empty box is not drawn again`);
-          if (c.once) check(favHits() - f0 === 1, `${width} ${c.name}: Favourites is fetched once for the change (${favHits() - f0})`);
+          if (c.once) check(favHits() - f0 === 1, `${width} ${c.name}: Bookmarks is fetched once for the change (${favHits() - f0})`);
           const o = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
           check(o <= 0, `${width} ${c.name}: nothing wider than the screen (${o})`);
           await page.screenshot({ path: path.join(SHOTS, `${c.name}-${width}.png`) });
@@ -117,7 +117,7 @@ const cases = [
         try {
           await fx.go(page, '/favourites');
           const shown = await page.waitForSelector('#favother [data-ditem]', { timeout: 8000 }).then(() => true, () => false);
-          check(shown, `${width} ${name}: the other services' favourite is listed`);
+          check(shown, `${width} ${name}: the other services' bookmark is listed`);
           for (let i = 0; i < 50 && !socket; i++) await sleep(100);
           if (shown && socket) {
             await sleep(300);

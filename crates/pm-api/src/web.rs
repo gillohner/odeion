@@ -113,8 +113,14 @@ mod tests {
     #[tokio::test]
     async fn the_pages_forbid_scripts_that_are_not_the_nodes() {
         for (page, html) in [
-            (crate::web_ui().await, include_str!("../static/index.html")),
-            (crate::party_page().await, include_str!("../static/party.html")),
+            (
+                crate::web_ui(Default::default()).await,
+                include_str!("../static/index.html"),
+            ),
+            (
+                crate::party_page(Default::default()).await,
+                include_str!("../static/party.html"),
+            ),
         ] {
             let csp = page
                 .headers()

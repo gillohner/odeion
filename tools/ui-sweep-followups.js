@@ -43,10 +43,10 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
         await p.goto(`${BASE}/playlist/${encodeURIComponent(plid)}`); await p.waitForSelector('#plsongs .srow', { timeout: 20000 });
         const hero = await p.$$eval('.hero .actions > .btn', (bs) => bs.filter((b) => b.offsetParent).map((b) => Math.round(b.getBoundingClientRect().top)));
         if (touch(w)) {
-          check(hero.length >= 3 && new Set(hero).size === 1, `${w}: the playlist's hero buttons are one row (${JSON.stringify(hero)})`);
+          check(hero.length >= 3 && new Set(hero).size === 1, `${w}: the collection's hero buttons are one row (${JSON.stringify(hero)})`);
           check(!(await p.locator('#pldel').isVisible()), `${w}: no Delete button beside Play`);
           await p.click('#plmore'); await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
-          check(await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Delete playlist' }).count() === 1, `${w}: Delete playlist… is in ⋯`);
+          check(await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Delete collection' }).count() === 1, `${w}: Delete collection… is in ⋯`);
           await p.keyboard.press('Escape'); await sleep(200);
           const q = await boxes(p, '#plsongs .q-actions .icon-btn');
           if (w >= 600) check(q.length && q.every(([bw, bh]) => bw >= 40 && bh >= 40), `${w}: Move and Remove are 40 px (${JSON.stringify(q.slice(0, 3))})`);
@@ -155,7 +155,7 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
       check(await until(async () => /Loading your TIDAL collection/.test(await p.textContent(status)), 5000), 'A7: the top of the page says the collection is loading');
       const top = await p.$eval(status, (e) => Math.round(e.getBoundingClientRect().top)).catch(() => 9999);
       check(top < 844 - 160, `A7: where the eye is, above the fold (${top} px)`);
-      check(await until(async () => /Mock TIDAL list/.test(await p.textContent('#tidalmine')), 3000), 'A7: the playlists draw before the slow collection');
+      check(await until(async () => /Mock TIDAL list/.test(await p.textContent('#tidalmine')), 3000), 'A7: the collections draw before the slow collection');
       check(await until(async () => /take a while/.test(await p.textContent(status)), 4000), 'A7: after 2 s it says the first time takes a while');
       check(await until(async () => /Cold Album/.test(await p.textContent('#tidalmine')) && !(await p.isVisible(status)), 8000), 'A7: the collection draws, and the status goes');
       // Next time: the last good copy at once, while the node answers slowly again
