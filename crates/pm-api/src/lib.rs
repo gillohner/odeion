@@ -2016,7 +2016,13 @@ async fn enqueue(
     items.extend(
         tokio::task::spawn_blocking(move || queue_items_of(&lib, &ids, LOOKUP_TURN, || {}))
             .await
-            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??,
+            .map_err(|e| {
+                tracing::error!("queue lookup: {e}");
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the songs could not be looked up",
+                )
+            })??,
     );
     for mut it in body.items {
         it.uri = it.uri.trim().to_string();
@@ -2030,6 +2036,15 @@ async fn enqueue(
     }
     if items.is_empty() {
         return Err(ApiError::bad_request("nothing to enqueue"));
+    }
+    // Again: another request may have filled the queue while these were looked up
+    let has = if body.replace { 0 } else { zone.queue_len() };
+    if has + items.len() > pm_zones::MAX_QUEUE_ITEMS {
+        return Err(ApiError::bad_request(format!(
+            "a queue holds at most {} items (this one has {has}, {} more were sent)",
+            pm_zones::MAX_QUEUE_ITEMS,
+            items.len()
+        )));
     }
     drop_sign_ins(&s, &headers, &mut items);
     // Who queued them, from the request, never from the body: their own accounts play them
@@ -28287,7 +28302,8 @@ exec sleep 300
         let e = queue_items_of(&lib, &[ids[0], 9_999_999], LOOKUP_TURN, || {}).unwrap_err();
         assert_eq!(e.status, StatusCode::NOT_FOUND);
         // Another thread that waits for the library gets it while the lookup is under way (10
-        // songs a turn here: about 100 turns)
+        // songs a turn here: about 100 turns). Without the pause it mostly gets it only at the
+        // end; on a busy machine it can win a turn by luck, so this part is a check, not a proof.
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         let (done_turns, finished, got_in) = (
             AtomicUsize::new(0),
@@ -28297,14 +28313,12 @@ exec sleep 300
         let total = n.div_ceil(10);
         std::thread::scope(|sc| {
             sc.spawn(|| {
-                while !finished.load(Ordering::SeqCst) {
-                    let _held = lib.lock().unwrap();
-                    let t = done_turns.load(Ordering::SeqCst);
-                    if t > 0 && t < total - 1 {
-                        got_in.store(true, Ordering::SeqCst);
-                        return;
-                    }
+                // Once the lookup is under way, ask for the library once and wait
+                while done_turns.load(Ordering::SeqCst) == 0 && !finished.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
                 }
+                let _held = lib.lock().unwrap();
+                got_in.store(done_turns.load(Ordering::SeqCst) < total - 1, Ordering::SeqCst);
             });
             queue_items_of(&lib, &ids, 10, || {
                 done_turns.fetch_add(1, Ordering::SeqCst);
