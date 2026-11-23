@@ -323,7 +323,9 @@ async fn a_backup_held_back_is_an_error_not_ok() {
     assert!(body.contains("not replaced yet"), "{body}");
     let requests = fixture.hs.requests.lock().unwrap();
     assert!(
-        requests.iter().all(|(m, _, _)| m == Method::GET),
+        requests
+            .iter()
+            .all(|(m, _, _)| m == Method::GET || m == Method::HEAD),
         "nothing written: {requests:?}"
     );
     assert!(
