@@ -1782,4 +1782,17 @@ async fn a_lost_vault_gets_the_nodes_sign_ins_back() {
     assert_eq!(r["signed_out"], json!(["tidal"]), "{r}");
     assert_eq!(get(&n1, "tidal.user"), None);
     assert_eq!(get(&n1, "jamendo.user").as_deref(), Some(jamendo));
+
+    // No list, and Jamendo's blob there but unreadable: no lost vault either (Jamendo fails,
+    // nothing goes aside or out)
+    storage.delete(index.as_str()).await.unwrap();
+    storage
+        .put(jamendo_blob.as_str(), b"not an envelope".to_vec())
+        .await
+        .unwrap();
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["failed"], json!(["jamendo"]), "{r}");
+    assert_eq!(r["signed_out"], json!([]), "{r}");
+    assert_eq!(r["pushed"], json!([]), "{r}");
+    assert_eq!(get(&n1, "jamendo.user").as_deref(), Some(jamendo));
 }
