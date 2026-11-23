@@ -464,7 +464,8 @@ pub(crate) fn open_blocking(
         let _ = url.set_password(None);
     }
     let mut headers = Vec::new();
-    if !user.is_empty() {
+    // A password alone (`http://:token@host/`) is sent too, with an empty user name
+    if !user.is_empty() || !password.is_empty() {
         let basic = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
             format!("{user}:{password}"),
@@ -806,5 +807,31 @@ mod tests {
                 "{req}"
             );
         }
+        // A password alone in the address (a token) still goes, with an empty user name
+        while rx.try_recv().is_ok() {}
+        let token_only = base.replacen("http://", "http://:t%40ken@", 1);
+        let share = Share {
+            id: "ab12cd".into(),
+            name: "NAS".into(),
+            url: token_only,
+            user: String::new(),
+            password: String::new(),
+        };
+        let key = share.root().join("Queen/01 Song.flac");
+        let shared: Shared = Arc::new(RwLock::new(vec![share]));
+        let err = match open_blocking(&shared, &key) {
+            Ok(_) => panic!("zeros decoded"),
+            Err(e) => e,
+        };
+        let said = format!("{err} {err:?}");
+        assert!(!said.contains("t%40ken") && !said.contains("t@ken"), "{said}");
+        let basic = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ":t@ken");
+        let mut reqs = vec![rx.recv_timeout(Duration::from_secs(5)).unwrap()];
+        reqs.extend(rx.try_iter());
+        let want = format!("authorization: basic {}", basic.to_ascii_lowercase());
+        assert!(
+            reqs.iter().all(|r| r.to_ascii_lowercase().contains(&want)),
+            "{reqs:?}"
+        );
     }
 }
