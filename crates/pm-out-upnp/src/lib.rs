@@ -238,9 +238,15 @@ pub fn probe_address(addr: &str, timeout: Duration) -> Result<Vec<Renderer>, Upn
     let mut buf = [0u8; 4096];
     while Instant::now() < deadline {
         match socket.recv_from(&mut buf) {
-            Ok((n, _)) => {
+            Ok((n, from)) => {
                 let text = String::from_utf8_lossy(&buf[..n]);
                 if let Some(loc) = header(&text, "LOCATION") {
+                    // The answer is network input as much as a multicast one: only from the
+                    // address asked, about itself (anything can send to this socket)
+                    if !(from.ip() == dest.ip() && location_from(&loc, from.ip())) {
+                        tracing::debug!(%from, %loc, "unicast SSDP answer from or about another host: not fetched");
+                        continue;
+                    }
                     if !locations.iter().any(|l| l.eq_ignore_ascii_case(&loc)) {
                         locations.push(loc);
                     }
