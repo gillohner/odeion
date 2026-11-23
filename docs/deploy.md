@@ -268,7 +268,9 @@ works until the Pubky transport exists (ADR 0008):
 The API port speaks HTTP/1.1 (a proxy in front may speak HTTP/2 or 3 to browsers). A connection has
 30 s to send each request's headers, also between requests on a kept-alive connection, and the port
 holds at most 256 connections at once (remote access's own listener too); more wait until one
-closes. Event streams count until they become WebSockets.
+closes. One address holds at most 64 of them (more from it are closed); connections from this
+machine are not counted per address, so a reverse proxy on another machine shares 64 for everyone
+behind it. Event streams count until they become WebSockets.
 
 ## Streaming services: what you set up
 
