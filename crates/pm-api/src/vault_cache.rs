@@ -211,6 +211,11 @@ pub struct Synced {
     /// never signs it as its own, only what it wrote itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub from_unsigned: bool,
+    /// The vault lost its files since (no device list, none of the sign-ins this node synced
+    /// with it; [`a_lost_vault`]): gone from the vault is no sign-out, this copy goes back in.
+    /// Cleared once the vault shows a copy again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lost: bool,
 }
 
 fn synced_key(service: &str) -> String {
@@ -848,6 +853,15 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
                     Do::Push
                 }
             }
+            // The vault lost its files since: this copy goes back in, unless the person signed
+            // out everywhere since
+            Some(s) if s.lost => {
+                if wipe.since_seen {
+                    Do::MoveAside
+                } else {
+                    Do::Push
+                }
+            }
             // A new sign-in here goes out (one older than the last sign-out everywhere went aside
             // above); a refresh of the old one doesn't bring back what was signed out
             Some(s) if !same_sign_in(m, s) => Do::Push,
@@ -921,6 +935,16 @@ fn remember(lib: &Library, service: &str, synced: &Synced) {
         &synced_key(service),
         &serde_json::to_string(synced).unwrap_or_default(),
     );
+}
+
+/// A lost vault ([`Synced::lost`]) shows a copy of `service` again: the record is a plain one.
+fn found_again(lib: &Library, service: &str, owner: &str, client: &str) {
+    if let Ok(Some(mut x)) = last_synced(lib, service, owner, client) {
+        if x.lost {
+            x.lost = false;
+            remember(lib, service, &x);
+        }
+    }
 }
 
 /// The record for a service, if it was made with this vault (`owner`) by this machine (`client`).
@@ -1177,6 +1201,12 @@ pub(crate) async fn sync_held(
         let theirs: Option<Opened> = match read {
             Ok(o) => o,
             Err(VaultStoreError::Vault(VaultError::NotARecipient)) => {
+                found_again(
+                    &s.library.lock().expect("library poisoned"),
+                    b.service,
+                    &owner,
+                    &client,
+                );
                 report.not_readable.push(service);
                 continue;
             }
@@ -1270,6 +1300,20 @@ pub(crate) async fn sync_held(
                 }
             })
         });
+        // A copy in the vault again (pulled, in step, anyone's): a lost vault is over for it
+        let mut seen = seen;
+        if their_side.is_some() && seen.as_ref().is_some_and(|x| x.lost) {
+            current()?;
+            found_again(
+                &s.library.lock().expect("library poisoned"),
+                b.service,
+                &owner,
+                &client,
+            );
+            if let Some(x) = seen.as_mut() {
+                x.lost = false;
+            }
+        }
         let wipe = Wipe {
             now: wiping,
             at: marker,
@@ -1421,6 +1465,7 @@ pub(crate) async fn sync_held(
                     at: pm_library::db::now_unix().max(0) as u64,
                     marker,
                     from_unsigned,
+                    lost: false,
                 },
             )
         };
@@ -1715,12 +1760,12 @@ pub async fn pass(
 /// vault):
 /// no device list, and none of the sign-ins this node synced with it. Each record of those then
 /// reads as a sign-in "signed out elsewhere", and every one would go aside while the vault stays
-/// empty. They become conflict records instead (nothing else in them changes), and a conflict
-/// gone from the vault goes back in, as long as no sign-out everywhere came since. Checked
-/// before the node registers again, which writes a new list. A list that is there, or one of
+/// empty. They are marked [`Synced::lost`] instead, and go back in, as long as no sign-out
+/// everywhere came since. Checked before the node registers again (a pass, or
+/// `POST /v1/vault/register`), which writes a new list. A list that is there, or one of
 /// those sign-ins still in the vault, is no lost vault: a sign-in gone from it was signed out.
 /// A copy the node took unsigned keeps its record (the node never signs it as its own).
-async fn a_lost_vault(
+pub(crate) async fn a_lost_vault(
     s: &NodeState,
     vault: &Vault<'_>,
     still: &(dyn Fn() -> bool + Sync),
@@ -1743,9 +1788,9 @@ async fn a_lost_vault(
     for (service, _) in &records {
         match vault.envelope(service).await {
             Ok(None) => {}
-            // There, readable or not (its own failure is the pass's to report): no lost vault
-            Ok(Some(_)) | Err(VaultStoreError::Vault(_)) => return Ok(()),
-            Err(e) => return Err(e),
+            // There, readable or not (its own failure is the pass's to report): no lost vault;
+            // not known (the homeserver didn't answer): nothing decided, the pass goes on
+            Ok(Some(_)) | Err(_) => return Ok(()),
         }
     }
     let lib = s.library.lock().expect("library poisoned");
@@ -1754,7 +1799,7 @@ async fn a_lost_vault(
     }
     let mut back = Vec::new();
     for (service, mut x) in records {
-        if x.conflict || x.from_unsigned {
+        if x.conflict || x.from_unsigned || x.lost {
             continue;
         }
         // Still the record read above (no pass runs meanwhile; this is the check)
@@ -1765,7 +1810,7 @@ async fn a_lost_vault(
         {
             continue;
         }
-        x.conflict = true;
+        x.lost = true;
         let v = serde_json::to_string(&x).map_err(local_error)?;
         lib.set_setting(&synced_key(service), &v).map_err(local_error)?;
         back.push(service);
@@ -2133,6 +2178,36 @@ mod tests {
         let mut mine = lin(side("h2", ""), "L2");
         mine.account = None;
         assert_eq!(d(Some(&j), Some(&mine), None), Do::Push);
+    }
+
+    #[test]
+    fn a_lost_vaults_copies_go_back_in() {
+        let w = |since_seen| Wipe {
+            now: false,
+            at: Some(100),
+            since_seen,
+        };
+        // Synced since the last sign-out everywhere (its id is older), refreshed since, and
+        // the vault lost its files: it goes back in; as a plain record it would go aside
+        let mut s = seen("h1", "7");
+        s.lineage = Some("50-L1".into());
+        let refreshed = lin(side("h2", "7"), "50-L1");
+        assert_eq!(decide(Some(&s), Some(&refreshed), None, &w(false)), Do::MoveAside);
+        s.lost = true;
+        assert_eq!(decide(Some(&s), Some(&refreshed), None, &w(false)), Do::Push);
+        assert_eq!(
+            decide(
+                Some(&s),
+                Some(&lin(side("h1", "7"), "50-L1")),
+                None,
+                &Wipe::default()
+            ),
+            Do::Push
+        );
+        // ...unless the person signed out everywhere since
+        assert_eq!(decide(Some(&s), Some(&refreshed), None, &w(true)), Do::MoveAside);
+        // Signed out here meanwhile: the record goes
+        assert_eq!(decide(Some(&s), None, None, &Wipe::default()), Do::Forget);
     }
 
     #[test]

@@ -196,7 +196,16 @@ pub(crate) async fn register(State(s): State<Arc<NodeState>>) -> ApiResult<Vault
         .device("node")
         .remember_revocations(&revoked)
         .keep_marks(&marks);
-    vault.touch(&s.name).await.map_err(vault_error)?;
+    // Registering writes a new device list: a vault that lost its files is told apart first,
+    // one pass at a time, or the next pass would take it for a vault that signed out of all
+    {
+        let _pass = crate::vault_cache::take_pass(&s).await.map_err(vault_error)?;
+        let still = || !sync.is_retired();
+        crate::vault_cache::a_lost_vault(&s, &vault, &still)
+            .await
+            .map_err(vault_error)?;
+        vault.touch(&s.name).await.map_err(vault_error)?;
+    }
     vault.share_with_trusted().await.map_err(vault_error)?;
     Ok(Json(view(&vault).await.map_err(vault_error)?))
 }
