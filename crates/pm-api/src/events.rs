@@ -18,7 +18,7 @@
 //! linger. The node also sends a WebSocket ping every [`SERVER_PING`].
 //!
 //! At most [`MAX_STREAMS`] streams are open at once, [`MAX_STREAMS_EACH`] of them per caller (the
-//! owner, one person, one party guest): past that the handshake is answered 503. An upgraded
+//! owner, one person): past that the handshake is answered 503. An upgraded
 //! socket is not counted among the listener's HTTP connections, so this is what bounds them.
 
 use std::sync::atomic::{AtomicU64, Ordering};
