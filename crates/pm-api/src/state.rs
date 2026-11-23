@@ -1240,6 +1240,14 @@ impl NodeState {
         h.to_hex()[..32].to_string()
     }
 
+    /// Whether `given` is [`Self::stream_key`] of `name`, in time that does not depend on where
+    /// they differ (the key is sent by whoever asks, over and over).
+    pub fn stream_key_ok(&self, name: &str, given: &str) -> bool {
+        let want = self.stream_key(name);
+        let (a, b) = (want.as_bytes(), given.as_bytes());
+        a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+    }
+
     /// Create (or reuse) a pull output under `name`, registered for the HTTP route: for a
     /// renderer the node tells when to fetch ([`pm_zones::outputs::PullOutput::controlled`]).
     pub fn pull_output(self: &Arc<Self>, name: &str) -> Arc<pm_zones::outputs::PullOutput> {
