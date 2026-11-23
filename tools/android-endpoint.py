@@ -994,7 +994,11 @@ def to_this_phone(what):
     for attempt in (1, 2):
         mark = len(logcat())
         # (the row's text starts with the name; "Playing on This phone: …" and "Move here: This phone" don't)
-        pick('="This phone', "the page's “This phone”")
+        try:
+            pick('="This phone', "the page's “This phone”")
+        except AppNotResponding:
+            diagnose(what)
+            raise
         try:
             zone = until("the page on a zone", lambda: page_zone(mark), timeout=20)
         except RuntimeError:

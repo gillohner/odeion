@@ -214,6 +214,14 @@ class ThisPhoneTests(unittest.TestCase):
             finally:
                 self.calls = pick.call_count
 
+    def test_the_apps_own_dialog_on_the_pick_keeps_the_screen(self):
+        with patch.object(ep, "logcat", return_value=""), patch.object(ep, "until", side_effect=RuntimeError("no zone said")), \
+                patch.object(ep, "pick", side_effect=ep.AppNotResponding("the app itself is not responding")), \
+                patch.object(ep, "diagnose") as diagnose, patch.object(ep, "log"):
+            with self.assertRaises(ep.AppNotResponding):
+                ep.to_this_phone("this-phone-test")
+        diagnose.assert_called_once_with("this-phone-test")
+
     def test_already_on_this_phone_taps_nothing(self):
         self.run_with("browser", [])
         self.assertEqual(self.calls, 0)
