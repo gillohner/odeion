@@ -10394,6 +10394,50 @@ mod tests {
         assert_eq!(runs.load(SeqCst), 3, "the interval passed: it runs again");
     }
 
+    /// A request as it reaches the MusicBrainz proxy from a computer on the local network.
+    fn mb_from_lan(mut r: Request<Body>) -> Request<Body> {
+        r.extensions_mut().insert(axum::extract::ConnectInfo(
+            "192.168.1.30:50000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        r
+    }
+
+    /// The MusicBrainz proxy takes no token, so it answers this machine and the local network
+    /// only: not a caller without an address, one on the internet, one through a proxy or tunnel
+    /// (a forwarding header), nor one through iroh.
+    #[tokio::test]
+    async fn the_musicbrainz_proxy_answers_the_local_network_only() {
+        let dir = tempfile::tempdir().unwrap();
+        // With an API token: a node without one answers only directly at a loopback name anyway
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        let status = |r: Request<Body>| {
+            let app = app.clone();
+            async move { app.oneshot(r).await.unwrap().status() }
+        };
+        let get = || Request::builder().uri("/mb/ws/2/..%2Fetc");
+        let from = |ip: &str| {
+            let mut r = get().body(Body::empty()).unwrap();
+            r.extensions_mut().insert(axum::extract::ConnectInfo(
+                format!("{ip}:50000").parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            r
+        };
+        assert_eq!(status(get().body(Body::empty()).unwrap()).await, StatusCode::FORBIDDEN);
+        assert_eq!(status(from("203.0.113.5")).await, StatusCode::FORBIDDEN);
+        let mut proxied = from("127.0.0.1");
+        proxied
+            .headers_mut()
+            .insert("x-forwarded-for", "203.0.113.5".parse().unwrap());
+        assert_eq!(status(proxied).await, StatusCode::FORBIDDEN);
+        let mut tunnel = from("127.0.0.1");
+        tunnel.extensions_mut().insert(crate::peer::Remote);
+        assert_eq!(status(tunnel).await, StatusCode::FORBIDDEN);
+        // From this machine and the local network it goes on to its own checks (no contact yet)
+        assert_eq!(status(from("127.0.0.1")).await, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(status(from("192.168.1.30")).await, StatusCode::PRECONDITION_FAILED);
+    }
+
     #[tokio::test]
     async fn the_musicbrainz_proxy_needs_a_contact_and_rejects_bad_paths() {
         let dir = tempfile::tempdir().unwrap();
@@ -10405,6 +10449,7 @@ mod tests {
                 Request::builder()
                     .uri("/mb/ws/2/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69")
                     .body(Body::empty())
+                    .map(mb_from_lan)
                     .unwrap(),
             )
             .await
@@ -10417,6 +10462,7 @@ mod tests {
                 Request::builder()
                     .uri("/mb/ws/2/..%2Fetc")
                     .body(Body::empty())
+                    .map(mb_from_lan)
                     .unwrap(),
             )
             .await
@@ -10454,7 +10500,7 @@ mod tests {
         let get_ = |path: &'static str| {
             let app = app.clone();
             async move {
-                app.oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                app.oneshot(mb_from_lan(Request::builder().uri(path).body(Body::empty()).unwrap()))
                     .await
                     .unwrap()
                     .status()

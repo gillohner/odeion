@@ -2,12 +2,14 @@
 //! tools) can point their `base_url` at this node instead of musicbrainz.org:
 //! answers are cached for a week, upstream calls are spaced one second apart
 //! and carry the node's contact (MusicBrainz's terms). Read-only, GET only,
-//! on when the node has a contact (discovery on), off otherwise.
+//! on when the node has a contact (discovery on), off otherwise. For callers on
+//! this machine and the local network only ([`crate::peer::lan_peer`]): it takes
+//! no token, and every caller spends the node's one request a second.
 
 use crate::state::NodeState;
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,8 +45,25 @@ pub(crate) async fn forward(
     State(s): State<Arc<NodeState>>,
     Path(path): Path<String>,
     Query(q): Query<Vec<(String, String)>>,
-    headers: HeaderMap,
+    req: Request,
 ) -> Response {
+    // No token is asked for, so not for anyone the node can be reached by (a tunnel, iroh, the
+    // internet): they would spend the node's turns at MusicBrainz under its contact
+    if crate::peer::lan_peer(&req).is_none() {
+        return (
+            StatusCode::FORBIDDEN,
+            "the MusicBrainz proxy answers on this machine and the local network only",
+        )
+            .into_response();
+    }
+    let accept = req
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .filter(|a| a.contains("xml"))
+        .map(|_| "application/xml")
+        .unwrap_or("application/json");
+    drop(req);
     if s.contact().trim().is_empty() {
         return (
             StatusCode::PRECONDITION_FAILED,
@@ -84,12 +103,6 @@ pub(crate) async fn forward(
             return cached_response(&c, true);
         }
     }
-    let accept = headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .filter(|a| a.contains("xml"))
-        .map(|_| "application/xml")
-        .unwrap_or("application/json");
     // MusicBrainz answers 503 when the IP goes over its rate; wait as it asks
     // (Retry-After, else two seconds) and try once more before passing it on.
     // One request at a time with the rest of the node (pm_library::musicbrainz::take_turn)
