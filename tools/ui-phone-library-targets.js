@@ -108,7 +108,7 @@ async function azStrip(browser, width, android) {
         return { width: b.width, height: b.height, edge: document.elementFromPoint(b.left + b.width / 2, b.bottom - 2) === el, oneLine: !fav || (fav.top < b.bottom && fav.bottom > b.top), inside: b.left >= 0 && b.right <= innerWidth };
       });
       check(sort.height >= 44 && sort.width >= 44 && sort.edge, `${at}: Sort is at least 44 px tall and its bottom edge lands on it (${sort.width.toFixed(1)}×${sort.height.toFixed(1)})`);
-      check(sort.oneLine && sort.inside, `${at}: Sort stays on Favourites' line and inside the screen`);
+      check(sort.oneLine && sort.inside, `${at}: Sort stays on Bookmarks' line and inside the screen`);
       // A press at the bottom of the reach, at the letter's right edge, jumps to that letter. A mouse
       // press, because a touch there would be snapped onto the letter by the browser even without a reach
       const b = await page.locator('[data-az="B"]').boundingBox();

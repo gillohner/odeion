@@ -32,7 +32,7 @@ const fixtures = {
 const menu = (page) => page.evaluate(() => [...document.querySelectorAll('.popover.menu:not([hidden]) .pop-item')].map((b) => ({ label: b.textContent.trim(), icon: (b.querySelector('use')?.getAttribute('href') || '').replace('#i-', '') })));
 const close = async (page) => { await page.keyboard.press('Escape'); await page.waitForSelector('.popover.menu:not([hidden])', { state: 'detached', timeout: 2000 }).catch(() => {}); await page.waitForTimeout(150); };
 // The shared actions, in the order every song menu lists them
-const ORDER = ['Play next', 'Add to queue', 'Add to playlist…', 'Download', 'Add to favourites', 'Start radio', 'Go to song page', 'Go to artist', 'Go to album', 'Edit tags…', 'Remove from library', 'Which song is this?…', 'Wrong match?…', 'Copy link'];
+const ORDER = ['Play next', 'Add to queue', 'Add to collection…', 'Download', 'Add to Bookmarks', 'Start radio', 'Go to song page', 'Go to artist', 'Go to album', 'Edit tags…', 'Remove from library', 'Which song is this?…', 'Wrong match?…', 'Copy link'];
 const inOrder = (labels) => { const known = labels.filter((l) => ORDER.includes(l)); return known.every((l, i) => i === 0 || ORDER.indexOf(known[i - 1]) < ORDER.indexOf(l)); };
 
 async function run(browser, width) {
@@ -50,7 +50,7 @@ async function run(browser, width) {
     assert.ok(sl.includes('Go to song page') && !sl.includes('Song page'), `${width}: Songs' menu says "Go to song page" (${sl.join(' · ')})`);
     assert.equal(songs.find((m) => m.label === 'Copy link')?.icon, 'copy', `${width}: Songs' Copy link has the copy icon`);
     assert.ok(inOrder(sl), `${width}: Songs' menu in the shared order (${sl.join(' · ')})`);
-    assert.ok(sl.indexOf('Add to playlist…') === 2, `${width}: Add to playlist… third, after Add to queue (${sl.join(' · ')})`);
+    assert.ok(sl.indexOf('Add to collection…') === 2, `${width}: Add to collection… third, after Add to queue (${sl.join(' · ')})`);
     assert.ok(sl.includes('Wrong match?…') && !sl.includes('Which song is this?…') && sl.indexOf('Wrong match?…') > sl.indexOf('Remove from library') && sl.indexOf('Wrong match?…') < sl.indexOf('Copy link'), `${width}: a matched song: Wrong match?… after Remove, before Copy link (${sl.join(' · ')})`);
     // Go to song page opens it
     await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Go to song page' }).click();

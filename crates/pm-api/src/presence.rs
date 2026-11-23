@@ -500,6 +500,8 @@ async fn end_group(s: &Arc<NodeState>, a: &Along) -> Result<ZoneState, ApiError>
         h.transport == Transport::Stopped && h.queue_version == a.home_version
     };
     let st = if untouched {
+        // The music goes back home in the hands the group was in (listens.rs)
+        crate::listens::zone_follows(s, &a.group, &a.host_zone);
         move_music(&group, &home, true).await
     } else {
         group.stop();
@@ -677,6 +679,9 @@ pub async fn join(
     mine.stop();
     let _ = tokio::time::timeout(Duration::from_secs(5), mine.wait_stopped()).await;
     let regroup = existing.is_some();
+    // The group plays the host's music: its plays are whose the host zone's were (listens.rs).
+    // Before the music moves, so the song that starts there is judged by it
+    crate::listens::zone_follows(&s, &host_zone.id().0, &group.id().0);
     let st = move_music(&host_zone, &group, regroup).await;
     if !regroup {
         along.home_version = host_zone.state().queue_version;
@@ -750,6 +755,8 @@ pub async fn leave(
             return Ok(Json(end_group(&s, &along).await?));
         }
     };
+    // The group as it is rebuilt plays the same music, in the same hands (listens.rs)
+    crate::listens::zone_follows(&s, &group.id().0, &next.id().0);
     let st = move_music(&group, &next, true).await;
     along.group = next.id().0.clone();
     host_plays(&s, &along.group, &along.host, since);

@@ -152,11 +152,11 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
     await goto(page, '/playlist/c1');
     await page.click('#plmore').catch(() => {}); await sleep(400);
     labels = await menuLabels(page);
-    check(labels.includes('Download'), `${at}: a playlist's ⋯ menu has Download (${labels.join(' | ')})`);
+    check(labels.includes('Download'), `${at}: a collection's ⋯ menu has Download (${labels.join(' | ')})`);
     if (labels.includes('Download')) { await pick(page, 'Download'); await sleep(400); }
     keep = (await calls(page, 'downloads_keep')).pop();
     const toastText = await page.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
-    check(keep && keep[1].kind === 'playlist' && keep[1].id === 'c1' && /1 song not in your library stays online/.test(toastText), `${at}: it keeps the playlist and says what stays online (${toastText})`);
+    check(keep && keep[1].kind === 'playlist' && keep[1].id === 'c1' && /1 song not in your library stays online/.test(toastText), `${at}: it keeps the collection and says what stays online (${toastText})`);
     await closeMenu(page);
     const smore = await page.$$('[data-smore]');
     if (smore.length >= 2) {
@@ -164,7 +164,7 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
       labels = await menuLabels(page);
       check(!labels.includes('Download') && !labels.includes('Remove download'), `${at}: the TIDAL song's menu has no Download (${labels.join(' | ')})`);
       await closeMenu(page);
-    } else check(false, `${at}: the playlist's song rows (${smore.length})`);
+    } else check(false, `${at}: the collection's song rows (${smore.length})`);
     // The storage screen, from Your library
     await page.evaluate(() => { Object.assign(window.__dl, { items: [{ kind: 'album', id: '7', title: 'Journey', sub: 'Sefa', here: 2, bytes: 61e6, songs: 3, online: 0 }, { kind: 'playlist', id: 'c1', title: 'Music and notes', sub: '', here: 1, bytes: 30e6, songs: 1, online: 1 }, { kind: 'track', id: '2', title: 'Song 2', sub: 'Sefa', here: 0, bytes: 0, songs: 1, online: 0 }], songs: 3, bytes: 91e6, progress: { running: true, wanted: 3, bytes_wanted: 90e6, done: 1, bytes_done: 30e6, failed: 0, current: 'Song 2' } }); });
     await goto(page, '/library');
@@ -199,7 +199,7 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
     check(lim && lim[1].bytes === 5e9, `${at}: the limit is set (${JSON.stringify(lim && lim[1])})`);
     await page.click('#dlrmall'); await sleep(400);
     const asked = await page.evaluate(() => { const d = document.querySelector('dialog[open]'); return d ? d.innerText : ''; });
-    check(/Remove all downloads\?/.test(asked) && /library and your playlists stay/.test(asked), `${at}: Remove all asks first`);
+    check(/Remove all downloads\?/.test(asked) && /library and your collections stay/.test(asked), `${at}: Remove all asks first`);
     await page.click('dialog[open] button.primary'); await sleep(500);
     check((await calls(page, 'downloads_remove_all')).length === 1, `${at}: and removes the phone's copies`);
     const empty = await page.evaluate(() => document.querySelector('main').innerText);

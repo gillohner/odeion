@@ -74,7 +74,9 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 /// of sign-ins found in saved queues at a start. A short token set in the config could be guessed
 /// from any of them offline).
 /// The owner's browser sessions and device sign-ins (their hashes) are this node's too: a backup
-/// from before Make a new token never brings back a sign-in that ended with it.
+/// from before Make a new token never brings back a sign-in that ended with it. The listeners'
+/// tokens likewise: one that ended (their Log out, Remove) stays ended after a restore, and the
+/// people list still decides who may use the ones the node has.
 /// Also the files jobs this node is running or keeps for its next start (copies to the
 /// homeserver, bringing files here, uploads it left half written): a restored backup never starts
 /// one nobody asked for, and the node's own carry on (#237 review, M2).
@@ -87,6 +89,7 @@ const NODE_OWN: &[&str] = &[
     crate::accounts::OWNER_SESSIONS_TOKEN,
     crate::accounts::OWNER_SESSIONS,
     crate::accounts::DEVICE_SESSIONS,
+    crate::accounts::TOKENS,
     crate::app_passwords::KEY,
     crate::access_token::PUBLISHED_TOKEN_KEY,
     crate::accounts::API_TOKEN_EXPOSED,
@@ -903,8 +906,8 @@ async fn restore_locked(
         Ok(())
     })();
     drop(roster);
-    // People's tokens and the owner's sessions are the restored library's now: usage insights
-    // let in before end, and nothing let in with an old credential changes anything (usage.rs).
+    // The people list is the restored library's now (who may use a sign-in can have changed):
+    // usage insights let in before end, and nothing let in before changes anything (usage.rs).
     // Their file is not in the backup and stays as it is (choices included)
     s.usage.revoke_all();
     remove_db(&staged);

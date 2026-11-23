@@ -137,7 +137,7 @@ async function queue(browser, width) {
     await more(2).click(); await shown(page);
     check(!(await where(page)).startsWith('menu:'), `${width} Queue: a click on a ⋯ doesn't move the focus into the menu (${await where(page)})`);
     const before = state.hits.length;
-    await page.locator(`${MENU} .pop-item`, { hasText: 'Add to favourites' }).click(); await page.waitForTimeout(500);
+    await page.locator(`${MENU} .pop-item`, { hasText: 'Add to Bookmarks' }).click(); await page.waitForTimeout(500);
     const after = await where(page);
     check(after !== 'qmore@Song 2' && !after.startsWith('menu:'), `${width} Queue: after a clicked item the focus isn't put on a ⋯ (${after})`);
     check(state.hits.slice(before).some((h) => h.v === '/favourites' || h.v === '/bookmarks'), `${width} Queue: the clicked item ran`);

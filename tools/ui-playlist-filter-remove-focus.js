@@ -66,7 +66,7 @@ async function run(browser, width, android) {
     if (!(await until(menuOpen, 3000))) return false;
     for (let i = 0; i < 30; i++) {
       const at = await page.evaluate(() => (document.activeElement && document.activeElement.closest('.popover.menu') ? document.activeElement.textContent.trim() : ''));
-      if (at === 'Remove from playlist') { await page.keyboard.press('Enter'); return true; }
+      if (at === 'Remove from collection') { await page.keyboard.press('Enter'); return true; }
       await page.keyboard.press('ArrowDown');
     }
     await page.keyboard.press('Escape');
@@ -76,7 +76,7 @@ async function run(browser, width, android) {
     await fx.go(page, '/playlists');
     // 1. Library chip on (Alpha, Charlie show): Alpha removed, the focus goes on to Charlie, not to the hidden Bravo
     check(await open('f1', 'Alpha,Bravo,Charlie,Delta', 'library'), `${tag}: the Library chip shows ${await shown()}`);
-    check(await keyRemove('Alpha'), `${tag}: Alpha's Remove from playlist from the keyboard`);
+    check(await keyRemove('Alpha'), `${tag}: Alpha's Remove from collection from the keyboard`);
     await until(async () => (await all()) === 'Bravo,Charlie,Delta', 4000);
     await until(async () => (await focused()) === `Charlie:${kind}`, 2000);
     check(writes.join() === 'f1 DELETE 0' && (await shown()) === 'Charlie', `${tag}: Alpha is removed, the chip still on (${writes}; shows ${await shown()})`);
@@ -84,8 +84,8 @@ async function run(browser, width, android) {
     await page.screenshot({ path: path.join(SHOTS, `after-next-shown-${tag}.png`) });
 
     // 2. The last song that shows (Delta after it is hidden): the focus goes to the shown one before it
-    check(await open('f2', 'Alpha,Bravo,Charlie,Delta', 'library'), `${tag}: the second playlist's Library chip shows ${await shown()}`);
-    check(await keyRemove('Charlie'), `${tag}: Charlie's Remove from playlist from the keyboard`);
+    check(await open('f2', 'Alpha,Bravo,Charlie,Delta', 'library'), `${tag}: the second collection's Library chip shows ${await shown()}`);
+    check(await keyRemove('Charlie'), `${tag}: Charlie's Remove from collection from the keyboard`);
     await until(async () => (await all()) === 'Alpha,Bravo,Delta', 4000);
     await until(async () => (await focused()) === `Alpha:${kind}`, 2000);
     check((await focused()) === `Alpha:${kind}`, `${tag}: the last shown song removed: the focus goes to the shown one before it, Alpha (${await focused()})`);
@@ -93,10 +93,10 @@ async function run(browser, width, android) {
     // 3. The chip's only song removed: the whole playlist shows again, "N songs" on, focus on the next song
     check(await open('f3', 'Alpha,Bravo,Charlie', 'tidal'), `${tag}: the TIDAL chip shows ${await shown()}`);
     check((await shown()) === 'Bravo', `${tag}: only Bravo shows under the TIDAL chip (${await shown()})`);
-    check(await keyRemove('Bravo'), `${tag}: Bravo's Remove from playlist from the keyboard`);
+    check(await keyRemove('Bravo'), `${tag}: Bravo's Remove from collection from the keyboard`);
     await until(async () => (await all()) === 'Alpha,Charlie', 4000);
     await until(async () => (await shown()) === 'Alpha,Charlie' && (await focused()) === `Charlie:${kind}`, 2000);
-    check((await shown()) === 'Alpha,Charlie', `${tag}: with no TIDAL song left the whole playlist shows (${await shown()})`);
+    check((await shown()) === 'Alpha,Charlie', `${tag}: with no TIDAL song left the whole collection shows (${await shown()})`);
     check(/^2 songs/.test(await chipOn()), `${tag}: "2 songs" is the chip on (${await chipOn()})`);
     check((await focused()) === `Charlie:${kind}`, `${tag}: the focus goes on to the next song, Charlie (${await focused()})`);
     await page.screenshot({ path: path.join(SHOTS, `after-chip-emptied-${tag}.png`) });
