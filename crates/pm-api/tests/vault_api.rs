@@ -1741,7 +1741,8 @@ async fn a_lost_vault_gets_the_nodes_sign_ins_back() {
         *n.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(client(), session)));
     }
     let (a1, a2) = (router(n1.clone()), router(n2.clone()));
-    let tidal = r#"{"access_token":"at-1","refresh_token":"rt-1","expires_at":1000,"user_id":"7","country":"CH"}"#;
+    let tidal =
+        r#"{"access_token":"at-1","refresh_token":"rt-1","expires_at":1000,"user_id":"7","country":"CH"}"#;
     let jamendo = r#"{"access_token":"jam-1","refresh_token":"jam-r","expires_at":5000,"name":"Gil"}"#;
     let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
     let get = |n: &NodeState, k: &str| n.library.lock().unwrap().get_setting(k).unwrap();

@@ -1731,7 +1731,10 @@ async fn forget_a_lost_vault(
     }
     let mut forgotten = Vec::new();
     for b in BRIDGES {
-        if last_synced(&lib, b.service, &owner, &client).map_err(local_error)?.is_some() {
+        if last_synced(&lib, b.service, &owner, &client)
+            .map_err(local_error)?
+            .is_some()
+        {
             lib.delete_setting(&synced_key(b.service)).map_err(local_error)?;
             forgotten.push(b.service);
         }
