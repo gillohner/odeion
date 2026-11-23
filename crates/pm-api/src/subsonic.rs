@@ -265,9 +265,20 @@ async fn rest(
     }
     match dispatch(&s, &method, &params, &ids, &headers).await {
         // An app password reads file names, not where the owner keeps files (as on /v1)
-        Ok(Reply::Json(mut m)) if app => {
-            m.remove("path");
-            m.values_mut().for_each(drop_paths);
+        // (and no node sign-in in a link, a saved radio station's say: as a person's answers)
+        Ok(Reply::Json(m)) if app => {
+            let mut v = Value::Object(m);
+            drop_paths(&mut v);
+            let known = crate::accounts::KnownTokens::lazy(&s);
+            crate::accounts::hide_for_listener(
+                &mut v,
+                &crate::accounts::library_roots(&s),
+                &s.node_origins(),
+                &|t| known.has(t),
+            );
+            let Value::Object(m) = v else {
+                unreachable!("an object stays an object")
+            };
             envelope(fmt, "ok", m)
         }
         Ok(Reply::Json(m)) => envelope(fmt, "ok", m),

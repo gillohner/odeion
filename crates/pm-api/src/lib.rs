@@ -28660,6 +28660,52 @@ exec sleep 300
         let scan = rest(format!("startScan?p={sub_pw}")).await;
         assert_eq!(scan["error"]["code"], 50, "{scan}");
         assert_eq!(rest("startScan?p=s3cret".into()).await["status"], "ok");
+        // A saved radio station's link on the node with the other app's password in it: the
+        // owner's Subsonic answer shows it, an app's never
+        let origin = s.node_origins().first().cloned().expect("the node's own address");
+        let link = format!("{origin}/v1/library/tracks/1/file?token={pw}");
+        let enc: String = url::form_urlencoded::byte_serialize(link.as_bytes()).collect();
+        let made = rest(format!(
+            "createInternetRadioStation?p=s3cret&name=Home&streamUrl={enc}"
+        ))
+        .await;
+        assert_eq!(made["status"], "ok", "{made}");
+        let theirs = rest("getInternetRadioStations?p=s3cret".into()).await;
+        assert!(
+            theirs.to_string().contains(&pw),
+            "the owner's answer has it: {theirs}"
+        );
+        let seen = rest(format!("getInternetRadioStations?p={sub_pw}")).await;
+        assert!(
+            seen.to_string().contains("/v1/library/tracks/1/file") && !seen.to_string().contains(&pw),
+            "{seen}"
+        );
+
+        // Search's stream is not JSON (the `auth` filter leaves it): each line is filtered for
+        // anyone but the owner, a link with a sign-in in it included
+        let hit = search::SearchHit {
+            kind: "song".into(),
+            title: "One".into(),
+            image: Some(format!("/v1/library/albums/1/cover?token={sub_pw}")),
+            ..Default::default()
+        };
+        let answer = search::SourceAnswer {
+            source: "library".into(),
+            status: "ok".into(),
+            hits: vec![hit],
+            ..Default::default()
+        };
+        let hide = (accounts::library_roots(&s), s.node_origins(), s.clone());
+        let line = String::from_utf8(search::ndjson_line(&answer, Some(&hide))).unwrap();
+        assert!(
+            line.contains("/v1/library/albums/1/cover") && !line.contains(&sub_pw),
+            "{line}"
+        );
+        assert!(String::from_utf8(search::ndjson_line(&answer, None))
+            .unwrap()
+            .contains(&sub_pw));
+        let (st, _, _) = send_as(&app, "GET", "/v1/search?q=one", mine, &[], None).await;
+        assert_eq!(st, StatusCode::OK);
 
         // Removed: that app stops at once, the other and the API token go on
         let (st, _, _) = send_as(

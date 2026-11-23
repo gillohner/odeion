@@ -206,6 +206,26 @@ const CACHE_MAX: usize = 512;
 /// The longest search text taken (a pasted link with its parameters fits).
 const QUERY_MAX: usize = 2000;
 
+/// What filtering an answer for someone other than the owner needs: the library's folders, the
+/// node's own addresses, and the node (for the sign-ins it knows).
+pub(crate) type Hide = (Vec<String>, Vec<String>, Arc<NodeState>);
+
+/// One answer as one NDJSON line; with `hide`, filtered as a person's JSON answers are
+/// (`accounts::hide_for_listener`).
+pub(crate) fn ndjson_line(a: &SourceAnswer, hide: Option<&Hide>) -> Vec<u8> {
+    let mut line = match hide {
+        Some((roots, origins, s)) => {
+            let mut v = serde_json::to_value(a).unwrap_or_default();
+            let known = crate::accounts::KnownTokens::lazy(s);
+            crate::accounts::hide_for_listener(&mut v, roots, origins, &|t| known.has(t));
+            serde_json::to_vec(&v).unwrap_or_default()
+        }
+        None => serde_json::to_vec(a).unwrap_or_default(),
+    };
+    line.push(b'\n');
+    line
+}
+
 /// Before an answer is added to a full cache: the ones past `ttl` go, and when it is still full
 /// of fresh ones, the older half.
 fn make_room<K: Eq + std::hash::Hash, V>(cache: &mut HashMap<K, (Instant, V)>, max: usize, ttl: Duration) {
@@ -237,8 +257,11 @@ pub(crate) async fn search(
     axum::Extension(c): axum::Extension<crate::accounts::Caller>,
     Query(p): Query<SearchParams>,
 ) -> Response {
-    // (an app password searches as the owner's: their collections too)
-    let owner = crate::accounts::Who::of(&c) == crate::accounts::Who::Owner;
+    // (an app password searches as the people you add do: the library, not the owner's own)
+    let owner = c.role == crate::accounts::Role::Owner;
+    // Anyone but the owner reads each answer as their JSON answers are filtered (`auth` leaves
+    // this stream alone, as it is not JSON): file names, not folders, no node sign-in in a link
+    let hide = (!owner).then(|| (crate::accounts::library_roots(&s), s.node_origins(), s.clone()));
     let q = query_with_tags(&p);
     if q.chars().count() > QUERY_MAX {
         return crate::ApiError::bad_request("the search text is too long").into_response();
@@ -332,11 +355,10 @@ pub(crate) async fn search(
         });
     }
     drop(tx);
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+    let stream = futures_util::stream::unfold((rx, hide), |(mut rx, hide)| async move {
         let a = rx.recv().await?;
-        let mut line = serde_json::to_vec(&a).unwrap_or_default();
-        line.push(b'\n');
-        Some((Ok::<_, std::io::Error>(bytes::Bytes::from(line)), rx))
+        let line = ndjson_line(&a, hide.as_ref());
+        Some((Ok::<_, std::io::Error>(bytes::Bytes::from(line)), (rx, hide)))
     });
     (
         [
