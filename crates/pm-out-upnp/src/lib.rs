@@ -113,7 +113,10 @@ pub fn search_mx(timeout: Duration) -> u64 {
 
 /// [`describe`] with its own `timeout` (a remembered renderer that is off shouldn't hold a pass).
 pub fn describe_within(location: &str, timeout: Duration) -> Result<Option<Renderer>, UpnpError> {
-    let client = reqwest::blocking::Client::builder().timeout(timeout).build()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
     let xml = client.get(location).send()?.error_for_status()?.text()?;
     parse_description(location, &xml)
 }
@@ -176,6 +179,10 @@ pub fn ssdp_probe(timeout: Duration) -> Result<Vec<SsdpAnswer>, UpnpError> {
         }
     }
     for a in &mut found {
+        let sender = a.from.parse::<std::net::SocketAddr>().ok().map(|f| f.ip());
+        if !sender.is_some_and(|ip| location_from(&a.location, ip)) {
+            continue;
+        }
         match describe(&a.location) {
             Ok(Some(r)) => {
                 a.friendly_name = Some(r.friendly_name);
@@ -439,6 +446,7 @@ fn linked_description(url: &str) -> Option<Renderer> {
 fn friendly_name_of(location: &str) -> Option<String> {
     let text = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .ok()?
         .get(location)
@@ -480,9 +488,13 @@ pub fn ssdp_search_usn(timeout: Duration) -> Result<Vec<(String, Option<String>)
         }
         for socket in &sockets {
             match socket.recv_from(&mut buf) {
-                Ok((n, _)) => {
+                Ok((n, from)) => {
                     let text = String::from_utf8_lossy(&buf[..n]);
                     if let Some(loc) = header(&text, "LOCATION") {
+                        if !location_from(&loc, from.ip()) {
+                            tracing::debug!(%from, %loc, "SSDP answer naming another host than its sender: not fetched");
+                            continue;
+                        }
                         if !found.iter().any(|(l, _)| l.eq_ignore_ascii_case(&loc)) {
                             found.push((loc, header(&text, "USN").and_then(|u| usn_uuid(&u))));
                         }
@@ -562,6 +574,31 @@ pub fn usn_uuid(usn: &str) -> Option<String> {
     (!id.is_empty()).then(|| id.to_string())
 }
 
+/// Whether an SSDP answer's `LOCATION` is a plain `http(s)` URL on the address the answer came
+/// from. A device describes itself; an answer naming another host (anything on the network can
+/// answer a search) would have the node fetch that host and later send it SOAP requests.
+fn location_from(location: &str, from: std::net::IpAddr) -> bool {
+    let plain = |ip: std::net::IpAddr| match ip {
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, std::net::IpAddr::V4),
+        v4 => v4,
+    };
+    let Ok(u) = url::Url::parse(location) else {
+        return false;
+    };
+    let host = match u.host() {
+        Some(url::Host::Ipv4(v4)) => std::net::IpAddr::V4(v4),
+        Some(url::Host::Ipv6(v6)) => std::net::IpAddr::V6(v6),
+        _ => return false,
+    };
+    matches!(u.scheme(), "http" | "https") && plain(host) == plain(from)
+}
+
+/// Whether `url` is on the host of `base` (any port): a description's service URLs, and the
+/// `URLBase` it names, stay on the device that served it.
+fn same_host(base: &url::Url, url: &url::Url) -> bool {
+    matches!(url.scheme(), "http" | "https") && url.host() == base.host()
+}
+
 fn header(resp: &str, name: &str) -> Option<String> {
     resp.lines().find_map(|l| {
         let (k, v) = l.split_once(':')?;
@@ -574,6 +611,8 @@ fn header(resp: &str, name: &str) -> Option<String> {
 pub fn describe(location: &str) -> Result<Option<Renderer>, UpnpError> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
+        // A device serves its own description; a redirect could send the node anywhere
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let xml = client.get(location).send()?.error_for_status()?.text()?;
     parse_description(location, &xml)
@@ -695,28 +734,39 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
     let Some(av) = av else {
         return Ok(None);
     };
-    let base = match url_base.as_deref().and_then(|b| url::Url::parse(b).ok()) {
+    let home = base.clone();
+    let base = match url_base
+        .as_deref()
+        .and_then(|b| url::Url::parse(b).ok())
+        .filter(|b| same_host(&home, b))
+    {
         Some(b) => b,
         None => base,
     };
-    let abs = |u: &str| {
+    // A URL on another host than the description's is left out (the node would send it SOAP
+    // requests and subscriptions)
+    let on_device = |u: &str| {
         base.join(u)
+            .ok()
+            .filter(|x| same_host(&home, x))
             .map(|x| x.to_string())
-            .unwrap_or_else(|_| u.to_string())
+    };
+    let Some(av) = on_device(&av) else {
+        return Ok(None);
     };
     Ok(Some(Renderer {
         udn: udn.unwrap_or_else(|| location.to_string()),
         friendly_name: friendly.unwrap_or_else(|| "UPnP renderer".into()),
         manufacturer,
         model,
-        av_transport: abs(&av),
-        rendering_control: rc.map(|c| abs(&c)),
-        connection_manager: cm.map(|c| abs(&c)),
-        zone_group_topology: zgt.map(|c| abs(&c)),
+        av_transport: av,
+        rendering_control: rc.and_then(|c| on_device(&c)),
+        connection_manager: cm.and_then(|c| on_device(&c)),
+        zone_group_topology: zgt.and_then(|c| on_device(&c)),
         location: location.to_string(),
         events: RendererEvents {
-            rendering_control: rc_event.map(|c| abs(&c)),
-            openhome_volume: oh_volume_event.map(|c| abs(&c)),
+            rendering_control: rc_event.and_then(|c| on_device(&c)),
+            openhome_volume: oh_volume_event.and_then(|c| on_device(&c)),
         },
     }))
 }
@@ -898,5 +948,70 @@ mod tests {
             .as_deref(),
             Some("http://x/d.xml")
         );
+    }
+
+    /// An SSDP answer is fetched only when its LOCATION is on the address it came from.
+    #[test]
+    fn an_ssdp_answer_describes_its_own_sender_only() {
+        let from = |ip: &str| ip.parse::<std::net::IpAddr>().unwrap();
+        assert!(location_from(
+            "http://192.168.1.20:49152/d.xml",
+            from("192.168.1.20")
+        ));
+        assert!(location_from(
+            "http://192.168.1.20/d.xml",
+            from("::ffff:192.168.1.20")
+        ));
+        assert!(location_from("http://[fe80::1]:1400/d.xml", from("fe80::1")));
+        for (loc, ip) in [
+            ("http://192.168.1.21:49152/d.xml", "192.168.1.20"),
+            ("http://169.254.169.254/latest/meta-data/", "192.168.1.20"),
+            ("http://127.0.0.1:7788/v1/info", "192.168.1.20"),
+            ("http://renderer.local/d.xml", "192.168.1.20"),
+            ("file:///etc/passwd", "192.168.1.20"),
+            ("not a url", "192.168.1.20"),
+        ] {
+            assert!(!location_from(loc, from(ip)), "{loc}");
+        }
+    }
+
+    /// A description's service URLs, and the URLBase it names, stay on the device that served
+    /// it: one on another host is left out, and without an AVTransport on the device it is no
+    /// renderer.
+    #[test]
+    fn service_urls_on_another_host_are_left_out() {
+        let desc = |base: &str, av: &str, rc: &str| {
+            format!(
+                "<root>{base}<device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>\
+                 <UDN>uuid:r1</UDN><friendlyName>R</friendlyName><serviceList>\
+                 <service><serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType><controlURL>{av}</controlURL></service>\
+                 <service><serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType><controlURL>{rc}</controlURL><eventSubURL>{rc}</eventSubURL></service>\
+                 </serviceList></device></root>"
+            )
+        };
+        let loc = "http://192.168.1.20:49152/d.xml";
+        let r = parse_description(loc, &desc("", "/av", "http://127.0.0.1:7788/v1/x"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.av_transport, "http://192.168.1.20:49152/av");
+        assert_eq!(r.rendering_control, None);
+        assert_eq!(r.events.rendering_control, None);
+        // Another port of the same device is its own
+        let r = parse_description(loc, &desc("", "http://192.168.1.20:1400/av", "/rc"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.av_transport, "http://192.168.1.20:1400/av");
+        assert_eq!(
+            r.rendering_control.as_deref(),
+            Some("http://192.168.1.20:49152/rc")
+        );
+        // A URLBase elsewhere is not used; an AVTransport elsewhere is no renderer
+        let r = parse_description(loc, &desc("<URLBase>http://10.0.0.9/</URLBase>", "av", "rc"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.av_transport, "http://192.168.1.20:49152/av");
+        assert!(parse_description(loc, &desc("", "http://10.0.0.9/av", "/rc"))
+            .unwrap()
+            .is_none());
     }
 }
