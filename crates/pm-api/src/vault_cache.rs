@@ -1767,8 +1767,8 @@ pub async fn pass(
 /// those sign-ins still in the vault, is no lost vault: a sign-in gone from it was signed out.
 /// A copy the node took unsigned keeps its record (the node never signs it as its own).
 /// Limit: a node that was off through a sign-out everywhere, and finds the vault without its list
-/// afterwards (removed by a device the person signed out, which keeps write access until its grant
-/// is revoked in Ring), can't tell that from a lost vault: it puts its sign-ins back. A sign-out
+/// afterwards (a new homeserver, a restore, or a list removed by a device the person signed out),
+/// can't tell that from a lost vault: it puts its sign-ins back. A sign-out
 /// everywhere the node has seen is in its marks and still holds.
 pub(crate) async fn a_lost_vault(
     s: &NodeState,
