@@ -343,11 +343,15 @@ pub fn import_playlist(cfg: &NodeConfig, file: &Path, name: Option<&str>) -> any
     // Lines as written: a relative one is looked up at the playlist's folder first, then matched
     // by its own folders (resolve_import_in), never by the playlist's
     let list = parse(&bytes, format, None)?;
+    // The playlist's folder, also for a bare file name given on the command line
+    let folder = std::path::absolute(file)
+        .ok()
+        .and_then(|f| f.parent().map(Path::to_path_buf));
     let lib = open(cfg)?;
     let mut items = Vec::new();
     let mut unresolved = Vec::new();
     for t in &list.tracks {
-        match lib.resolve_import_in(t, file.parent())? {
+        match lib.resolve_import_in(t, folder.as_deref())? {
             Some(track) => match track.publishable_uri() {
                 Some(u) => items.push(PlaylistItem::new(u)),
                 None => unresolved.push(format!("{} (in library, no canonical id)", t.title)),
