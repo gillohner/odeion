@@ -57,6 +57,8 @@ async function open(browser, width, mode) {
     await t.page.locator('#dspbox').screenshot({ path: path.join(SHOTS, `dsp-editor-to-pcm-${width}.png`) });
     await t.page.locator('#d-dsd').selectOption('auto'); await t.page.waitForTimeout(100);
     const b = await t.read();
+    const desc = await t.page.evaluate(() => document.querySelector('#d-dsd').getAttribute('aria-describedby'));
+    check(!desc, `${at}: once another is chosen, the choice is no longer described by the hidden note (${desc})`);
     await t.page.locator('#d-save').click(); await t.page.waitForTimeout(400);
     check(!b.note && t.puts.length === 1 && t.puts[0].dsd_mode === 'auto', `${at}: another choice takes the note away and is what Save sends (${t.puts.map((p) => p.dsd_mode).join()}, note "${b.note}")`);
     check(t.state.errors.length === 0, `${at}: no script errors (${t.state.errors.join(' | ')})`);

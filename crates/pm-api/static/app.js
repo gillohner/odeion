@@ -6620,7 +6620,7 @@
     $('#d-save').onclick = async () => { try { await api('PUT', `/zones/${encodeURIComponent(zoneId)}/dsp`, collect()); toast('DSP saved; applies from the next song'); } catch (e) { toast(e.message, 'error'); } };
     $('#d-reset').onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(zoneId)}/dsp`); toast('DSP reset'); render(); } catch (e) { toast(e.message, 'error'); } };
     $('#d-close').onclick = () => { state.dspOpen = null; render(); };
-    $('#d-dsd').onchange = () => { const n = $('#d-dsdnote'); if (n) n.hidden = $('#d-dsd').value === 'to_pcm' ? false : true; };
+    $('#d-dsd').onchange = () => { const sel = $('#d-dsd'); const n = $('#d-dsdnote'); if (!n) return; const on = sel.value === 'to_pcm'; n.hidden = !on; if (on) sel.setAttribute('aria-describedby', 'd-dsdnote'); else sel.removeAttribute('aria-describedby'); }; // (a hidden note is still read through aria-describedby: it goes with it)
   };
   // "New releases from your artists": release groups MusicBrainz lists for tagged artists.
   const newReleasesSection = (nr) => {
