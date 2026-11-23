@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **Scheduled backups remove only this node's own older files.** When the node pruned its scheduled backups, it took every `pubky-music-….pmbackup` in the folder. So two nodes writing to one folder (a NAS) deleted each other's, and a backup downloaded from Settings and saved there was deleted as well. A scheduled file's name now ends with the first 8 characters of the node's id, and only those files are ever removed. A new file is also written to disk and read back before any older one goes, so a share or a full disk that kept less than was written no longer costs the older backups. Scheduled files made before this change keep their names and are no longer removed: delete them by hand when you no longer need them.
+
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21
