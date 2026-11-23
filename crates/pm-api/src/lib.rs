@@ -24504,9 +24504,13 @@ exec sleep 300
         let n = passes.clone();
         let browse: crate::state::MdnsBrowse = Arc::new(move || {
             if n.fetch_add(1, Ordering::SeqCst) < 2 {
-                (Vec::new(), Vec::new())
+                crate::state::MdnsFound::default()
             } else {
-                (vec![air()], vec![blu()])
+                crate::state::MdnsFound {
+                    airplay: vec![air()],
+                    bluos: vec![blu()],
+                    cast: Vec::new(),
+                }
             }
         });
         s.spawn_mdns_passes(
@@ -28138,5 +28142,56 @@ exec sleep 300
         )
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
+    }
+
+    /// A Cast device switched on after the start gets its zone from the background mDNS watch,
+    /// without a rescan, once; later passes that find it again add nothing.
+    #[tokio::test]
+    async fn a_cast_device_found_after_the_start_gets_its_zone() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let cast_zones = |s: &NodeState| {
+            s.zones
+                .list()
+                .into_iter()
+                .filter(|z| z.output.to_string().starts_with("cast"))
+                .count()
+        };
+        let before = s.zones.list().len();
+        let passes = Arc::new(AtomicUsize::new(0));
+        let n = passes.clone();
+        let browse: crate::state::MdnsBrowse = Arc::new(move || {
+            if n.fetch_add(1, Ordering::SeqCst) < 1 {
+                crate::state::MdnsFound::default()
+            } else {
+                crate::state::MdnsFound {
+                    cast: vec![pm_out_cast::Device {
+                        id: "4f3c2b1a-living-room".into(),
+                        friendly_name: "Living room".into(),
+                        model: Some("Chromecast Audio".into()),
+                        addr: "192.0.2.40:8009".parse().unwrap(),
+                    }],
+                    ..Default::default()
+                }
+            }
+        });
+        s.spawn_mdns_passes(
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(100),
+            browse,
+        );
+        let mut waited = 0;
+        while cast_zones(&s) == 0 && waited < 100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            waited += 1;
+        }
+        assert_eq!(cast_zones(&s), 1, "the Cast device got its zone without a rescan");
+        let seen = passes.load(Ordering::SeqCst);
+        while passes.load(Ordering::SeqCst) < seen + 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(cast_zones(&s), 1, "found again: nothing more");
+        assert_eq!(s.zones.list().len(), before + 1);
     }
 }

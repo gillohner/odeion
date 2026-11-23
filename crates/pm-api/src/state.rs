@@ -342,9 +342,17 @@ const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
 /// search misses it (a lost datagram, a device slow to answer) still finds it.
 const UPNP_KNOWN_KEY: &str = "outputs.upnp_known";
 
-/// One mDNS look for AirPlay receivers and BluOS players ([`NodeState::spawn_mdns_passes`]). Blocking.
-pub(crate) type MdnsBrowse =
-    Arc<dyn Fn() -> (Vec<pm_out_airplay::Device>, Vec<pm_out_bluos::Player>) + Send + Sync>;
+/// What one mDNS look found.
+#[derive(Default)]
+pub(crate) struct MdnsFound {
+    pub airplay: Vec<pm_out_airplay::Device>,
+    pub bluos: Vec<pm_out_bluos::Player>,
+    pub cast: Vec<pm_out_cast::Device>,
+}
+
+/// One mDNS look for AirPlay receivers, BluOS players and Cast devices
+/// ([`NodeState::spawn_mdns_passes`]). Blocking.
+pub(crate) type MdnsBrowse = Arc<dyn Fn() -> MdnsFound + Send + Sync>;
 
 /// Where a UPnP renderer that had a zone was described, and when (Unix seconds) it was last seen.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1626,15 +1634,15 @@ impl NodeState {
         });
     }
 
-    /// AirPlay receivers and BluOS players switched on after the start (asleep, unplugged) get their
-    /// zones without a rescan: an mDNS pass `first` after the start and one every `every`, each a
+    /// AirPlay receivers, BluOS players and Cast devices switched on after the start (asleep,
+    /// unplugged) get their zones without a rescan: an mDNS pass `first` after the start and one every `every`, each a
     /// short browse of the services that are on. What is new is registered as a rescan does it (saved
     /// queue restored; one already there is left as it is). Call from inside the runtime.
     pub fn spawn_mdns_watch(self: &Arc<Self>, first: std::time::Duration, every: std::time::Duration) {
         let st = Arc::downgrade(self);
         let browse: MdnsBrowse = Arc::new(move || {
             let Some(st) = st.upgrade() else {
-                return (Vec::new(), Vec::new());
+                return MdnsFound::default();
             };
             let on = |f: &std::sync::atomic::AtomicBool| f.load(std::sync::atomic::Ordering::Relaxed);
             let wait = std::time::Duration::from_millis(1500);
@@ -1648,7 +1656,12 @@ impl NodeState {
             } else {
                 Vec::new()
             };
-            (airplay, bluos)
+            let cast = if st.cast {
+                pm_out_cast::discover(wait)
+            } else {
+                Vec::new()
+            };
+            MdnsFound { airplay, bluos, cast }
         });
         self.spawn_mdns_passes(first, every, browse);
     }
@@ -1668,18 +1681,22 @@ impl NodeState {
                 let Some(s) = st.upgrade() else { return };
                 let browse = browse.clone();
                 let new = tokio::task::spawn_blocking(move || {
-                    let (airplay, bluos) = browse();
-                    let mut new = s.register_airplay(airplay);
-                    new.extend(s.register_bluos(bluos));
+                    let found = browse();
+                    let mut new = s.register_airplay(found.airplay);
+                    new.extend(s.register_bluos(found.bluos));
+                    new.extend(s.register_cast(found.cast));
                     new
                 })
                 .await
                 .unwrap_or_else(|e| {
-                    tracing::warn!("AirPlay/BluOS pass failed: {e}");
+                    tracing::warn!("AirPlay/BluOS/Cast pass failed: {e}");
                     Vec::new()
                 });
                 if !new.is_empty() {
-                    tracing::info!(count = new.len(), "AirPlay/BluOS speakers found after the start");
+                    tracing::info!(
+                        count = new.len(),
+                        "AirPlay/BluOS/Cast speakers found after the start"
+                    );
                 }
                 tokio::time::sleep(every).await;
             }
@@ -1947,8 +1964,14 @@ impl NodeState {
         if !self.cast {
             return Vec::new();
         }
+        self.register_cast(pm_out_cast::discover(timeout))
+    }
+
+    /// Cast devices found: each one new gets an output and a zone (as a rescan does it: one
+    /// already there is left as it is).
+    pub(crate) fn register_cast(self: &Arc<Self>, devices: Vec<pm_out_cast::Device>) -> Vec<OutputId> {
         let mut new = Vec::new();
-        for d in pm_out_cast::discover(timeout) {
+        for d in devices {
             let name = format!(
                 "cast-{}",
                 d.id.chars()

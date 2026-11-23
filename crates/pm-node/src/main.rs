@@ -387,10 +387,16 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     {
         let st = state.clone();
         let found = tokio::task::spawn_blocking(move || {
-            let mut found = st.discover_upnp(std::time::Duration::from_secs(3));
-            found.extend(st.discover_snapcast());
-            found.extend(st.discover_airplay(std::time::Duration::from_millis(1500)));
-            found.extend(st.discover_bluos(std::time::Duration::from_millis(1500)));
+            // Cast beside the rest, so the start waits no longer for it
+            let (mut found, cast) = std::thread::scope(|sc| {
+                let cast = sc.spawn(|| st.discover_cast(std::time::Duration::from_millis(1500)));
+                let mut found = st.discover_upnp(std::time::Duration::from_secs(3));
+                found.extend(st.discover_snapcast());
+                found.extend(st.discover_airplay(std::time::Duration::from_millis(1500)));
+                found.extend(st.discover_bluos(std::time::Duration::from_millis(1500)));
+                (found, cast.join().unwrap_or_default())
+            });
+            found.extend(cast);
             found.extend(st.discover_mpd());
             found.extend(st.restore_upnp_addresses());
             found.extend(st.restore_endpoint_addresses());
@@ -411,8 +417,8 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             std::time::Duration::from_secs(20),
             std::time::Duration::from_secs(300),
         );
-        // AirPlay receivers and BluOS players switched on after the start (a speaker asleep or
-        // unplugged at the start) get their zones within a minute, without a rescan
+        // AirPlay receivers, BluOS players and Cast devices switched on after the start (a speaker
+        // asleep or unplugged at the start) get their zones within a minute, without a rescan
         state.spawn_mdns_watch(
             std::time::Duration::from_secs(20),
             std::time::Duration::from_secs(60),
