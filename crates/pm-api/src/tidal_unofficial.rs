@@ -1331,7 +1331,8 @@ fn token_blocking(
         "HI_RES_LOSSLESS"
     }
     .to_string();
-    if sess.expires_at - now() > 60 {
+    // (a paste TIDAL never vouched for is renewed, and so checked, before its first play)
+    if sess.expires_at - now() > 60 && !sess.unconfirmed {
         return Ok(Some((sess, quality)));
     }
     let Some(refresh) = sess.refresh_token.clone() else {
@@ -1435,8 +1436,16 @@ fn token_blocking(
             save(&lib, who, &st);
         } else {
             tracing::info!("a renewed TIDAL full-tracks session was dropped: the sign-in changed meanwhile");
-            return Ok(st.session.map(|c| (c, quality)));
+            // (one TIDAL never vouched for plays only once a renewal has checked it)
+            return Ok(st.session.filter(|c| !c.unconfirmed).map(|c| (c, quality)));
         }
+    }
+    // Still only what the paste claimed (TIDAL's renewal named no account): it doesn't play
+    if fresh.unconfirmed {
+        return Err(FullError::Mode(
+            "TIDAL didn't say whose account this pasted sign-in is, so it doesn't play here: use Sign in with TIDAL"
+                .into(),
+        ));
     }
     Ok(Some((fresh, quality)))
 }

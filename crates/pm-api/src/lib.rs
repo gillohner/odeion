@@ -27887,6 +27887,36 @@ exec sleep 300
         // Only the paste says it is 5: that holds no account for anyone else yet, and its renewal
         // is checked even when it names 5 again
         assert!(kept.unconfirmed, "TIDAL didn't answer for it");
+        // It is not played before a renewal has checked it: without a way to renew it, not at all;
+        // with one, its first play renews it first, and a renewal that names no account (this
+        // mock's) still leaves it unplayed
+        tidal_unofficial::update(&s, &ben_who, |st| st.enabled = true);
+        let play = || {
+            let (s2, ben_who2) = (s.clone(), ben_who.clone());
+            tokio::task::spawn_blocking(move || {
+                let ep = s2.tidal.read().unwrap().clone();
+                tidal_unofficial::open_blocking(&s2.library, &ep, "1", &ben_who2).map(|_| ())
+            })
+        };
+        assert!(play().await.unwrap().is_err(), "not played unchecked");
+        assert!(bens().unwrap().unconfirmed);
+        // (a browser sign-in's renewal: this node has the browser client, not a device one)
+        let renewable = tidal_unofficial::Session {
+            refresh_token: Some("r".into()),
+            client: tidal_unofficial::ClientKind::Pkce,
+            ..kept.clone()
+        };
+        tidal_unofficial::update(&s, &ben_who, |st| st.session = Some(renewable));
+        assert!(
+            play().await.unwrap().is_err(),
+            "renewed, still unchecked: not played"
+        );
+        let renewed = bens().unwrap();
+        assert!(
+            renewed.unconfirmed && renewed.access_token == "pk-at-renewed",
+            "the renewal is kept, unconfirmed: {renewed:?}"
+        );
+        tidal_unofficial::update(&s, &ben_who, |st| st.session = Some(kept.clone()));
         {
             let lib = s.library.lock().unwrap();
             let anna_who = accounts::Who::Listener(anna.to_string());
