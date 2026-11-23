@@ -2444,8 +2444,8 @@ impl Library {
 
     /// Match an imported playlist entry: exact path, then file name, then title and artist. A
     /// file of the same name elsewhere is taken when it is the only one in two folders named as
-    /// the entry's (a library on another disk), or when its title and artist agree with the
-    /// entry's.
+    /// the entry's (a library on another disk), when it is the only one and the entry is only a
+    /// path, or when its title and artist agree with the entry's.
     pub fn resolve_import(&self, t: &ImportedTrack) -> Result<Option<Track>> {
         if let Some(p) = t.path.as_deref().and_then(crate::import::local_path) {
             if let Some(row) = self.file_by_path(&p)? {
@@ -2463,7 +2463,17 @@ impl Library {
                         }
                     }
                 }
-                let hits = self.tracks_by_file_name(name)?;
+                let mut hits = self.tracks_by_file_name(name)?;
+                // A line that is only a path (no title, artist or length of its own) has nothing
+                // to disagree with: the only file of that name is it
+                let path_only = t.artist.as_deref().is_none_or(|a| a.trim().is_empty())
+                    && t.duration_ms.is_none_or(|d| d == 0)
+                    && t.path
+                        .as_deref()
+                        .is_some_and(|raw| t.title == crate::import::title_from_path(raw));
+                if path_only && hits.len() == 1 {
+                    return Ok(hits.pop());
+                }
                 if let Some(h) = hits.into_iter().find(|h| agrees(h, t)) {
                     return Ok(Some(h));
                 }
@@ -8233,6 +8243,32 @@ mod identify_tests {
             path_of(lib.resolve_import(&disc).unwrap()),
             None,
             "one folder alike"
+        );
+        // A line that is only a path: the only file of that name, whatever its tags say
+        lib.upsert_track(&import_test_track(
+            "/m/Artist A/First/a.wav",
+            "Get Lucky",
+            Some("Artist A"),
+            60,
+        ))
+        .unwrap();
+        let raw = "/mnt/old-nas/a.wav";
+        let bare = entry(&crate::import::title_from_path(raw), None, Some(raw), None);
+        assert_eq!(
+            path_of(lib.resolve_import(&bare).unwrap()).as_deref(),
+            Some("/m/Artist A/First/a.wav")
+        );
+        lib.upsert_track(&import_test_track(
+            "/m/Other/Live/a.wav",
+            "Something",
+            Some("Other"),
+            30,
+        ))
+        .unwrap();
+        assert_eq!(
+            path_of(lib.resolve_import(&bare).unwrap()),
+            None,
+            "two files of that name"
         );
         // The same folders on another disk: the tags may say anything.
         let moved = entry(
