@@ -1968,7 +1968,7 @@ async fn create_zone(
         return Err(ApiError::bad_request("give `output` or `outputs`"));
     }
     // An app password groups speakers (and ungroups them, `delete_zone`): two or more
-    if caller.role == accounts::Role::App && ids.len() < 2 {
+    if caller.role == accounts::Role::App && ids.iter().collect::<std::collections::HashSet<_>>().len() < 2 {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "An app password groups two speakers or more; it doesn't add a zone.",
@@ -2069,7 +2069,11 @@ async fn delete_zone(
     // (an output that is no one speaker), not a speaker's own zone or someone's listen-along group
     if caller.role == accounts::Role::App {
         let out = zone_of(&s, &id)?.output().id();
-        let group = out.0.starts_with("group:") || s.outputs.get(&out).is_none();
+        // (the node's groups are `group:…`; Sonos, HEOS and BluOS groups `<kind>-group:…`)
+        let group = out
+            .0
+            .split_once(':')
+            .is_some_and(|(kind, _)| kind == "group" || kind.ends_with("-group"));
         if !group || presence::is_along(&s, &id) {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,

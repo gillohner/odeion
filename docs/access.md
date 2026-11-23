@@ -97,7 +97,8 @@ API token or another password. Its queue takes library songs, the services' trac
 on the home network too (spoken announcements), never a file path or a loopback address. It
 groups two speakers or more and ungroups them, but doesn't add a zone for one speaker or remove a
 speaker's own zone or someone's listen-along group. A collection it makes is private, and it can't
-make one public; one you made public stays public when the app changes it, and goes if it deletes it.
+make one public; one you made public stays public when the app changes it through `/v1`, and goes
+if it deletes it (a Subsonic app's save keeps a collection private, as it does with the API token).
 
 - `GET /v1/node/app-passwords` lists them (name, made, last used: never the password);
   `DELETE /v1/node/app-passwords/{id}` removes one, and that app alone stops at once. An app that
