@@ -5411,7 +5411,9 @@
     state.drawnPage = null; endSelect(); // (opening a page, the same one too, ends Select)
     state.zoneInView = v === 'zones' && how !== 'pop'; // Zones opened (not Back): show the zone in use
     // (a page that drew nothing, its code done or failed: at its top then, unless a newer page waits)
-    return navigate(fresh).finally(() => { if (top && topLater === top) topNow(); });
+    // (not for a change inside the page, 'replace': a tag taken off, a tab, the next page of a list;
+    // nor before the person has pressed or typed anything: a page the app opens by itself)
+    return navigate(fresh, fresh && !firstPage && how !== 'replace' && personActed).finally(() => { if (top && topLater === top) topNow(); });
   };
   // (a post that is no playlist pasted over a search with a query: that search's entry takes its
   // search, as a new query there does, so Back and Escape go where Search was opened from: { q, in, depth
@@ -8169,7 +8171,31 @@
   const NAV_SKELETON = `<div class="navskel" aria-busy="true"><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div>${skelRows(6)}${SLOW}</div>`;
   // Drawn: something of the page's own that isn't a placeholder (a page's own loading() is one)
   const pageDrawn = (before) => { const f = main.firstElementChild; return f !== before && !main.querySelector(':scope > .navskel, :scope > .skeleton, :scope > .sk-grid'); };
-  const navigate = (fresh) => {
+  // Another page opened (not the first one, not a new query): where the focus goes. When it was on
+  // what the new page replaced (a tile, a row's link, the page's Back), it had fallen to the page's
+  // body, so the next Tab started at the sidebar and a screen reader said nothing of the new page: it
+  // goes to the page's heading (else the page). Anywhere else (a sidebar place, the search box, the
+  // player) it stays, and the page's name is said instead. A page that puts the focus somewhere itself
+  // keeps that.
+  let personActed = false;
+  for (const type of ['keydown', 'pointerdown']) document.addEventListener(type, () => { personActed = true; }, { capture: true, once: true });
+  const lostFocus = () => { const a = document.activeElement; return !a || a === document.body; };
+  // (one that is drawn: a phone's Settings has the other panels' titles in the page, hidden)
+  const shown = (el) => el.getClientRects().length > 0;
+  const pageHeading = () => [...main.querySelectorAll(':scope h1, :scope .page-head h2')].find(shown) || [...main.querySelectorAll(':scope h2')].find(shown) || null;
+  // (its words without the count beside them: "Artists", not "Artists2")
+  const headingName = (h) => (h ? [...h.childNodes].filter((n) => n.nodeType === 3 || (n.nodeType === 1 && !n.matches('.count, [aria-hidden="true"]'))).map((n) => n.textContent).join('').trim() : '');
+  const focusPage = () => {
+    const h = pageHeading();
+    if (!h) { main.focus({ preventScroll: true }); return document.activeElement === main ? main : null; }
+    // (only for this: a click on the heading later doesn't take the focus; no ring on a heading that
+    // can't be pressed)
+    if (!h.hasAttribute('tabindex')) { h.setAttribute('tabindex', '-1'); h.dataset.navfocus = ''; h.addEventListener('blur', () => { if (h.dataset.navfocus != null) { h.removeAttribute('tabindex'); delete h.dataset.navfocus; } }, { once: true }); }
+    h.focus({ preventScroll: true });
+    if (document.activeElement === h) return h;
+    main.focus({ preventScroll: true }); return document.activeElement === main ? main : null;
+  };
+  const navigate = (fresh, moveFocus = false) => {
     const gen = ++navGen; navCtl.abort(); navCtl = new AbortController();
     navStop(); const superseded = new Promise((res) => { navStop = res; });
     let bar = document.getElementById('navprog');
@@ -8187,10 +8213,24 @@
     // A fresh page comes in with a short rise (and its first tiles and rows after one another); the
     // class goes after that, so what arrives later on the page doesn't move
     const pageIn = () => { if (!fresh) return; clearTimeout(main.viewInT); main.classList.remove('view-in'); void main.offsetWidth; main.classList.add('view-in'); main.viewInT = setTimeout(() => main.classList.remove('view-in'), 900); };
-    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(() => { capped = true; res(); }, 15000); });
-    const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
+    // (moved: the page's heading had the focus; it is put there again when the page's code is done if
+    // a later draw of the page took it away)
+    let moved = false;
+    const place = () => { if (!moveFocus || gen !== navGen) return; if (lostFocus()) moved = !!focusPage(); };
+    const had = document.activeElement;
+    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); place(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(() => { capped = true; res(); }, 15000); });
+    const end = () => {
+      clearTimeout(skel); clearTimeout(cap); mo.disconnect();
+      if (gen !== navGen) return;
+      bar.hidden = true; said.textContent = '';
+      // (the focus stayed where it was: the page's name is said)
+      // (a moment later, and only if the focus is still where it was: a page that put it in a field
+      // of its own says enough)
+      if (moveFocus && !moved && !capped) setTimeout(() => { if (gen !== navGen || document.activeElement !== had) return; const name = headingName(pageHeading()); if (name) said.textContent = name; }, 60);
+    };
     const t0 = performance.now(); const shown = state.view;
     fromNav = true; let rendering; try { rendering = render(); } finally { fromNav = false; } navRendering = rendering; drawing = lastDrawing;
+    if (moveFocus) drawing.done.then(() => { if (moved && gen === navGen && lostFocus()) focusPage(); });
     // Usage insights: how this page went (drawn, or its code failed or it never drew in 15 s); a
     // newer page first says nothing
     if (window.PM_USAGE) Promise.race([rendering.then(() => 'ok', () => 'failed'), superseded.then(() => null), drawn.then(() => (capped ? 'failed' : 'ok'))]).then((o) => { if (o) PM_USAGE.loaded(shown, o, performance.now() - t0); });

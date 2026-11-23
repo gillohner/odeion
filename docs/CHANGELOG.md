@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **Opening a page from inside another one moves the keyboard focus to the new page's heading.** Pressing an album tile, a link in a row or Back took the focus away with the old page: the next Tab started at the sidebar again, and a screen reader said nothing about the new page. The new page's heading now gets the focus (it shows no ring), so the next Tab goes into the page. A page opened from the sidebar or the phone's tabs leaves the focus where it was, and a screen reader says the page's name. The first page of a visit, a page the app opens by itself before anything was pressed, and a change inside a page (a tag taken off, a tab, the next page of a list) do not move the focus.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.
