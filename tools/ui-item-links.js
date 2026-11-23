@@ -52,9 +52,19 @@ async function tabOnto(page, sel, where) {
     const all = [...document.querySelectorAll('a[href], button, input, [tabindex]')].filter((x) => x.tabIndex >= 0 && x.getClientRects().length && !x.disabled);
     const before = all.filter((x) => x !== el && (x.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)).pop();
     (before || document.body).focus();
+    // (for a failure's message: what was focused first, and what the page redrew before the key came)
+    const name = (a) => (a ? `${a.tagName.toLowerCase()}${a.id ? `#${a.id}` : ''}${typeof a.className === 'string' && a.className.trim() ? `.${a.className.trim().split(/\s+/).join('.')}` : ''}` : 'nothing');
+    const seen = { from: name(before), had: document.activeElement === before, redrawn: [] };
+    if (window.__tabWatch) window.__tabWatch.disconnect();
+    window.__tabWatch = new MutationObserver((recs) => { for (const r of recs) if (r.addedNodes.length || r.removedNodes.length) seen.redrawn.push(name(r.target)); });
+    window.__tabWatch.observe(document.body, { childList: true, subtree: true });
+    window.__tabSeen = seen; window.__tabName = name;
   });
   await page.keyboard.press('Tab');
-  assert.equal(await focused(page, sel), true, `${where}: Tab reaches ${sel}`);
+  if (await focused(page, sel)) return;
+  const got = await page.evaluate(() => { const s = window.__tabSeen || {}; const a = document.activeElement; return `focus is on ${window.__tabName ? window.__tabName(a) : '?'} "${((a && (a.getAttribute('aria-label') || a.textContent)) || '').trim().slice(0, 40)}"; Tab was pressed from ${s.from}${s.had ? '' : ' (which did not take the focus)'}; redrawn meanwhile: ${[...new Set(s.redrawn || [])].slice(0, 8).join(', ') || 'nothing'}`; });
+  await page.screenshot({ path: path.join(shots, `tab-missed-${where.replace(/[^a-z0-9]+/gi, '-')}.png`) }).catch(() => {});
+  assert.fail(`${where}: Tab reaches ${sel} (${got})`);
 }
 // Enter on the focused link opens `want` inside the app; Back returns to `from`
 async function enterOpens(page, sel, want, from, ready, where) {
@@ -179,6 +189,10 @@ async function connectLinks(browser, width) {
   const run = await fx.create(browser, width, { fixtures: connectFixtures });
   const { page, state } = run;
   try {
+    // A clickable row is reachable by keyboard in the step it is drawn in (it was a frame later, and
+    // Tab pressed in that frame went past it): looked at as each row arrives, after the page's own
+    // observers have run
+    await page.addInitScript(() => { window.__lateRows = []; document.addEventListener('DOMContentLoaded', () => { new MutationObserver((recs) => { for (const r of recs) for (const n of r.addedNodes) { if (n.nodeType !== 1) continue; for (const el of [n, ...n.querySelectorAll('.clickable')]) if (el.matches('.clickable:not(button):not(a)') && el.tabIndex < 0) window.__lateRows.push(el.className); } }).observe(document.body, { childList: true, subtree: true }); }); });
     for (const [from, box, label, want, where] of [
       ['/album/mb-nowhere', '#isongs', 'Connect TIDAL', '/sources/tidal', `album page Connect ${width}`],
       ['/favourites', '#favother', 'Connect TIDAL', '/sources/tidal', `Favourites row Connect ${width}`],
@@ -190,6 +204,7 @@ async function connectLinks(browser, width) {
       const link = page.locator(box).getByText(label);
       assert.equal(await link.count(), 1, `${where}: the ${label} link is shown`);
       assert.equal(await link.getAttribute('href'), want, `${where}: ${label} has the address ${want}`);
+      assert.deepEqual(await page.evaluate(() => window.__lateRows), [], `${where}: every clickable row could be reached by keyboard when it was drawn`);
       await tabOnto(page, sel, where);
       if (width === 1280) await page.screenshot({ path: path.join(shots, `connect-focus-${from.split('/').pop()}-${width}.png`) });
       await enterOpens(page, sel, want, from, sel, where);
