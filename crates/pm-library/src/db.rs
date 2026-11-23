@@ -2446,9 +2446,20 @@ impl Library {
     /// one, in a folder named as the entry's nearest, and the entry is only a path; or when its
     /// title and artist agree with the entry's (without an artist: also that nearest folder).
     pub fn resolve_import(&self, t: &ImportedTrack) -> Result<Option<Track>> {
+        let path = t.path.as_deref().and_then(crate::import::local_path);
+        // Without an artist, a file elsewhere must also be in a folder named as the entry's
+        // nearest one, case aside (another album's "01 Intro.flac" is not it); a line naming no
+        // folder has nothing to disagree with
+        let entry_folder = path.as_deref().and_then(nearest_folder);
+        let near = |h: &Track| {
+            entry_folder
+                .as_ref()
+                .is_none_or(|f| nearest_folder(&h.file.path).as_ref() == Some(f))
+        };
+        let named = t.artist.as_deref().is_some_and(|a| !a.trim().is_empty());
         // Files of the entry's name looked at and turned down: the title search does not take them
         let mut turned_down: Vec<Option<TrackId>> = Vec::new();
-        if let Some(p) = t.path.as_deref().and_then(crate::import::local_path) {
+        if let Some(p) = path {
             if let Some(row) = self.file_by_path(&p)? {
                 if let Some(track) = self.get_track(row.track_id)? {
                     return Ok(Some(track));
@@ -2470,14 +2481,9 @@ impl Library {
                     }
                 }
                 let mut hits = self.tracks_by_file_name(name)?;
-                // Without an artist, a file elsewhere must also be in a folder named as the
-                // entry's nearest one (another album's "01 Intro.flac" is not it)
-                let entry_folder = folders(&p).first().copied();
-                let near = |h: &Track| entry_folder.is_none_or(|f| folders(&h.file.path).first() == Some(&f));
-                let named = t.artist.as_deref().is_some_and(|a| !a.trim().is_empty());
                 // A line that is only a path (no title, artist or length of its own) has nothing
                 // to disagree with: the only file of that name is it
-                let path_only = t.artist.as_deref().is_none_or(|a| a.trim().is_empty())
+                let path_only = !named
                     && t.duration_ms.is_none_or(|d| d == 0)
                     && t.path
                         .as_deref()
@@ -2491,7 +2497,25 @@ impl Library {
                 turned_down.extend(hits.iter().map(|h| h.id));
             }
         }
-        self.find_by_title_artist_except(&t.title, t.artist.as_deref(), &turned_down)
+        let found = self.find_by_title_artist_except(&t.title, t.artist.as_deref(), &turned_down)?;
+        // The title search too: without an artist, a line that names a folder needs it here
+        Ok(found.filter(|h| named || near(h)))
+    }
+
+    /// [`Self::resolve_import`] for a playlist file in `base`: a relative line is first the
+    /// library file at that place (`..` worked out), then matched as written, so its folders are
+    /// its own, not the playlist's.
+    pub fn resolve_import_in(&self, t: &ImportedTrack, base: Option<&Path>) -> Result<Option<Track>> {
+        if let (Some(base), Some(p)) = (base, t.path.as_deref().and_then(crate::import::local_path)) {
+            if p.is_relative() {
+                if let Some(row) = self.file_by_path(&lexical(&base.join(&p)))? {
+                    if let Some(track) = self.get_track(row.track_id)? {
+                        return Ok(Some(track));
+                    }
+                }
+            }
+        }
+        self.resolve_import(t)
     }
 
     /// Record that `track` started playing on `zone`; returns the entry id.
@@ -5567,6 +5591,26 @@ fn same_length(a: Option<u64>, b: Option<u64>) -> bool {
     }
 }
 
+/// The name of the folder a file is in, lower case (`None`: a bare file name).
+fn nearest_folder(p: &Path) -> Option<String> {
+    folders(p).first().map(|f| f.to_string_lossy().to_lowercase())
+}
+
+/// `p` with `.` and `..` worked out on the text (no link is followed).
+fn lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// The named folders a file is in, nearest first.
 fn folders(p: &Path) -> Vec<&std::ffi::OsStr> {
     p.parent()
@@ -8453,5 +8497,71 @@ mod identify_tests {
         assert!(by_artist(&avicii, "Avicii x Nicky Romero"));
         let ewf = import_test_track("/m/e/Fire.flac", "Fire", Some("Fire"), 100);
         assert!(!by_artist(&ewf, "Earth, Wind & Fire"), "a known act stays whole");
+    }
+
+    /// Folder names compare without case; a playlist's relative line is the file at that place
+    /// (`..` worked out), else matched by its own folders, not the playlist's; the last title
+    /// search keeps the nearest-folder rule for a line without an artist.
+    #[test]
+    fn relative_lines_and_folder_case() {
+        let lib = Library::open_in_memory().unwrap();
+        let path_of = |t: Option<Track>| t.map(|t| t.file.path.to_string_lossy().into_owned());
+        lib.upsert_track(&import_test_track(
+            "/srv/Music/a.wav",
+            "Get Lucky",
+            Some("Daft Punk"),
+            60,
+        ))
+        .unwrap();
+        let raw = "/mnt/nas/music/a.wav";
+        let bare = entry(&crate::import::title_from_path(raw), None, Some(raw), None);
+        assert_eq!(
+            path_of(lib.resolve_import(&bare).unwrap()).as_deref(),
+            Some("/srv/Music/a.wav")
+        );
+
+        let intro = "/m/Artist A/First/01 Intro.flac";
+        lib.upsert_track(&import_test_track(intro, "Intro", Some("Artist A"), 60))
+            .unwrap();
+        let up = entry("Intro", None, Some("../Artist A/First/01 Intro.flac"), None);
+        assert_eq!(
+            path_of(
+                lib.resolve_import_in(&up, Some(Path::new("/m/Playlists")))
+                    .unwrap()
+            )
+            .as_deref(),
+            Some(intro),
+            "the file at that place"
+        );
+        // The file at that place wins whatever the line says (".." worked out)
+        let exact = entry("Intro", Some("Somebody Else"), Some("../01 Intro.flac"), None);
+        assert_eq!(
+            path_of(
+                lib.resolve_import_in(&exact, Some(Path::new("/m/Artist A/First/Playlists")))
+                    .unwrap()
+            )
+            .as_deref(),
+            Some(intro)
+        );
+        let here = entry("Intro", None, Some("01 Intro.flac"), None);
+        assert_eq!(
+            path_of(
+                lib.resolve_import_in(&here, Some(Path::new("/home/u/Downloads")))
+                    .unwrap()
+            )
+            .as_deref(),
+            Some(intro),
+            "a bare relative line names no folder, whatever folder the playlist is in"
+        );
+        // Another extension: no file of that name, and the title search keeps the folder rule
+        let raw = "/old/Artist B/Second/01 Intro.mp3";
+        let other = entry(&crate::import::title_from_path(raw), None, Some(raw), None);
+        assert_eq!(path_of(lib.resolve_import(&other).unwrap()), None);
+        let raw = "/old/Artist A/First/01 Intro.mp3";
+        let converted = entry(&crate::import::title_from_path(raw), None, Some(raw), None);
+        assert_eq!(
+            path_of(lib.resolve_import(&converted).unwrap()).as_deref(),
+            Some(intro)
+        );
     }
 }
