@@ -4018,6 +4018,7 @@ dependencies = [
  "calamine",
  "hound",
  "id3",
+ "libc",
  "metaflac",
  "pm-model",
  "reqwest",
