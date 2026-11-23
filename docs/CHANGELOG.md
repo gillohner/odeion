@@ -6,7 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-23
 
-- **Album covers no longer take memory the size of the picture.** The node read a cover file whole into memory for each request before sending it (album covers, artist portraits and Subsonic apps' `getCoverArt`). A folder cover can be a scan of tens of MB, and a page of album tiles asks for many at once. It now sends the file as it reads it, 64 KB at a time, with the same type check and headers.
+- **Album covers no longer take memory the size of the picture.** The node read a cover file whole into memory for each request before sending it (album covers, artist portraits and Subsonic apps' `getCoverArt`). A folder cover can be a scan of tens of MB, and a page of album tiles asks for many at once. It now sends the file as it reads it, 64 KB at a time, with the same type check and headers, and with an ETag: a browser that already has the picture gets a short "not modified" answer when it asks again the next day.
 
 ### 2026-11-22
 

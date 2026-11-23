@@ -1452,7 +1452,7 @@ async fn dispatch(
                 .ok_or_else(|| SubErr::not_found("Cover art not found"))?;
             // Served by its bytes, never by the stored type (a row from an older scan may hold
             // any), as it is read
-            let resp = crate::art::picture_file(&art.file, "private, max-age=86400")
+            let resp = crate::art::picture_file(&art.file, "private, max-age=86400", headers)
                 .await
                 .map_err(|e| match e.kind() {
                     std::io::ErrorKind::InvalidData => SubErr::not_found("Cover art not found"),

@@ -270,17 +270,40 @@ const PICTURE_CHUNK: usize = 64 << 10;
 
 /// A picture file as an answer, as [`picture`] answers bytes (its type by its first bytes, the
 /// same headers), but sent as it is read: a folder cover can be a scan of tens of MB, and a page
-/// of album tiles asks for many at once. The error is the file's own (open, read), or
-/// `InvalidData` when it is no picture.
+/// of album tiles asks for many at once. With an `ETag` (its length and change time), so a
+/// browser that has it gets a 304 instead of the picture again. The error is the file's own
+/// (open, read), or `InvalidData` when it is no picture.
 pub(crate) async fn picture_file(
     path: &std::path::Path,
     cache: &'static str,
+    asked: &axum::http::HeaderMap,
 ) -> std::io::Result<axum::response::Response> {
-    use axum::http::{header, HeaderValue};
+    use axum::http::{header, HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
     use futures_util::StreamExt;
     use tokio::io::AsyncReadExt;
     let mut file = tokio::fs::File::open(path).await?;
-    let len = file.metadata().await?.len();
+    let meta = file.metadata().await?;
+    let len = meta.len();
+    let changed = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    let etag = format!("\"{len:x}-{:x}.{:x}\"", changed.as_secs(), changed.subsec_nanos());
+    let etag = HeaderValue::from_str(&etag).map_err(std::io::Error::other)?;
+    let has_it = asked
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag));
+    if has_it {
+        let cache = HeaderValue::from_static(cache);
+        return Ok((
+            StatusCode::NOT_MODIFIED,
+            [(header::ETAG, etag), (header::CACHE_CONTROL, cache)],
+        )
+            .into_response());
+    }
     let mut head = vec![0u8; 16];
     let mut got = 0;
     while got < head.len() {
@@ -310,6 +333,7 @@ pub(crate) async fn picture_file(
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(got as u64 + rest));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    h.insert(header::ETAG, etag);
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -398,7 +422,9 @@ mod tests {
         let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0];
         bytes.extend((0..3_000_000u32).map(|i| (i % 251) as u8));
         std::fs::write(&path, &bytes).unwrap();
-        let resp = picture_file(&path, "private").await.unwrap();
+        let resp = picture_file(&path, "private", &axum::http::HeaderMap::new())
+            .await
+            .unwrap();
         let h = resp.headers().clone();
         assert_eq!(h["content-type"], "image/jpeg");
         assert_eq!(h["content-length"], bytes.len().to_string().as_str());
@@ -419,10 +445,30 @@ mod tests {
             bytes.len()
         );
         assert!(largest <= PICTURE_CHUNK, "a part of {largest} bytes");
+        // Asked again with the ETag it gave: 304, no picture; another ETag: the picture
+        let etag = h["etag"].clone();
+        let mut again = axum::http::HeaderMap::new();
+        again.insert("if-none-match", etag.clone());
+        let resp = picture_file(&path, "private", &again).await.unwrap();
+        assert_eq!(resp.status(), 304);
+        assert_eq!(resp.headers()["etag"], etag);
+        assert!(resp.into_body().collect().await.unwrap().to_bytes().is_empty());
+        again.insert("if-none-match", "\"other\", W/\"x\"".parse().unwrap());
+        let resp = picture_file(&path, "private", &again).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        // The file changed: another ETag, so the old one gets the picture
+        bytes.extend_from_slice(b"more");
+        std::fs::write(&path, &bytes).unwrap();
+        again.insert("if-none-match", etag.clone());
+        let resp = picture_file(&path, "private", &again).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_ne!(resp.headers()["etag"], etag);
         // A picture shorter than the bytes its type is read from
         let tiny = dir.path().join("tiny.gif");
         std::fs::write(&tiny, b"GIF89a").unwrap();
-        let resp = picture_file(&tiny, "private").await.unwrap();
+        let resp = picture_file(&tiny, "private", &axum::http::HeaderMap::new())
+            .await
+            .unwrap();
         assert_eq!(resp.headers()["content-type"], "image/gif");
         let got = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&got[..], b"GIF89a");
@@ -432,11 +478,16 @@ mod tests {
             ("empty.png", &b""[..]),
         ] {
             std::fs::write(dir.path().join(name), text).unwrap();
-            let e = picture_file(&dir.path().join(name), "private").await.unwrap_err();
+            let e = picture_file(&dir.path().join(name), "private", &axum::http::HeaderMap::new())
+                .await
+                .unwrap_err();
             assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{name}");
         }
-        assert!(picture_file(&dir.path().join("none.jpg"), "private")
-            .await
-            .is_err());
+        let none = picture_file(
+            &dir.path().join("none.jpg"),
+            "private",
+            &axum::http::HeaderMap::new(),
+        );
+        assert!(none.await.is_err());
     }
 }

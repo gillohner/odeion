@@ -2803,7 +2803,11 @@ async fn artist_info_handler(
     Ok(Json(artist_info::artist_info(&s, id, &lang).await?))
 }
 
-async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Result<Response, ApiError> {
+async fn artist_image(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
     let path = artist_info::image_path(&s, id);
     // The page's own fetch (in the reader's language) brings the portrait: wait for it rather
     // than fetch it all again
@@ -2841,7 +2845,7 @@ async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> R
                 .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }
     }
-    art::picture_file(&path, "private, max-age=86400")
+    art::picture_file(&path, "private, max-age=86400", &headers)
         .await
         .map_err(|e| ApiError::not_found(format!("portrait for artist {id}: {e}")))
 }
@@ -3303,15 +3307,20 @@ async fn keyed_cover(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<i64>,
     Query(q): Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if q.get("k") != Some(&s.stream_key(&format!("art:{id}"))) {
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong key"));
     }
-    album_cover(State(s), Path(id)).await
+    album_cover(State(s), Path(id), headers).await
 }
 
 /// The album's cover image (extracted at scan time or found in the folder).
-async fn album_cover(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Result<Response, ApiError> {
+async fn album_cover(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
     let known = s.library.lock().expect("library poisoned").album_art(id)?;
     let art = match known {
         Some(a) => a,
@@ -3321,7 +3330,7 @@ async fn album_cover(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Re
     };
     // Its type by its bytes, also for covers stored before the scan checked them; sent as it is
     // read (a folder cover is any size)
-    art::picture_file(&art.file, "private, max-age=86400")
+    art::picture_file(&art.file, "private, max-age=86400", &headers)
         .await
         .map_err(|e| ApiError::not_found(format!("cover file for album {id}: {e}")))
 }
