@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **After a restart, Play goes on from the song the queue was at.** The node keeps each zone's queue across a restart, but not its place in it: a zone stopped at the fifth song started again from the first after an update or a power cut. The place is now saved with the queue and put back (nothing starts playing by itself). Queues saved before this start at their first song as before.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.

@@ -261,6 +261,8 @@ pub struct QueueSnapshot {
     pub shuffle: bool,
     /// With shuffle on: the original order as indexes into `items` ([`Queue::shuffle_order`]).
     pub order: Vec<usize>,
+    /// The current item's index in `items`: what Play starts with after a Stop.
+    pub current: Option<usize>,
     pub version: u64,
 }
 
@@ -558,7 +560,8 @@ impl Queue {
     }
 
     /// Everything that is saved per zone, from one look at the queue (the items in play order,
-    /// the modes, and the original order as indexes while shuffled), with its version.
+    /// the modes, the original order as indexes while shuffled, and the current item), with its
+    /// version.
     pub fn snapshot(&self) -> QueueSnapshot {
         QueueSnapshot {
             items: self.items.clone(),
@@ -566,6 +569,7 @@ impl Queue {
             radio: self.radio,
             shuffle: self.shuffle,
             order: self.shuffle_order().unwrap_or_default(),
+            current: self.current,
             version: self.version,
         }
     }

@@ -724,6 +724,7 @@ impl NodeState {
                         radio: snap.radio,
                         shuffle: snap.shuffle,
                         order: snap.order,
+                        current: snap.current,
                     };
                     if let Ok(json) = serde_json::to_string(&saved) {
                         let lib = library.lock().expect("library poisoned");
@@ -815,6 +816,10 @@ impl NodeState {
         zone.set_radio(saved.radio);
         if saved.shuffle {
             zone.restore_shuffle(&saved.order);
+        }
+        // The place it was at: Play goes on from there, as it would have before the restart
+        if let Some(i) = saved.current {
+            zone.restore_current(i);
         }
         tracing::info!(zone = %zone.id(), items = n, shuffle = saved.shuffle, "queue restored");
     }
@@ -2568,7 +2573,7 @@ fn queue_key(id: &ZoneId) -> String {
 }
 
 /// What survives a restart per zone: the items (in play order), the repeat and shuffle modes,
-/// and with shuffle on the original order as indexes into the items.
+/// with shuffle on the original order as indexes into the items, and the current item.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedQueue {
     items: Vec<pm_zones::QueueItem>,
@@ -2579,6 +2584,9 @@ struct SavedQueue {
     shuffle: bool,
     #[serde(default)]
     order: Vec<usize>,
+    /// Older saves have none: the queue then starts at its first item.
+    #[serde(default)]
+    current: Option<usize>,
 }
 
 /// Library radio: when a zone with `radio` on runs out of queue, add tracks

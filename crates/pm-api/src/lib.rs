@@ -28139,4 +28139,106 @@ exec sleep 300
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
     }
+
+    /// A zone stopped in the middle of its queue is back there after a restart: Play goes on
+    /// from that song, not from the first.
+    #[tokio::test]
+    async fn a_restarted_zone_keeps_its_place_in_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("ten-seconds.wav");
+        write_wav(&wav, 441_000);
+        let zid;
+        {
+            let s = state(dir.path(), None).await;
+            let app = router(s.clone());
+            let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+            zid = zones[0]["id"].as_str().unwrap().to_string();
+            let items: Vec<_> = ["t0", "t1", "t2"]
+                .iter()
+                .map(|t| serde_json::json!({"uri": wav.to_string_lossy(), "title": t}))
+                .collect();
+            let (st, _) = call(
+                &app,
+                "POST",
+                &format!("/v1/zones/{zid}/queue"),
+                Some(serde_json::json!({"items": items, "replace": true})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let mut events = s.events.subscribe();
+            for action in [
+                serde_json::json!({"action": "play", "index": 1}),
+                serde_json::json!({"action": "stop"}),
+            ] {
+                let (st, z) = call(&app, "POST", &format!("/v1/zones/{zid}/transport"), Some(action)).await;
+                assert_eq!(st, StatusCode::OK, "{z}");
+            }
+            // Saved just before the zone's state goes out on the bus
+            let key = format!("queue.{zid}");
+            let saved_place = || {
+                s.library
+                    .lock()
+                    .unwrap()
+                    .get_setting(&key)
+                    .unwrap()
+                    .is_some_and(|j| j.contains("\"current\":1"))
+            };
+            let saved = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                while !saved_place() {
+                    let _ = events.recv().await;
+                }
+            })
+            .await;
+            assert!(saved.is_ok(), "the place was not saved");
+            let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+            assert_eq!(
+                (z["transport"].as_str(), z["queue_index"].as_u64()),
+                (Some("stopped"), Some(1)),
+                "{z}"
+            );
+        }
+        let s2 = state(dir.path(), None).await;
+        let app2 = router(s2.clone());
+        // The engine publishes the restored queue on its own thread: look until it has
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let z = loop {
+            let (_, z) = call(&app2, "GET", &format!("/v1/zones/{zid}"), None).await;
+            if z["queue_index"].as_u64().is_some() || std::time::Instant::now() > deadline {
+                break z;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert_eq!(z["queue"].as_array().map(Vec::len), Some(3), "{z}");
+        assert_eq!(
+            (z["transport"].as_str(), z["queue_index"].as_u64()),
+            (Some("stopped"), Some(1)),
+            "{z}"
+        );
+        let (st, _) = call(
+            &app2,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "play"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let (_, z) = call(&app2, "GET", &format!("/v1/zones/{zid}"), None).await;
+            if z["transport"] == "playing" {
+                assert_eq!(z["queue_index"].as_u64(), Some(1), "Play started elsewhere: {z}");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "never played: {z}");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (st, _) = call(
+            &app2,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "stop"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+    }
 }

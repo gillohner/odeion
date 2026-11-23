@@ -406,6 +406,12 @@ impl Zone {
         self.with_queue(|q| q.restore_shuffle(order))
     }
 
+    /// The current item of a saved queue, put back into a zone that is not playing: nothing
+    /// starts, and Play starts there. False when the queue has no item at `index`.
+    pub fn restore_current(&self, index: usize) -> bool {
+        self.with_queue(|q| q.set_current(Some(index)))
+    }
+
     pub fn set_repeat(&self, r: Repeat) {
         self.with_queue(|q| q.set_repeat(r))
     }
