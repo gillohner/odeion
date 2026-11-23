@@ -48,6 +48,7 @@ One WebSocket per controller carries every change. The REST API (`/v1/...`) carr
   snapshot.
 - The node answers `{"type":"ping","id":n}` with `{"type":"pong","id":n}`. Pongs carry no `seq`.
 - On `{"type":"resync"}` the node sends a fresh snapshot.
+- A message a controller sends may be at most 16 KiB; a larger one ends the socket.
 - The node sends a WebSocket ping every 20 s. A controller that has pinged at least once is dropped
   after 45 s of silence, so the half-open socket of a laptop that went to sleep does not linger.
   Controllers that never ping (`pm-client`, older UIs) are not held to this.
