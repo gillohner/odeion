@@ -148,7 +148,9 @@ async fn get(s: &NodeState, srv: &Server, path: &str, query: &[(&str, &str)]) ->
     .await
     .map_err(|e| upstream(e.without_url()))?;
     match resp.status() {
-        st if st.is_success() => resp.json().await.map_err(|e| upstream(e.without_url())),
+        st if st.is_success() => crate::capped::json(resp, crate::capped::MEDIA_SERVER_MAX)
+            .await
+            .map_err(upstream),
         StatusCode::UNAUTHORIZED => Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             "Plex no longer accepts this token: connect again (Sources › Plex)",

@@ -34,13 +34,31 @@ pub(crate) async fn bytes(mut resp: reqwest::Response, max: usize) -> Result<Vec
         return Err(Error::TooLong(max));
     }
     let mut out = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| Error::Read(e.to_string()))? {
+    // Without the address: a media server's carries its sign-in in the query
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| Error::Read(e.without_url().to_string()))?
+    {
         if out.len() + chunk.len() > max {
             return Err(Error::TooLong(max));
         }
         out.extend_from_slice(&chunk);
     }
     Ok(out)
+}
+
+/// Answers of the media servers the owner signs into (Jellyfin, Plex, OpenSubsonic,
+/// Audiobookshelf), at most: a whole library's listing fits many times over.
+pub(crate) const MEDIA_SERVER_MAX: usize = 64 << 20;
+
+/// [`bytes`] parsed as JSON.
+pub(crate) async fn json<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+    max: usize,
+) -> Result<T, Error> {
+    let body = bytes(resp, max).await?;
+    serde_json::from_slice(&body).map_err(|e| Error::Read(format!("not JSON: {e}")))
 }
 
 /// [`bytes`] as text, read as UTF-8 with anything else replaced (as `reqwest`'s `text()` does
@@ -142,5 +160,30 @@ mod tests {
             super::text_blocking(r, 1 << 20),
             Err(super::Error::TooLong(1 << 20))
         );
+    }
+
+    /// A media server's answer is read as JSON up to its size, and a failed read never names the
+    /// address (a Subsonic server's carries the sign-in in its query).
+    #[tokio::test]
+    async fn json_is_read_up_to_its_size_and_errors_leave_the_address_out() {
+        let url = serve(OPEN_ENDED, br#"{"ok": [1, 2]}"#.to_vec());
+        let r = reqwest::get(&url).await.unwrap();
+        let v: serde_json::Value = super::json(r, 100).await.unwrap();
+        assert_eq!(v["ok"][1], 2);
+        let url = serve(OPEN_ENDED, vec![b' '; 300]);
+        let r = reqwest::get(&url).await.unwrap();
+        let e = super::json::<serde_json::Value>(r, 100).await.unwrap_err();
+        assert_eq!(e, super::Error::TooLong(100));
+        // Says 100 bytes, sends 10, closes
+        let url = serve(
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n",
+            b"{\"ok\": 1,".to_vec(),
+        );
+        let r = reqwest::get(format!("{url}rest/ping?u=me&p=s3cret"))
+            .await
+            .unwrap();
+        let e = super::json::<serde_json::Value>(r, 1000).await.unwrap_err();
+        assert!(matches!(e, super::Error::Read(_)), "{e:?}");
+        assert!(!e.to_string().contains("s3cret"), "{e}");
     }
 }
