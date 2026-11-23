@@ -164,9 +164,13 @@ pub(crate) async fn serve(
                 }
             },
         };
+        // Whether the connection has sent a request: one that never did is not waited for at a stop
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = asked.clone();
         let app = app
             .clone()
             .map_request(move |mut req: axum::http::Request<hyper::body::Incoming>| {
+                seen.store(true, std::sync::atomic::Ordering::Relaxed);
                 req.extensions_mut().insert(ConnectInfo(addr));
                 req.map(axum::body::Body::new)
             });
@@ -187,6 +191,11 @@ pub(crate) async fn serve(
                     return;
                 }
                 _ = stop_seen.wait_for(|s| *s) => {}
+            }
+            // hyper counts a connection that has sent nothing yet (a browser's preconnect) as busy
+            // and would keep it until the header timer: it has nothing to finish
+            if !asked.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
             }
             conn.as_mut().graceful_shutdown();
             let _ = conn.await;
@@ -310,6 +319,8 @@ mod tests {
     #[tokio::test]
     async fn told_to_stop_it_closes_idle_connections_and_returns() {
         let (addr, stop, task) = started(Limits::default()).await;
+        // One that never sent a request (a preconnect) does not hold the stop for the header time
+        let mut silent = tokio::net::TcpStream::connect(addr).await.unwrap();
         let mut idle = tokio::net::TcpStream::connect(addr).await.unwrap();
         idle.write_all(b"GET /peer HTTP/1.1\r\nHost: x\r\n\r\n")
             .await
@@ -323,6 +334,8 @@ mod tests {
             .unwrap();
         let (_, closed) = read_all(&mut idle, Duration::from_secs(5)).await;
         assert!(closed);
+        let (_, closed) = read_all(&mut silent, Duration::from_secs(5)).await;
+        assert!(closed, "the connection that never asked was not closed");
         assert!(
             tokio::net::TcpStream::connect(addr).await.is_err(),
             "still taking connections"

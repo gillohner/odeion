@@ -350,7 +350,8 @@ mod tests {
             .unwrap();
         let client = ClientTunnel::start(server.addr(), &Relays::Off).await.unwrap();
         client.connect().await.unwrap();
-        // Three controllers' connections, each saying its own letter so its stream reaches the node
+        // Three streams over one controller connection, each saying its own letter so it reaches
+        // the node
         let mut local = Vec::new();
         for letter in *b"abc" {
             let mut s = TcpStream::connect(client.local_addr()).await.unwrap();
