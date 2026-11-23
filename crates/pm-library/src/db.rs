@@ -524,7 +524,7 @@ impl Library {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(mut conn: Connection) -> Result<Self> {
         // A scan writes from its own connection in batches of a few hundred files (and two scans
         // of large shares may run with the API writing too); a writer waits for the others instead
         // of failing with "database is locked".
