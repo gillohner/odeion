@@ -37,6 +37,8 @@ Newest first. Dates are when the change landed on `main`.
 
 - **A long Songs list opens and scrolls with less work.** Song rows that are off screen are no longer styled, laid out and painted until they come near. On a phone-sized page with 832 songs the page's long tasks while opening Songs drop from about 1.2 s to 0.6 s (a slowed-down test device), and from 2.0 s to 0.7 s on a desktop-sized one; the longer the list, the bigger the difference. Nothing looks different: the list is as long as before and the scroll position as exact.
 
+- **Saving a form shows progress on its button, and Enter twice no longer sends twice.** Nine forms started their save without telling the page: the AcoustID key, the Spotify app, a pasted sign-in, Bandcamp, Soloist (two), the Spotify Connect device, SoundCloud (two). Their button now shows the spinner at once and ignores a second Enter until the answer is in. Enter in a field that sits beside a button (add a folder, the contact address, a shared link, radio search) now presses that button, with the same progress; a shared link opened with Enter twice was looked up twice. Downloads' Play and Shuffle show their progress too.
+
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21
