@@ -1766,6 +1766,24 @@ async fn a_new_node_takes_in_the_settings_copy_before_replacing_it() {
     );
     assert_eq!(n.contact(), "https://example.org/old-node");
     assert!(copy["settings"]["smart.0035WKVKQDHSM"].is_string(), "{copy}");
+    // The copy above may be the one written before the sync (vault_cache::start): once the first
+    // sync is done, a backup still keeps what was taken in
+    for _ in 0..600 {
+        if n.sync_activity.lock().unwrap().finished_at.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        n.sync_activity.lock().unwrap().finished_at.is_some(),
+        "the first sync ended"
+    );
+    sync.backup_settings(&n).await.expect("backed up");
+    let copy = settings_copy(&homeserver, &first).await;
+    assert!(
+        copy["settings"]["smart.0035WKVKQDHSM"].is_string(),
+        "after the sync: {copy}"
+    );
     // Taken in: with no folders and the derived contact again, the node is not "fresh" at its
     // next start or sign-in (what it removed since would come back)
     n.set_contact(&format!("https://pubky.app/profile/{}", sync.z32()))
