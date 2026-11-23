@@ -2032,15 +2032,6 @@ async fn enqueue(
     if items.is_empty() {
         return Err(ApiError::bad_request("nothing to enqueue"));
     }
-    // Again: another request may have filled the queue while these were looked up
-    let has = if body.replace { 0 } else { zone.queue_len() };
-    if has + items.len() > pm_zones::MAX_QUEUE_ITEMS {
-        return Err(ApiError::bad_request(format!(
-            "a queue holds at most {} items (this one has {has}, {} more were sent)",
-            pm_zones::MAX_QUEUE_ITEMS,
-            items.len()
-        )));
-    }
     drop_sign_ins(&s, &headers, &mut items);
     // Who queued them, from the request, never from the body: their own accounts play them
     let by = accounts::Who::of(&caller).by();

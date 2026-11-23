@@ -820,4 +820,31 @@ async fn a_jukebox_list_set_with_shuffle_on_plays_shuffled() {
     let r = call(&app, &format!("/rest/jukeboxControl?action=set{ids}&{auth}")).await;
     assert_eq!(r["status"], "ok", "{r}");
     assert_eq!(zone.queue_len(), sent.len());
+    // But a set of more than a queue holds is refused before any song is looked up (these do not
+    // exist: the answer is the limit, not "unknown song"); sent as a form, too long for a URL
+    let form: String = (0..=pm_zones::MAX_QUEUE_ITEMS).map(|_| "id=999999999&").collect();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/rest/jukeboxControl?action=set&{auth}"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let r: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let r = &r["subsonic-response"];
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at most 100000 items (this one has 0, 100001 more were sent)"),
+        "{r}"
+    );
+    assert_eq!(zone.queue_len(), sent.len(), "the queue is not touched");
 }

@@ -651,18 +651,6 @@ async fn dispatch(
                         })
                         .await
                         .map_err(|e| SubErr::new(0, e.message))??;
-                    // Again: a Play may have filled the queue while these were looked up
-                    let has = if action == "add" { zone.queue_len() } else { 0 };
-                    if has + items.len() > pm_zones::MAX_QUEUE_ITEMS {
-                        return Err(SubErr::new(
-                            0,
-                            format!(
-                                "a queue holds at most {} items (this one has {has}, {} more were sent)",
-                                pm_zones::MAX_QUEUE_ITEMS,
-                                items.len()
-                            ),
-                        ));
-                    }
                     if action == "set" {
                         zone.stop();
                         if items.is_empty() {
