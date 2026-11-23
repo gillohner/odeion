@@ -1267,7 +1267,7 @@ impl Library {
     pub fn track_ids_by_hash_prefix(&self) -> Result<std::collections::HashMap<String, TrackId>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT substr(h.blake3, 1, 16), f.track_id FROM file_hashes h JOIN files f ON f.path = h.path AND f.missing = 0",
+            "SELECT substr(h.blake3, 1, 16), f.track_id FROM file_hashes h JOIN files f ON f.path = h.path AND +f.missing = 0",
         )?;
         let mut out = std::collections::HashMap::new();
         for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
@@ -1335,7 +1335,7 @@ impl Library {
     /// homeserver's private files to the songs they are: `name -> track id`.
     pub fn track_ids_by_file_name(&self) -> Result<std::collections::HashMap<String, TrackId>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT path, track_id FROM files WHERE missing = 0")?;
+        let mut stmt = conn.prepare("SELECT path, track_id FROM files WHERE +missing = 0")?;
         let mut out = std::collections::HashMap::new();
         for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
             let (path, id) = row?;
@@ -1369,7 +1369,7 @@ impl Library {
         let conn = self.lock();
         let filter = match focus {
             Some(f) => format!(
-                " AND EXISTS (SELECT 1 FROM tracks t JOIN files f ON f.track_id = t.id WHERE t.album_id = albums.id AND f.missing = 0 AND {})",
+                " AND EXISTS (SELECT 1 FROM tracks t JOIN files f ON f.track_id = t.id WHERE t.album_id = albums.id AND +f.missing = 0 AND {})",
                 f.predicate()
             ),
             None => format!(" AND {ALBUM_PRESENT}"),
@@ -1390,7 +1390,7 @@ impl Library {
             "SELECT t.album_id, f.container, f.sample_kind, f.rate_hz, f.bits,
                     MAX(f.rate_hz * 100 + f.bits)
              FROM files f JOIN tracks t ON t.id = f.track_id
-             WHERE t.album_id IS NOT NULL AND f.missing = 0
+             WHERE t.album_id IS NOT NULL AND +f.missing = 0
              GROUP BY t.album_id ORDER BY t.album_id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1907,7 +1907,7 @@ impl Library {
             .prepare(
                 "SELECT al.id, MIN(f.path) FROM albums al
                  JOIN tracks t ON t.album_id = al.id
-                 JOIN files f ON f.track_id = t.id AND f.missing = 0
+                 JOIN files f ON f.track_id = t.id AND +f.missing = 0
                  LEFT JOIN album_art aa ON aa.album_id = al.id
                  WHERE aa.album_id IS NULL GROUP BY al.id",
             )?
@@ -1936,7 +1936,7 @@ impl Library {
             .prepare(
                 "SELECT f.path, f.size_bytes, substr(h.blake3, 1, 16) FROM files f
                  LEFT JOIN file_hashes h ON h.path = f.path AND h.size_bytes = f.size_bytes
-                 WHERE f.missing = 0 AND f.path >= ?1 AND f.path < ?2 ORDER BY f.path",
+                 WHERE +f.missing = 0 AND f.path >= ?1 AND f.path < ?2 ORDER BY f.path",
             )?
             .query_map(params![prefix, upper], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?))
@@ -1958,7 +1958,7 @@ impl Library {
                 "SELECT f.path, al.id, al.title FROM files f
                  JOIN tracks t ON t.id = f.track_id
                  JOIN albums al ON al.id = t.album_id
-                 WHERE f.missing = 0 AND f.path LIKE ?1 ESCAPE '\\'",
+                 WHERE +f.missing = 0 AND f.path LIKE ?1 ESCAPE '\\'",
             )?
             .query_map(params![format!("{}%", like_escape(&prefix))], |r| {
                 Ok((PathBuf::from(r.get::<_, String>(0)?), r.get(1)?, r.get(2)?))
@@ -2022,7 +2022,7 @@ impl Library {
         let conn = self.lock();
         let mut st = conn.prepare(
             "SELECT t.id, f.path, f.size_bytes, f.mtime_unix FROM tracks t
-             JOIN files f ON f.track_id = t.id AND f.missing = 0 AND f.sample_kind = 'pcm'
+             JOIN files f ON f.track_id = t.id AND +f.missing = 0 AND f.sample_kind = 'pcm'
              LEFT JOIN track_loudness l ON l.track_id = t.id
              WHERE t.replaygain_track_gain_db IS NULL
                AND f.path NOT LIKE '%://%'
@@ -2122,7 +2122,7 @@ impl Library {
         )?;
         let todo: i64 = conn.query_row(
             "SELECT COUNT(*) FROM tracks t
-             JOIN files f ON f.track_id = t.id AND f.missing = 0 AND f.sample_kind = 'pcm'
+             JOIN files f ON f.track_id = t.id AND +f.missing = 0 AND f.sample_kind = 'pcm'
              LEFT JOIN track_loudness l ON l.track_id = t.id
              WHERE t.replaygain_track_gain_db IS NULL AND f.path NOT LIKE '%://%'
                AND (l.track_id IS NULL OR l.size_bytes != f.size_bytes OR l.mtime_unix != f.mtime_unix)",
@@ -2383,7 +2383,7 @@ impl Library {
     pub fn tracks_by_file_name(&self, name: &str) -> Result<Vec<Track>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
-            "{TRACK_SELECT} WHERE fi.path LIKE ?1 ESCAPE '\\' AND fi.missing = 0 LIMIT 20"
+            "{TRACK_SELECT} WHERE fi.path LIKE ?1 ESCAPE '\\' AND +fi.missing = 0 LIMIT 20"
         ))?;
         let escaped = name.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let raws: Vec<RawTrack> = stmt
@@ -2798,7 +2798,7 @@ impl Library {
         let ids: Vec<i64> = {
             let conn = self.lock();
             let mut stmt = conn.prepare(
-                "SELECT ta.track_id FROM track_artists ta JOIN files f ON f.track_id = ta.track_id AND f.missing = 0
+                "SELECT ta.track_id FROM track_artists ta JOIN files f ON f.track_id = ta.track_id AND +f.missing = 0
                  GROUP BY ta.track_id HAVING COUNT(*) > 1 ORDER BY ta.track_id",
             )?;
             let v = stmt
@@ -3059,7 +3059,7 @@ impl Library {
     pub fn suggested_track_paths(&self) -> Result<Vec<(i64, String)>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT t.id, f.path FROM tracks t JOIN files f ON f.track_id = t.id AND f.missing = 0
+            "SELECT t.id, f.path FROM tracks t JOIN files f ON f.track_id = t.id AND +f.missing = 0
              WHERE t.canonical_uri IS NULL AND EXISTS (SELECT 1 FROM identify_suggestions s WHERE s.track_id = t.id)
                AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped')
              ORDER BY t.id",
@@ -3501,7 +3501,7 @@ impl Library {
     pub fn input_generations(&self) -> Result<std::collections::HashMap<i64, String>> {
         let ids: Vec<(i64, String)> = {
             let conn = self.lock();
-            let mut stmt = conn.prepare("SELECT track_id, path FROM files WHERE missing = 0")?;
+            let mut stmt = conn.prepare("SELECT track_id, path FROM files WHERE +missing = 0")?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<std::result::Result<_, _>>()?;
@@ -3683,7 +3683,7 @@ impl Library {
             let (open, state, present, offered, turned_down): (Option<bool>, Option<String>, bool, bool, bool) = conn.query_row(
                 "SELECT (SELECT canonical_uri IS NULL FROM tracks WHERE id = ?1),
                         (SELECT state FROM identify_state WHERE track_id = ?1),
-                        EXISTS (SELECT 1 FROM files f WHERE f.track_id = ?1 AND f.missing = 0),
+                        EXISTS (SELECT 1 FROM files f WHERE f.track_id = ?1 AND +f.missing = 0),
                         EXISTS (SELECT 1 FROM identify_suggestions o WHERE o.track_id = ?1 AND o.recording_mbid = ?2),
                         EXISTS (SELECT 1 FROM identify_rejections WHERE track_id = ?1)",
                 params![track, rec],
@@ -4011,7 +4011,7 @@ impl Library {
     /// Library files present on disk whose size is one of `sizes`: (path, size, mtime).
     pub fn files_of_sizes(&self, sizes: &std::collections::HashSet<u64>) -> Result<Vec<(PathBuf, u64, i64)>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT path, size_bytes, mtime_unix FROM files WHERE missing = 0")?;
+        let mut stmt = conn.prepare("SELECT path, size_bytes, mtime_unix FROM files WHERE +missing = 0")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 PathBuf::from(r.get::<_, String>(0)?),
@@ -4123,9 +4123,9 @@ impl Library {
             artists: count(&format!(
                 "SELECT COUNT(DISTINCT ta.artist_id) FROM track_artists ta JOIN tracks t ON t.id = ta.track_id WHERE {TRACK_PRESENT}"
             ))?,
-            files: count("SELECT COUNT(*) FROM files WHERE missing = 0")?,
+            files: count("SELECT COUNT(*) FROM files WHERE +missing = 0")?,
             missing_files: count("SELECT COUNT(*) FROM files WHERE missing = 1")?,
-            total_duration_ms: count("SELECT COALESCE(SUM(duration_ms), 0) FROM files WHERE missing = 0")?,
+            total_duration_ms: count("SELECT COALESCE(SUM(duration_ms), 0) FROM files WHERE +missing = 0")?,
         })
     }
 
@@ -4229,7 +4229,7 @@ impl Library {
         }
         let conn = self.lock();
         Ok(conn.query_row(
-            "SELECT COUNT(DISTINCT track_id), COALESCE(SUM(size_bytes), 0) FROM files WHERE missing = 0 AND path LIKE ?1 ESCAPE '\\'",
+            "SELECT COUNT(DISTINCT track_id), COALESCE(SUM(size_bytes), 0) FROM files WHERE +missing = 0 AND path LIKE ?1 ESCAPE '\\'",
             params![format!("{}%", like_escape(&prefix))],
             |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
         )?)
@@ -4290,7 +4290,7 @@ impl Library {
             prefix.push(std::path::MAIN_SEPARATOR);
         }
         let n = self.lock().execute(
-            "UPDATE files SET missing = 1 WHERE missing = 0 AND path LIKE ?1 ESCAPE '\\' AND (last_seen_scan_id IS NULL OR last_seen_scan_id <> ?2)",
+            "UPDATE files SET missing = 1 WHERE +missing = 0 AND path LIKE ?1 ESCAPE '\\' AND (last_seen_scan_id IS NULL OR last_seen_scan_id <> ?2)",
             params![format!("{}%", like_escape(&prefix)), scan_id],
         )?;
         Ok(n as u64)
@@ -4594,7 +4594,7 @@ fn answer_names(conn: &Connection, track: i64, recording: &str) -> Result<bool> 
         .query_row(
             "SELECT fp.lookup_json FROM files f JOIN identify_file_keys k ON k.path = f.path
                JOIN fingerprints fp ON fp.file_key = k.file_key
-             WHERE f.track_id = ?1 AND f.missing = 0 AND fp.lookup_json IS NOT NULL LIMIT 1",
+             WHERE f.track_id = ?1 AND +f.missing = 0 AND fp.lookup_json IS NOT NULL LIMIT 1",
             params![track],
             |r| r.get(0),
         )
@@ -4651,7 +4651,7 @@ fn identify_input_of(conn: &Connection, track: i64, path: &str) -> Result<Option
 fn identify_input_by_track(conn: &Connection, track: i64) -> Result<Option<String>> {
     let path: Option<String> = conn
         .query_row(
-            "SELECT path FROM files WHERE track_id = ?1 AND missing = 0 ORDER BY rowid LIMIT 1",
+            "SELECT path FROM files WHERE track_id = ?1 AND +missing = 0 ORDER BY rowid LIMIT 1",
             params![track],
             |r| r.get(0),
         )
@@ -4802,6 +4802,12 @@ const TRACK_SELECT: &str = "SELECT t.id, t.title, t.album_id, t.track_no, t.disc
     FROM tracks t
     JOIN files fi ON fi.track_id = t.id AND NOT EXISTS (SELECT 1 FROM hidden_files h WHERE h.path = fi.path)
     LEFT JOIN albums al ON al.id = t.album_id";
+
+// Every "the file is there" test in this file is written `+missing = 0`: the `+` keeps SQLite
+// from choosing the index on `files.missing` for it. Nearly every file is present, so that
+// index narrows nothing, and a query that reaches for it reads every file where it could have
+// gone straight to a track's or a folder's (the test `presence_checks_never_go_through_the_
+// missing_index` reads this file for one without it).
 
 /// A track (aliased `t`) has a present file.
 const TRACK_PRESENT: &str = "EXISTS (SELECT 1 FROM files pf WHERE pf.track_id = t.id AND +pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path))";
@@ -5540,6 +5546,68 @@ mod tests {
         let formats = lib.album_formats().unwrap();
         assert_eq!(formats.len(), 3);
         assert!(formats.iter().any(|f| f.label == "24/96 FLAC" && f.hi_res));
+    }
+
+    /// Every lookup that also asks "is the file there" must not be planned through the index on
+    /// `files.missing`: it holds every file of the library, so one song's or one folder's lookup
+    /// read them all (an album Focus nothing matched took 20 s at 50,000 songs, each of a few
+    /// lookups Identify makes per song 4-12 ms). The `+` in `+missing = 0` rules that index out.
+    #[test]
+    fn presence_checks_never_go_through_the_missing_index() {
+        let source = include_str!("db.rs");
+        // Up to the first test module (the attribute at the start of a line, then a module)
+        let first_test_module = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
+            .iter()
+            .filter_map(|start| source.find(start))
+            .min()
+            .unwrap();
+        let code = &source[..first_test_module];
+        let mut checks = 0;
+        for (n, line) in code.lines().enumerate() {
+            for (at, _) in line.match_indices("missing = 0") {
+                let before = &line[..at];
+                // (`UPDATE files SET .. missing = 0` sets it)
+                if before.contains("SET ") && !before.contains("WHERE") {
+                    continue;
+                }
+                let column = before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.');
+                assert!(column.ends_with('+'), "db.rs:{}: `{}`", n + 1, line.trim());
+                checks += 1;
+            }
+        }
+        assert!(checks > 20, "{checks}");
+
+        // And what the planner does with them: no step of these reads `files_missing`
+        let lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&sample_track("/music/a/one.flac", "One"))
+            .unwrap();
+        let conn = lib.lock();
+        let plan = |sql: &str| -> String {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let steps: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(|s| s.unwrap())
+                .collect();
+            steps.join("; ")
+        };
+        let unhinted = plan("SELECT path FROM files WHERE track_id = 1 AND missing = 0");
+        assert!(
+            unhinted.contains("files_missing"),
+            "the trap is still there: {unhinted}"
+        );
+        for sql in [
+            "SELECT path FROM files WHERE track_id = 1 AND +missing = 0".to_string(),
+            "SELECT path FROM files f WHERE +f.missing = 0 AND f.path >= '/music/a/' AND f.path < '/music/a0'"
+                .to_string(),
+            format!(
+                "SELECT id FROM albums WHERE id > 0 AND EXISTS (SELECT 1 FROM tracks t JOIN files f ON f.track_id = t.id WHERE t.album_id = albums.id AND +f.missing = 0 AND {}) ORDER BY id LIMIT 60",
+                Focus::Dsd.predicate()
+            ),
+        ] {
+            let steps = plan(&sql);
+            assert!(!steps.contains("files_missing"), "{sql}: {steps}");
+        }
     }
 
     #[test]
