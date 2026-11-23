@@ -40,9 +40,9 @@ const cases = [
   { name: 'mymusic-signin', path: '/library', opts: {},
     ready: '[data-goto-accounts]', a: '.card:has(> [data-goto-accounts]) > p', b: '[data-goto-accounts]', what: 'My music: the sentence, then Sign in' },
   { name: 'favourites-hsnote', path: '/favourites', opts: { role: 'listener', fixtures: { '/favourites': { body: { uris: [], tracks: [], albums: [], artists: [], other: [], homeserver: notConnected } } } },
-    ready: '#hsnote .btn', a: '#hsnote > p', b: '#hsnote > .btn', what: 'Favourites: the homeserver note, then its button' },
+    ready: '#hsnote .btn', a: '#hsnote > p', b: '#hsnote > .btn', what: 'Bookmarks: the homeserver note, then its button' },
   { name: 'playlists-hsnote', path: '/playlists', opts: { role: 'listener', fixtures: { '/me/homeserver': { body: notConnected } } },
-    ready: '#hsnote .btn', a: '#hsnote > p', b: '#hsnote > .btn', what: 'Playlists: the homeserver note, then its button' },
+    ready: '#hsnote .btn', a: '#hsnote > p', b: '#hsnote > .btn', what: 'Collections: the homeserver note, then its button' },
 ];
 
 (async () => {

@@ -108,7 +108,7 @@ it lives in the library, not in that file.
 ## With your own Pubky homeserver
 
 [`deploy/bundle/`](../../deploy/bundle/) runs the node together with a Pubky homeserver, so your
-Pubky account, playlists and uploaded files live on your own machine. Steps and options are in
+Pubky account, collections and uploaded files live on your own machine. Steps and options are in
 [docs/deploy.md](../deploy.md#with-its-own-pubky-homeserver-bundled). In short:
 
 ```sh

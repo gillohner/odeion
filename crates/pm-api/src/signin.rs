@@ -126,6 +126,14 @@ pub(crate) fn source(id: &str) -> Option<Box<dyn SignInSource>> {
     })
 }
 
+/// Whether `id` is a source each person signs in to on their own (TIDAL, Qobuz, Spotify): the
+/// rest have one node-wide sign-in, the owner's, or none. The sign-in check goes by
+/// [`crate::access::PER_PERSON`]; a test holds the two together.
+#[cfg(test)]
+pub(crate) fn per_person(id: &str) -> bool {
+    source(id).is_some_and(|x| x.per_person())
+}
+
 /// The setting that remembers the picked way.
 pub fn way_key(source: &str) -> String {
     format!("{source}.signin_way")

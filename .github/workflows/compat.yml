@@ -47,6 +47,10 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # ci.yml's cache (the same dependencies), read only
+          shared-key: ci
+          save-if: false
       - run: docker pull -q ${{ matrix.image }}
       - run: cargo build -p pm-node
       - name: dlna_dmr against the zone renderers
@@ -86,6 +90,10 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # ci.yml's cache (the same dependencies), read only
+          shared-key: ci
+          save-if: false
       # The check's provider handling, offline (no MA, no node)
       - run: python3 -I tools/ma-check-provider-test.py
       - run: docker pull -q ${{ matrix.image }}

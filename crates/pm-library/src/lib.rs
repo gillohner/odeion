@@ -41,8 +41,8 @@ pub use db::{
     IdentityCounts, PlayEntry, PlayedTrack, SuggestionRow, TagRow, UNKNOWN_ARTIST_ID,
 };
 pub use db::{
-    AlbumEdit, AutoSettle, ConfirmChoice, ConfirmReport, Library, LibraryStats, Rematch, StaleChoice,
-    TrackOverride,
+    AlbumEdit, AutoSettle, ConfirmChoice, ConfirmReport, Library, LibraryLock, LibraryStats, Rematch,
+    StaleChoice, TrackOverride,
 };
 pub use error::{LibraryError, Result};
 pub use image::{file_image_type, image_extension, image_type};

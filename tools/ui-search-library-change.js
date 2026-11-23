@@ -46,7 +46,7 @@ async function setup(browser, width, opts = {}) {
     if (lib.offline > 0) { lib.offline -= 1; return route.abort('internetdisconnected').catch(() => {}); }
     // (noLibrary: that many asks end before the library answers)
     if (lib.noLibrary > 0) { lib.noLibrary -= 1; return route.fulfill({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': lib.sources }, body: '' }).catch(() => {}); }
-    const hit = { kind: 'playlist', id: 'c1', title: 'Road songs', subtitle: `${n} songs · your playlist`, uri: 'playlist:c1', keys: ['playlist:c1'] };
+    const hit = { kind: 'playlist', id: 'c1', title: 'Road songs', subtitle: `${n} songs · your collection`, uri: 'playlist:c1', keys: ['playlist:c1'] };
     const song = { kind: 'song', id: 'lib-1', title: fx.track.title, subtitle: 'Sefa, Dr. Peacock', track_id: 1, uri: 'track:1', keys: ['track:1'] };
     const song2 = { kind: 'song', id: 'lib-2', title: SONG2, subtitle: 'Sefa, Dr. Peacock', track_id: 2, uri: 'track:2', keys: ['track:2'] };
     // (breakAfter: that many asks' streams break after every source answered: a cut-off line)
@@ -83,7 +83,7 @@ async function ownWrite(browser, width) {
   const { page, context, state, lib } = await setup(browser, width);
   try {
     await fx.go(page, '/search?q=road');
-    await until(page, () => /2 songs · your playlist/.test((document.querySelector('#sresults') || {}).innerText || ''), 'first answer drawn');
+    await until(page, () => /2 songs · your collection/.test((document.querySelector('#sresults') || {}).innerText || ''), 'first answer drawn');
     assert.equal(lib.asked.length, 1);
     await page.screenshot({ path: path.join(shots, `own-${width}-before.png`) });
     // Kept: the same search again (no write yet) does not ask the node again
@@ -95,9 +95,9 @@ async function ownWrite(browser, width) {
     await nav(page, 'playlists');
     await page.locator('#plname').fill('New one');
     await page.locator('#plcreate').click();
-    await until(page, () => /Created/.test(document.body.innerText), 'playlist made');
+    await until(page, () => /Created/.test(document.body.innerText), 'collection made');
     await typeAgain(page, 'road');
-    await until(page, () => /3 songs · your playlist/.test((document.querySelector('#sresults') || {}).innerText || ''), 'new count after the app\'s own playlist write');
+    await until(page, () => /3 songs · your collection/.test((document.querySelector('#sresults') || {}).innerText || ''), 'new count after the app\'s own collection write');
     assert.equal(lib.asked.length, 2, 'the search was asked again once after the write');
     assert.doesNotMatch(await shown(page), /2 songs/);
     await page.screenshot({ path: path.join(shots, `own-${width}-after.png`) });
@@ -109,17 +109,17 @@ async function nodeEvent(browser, width) {
   const { page, context, state, lib, changed } = await setup(browser, width);
   try {
     await fx.go(page, '/search?q=road');
-    await until(page, () => /2 songs · your playlist/.test((document.querySelector('#sresults') || {}).innerText || ''), 'first answer drawn');
+    await until(page, () => /2 songs · your collection/.test((document.querySelector('#sresults') || {}).innerText || ''), 'first answer drawn');
     // The library changes while its search is on screen: it stays as drawn, nothing asked again
     lib.count = 1;
     changed();
     await sleep(600);
     assert.equal(lib.asked.length, 1, 'the search on screen is not asked again by a library change');
-    assert.match(await shown(page), /2 songs · your playlist/, 'the search on screen is not emptied');
+    assert.match(await shown(page), /2 songs · your collection/, 'the search on screen is not emptied');
     // ... and typed again (from another page) it asks the node: the new count
     await nav(page, 'home');
     await typeAgain(page, 'road');
-    await until(page, () => /1 song · your playlist|1 songs · your playlist/.test((document.querySelector('#sresults') || {}).innerText || ''), 'new count after the node\'s library_changed');
+    await until(page, () => /1 song · your collection|1 songs · your collection/.test((document.querySelector('#sresults') || {}).innerText || ''), 'new count after the node\'s library_changed');
     assert.equal(lib.asked.length, 2);
     // A search still on its way when the library changes is not cut off: its answer is drawn
     let release; lib.hold = new Promise((r) => { release = r; });
@@ -130,7 +130,7 @@ async function nodeEvent(browser, width) {
     changed();
     await sleep(300);
     release(); lib.hold = null;
-    await until(page, () => /4 songs · your playlist/.test((document.querySelector('#sresults') || {}).innerText || '') && window.pmLastSearch && window.pmLastSearch.q === 'roads', 'in-flight answer drawn after the change');
+    await until(page, () => /4 songs · your collection/.test((document.querySelector('#sresults') || {}).innerText || '') && window.pmLastSearch && window.pmLastSearch.q === 'roads', 'in-flight answer drawn after the change');
     assert.equal(lib.asked.filter((a) => a.q === 'roads').length, 1, 'the search on its way was neither cut off nor asked again');
     await page.screenshot({ path: path.join(shots, `event-${width}-after.png`) });
     assert.deepEqual(state.errors, []);
@@ -143,7 +143,7 @@ async function back(browser, width) {
   const { page, context, state, lib, changed } = await setup(browser, width);
   try {
     await fx.go(page, '/search?q=road');
-    await until(page, () => /2 songs · your playlist/.test((document.querySelector('#sresults') || {}).innerText || ''), 'first answer drawn');
+    await until(page, () => /2 songs · your collection/.test((document.querySelector('#sresults') || {}).innerText || ''), 'first answer drawn');
     await page.locator('#sresults', { hasText: 'Road songs' }).getByText('Road songs').first().click();
     await until(page, () => history.state && history.state.v !== 'search', 'left the search');
     lib.count = 5; changed();
@@ -151,12 +151,12 @@ async function back(browser, width) {
     await page.goBack();
     await until(page, () => history.state && history.state.v === 'search' && !!document.querySelector('#sresults'), 'back on the search');
     for (const end = Date.now() + 7000; lib.asked.length < 2; await sleep(50)) if (Date.now() > end) throw new Error('Timed out: asked again after Back');
-    assert.match(await shown(page), /2 songs · your playlist/, 'while the node is asked again, the old results stay drawn');
+    assert.match(await shown(page), /2 songs · your collection/, 'while the node is asked again, the old results stay drawn');
     assert.equal(lib.asked[1].scope, 'library', 'only the library is asked again (the services keep their answers)');
     assert.equal(await page.evaluate(() => document.querySelector('#sprog').hidden), false, 'the progress line shows while it is asked again');
     await page.screenshot({ path: path.join(shots, `back-${width}-asking.png`) });
     release(); lib.hold = null;
-    await until(page, () => /5 songs · your playlist/.test((document.querySelector('#sresults') || {}).innerText || ''), 'new count after Back');
+    await until(page, () => /5 songs · your collection/.test((document.querySelector('#sresults') || {}).innerText || ''), 'new count after Back');
     assert.equal(lib.asked.length, 2);
     await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone');
     await page.screenshot({ path: path.join(shots, `back-${width}-after.png`) });
@@ -170,7 +170,7 @@ async function redrawn(browser, width) {
   const { page, context, state, lib } = await setup(browser, width);
   try {
     await fx.go(page, '/search?q=road');
-    await until(page, () => /2 songs · your playlist/.test((document.querySelector('#sresults') || {}).innerText || ''), 'first answer drawn');
+    await until(page, () => /2 songs · your collection/.test((document.querySelector('#sresults') || {}).innerText || ''), 'first answer drawn');
     lib.count = 1;
     const row = page.locator('#sresults .srow', { hasText: fx.track.title }).first();
     await row.locator('[data-smore]').click({ force: true });
@@ -180,12 +180,12 @@ async function redrawn(browser, width) {
     await sleep(400);
     assert.ok(state.hits.some((h) => h.v === '/library/tracks/1' && h.m === 'DELETE'), 'the song was removed');
     assert.equal(lib.asked.length, 1, 'the search page drawn again is not asked again');
-    assert.match(await shown(page), /2 songs · your playlist/, 'the search page drawn again keeps its results');
+    assert.match(await shown(page), /2 songs · your collection/, 'the search page drawn again keeps its results');
     assert.deepEqual(state.errors, []);
   } finally { await context.close(); }
 }
 
-const countShown = (page, n) => until(page, (k) => new RegExp(`${k} songs · your playlist`).test((document.querySelector('#sresults') || {}).innerText || ''), `${n} songs drawn`, n);
+const countShown = (page, n) => until(page, (k) => new RegExp(`${k} songs · your collection`).test((document.querySelector('#sresults') || {}).innerText || ''), `${n} songs drawn`, n);
 // Open the search, leave it for a result, change the library, and come Back while the node's
 // library answer is held: { release } lets that answer through
 async function backWhileHeld(page, lib, changed, count) {
@@ -248,7 +248,7 @@ async function hung(browser, width) {
     assert.equal(await page.evaluate(() => document.querySelector('#sprog').hidden), false, 'progress line while asked');
     await page.clock.fastForward(16000);
     await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone after the hung ask is given up');
-    assert.match(await shown(page), /2 songs · your playlist/, 'the old results stay');
+    assert.match(await shown(page), /2 songs · your collection/, 'the old results stay');
     await page.screenshot({ path: path.join(shots, `hung-${width}-given-up.png`) });
     held.release();
     await nav(page, 'home');
@@ -468,7 +468,7 @@ async function broughtBack(browser, width, other = 'known') {
       await broughtBack(browser, width, 'failed');
       await broughtBack(browser, width, 'pending');
       if (width === 360) await hung(browser, width);
-      console.log(`ok ${width}px: a playlist write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing, or when the stream broke after every answer); an offline one starts afresh; a song removed during the ask stays out, unless brought back meanwhile (only the song whose file was brought back, not one whose file lookup failed or is still on its way)`);
+      console.log(`ok ${width}px: a collection write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing, or when the stream broke after every answer); an offline one starts afresh; a song removed during the ask stays out, unless brought back meanwhile (only the song whose file was brought back, not one whose file lookup failed or is still on its way)`);
     }
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });

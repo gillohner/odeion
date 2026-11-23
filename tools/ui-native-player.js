@@ -267,7 +267,7 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
     check(entries.includes('browser') && !entries.includes(ownZone.id), `${at}: the phone's picker has one This phone (${entries.join(', ')})`);
     await page.keyboard.press('Escape'); await sleep(200);
     // A stream the app can't play: <audio> plays it, and Details says Android mixer
-    await page.evaluate(() => window.pmPlayer.play([{ uri: 'http://odeion-fixture.test/v1/sources/x/stream/refuse', title: 'A playlist stream' }]));
+    await page.evaluate(() => window.pmPlayer.play([{ uri: 'http://odeion-fixture.test/v1/sources/x/stream/refuse', title: 'A collection stream' }]));
     await sleep(800);
     const plays = await page.evaluate(() => window.__audioPlays);
     check(plays.some((u) => /refuse/.test(u)), `${at}: refused by the app, <audio> plays it (${JSON.stringify(plays)})`);

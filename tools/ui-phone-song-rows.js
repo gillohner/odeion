@@ -29,7 +29,7 @@ const tapAt = async (page, loc, touch) => {
 // The page each list is on, and the row's names in it
 const PAGES = [
   { at: '/tracks', name: 'Songs', ready: '.tracks[data-list="all"] .track' },
-  { at: '/favourites', name: 'Favourites', ready: '.tracks[data-list="fav"] .track', opts: { favs: [fx.SONG] } },
+  { at: '/favourites', name: 'Bookmarks', ready: '.tracks[data-list="fav"] .track', opts: { favs: [fx.SONG] } },
 ];
 
 async function phoneCase(browser, width, { android = false, touch = true } = {}) {
@@ -133,29 +133,29 @@ async function tabCase(browser, width, { touch = true } = {}) {
     await fx.go(page, '/playlist/c1');
     const credits = page.locator('#plsongs .srow').first().locator('[data-artist-credit]');
     const split = await page.waitForFunction(() => document.querySelectorAll('#plsongs .srow [data-artist-credit]').length === 2, null, { timeout: 4000 }).then(() => true, () => false);
-    check(split, `${label} playlist: the flattened artist line is read in as two artists`);
+    check(split, `${label} collection: the flattened artist line is read in as two artists`);
     const pl = await tabs(page, `#plsongs ${SROW_NAMES}`);
-    check(split && pl.length >= 3 && pl.every((n) => n === want), `${label} playlist: its row's ${pl.length} names, read-in artists too, have tabIndex ${want} (${pl})`);
-    check(await credits.count() === 2, `${label} playlist: two artist links`);
+    check(split && pl.length >= 3 && pl.every((n) => n === want), `${label} collection: its row's ${pl.length} names, read-in artists too, have tabIndex ${want} (${pl})`);
+    check(await credits.count() === 2, `${label} collection: two artist links`);
     // its ⋯: one Go to per artist on a phone; desktop keeps its one row (the names are links there)
     await page.locator('#plsongs .srow').first().locator('[data-smore]').click();
     await page.locator(MENU).getByText('Add to queue', { exact: true }).waitFor({ timeout: 3000 }).catch(() => {});
     const arts = await menuArtists(page);
-    check(phone ? arts.join('|') === 'Go to Sefa|Go to Dr. Peacock' : arts.length === 1, `${label} playlist: ⋯ has ${phone ? 'one Go to per artist' : 'one artist row'} (${arts.join(' | ')})`);
+    check(phone ? arts.join('|') === 'Go to Sefa|Go to Dr. Peacock' : arts.length === 1, `${label} collection: ⋯ has ${phone ? 'one Go to per artist' : 'one artist row'} (${arts.join(' | ')})`);
     if (phone) {
       await page.locator(MENU).getByText('Go to Dr. Peacock', { exact: true }).click().catch(() => {});
       await page.waitForFunction(() => location.pathname.startsWith('/artist/')).catch(() => {});
-      check(path0(page) === '/artist/lib-22', `${label} playlist: Go to Dr. Peacock opens the second artist (${path0(page)})`);
+      check(path0(page) === '/artist/lib-22', `${label} collection: Go to Dr. Peacock opens the second artist (${path0(page)})`);
       await fx.go(page, '/playlist/c1');
       await page.waitForFunction(() => document.querySelectorAll('#plsongs .srow [data-artist-credit]').length === 2, null, { timeout: 4000 }).catch(() => {});
     } else await page.keyboard.press('Escape');
     if (phone) { // (the artists too follow a change of layout)
       await page.setViewportSize({ width: 1280, height: 900 }); await page.waitForFunction(() => document.documentElement.dataset.shell !== 'phone');
       const wide = await tabs(page, `#plsongs ${SROW_NAMES}`);
-      check(wide.length === pl.length && wide.every((n) => n === 0), `${label} playlist: widened, its names are Tab stops again (${wide})`);
+      check(wide.length === pl.length && wide.every((n) => n === 0), `${label} collection: widened, its names are Tab stops again (${wide})`);
       await page.setViewportSize({ width, height: 900 }); await page.waitForFunction(() => document.documentElement.dataset.shell === 'phone');
       const back = await tabs(page, `#plsongs ${SROW_NAMES}`);
-      check(back.length === pl.length && back.every((n) => n === -1), `${label} playlist: narrowed again, they are not (${back})`);
+      check(back.length === pl.length && back.every((n) => n === -1), `${label} collection: narrowed again, they are not (${back})`);
     }
     check(state.errors.length === 0, `${label}: no page errors ${state.errors.join(' | ')}`);
   } catch (e) { check(false, `${label}: ${e.message.split('\n')[0]}`); } finally { await context.close(); }

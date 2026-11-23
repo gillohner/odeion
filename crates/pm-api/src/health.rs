@@ -163,14 +163,28 @@ async fn probe_all(s: &Arc<NodeState>) -> Vec<HealthPart> {
 
 /// `GET /v1/health`: each outside part the node uses, `ok`, `down` (with why) or
 /// `needs_sign_in`. Parts that are not set up are left out.
-pub(crate) async fn health(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<HealthPart>> {
+///
+/// The owner sees every part. Anyone else sees [`FOR_EVERYONE`] only: which services the owner
+/// signed in to, the state of the owner's homeserver and a note about the node's API token are
+/// the owner's to see (a play that fails for one of them says why where it fails).
+pub(crate) async fn health(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<crate::accounts::Caller>,
+) -> ApiResult<Vec<HealthPart>> {
+    let all = c.can(crate::access::Capability::Settings);
+    let shown = move |parts: Vec<HealthPart>| -> Vec<HealthPart> {
+        parts
+            .into_iter()
+            .filter(|p| all || FOR_EVERYONE.contains(&p.id.as_str()))
+            .collect()
+    };
     if let Some((at, parts)) = cache().lock().expect("health cache").get(&s.node_id).cloned() {
         if at.elapsed() >= TTL {
             // The last answer now, a fresh look in the background (a cold check took 1.3 s and
             // held one of the browser's few connections to the node)
             refresh_in_background(&s);
         }
-        return Ok(Json(parts));
+        return Ok(Json(shown(parts)));
     }
     // The node's health, as its owner's sign-ins see it (who asks first doesn't change it)
     let parts = crate::accounts::as_owner(probe_all(&s)).await;
@@ -178,5 +192,8 @@ pub(crate) async fn health(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<Hea
         .lock()
         .expect("health cache")
         .insert(s.node_id.clone(), (Instant::now(), parts.clone()));
-    Ok(Json(parts))
+    Ok(Json(shown(parts)))
 }
+
+/// The parts everyone signed in sees: Pinakes (Home, links and tags stop working without it).
+const FOR_EVERYONE: &[&str] = &["pinakes"];
