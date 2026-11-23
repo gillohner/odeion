@@ -481,8 +481,10 @@ fn schema_to_upgrade(path: &Path) -> Option<(i64, Connection)> {
         .ok()
     };
     let found: i64 = if tables("schema_version")? > 0 {
-        conn.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
-            .ok()?
+        conn.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| {
+            r.get(0)
+        })
+        .ok()?
     } else if tables("")? > 0 {
         // Tables from before the schema had a version
         0
@@ -1800,10 +1802,10 @@ impl Library {
             // the version it was copied at (no migration went in), the copy holds nothing the
             // library does not: without it, as before there was one. Once a migration went in,
             // the copy is the only way back and stays
-            (Err(e), Some((copy, found)))
-                if schema_to_upgrade(path).map(|(v, _)| v) == Some(found) =>
-            {
-                tracing::warn!("the library did not open after its copy was made ({e}): trying again without the copy");
+            (Err(e), Some((copy, found))) if schema_to_upgrade(path).map(|(v, _)| v) == Some(found) => {
+                tracing::warn!(
+                    "the library did not open after its copy was made ({e}): trying again without the copy"
+                );
                 let _ = std::fs::remove_file(&copy);
                 Self::open(path)
             }
