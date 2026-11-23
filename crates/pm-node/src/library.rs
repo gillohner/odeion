@@ -15,6 +15,7 @@ fn open(cfg: &NodeConfig) -> anyhow::Result<Library> {
 /// A running node's hold on its data folder: a lock on `node.lock` there, kept as long as this
 /// lives. The system lets go of it when the process ends, however it ends, so no stale hold
 /// stays behind.
+#[derive(Debug)]
 pub struct DataDirLock {
     _file: std::fs::File,
 }
