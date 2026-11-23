@@ -287,6 +287,29 @@ pub struct Limits {
     pub per_address: usize,
     /// Players (by MAC) the server keeps an output for. One already known always reconnects.
     pub players: usize,
+    /// Which peer addresses may connect at all ([`nearby`] by default): a connection from any
+    /// other is closed before it is read.
+    pub allow: fn(IpAddr) -> bool,
+}
+
+/// A peer on this machine or on a local network: loopback, private (10/8, 172.16/12,
+/// 192.168/16), link-local, the shared address space of VPNs such as Tailscale (100.64/10), and
+/// IPv6 unique-local (fc00::/7) and link-local (fe80::/10). Squeezebox players are on the
+/// network the node plays in; nothing on the internet has a reason to register as one.
+pub fn nearby(ip: IpAddr) -> bool {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 impl Default for Limits {
@@ -297,6 +320,7 @@ impl Default for Limits {
             connections: 128,
             per_address: 16,
             players: 64,
+            allow: nearby,
         }
     }
 }
@@ -428,6 +452,10 @@ fn serve_on(
         let Ok(addr) = stream.peer_addr() else {
             continue;
         };
+        if !(limits.allow)(addr.ip()) {
+            tracing::debug!(peer = %addr, "slimproto: connection closed, not from this machine or a local network");
+            continue;
+        }
         let Some(slot) = admit(&open, addr.ip(), &limits) else {
             tracing::debug!(peer = %addr, "slimproto: connection closed, too many open");
             continue;
@@ -750,6 +778,7 @@ mod tests {
             connections: 3,
             per_address: 2,
             players: 1,
+            allow: nearby,
         }
     }
 
@@ -1097,5 +1126,44 @@ mod tests {
             closed_within(&mut three, Duration::from_secs(2)),
             "a taken player keeps its place"
         );
+    }
+
+    /// Only peers on this machine or a local network may connect: one from anywhere else is
+    /// closed before its `HELO` is read, and the server goes on taking the others.
+    #[test]
+    fn only_nearby_peers_may_connect() {
+        for (ip, ok) in [
+            ("127.0.0.1", true),
+            ("10.1.2.3", true),
+            ("172.20.0.5", true),
+            ("192.168.1.20", true),
+            ("169.254.3.4", true),
+            ("100.101.102.103", true),
+            ("::1", true),
+            ("fd7a:115c:a1e0::1", true),
+            ("fe80::1", true),
+            ("::ffff:192.168.1.20", true),
+            ("8.8.8.8", false),
+            ("100.128.0.1", false),
+            ("172.32.0.1", false),
+            ("2001:db8::1", false),
+            ("::ffff:8.8.8.8", false),
+        ] {
+            assert_eq!(nearby(ip.parse().unwrap()), ok, "{ip}");
+        }
+        // The check is made: a server that allows no loopback peer closes this test's connection
+        let (addr, rx) = server(Limits {
+            allow: |ip| !ip.is_loopback(),
+            ..tight()
+        });
+        let mut far = TcpStream::connect(addr).unwrap();
+        far.write_all(&hello(1)).unwrap();
+        assert!(closed_within(&mut far, Duration::from_secs(2)), "closed");
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "no player");
+        // And the default lets it in
+        let (addr, rx) = server(tight());
+        let mut near = TcpStream::connect(addr).unwrap();
+        near.write_all(&hello(2)).unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok(), "the player");
     }
 }

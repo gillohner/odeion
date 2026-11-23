@@ -368,7 +368,9 @@ A player has 10 s to introduce itself after connecting, and one that sends nothi
 disconnected (players report every 5 s, and reconnect on their own). The node takes up to 128
 connections, 16 from one address, and keeps up to 64 players; a player it already knows always
 reconnects. Outputs found on the network (discovery and players together) stop being added at 256.
-To take only players on this machine, set `[outputs] slimproto_bind = "127.0.0.1"` (the discovery
+Players connect from this machine or a local network only: loopback, private addresses (10/8,
+172.16/12, 192.168/16), link-local, 100.64/10 (VPNs such as Tailscale) and IPv6 unique-local and
+link-local addresses. A connection from anywhere else is closed at once. To take only players on this machine, set `[outputs] slimproto_bind = "127.0.0.1"` (the discovery
 responder is then off); any other address of the machine works too.
 
 ## Where the music can live
