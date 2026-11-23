@@ -2852,7 +2852,7 @@ body.kiosk #usagenotice { display: none; }
 /* Zones: the choice, then the zones under "Only these" */
 .pa-zmode { display: flex; flex-wrap: wrap; gap: 4px 24px; margin-bottom: 10px; }
 .pa-zmode input, .pa-zones input { margin: 0; accent-color: var(--accent); }
-.pa-zones { margin: 0 0 10px; }
+.pa-zones, .pa-zhelp { margin: 0 0 10px; }
 .pa-zones .chip { display: inline-flex; align-items: center; gap: 6px; }
 .pa-policy { margin: 0; }
 .pa-limits { margin-top: 8px; }

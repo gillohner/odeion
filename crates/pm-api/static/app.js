@@ -2195,6 +2195,8 @@
   const isOffline = () => !!(state.info && state.info.offline);
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
   const LISTENER_VIEWS_OFF = new Set(['home', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
+  // "No zone" as a node before that choice keeps it: a list of one zone without a name
+  const noZoneList = (l) => Array.isArray(l) && l.length > 0 && l.every((id) => id === '');
   const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
   // The phone's own zone (the node's, on this app's output) while the app plays its music itself:
   // one "This phone" in the phone's picker; listed again while it is the zone in use or plays
@@ -10610,7 +10612,8 @@
             const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
             const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
             // null: every zone; []: none (the owner opened none, or the node can't read its list); else the zones named
-            const noZones = Array.isArray(me.zones) && !me.zones.length;
+            // (a node before "no zone" was a choice says it as a list of one zone without a name)
+            const noZones = Array.isArray(me.zones) && (!me.zones.length || noZoneList(me.zones));
             const zonesText = me.zones && me.zones.length ? `Use ${me.zones.length === 1 ? 'this zone' : 'these zones'}: ${listWords(me.zones.map((z) => (state.zones[z] ? state.zones[z].name : z)))}` : 'Use every zone of this node';
             // What they can do here, in the words the owner's People & access screen uses, from what
             // the node says they can (GET /v1/me's `can`); own sign-ins only where the node lets them.
@@ -10985,9 +10988,13 @@
             const onHs = !!(hs.configured && hs.reachable);
             const kinds = onHs ? ['homeserver_music', 'homeserver', 'music'] : ['music'];
             const zones = zoneList().filter((z) => z.id !== BROWSER);
-            // The zones open to the people you add: none saved is every zone. One that is saved but not
-            // among the node's zones now stays in the list (and is saved again), said as "not here now".
-            const open = zl.zones;
+            // The zones open to the people you add: none saved is every zone, unless the node says no
+            // zone at all is the choice (`none`, or from a node before that the list of one zone
+            // without a name: they then play in their own browser or app only). One that is saved but
+            // not among the node's zones now stays in the list (and is saved again), said as "not here
+            // now".
+            const noZone = !zl.error && (zl.none === true || noZoneList(zl.zones));
+            const open = zl.zones.filter((id) => id !== '');
             const zoneName = (id) => { const z = zones.find((x) => x.id === id) || state.zones[id]; return z ? z.name : null; };
             const gone = open.filter((id) => !zones.some((z) => z.id === id));
             // (the node's settings could not be read: no choice is known, and none is shown as made)
@@ -11021,7 +11028,7 @@
             const whoLabel = (p) => p.name || `the person with the key ${shortKey(p.key)}`;
             const plays = (p) => !!p.music_enabled && p.access !== 'homeserver';
             const signInsOf = (p) => (Array.isArray(p.sign_ins) ? p.sign_ins : []);
-            const says = (p) => (plays(p) ? `Plays music here, ${zonesPhrase}${policyRow ? `, ${policyRow[3]}` : ''}.` : p.access === 'homeserver' ? 'Has storage on this node’s homeserver. No music.' : 'Music is switched off for them.');
+            const says = (p) => (plays(p) ? `Plays music here${noZone ? ' in their own browser or app only' : `, ${zonesPhrase}`}${policyRow ? `, ${policyRow[3]}` : ''}.` : p.access === 'homeserver' ? 'Has storage on this node’s homeserver. No music.' : 'Music is switched off for them.');
             const store = (p) => {
               if (p.access === 'music') return '';
               const off = p.homeserver_enabled === false ? '<span class="warn-text">Their homeserver account is switched off: they can read and delete, not save.</span> ' : '';
@@ -11065,14 +11072,15 @@
               + (r.invites.length ? `<div class="set-row set-block" data-pinv-head><div class="set-label"><div class="set-name">Invites not used yet</div><p class="set-help">Taking one off this list doesn’t cancel it: an invite already sent stays usable on the homeserver.</p></div></div>${r.invites.map(invite).join('')}` : '');
 
             // 3. What the people you add can and can't do, whoever they are
-            const canBody = `<div class="set-row set-block" id="pcando">${canLists({ has: (cap) => LISTENER_CAN.has(cap) && (cap !== 'own_sign_in' || (!!policy && policy !== 'node')), their: 'their', owners: 'your', zones: 'Use the zones you open to them', canTitle: 'They can', cantTitle: 'They can’t' })}</div>`;
+            const canBody = `<div class="set-row set-block" id="pcando">${canLists({ has: (cap) => LISTENER_CAN.has(cap) && (cap !== 'own_sign_in' || (!!policy && policy !== 'node')) && !(cap === 'zone_use' && noZone), their: 'their', owners: 'your', zones: 'Use the zones you open to them', noZone: noZone ? 'Play on a zone: none is open to them' : '', canTitle: 'They can', cantTitle: 'They can’t' })}</div>`;
 
-            // 4. The zones they can play on: every zone, or only the ones ticked (never "only these" with none)
+            // 4. The zones they can play on: every zone, only the ones ticked (never "only these" with
+            // none ticked), or no zone at all
             const zoneOpts = [...zones.map((z) => [z.id, z.name]), ...gone.map((id) => [id, zoneName(id) || `${id} (not here now)`])];
-            const zMode = zl.error ? '' : open.length ? 'some' : 'all';
+            const zMode = zl.error ? '' : noZone ? 'none' : open.length ? 'some' : 'all';
             const zonesBody = block('', zl.error ? `<span class="pa-err">Couldn’t read the zones: ${esc(zl.error)}.</span> Until they are saved again, the people you add can play on no zone: choose and save.` : 'The same for everyone you add.',
               zoneOpts.length
-                ? `<div class="pa-zmode" role="radiogroup" aria-label="Zones the people you add can play on"><label class="check"><input type="radio" name="pzmode" value="all" ${zMode === 'all' ? 'checked' : ''}> Every zone</label><label class="check"><input type="radio" name="pzmode" value="some" ${zMode === 'some' ? 'checked' : ''}> Only these</label></div><div class="chips pa-zones" id="pzones" role="group" aria-label="Only these zones" ${zMode === 'some' ? '' : 'hidden'}>${zoneOpts.map(([id, name]) => `<label class="chip"><input type="checkbox" value="${esc(id)}" ${open.includes(id) ? 'checked' : ''}> ${esc(name)}</label>`).join('')}</div><p class="field-err small" id="pzerr" role="alert" hidden></p><div class="actions"><button class="btn" id="pzsave">Save zones</button></div>`
+                ? `<div class="pa-zmode" role="radiogroup" aria-label="Zones the people you add can play on"><label class="check"><input type="radio" name="pzmode" value="all" ${zMode === 'all' ? 'checked' : ''}> Every zone</label><label class="check"><input type="radio" name="pzmode" value="some" ${zMode === 'some' ? 'checked' : ''}> Only these</label><label class="check"><input type="radio" name="pzmode" value="none" aria-describedby="pznonehelp" ${zMode === 'none' ? 'checked' : ''}> No zone</label></div><p class="set-help pa-zhelp" id="pznonehelp" ${zMode === 'none' ? '' : 'hidden'}>They play in their own browser or app only.</p><div class="chips pa-zones" id="pzones" role="group" aria-label="Only these zones" ${zMode === 'some' ? '' : 'hidden'}>${zoneOpts.map(([id, name]) => `<label class="chip"><input type="checkbox" value="${esc(id)}" ${open.includes(id) ? 'checked' : ''}> ${esc(name)}</label>`).join('')}</div><p class="field-err small" id="pzerr" role="alert" hidden></p><div class="actions"><button class="btn" id="pzsave">Save zones</button></div>`
                 : '<p class="muted small">No zones yet.</p>');
 
             // 5. Whose TIDAL, Qobuz and Spotify sign-ins they play with (owner, 2026-11-03)
@@ -11256,17 +11264,29 @@
                 $$('input[name="pzmode"]', box).forEach((i) => { i.checked = i.value === draft.zones.mode; });
                 $$('input', list).forEach((i) => { i.checked = draft.zones.picked.includes(i.value); });
               }
-              const fitZones = () => { list.hidden = mode() !== 'some'; };
+              const fitZones = () => { list.hidden = mode() !== 'some'; $('#pznonehelp', box).hidden = mode() !== 'none'; };
               $$('input[name="pzmode"]', box).forEach((i) => i.onchange = () => { zonesTouched = true; say(''); fitZones(); }); fitZones();
               $$('input', list).forEach((i) => i.onchange = () => { zonesTouched = true; say(''); });
               pzs.onclick = async () => {
                 const m = mode(); const picked = $$('input:checked', list).map((i) => i.value);
-                if (!m) { say('Choose “Every zone” or “Only these” first.'); $('input[name="pzmode"]', box).focus(); return; }
+                if (!m) { say('Choose “Every zone”, “Only these” or “No zone” first.'); $('input[name="pzmode"]', box).focus(); return; }
                 // ("Only these" with none ticked would save an empty list, which the node reads as every zone)
-                if (m === 'some' && !picked.length) { say('Tick at least one zone, or choose “Every zone”.'); $('input', list).focus(); return; }
+                if (m === 'some' && !picked.length) { say('Tick at least one zone, or choose “Every zone” or “No zone”.'); $('input', list).focus(); return; }
                 say('');
-                const sent = m === 'all' ? [] : picked;
-                try { await api('PUT', '/people/zones', { zones: sent }); toast(sent.length ? `The people you add can play on ${listWords(sent.map((id) => zoneName(id) || id))}` : 'The people you add can play on every zone'); } catch (e) { toast(e.message, 'error'); return; }
+                const sent = m === 'some' ? picked : [];
+                // No zone goes out as `none` with the list of one zone without a name: a node before
+                // `none` keeps that list, and it opens no zone there either (an empty list would be
+                // every zone: the opposite of what was asked)
+                let saved;
+                try { saved = await api('PUT', '/people/zones', m === 'none' ? { zones: [''], none: true } : { zones: sent }); } catch (e) { toast(e.message, 'error'); return; }
+                if (m === 'none' && !(saved && (saved.none === true || noZoneList(saved.zones)))) {
+                  // The node answered and did not keep it: the screen is drawn again from what the
+                  // node has now, and says so where the choice is
+                  await loadPeople({ fresh: 'zones', focus: ['pzsave'] });
+                  const again = $('#pzerr', $('#peoplebox') || box); if (again) { again.textContent = 'This node did not keep “No zone”. The choice above is what it has now.'; again.hidden = false; }
+                  return;
+                }
+                toast(m === 'none' ? 'The people you add play in their own browser or app only' : sent.length ? `The people you add can play on ${listWords(sent.map((id) => zoneName(id) || id))}` : 'The people you add can play on every zone');
                 await loadPeople({ fresh: 'zones', focus: ['pzsave'] });
               };
             }

@@ -19,6 +19,7 @@ Newest first. Dates are when the change landed on `main`.
   - **Add someone** keeps its three kinds. After adding someone by their key the page says what to send them: this node's address and "log in with Pubky Ring", with Copy (opened at an address that only works on the node's own machine, such as 127.0.0.1, it says to send the node's address on your network instead). "Forget" on an unused invite is now "Take off the list".
   - **What people you add can do**, as two short lists (can, can't).
   - **Zones they can play on** is "Every zone" or "Only these". "Only these" with nothing ticked is refused: before, saving with nothing ticked opened every zone.
+  - **No zone** is a third choice there: the people you add then play in their own browser or app only, and their own Settings list a zone under what they can't do. `PUT /v1/people/zones` takes `none: true` for it; a zone id that is empty is refused.
   - **Whose music services they play with** moved here from Service apps, which keeps a row that points here.
   - **Browsers and apps signed in as you**, with Log out for this one, Sign out for each other one and Sign out all others, and **Password for apps (API token)**, moved here from About, which keeps a row that points here.
   - **Party** is unchanged, except that a party list the node could not read says so with Retry instead of showing no parties. The same goes for the people: a list that could not be read says so with Retry, and the rest of the screen keeps working.

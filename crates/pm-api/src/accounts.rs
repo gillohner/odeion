@@ -1009,8 +1009,9 @@ pub(crate) fn listener_report_membership(s: &NodeState, token: &str, key: &str) 
 }
 
 /// The zones a listener may play on: the owner's list, or every zone when none is set
-/// (`None`). A list that can't be read, or isn't a list of zone ids, is an error: listeners
-/// are then kept off every zone until the owner sets the list again, never let onto all of them.
+/// (`None`). "No zone" is a list that names no zone a node can have (`NO_ZONE`). A list that
+/// can't be read, or isn't a list of zone ids, is an error: listeners are then kept off every
+/// zone until the owner sets the list again, never let onto all of them.
 pub fn listener_zones(s: &NodeState) -> Result<Option<Vec<String>>, ApiError> {
     let raw = s
         .library
@@ -1046,6 +1047,10 @@ pub const NODE_SOURCES_ONLY: &str =
 /// Whether a listener may use this zone: the owner's list, or every zone when none is set; none
 /// while the list can't be read.
 pub(crate) fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
+    // No zone has an empty id, and "no zone" is stored as a list of that one (`NO_ZONE`)
+    if zone.is_empty() {
+        return Some("the owner has not opened that zone to listeners");
+    }
     match listener_zones(s) {
         Err(_) => Some("the owner's zone list can't be read"),
         // A listen-along group is open when every zone it plays for is (presence.rs)
@@ -1166,9 +1171,13 @@ pub(crate) async fn me(
     axum::Extension(c): axum::Extension<Caller>,
 ) -> ApiResult<Me> {
     Ok(Json(Me {
-        // A list that can't be read opens no zone
+        // A list that can't be read opens no zone; "no zone" is an empty list too
         zones: (c.role == Role::Listener)
-            .then(|| listener_zones(&s).unwrap_or(Some(Vec::new())))
+            .then(|| match listener_zones(&s) {
+                Ok(None) => None,
+                Ok(stored) => Some(zones_shown(stored).zones),
+                Err(_) => Some(Vec::new()),
+            })
             .flatten(),
         can: crate::access::can(&s, &c),
         role: c.role,
@@ -1246,27 +1255,57 @@ pub(crate) async fn sign_out(
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ListenerZones {
-    /// Zone ids listeners may play on; empty = every zone.
+    /// Zone ids listeners may play on; empty = every zone, unless `none`.
     pub zones: Vec<String>,
+    /// No zone at all: listeners play in their own browser or app only.
+    #[serde(default)]
+    pub none: bool,
 }
 
-/// `GET /v1/people/zones`: the zones open to listeners (empty = all).
+/// How "no zone" is stored: a list that names one zone no node has (zone ids are never empty).
+/// The check needs no case of its own, and an older version reads it as the same thing.
+const NO_ZONE: &str = "";
+
+/// The zones as [`listener_zones`] read them, for `GET /v1/people/zones` and `GET /v1/me`.
+fn zones_shown(stored: Option<Vec<String>>) -> ListenerZones {
+    let stored = stored.unwrap_or_default();
+    ListenerZones {
+        none: !stored.is_empty() && stored.iter().all(|z| z == NO_ZONE),
+        zones: stored.into_iter().filter(|z| z != NO_ZONE).collect(),
+    }
+}
+
+/// `GET /v1/people/zones`: the zones open to listeners (`zones` empty = all, unless `none`).
 pub(crate) async fn get_zones(State(s): State<Arc<NodeState>>) -> ApiResult<ListenerZones> {
-    Ok(Json(ListenerZones {
-        zones: listener_zones(&s)?.unwrap_or_default(),
-    }))
+    Ok(Json(zones_shown(listener_zones(&s)?)))
 }
 
-/// `PUT /v1/people/zones {zones}`.
+/// `PUT /v1/people/zones {zones, none?}`: these zones, every zone (`zones` empty), or no zone
+/// (`none`). An empty zone id is refused, except next to `none`.
 pub(crate) async fn set_zones(
     State(s): State<Arc<NodeState>>,
     Json(b): Json<ListenerZones>,
 ) -> ApiResult<ListenerZones> {
+    let sent = b.zones.len();
+    let zones: Vec<String> = b.zones.into_iter().filter(|z| !z.trim().is_empty()).collect();
+    if b.none && !zones.is_empty() {
+        return Err(ApiError::bad_request(
+            "either the zones people may play on, or none: not both",
+        ));
+    }
+    // An empty id names no zone. Dropping it could leave an empty list, which is every zone:
+    // without `none` it is refused (with `none`, a page may send one for a node before this)
+    if !b.none && zones.len() != sent {
+        return Err(ApiError::bad_request(
+            "a zone id is empty: send the zones' ids, or none: true for no zone",
+        ));
+    }
+    let stored = if b.none { vec![NO_ZONE.to_string()] } else { zones };
     s.library
         .lock()
         .expect("library poisoned")
-        .set_setting(ZONES, &serde_json::to_string(&b.zones).expect("serializes"))?;
-    Ok(Json(b))
+        .set_setting(ZONES, &serde_json::to_string(&stored).expect("serializes"))?;
+    Ok(Json(zones_shown(Some(stored))))
 }
 
 /// Signed-in devices per person, for People.
