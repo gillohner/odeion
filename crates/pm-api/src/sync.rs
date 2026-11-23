@@ -1546,6 +1546,14 @@ impl PubkySync {
         }
     }
 
+    /// When the history was deleted, as the settings copy on the homeserver says (another node
+    /// may have done it). `None` when there is no copy, it can't be read, or no delete.
+    async fn cleared_elsewhere(&self) -> Option<i64> {
+        let v = self.homeserver.read_node_settings(&self.session).await.ok()??;
+        let backup: SettingsBackup = serde_json::from_value(v).ok()?;
+        backup.settings.get(crate::listens::CLEARED)?.parse().ok()
+    }
+
     /// Bring the owner's settings onto this node from the private folder.
     /// `only_if_fresh`: skip when the node already has folders or a contact
     /// (a running node keeps what it has). Returns what was applied.
