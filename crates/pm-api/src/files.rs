@@ -601,24 +601,78 @@ async fn clear_parts(dest: &Path, name: &str) {
         return;
     }
     let dir = dest.join(name);
-    match tokio::fs::symlink_metadata(&dir).await {
+    let at = dir.clone();
+    let _ = tokio::task::spawn_blocking(move || clear_numbered_parts(&at)).await;
+    let _ = tokio::fs::remove_dir(&dir).await;
+}
+
+/// `<n>.part` (digits only): a name a bring gave a part.
+fn numbered_part(n: &[u8]) -> bool {
+    n.strip_suffix(b".part")
+        .is_some_and(|k| !k.is_empty() && k.iter().all(u8::is_ascii_digit))
+}
+
+/// Remove the numbered part files in `dir`. On Unix the folder is opened once without following a
+/// link, and its entries are listed and removed through that handle, so a folder swapped for a link
+/// meanwhile cannot send the removals elsewhere. (Removing a name never touches what a link there
+/// leads to.)
+#[cfg(unix)]
+fn clear_numbered_parts(dir: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return;
+    };
+    // SAFETY: a NUL-terminated path that lives through the call
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return;
+    }
+    // SAFETY: `fd` is an open folder; on success the stream owns it, on failure it is closed here
+    let dirp = unsafe { libc::fdopendir(fd) };
+    if dirp.is_null() {
+        // SAFETY: `fd` is still ours
+        unsafe { libc::close(fd) };
+        return;
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `dirp` is an open stream; an entry is read before the next call
+        let ent = unsafe { libc::readdir(dirp) };
+        if ent.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is a NUL-terminated name inside the entry
+        let name = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
+        if numbered_part(name.to_bytes()) {
+            names.push(name.to_owned());
+        }
+    }
+    for n in &names {
+        // SAFETY: the stream's folder and a NUL-terminated name
+        unsafe { libc::unlinkat(libc::dirfd(dirp), n.as_ptr(), 0) };
+    }
+    // SAFETY: closes the stream and its folder, once
+    unsafe { libc::closedir(dirp) };
+}
+
+#[cfg(not(unix))]
+fn clear_numbered_parts(dir: &Path) {
+    match std::fs::symlink_metadata(dir) {
         Ok(m) if m.is_dir() => {}
         _ => return,
     }
-    if let Ok(mut rd) = tokio::fs::read_dir(&dir).await {
-        while let Ok(Some(e)) = rd.next_entry().await {
-            let n = e.file_name();
-            let n = n.to_string_lossy();
-            let numbered = n
-                .strip_suffix(".part")
-                .is_some_and(|k| !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()));
-            // (removing a name never touches what a link there leads to)
-            if numbered {
-                let _ = tokio::fs::remove_file(e.path()).await;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if numbered_part(e.file_name().to_string_lossy().as_bytes()) {
+                let _ = std::fs::remove_file(e.path());
             }
         }
     }
-    let _ = tokio::fs::remove_dir(&dir).await;
 }
 
 /// The bring record ([`BRING_RESUME_KEY`]), if there is one that reads.
@@ -729,7 +783,9 @@ async fn rename_noreplace(from: &Path, to: &Path) -> Option<std::io::Result<()>>
 
 /// Copy `part` into a file made only when the name `target` is free (one step), never a
 /// rename, which would replace a file that appeared since. What a failed copy made goes, and
-/// only that: a file another put under the name meanwhile stays.
+/// only that: a file another put under the name meanwhile stays. (Between the look and the
+/// removal another process could still swap the file; that needs write access to the folder,
+/// which can remove or replace any file there anyway.)
 async fn copy_new(part: &Path, target: &Path) -> std::io::Result<()> {
     let mut out = tokio::fs::OpenOptions::new()
         .write(true)
