@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **Imported songs land on the right artist's song.** A playlist import, a Roon export (with its bookmarks and tags), a play reported by an app and a Subsonic app's lyrics request matched a line by its title when no song of that title and artist was found, so "Hurt" by Johnny Cash could land on Nine Inch Nails' "Hurt"; and a line naming a file took the library's only file of that name wherever it was. Now a line that names an artist matches only that artist's song (names compared without case, accents, punctuation or a leading "the"; a credit naming several artists matches any of them; "Various Artists" names no one), and a file of the same name in another place is taken only when its folders, or its title and artist, agree. A line that matches nothing is listed in the import's report instead.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.

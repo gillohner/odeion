@@ -5498,6 +5498,15 @@ fn match_key(s: &str) -> String {
     fold(s.strip_prefix("the ").unwrap_or(&s))
 }
 
+/// An artist's name for matching: [`match_key`], or for a name of punctuation only ("!!!") the
+/// name itself in lower case, so it names someone.
+fn artist_key(s: &str) -> String {
+    match match_key(s) {
+        k if k.is_empty() => s.trim().to_lowercase(),
+        k => k,
+    }
+}
+
 /// Lower case, letters and digits only (Latin letters without their marks), "&" and "+" read as
 /// "and".
 fn fold(s: &str) -> String {
@@ -5553,21 +5562,21 @@ fn same_title(a: &str, b: &str) -> bool {
 /// album artist.
 fn by_artist(t: &Track, artist: &str) -> bool {
     // The whole credit and the artists it names, split as the library splits credits
-    let mut wanted = vec![match_key(artist)];
-    wanted.extend(crate::credits::split_credit(artist).iter().map(|a| match_key(a)));
+    let mut wanted = vec![artist_key(artist)];
+    wanted.extend(crate::credits::split_credit(artist).iter().map(|a| artist_key(a)));
     wanted.retain(|k| !k.is_empty());
     let album_artist = own_album_artist(t);
     t.artists
         .iter()
         .map(|a| a.name.as_str())
         .chain(album_artist)
-        .map(match_key)
+        .map(artist_key)
         .any(|have| !have.is_empty() && wanted.contains(&have))
 }
 
 /// A track that names no artist at all, nor an album artist (nothing to disagree with).
 fn no_artist(t: &Track) -> bool {
-    t.artists.iter().all(|a| match_key(&a.name).is_empty()) && own_album_artist(t).is_none()
+    t.artists.iter().all(|a| artist_key(&a.name).is_empty()) && own_album_artist(t).is_none()
 }
 
 /// The album artist when it names someone ("Various Artists" names no one).
@@ -5575,7 +5584,7 @@ fn own_album_artist(t: &Track) -> Option<&str> {
     t.album
         .as_ref()
         .and_then(|a| a.album_artist.as_deref())
-        .filter(|a| !matches!(match_key(a).as_str(), "" | "variousartists" | "va"))
+        .filter(|a| !matches!(artist_key(a).as_str(), "" | "variousartists" | "va"))
 }
 
 fn track_length(t: &Track) -> Option<u64> {
@@ -8563,5 +8572,25 @@ mod identify_tests {
             path_of(lib.resolve_import(&converted).unwrap()).as_deref(),
             Some(intro)
         );
+    }
+    /// An artist named in punctuation only ("!!!") names someone: an entry by another artist
+    /// with the same title is not theirs, one naming "!!!" is.
+    #[test]
+    fn an_artist_named_in_punctuation_only_is_someone() {
+        let chk = import_test_track("/m/chk/Heart.flac", "Heart of Hearts", Some("!!!"), 100);
+        assert!(!no_artist(&chk));
+        assert!(!by_artist(&chk, "Someone Else"));
+        assert!(by_artist(&chk, "!!!"));
+        assert!(!by_artist(&chk, "?"));
+        let lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&chk).unwrap();
+        assert!(lib
+            .find_by_title_artist("Heart of Hearts", Some("Someone Else"))
+            .unwrap()
+            .is_none());
+        assert!(lib
+            .find_by_title_artist("Heart of Hearts", Some("!!!"))
+            .unwrap()
+            .is_some());
     }
 }
