@@ -13,6 +13,7 @@ pub mod about;
 pub mod access;
 pub mod access_token;
 pub mod activity;
+pub mod app_passwords;
 pub mod archive;
 pub mod art;
 pub mod artist_info;
@@ -237,6 +238,12 @@ fn v1_routes() -> access::Routes {
         .route("/node/apps/{id}", put(apps::put))
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/node/token", post(access_token::replace))
+        // App passwords: one per app, instead of the API token (app_passwords.rs)
+        .route(
+            "/node/app-passwords",
+            get(app_passwords::get).post(app_passwords::post),
+        )
+        .route("/node/app-passwords/{id}", delete(app_passwords::delete))
         // Usage insights, the owner's side (usage.rs; listeners are refused under /node too)
         .route("/node/usage", get(usage::status).put(usage::set_gate))
         .route("/node/usage/clear", post(usage::clear_all))
@@ -1069,13 +1076,19 @@ async fn auth(
     let at = access::At::of(route, params.iter().flat_map(|p| p.iter()));
     let refusal = access::decide(&state, &caller, access::required(req.method(), route), &at);
     if let Some(why) = refusal {
+        // (an app is told as it is, not as a person would be)
+        if caller.role == accounts::Role::App {
+            return ApiError::new(StatusCode::FORBIDDEN, format!("{why}.")).into_response();
+        }
         return accounts::refused(why).into_response();
     }
     // Who changed a zone last decides whether its plays are the owner's listens (listens.rs).
     // The zone is the one the router found in the path, decoded: the one the handler acts on
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
         if let Some(zone) = at.zone.filter(|_| listens::zone_of_path(route).is_some()) {
-            listens::zone_changed_by(&state, zone, caller.role == accounts::Role::Owner);
+            // (An app password's are the owner's)
+            let owners = accounts::Who::of(&caller) == accounts::Who::Owner;
+            listens::zone_changed_by(&state, zone, owners);
         }
     }
     // Listeners (and, to be safe, party guests) see file names, not where the owner keeps files
@@ -1845,7 +1858,11 @@ async fn zones(
     Json(events::visible(&s, &c, s.zones.list()))
 }
 
-async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZone>) -> ApiResult<ZoneState> {
+async fn create_zone(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<accounts::Caller>,
+    Json(body): Json<CreateZone>,
+) -> ApiResult<ZoneState> {
     if body.name.trim().is_empty() {
         return Err(ApiError::bad_request("zone name is empty"));
     }
@@ -1857,6 +1874,13 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
     }
     if ids.is_empty() {
         return Err(ApiError::bad_request("give `output` or `outputs`"));
+    }
+    // An app password groups speakers (and ungroups them, `delete_zone`): two or more
+    if caller.role == accounts::Role::App && ids.iter().collect::<std::collections::HashSet<_>>().len() < 2 {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "An app password groups two speakers or more; it doesn't add a zone.",
+        ));
     }
     let output = zone_output(&s, body.name.trim(), &ids).await?;
     let zone = s.create_zone(body.name.trim(), output);
@@ -1947,7 +1971,24 @@ async fn zone(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiRes
 async fn delete_zone(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    axum::Extension(caller): axum::Extension<accounts::Caller>,
 ) -> Result<StatusCode, ApiError> {
+    // An app password ungroups (`access::Capability::ZoneGroup`): a zone on a group of speakers
+    // (an output that is no one speaker), not a speaker's own zone or someone's listen-along group
+    if caller.role == accounts::Role::App {
+        let out = zone_of(&s, &id)?.output().id();
+        // (the node's groups are `group:…`; Sonos, HEOS and BluOS groups `<kind>-group:…`)
+        let group = out
+            .0
+            .split_once(':')
+            .is_some_and(|(kind, _)| kind == "group" || kind.ends_with("-group"));
+        if !group || presence::is_along(&s, &id) {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "An app password ungroups speakers; it doesn't remove a zone.",
+            ));
+        }
+    }
     // A listen-along group ends as when its host ends it: the music goes back, not lost
     if presence::delete_group(&s, &id).await? {
         return Ok(StatusCode::NO_CONTENT);
@@ -2017,9 +2058,7 @@ async fn enqueue(
         if it.uri.is_empty() {
             return Err(ApiError::bad_request("item uri is empty"));
         }
-        if caller.role != accounts::Role::Owner {
-            accounts::check_listener_item(&mut it)?;
-        }
+        accounts::check_item(&caller, &mut it)?;
         items.push(it);
     }
     if items.is_empty() {
@@ -2410,9 +2449,7 @@ async fn load(
         if it.uri.is_empty() {
             return Err(ApiError::bad_request("item uri is empty"));
         }
-        if caller.role != accounts::Role::Owner {
-            accounts::check_listener_item(it)?;
-        }
+        accounts::check_item(&caller, it)?;
         // Moved by this person from their browser: played with their accounts (the owner's
         // whole: no fetch limit left from someone else's queue either)
         it.by = accounts::Who::of(&caller).by();
@@ -28266,5 +28303,405 @@ exec sleep 300
         assert_eq!(st, StatusCode::NOT_FOUND);
         let (_, unfinished) = people().await;
         assert!(unfinished.is_null(), "{unfinished}");
+    }
+
+    /// An app password (Settings › People & access › Apps) plays, controls zones and browses as
+    /// the owner, and nothing else: no settings, people, tokens, sign-ins or library changes, never
+    /// a file path in a queue, and never the API token in what it reads. Subsonic takes it as a
+    /// password too. Removing it, or the app signing out, stops it at once; the API token stays.
+    #[tokio::test]
+    async fn an_app_password_plays_and_browses_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("music")).unwrap();
+        write_wav(&dir.path().join("music/one.wav"), 4410);
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        let owner = Some("s3cret");
+        // One song in the library
+        let (st, _, _) = send_as(
+            &app,
+            "POST",
+            "/v1/library/scan",
+            owner,
+            &[],
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        for _ in 0..500 {
+            if !s.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!s.is_scanning());
+        // Old nodes have none: the list is empty, nothing else changes
+        let (st, v, _) = send_as(&app, "GET", "/v1/node/app-passwords", owner, &[], None).await;
+        assert_eq!((st, &v), (StatusCode::OK, &serde_json::json!([])));
+        let make = |name: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                send_as(
+                    &app,
+                    "POST",
+                    "/v1/node/app-passwords",
+                    owner,
+                    &[],
+                    Some(serde_json::json!({"name": name})),
+                )
+                .await
+            }
+        };
+        let (st, _, _) = make(serde_json::json!("  ")).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "a name is needed");
+        let (st, ha, _) = make(serde_json::json!(" Home Assistant ")).await;
+        assert_eq!(st, StatusCode::OK, "{ha}");
+        let pw = ha["password"].as_str().unwrap().to_string();
+        let id = ha["id"].as_str().unwrap().to_string();
+        assert!(pw.starts_with(app_passwords::PREFIX) && pw.len() > 40, "{ha}");
+        assert_eq!(ha["name"], "Home Assistant");
+        let (_, sub, _) = make(serde_json::json!("Symfonium")).await;
+        let sub_pw = sub["password"].as_str().unwrap().to_string();
+        // Listed without the password
+        let (_, listed, _) = send_as(&app, "GET", "/v1/node/app-passwords", owner, &[], None).await;
+        assert_eq!(listed.as_array().unwrap().len(), 2, "{listed}");
+        assert!(!listed.to_string().contains(&pw) && !listed.to_string().contains(&sub_pw));
+        assert_eq!(listed[0]["name"], "Symfonium", "newest first: {listed}");
+        assert!(listed[1]["last_used"].is_null());
+
+        let mine = Some(pw.as_str());
+        // Who it is, and what it can do
+        let (st, me, _) = send_as(&app, "GET", "/v1/me", mine, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{me}");
+        assert_eq!(me["role"], "app");
+        let can: Vec<&str> = me["can"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            can,
+            [
+                "artwork",
+                "session",
+                "library",
+                "zone_list",
+                "zone_use",
+                "collections",
+                "own_play",
+                "zone_group"
+            ],
+            "{me}"
+        );
+        // Plays and browses: every zone, the library, the owner's collections and play order
+        let (st, zones, _) = send_as(&app, "GET", "/v1/zones", mine, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{zones}");
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        for (method, uri) in [
+            ("GET", "/v1/library/albums".to_string()),
+            ("GET", "/v1/outputs".to_string()),
+            ("GET", "/v1/playlists".to_string()),
+            ("GET", "/v1/play-order".to_string()),
+            ("GET", format!("/v1/zones/{zid}")),
+            ("POST", format!("/v1/zones/{zid}/shuffle")),
+        ] {
+            let (st, v, _) = send_as(&app, method, &uri, mine, &[], Some(serde_json::json!({}))).await;
+            assert!(st.is_success(), "{method} {uri}: {st} {v}");
+        }
+        // Noted as used today
+        let (_, listed, _) = send_as(&app, "GET", "/v1/node/app-passwords", owner, &[], None).await;
+        let used = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id.as_str())
+            .unwrap();
+        assert!(used["last_used"].is_i64(), "{listed}");
+        // Nothing else: settings, people, tokens and app passwords, sign-ins, the library, backups
+        for (method, uri) in [
+            ("GET", "/v1/node/settings"),
+            ("POST", "/v1/node/token"),
+            ("GET", "/v1/node/app-passwords"),
+            ("POST", "/v1/node/app-passwords"),
+            ("GET", "/v1/people"),
+            ("GET", "/v1/me/sign-ins"),
+            ("DELETE", "/v1/me/sign-ins"),
+            ("GET", "/v1/me/prefs"),
+            ("PUT", "/v1/tags"),
+            ("DELETE", "/v1/me/listens"),
+            ("POST", "/v1/library/scan"),
+            ("POST", "/v1/node/settings/backup"),
+        ] {
+            let (st, v, _) = send_as(&app, method, uri, mine, &[], Some(serde_json::json!({}))).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{method} {uri}: {v}");
+        }
+        let (_, v, _) = send_as(&app, "GET", "/v1/people", mine, &[], None).await;
+        let why = v["error"].as_str().unwrap();
+        assert!(why.contains("app password") && !why.contains("listener"), "{v}");
+        // A queue takes library songs and web links, on the home network too (an announcement
+        // from Home Assistant), fetched only where an app's may be; never a file
+        let queue = format!("/v1/zones/{zid}/queue");
+        for uri in ["/etc/hosts", "file:///etc/hosts", "relative/song.flac"] {
+            let (st, v, _) = send_as(
+                &app,
+                "POST",
+                &queue,
+                mine,
+                &[],
+                Some(serde_json::json!({"items": [{"uri": uri}]})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{uri}: {v}");
+        }
+        let tts = "http://192.168.1.20:8123/api/tts_proxy/hello.mp3";
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            &queue,
+            mine,
+            &[],
+            Some(serde_json::json!({"items": [{"uri": format!(" {tts} ")}], "at": "end"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let queued = s.zones.get(&pm_zones::ZoneId::new(&zid)).unwrap().state();
+        let it = queued
+            .queue
+            .iter()
+            .find(|q| q.uri == tts)
+            .expect("queued as checked");
+        assert_eq!(it.limit, Some(accounts::APP_FETCH));
+        assert_eq!(it.by, None, "the owner's");
+        // An app's answers go through what people's do (file names, not the owner's folders; and
+        // no sign-in of the node's in a link, which accounts::KnownSet now names app passwords in)
+        let folder = dir.path().join("music").to_string_lossy().into_owned();
+        let (_, t, _) = send_as(&app, "GET", "/v1/library/tracks?limit=5", owner, &[], None).await;
+        assert!(
+            t.to_string().contains(&folder),
+            "the owner's answer names the folder: {t}"
+        );
+        let (_, t, _) = send_as(&app, "GET", "/v1/library/tracks?limit=5", mine, &[], None).await;
+        assert!(
+            t.to_string().contains("one.wav") && !t.to_string().contains(&folder),
+            "{t}"
+        );
+        let (_, z, _) = send_as(&app, "GET", &format!("/v1/zones/{zid}"), mine, &[], None).await;
+        assert!(
+            !z.to_string().contains("s3cret") && !z.to_string().contains(&sub_pw),
+            "{z}"
+        );
+        let known = accounts::KnownTokens::lazy(&s);
+        assert!(
+            known.has(&sub_pw) && known.has("s3cret"),
+            "an app password is hidden like a sign-in"
+        );
+        // The speakers, and grouping them: yes; adding a speaker by address or tuning one: no
+        let (st, _, _) = send_as(
+            &app,
+            "POST",
+            "/v1/outputs/upnp",
+            mine,
+            &[],
+            Some(serde_json::json!({"address": "127.0.0.1:1"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _, _) = send_as(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/dsp"),
+            mine,
+            &[],
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        // Removing a speaker's own zone, no; grouping two speakers and ungrouping them, yes
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/zones/{zid}"), mine, &[], None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        assert!(
+            s.zones.get(&pm_zones::ZoneId::new(&zid)).is_some(),
+            "the zone is still there"
+        );
+        let a: Arc<dyn Output> = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        let b: Arc<dyn Output> = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }));
+        let (aid, bid) = (a.id(), b.id());
+        s.outputs.register(a);
+        s.outputs.register(b);
+        let (st, pair, _) = send_as(
+            &app,
+            "POST",
+            "/v1/zones",
+            mine,
+            &[],
+            Some(serde_json::json!({"name": "Kitchen + Den", "outputs": [aid.0, bid.0]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{pair}");
+        let pid = pair["id"].as_str().unwrap().to_string();
+        assert!(!pid.starts_with("group:"), "a zone's id is its name's: {pid}");
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/zones/{pid}"), mine, &[], None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+        assert!(s.zones.get(&pm_zones::ZoneId::new(&pid)).is_none());
+        // Making a collection public is the owner's (it is posted under their name)
+        for uri in ["/v1/collections/x/visibility", "/v1/playlists/x/visibility"] {
+            let (st, v, _) = send_as(
+                &app,
+                "PUT",
+                uri,
+                mine,
+                &[],
+                Some(serde_json::json!({"public": true})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{uri}: {v}");
+        }
+        // The live Spotify item is that exact link, nothing after it
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            &queue,
+            mine,
+            &[],
+            Some(serde_json::json!({"items": [{"uri": "librespot:connect/../etc/hosts"}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        // (and for a person, the same check)
+        let mut theirs = pm_zones::QueueItem::new("librespot:connect/../etc/hosts");
+        assert!(accounts::check_listener_item(&mut theirs).is_err());
+        let mut live = pm_zones::QueueItem::new(librespot::LIVE_URI);
+        assert!(accounts::check_listener_item(&mut live).is_ok());
+        // One speaker is no group: an app doesn't add zones it couldn't take away
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/zones",
+            mine,
+            &[],
+            Some(serde_json::json!({"name": "Alone", "outputs": [aid.0]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        // A collection an app makes is private, whatever it asks
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/collections",
+            mine,
+            &[],
+            Some(serde_json::json!({"name": "From the app", "public": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(
+            v.to_string().contains(r#""visibility":"private""#)
+                && !v.to_string().contains(r#""visibility":"public""#),
+            "{v}"
+        );
+
+        // Subsonic: the password, plain, hex or as a salted md5; not for a scan
+        let rest = |q: String| {
+            let app = app.clone();
+            async move {
+                let (_, v, _) = send_as(
+                    &app,
+                    "GET",
+                    &format!("/rest/{q}&u=pubky&v=1.16.1&c=t&f=json"),
+                    None,
+                    &[],
+                    None,
+                )
+                .await;
+                v["subsonic-response"].clone()
+            }
+        };
+        let salted = |pw: &str, salt: &str| {
+            use md5::Digest;
+            let mut h = md5::Md5::new();
+            h.update(pw.as_bytes());
+            h.update(salt.as_bytes());
+            hex::encode(h.finalize())
+        };
+        assert_eq!(rest(format!("ping?p={sub_pw}")).await["status"], "ok");
+        // (its answers name no file on the node's disk)
+        let songs = rest(format!("getRandomSongs?p={sub_pw}")).await;
+        assert_eq!(songs["status"], "ok", "{songs}");
+        assert!(
+            songs.to_string().contains(r#""title":"One""#),
+            "the song: {songs}"
+        );
+        assert!(!songs.to_string().contains("\"path\""), "{songs}");
+        let theirs = rest("getRandomSongs?p=s3cret".into()).await;
+        assert!(
+            theirs.to_string().contains("\"path\""),
+            "the owner's answer has it: {theirs}"
+        );
+        assert_eq!(
+            rest(format!("ping?p=enc:{}", hex::encode(&sub_pw))).await["status"],
+            "ok"
+        );
+        assert_eq!(
+            rest(format!("ping?t={}&s=abc123", salted(&sub_pw, "abc123"))).await["status"],
+            "ok"
+        );
+        assert_eq!(
+            rest(format!("ping?t={}&s=abc123", salted("s3cret", "abc123"))).await["status"],
+            "ok"
+        );
+        let wrong = rest(format!("ping?t={}&s=abc123", salted("pma_nope", "abc123"))).await;
+        assert_eq!(wrong["error"]["code"], 40, "{wrong}");
+        let scan = rest(format!("startScan?p={sub_pw}")).await;
+        assert_eq!(scan["error"]["code"], 50, "{scan}");
+        assert_eq!(rest("startScan?p=s3cret".into()).await["status"], "ok");
+
+        // Removed: that app stops at once, the other and the API token go on
+        let (st, _, _) = send_as(
+            &app,
+            "DELETE",
+            &format!("/v1/node/app-passwords/{id}"),
+            owner,
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _, _) = send_as(
+            &app,
+            "DELETE",
+            &format!("/v1/node/app-passwords/{id}"),
+            owner,
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _, _) = send_as(&app, "GET", "/v1/zones", mine, &[], None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _, _) = send_as(&app, "GET", "/v1/zones", Some(&sub_pw), &[], None).await;
+        assert_eq!(st, StatusCode::OK);
+        // An app that signs out gives its password up
+        let (st, v, _) = send_as(&app, "DELETE", "/v1/me/token", Some(&sub_pw), &[], None).await;
+        assert_eq!(
+            (st, &v["ended"]),
+            (StatusCode::OK, &serde_json::json!(true)),
+            "{v}"
+        );
+        assert_eq!(rest(format!("ping?p={sub_pw}")).await["error"]["code"], 40);
+        let (st, v, _) = send_as(&app, "GET", "/v1/node/app-passwords", owner, &[], None).await;
+        assert_eq!((st, v), (StatusCode::OK, serde_json::json!([])));
+        // At most 20 at once
+        for n in 0..20 {
+            assert_eq!(
+                make(serde_json::json!(format!("app {n}"))).await.0,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(make(serde_json::json!("one more")).await.0, StatusCode::CONFLICT);
     }
 }

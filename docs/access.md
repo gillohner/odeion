@@ -10,7 +10,8 @@ route that names no capability is the owner's alone, and the tests fail until it
 | :-- | :-- | :-- |
 | The owner's browser | logged in with Pubky Ring as the node's own identity | owner |
 | The owner's app (desktop, Android) | the same, as a separate sign-in: Log out in a browser does not end it | owner |
-| Anything with the API token | `PM_TOKEN`, `[api] token` or the token the node made (`<data>/api-token`): scripts, Home Assistant, a Subsonic app (as its password) | owner |
+| Anything with the API token | `PM_TOKEN`, `[api] token` or the token the node made (`<data>/api-token`): scripts, and apps not yet given a password of their own | owner |
+| An app with an app password | one the owner made for it in Settings › People & access › Apps: Home Assistant, a Subsonic app (as its password), a script | app |
 | A node without an API token (it then listens on its own machine only) | only requests from the node's own machine, addressed to `127.0.0.1` or `localhost` | owner |
 | A person you gave music access | logged in with Pubky Ring as someone in People with music on | listener |
 | A party guest | joined with a party's link | guest |
@@ -24,37 +25,39 @@ proxy that marks what it forwards (a forwarding header).
 
 ## What each role can do
 
-| Capability | What it covers | Owner | Listener | Guest |
-| :-- | :-- | :-: | :-: | :-: |
-| `artwork` | album covers | yes | yes | yes |
-| `party_guest` | the party they joined: its search and its queue | yes | | yes |
-| `session` | who am I, log out, the node's name and health, live updates | yes | yes | |
-| `library` | browse, search and play the shared library and the public catalogues | yes | yes | |
-| `zone_list` | the list of zones (each caller sees the ones they may use) | yes | yes | |
-| `zone_use` | a zone's queue, transport, volume, sleep timer | yes | on the zones the owner opened | |
-| `own` | their own bookmarks, collections, preferences, devices, presence, problem reports, sign-ins on this node | yes | yes | |
-| `own_play` | play with their own streaming sign-ins | yes | yes | |
-| `own_sign_in_state` | see their own streaming sign-ins, sign out of them | yes | yes | |
-| `own_sign_in` | sign in to their own TIDAL, Qobuz or Spotify | yes | unless the node plays everyone through its own sign-ins | |
-| `owner_music` | the owner's tags, reviews, history, smart collections, Home, radio stations, podcasts, follows, imports | yes | | |
-| `zone_manage` | add, remove and tune zones and speakers | yes | | |
-| `library_manage` | folders, scans, uploads, edits, hiding and deleting songs, identification, homeserver files | yes | | |
-| `settings` | the node's settings and service apps | yes | | |
-| `service_logins` | the node's own sign-ins at services and media servers | yes | | |
-| `people` | invites, music access, sign-ins of people, the zones open to them | yes | | |
-| `tokens` | the API token | yes | | |
-| `vault` | the sources vault: its devices and keys | yes | | |
-| `backup` | back up and restore | yes | | |
-| `identity` | the node's Pubky identity and its homeserver | yes | | |
-| `remote_access` | the tunnel | yes | | |
-| `party` | start and end parties | yes | | |
-| `diagnostics` | usage insights across the node, the speaker discovery report | yes | | |
+| Capability | What it covers | Owner | Listener | App | Guest |
+| :-- | :-- | :-: | :-: | :-: | :-: |
+| `artwork` | album covers | yes | yes | yes | yes |
+| `party_guest` | the party they joined: its search and its queue | yes | | | yes |
+| `session` | who am I, log out, the node's name and health, live updates | yes | yes | yes | |
+| `library` | browse, search and play the shared library and the public catalogues | yes | yes | yes | |
+| `zone_list` | the list of zones (each caller sees the ones they may use) | yes | yes | yes | |
+| `zone_use` | a zone's queue, transport, volume, sleep timer | yes | on the zones the owner opened | every zone | |
+| `collections` | their bookmarks and collections, and the order they play in | yes | yes | yes | |
+| `own` | their own preferences, devices, presence, problem reports, sign-ins on this node, making a collection public | yes | yes | | |
+| `own_play` | play with their own streaming sign-ins | yes | yes | yes | |
+| `own_sign_in_state` | see their own streaming sign-ins, sign out of them | yes | yes | | |
+| `own_sign_in` | sign in to their own TIDAL, Qobuz or Spotify | yes | unless the node plays everyone through its own sign-ins | | |
+| `owner_music` | the owner's tags, reviews, history, smart collections, Home, radio stations, podcasts, follows, imports | yes | | | |
+| `zone_manage` | add, remove and tune zones and speakers | yes | | | |
+| `zone_group` | see the speakers, group them into a zone and ungroup it | yes | | yes | |
+| `library_manage` | folders, scans, uploads, edits, hiding and deleting songs, identification, homeserver files | yes | | | |
+| `settings` | the node's settings and service apps | yes | | | |
+| `service_logins` | the node's own sign-ins at services and media servers | yes | | | |
+| `people` | invites, music access, sign-ins of people, the zones open to them | yes | | | |
+| `tokens` | the API token and the app passwords | yes | | | |
+| `vault` | the sources vault: its devices and keys | yes | | | |
+| `backup` | back up and restore | yes | | | |
+| `identity` | the node's Pubky identity and its homeserver | yes | | | |
+| `remote_access` | the tunnel | yes | | | |
+| `party` | start and end parties | yes | | | |
+| `diagnostics` | usage insights across the node, the speaker discovery report | yes | | | |
 
 `GET /v1/me` answers the caller's capabilities as `can`. The owner's list there leaves out
 `party_guest`: the guest routes answer a guest's own sign-in only.
 
-`own` also covers a person's play order, their usage choice, their own homeserver link and whose
-sign-ins they play with. `owner_music` also covers browsing a streaming service with the node's
+`own` also covers a person's usage choice, their own homeserver link and whose sign-ins they play
+with. `owner_music` also covers browsing a streaming service with the node's
 sign-ins.
 
 The owner opens zones to the people they added in Settings › People & access: every zone (so it is
@@ -83,6 +86,29 @@ another listener's. What they read of the library shows file names, not the owne
   at the next start.
 - The owner's sign-ins are never part of a backup, and a restore keeps the ones the node has.
 
+## App passwords
+
+An app password is for one app (Home Assistant, a Subsonic app, a script) instead of the API token.
+The owner makes one in Settings › People & access › Apps (`POST /v1/node/app-passwords {name}`); the
+node shows it once. With it the app plays, controls and groups zones, browses and searches the
+library and the owner's collections, all as the owner's (`app` in the table above); it can't change
+settings, people, the library, the API token or anyone's sign-ins, and its answers never show the
+API token or another password. Its queue takes library songs, the services' tracks and web links,
+on the home network too (spoken announcements), never a file path or a loopback address. It
+groups two speakers or more and ungroups them, but doesn't add a zone for one speaker or remove a
+speaker's own zone or someone's listen-along group. A collection it makes is private, and it can't
+make one public; one you made public stays public when the app changes it through `/v1`, and goes
+if it deletes it (a Subsonic app's save keeps a collection private, as it does with the API token).
+
+- `GET /v1/node/app-passwords` lists them (name, made, last used: never the password);
+  `DELETE /v1/node/app-passwords/{id}` removes one, and that app alone stops at once. An app that
+  logs out (`DELETE /v1/me/token`) gives its password up. A node keeps 20 at most.
+- Subsonic takes an app password as the password, plain, `enc:` or as a salted token; with one it
+  does everything a player does (recently and most played albums and scrobbles included, as the
+  owner's), not a library scan or changes to the radio stations, and its answers name no file paths.
+- The node keeps the passwords themselves (a Subsonic app's salted token needs them), on this node
+  only: never in a backup, and a restore keeps the node's own. Make a new token leaves them.
+
 ## Without a sign-in
 
 These routes sit outside the sign-in check (`OPEN` in `access.rs`; a test compares the list with
@@ -99,7 +125,7 @@ the routes the node serves). Each hands out nothing private, or checks a key or 
 | `/mb/ws/2/{*path}` | the MusicBrainz caching proxy: public data only, one upstream request a second |
 
 The web page's own files and the UPnP renderer (above) need no sign-in either. A Subsonic app signs
-in with the API token as its password (`/rest`). A node without an API token answers only its own
+in with an app password or the API token as its password (`/rest`). A node without an API token answers only its own
 machine.
 
 ## Adding a route

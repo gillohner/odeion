@@ -4,6 +4,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **Apps with their own password.** Settings › People & access has a new section, Apps with their own password: give Home Assistant, a Subsonic app or a script a password of its own instead of the node's password for apps (the API token). With it the app plays, controls and groups zones and browses the library and your collections, as yours; it can't change settings, people, the library, the API token or anyone's sign-ins, and what it reads never shows the API token. Each is listed with when it was made and last used, and Remove stops that app alone. Subsonic apps take one as their password (all three ways Subsonic sends it); with one, a library scan and changes to the radio stations are refused. The node shows a new password once, keeps at most 20, never puts them in a backup and keeps its own over a restore. API: `GET`/`POST /v1/node/app-passwords`, `DELETE /v1/node/app-passwords/{id}`; `GET /v1/me` answers `role: app` for one. A person's bookmarks, collections and play order are now their own capability, `collections`, in `can` (`own` keeps the rest).
+- **Zones: Ungroup shows on a group of speakers again.** The button looked for a zone id starting with `group:`, but a zone's id is made from its name; it now goes by the zone's speakers.
+- **Home Assistant: a refused call is not a refused password.** The integration treated every 403 as a wrong token; it now shows the node's reason, and only a 401 asks for a new password.
+
 ### 2026-11-22
 
 - **A removal that did not finish is still offered after a reload.** Removing someone can fail part-way, after they are already off the list; the page then kept "Remove again" only until it was reloaded. The node now remembers such removals (`unfinished` in `GET /v1/people`), and People & access keeps the person on the screen with Remove until it has finished. When nothing of theirs is left after all, the page says so instead of reporting a failure.
