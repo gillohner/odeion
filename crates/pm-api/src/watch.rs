@@ -73,16 +73,18 @@ pub fn spawn(
 }
 
 /// What a watch event asks to rescan: its paths for a change, no paths (every folder) when
-/// events were lost (the system's event queue overflowed) or the watch reported an error, and
-/// nothing for events that change no file (a file read or opened).
+/// events were lost (the system's event queue overflowed) or the watch reported an error that
+/// names no path, and nothing for events that change no file (a file read or opened).
 fn changed_paths(res: notify::Result<Event>) -> Option<Vec<PathBuf>> {
     match res {
         Ok(ev) if ev.need_rescan() => Some(Vec::new()),
         Ok(ev) if ev.kind.is_create() || ev.kind.is_modify() || ev.kind.is_remove() => Some(ev.paths),
         Ok(_) => None,
+        // An error that names folders (a new subfolder past the system's watch limit) rescans
+        // the library folders they are in, one that names none every folder
         Err(e) => {
             tracing::warn!("folder watch: {e}");
-            Some(Vec::new())
+            Some(e.paths)
         }
     }
 }
@@ -175,6 +177,11 @@ mod tests {
         assert_eq!(
             changed_paths(Err(notify::Error::generic("queue overflow"))),
             Some(Vec::new())
+        );
+        let limit = notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path("/nas/share/New".into());
+        assert_eq!(
+            changed_paths(Err(limit)),
+            Some(vec![PathBuf::from("/nas/share/New")])
         );
         let read = Event::new(EventKind::Access(AccessKind::Read)).add_path("/music/jazz/a.flac".into());
         assert_eq!(changed_paths(Ok(read)), None);
