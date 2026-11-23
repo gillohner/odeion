@@ -16,6 +16,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const TTL: Duration = Duration::from_secs(60);
+/// How many sections are kept at most (one per section, person and query: the tag page's
+/// labels are any text).
+const SECTIONS_MAX: usize = 512;
 const LOCATION_KEY: &str = "home.location";
 /// Concerts within this distance of the owner's city.
 pub(crate) const CONCERT_RADIUS_M: u32 = 50_000;
@@ -62,6 +65,11 @@ pub struct HomeLocation {
 fn cache() -> &'static Mutex<HashMap<String, (Instant, HomeSection)>> {
     static C: OnceLock<Mutex<HashMap<String, (Instant, HomeSection)>>> = OnceLock::new();
     C.get_or_init(Default::default)
+}
+
+/// Cache one section; the cache holds at most [`SECTIONS_MAX`].
+fn keep(cache: &mut HashMap<String, (Instant, HomeSection)>, key: String, section: HomeSection) {
+    crate::capped::insert(cache, key, section, SECTIONS_MAX, TTL);
 }
 
 /// The Home sections, in page order.
@@ -183,10 +191,8 @@ pub(crate) async fn section(
     out.section = name;
     // "Needs a contact / sign-in" is not kept: it changes the moment the owner acts
     if out.error.is_none() && out.needs.is_none() {
-        cache()
-            .lock()
-            .expect("home cache")
-            .insert(key, (Instant::now(), out.clone()));
+        let mut cache = cache().lock().expect("home cache");
+        keep(&mut cache, key, out.clone());
     }
     Ok(Json(out))
 }
@@ -710,5 +716,16 @@ mod merge_tests {
                 (Some("Das Boot"), Some("Sefa"), 1),
             ]
         );
+    }
+
+    /// The tag page's labels are any text, one section each; the cache keeps at most SECTIONS_MAX.
+    #[test]
+    fn the_section_cache_has_a_size() {
+        let mut cache = HashMap::new();
+        for n in 0..SECTIONS_MAX + 100 {
+            keep(&mut cache, format!("tag|{n}"), HomeSection::default());
+            assert!(cache.len() <= SECTIONS_MAX);
+        }
+        assert!(cache.contains_key(&format!("tag|{}", SECTIONS_MAX + 99)));
     }
 }

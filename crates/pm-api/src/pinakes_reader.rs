@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 pub const RESOLVE_INTERVAL: Duration = Duration::from_millis(2100);
 /// A card is kept this long before it is asked for again.
 const FOUND_TTL: Duration = Duration::from_secs(3600);
+/// How many cards are kept at most (one per link asked about; listeners pick the links).
+const CARDS_MAX: usize = 2048;
 /// A pending or unknown link is not resolved again sooner than this.
 pub const RETRY_AFTER: Duration = Duration::from_secs(20);
 
@@ -66,10 +68,8 @@ impl PinakesReader {
     }
 
     fn remember(&self, uri: &str, card: &Card) {
-        self.cache
-            .lock()
-            .expect("reader cache")
-            .insert(uri.to_string(), (Instant::now(), card.clone()));
+        let mut cache = self.cache.lock().expect("reader cache");
+        crate::capped::insert(&mut cache, uri.to_string(), card.clone(), CARDS_MAX, FOUND_TTL);
     }
 
     /// Wait for the next resolve slot.
@@ -272,4 +272,22 @@ pub(crate) async fn get_card(
         Card::Reading(r) => view("reading", r),
         Card::Unknown => view("unknown", None),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Listeners pick the links; the card cache keeps at most CARDS_MAX.
+    #[test]
+    fn the_card_cache_has_a_size() {
+        let r = PinakesReader::default();
+        for n in 0..CARDS_MAX + 100 {
+            r.remember(&format!("https://example.org/{n}"), &Card::Unknown);
+            assert!(r.cache.lock().expect("reader cache").len() <= CARDS_MAX);
+        }
+        assert!(r
+            .cached(&format!("https://example.org/{}", CARDS_MAX + 99))
+            .is_some());
+    }
 }

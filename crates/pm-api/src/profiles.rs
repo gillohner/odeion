@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 /// Profiles are kept an hour, avatars a day.
 const PROFILE_TTL: Duration = Duration::from_secs(3600);
 const AVATAR_TTL: Duration = Duration::from_secs(86_400);
+/// How many profiles are kept at most (`GET /v1/profiles` takes 50 keys a request, any keys).
+const PROFILES_MAX: usize = 4096;
 
 /// A person on a tag chip or in a list.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -90,6 +92,11 @@ type ProfileCache = Mutex<HashMap<String, (Instant, Option<UserView>)>>;
 fn profiles() -> &'static ProfileCache {
     static C: OnceLock<ProfileCache> = OnceLock::new();
     C.get_or_init(Default::default)
+}
+
+/// Cache one profile; the cache holds at most [`PROFILES_MAX`].
+fn keep(cache: &mut HashMap<String, (Instant, Option<UserView>)>, id: String, v: Option<UserView>) {
+    crate::capped::insert(cache, id, v, PROFILES_MAX, PROFILE_TTL);
 }
 
 fn me(s: &NodeState) -> Option<String> {
@@ -181,7 +188,7 @@ async fn views_from(s: &NodeState, ids: &[String], direct: bool) -> HashMap<Stri
                 .and_then(|(_, v)| v.clone())
         });
         if direct || v.is_some() {
-            cache.insert(id.clone(), (Instant::now(), v.clone()));
+            keep(&mut cache, id.clone(), v.clone());
         }
         out.insert(id, v);
     }
@@ -270,10 +277,8 @@ pub(crate) async fn page(State(s): State<Arc<NodeState>>, Path(id): Path<String>
         None => profile_from_homeserver(&s, &id).await,
     };
     if let Some(v) = &view {
-        profiles()
-            .lock()
-            .expect("profiles")
-            .insert(id.clone(), (Instant::now(), Some(v.clone())));
+        let mut cache = profiles().lock().expect("profiles");
+        keep(&mut cache, id.clone(), Some(v.clone()));
     }
     let mut pg = PersonPage {
         card: card(&s, &id, view.as_ref(), me.as_deref()),
@@ -585,5 +590,16 @@ mod tests {
         ));
         assert!(!valid_id("../etc"));
         assert_eq!(short(k), "gujx…xexo");
+    }
+
+    /// Any caller may ask about 50 keys a request; the cache keeps at most PROFILES_MAX.
+    #[test]
+    fn the_profile_cache_has_a_size() {
+        let mut cache = HashMap::new();
+        for n in 0..PROFILES_MAX + 100 {
+            keep(&mut cache, format!("k{n}"), None);
+            assert!(cache.len() <= PROFILES_MAX);
+        }
+        assert!(cache.contains_key(&format!("k{}", PROFILES_MAX + 99)));
     }
 }

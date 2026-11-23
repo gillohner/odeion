@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 pub const REACHES: [&str; 4] = ["me", "following", "friends", "all"];
 /// How long one network answer is reused (the editor previews on every change).
 const CACHE: Duration = Duration::from_secs(300);
+/// How many answers are kept at most (one per set of rules and viewer).
+const ANSWERS_MAX: usize = 256;
 /// Most taggers named per item.
 const TAGGERS_SHOWN: usize = 5;
 
@@ -109,6 +111,11 @@ type Cache = Mutex<HashMap<CacheKey, (Instant, Vec<NetworkItem>)>>;
 fn cache() -> &'static Cache {
     static C: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
     C.get_or_init(Default::default)
+}
+
+/// Cache one answer; the cache holds at most [`ANSWERS_MAX`].
+fn keep(cache: &mut HashMap<CacheKey, (Instant, Vec<NetworkItem>)>, key: CacheKey, items: Vec<NetworkItem>) {
+    crate::capped::insert(cache, key, items, ANSWERS_MAX, CACHE);
 }
 
 /// Make every cached answer `by` older (tests: an answer past its time).
@@ -336,10 +343,7 @@ pub(crate) async fn network(s: &Arc<NodeState>, r: &Rules) -> Result<Vec<Network
     }
     // Playable here first, then the rest (cards)
     out.sort_by_key(|it| it.plays_from.is_none());
-    cache()
-        .lock()
-        .expect("network cache")
-        .insert(key, (Instant::now(), out.clone()));
+    keep(&mut cache().lock().expect("network cache"), key, out.clone());
     Ok(out.into_iter().take(limit).collect())
 }
 
@@ -607,5 +611,18 @@ mod tests {
             (id, first),
             "a rewrite keeps the id and its time"
         );
+    }
+
+    /// One answer per set of rules; the cache keeps at most ANSWERS_MAX.
+    #[test]
+    fn the_answer_cache_has_a_size() {
+        use super::{keep, ANSWERS_MAX};
+        let mut cache = std::collections::HashMap::new();
+        let key = |n: usize| (vec![format!("t{n}")], "any".to_string(), "all".to_string(), None);
+        for n in 0..ANSWERS_MAX + 100 {
+            keep(&mut cache, key(n), Vec::new());
+            assert!(cache.len() <= ANSWERS_MAX);
+        }
+        assert!(cache.contains_key(&key(ANSWERS_MAX + 99)));
     }
 }

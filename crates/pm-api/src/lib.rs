@@ -40,6 +40,7 @@ pub mod backup;
 pub mod bandcamp;
 pub mod bookmarks;
 pub mod bundled;
+mod capped;
 mod client_mask;
 pub mod comments;
 pub mod dash;
