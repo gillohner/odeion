@@ -265,6 +265,11 @@ works until the Pubky transport exists (ADR 0008):
 - **Pubky**: a signed-in node publishes its address privately on your homeserver; the app's
   "Find my node via Pubky" reads it, so a moved or re-addressed node is found again without typing.
 
+The API port speaks HTTP/1.1 (a proxy in front may speak HTTP/2 or 3 to browsers). A connection has
+30 s to send each request's headers, also between requests on a kept-alive connection, and the port
+holds at most 256 connections at once (remote access's own listener too); more wait until one
+closes. Event streams count until they become WebSockets.
+
 ## Streaming services: what you set up
 
 Nothing for most services. A release build carries the project's own TIDAL, Jamendo and AcoustID apps (public ids only;
