@@ -229,8 +229,12 @@ pub(crate) async fn send_one(
         // Not listed: a good copy there now is kept; sent when there is none, or when that
         // cannot be checked (as before the check)
         None => {
-            if let Ok(false) = crate::copy_guard::needs_sending(target, remote, len).await {
-                return Ok(false);
+            // (only a copy of this very size counts: one whose size is not said may be half written)
+            if let Ok(Some(Some(n))) = target.stat(remote).await {
+                if n == len {
+                    present.insert(remote.to_string(), Some(len));
+                    return Ok(false);
+                }
             }
         }
         // Listed with its size unknown or another: what is there now decides

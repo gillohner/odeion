@@ -20432,6 +20432,7 @@ exec sleep 300
 
         // Paused before the restart: still paused, nothing sent, until Resume
         hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
         *s.copy_jobs.queue.lock().unwrap() = Default::default();
         s.library
             .lock()
@@ -20450,6 +20451,7 @@ exec sleep 300
 
         // Cancelled just before the stop: it ends at the start, and the copy queued after it runs
         hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
         *s.copy_jobs.queue.lock().unwrap() = Default::default();
         let mut kept_cancelled: serde_json::Value = serde_json::from_str(&kept("cancelled")).unwrap();
         let mut next = kept_cancelled["current"].clone();
@@ -20909,6 +20911,7 @@ exec sleep 300
 
         // Paused, then someone else signs in and it is resumed
         hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
         let start = || {
             call(
                 &app,
@@ -20935,6 +20938,7 @@ exec sleep 300
         // Someone else signs in while it runs: it stops before the next file
         sign_in_as(None);
         hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
         let (_, job) = start().await;
         let id = job["id"].as_str().unwrap().to_string();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -20946,6 +20950,7 @@ exec sleep 300
         // Kept by a node that didn't note the account: it doesn't run
         sign_in_as(None);
         hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
         *s.copy_jobs.queue.lock().unwrap() = Default::default();
         s.library
             .lock()
