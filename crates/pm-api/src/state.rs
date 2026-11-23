@@ -771,7 +771,9 @@ impl NodeState {
                                 crate::lastfm::track_ended(&n, &id, item);
                             }
                         }
-                        if matches!(event, pm_zones::ZoneEvent::Stopped) {
+                        // Radio carries on when the queue ran out, not after a Stop (also the one
+                        // before a queue is replaced, cleared or moved to another zone) or an error
+                        if matches!(event, pm_zones::ZoneEvent::Stopped { queue_ended: true }) {
                             continue_radio(&library, &zone_for_radio);
                         }
                         let _ = events.send(ApiEvent::ZoneEvent {
