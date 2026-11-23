@@ -624,19 +624,23 @@ async fn dispatch(
                         ));
                     }
                     // In turns off the request thread, so a long list does not hold the library
+                    let names = ids.to_vec();
                     let items: Vec<QueueItem> =
                         crate::in_turns_off_thread(s.library.clone(), "jukebox", move |lib| {
-                            let mut items = Vec::with_capacity(tids.len());
+                            let (mut items, mut at) = (Vec::with_capacity(tids.len()), 0);
                             crate::in_turns(
                                 lib,
                                 &tids,
                                 crate::LOOKUP_TURN,
                                 || {},
                                 |lib, tid| {
+                                    // The id as the app sent it ("007", not 7)
+                                    let sent = &names[at];
+                                    at += 1;
                                     let t = lib
                                         .get_track(TrackId(tid))
                                         .map_err(|e| SubErr::new(0, e.to_string()))?
-                                        .ok_or_else(|| SubErr::new(70, format!("unknown song {tid}")))?;
+                                        .ok_or_else(|| SubErr::new(70, format!("unknown song {sent}")))?;
                                     if let Some(it) = NodeSources::item_for(&t) {
                                         items.push(it);
                                     }

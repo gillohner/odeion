@@ -2025,11 +2025,11 @@ async fn search_says_a_playlists_new_count_right_after_an_edit() {
     assert_eq!(found(&a), (false, Some("1 song · your playlist".into())));
 }
 
-/// A playlist made of more songs than one lookup turn (the library is let go every 500 songs)
-/// keeps the order sent, published and node-only songs each in theirs; an add naming a song that
-/// is not there changes nothing.
+/// A playlist made of more songs than one lookup turn (500) keeps the order sent, published and
+/// node-only songs each in theirs; an add naming a song that is not there changes nothing. (That
+/// the library is let go between turns is `queue_lookups_let_the_library_go_between_turns`'s.)
 #[tokio::test]
-async fn a_long_list_of_songs_keeps_its_order_across_lookup_turns() {
+async fn a_playlist_of_more_songs_than_one_lookup_turn_keeps_their_order() {
     let dir = tempfile::tempdir().unwrap();
     let settings = settings_for(dir.path(), "turns", None, None);
     let db = settings.db_path.clone();
