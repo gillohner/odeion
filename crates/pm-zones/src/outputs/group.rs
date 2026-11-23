@@ -51,12 +51,7 @@ pub struct GroupOutput {
     members: Vec<Arc<dyn Output>>,
     caps: OutputCaps,
     drift_correction: bool,
-    /// Members the open sink left out (they did not open, or a write failed): volume and
-    /// standby skip them while that sink plays. Emptied when the sink is dropped.
-    left_out: LeftOut,
 }
-
-type LeftOut = Arc<std::sync::Mutex<Vec<OutputId>>>;
 
 /// At most one slipped frame per this many frames written.
 pub const SLIP_DIVISOR: usize = 1000;
@@ -111,7 +106,6 @@ impl GroupOutput {
             members,
             caps,
             drift_correction: true,
-            left_out: LeftOut::default(),
         })
     }
 
@@ -119,12 +113,6 @@ impl GroupOutput {
     pub fn with_drift_correction(mut self, on: bool) -> Self {
         self.drift_correction = on;
         self
-    }
-
-    /// The members the open sink plays (all, when it left none out or no sink is open).
-    fn playing(&self) -> Vec<&Arc<dyn Output>> {
-        let out = self.left_out.lock().unwrap_or_else(|e| e.into_inner());
-        self.members.iter().filter(|m| !out.contains(&m.id())).collect()
     }
 
     pub fn members(&self) -> &[Arc<dyn Output>] {
@@ -288,12 +276,6 @@ impl Output for GroupOutput {
         if sinks.is_empty() {
             return Err(first_err.unwrap_or_else(|| SinkError::Device("the group has no members".into())));
         }
-        *self.left_out.lock().unwrap_or_else(|e| e.into_inner()) = self
-            .members
-            .iter()
-            .map(|m| m.id())
-            .filter(|id| !sinks.iter().any(|(s, _, _)| s == id))
-            .collect();
         let max_latency = sinks.iter().map(|(_, l, _)| *l).max().unwrap_or(0);
         let mut members = Vec::with_capacity(sinks.len());
         for (id, latency, mut sink) in sinks {
@@ -327,7 +309,6 @@ impl Output for GroupOutput {
             warmup_frames: ms_to_frames(fmt, WARMUP_MS),
             deadband_frames: ms_to_frames(fmt, DEADBAND_MS) as i64,
             paused: None,
-            left_out: self.left_out.clone(),
         };
         g.preroll()?;
         Ok(Box::new(g))
@@ -337,10 +318,10 @@ impl Output for GroupOutput {
         if self.caps.hw_volume.is_none() {
             return Err(SinkError::NoVolume(self.id()));
         }
-        // Every member that plays is set, whatever one of them answers: the others still get the
-        // level (and the zone's cap after an unmute); the first failure is reported after
+        // Every member is set, whatever one of them answers: the others still get the level
+        // (and the zone's cap after an unmute); the first failure is reported after
         let mut failed = None;
-        for m in self.playing() {
+        for m in &self.members {
             if let Err(e) = m.set_volume(v).await {
                 failed.get_or_insert(e);
             }
@@ -367,11 +348,7 @@ impl Output for GroupOutput {
         _sole: bool,
         safety: &crate::sink::UnmuteSafety,
     ) -> crate::sink::Unmuted {
-        let members: Vec<&dyn Output> = self
-            .playing()
-            .into_iter()
-            .map(|m| m.as_ref() as &dyn Output)
-            .collect();
+        let members: Vec<&dyn Output> = self.members.iter().map(|m| m.as_ref() as &dyn Output).collect();
         crate::sink::unmute_each(&members, level, max, last, safety).await
     }
 
@@ -379,7 +356,7 @@ impl Output for GroupOutput {
         if !self.caps.standby {
             return Err(SinkError::NoStandby(self.id()));
         }
-        for m in self.playing() {
+        for m in &self.members {
             m.standby(on).await?;
         }
         Ok(())
@@ -494,15 +471,6 @@ pub struct GroupSink {
     deadband_frames: i64,
     /// Paused: whether each member held its buffer.
     paused: Option<Vec<bool>>,
-    /// Shared with the output: who this sink left out.
-    left_out: LeftOut,
-}
-
-impl Drop for GroupSink {
-    fn drop(&mut self) {
-        // The next open tries every member again; until then volume reaches all of them
-        self.left_out.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    }
 }
 
 /// `block` with its last frame repeated `extra` times.
@@ -633,10 +601,6 @@ impl GroupSink {
         for (i, e) in failed.into_iter().rev() {
             let m = self.members.remove(i);
             tracing::warn!(output = %m.id, "group member left out until the group's output opens again: {e}");
-            self.left_out
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(m.id.clone());
             if let Some(held) = self.paused.as_mut() {
                 held.remove(i);
             }
@@ -685,7 +649,7 @@ impl AudioSink for GroupSink {
             if i > 0 && correcting {
                 let drift = audible[i] - leader;
                 let settled = leader >= self.nudge_from;
-                if !(m.nudges && !settled)
+                if (!m.nudges || settled)
                     && !m.try_nudge(drift, self.written, self.fmt)
                     && drift.abs() > self.deadband_frames
                 {
@@ -1651,34 +1615,5 @@ mod tests {
         let g = GroupOutput::new("g", vec![Flaky::failing("a", 0), Flaky::failing("b", 0)]).unwrap();
         let mut sink = g.open(fmt).await.unwrap();
         assert!(sink.write(&block).is_err(), "every member failed");
-    }
-
-    /// While a member is left out, a volume change reaches the others and is no error; once that
-    /// sink is gone, every member is asked again.
-    #[tokio::test]
-    async fn volume_skips_a_member_left_out_while_the_group_plays() {
-        use pm_model::{VolumeKind, VolumeLevel};
-        let fmt = AudioFormat::pcm(48_000, 24, 2);
-        let null = Arc::new(NullOutput::with_volume(VolumeKind::Percent));
-        let off: Arc<dyn Output> = Arc::new(Flaky {
-            id: "off",
-            off: true,
-            fail_from: 0,
-            caps: null.caps().clone(),
-        });
-        let g = GroupOutput::new("g", vec![off, null.clone()]).unwrap();
-        let sink = g.open(fmt).await.unwrap();
-        g.set_volume(Volume::Percent(30))
-            .await
-            .expect("the member that plays takes it");
-        assert_eq!(
-            null.volume().await.unwrap().unwrap().level,
-            VolumeLevel::Percent(30)
-        );
-        drop(sink);
-        assert!(
-            g.set_volume(Volume::Percent(40)).await.is_err(),
-            "the member that is off is asked again"
-        );
     }
 }
