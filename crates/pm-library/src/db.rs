@@ -2522,13 +2522,27 @@ impl Library {
     }
 
     /// [`Self::resolve_import`] for a playlist file in `base`: a relative line is first the
-    /// library file at that place (`..` worked out), then matched as written, so its folders are
-    /// its own, not the playlist's.
+    /// library file at that place (`..` worked out), then matched as that place (a playlist
+    /// from another disk: a file in folders named as the playlist's is taken first), then as
+    /// written, so a playlist kept elsewhere (Downloads) needs no folder of its name.
     pub fn resolve_import_in(&self, t: &ImportedTrack, base: Option<&Path>) -> Result<Option<Track>> {
         if let (Some(base), Some(p)) = (base, t.path.as_deref().and_then(crate::import::local_path)) {
             if p.is_relative() {
-                if let Some(row) = self.file_by_path(&lexical(&base.join(&p)))? {
+                let at = lexical(&base.join(&p));
+                if let Some(row) = self.file_by_path(&at)? {
                     if let Some(track) = self.get_track(row.track_id)? {
+                        return Ok(Some(track));
+                    }
+                }
+                // As that place: the two-folder rule and, for a line without an artist, the
+                // nearest-folder rule see the playlist's folders; nothing found there, the line
+                // as written
+                if let Some(path) = at.to_str() {
+                    let placed = ImportedTrack {
+                        path: Some(path.to_owned()),
+                        ..t.clone()
+                    };
+                    if let Some(track) = self.resolve_import(&placed)? {
                         return Ok(Some(track));
                     }
                 }
@@ -8544,7 +8558,7 @@ mod identify_tests {
     }
 
     /// Folder names compare without case; a playlist's relative line is the file at that place
-    /// (`..` worked out), else matched by its own folders, not the playlist's; the last title
+    /// (`..` worked out), else matched by its own folders (the playlist's are not required); the last title
     /// search keeps the nearest-folder rule for a line without an artist.
     #[test]
     fn relative_lines_and_folder_case() {
@@ -8736,5 +8750,34 @@ mod identify_tests {
         // An album the library does not have still finds nothing
         row.album = Some("Collection 99".into());
         assert!(lib.resolve_import(&row).unwrap().is_none());
+    }
+
+    /// A bare line of a playlist from another disk ("01 Intro.flac" in
+    /// /old/Artist B/Second/list.m3u) takes the library's file of that name in folders named as
+    /// the playlist's, not the first of several files of that name.
+    #[test]
+    fn a_bare_line_takes_the_file_in_the_playlists_folders() {
+        let lib = Library::open_in_memory().unwrap();
+        let path_of = |t: Option<Track>| t.map(|t| t.file.path.to_string_lossy().into_owned());
+        let a = "/m/Artist A/First/01 Intro.flac";
+        let b = "/m/Artist B/Second/01 Intro.flac";
+        lib.upsert_track(&import_test_track(a, "Intro", Some("Artist A"), 60))
+            .unwrap();
+        lib.upsert_track(&import_test_track(b, "Intro", Some("Artist B"), 60))
+            .unwrap();
+        let line = entry("Intro", None, Some("01 Intro.flac"), None);
+        // Each way round, so the order of the name lookup's hits decides nothing
+        for (folder, want) in [("/old/Artist B/Second", b), ("/old/Artist A/First", a)] {
+            assert_eq!(
+                path_of(lib.resolve_import_in(&line, Some(Path::new(folder))).unwrap()).as_deref(),
+                Some(want),
+                "{folder}"
+            );
+        }
+        // A playlist kept elsewhere names neither: the line as written, as before
+        assert!(lib
+            .resolve_import_in(&line, Some(Path::new("/home/u/Downloads")))
+            .unwrap()
+            .is_some());
     }
 }
