@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 fn open(cfg: &NodeConfig) -> anyhow::Result<Library> {
     std::fs::create_dir_all(&cfg.data_dir)?;
     let path = cfg.db_path();
-    Library::open(&path).with_context(|| format!("opening library {}", path.display()))
+    Library::open_node_library(&path).with_context(|| format!("opening library {}", path.display()))
 }
 
 /// The work folders `backup` makes in the data folder: `backup-work-<pid>`.

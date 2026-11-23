@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **A restore in Settings and a database upgrade keep the library they replace.** A restore of the wrong backup file used to replace the library with no way back. It now keeps the library as it was as `library.db.bak` in the data folder (the name `odeiond restore` already used) until the next restore, and the report says where. When there is no room for that copy, nothing is changed and the restore says why. A node that upgrades the library's database schema at start first keeps the file as it was as `library.db.before-upgrade`, so going back to the previous version, or undoing an upgrade that went wrong, no longer needs a backup made by hand. The bundle's `backup.sh` leaves both copies out.
+
 - **Each Zones card's volume slider has room again at every window width.** At some widths (around 800, 930, 1100, 1300 and 1500 px) the volume stayed next to Previous, Play and Next with a slider only 56-79 px long, and Play to dropped onto a line of its own under it. The volume and Play to (or "selected") now stay together. They sit next to the playback buttons only when the slider gets at least 80 px there, and otherwise they move under them as one, where the slider gets the rest of the line (122 px instead of 60 px at 800 px). Phones are unchanged.
 
 ### 2026-11-21

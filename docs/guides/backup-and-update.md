@@ -18,6 +18,10 @@ database, its key and your Pubky account's files. `backup.sh` below does all of 
   Pubky and so on). After a restore the node lists which services to sign in to again.
 - With a passphrase the sign-ins are included, encrypted. Nothing opens them without the
   passphrase, so keep it somewhere safe.
+- A restore keeps the library it replaces in the data folder as `library.db.bak` until the next
+  restore, so restoring the wrong file can be undone (stop the node, then
+  `odeiond restore <data folder>/library.db.bak`). When there is no room for that copy, the
+  restore changes nothing and says so.
 
 The file holds the node's library only, never a homeserver.
 
@@ -175,7 +179,9 @@ Set the image tag back (`ODEION_TAG` in the bundle's `.env`, or `PM_TAG` when th
 When the newer version changed the library's database (its CHANGELOG entry says so), put back the
 library from the backup you made before updating; versions after 0.2.0 refuse to start on a
 library a newer version changed ("this library was opened by a newer version of Odeion").
-With the bundle:
+A node that upgrades the library's database keeps the file as it was first, beside it, as
+`library.db.before-upgrade` (from the latest upgrade only): with nothing changed since, that file
+can go back instead of the backup's `library.db`, by the same steps. With the bundle:
 
 ```sh
 cd ~/pubky-music-node/deploy/bundle

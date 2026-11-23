@@ -897,6 +897,19 @@ async fn restore_locked(
             .collect();
         drop(copy);
         fail_before_swap_for_tests(s)?;
+        // The library as it is stays beside it until the next restore, under the name the
+        // stopped-node restore uses: a restore of the wrong file can be undone. Without that
+        // copy nothing is replaced
+        let before = s.db_path.with_extension("db.bak");
+        lib.keep_copy(&before).map_err(|e| {
+            BackupError::Io(std::io::Error::other(format!(
+                "no copy of the library as it is could be kept ({e}), so nothing was changed: free some space, or restore with the node stopped (odeiond restore)"
+            )))
+        })?;
+        report.notes.push(format!(
+            "The library from before this restore is kept as {} until the next restore.",
+            before.display()
+        ));
         // The one step that changes the live library (SQLite's backup API: all or nothing)
         lib.restore_from(&staged)?;
         Ok(())
