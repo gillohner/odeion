@@ -626,6 +626,11 @@ pub fn discovery_responder(name: &str) -> io::Result<()> {
     let mut buf = [0u8; 1024];
     loop {
         let (n, from) = socket.recv_from(&mut buf)?;
+        // Players broadcast on their own network; a reply to anywhere else could be sent to an
+        // address a request only claims to come from (UDP), larger than the request
+        if !nearby(from.ip()) {
+            continue;
+        }
         if let Some(reply) = discovery_reply(&buf[..n], name) {
             let _ = socket.send_to(&reply, from);
         }
@@ -1158,7 +1163,8 @@ mod tests {
         });
         let mut far = TcpStream::connect(addr).unwrap();
         far.write_all(&hello(1)).unwrap();
-        assert!(closed_within(&mut far, Duration::from_secs(2)), "closed");
+        // Well within `hello_within` and `idle` (300 and 600 ms): closed before it was read
+        assert!(closed_within(&mut far, Duration::from_millis(200)), "closed");
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "no player");
         // And the default lets it in
         let (addr, rx) = server(tight());
