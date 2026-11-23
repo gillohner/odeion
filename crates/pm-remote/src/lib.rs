@@ -316,7 +316,7 @@ mod tests {
         client.connect().await.unwrap();
         // Three controllers' connections, each saying its own letter so its stream reaches the node
         let mut local = Vec::new();
-        for letter in [b'a', b'b', b'c'] {
+        for letter in *b"abc" {
             let mut s = TcpStream::connect(client.local_addr()).await.unwrap();
             s.write_all(&[letter]).await.unwrap();
             local.push((letter, s));
