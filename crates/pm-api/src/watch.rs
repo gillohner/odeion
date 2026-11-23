@@ -72,19 +72,19 @@ pub fn spawn(
     Ok(watcher)
 }
 
-/// What a watch event asks to rescan: its paths for a change, no paths (every folder) when
-/// events were lost (the system's event queue overflowed) or the watch reported an error that
-/// names no path, and nothing for events that change no file (a file read or opened).
+/// What a watch event asks to rescan: its paths for a change; when events were lost (the
+/// system's event queue overflowed) the paths it names, or none (every folder); for an error,
+/// the paths it names (a new subfolder past the system's watch limit); nothing for an error
+/// without a path (logged, as a watch error that repeats would otherwise keep the quiet period
+/// from ever coming) or for events that change no file (a file read or opened).
 fn changed_paths(res: notify::Result<Event>) -> Option<Vec<PathBuf>> {
     match res {
-        Ok(ev) if ev.need_rescan() => Some(Vec::new()),
+        Ok(ev) if ev.need_rescan() => Some(ev.paths),
         Ok(ev) if ev.kind.is_create() || ev.kind.is_modify() || ev.kind.is_remove() => Some(ev.paths),
         Ok(_) => None,
-        // An error that names folders (a new subfolder past the system's watch limit) rescans
-        // the library folders they are in, one that names none every folder
         Err(e) => {
             tracing::warn!("folder watch: {e}");
-            Some(e.paths)
+            (!e.paths.is_empty()).then_some(e.paths)
         }
     }
 }
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn lost_events_and_errors_rescan_every_folder() {
+    fn lost_events_rescan_their_folders_or_every_folder() {
         use notify::event::{AccessKind, CreateKind, EventKind, Flag};
         let created = Event::new(EventKind::Create(CreateKind::File)).add_path("/music/jazz/a.flac".into());
         assert_eq!(
@@ -174,15 +174,21 @@ mod tests {
         // The system dropped events: they may have been anywhere
         let lost = Event::new(EventKind::Other).set_flag(Flag::Rescan);
         assert_eq!(changed_paths(Ok(lost)), Some(Vec::new()));
+        // ... or anywhere under the folder it names (macOS)
+        let lost_under = Event::new(EventKind::Other)
+            .set_flag(Flag::Rescan)
+            .add_path("/music/jazz".into());
         assert_eq!(
-            changed_paths(Err(notify::Error::generic("queue overflow"))),
-            Some(Vec::new())
+            changed_paths(Ok(lost_under)),
+            Some(vec![PathBuf::from("/music/jazz")])
         );
+        // A subfolder past the watch limit is rescanned; an error without a path is only logged
         let limit = notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path("/nas/share/New".into());
         assert_eq!(
             changed_paths(Err(limit)),
             Some(vec![PathBuf::from("/nas/share/New")])
         );
+        assert_eq!(changed_paths(Err(notify::Error::generic("read failed"))), None);
         let read = Event::new(EventKind::Access(AccessKind::Read)).add_path("/music/jazz/a.flac".into());
         assert_eq!(changed_paths(Ok(read)), None);
     }
