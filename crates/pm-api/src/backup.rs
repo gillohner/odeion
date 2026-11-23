@@ -1416,6 +1416,48 @@ pub(crate) async fn run_schedule(State(s): State<Arc<NodeState>>) -> ApiResult<S
 mod tests {
     use super::*;
 
+    fn zip_of(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let deflate =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in members {
+            zip.start_file(*name, deflate).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn manifest_json() -> Vec<u8> {
+        serde_json::to_vec(&Manifest {
+            format: FORMAT.into(),
+            version: VERSION,
+            created_at: 0,
+            node_name: "n".into(),
+            node_version: "0".into(),
+            counts: BackupCounts::default(),
+            folders: vec![],
+            secrets: None,
+            left_out: vec![],
+        })
+        .unwrap()
+    }
+
+    /// A restore reads a backup's parts only up to what they may unpack to: a small upload
+    /// (deflated zeros) must not unpack into gigabytes in memory.
+    #[test]
+    fn a_backup_unpacks_only_up_to_its_caps() {
+        // A manifest padded past its cap: a few KiB deflated
+        let mut big = manifest_json();
+        big.extend(std::iter::repeat_n(b' ', 2 << 20));
+        let bytes = zip_of(&[("manifest.json", &big), ("library.db", b"db")]);
+        assert!(bytes.len() < 64 * 1024);
+        let e = parse(&bytes).err().expect("refused");
+        assert!(e.to_string().contains("too big"), "{e}");
+
+        let ok = zip_of(&[("manifest.json", &manifest_json()), ("library.db", &[0u8; 5000])]);
+        assert_eq!(parse(&ok).unwrap().database.len(), 5000);
+    }
+
     #[test]
     fn scratch_collisions_preserve_existing_folders_and_repeated_clock_allocations() {
         let root = tempfile::tempdir().unwrap();
