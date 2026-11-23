@@ -449,17 +449,30 @@ pub(crate) fn open_blocking(
     let (id, rel) = split_key(key).ok_or_else(|| fail("not a WebDAV file".into()))?;
     let share = find(shared, &id).ok_or_else(|| fail("that WebDAV share was removed".into()))?;
     let mut url = share.file_url(&rel).map_err(fail)?;
-    if !share.user.is_empty() {
-        // The HTTP reader takes a URL only: the credentials ride in it, inside the node
-        let _ = url.set_username(&share.user);
-        let _ = url.set_password(Some(&share.password));
+    // The credentials go as a header, never in the URL: errors name the URL (a decoder's too),
+    // and zone state and events carry them to listeners. A request with headers never follows
+    // a playlist to another host. Credentials typed into the share's address move to the
+    // header as well.
+    let (mut user, mut password) = (share.user.clone(), share.password.clone());
+    if !url.username().is_empty() || url.password().is_some() {
+        let decode = crate::about::percent_decode;
+        if user.is_empty() {
+            user = decode(url.username());
+            password = decode(url.password().unwrap_or(""));
+        }
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
     }
-    crate::sources::open_http_stream(url.as_str()).map_err(|e| match e {
-        pm_zones::SourceError::Open { reason, .. } => fail(if share.password.is_empty() {
-            reason
-        } else {
-            reason.replace(&share.password, "<password>")
-        }),
+    let mut headers = Vec::new();
+    if !user.is_empty() {
+        let basic = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("{user}:{password}"),
+        );
+        headers.push(("authorization".to_string(), format!("Basic {basic}")));
+    }
+    crate::sources::open_http_stream_with(url.as_str(), &headers, None).map_err(|e| match e {
+        pm_zones::SourceError::Open { reason, .. } => fail(reason),
         other => other,
     })
 }
