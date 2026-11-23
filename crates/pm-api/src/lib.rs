@@ -1950,7 +1950,11 @@ async fn zones(
     Json(events::visible(&s, &c, s.zones.list()))
 }
 
-async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZone>) -> ApiResult<ZoneState> {
+async fn create_zone(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<accounts::Caller>,
+    Json(body): Json<CreateZone>,
+) -> ApiResult<ZoneState> {
     if body.name.trim().is_empty() {
         return Err(ApiError::bad_request("zone name is empty"));
     }
@@ -1962,6 +1966,13 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
     }
     if ids.is_empty() {
         return Err(ApiError::bad_request("give `output` or `outputs`"));
+    }
+    // An app password groups speakers (and ungroups them, `delete_zone`): two or more
+    if caller.role == accounts::Role::App && ids.len() < 2 {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "An app password groups two speakers or more; it doesn't add a zone.",
+        ));
     }
     let output = zone_output(&s, body.name.trim(), &ids).await?;
     let zone = s.create_zone(body.name.trim(), output);
@@ -28472,6 +28483,38 @@ exec sleep 300
         )
         .await;
         assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        // (and for a person, the same check)
+        let mut theirs = pm_zones::QueueItem::new("librespot:connect/../etc/hosts");
+        assert!(accounts::check_listener_item(&mut theirs).is_err());
+        let mut live = pm_zones::QueueItem::new(librespot::LIVE_URI);
+        assert!(accounts::check_listener_item(&mut live).is_ok());
+        // One speaker is no group: an app doesn't add zones it couldn't take away
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/zones",
+            mine,
+            &[],
+            Some(serde_json::json!({"name": "Alone", "outputs": [aid.0]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        // A collection an app makes is private, whatever it asks
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/collections",
+            mine,
+            &[],
+            Some(serde_json::json!({"name": "From the app", "public": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(
+            v.to_string().contains(r#""visibility":"private""#)
+                && !v.to_string().contains(r#""visibility":"public""#),
+            "{v}"
+        );
 
         // Subsonic: the password, plain, hex or as a salted md5; not for a scan
         let rest = |q: String| {

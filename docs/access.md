@@ -95,8 +95,9 @@ library and the owner's collections, all as the owner's (`app` in the table abov
 settings, people, the library, the API token or anyone's sign-ins, and its answers never show the
 API token or another password. Its queue takes library songs, the services' tracks and web links,
 on the home network too (spoken announcements), never a file path or a loopback address. It
-ungroups a group of speakers, but doesn't remove a speaker's own zone or someone's listen-along group,
-and it doesn't make a collection public.
+groups two speakers or more and ungroups them, but doesn't add a zone for one speaker or remove a
+speaker's own zone or someone's listen-along group. A collection it makes is private, and it can't
+make one public; one you made public stays public when the app changes it, and goes if it deletes it.
 
 - `GET /v1/node/app-passwords` lists them (name, made, last used: never the password);
   `DELETE /v1/node/app-passwords/{id}` removes one, and that app alone stops at once. An app that
