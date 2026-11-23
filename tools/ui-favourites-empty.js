@@ -44,7 +44,7 @@ const cases = [
           check(shown, `${width} ${c.name}: the page shows its empty state`);
           if (!shown) continue;
           const e = await page.evaluate(() => { const box = document.querySelector('.main .empty'); return { title: box.querySelector('h3')?.textContent, text: box.querySelector('p')?.textContent || '', buttons: [...box.querySelectorAll('button')].map((b) => b.textContent.trim()) }; });
-          check(e.title === 'Nothing hearted yet', `${width} ${c.name}: the title is "Nothing hearted yet" (${e.title})`);
+          check(e.title === 'No bookmarks yet', `${width} ${c.name}: the title is "No bookmarks yet" (${e.title})`);
           if (c.exact) check(e.text === c.text, `${width} ${c.name}: it says "${c.text}" (${e.text})`);
           else check(e.text.includes(c.text || 'Press the heart on a song, album or artist'), `${width} ${c.name}: it says how to heart something (${e.text})`);
           if (c.button) check(e.buttons.length === 1 && e.buttons[0] === c.button, `${width} ${c.name}: one button, ${c.button} (${e.buttons.join(', ')})`);

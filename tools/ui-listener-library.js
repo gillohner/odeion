@@ -63,7 +63,7 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
 
       // ---- not connected: Favourites asks to connect ----
       await go('/favourites');
-      assert.ok(await page.locator('#main').innerText().then((t) => /Favourites/.test(t)), 'a listener has Favourites (not sent to Albums)');
+      assert.ok(await page.locator('#main').innerText().then((t) => /Bookmarks/.test(t)), 'a listener has Bookmarks (not sent to Albums)');
       assert.match(await page.locator('#hsnote').innerText(), /own homeserver/);
       await shot('bookmarks-connect');
       // Connect: the Ring QR, the link, then theirs

@@ -201,7 +201,7 @@ async function run(browser, width, kind) {
       assert.equal(await page.locator('#filter').inputValue(), 'loop', `${kind} ${width}: the filter that is off keeps its text when drawn again`);
       await page.locator('[data-lfav]').click();
       await page.waitForFunction(([sel]) => !document.querySelector('#filter')?.disabled && document.querySelectorAll(sel).length === 3, [k.rows]);
-      assert.equal(await page.locator('#filter').inputValue(), 'loop', `${kind} ${width}: and filters again once Favourites is off`);
+      assert.equal(await page.locator('#filter').inputValue(), 'loop', `${kind} ${width}: and filters again once Bookmarks is off`);
     }
     assert.deepEqual(state.errors, [], 'no page errors');
     console.log(`PASS ${kind} ${width}: drawn again where it stands, the filter, caret, focus and scroll stay`);
@@ -229,16 +229,16 @@ async function lateFavourites(browser, width) {
     const open = page.locator('.nav-item[data-view="albums"]');
     await (await open.isVisible() ? open : page.locator('[data-libnav="albums"]')).click();
     await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length >= 1, null, { timeout: 6000 });
-    assert.deepEqual(await tiles(), ['1'], `late favourites ${width}: the favourites listed already show first (the case this checks)`);
+    assert.deepEqual(await tiles(), ['1'], `late bookmarks ${width}: the bookmarks listed already show first (the case this checks)`);
     await page.locator('#albumgrid .tile').first().focus();
     await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length === 2, null, { timeout: 8000 })
-      .catch(() => assert.fail(`late favourites ${width}: the new favourite shows once they are in`));
-    assert.deepEqual((await tiles()).sort(), ['1', '2'], `late favourites ${width}: both favourites`);
-    assert.equal(await page.locator('.page-head .count').textContent(), '2 of 300', `late favourites ${width}: the count follows`);
-    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-album')), '1', `late favourites ${width}: the focused album keeps focus`);
+      .catch(() => assert.fail(`late bookmarks ${width}: the new bookmark shows once they are in`));
+    assert.deepEqual((await tiles()).sort(), ['1', '2'], `late bookmarks ${width}: both bookmarks`);
+    assert.equal(await page.locator('.page-head .count').textContent(), '2 of 300', `late bookmarks ${width}: the count follows`);
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-album')), '1', `late bookmarks ${width}: the focused album keeps focus`);
     assert.deepEqual(state.errors, [], 'no page errors');
     await page.screenshot({ path: path.join(shots, `albums-${width}-late-favourite.png`) });
-    console.log(`PASS late favourites ${width}: a favourite that comes late joins those listed`);
+    console.log(`PASS late bookmarks ${width}: bookmarked that comes late joins those listed`);
   } finally { await context.close(); }
 }
 

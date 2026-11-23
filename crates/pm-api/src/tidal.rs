@@ -2766,7 +2766,7 @@ pub(crate) fn not_connected(who: &Who) -> String {
 /// A valid access token of `who`'s for the audio thread: the stored one, or a blocking refresh
 /// when it is about to expire.
 fn user_token_blocking(
-    library: &std::sync::Mutex<pm_library::Library>,
+    library: &pm_library::LibraryLock,
     ep: &TidalEndpoints,
     client: &reqwest::blocking::Client,
     who: &Who,
@@ -2821,7 +2821,7 @@ fn user_token_blocking(
 /// Open `tidal:track:<id>` for playback: fetch the stream manifest with the
 /// user's token, then read the HLS segments as one FLAC/AAC stream.
 pub(crate) fn open_track_blocking(
-    library: &std::sync::Mutex<pm_library::Library>,
+    library: &pm_library::LibraryLock,
     endpoints: &SharedEndpoints,
     id: &str,
     who: &Who,

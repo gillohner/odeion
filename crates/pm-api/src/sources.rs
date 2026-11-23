@@ -5,7 +5,6 @@
 //! plug in here as further URI schemes.
 
 use pm_audio::{LocalFiles, PipelineConfig};
-use pm_library::Library;
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, TrackId};
 use pm_zones::{FetchLimit, FrameSource, OutputId, Processor, QueueItem, SourceError, SourceFactory};
 use std::collections::HashMap;
@@ -16,7 +15,7 @@ pub const TRACK_SCHEME: &str = "track:";
 pub const DSP_KEY_PREFIX: &str = "dsp/";
 
 pub struct NodeSources {
-    library: Arc<Mutex<Library>>,
+    library: Arc<pm_library::LibraryLock>,
     files: LocalFiles,
     default_cfg: PipelineConfig,
     /// Per-output pipeline settings (DSP); the default applies otherwise.
@@ -48,7 +47,7 @@ impl NodeSources {
     /// One handle per source that opens its own URIs on the audio thread.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        library: Arc<Mutex<Library>>,
+        library: Arc<pm_library::LibraryLock>,
         cfg: PipelineConfig,
         tidal: crate::tidal::SharedEndpoints,
         deezer: crate::deezer::SharedBase,

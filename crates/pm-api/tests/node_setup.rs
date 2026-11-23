@@ -377,6 +377,33 @@ async fn event_sockets_opened_with_the_old_token_end_when_it_is_replaced() {
     );
 }
 
+/// A call that panics while it holds the library fails alone: the requests after it are answered
+/// as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panic_while_the_library_is_held_does_not_stop_the_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), vec![], just_null());
+    let app = router(s.clone());
+    let (st, _) = call(&app, OWNER, "GET", "/v1/library/stats", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let held = s.clone();
+    let panicked = std::thread::spawn(move || {
+        let _lib = held.library.lock().expect("library poisoned");
+        panic!("a parser tripped over a file's tag");
+    })
+    .join();
+    assert!(panicked.is_err());
+    for path in [
+        "/v1/library/stats",
+        "/v1/info",
+        "/v1/library/tracks?limit=5",
+        "/v1/zones",
+    ] {
+        let (st, r) = call(&app, OWNER, "GET", path, None).await;
+        assert_eq!(st, StatusCode::OK, "{path}: {r}");
+    }
+}
+
 /// A config folder taken out of the config and the node restarted: an ordinary folder now, which
 /// Remove takes out with its songs (what the 409 says to do). And a config folder isn't moved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
