@@ -336,11 +336,13 @@ pub(crate) async fn cancel_job(
         j.clone()
     };
     if job.kind == "bring" {
-        let _ = s
-            .library
-            .lock()
-            .expect("library poisoned")
-            .delete_setting(BRING_RESUME_KEY);
+        // Not started again after a restart; the record stays until the job has cleared its
+        // part folder (or, if the node stops first, the next start clears it)
+        let lib = s.library.lock().expect("library poisoned");
+        if let Some(mut v) = bring_record(&lib).filter(|v| v.is_object()) {
+            v["cancelled"] = true.into();
+            let _ = lib.set_setting(BRING_RESUME_KEY, &v.to_string());
+        }
     }
     Ok(Json(job))
 }
@@ -384,8 +386,9 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// A bring job that was running when the node stopped: `{dest, parts}` (`parts`: the name of its
-/// part folder in `dest`, which the next bring clears); the node starts it again.
+/// A bring job that was running when the node stopped: `{dest, parts, cancelled?}` (`parts`: the
+/// name of its part folder in `dest`, which the next bring clears); the node starts it again,
+/// unless it was cancelled (then only its part folder is cleared).
 pub const BRING_RESUME_KEY: &str = "files.bring";
 
 /// What the homeserver has and what this node lacks.
@@ -618,6 +621,40 @@ async fn clear_parts(dest: &Path, name: &str) {
     let _ = tokio::fs::remove_dir(&dir).await;
 }
 
+/// The bring record ([`BRING_RESUME_KEY`]), if there is one that reads.
+fn bring_record(lib: &pm_library::Library) -> Option<serde_json::Value> {
+    lib.get_setting(BRING_RESUME_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+}
+
+/// A record's destination and part folder name.
+fn record_parts(v: &serde_json::Value) -> Option<(PathBuf, String)> {
+    Some((
+        PathBuf::from(v["dest"].as_str()?),
+        v["parts"].as_str()?.to_string(),
+    ))
+}
+
+/// The bring is over: its part folder is cleared and its record goes. `only`: only when the
+/// record still names that part folder (a job ending does not remove a later bring's record).
+async fn forget_bring(s: &NodeState, only: Option<&str>) {
+    let rec = bring_record(&s.library.lock().expect("library poisoned"));
+    let Some(rec) = rec else { return };
+    if only.is_some_and(|name| rec["parts"].as_str() != Some(name)) {
+        return;
+    }
+    if let Some((dest, name)) = record_parts(&rec) {
+        clear_parts(&dest, &name).await;
+    }
+    let lib = s.library.lock().expect("library poisoned");
+    // (unless a bring started meanwhile)
+    if bring_record(&lib).is_some_and(|now| now["parts"] == rec["parts"]) {
+        let _ = lib.delete_setting(BRING_RESUME_KEY);
+    }
+}
+
 /// Give a finished download (`part`, a file this bring made) its name (`target`) without
 /// replacing a file that got that name since the plan was made: such a file stays, the download
 /// is dropped and the error says so (the next bring gives it another name).
@@ -774,17 +811,7 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
     // The part folder of a bring that stopped midway (its record), cleared below
     let earlier = {
         let lib = s.library.lock().expect("library poisoned");
-        let earlier = lib
-            .get_setting(BRING_RESUME_KEY)
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
-            .and_then(|v| {
-                Some((
-                    PathBuf::from(v["dest"].as_str()?),
-                    v["parts"].as_str()?.to_string(),
-                ))
-            });
+        let earlier = bring_record(&lib).as_ref().and_then(record_parts);
         let parts_name = format!("{PARTS_PREFIX}{id}");
         let _ = lib.set_setting(
             BRING_RESUME_KEY,
@@ -799,6 +826,11 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
             }
         };
         let dest = plan.dest.clone();
+        // What an earlier bring left (the node stopped) goes first; a part that is a link to a
+        // song already in place is only a second name for it
+        if let Some((at, name)) = &earlier {
+            clear_parts(at, name).await;
+        }
         if let Err(e) = tokio::fs::create_dir_all(&dest).await {
             let msg = format!("could not create {}: {e}", dest.display());
             set(&|j| {
@@ -808,11 +840,6 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
             return;
         }
         let mut fetched = 0usize;
-        // What an earlier bring left (the node stopped) goes first; a part that is a link to a
-        // song already in place is only a second name for it
-        if let Some((at, name)) = &earlier {
-            clear_parts(at, name).await;
-        }
         // Part files: `.odeion-bring-<id>/<n>.part` in the destination, a folder made new here
         // (never one that was there) that only the node can write in
         let parts = dest.join(format!("{PARTS_PREFIX}{id}"));
@@ -901,13 +928,8 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
                 }
             }
         }
-        if !is_cancelled(&s, &id) {
-            let _ = s
-                .library
-                .lock()
-                .expect("library poisoned")
-                .delete_setting(BRING_RESUME_KEY);
-        }
+        // Done or cancelled: not started again (the part folder is clear already)
+        forget_bring(&s, Some(&format!("{PARTS_PREFIX}{id}"))).await;
         set(&|j| {
             j.current = None;
             j.finished = true;
@@ -925,14 +947,12 @@ pub fn resume_jobs(s: &Arc<NodeState>) {
     // The copies the node had are back in place now (a copy started meanwhile queues behind
     // them); they run once the rest is done
     crate::copy_jobs::resume_after_restart(s);
-    let dest = s
-        .library
-        .lock()
-        .expect("library poisoned")
-        .get_setting(BRING_RESUME_KEY)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+    let rec = bring_record(&s.library.lock().expect("library poisoned"));
+    // A cancelled bring is not started again
+    let cancelled = rec.as_ref().is_some_and(|v| v["cancelled"] == true);
+    let dest = rec
+        .as_ref()
+        .filter(|_| !cancelled)
         .and_then(|v| v["dest"].as_str().map(PathBuf::from));
     let s = s.clone();
     tokio::spawn(async move {
@@ -942,6 +962,8 @@ pub fn resume_jobs(s: &Arc<NodeState>) {
         // A bring job before the copies, which would otherwise find a copy in its place
         if let Some(dest) = dest {
             resume_bring(&s, dest).await;
+        } else if cancelled {
+            forget_bring(&s, None).await;
         }
         crate::copy_jobs::release_after_restart(&s);
     });
@@ -969,11 +991,7 @@ async fn resume_bring(s: &Arc<NodeState>, dest: PathBuf) {
             }
         };
         if plan.fetch.is_empty() {
-            let _ = s
-                .library
-                .lock()
-                .expect("library poisoned")
-                .delete_setting(BRING_RESUME_KEY);
+            forget_bring(&s, None).await;
             return;
         }
         let progress = UploadProgress {
@@ -1177,10 +1195,11 @@ mod tests {
         let (part, target) = (dir.path().join("1.part"), dir.path().join("Song.flac"));
         std::fs::write(&part, b"from the homeserver").unwrap();
         std::fs::write(&target, b"the owner's").unwrap();
-        let e = rename_noreplace(&part, &target)
-            .await
-            .expect("this system has it")
-            .unwrap_err();
+        // (a temp folder whose file system has no such move: nothing to test here)
+        let Some(r) = rename_noreplace(&part, &target).await else {
+            return;
+        };
+        let e = r.unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&target).unwrap(), b"the owner's");
         assert!(part.exists());
