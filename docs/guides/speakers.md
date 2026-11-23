@@ -40,6 +40,9 @@ and outputs › Group outputs** and press **Create group**:
 - **Snapcast:** group the players in Snapcast; each Snapcast group is one zone.
 - **Chromecast:** a speaker group made in the Google Home app shows up as one speaker.
 
+A speaker of a group that is switched off, or that goes away while the group plays, is left out and
+the others play on; it joins again when the group starts after a Stop.
+
 ## A Raspberry Pi with a DAC (squeezelite)
 
 The simplest dedicated player: a Raspberry Pi, a USB or HAT DAC, and squeezelite. It plays

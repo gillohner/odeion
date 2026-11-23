@@ -88,8 +88,9 @@ const SYNC_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 const SYNC_LEAD: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl GroupOutput {
-    /// Group `members` (two or more); the first is the leader whose clock
-    /// and position the zone reports.
+    /// Group `members` (two or more); the first that plays is the leader whose clock and
+    /// position the zone reports. A member that does not open, or whose write fails, is left
+    /// out and the others play on; only when none is left is it the group's error.
     pub fn new(name: &str, members: Vec<Arc<dyn Output>>) -> Result<Self, SinkError> {
         if members.len() < 2 {
             return Err(SinkError::Device("a group needs at least two outputs".into()));
@@ -259,9 +260,21 @@ impl Output for GroupOutput {
         if !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
+        // A member that does not open (a speaker switched off, a player gone) is left out: the
+        // others play. Only when none opens is it the group's error (the first member's).
         let mut sinks = Vec::with_capacity(self.members.len());
+        let mut first_err = None;
         for m in &self.members {
-            sinks.push((m.id(), m.caps().fixed_latency_ms.unwrap_or(0), m.open(fmt).await?));
+            match m.open(fmt).await {
+                Ok(sink) => sinks.push((m.id(), m.caps().fixed_latency_ms.unwrap_or(0), sink)),
+                Err(e) => {
+                    tracing::warn!(group = %self.id(), output = %m.id(), "group member left out: {e}");
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if sinks.is_empty() {
+            return Err(first_err.unwrap_or_else(|| SinkError::Device("the group has no members".into())));
         }
         let max_latency = sinks.iter().map(|(_, l, _)| *l).max().unwrap_or(0);
         let mut members = Vec::with_capacity(sinks.len());
@@ -555,12 +568,47 @@ impl GroupSink {
     }
 
     fn preroll(&mut self) -> Result<(), SinkError> {
-        for m in self.members.iter_mut() {
+        let mut failed = Vec::new();
+        for (i, m) in self.members.iter_mut().enumerate() {
             if m.preroll_frames == 0 {
                 continue;
             }
             let block = silence(self.fmt, m.preroll_frames as usize);
-            m.sink.write(&block)?;
+            if let Err(e) = m.sink.write(&block) {
+                failed.push((i, e));
+            }
+        }
+        self.leave_out(failed)
+    }
+
+    /// Members whose write failed (`(index, error)`, in member order) leave the group; the others
+    /// play on, with drift measured afresh against the first that is left. When none is left,
+    /// the first error is the group's.
+    fn leave_out(&mut self, failed: Vec<(usize, SinkError)>) -> Result<(), SinkError> {
+        if failed.is_empty() {
+            return Ok(());
+        }
+        if failed.len() == self.members.len() {
+            if let Some((_, first)) = failed.into_iter().next() {
+                return Err(first);
+            }
+            return Ok(());
+        }
+        let leader_left = failed[0].0 == 0;
+        for (i, e) in failed.into_iter().rev() {
+            let m = self.members.remove(i);
+            tracing::warn!(output = %m.id, "group member left out until the group is played again: {e}");
+            if let Some(held) = self.paused.as_mut() {
+                held.remove(i);
+            }
+        }
+        if leader_left {
+            let leader = self.members.first().map(|m| m.audible()).unwrap_or(0);
+            self.nudge_from = leader + ms_to_frames(self.fmt, NUDGE_SETTLE_MS) as i64;
+            for m in self.members.iter_mut() {
+                m.drift_avg = None;
+                m.beyond = None;
+            }
         }
         Ok(())
     }
@@ -590,38 +638,37 @@ impl AudioSink for GroupSink {
         let audible: Vec<i64> = self.members.iter().map(|m| m.audible()).collect();
         let leader = audible.first().copied().unwrap_or(0);
         let correcting = self.correct && self.written >= self.warmup_frames && frames > 0;
+        let mut failed = Vec::new();
         for (i, m) in self.members.iter_mut().enumerate() {
-            if i == 0 || !correcting {
-                m.sink.write(block)?;
-                continue;
+            // Frames slipped into this member's copy: + repeated (it is ahead: its clock consumed
+            // more, so it gets more to play), - left out (behind)
+            let mut slip: i64 = 0;
+            if i > 0 && correcting {
+                let drift = audible[i] - leader;
+                let settled = leader >= self.nudge_from;
+                if !(m.nudges && !settled)
+                    && !m.try_nudge(drift, self.written, self.fmt)
+                    && drift.abs() > self.deadband_frames
+                {
+                    let n = frames
+                        .div_ceil(SLIP_DIVISOR)
+                        .min(drift.unsigned_abs() as usize)
+                        .min(frames - 1);
+                    slip = n as i64 * drift.signum();
+                }
             }
-            let drift = audible[i] - leader;
-            let settled = leader >= self.nudge_from;
-            if m.nudges && !settled {
-                m.sink.write(block)?;
-                continue;
-            }
-            if m.try_nudge(drift, self.written, self.fmt) {
-                m.sink.write(block)?;
-                continue;
-            }
-            if drift.abs() <= self.deadband_frames {
-                m.sink.write(block)?;
-                continue;
-            }
-            let slip = frames
-                .div_ceil(SLIP_DIVISOR)
-                .min(drift.unsigned_abs() as usize)
-                .min(frames - 1);
-            if drift > 0 {
-                // Ahead: its clock consumed more, so it gets more to play.
-                m.sink.write(&with_repeated_tail(block, slip))?;
-                m.inserted += slip as u64;
-            } else {
-                m.sink.write(&without_tail(block, slip))?;
-                m.dropped += slip as u64;
+            let wrote = match slip.cmp(&0) {
+                std::cmp::Ordering::Greater => m.sink.write(&with_repeated_tail(block, slip as usize)),
+                std::cmp::Ordering::Less => m.sink.write(&without_tail(block, slip.unsigned_abs() as usize)),
+                std::cmp::Ordering::Equal => m.sink.write(block),
+            };
+            match wrote {
+                Err(e) => failed.push((i, e)),
+                Ok(()) if slip > 0 => m.inserted += slip as u64,
+                Ok(()) => m.dropped += slip.unsigned_abs(),
             }
         }
+        self.leave_out(failed)?;
         self.written += frames as u64;
         self.since_start += frames as u64;
         self.maybe_start()
@@ -1437,5 +1484,133 @@ mod tests {
             "{:?}",
             log.lock().unwrap()
         );
+    }
+
+    /// An output that is off (its open fails), or whose sink fails from its `fail_from`-th write
+    /// on (counted from 0).
+    struct Flaky {
+        id: &'static str,
+        off: bool,
+        fail_from: usize,
+        caps: OutputCaps,
+    }
+
+    impl Flaky {
+        fn off(id: &'static str) -> Arc<dyn Output> {
+            Arc::new(Flaky {
+                id,
+                off: true,
+                fail_from: 0,
+                caps: OutputCaps::unlimited(),
+            })
+        }
+        fn failing(id: &'static str, fail_from: usize) -> Arc<dyn Output> {
+            Arc::new(Flaky {
+                id,
+                off: false,
+                fail_from,
+                caps: OutputCaps::unlimited(),
+            })
+        }
+    }
+
+    struct FlakySink {
+        fmt: AudioFormat,
+        writes: usize,
+        fail_from: usize,
+        written: u64,
+    }
+
+    #[async_trait]
+    impl Output for Flaky {
+        fn id(&self) -> OutputId {
+            OutputId::new("flaky", self.id)
+        }
+        fn name(&self) -> String {
+            self.id.into()
+        }
+        fn caps(&self) -> &OutputCaps {
+            &self.caps
+        }
+        async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+            if self.off {
+                return Err(SinkError::Device(format!("{} is switched off", self.id)));
+            }
+            Ok(Box::new(FlakySink {
+                fmt,
+                writes: 0,
+                fail_from: self.fail_from,
+                written: 0,
+            }))
+        }
+    }
+
+    impl AudioSink for FlakySink {
+        fn format(&self) -> AudioFormat {
+            self.fmt
+        }
+        fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
+            self.writes += 1;
+            if self.writes > self.fail_from {
+                return Err(SinkError::Device("the player went away".into()));
+            }
+            self.written += block.frames() as u64;
+            Ok(())
+        }
+        fn buffer_level(&self) -> BufferLevel {
+            BufferLevel {
+                queued_frames: 0,
+                capacity_frames: 0,
+            }
+        }
+        fn flush(&mut self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn drain(&mut self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn frames_written(&self) -> u64 {
+            self.written
+        }
+    }
+
+    /// A speaker that is switched off does not keep the rest of the group silent.
+    #[tokio::test]
+    async fn a_member_that_is_off_is_left_out_and_the_others_play() {
+        let fmt = AudioFormat::pcm(48_000, 24, 2);
+        let block = AudioBlock::pcm_i32(fmt, vec![0; 600]);
+        let null = Arc::new(NullOutput::new());
+        let g = GroupOutput::new("g", vec![Flaky::off("off"), null.clone()]).unwrap();
+        let mut sink = g.open(fmt).await.expect("the member that is on plays");
+        sink.write(&block).unwrap();
+        let members: Vec<OutputId> = sink.members().into_iter().map(|m| m.output).collect();
+        assert_eq!(members, [null.id()]);
+        assert_eq!(null.frames_total(), 300);
+        // None on: the group's error
+        let g = GroupOutput::new("g", vec![Flaky::off("a"), Flaky::off("b")]).unwrap();
+        let err = g.open(fmt).await.err().expect("no member opened");
+        assert!(err.to_string().contains("a is switched off"), "{err}");
+    }
+
+    /// A member whose writes start failing (a player that went away) leaves; the others play on,
+    /// also when it was the leader. Only when every member fails is the write the group's error.
+    #[tokio::test]
+    async fn a_member_whose_write_fails_leaves_and_the_others_play_on() {
+        let fmt = AudioFormat::pcm(48_000, 24, 2);
+        let block = AudioBlock::pcm_i32(fmt, vec![0; 600]);
+        let null = Arc::new(NullOutput::new());
+        let g = GroupOutput::new("g", vec![Flaky::failing("gone", 1), null.clone()]).unwrap();
+        let mut sink = g.open(fmt).await.unwrap();
+        for _ in 0..3 {
+            sink.write(&block).expect("the others play on");
+        }
+        assert_eq!(null.frames_total(), 900);
+        let members: Vec<OutputId> = sink.members().into_iter().map(|m| m.output).collect();
+        assert_eq!(members, [null.id()]);
+        assert_eq!(sink.frames_written(), 900);
+
+        let g = GroupOutput::new("g", vec![Flaky::failing("a", 0), Flaky::failing("b", 0)]).unwrap();
+        let mut sink = g.open(fmt).await.unwrap();
+        assert!(sink.write(&block).is_err(), "every member failed");
     }
 }
