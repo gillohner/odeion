@@ -1298,7 +1298,7 @@ pub fn caller(s: &NodeState, token: Option<&str>) -> Option<Caller> {
         });
     };
     let t = token?;
-    if t == api.as_str() {
+    if crate::state::same_secret(&api, t) {
         return Some(Caller {
             role: Role::Owner,
             key: owner_key(),

@@ -1268,7 +1268,7 @@ fn token_ok(
         .map(str::to_string)
         // Browsers cannot set headers on WebSocket upgrades: allow `?token=`.
         .or_else(|| query.get("token").cloned());
-    bearer.as_deref() == Some(token.as_str())
+    bearer.is_some_and(|b| crate::state::same_secret(&token, &b))
 }
 
 // ---- web UI ----
@@ -30005,9 +30005,10 @@ exec sleep 300
         assert_eq!(make(serde_json::json!("one more")).await.0, StatusCode::CONFLICT);
     }
 
-    /// A renderer's cover and pull-stream URLs open with their own key only: the key of another
-    /// album, one character off, one character more or less, or none is refused. The key is
-    /// compared in time that does not depend on where it differs (`stream_key_ok`).
+    /// A renderer's cover and pull-stream URLs open with their own key only, and the API token
+    /// signs in only when it is the token: a key of another album, one character off, one
+    /// character more or less, or none is refused. (That the comparison takes the same time
+    /// wherever they differ, `state::same_secret`, is not something a test here can see.)
     #[tokio::test]
     async fn keyed_urls_open_with_their_own_key_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -30081,5 +30082,31 @@ exec sleep 300
                 "{wrong}"
             );
         }
+        // The API token: as a bearer token and as `?token=` (WebSocket upgrades, pull streams)
+        let bearer = |t: String| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .uri("/v1/zones")
+                    .header("authorization", format!("Bearer {t}"))
+                    .body(Body::empty())
+                    .unwrap();
+                app.oneshot(req).await.unwrap().status()
+            }
+        };
+        assert_eq!(bearer("s3cret".into()).await, StatusCode::OK);
+        for wrong in ["s3crex", "s3cre", "s3cret0", ""] {
+            assert_eq!(bearer(wrong.into()).await, StatusCode::UNAUTHORIZED, "{wrong}");
+            assert_eq!(
+                get(format!("/v1/outputs/pull/den/stream.wav?token={wrong}")).await,
+                StatusCode::UNAUTHORIZED,
+                "{wrong}"
+            );
+        }
+        assert!(crate::state::same_secret("s3cret", "s3cret"));
+        assert!(
+            !crate::state::same_secret("", ""),
+            "an empty secret matches nothing"
+        );
     }
 }

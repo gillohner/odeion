@@ -1240,12 +1240,9 @@ impl NodeState {
         h.to_hex()[..32].to_string()
     }
 
-    /// Whether `given` is [`Self::stream_key`] of `name`, in time that does not depend on where
-    /// they differ (the key is sent by whoever asks, over and over).
+    /// Whether `given` is [`Self::stream_key`] of `name` ([`same_secret`]).
     pub fn stream_key_ok(&self, name: &str, given: &str) -> bool {
-        let want = self.stream_key(name);
-        let (a, b) = (want.as_bytes(), given.as_bytes());
-        a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+        same_secret(&self.stream_key(name), given)
     }
 
     /// Create (or reuse) a pull output under `name`, registered for the HTTP route: for a
@@ -2837,4 +2834,12 @@ fn stream_secret(lib: &Library) -> [u8; 32] {
         tracing::warn!(error = %e, "saving the stream secret");
     }
     secret
+}
+
+/// Whether `given` is the secret `want`, in time that does not depend on where they differ (a
+/// secret is sent by whoever asks, over and over). A different length is no match; an empty
+/// `want` matches nothing.
+pub(crate) fn same_secret(want: &str, given: &str) -> bool {
+    let (a, b) = (want.as_bytes(), given.as_bytes());
+    !a.is_empty() && a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
