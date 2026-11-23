@@ -1774,6 +1774,17 @@ async fn a_lost_vault_gets_the_nodes_sign_ins_back() {
     assert_eq!(r["signed_out"], json!([]), "{r}");
     assert_eq!(r["conflicts"], json!([]), "{r}");
 
+    // Gone again, and the node is registered by hand before its next pass: the same
+    for p in [&index, &tidal_blob, &jamendo_blob] {
+        storage.delete(p.as_str()).await.unwrap();
+    }
+    let (st, r) = call(&a1, "POST", "/v1/vault/register").await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["signed_out"], json!([]), "nothing goes aside: {r}");
+    assert_eq!(r["pushed"], json!(["tidal", "jamendo"]), "{r}");
+    assert_eq!(get(&n1, "tidal.user").as_deref(), Some(tidal));
+
     // No list, but Jamendo still there: TIDAL was signed out elsewhere, as before
     for p in [&index, &tidal_blob] {
         storage.delete(p.as_str()).await.unwrap();
