@@ -2423,7 +2423,12 @@ impl Library {
                 .iter()
                 .any(|t| same_title(&t.title, title) && by_artist(t, artist))
         {
-            hits = self.search_tracks(title, 20)?;
+            // Added to the first search's hits: one of them may be the song by another name
+            for t in self.search_tracks(title, 20)? {
+                if !hits.iter().any(|h| h.id == t.id) {
+                    hits.push(t);
+                }
+            }
         }
         let named = hits
             .iter()
@@ -2431,17 +2436,16 @@ impl Library {
         Ok(named
             .or_else(|| {
                 hits.iter().find(|t| {
-                    same_title(&t.title, title)
-                        && (no_artist(t) || close_lengths(track_length(t), duration_ms))
+                    same_title(&t.title, title) && (no_artist(t) || same_length(track_length(t), duration_ms))
                 })
             })
             .cloned())
     }
 
     /// Match an imported playlist entry: exact path, then file name, then title and artist. A
-    /// file of the same name elsewhere is taken when its folders are named as the entry's (two
-    /// levels up where the entry has them: a library on another disk), or when its title and
-    /// artist agree with the entry's.
+    /// file of the same name elsewhere is taken when it is the only one in two folders named as
+    /// the entry's (a library on another disk), or when its title and artist agree with the
+    /// entry's.
     pub fn resolve_import(&self, t: &ImportedTrack) -> Result<Option<Track>> {
         if let Some(p) = t.path.as_deref().and_then(crate::import::local_path) {
             if let Some(row) = self.file_by_path(&p)? {
@@ -2450,14 +2454,16 @@ impl Library {
                 }
             }
             if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                let hits = self.tracks_by_file_name(name)?;
-                let want = folders(&p).len().min(2);
-                let mut same_folder = hits
-                    .iter()
-                    .filter(|h| want > 0 && shared_folders(&p, &h.file.path) >= want);
-                if let (Some(h), None) = (same_folder.next(), same_folder.next()) {
-                    return Ok(Some(h.clone()));
+                // The only file in two folders named as the entry's: a library on another disk
+                if let [near, up, ..] = folders(&p)[..] {
+                    if let (Some(near), Some(up)) = (near.to_str(), up.to_str()) {
+                        let mut same = self.tracks_by_file_name(&format!("{up}/{near}/{name}"))?;
+                        if same.len() == 1 {
+                            return Ok(same.pop());
+                        }
+                    }
                 }
+                let hits = self.tracks_by_file_name(name)?;
                 if let Some(h) = hits.into_iter().find(|h| agrees(h, t)) {
                     return Ok(Some(h));
                 }
@@ -5493,7 +5499,7 @@ fn track_length(t: &Track) -> Option<u64> {
 
 /// Both lengths known (an M3U writes -1, read as 0, for an unknown one) and within
 /// [`IMPORT_LENGTH_SLACK_MS`].
-fn close_lengths(a: Option<u64>, b: Option<u64>) -> bool {
+fn same_length(a: Option<u64>, b: Option<u64>) -> bool {
     match (a.filter(|&n| n > 0), b.filter(|&n| n > 0)) {
         (Some(a), Some(b)) => a.abs_diff(b) <= IMPORT_LENGTH_SLACK_MS,
         _ => false,
@@ -5515,22 +5521,14 @@ fn folders(p: &Path) -> Vec<&std::ffi::OsStr> {
         .unwrap_or_default()
 }
 
-/// How many folders, from the nearest up, two files' paths have in common.
-fn shared_folders(a: &Path, b: &Path) -> usize {
-    folders(a)
-        .iter()
-        .zip(folders(b))
-        .take_while(|(x, y)| **x == *y)
-        .count()
-}
-
 /// A library file of the entry's file name is the entry's song: its title (or, where tags and
-/// the other app disagree on it, its length) and its artist agree with the entry.
+/// the other app disagree on it, its length) agrees with the entry, and so does its artist (or,
+/// for a name written another way, title and length both).
 fn agrees(h: &Track, t: &ImportedTrack) -> bool {
-    let len = close_lengths(track_length(h), t.duration_ms);
+    let len = same_length(track_length(h), t.duration_ms);
+    let title = same_title(&h.title, &t.title);
     let artist = t.artist.as_deref().map(str::trim).unwrap_or("");
-    (same_title(&h.title, &t.title) || len)
-        && (artist.is_empty() || no_artist(h) || by_artist(h, artist) || len)
+    (title || len) && (artist.is_empty() || no_artist(h) || by_artist(h, artist) || (title && len))
 }
 
 #[cfg(test)]
@@ -8220,6 +8218,21 @@ mod identify_tests {
             path_of(lib.resolve_import(&other).unwrap()),
             None,
             "another artist's intro"
+        );
+        // A length a second away does not make another artist's intro this one
+        let close = entry(
+            "Intro",
+            Some("Artist B"),
+            Some("/old/Artist B/Second/01 Intro.flac"),
+            Some(61),
+        );
+        assert_eq!(path_of(lib.resolve_import(&close).unwrap()), None, "same length");
+        // One folder named alike is not enough: the tags must agree then
+        let disc = entry("Untitled", Some("Artist B"), Some("First/01 Intro.flac"), None);
+        assert_eq!(
+            path_of(lib.resolve_import(&disc).unwrap()),
+            None,
+            "one folder alike"
         );
         // The same folders on another disk: the tags may say anything.
         let moved = entry(
