@@ -13,8 +13,16 @@ pub(crate) const RELAY_MAX: Duration = Duration::from_secs(6 * 3600);
 pub(crate) const RELAY_IDLE: Duration = Duration::from_secs(30);
 
 /// The player's `Range` and `If-Range` on the request to the source, so a player can seek past
-/// what it has (a source that takes ranges answers 206).
+/// what it has (a source that takes ranges answers 206). Only a range of one part: several
+/// would come back as `multipart/byteranges` under an audio type (players ask for one).
 pub(crate) fn ranged(rb: reqwest::RequestBuilder, player: &axum::http::HeaderMap) -> reqwest::RequestBuilder {
+    let one_part = player
+        .get(axum::http::header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|r| !r.contains(','));
+    if !one_part {
+        return rb;
+    }
     let mut rb = rb;
     for h in [axum::http::header::RANGE, axum::http::header::IF_RANGE] {
         if let Some(v) = player.get(&h) {
@@ -190,5 +198,10 @@ mod tests {
             .unwrap();
         assert_eq!(out.status(), 200);
         assert!(out.headers().get("content-range").is_none());
+        // A range of several parts is not passed on
+        let mut several = axum::http::HeaderMap::new();
+        several.insert(axum::http::header::RANGE, "bytes=0-1,5-6".parse().unwrap());
+        let _resp = send(ranged(client.get(&url), &several)).await.unwrap();
+        assert!(!rx.recv().await.unwrap().contains("range:"));
     }
 }
