@@ -5620,7 +5620,13 @@ mod tests {
         let t = std::time::Instant::now();
         let at_once = finish_tracks(&conn, raws).unwrap();
         let after = t.elapsed();
-        println!("{n} tracks: one by one {before:?}, at once {after:?}");
+        // The typed fields alone, which both ways do: the rest is the database
+        let raws = read();
+        let t = std::time::Instant::now();
+        let fields: Vec<Track> = raws.into_iter().map(|r| finish_fields(r).unwrap()).collect();
+        let parse = t.elapsed();
+        assert_eq!(fields.len(), n - 3);
+        println!("{n} tracks: one by one {before:?}, at once {after:?}, of which the fields {parse:?}");
         assert_eq!(at_once.len(), n);
         assert_eq!(at_once, one_by_one);
         assert!(at_once
