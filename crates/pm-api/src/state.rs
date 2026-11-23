@@ -749,7 +749,7 @@ impl NodeState {
                             record_play(&library, &id, &item.uri);
                             // A listen only when the play is the owner's (listens.rs)
                             if let Some(n) = node.upgrade() {
-                                if crate::listens::plays_are_the_owners(&n, &id.0) {
+                                if crate::listens::play_is_the_owners(&n, &id.0, item) {
                                     crate::listens::record_zone_play(
                                         &library.lock().expect("library poisoned"),
                                         &item.uri,
@@ -760,7 +760,7 @@ impl NodeState {
                             // Scrobbles too: a listener's or a party's plays never go to the owner's
                             // Last.fm or ListenBrainz
                             if let Some(n) = node.upgrade() {
-                                if crate::listens::plays_are_the_owners(&n, &id.0) {
+                                if crate::listens::play_is_the_owners(&n, &id.0, item) {
                                     crate::listenbrainz::track_started(
                                         &n,
                                         zone_for_radio.clone(),
@@ -2612,9 +2612,15 @@ fn continue_radio(library: &pm_library::LibraryLock, zone: &Arc<Zone>) {
         };
         lib.similar_tracks(&seed, &queued, 10).unwrap_or_default()
     };
+    // Queued for whoever queued the song they continue from: a listener's radio is never the
+    // owner's listens (listens.rs). They are library songs, so no one's sign-in plays them
     let items: Vec<pm_zones::QueueItem> = picks
         .iter()
         .filter_map(crate::sources::NodeSources::item_for)
+        .map(|mut it| {
+            it.by = last.by.clone();
+            it
+        })
         .collect();
     if items.is_empty() {
         return;

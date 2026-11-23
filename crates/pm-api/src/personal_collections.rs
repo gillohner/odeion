@@ -1656,13 +1656,17 @@ pub(crate) async fn play(
         .iter()
         .find(|k| k.id == id && !k.deleted)
         .ok_or_else(|| not_found(&id))?;
-    let (items, missing) =
+    let (mut items, missing) =
         playlists::library_queue(&s.library.lock().expect("library poisoned"), &k.playlist);
     if items.is_empty() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "none of the collection's items is in this node's library",
         ));
+    }
+    // Who queued them, as the queue routes record it: never the owner's plays (listens.rs)
+    for it in &mut items {
+        it.by = Some(key.clone());
     }
     crate::listens::zone_changed_by(&s, &body.zone, false);
     let queued = items.len();
