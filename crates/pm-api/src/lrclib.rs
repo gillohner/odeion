@@ -13,22 +13,19 @@ use std::sync::{Arc, OnceLock, RwLock};
 const KEEP_SECS: i64 = 7 * 86_400;
 /// The most answers kept; the oldest go first.
 const KEEP_ROWS: usize = 20_000;
-/// The longest title, artist or album asked about (bytes). Anyone who may read the library can
+/// The longest title or artist asked about, and the longest album sent along (bytes). Anyone who may read the library can
 /// ask, and each new question is a row and a request to LRCLIB under the node's contact.
 const FIELD_MAX: usize = 300;
 const PREFIX: &str = "lyrics.lrclib.";
 
-/// Whether a song's fields are something to ask about: both names there, none too long.
-fn askable(title: &str, artist: &str, album: Option<&str>) -> bool {
-    !title.is_empty()
-        && !artist.is_empty()
-        && title.len() <= FIELD_MAX
-        && artist.len() <= FIELD_MAX
-        && album.is_none_or(|a| a.len() <= FIELD_MAX)
+/// Whether a song's names are something to ask about: both there, neither too long.
+fn askable(title: &str, artist: &str) -> bool {
+    !title.is_empty() && !artist.is_empty() && title.len() <= FIELD_MAX && artist.len() <= FIELD_MAX
 }
 
-/// Old answers go, at most once an hour: rows older than [`KEEP_SECS`] (they would be asked
-/// again anyway), then all but the [`KEEP_ROWS`] newest.
+/// Old answers go, at most once an hour (after an answer is stored): rows older than
+/// [`KEEP_SECS`] (they would be asked again anyway), then all but the [`KEEP_ROWS`] newest. So
+/// the rows are trimmed to that many each hour, not held to it between.
 fn prune(s: &NodeState) {
     static LAST: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
     let now = pm_library::db::now_unix();
@@ -77,8 +74,11 @@ pub(crate) async fn find(
     let title = title.trim();
     let artist = artist.trim();
     // Outside services hear who asks (the contact in the User-Agent); none set, none asked
-    let album = album.map(str::trim).filter(|a| !a.is_empty());
-    if !askable(title, artist, album) || s.contact().is_empty() {
+    // (an album name too long to send is left out; the album is not part of the key)
+    let album = album
+        .map(str::trim)
+        .filter(|a| !a.is_empty() && a.len() <= FIELD_MAX);
+    if !askable(title, artist) || s.contact().is_empty() {
         return None;
     }
     let secs = duration_ms.map(|d| (d + 500) / 1000).unwrap_or(0);
@@ -171,14 +171,12 @@ mod tests {
 
     #[test]
     fn only_songs_with_names_of_a_sane_length_are_asked_about() {
-        assert!(askable("Song", "Artist", None));
-        assert!(askable("Song", "Artist", Some("Album")));
-        assert!(!askable("", "Artist", None));
-        assert!(!askable("Song", "", None));
+        assert!(askable("Song", "Artist"));
+        assert!(!askable("", "Artist"));
+        assert!(!askable("Song", ""));
         let long = "x".repeat(FIELD_MAX + 1);
-        assert!(!askable(&long, "Artist", None));
-        assert!(!askable("Song", &long, None));
-        assert!(!askable("Song", "Artist", Some(&long)));
-        assert!(askable(&"x".repeat(FIELD_MAX), "Artist", None));
+        assert!(!askable(&long, "Artist"));
+        assert!(!askable("Song", &long));
+        assert!(askable(&"x".repeat(FIELD_MAX), "Artist"));
     }
 }

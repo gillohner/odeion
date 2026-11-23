@@ -9792,6 +9792,46 @@ mod tests {
             before,
             "a none is kept too"
         );
+        // A title too long is not asked about and keeps nothing
+        let rows = s
+            .library
+            .lock()
+            .unwrap()
+            .settings_with_prefix("lyrics.lrclib.")
+            .unwrap()
+            .len();
+        let long = "x".repeat(301);
+        let (st, _) = call(
+            &app,
+            "GET",
+            &format!("/v1/lyrics?title={long}&artist=Nobody"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "not asked"
+        );
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .settings_with_prefix("lyrics.lrclib.")
+                .unwrap()
+                .len(),
+            rows
+        );
+        // An album too long is left out, and the song is still asked about
+        let (st, _) = call(
+            &app,
+            "GET",
+            &format!("/v1/lyrics?title=Known%20Song&artist=Other&album={long}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
     }
 
     /// One search, streamed per source: the library answers first, a slow
