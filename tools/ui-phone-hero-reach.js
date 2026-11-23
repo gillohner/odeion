@@ -103,8 +103,10 @@ const reach = (page, sel) => page.evaluate((sel) => {
         if (kind === 'song') {
           const before = state.hits.length;
           await page.mouse.click(p.l + 20, p.b - 6);
-          const went = await until(() => page.evaluate(() => location.pathname !== '/song/lib-1'));
-          check(went && state.hits.slice(before).some((h) => h.v.startsWith('/item/song/') && !h.v.endsWith('/lib-1') && !h.v.includes('/lib-1/')), `${w}: pressing "every source, versions and tags" opens the song for every source (${await page.evaluate(() => location.pathname)})`);
+          // The address changes before the page's request reaches the fixture's router: wait for both
+          const asked = () => state.hits.slice(before).some((h) => h.v.startsWith('/item/song/') && !h.v.endsWith('/lib-1') && !h.v.includes('/lib-1/'));
+          const went = await until(async () => (await page.evaluate(() => location.pathname !== '/song/lib-1')) && asked());
+          check(went && asked(), `${w}: pressing "every source, versions and tags" opens the song for every source (${await page.evaluate(() => location.pathname)})`);
           if (went) { await page.goBack(); await until(() => page.evaluate(() => location.pathname === '/song/lib-1' && !!document.querySelector('.wikilink') && !!document.querySelector('.item-hero .ptag-add'))); await sleep(200); }
         }
       }
