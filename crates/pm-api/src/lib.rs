@@ -28151,9 +28151,10 @@ exec sleep 300
             let req = Request::builder().uri("/v1/events").body(Body::empty()).unwrap();
             app.clone().oneshot(req).await.unwrap().status()
         };
-        // Without a token every caller is the owner
+        // Without a token every caller is the owner (the key as the route makes it)
+        let owner = events::stream_key(&accounts::caller(&s, None).unwrap());
         let mut held: Vec<_> = (0..events::MAX_STREAMS_EACH)
-            .map(|_| s.events.take_place("Owner:", true).unwrap())
+            .map(|_| s.events.take_place(&owner, true).unwrap())
             .collect();
         assert_eq!(open().await, StatusCode::SERVICE_UNAVAILABLE);
         held.pop();
@@ -28164,9 +28165,9 @@ exec sleep 300
         // The refused request's place was not kept: one more is free after the one taken back
         held.push(
             s.events
-                .take_place("Owner:", true)
+                .take_place(&owner, true)
                 .expect("the request gave its place back"),
         );
-        assert!(s.events.take_place("Owner:", true).is_none());
+        assert!(s.events.take_place(&owner, true).is_none());
     }
 }

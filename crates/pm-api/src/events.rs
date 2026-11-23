@@ -243,7 +243,7 @@ pub(crate) async fn events_ws(
             .into_response();
     }
     // A place before the upgrade: an upgraded socket leaves the listener's connection count
-    let who = format!("{:?}:{}", c.role, c.key.as_deref().unwrap_or(""));
+    let who = stream_key(&c);
     let owner = c.role == crate::accounts::Role::Owner;
     let Some(place) = s.events.take_place(&who, owner) else {
         tracing::warn!(role = ?c.role, "event stream refused: too many open");
@@ -263,6 +263,12 @@ pub(crate) async fn events_ws(
         let _place = place;
         event_stream(socket, s, c, token).await
     })
+}
+
+/// Whose places an event stream takes: the role and the key (the owner's API token and browser
+/// sessions share theirs).
+pub(crate) fn stream_key(c: &Caller) -> String {
+    format!("{:?}:{}", c.role, c.key.as_deref().unwrap_or(""))
 }
 
 fn snapshot(s: &NodeState, c: &Caller, seq: u64) -> SnapshotMsg {
