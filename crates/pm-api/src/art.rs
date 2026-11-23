@@ -485,11 +485,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{name}");
         }
-        let none = picture_file(
-            &dir.path().join("none.jpg"),
-            "private",
-            &axum::http::HeaderMap::new(),
-        );
-        assert!(none.await.is_err());
+        let (none, no_headers) = (dir.path().join("none.jpg"), axum::http::HeaderMap::new());
+        assert!(picture_file(&none, "private", &no_headers).await.is_err());
     }
 }
