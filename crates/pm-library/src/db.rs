@@ -2393,8 +2393,20 @@ impl Library {
     }
 
     /// The library track for a title and (optional) artist: the first search
-    /// hit whose title matches exactly, preferring one by that artist.
+    /// hit whose title matches, by that artist when one is given.
     pub fn find_by_title_artist(&self, title: &str, artist: Option<&str>) -> Result<Option<Track>> {
+        self.find_by_title_artist_len(title, artist, None)
+    }
+
+    /// [`Self::find_by_title_artist`]; a hit by another name for the artist is taken only when
+    /// it has no artist or its length is within [`IMPORT_LENGTH_SLACK_MS`] of `duration_ms`.
+    /// Another artist's song of the same title (a cover, a namesake) is no match.
+    fn find_by_title_artist_len(
+        &self,
+        title: &str,
+        artist: Option<&str>,
+        duration_ms: Option<u64>,
+    ) -> Result<Option<Track>> {
         let title = title.trim();
         if title.is_empty() {
             return Ok(None);
@@ -2406,26 +2418,30 @@ impl Library {
             format!("{title} {artist}")
         };
         let mut hits = self.search_tracks(&q, 20)?;
-        if hits.is_empty() && !artist.is_empty() {
+        if !artist.is_empty()
+            && !hits
+                .iter()
+                .any(|t| same_title(&t.title, title) && by_artist(t, artist))
+        {
             hits = self.search_tracks(title, 20)?;
         }
-        let norm = |s: &str| s.trim().to_lowercase();
-        let first_artist = artist.split([',', ';', '&']).next().unwrap_or("").trim();
-        Ok(hits
+        let named = hits
             .iter()
-            .find(|t| {
-                norm(&t.title) == norm(title)
-                    && (artist.is_empty()
-                        || t.artists
-                            .iter()
-                            .any(|a| norm(&a.name) == norm(artist) || norm(&a.name) == norm(first_artist)))
+            .find(|t| same_title(&t.title, title) && (artist.is_empty() || by_artist(t, artist)));
+        Ok(named
+            .or_else(|| {
+                hits.iter().find(|t| {
+                    same_title(&t.title, title)
+                        && (no_artist(t) || close_lengths(track_length(t), duration_ms))
+                })
             })
-            .or_else(|| hits.iter().find(|t| norm(&t.title) == norm(title)))
             .cloned())
     }
 
-    /// Match an imported playlist entry: exact path, then file name, then
-    /// title and artist.
+    /// Match an imported playlist entry: exact path, then file name, then title and artist. A
+    /// file of the same name elsewhere is taken when its folders are named as the entry's (two
+    /// levels up where the entry has them: a library on another disk), or when its title and
+    /// artist agree with the entry's.
     pub fn resolve_import(&self, t: &ImportedTrack) -> Result<Option<Track>> {
         if let Some(p) = t.path.as_deref().and_then(crate::import::local_path) {
             if let Some(row) = self.file_by_path(&p)? {
@@ -2435,15 +2451,19 @@ impl Library {
             }
             if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
                 let hits = self.tracks_by_file_name(name)?;
-                if hits.len() == 1 {
-                    return Ok(hits.into_iter().next());
+                let want = folders(&p).len().min(2);
+                let mut same_folder = hits
+                    .iter()
+                    .filter(|h| want > 0 && shared_folders(&p, &h.file.path) >= want);
+                if let (Some(h), None) = (same_folder.next(), same_folder.next()) {
+                    return Ok(Some(h.clone()));
                 }
-                if let Some(h) = hits.into_iter().find(|h| h.title.eq_ignore_ascii_case(&t.title)) {
+                if let Some(h) = hits.into_iter().find(|h| agrees(h, t)) {
                     return Ok(Some(h));
                 }
             }
         }
-        self.find_by_title_artist(&t.title, t.artist.as_deref())
+        self.find_by_title_artist_len(&t.title, t.artist.as_deref(), t.duration_ms)
     }
 
     /// Record that `track` started playing on `zone`; returns the entry id.
@@ -5416,6 +5436,103 @@ fn row_to_album(r: &Row<'_>) -> rusqlite::Result<Result<Album>> {
     })())
 }
 
+/// Two lengths closer than this are taken as one recording when an imported entry names its
+/// artist differently from the library (a spelling, an accent).
+const IMPORT_LENGTH_SLACK_MS: u64 = 2_000;
+
+/// A name folded for matching names written by other apps: lower case, letters and digits only,
+/// "&" and "+" read as "and", without a leading "the".
+fn match_key(s: &str) -> String {
+    let s = s.trim().to_lowercase().replace(['&', '+'], " and ");
+    let s = s.trim_start();
+    let s = s.strip_prefix("the ").unwrap_or(s);
+    s.chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// The same title, ignoring case, spaces and punctuation (a title of punctuation only must be
+/// the same text).
+fn same_title(a: &str, b: &str) -> bool {
+    let (ka, kb) = (match_key(a), match_key(b));
+    if ka.is_empty() || kb.is_empty() {
+        a.trim().to_lowercase() == b.trim().to_lowercase()
+    } else {
+        ka == kb
+    }
+}
+
+/// `artist` (as another app writes it: one name, or several joined by "," ";" "&" "/" or
+/// "feat.") names one of the track's artists or its album artist.
+fn by_artist(t: &Track, artist: &str) -> bool {
+    let mut wanted = vec![match_key(artist)];
+    let lower = artist.to_lowercase();
+    for sep in [" featuring ", " feat. ", " feat ", " ft. ", " with "] {
+        if let Some((head, tail)) = lower.split_once(sep) {
+            wanted.push(match_key(head));
+            wanted.push(match_key(tail));
+        }
+    }
+    wanted.extend(lower.split([',', ';', '&', '/']).map(match_key));
+    wanted.retain(|k| !k.is_empty());
+    let album_artist = t.album.as_ref().and_then(|a| a.album_artist.as_deref());
+    t.artists
+        .iter()
+        .map(|a| a.name.as_str())
+        .chain(album_artist)
+        .map(match_key)
+        .any(|have| !have.is_empty() && wanted.contains(&have))
+}
+
+/// A track that names no artist at all (nothing to disagree with).
+fn no_artist(t: &Track) -> bool {
+    t.artists.iter().all(|a| match_key(&a.name).is_empty())
+}
+
+fn track_length(t: &Track) -> Option<u64> {
+    t.duration_ms.or(t.file.duration_ms)
+}
+
+/// Both lengths known (an M3U writes -1, read as 0, for an unknown one) and within
+/// [`IMPORT_LENGTH_SLACK_MS`].
+fn close_lengths(a: Option<u64>, b: Option<u64>) -> bool {
+    match (a.filter(|&n| n > 0), b.filter(|&n| n > 0)) {
+        (Some(a), Some(b)) => a.abs_diff(b) <= IMPORT_LENGTH_SLACK_MS,
+        _ => false,
+    }
+}
+
+/// The named folders a file is in, nearest first.
+fn folders(p: &Path) -> Vec<&std::ffi::OsStr> {
+    p.parent()
+        .map(|d| {
+            d.components()
+                .rev()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(n) => Some(n),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// How many folders, from the nearest up, two files' paths have in common.
+fn shared_folders(a: &Path, b: &Path) -> usize {
+    folders(a)
+        .iter()
+        .zip(folders(b))
+        .take_while(|(x, y)| **x == *y)
+        .count()
+}
+
+/// A library file of the entry's file name is the entry's song: its title (or, where tags and
+/// the other app disagree on it, its length) and its artist agree with the entry.
+fn agrees(h: &Track, t: &ImportedTrack) -> bool {
+    let len = close_lengths(track_length(h), t.duration_ms);
+    let artist = t.artist.as_deref().map(str::trim).unwrap_or("");
+    (same_title(&h.title, &t.title) || len)
+        && (artist.is_empty() || no_artist(h) || by_artist(h, artist) || len)
+}
+
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::*;
@@ -7953,5 +8070,182 @@ mod identify_tests {
         let names: Vec<String> = lib.list_artists().unwrap().into_iter().map(|a| a.name).collect();
         assert_eq!(names, ["Artist 0", "Artist 1"]);
         assert_eq!(lib.list_genres().unwrap().len(), 2);
+    }
+
+    fn import_test_track(path: &str, title: &str, artist: Option<&str>, secs: u64) -> Track {
+        let mut t = sample_track(path, title);
+        t.recording_mbid = None;
+        t.isrc = None;
+        t.canonical = None;
+        t.album = None;
+        t.artists = artist
+            .map(|name| Artist {
+                id: None,
+                name: name.into(),
+                mbid: None,
+            })
+            .into_iter()
+            .collect();
+        t.duration_ms = Some(secs * 1000);
+        t.file.duration_ms = Some(secs * 1000);
+        t
+    }
+
+    fn entry(title: &str, artist: Option<&str>, path: Option<&str>, secs: Option<u64>) -> ImportedTrack {
+        ImportedTrack {
+            title: title.into(),
+            artist: artist.map(Into::into),
+            album: None,
+            path: path.map(Into::into),
+            duration_ms: secs.map(|s| s * 1000),
+        }
+    }
+
+    /// An imported line (a playlist, a Roon export, a play reported by another app) that names an
+    /// artist is never matched to another artist's song of the same title.
+    #[test]
+    fn an_imported_entry_lands_on_its_artists_song_not_a_namesake() {
+        let lib = Library::open_in_memory().unwrap();
+        let path_of = |t: Option<Track>| t.map(|t| t.file.path.to_string_lossy().into_owned());
+        lib.upsert_track(&import_test_track(
+            "/m/nin/Hurt.flac",
+            "Hurt",
+            Some("Nine Inch Nails"),
+            373,
+        ))
+        .unwrap();
+        let cash = entry("Hurt", Some("Johnny Cash"), None, Some(218));
+        assert_eq!(
+            path_of(lib.resolve_import(&cash).unwrap()),
+            None,
+            "a cover is not the original"
+        );
+        assert_eq!(
+            path_of(lib.find_by_title_artist("Hurt", Some("Johnny Cash")).unwrap()),
+            None
+        );
+        // Names written another way still match.
+        for artist in [
+            "nine inch nails",
+            "The Nine Inch Nails",
+            "Nine Inch Nails feat. Someone",
+            "Someone, Nine Inch Nails",
+        ] {
+            assert_eq!(
+                path_of(
+                    lib.resolve_import(&entry("hurt", Some(artist), None, None))
+                        .unwrap()
+                )
+                .as_deref(),
+                Some("/m/nin/Hurt.flac"),
+                "{artist}"
+            );
+        }
+        // No artist named: the title is enough, as before.
+        assert_eq!(
+            path_of(lib.resolve_import(&entry("Hurt", None, None, None)).unwrap()).as_deref(),
+            Some("/m/nin/Hurt.flac")
+        );
+        lib.upsert_track(&import_test_track(
+            "/m/cash/Hurt.flac",
+            "Hurt",
+            Some("Johnny Cash"),
+            218,
+        ))
+        .unwrap();
+        assert_eq!(
+            path_of(lib.resolve_import(&cash).unwrap()).as_deref(),
+            Some("/m/cash/Hurt.flac")
+        );
+
+        // An accent the other app leaves out: the same length makes it the same recording.
+        lib.upsert_track(&import_test_track("/m/b/Halo.flac", "Halo", Some("Beyoncé"), 261))
+            .unwrap();
+        assert_eq!(
+            path_of(
+                lib.resolve_import(&entry("Halo", Some("Beyonce"), None, Some(262)))
+                    .unwrap()
+            )
+            .as_deref(),
+            Some("/m/b/Halo.flac")
+        );
+        assert_eq!(
+            path_of(
+                lib.resolve_import(&entry("Halo", Some("Beyonce"), None, Some(300)))
+                    .unwrap()
+            ),
+            None
+        );
+        assert_eq!(
+            path_of(
+                lib.resolve_import(&entry("Halo", Some("Beyonce"), None, Some(0)))
+                    .unwrap()
+            ),
+            None
+        );
+        // A song without an artist has nothing to disagree with.
+        lib.upsert_track(&import_test_track("/m/x/Lonely.flac", "Lonely", None, 100))
+            .unwrap();
+        assert_eq!(
+            path_of(
+                lib.resolve_import(&entry("Lonely", Some("Anyone"), None, None))
+                    .unwrap()
+            )
+            .as_deref(),
+            Some("/m/x/Lonely.flac")
+        );
+    }
+
+    /// A playlist path that is not in the library: a file of the same name elsewhere is the
+    /// entry's song when its folders are named the same (a library moved to another disk) or
+    /// when it agrees with the entry; not just because it is the only file of that name.
+    #[test]
+    fn a_file_of_the_same_name_elsewhere_must_be_the_entrys_song() {
+        let lib = Library::open_in_memory().unwrap();
+        let path_of = |t: Option<Track>| t.map(|t| t.file.path.to_string_lossy().into_owned());
+        lib.upsert_track(&import_test_track(
+            "/m/Artist A/First/01 Intro.flac",
+            "Intro",
+            Some("Artist A"),
+            60,
+        ))
+        .unwrap();
+        let other = entry(
+            "Intro",
+            Some("Artist B"),
+            Some("/old/Artist B/Second/01 Intro.flac"),
+            Some(90),
+        );
+        assert_eq!(
+            path_of(lib.resolve_import(&other).unwrap()),
+            None,
+            "another artist's intro"
+        );
+        // The same folders on another disk: the tags may say anything.
+        let moved = entry(
+            "Untitled",
+            None,
+            Some("/Volumes/Music/Artist A/First/01 Intro.flac"),
+            None,
+        );
+        assert_eq!(
+            path_of(lib.resolve_import(&moved).unwrap()).as_deref(),
+            Some("/m/Artist A/First/01 Intro.flac")
+        );
+        // One folder alike is not enough when the entry names two.
+        let half = entry("Untitled", None, Some("/old/Artist B/First/01 Intro.flac"), None);
+        assert_eq!(path_of(lib.resolve_import(&half).unwrap()), None);
+        // Elsewhere, but its title (or its length) and artist agree.
+        for e in [
+            entry("Intro", Some("Artist A"), Some("/x/y/01 Intro.flac"), None),
+            entry("Intro", None, Some("/x/y/01 Intro.flac"), None),
+            entry("Untitled", None, Some("/x/y/01 Intro.flac"), Some(61)),
+        ] {
+            assert_eq!(
+                path_of(lib.resolve_import(&e).unwrap()).as_deref(),
+                Some("/m/Artist A/First/01 Intro.flac"),
+                "{e:?}"
+            );
+        }
     }
 }
