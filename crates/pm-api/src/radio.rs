@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 const DIRECTORY: &str = "https://all.api.radio-browser.info/json/stations/search";
 const SETTING: &str = "radio.stations";
-/// The most one directory answer may be.
-const DIRECTORY_MAX: usize = 8 << 20;
+/// The most one directory answer may be (radio-browser, SomaFM).
+pub(crate) const DIRECTORY_MAX: usize = 8 << 20;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
 pub struct Station {
