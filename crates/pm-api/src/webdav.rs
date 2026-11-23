@@ -727,4 +727,71 @@ mod tests {
             assert_eq!(percent_decode(kept), kept);
         }
     }
+
+    /// A share's password never shows in what a failed playback says (the zone's state and its
+    /// events carry that to listeners): not as typed, not percent-encoded. It reaches the share
+    /// as a header.
+    #[test]
+    fn a_failed_playback_never_shows_the_share_password() {
+        use std::io::Write;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/dav/Music/", l.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                let mut c = c;
+                let mut req = [0u8; 4096];
+                let n = c.read(&mut req).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&req[..n]).into_owned());
+                // Audio by its type, nothing a decoder reads
+                let body = [0u8; 2048];
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = c.write_all(head.as_bytes());
+                let _ = c.write_all(&body);
+            }
+        });
+        let password = "p@ss word:/x";
+        let encoded: String = url::form_urlencoded::byte_serialize(password.as_bytes()).collect();
+        let basic = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("me:{password}"),
+        );
+        // In their own fields, and typed into the share's address
+        let in_address = base.replacen("http://", "http://me:p%40ss%20word%3A%2Fx@", 1);
+        for (url, user, pass) in [(base.clone(), "me", password), (in_address, "", "")] {
+            let share = Share {
+                id: "ab12cd".into(),
+                name: "NAS".into(),
+                url,
+                user: user.into(),
+                password: pass.into(),
+            };
+            let key = share.root().join("Queen/01 Song.flac");
+            let shared: Shared = Arc::new(RwLock::new(vec![share]));
+            let err = match open_blocking(&shared, &key) {
+                Ok(_) => panic!("zeros decoded"),
+                Err(e) => e,
+            };
+            let said = format!("{err} {err:?}");
+            for secret in [
+                password,
+                "p%40ss%20word%3A%2Fx",
+                "p%40ss",
+                encoded.as_str(),
+                "p@ss",
+            ] {
+                assert!(!said.contains(secret), "{secret:?} in {said}");
+            }
+            assert!(!said.contains("me:"), "{said}");
+            let req = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(
+                req.to_ascii_lowercase()
+                    .contains(&format!("authorization: basic {}", basic.to_ascii_lowercase())),
+                "{req}"
+            );
+        }
+    }
 }
