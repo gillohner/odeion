@@ -265,6 +265,62 @@ pub(crate) fn picture(bytes: Vec<u8>, cache: &str) -> Result<axum::response::Res
         .into_response())
 }
 
+/// The parts a picture file is sent in.
+const PICTURE_CHUNK: usize = 64 << 10;
+
+/// A picture file as an answer, as [`picture`] answers bytes (its type by its first bytes, the
+/// same headers), but sent as it is read: a folder cover can be a scan of tens of MB, and a page
+/// of album tiles asks for many at once. The error is the file's own (open, read), or
+/// `InvalidData` when it is no picture.
+pub(crate) async fn picture_file(
+    path: &std::path::Path,
+    cache: &'static str,
+) -> std::io::Result<axum::response::Response> {
+    use axum::http::{header, HeaderValue};
+    use futures_util::StreamExt;
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await?;
+    let len = file.metadata().await?.len();
+    let mut head = vec![0u8; 16];
+    let mut got = 0;
+    while got < head.len() {
+        match file.read(&mut head[got..]).await? {
+            0 => break,
+            n => got += n,
+        }
+    }
+    head.truncate(got);
+    let mime = pm_library::image_type(&head)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "not a picture"))?;
+    // (the length it had when it was opened: a file that grows meanwhile is not read on)
+    let rest = len.saturating_sub(got as u64);
+    let first = futures_util::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(head))]);
+    let after = futures_util::stream::unfold(
+        (file.take(rest), vec![0u8; PICTURE_CHUNK]),
+        |(mut r, mut buf)| async move {
+            match r.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => Some((Ok(bytes::Bytes::copy_from_slice(&buf[..n])), (r, buf))),
+                Err(e) => Some((Err(e), (r, buf))),
+            }
+        },
+    );
+    let mut resp = axum::response::Response::new(axum::body::Body::from_stream(first.chain(after)));
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(got as u64 + rest));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(PASSIVE_CSP),
+    );
+    Ok(resp)
+}
+
 /// The most a relayed picture may be.
 const RELAYED_PICTURE_MAX: usize = 16 << 20;
 
@@ -328,5 +384,59 @@ mod tests {
         assert_eq!(loose("Random Access Memories [Deluxe]"), "randomaccessmemories");
         assert_eq!(loose("AC/DC"), "acdc");
         assert_ne!(loose("Homework"), loose("Discovery"));
+    }
+
+    /// A cover file goes out as it is read, in parts, not read whole first (a folder cover can be
+    /// a scan of tens of MB, and a page of tiles asks for many at once): every byte, its length
+    /// and the headers of [`picture`]; a file that is no picture is refused by its bytes.
+    #[tokio::test]
+    async fn a_picture_file_is_sent_as_it_is_read() {
+        use super::{picture_file, PASSIVE_CSP, PICTURE_CHUNK};
+        use http_body_util::BodyExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cover.jpg");
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        bytes.extend((0..3_000_000u32).map(|i| (i % 251) as u8));
+        std::fs::write(&path, &bytes).unwrap();
+        let resp = picture_file(&path, "private").await.unwrap();
+        let h = resp.headers().clone();
+        assert_eq!(h["content-type"], "image/jpeg");
+        assert_eq!(h["content-length"], bytes.len().to_string().as_str());
+        assert_eq!(h["cache-control"], "private");
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        assert_eq!(h["content-security-policy"], PASSIVE_CSP);
+        let mut body = resp.into_body();
+        let (mut got, mut largest) = (Vec::new(), 0);
+        while let Some(frame) = body.frame().await {
+            let data = frame.unwrap().into_data().unwrap();
+            largest = largest.max(data.len());
+            got.extend_from_slice(&data);
+        }
+        assert!(
+            got == bytes,
+            "{} of {} bytes, or other bytes",
+            got.len(),
+            bytes.len()
+        );
+        assert!(largest <= PICTURE_CHUNK, "a part of {largest} bytes");
+        // A picture shorter than the bytes its type is read from
+        let tiny = dir.path().join("tiny.gif");
+        std::fs::write(&tiny, b"GIF89a").unwrap();
+        let resp = picture_file(&tiny, "private").await.unwrap();
+        assert_eq!(resp.headers()["content-type"], "image/gif");
+        let got = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&got[..], b"GIF89a");
+        // No picture, whatever its name; no file
+        for (name, text) in [
+            ("page.jpg", &b"<svg onload=alert(1)>"[..]),
+            ("empty.png", &b""[..]),
+        ] {
+            std::fs::write(dir.path().join(name), text).unwrap();
+            let e = picture_file(&dir.path().join(name), "private").await.unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{name}");
+        }
+        assert!(picture_file(&dir.path().join("none.jpg"), "private")
+            .await
+            .is_err());
     }
 }

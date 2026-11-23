@@ -2841,10 +2841,9 @@ async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> R
                 .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }
     }
-    let bytes = tokio::fs::read(&path)
+    art::picture_file(&path, "private, max-age=86400")
         .await
-        .map_err(|e| ApiError::not_found(format!("portrait for artist {id}: {e}")))?;
-    art::picture(bytes, "private, max-age=86400")
+        .map_err(|e| ApiError::not_found(format!("portrait for artist {id}: {e}")))
 }
 
 async fn artist_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
@@ -3320,11 +3319,11 @@ async fn album_cover(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Re
             .await?
             .ok_or_else(|| ApiError::not_found(format!("no cover for album {id}")))?,
     };
-    let bytes = tokio::fs::read(&art.file)
+    // Its type by its bytes, also for covers stored before the scan checked them; sent as it is
+    // read (a folder cover is any size)
+    art::picture_file(&art.file, "private, max-age=86400")
         .await
-        .map_err(|e| ApiError::not_found(format!("cover file for album {id}: {e}")))?;
-    // Its type by its bytes, also for covers stored before the scan checked them
-    art::picture(bytes, "private, max-age=86400")
+        .map_err(|e| ApiError::not_found(format!("cover file for album {id}: {e}")))
 }
 
 // ---- pubky ----
@@ -23019,6 +23018,19 @@ exec sleep 300
             let (st, h) = get(*id).await;
             assert_eq!(st, StatusCode::NOT_FOUND, "{h:?}");
         }
+        // Subsonic apps get the same picture, whole, by its bytes
+        let req = Request::builder()
+            .uri(format!(
+                "/rest/getCoverArt?id=al-{}&u={}&p=s3cret&v=1.16.1&c=test",
+                album_ids[0], s.subsonic_user
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let r = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "image/png");
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"\x89PNG\r\n\x1a\n-picture");
     }
 
     /// Files relayed from another server keep their type when it is audio, video or a raster

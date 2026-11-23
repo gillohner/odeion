@@ -1450,12 +1450,14 @@ async fn dispatch(
                 .expect("library poisoned")
                 .album_art(album_id)?
                 .ok_or_else(|| SubErr::not_found("Cover art not found"))?;
-            let bytes = tokio::fs::read(&art.file)
+            // Served by its bytes, never by the stored type (a row from an older scan may hold
+            // any), as it is read
+            let resp = crate::art::picture_file(&art.file, "private, max-age=86400")
                 .await
-                .map_err(|e| SubErr::not_found(format!("cover: {e}")))?;
-            // Served by its bytes, never by the stored type (a row from an older scan may hold any)
-            let resp = crate::art::picture(bytes, "private, max-age=86400")
-                .map_err(|_| SubErr::not_found("Cover art not found"))?;
+                .map_err(|e| match e.kind() {
+                    std::io::ErrorKind::InvalidData => SubErr::not_found("Cover art not found"),
+                    _ => SubErr::not_found(format!("cover: {e}")),
+                })?;
             return Ok(Reply::Raw(resp));
         }
         "startScan" | "getScanStatus" => {
