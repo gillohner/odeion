@@ -1064,14 +1064,15 @@ mod tests {
             matches!(lock_data_dir(&data).unwrap(), Hold::Taken(_)),
             "let go after a failure"
         );
-        // The lock file can be locked by another user too
+        // The lock file can be locked by another user too: made readable to all, also when it
+        // was not (whatever the umask)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(data.join("node.lock"))
-                .unwrap()
-                .permissions()
-                .mode();
+            let lock = data.join("node.lock");
+            std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+            drop(taken(lock_data_dir(&data).unwrap()));
+            let mode = std::fs::metadata(&lock).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o644);
         }
     }
