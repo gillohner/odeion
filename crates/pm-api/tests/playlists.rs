@@ -2035,7 +2035,8 @@ async fn a_playlist_of_more_songs_than_one_lookup_turn_keeps_their_order() {
     let db = settings.db_path.clone();
     let s = NodeState::new(settings, Library::open(&db).unwrap(), OutputRegistry::new());
     let app = router(s.clone());
-    // Even songs identified (published), odd ones not (kept on this node)
+    // Every tenth song identified (published: a post holds at most 50,000 characters), the
+    // others not (kept on this node)
     let ids: Vec<i64> = {
         let lib = s.library.lock().unwrap();
         (0..1001)
@@ -2051,7 +2052,7 @@ async fn a_playlist_of_more_songs_than_one_lookup_turn_keeps_their_order() {
                     "recording_mbid": null, "isrc": null, "acoustid": null, "canonical": null,
                     "replaygain_track_gain_db": null, "replaygain_album_gain_db": null}))
                 .unwrap();
-                if i % 2 == 0 {
+                if i % 10 == 0 {
                     let mbid = pm_model::Mbid::parse(&format!("00000000-0000-4000-8000-{i:012}")).unwrap();
                     t.canonical = Some((pm_model::MusicUri::recording(mbid), pm_model::Confidence::TaggedMbid));
                 }
@@ -2076,7 +2077,7 @@ async fn a_playlist_of_more_songs_than_one_lookup_turn_keeps_their_order() {
         .map(|x| x["uri"].as_str().unwrap().to_string())
         .collect();
     let want: Vec<String> = (0..1001)
-        .step_by(2)
+        .step_by(10)
         .map(|i| format!("https://musicbrainz.org/recording/00000000-0000-4000-8000-{i:012}"))
         .collect();
     assert_eq!(published, want);
@@ -2086,7 +2087,8 @@ async fn a_playlist_of_more_songs_than_one_lookup_turn_keeps_their_order() {
         .iter()
         .map(|x| x["id"].as_i64().unwrap())
         .collect();
-    assert_eq!(local, ids.iter().skip(1).step_by(2).copied().collect::<Vec<_>>());
+    let want_local: Vec<i64> = (0..1001).filter(|i| i % 10 != 0).map(|i| ids[i]).collect();
+    assert_eq!(local, want_local);
     // One song that is not there: 404, nothing added
     let (st, e) = call(
         &app,
