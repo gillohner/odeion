@@ -130,7 +130,7 @@ pub struct NodeState {
     /// The API port those renderers' descriptions are served on.
     renderer_port: std::sync::OnceLock<u16>,
     pub version: String,
-    pub library: Arc<Mutex<Library>>,
+    pub library: Arc<pm_library::LibraryLock>,
     /// Path of the SQLite file, so a scan can use its own connection.
     pub db_path: PathBuf,
     pub scan_folders: Vec<PathBuf>,
@@ -406,7 +406,7 @@ impl NodeState {
             .unwrap_or_else(|| settings.acoustid_key.clone());
         let node_id = node_id(&library);
         let stream_secret = stream_secret(&library);
-        let library = Arc::new(Mutex::new(library));
+        let library = Arc::new(pm_library::LibraryLock::new(library));
         let tidal: crate::tidal::SharedEndpoints =
             Arc::new(std::sync::RwLock::new(crate::tidal::TidalEndpoints {
                 creds: settings.tidal.clone(),
@@ -2578,7 +2578,7 @@ struct SavedQueue {
 
 /// Library radio: when a zone with `radio` on runs out of queue, add tracks
 /// similar to the last library track it played and keep going.
-fn continue_radio(library: &Mutex<Library>, zone: &Arc<Zone>) {
+fn continue_radio(library: &pm_library::LibraryLock, zone: &Arc<Zone>) {
     let state = zone.state();
     if !state.radio || state.queue.is_empty() || state.repeat != pm_zones::Repeat::Off {
         return;
@@ -2621,7 +2621,7 @@ fn continue_radio(library: &Mutex<Library>, zone: &Arc<Zone>) {
 }
 
 /// Library tracks (`track:<id>`) go into the play history; other URIs do not.
-fn record_play(library: &Mutex<Library>, zone: &ZoneId, uri: &str) {
+fn record_play(library: &pm_library::LibraryLock, zone: &ZoneId, uri: &str) {
     let Some(id) = uri
         .strip_prefix(crate::sources::TRACK_SCHEME)
         .and_then(|s| s.parse::<i64>().ok())
