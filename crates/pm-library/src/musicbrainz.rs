@@ -715,8 +715,11 @@ mod tests {
             "{:?}",
             at[1] - at[0]
         );
+        // A turn is spaced from the start of the last one in the client; the server stamps a
+        // request when it reads it, so one sent a little faster than the last can arrive up to a
+        // few ms early (a missing gate would leave ~50 ms here)
         for w in at[1..].windows(2) {
-            assert!(w[1] - w[0] >= Duration::from_millis(300), "{:?}", w[1] - w[0]);
+            assert!(w[1] - w[0] >= Duration::from_millis(280), "{:?}", w[1] - w[0]);
         }
         assert!(started.elapsed() < Duration::from_secs(5));
     }
