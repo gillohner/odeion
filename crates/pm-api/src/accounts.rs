@@ -1872,7 +1872,12 @@ pub fn library_roots(s: &NodeState) -> Vec<String> {
         roots.extend(shares.iter().map(|sh| sh.root().to_string_lossy().into_owned()));
     }
     if let Ok(drives) = s.drives.read() {
-        roots.extend(drives.roots.iter().map(|r| r.key().to_string_lossy().into_owned()));
+        roots.extend(
+            drives
+                .roots
+                .iter()
+                .map(|r| r.key().to_string_lossy().into_owned()),
+        );
     }
     roots.retain(|r| r.len() > 1);
     roots
