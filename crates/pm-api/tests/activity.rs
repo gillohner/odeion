@@ -218,7 +218,7 @@ async fn record_and_import_resolve_through_the_library() {
     // a title-only entry, a miss (kept as a search), a stream on Spotify, and a web page (kept)
     let a = music.join("a.wav");
     let m3u = format!(
-        "#EXTM3U\n#PLAYLIST:From elsewhere\n{}\n/mnt/old-nas/Daft Punk/a.wav\n#EXTINF:369,Daft Punk - Get Lucky\n/nowhere/x.flac\n#EXTINF:1,Nobody - Missing\n/nowhere/missing.flac\nhttps://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC\nhttps://example.com/mixtape-notes\n",
+        "#EXTM3U\n#PLAYLIST:From elsewhere\n{}\n/mnt/old-nas/music/a.wav\n#EXTINF:369,Daft Punk - Get Lucky\n/nowhere/x.flac\n#EXTINF:1,Nobody - Missing\n/nowhere/missing.flac\nhttps://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC\nhttps://example.com/mixtape-notes\n",
         a.display()
     );
     let req = Request::builder()

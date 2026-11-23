@@ -2430,8 +2430,9 @@ impl Library {
 
     /// Match an imported playlist entry: exact path, then file name, then title and artist. A
     /// file of the same name elsewhere is taken when it is the only one in two folders named as
-    /// the entry's (a library on another disk), when it is the only one and the entry is only a
-    /// path, or when its title and artist agree with the entry's.
+    /// the entry's (a library on another disk) and no other artist is named; when it is the only
+    /// one, in a folder named as the entry's nearest, and the entry is only a path; or when its
+    /// title and artist agree with the entry's (without an artist: also that nearest folder).
     pub fn resolve_import(&self, t: &ImportedTrack) -> Result<Option<Track>> {
         if let Some(p) = t.path.as_deref().and_then(crate::import::local_path) {
             if let Some(row) = self.file_by_path(&p)? {
@@ -2455,6 +2456,11 @@ impl Library {
                     }
                 }
                 let mut hits = self.tracks_by_file_name(name)?;
+                // Without an artist, a file elsewhere must also be in a folder named as the
+                // entry's nearest one (another album's "01 Intro.flac" is not it)
+                let entry_folder = folders(&p).first().copied();
+                let near = |h: &Track| entry_folder.is_none_or(|f| folders(&h.file.path).first() == Some(&f));
+                let named = t.artist.as_deref().is_some_and(|a| !a.trim().is_empty());
                 // A line that is only a path (no title, artist or length of its own) has nothing
                 // to disagree with: the only file of that name is it
                 let path_only = t.artist.as_deref().is_none_or(|a| a.trim().is_empty())
@@ -2462,10 +2468,10 @@ impl Library {
                     && t.path
                         .as_deref()
                         .is_some_and(|raw| t.title == crate::import::title_from_path(raw));
-                if path_only && hits.len() == 1 {
+                if path_only && hits.len() == 1 && near(&hits[0]) {
                     return Ok(hits.pop());
                 }
-                if let Some(h) = hits.into_iter().find(|h| agrees(h, t)) {
+                if let Some(h) = hits.into_iter().find(|h| agrees(h, t) && (named || near(h))) {
                     return Ok(Some(h));
                 }
             }
@@ -5503,20 +5509,15 @@ fn same_title(a: &str, b: &str) -> bool {
     }
 }
 
-/// `artist` (as another app writes it: one name, or several joined by "," ";" "&" "/" or
-/// "feat.") names one of the track's artists or its album artist.
+/// `artist` (as another app writes it: one name, or a credit naming several, split as
+/// [`crate::credits::split_credit`] splits the library's) names one of the track's artists or its
+/// album artist.
 fn by_artist(t: &Track, artist: &str) -> bool {
+    // The whole credit and the artists it names, split as the library splits credits
     let mut wanted = vec![match_key(artist)];
-    let lower = artist.to_lowercase();
-    for sep in [" featuring ", " feat. ", " feat ", " ft. ", " with "] {
-        if let Some((head, tail)) = lower.split_once(sep) {
-            wanted.push(match_key(head));
-            wanted.push(match_key(tail));
-        }
-    }
-    wanted.extend(lower.split([',', ';', '&', '/']).map(match_key));
+    wanted.extend(crate::credits::split_credit(artist).iter().map(|a| match_key(a)));
     wanted.retain(|k| !k.is_empty());
-    let album_artist = t.album.as_ref().and_then(|a| a.album_artist.as_deref());
+    let album_artist = own_album_artist(t);
     t.artists
         .iter()
         .map(|a| a.name.as_str())
@@ -5525,9 +5526,17 @@ fn by_artist(t: &Track, artist: &str) -> bool {
         .any(|have| !have.is_empty() && wanted.contains(&have))
 }
 
-/// A track that names no artist at all (nothing to disagree with).
+/// A track that names no artist at all, nor an album artist (nothing to disagree with).
 fn no_artist(t: &Track) -> bool {
-    t.artists.iter().all(|a| match_key(&a.name).is_empty())
+    t.artists.iter().all(|a| match_key(&a.name).is_empty()) && own_album_artist(t).is_none()
+}
+
+/// The album artist when it names someone ("Various Artists" names no one).
+fn own_album_artist(t: &Track) -> Option<&str> {
+    t.album
+        .as_ref()
+        .and_then(|a| a.album_artist.as_deref())
+        .filter(|a| !matches!(match_key(a).as_str(), "" | "variousartists" | "va"))
 }
 
 fn track_length(t: &Track) -> Option<u64> {
@@ -8207,8 +8216,13 @@ mod identify_tests {
         }
         assert_eq!(
             path_of(
-                lib.resolve_import(&entry("Halo", Some("Depeche Mode"), None, Some(262)))
-                    .unwrap()
+                lib.resolve_import(&entry(
+                    "Halo",
+                    Some("Depeche Mode"),
+                    Some("/x/y/Halo.flac"),
+                    Some(262)
+                ))
+                .unwrap()
             ),
             None,
             "another band's Halo of the same length"
@@ -8274,7 +8288,7 @@ mod identify_tests {
             60,
         ))
         .unwrap();
-        let raw = "/mnt/old-nas/a.wav";
+        let raw = "/mnt/old-nas/First/a.wav";
         let bare = entry(&crate::import::title_from_path(raw), None, Some(raw), None);
         assert_eq!(
             path_of(lib.resolve_import(&bare).unwrap()).as_deref(),
@@ -8309,8 +8323,8 @@ mod identify_tests {
         // Elsewhere, but its title (or its length) and artist agree.
         for e in [
             entry("Intro", Some("Artist A"), Some("/x/y/01 Intro.flac"), None),
-            entry("Intro", None, Some("/x/y/01 Intro.flac"), None),
-            entry("Untitled", None, Some("/x/y/01 Intro.flac"), Some(61)),
+            entry("Intro", None, Some("/x/First/01 Intro.flac"), None),
+            entry("Untitled", None, Some("/x/First/01 Intro.flac"), Some(61)),
         ] {
             assert_eq!(
                 path_of(lib.resolve_import(&e).unwrap()).as_deref(),
@@ -8357,5 +8371,72 @@ mod identify_tests {
             path_of(lib.resolve_import(&entry("end", None, None, None)).unwrap()).as_deref(),
             Some("/m/x/End.flac")
         );
+    }
+
+    /// Without an artist, a file of the entry's name in other folders is not it: a bare M3U
+    /// line, or one with a title only, naming another album's "01 Intro.flac".
+    #[test]
+    fn a_line_without_an_artist_needs_its_folder_too() {
+        let lib = Library::open_in_memory().unwrap();
+        let path_of = |t: Option<Track>| t.map(|t| t.file.path.to_string_lossy().into_owned());
+        lib.upsert_track(&import_test_track(
+            "/m/Artist A/First/01 Intro.flac",
+            "Intro",
+            Some("Artist A"),
+            60,
+        ))
+        .unwrap();
+        let raw = "/old/Artist B/Second/01 Intro.flac";
+        let bare = entry(&crate::import::title_from_path(raw), None, Some(raw), None);
+        assert_eq!(path_of(lib.resolve_import(&bare).unwrap()), None, "bare line");
+        let titled = entry("Intro", None, Some(raw), Some(90));
+        assert_eq!(path_of(lib.resolve_import(&titled).unwrap()), None, "title only");
+        // A relative line names no folder: nothing to disagree with
+        let relative = entry("Intro", None, Some("01 Intro.flac"), None);
+        assert_eq!(
+            path_of(lib.resolve_import(&relative).unwrap()).as_deref(),
+            Some("/m/Artist A/First/01 Intro.flac")
+        );
+    }
+
+    /// A song with an album artist only names that artist; "Various Artists" names no one; a
+    /// credit splits as the library splits credits.
+    #[test]
+    fn album_artists_and_credits_count_as_names() {
+        let lib = Library::open_in_memory().unwrap();
+        let path_of = |t: Option<Track>| t.map(|t| t.file.path.to_string_lossy().into_owned());
+        let mut only_album = sample_track("/m/dp/Lonely Planet.flac", "Lonely Planet");
+        only_album.artists.clear();
+        only_album.recording_mbid = None;
+        only_album.isrc = None;
+        only_album.canonical = None;
+        lib.upsert_track(&only_album).unwrap();
+        assert_eq!(
+            path_of(
+                lib.resolve_import(&entry("Lonely Planet", Some("Someone Else"), None, None))
+                    .unwrap()
+            ),
+            None,
+            "the album artist disagrees"
+        );
+        assert_eq!(
+            path_of(
+                lib.resolve_import(&entry("Lonely Planet", Some("Daft Punk"), None, None))
+                    .unwrap()
+            )
+            .as_deref(),
+            Some("/m/dp/Lonely Planet.flac")
+        );
+        let mut various = import_test_track("/m/va/Hits.flac", "Hits", Some("Somebody"), 100);
+        various.album = sample_track("/m/va/x.flac", "x").album;
+        if let Some(a) = various.album.as_mut() {
+            a.album_artist = Some("Various Artists".into());
+        }
+        assert!(by_artist(&various, "Somebody"));
+        assert!(!by_artist(&various, "Various Artists"));
+        let avicii = import_test_track("/m/a/One.flac", "One", Some("Avicii"), 100);
+        assert!(by_artist(&avicii, "Avicii x Nicky Romero"));
+        let ewf = import_test_track("/m/e/Fire.flac", "Fire", Some("Fire"), 100);
+        assert!(!by_artist(&ewf, "Earth, Wind & Fire"), "a known act stays whole");
     }
 }
