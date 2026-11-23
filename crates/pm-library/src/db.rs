@@ -1006,6 +1006,18 @@ impl Library {
         self.tracks_where("t.recording_mbid = ?1", mbid.to_string())
     }
 
+    /// [`Self::tracks_where`] with two arguments.
+    fn tracks_where2(&self, clause: &str, a: String, b: String) -> Result<Vec<Track>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "{TRACK_SELECT} WHERE {clause} ORDER BY fi.missing, t.id"
+        ))?;
+        let raws: Vec<RawTrack> = stmt
+            .query_map(params![a, b], row_to_track_raw)?
+            .collect::<std::result::Result<_, _>>()?;
+        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+    }
+
     fn tracks_where(&self, clause: &str, arg: String) -> Result<Vec<Track>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
@@ -1958,9 +1970,9 @@ impl Library {
                 "SELECT f.path, al.id, al.title FROM files f
                  JOIN tracks t ON t.id = f.track_id
                  JOIN albums al ON al.id = t.album_id
-                 WHERE +f.missing = 0 AND f.path LIKE ?1 ESCAPE '\\'",
+                 WHERE +f.missing = 0 AND f.path >= ?1 AND f.path < ?2",
             )?
-            .query_map(params![format!("{}%", like_escape(&prefix))], |r| {
+            .query_map(params![under(&prefix).0, under(&prefix).1], |r| {
                 Ok((PathBuf::from(r.get::<_, String>(0)?), r.get(1)?, r.get(2)?))
             })?
             .collect::<std::result::Result<_, _>>()?;
@@ -2862,7 +2874,8 @@ impl Library {
     /// Audio files in the folder of `path` that the library knows.
     pub fn tracks_in_folder(&self, dir: &std::path::Path) -> Result<Vec<Track>> {
         let prefix = format!("{}/", dir.to_string_lossy().trim_end_matches('/'));
-        let all = self.tracks_where("fi.path LIKE ?1 || '%'", prefix)?;
+        let (lo, hi) = under(&prefix);
+        let all = self.tracks_where2("fi.path >= ?1 AND fi.path < ?2", lo, hi)?;
         Ok(all
             .into_iter()
             .filter(|t| t.file.path.parent() == Some(dir))
@@ -4159,14 +4172,10 @@ impl Library {
         let mut conn = self.lock();
         let tx = conn.savepoint()?;
         let root_s = root.to_string_lossy().into_owned();
-        let prefix = format!("{}/", root_s.trim_end_matches('/'));
-        let escaped = prefix
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
+        let (lo, hi) = under(&format!("{}/", root_s.trim_end_matches('/')));
         let files = tx.execute(
-            "DELETE FROM files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-            params![root_s, format!("{escaped}%")],
+            "DELETE FROM files WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
+            params![root_s, lo, hi],
         )? as u64;
         tx.execute(
             "DELETE FROM plays WHERE track_id IN (SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM files))",
@@ -4229,8 +4238,8 @@ impl Library {
         }
         let conn = self.lock();
         Ok(conn.query_row(
-            "SELECT COUNT(DISTINCT track_id), COALESCE(SUM(size_bytes), 0) FROM files WHERE +missing = 0 AND path LIKE ?1 ESCAPE '\\'",
-            params![format!("{}%", like_escape(&prefix))],
+            "SELECT COUNT(DISTINCT track_id), COALESCE(SUM(size_bytes), 0) FROM files WHERE +missing = 0 AND path >= ?1 AND path < ?2",
+            params![under(&prefix).0, under(&prefix).1],
             |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
         )?)
     }
@@ -4290,8 +4299,8 @@ impl Library {
             prefix.push(std::path::MAIN_SEPARATOR);
         }
         let n = self.lock().execute(
-            "UPDATE files SET missing = 1 WHERE +missing = 0 AND path LIKE ?1 ESCAPE '\\' AND (last_seen_scan_id IS NULL OR last_seen_scan_id <> ?2)",
-            params![format!("{}%", like_escape(&prefix)), scan_id],
+            "UPDATE files SET missing = 1 WHERE +missing = 0 AND path >= ?1 AND path < ?2 AND (last_seen_scan_id IS NULL OR last_seen_scan_id <> ?3)",
+            params![under(&prefix).0, under(&prefix).1, scan_id],
         )?;
         Ok(n as u64)
     }
@@ -4741,8 +4750,17 @@ fn recording_uri(mbid: &str) -> Result<MusicUri> {
     Ok(MusicUri::Recording { mbid })
 }
 
-fn like_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+/// The paths under a folder as a range of the `files.path` index: `(lo, hi)` for
+/// `path >= lo AND path < hi`, where `prefix` is the folder with its separator at the end. Exact
+/// and case-sensitive, as paths are (`LIKE` ignores the case of ASCII letters, so `/music/` also
+/// matched every path under `/Music/`), and the index is used.
+fn under(prefix: &str) -> (String, String) {
+    let mut hi = prefix.as_bytes().to_vec();
+    // (the separator is ASCII: the next byte is still one character)
+    if let Some(last) = hi.last_mut() {
+        *last += 1;
+    }
+    (prefix.to_string(), String::from_utf8(hi).unwrap_or_default())
 }
 
 /// Turn free text into an FTS5 query: each word a prefix term, ANDed.
@@ -5472,6 +5490,48 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::{sample_track, MB};
     use super::*;
+
+    /// Two folders whose names differ only in case are two folders: removing, scanning or
+    /// counting one leaves the other's songs alone (`LIKE` ignored the case). A folder name with
+    /// `_` or `%` in it matches only itself.
+    #[test]
+    fn folders_that_differ_only_in_case_are_kept_apart() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut ids = std::collections::HashMap::new();
+        for p in [
+            "/m/Music/a.flac",
+            "/m/music/b.flac",
+            "/m/music/sub/c.flac",
+            "/m/a_b/d.flac",
+            "/m/axb/e.flac",
+        ] {
+            ids.insert(p, lib.upsert_track(&sample_track(p, p)).unwrap());
+        }
+        let present = |lib: &Library, p: &str| {
+            lib.get_track(ids[p])
+                .unwrap()
+                .is_some_and(|t| t.file.path == Path::new(p))
+        };
+        assert_eq!(lib.folder_totals(Path::new("/m/music")).unwrap().0, 2);
+        assert_eq!(lib.folder_totals(Path::new("/m/Music")).unwrap().0, 1);
+        assert_eq!(lib.folder_totals(Path::new("/m/a_b")).unwrap().0, 1);
+        assert_eq!(lib.album_files_under(Path::new("/m/Music")).unwrap().len(), 1);
+        assert_eq!(lib.tracks_in_folder(Path::new("/m/music")).unwrap().len(), 1);
+        // A scan of /m/music that saw nothing marks only its own two missing
+        assert_eq!(lib.mark_missing_under(Path::new("/m/music"), 99).unwrap(), 2);
+        assert_eq!(
+            lib.folder_totals(Path::new("/m/Music")).unwrap().0,
+            1,
+            "still there"
+        );
+        // Removing /m/music takes its own two songs only
+        let (files, _) = lib.remove_folder(Path::new("/m/music")).unwrap();
+        assert_eq!(files, 2);
+        assert!(present(&lib, "/m/Music/a.flac"));
+        assert!(lib.get_track(ids["/m/music/b.flac"]).unwrap().is_none());
+        lib.remove_folder(Path::new("/m/a_b")).unwrap();
+        assert!(present(&lib, "/m/axb/e.flac"), "`_` is no wildcard");
+    }
 
     #[test]
     fn a_settings_size_is_its_bytes_without_reading_it() {
