@@ -10,6 +10,7 @@
 //! by pubkey (M5) wraps this API rather than replacing it.
 
 pub mod about;
+pub mod access;
 pub mod access_token;
 pub mod activity;
 pub mod archive;
@@ -226,8 +227,9 @@ async fn deprecated(mut resp: Response) -> Response {
     resp
 }
 
-pub fn router(state: Arc<NodeState>) -> Router {
-    let v1 = Router::new()
+/// The `/v1` routes. Each names the capability it needs, per method, in [`access::ROUTES`].
+fn v1_routes() -> access::Routes {
+    access::Routes::new()
         .route("/info", get(info))
         .route("/health", get(health::health))
         .route("/node", get(groups::index))
@@ -840,6 +842,11 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/party/guest", get(party::guest))
         .route("/party/guest/search", get(party::search))
         .route("/party/guest/queue", post(party::add))
+}
+
+pub fn router(state: Arc<NodeState>) -> Router {
+    let (v1, _) = v1_routes().into_parts();
+    let v1 = v1
         .route_layer(middleware::from_fn_with_state(state.clone(), auth))
         .layer(middleware::map_response(plain_errors))
         .with_state(state.clone());
@@ -913,36 +920,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             get(|h: HeaderMap| async move { assets::APPLE_TOUCH_ICON.respond(&h, &[]) }),
         )
         .nest("/v1", v1)
-        // Reached without a bearer token: the OAuth redirect target and the
-        // Pubky Ring sign-in that hands the token out.
-        .merge(
-            Router::new()
-                .route("/tidal/callback", get(tidal::callback))
-                .route("/spotify/callback", get(spotify::callback))
-                .route("/lastfm/callback", get(lastfm::callback))
-                .route("/drives/{provider}/callback", get(drives::callback))
-                .route("/jamendo/callback", get(jamendo::callback))
-                .route("/v1/auth/pubky/start", post(controller_login_start))
-                .route("/v1/auth/pubky/poll", get(controller_login_poll))
-                .route("/v1/auth/pubky/owner/avatar", get(profiles::owner_avatar))
-                // A party guest's link: the page, and joining it (party.rs)
-                .route("/party/{code}", get(party_page))
-                .route("/v1/party/join", post(party::join))
-                // LAN discovery: the SSDP LOCATION (pm-discovery); names the node, nothing more.
-                .route(pm_discovery::DESCRIPTION_PATH, get(upnp_description))
-                // Renderers fetch pull streams with the stream's own key (`?k=`), or the token.
-                .route("/v1/outputs/pull/{name}/{file}", get(pull_stream))
-                // A renderer's volume events (GENA NOTIFY), to the token the node handed it; LAN only
-                .route(
-                    "/v1/upnp/events/{token}",
-                    axum::routing::any(upnp_events::notify).layer(middleware::from_fn(peer::lan_only)),
-                )
-                // Album covers for TV screens, with that cover's key.
-                .route("/v1/art/{id}", get(keyed_cover))
-                // MusicBrainz caching proxy for Pinakes and the owner's tools.
-                .route("/mb/ws/2/{*path}", get(mbproxy::forward))
-                .with_state(state.clone()),
-        )
+        .merge(open_routes().into_open_router().with_state(state.clone()))
         .merge(subsonic::router(state.clone()))
         // The zones as UPnP/DLNA renderers (no token, like any renderer; `[renderer] enabled`),
         // to LAN peers only (peer.rs)
@@ -957,6 +935,37 @@ pub fn router(state: Arc<NodeState>) -> Router {
             state.clone(),
             peer::tokenless_direct_only,
         ))
+}
+
+/// The routes reached without a sign-in: the OAuth redirect targets and the Pubky Ring sign-in
+/// that hands the token out, a party's link, and what carries a key of its own. Each is listed in
+/// [`access::OPEN`] with why it is open; one that is not listed fails the tests.
+fn open_routes() -> access::Routes {
+    access::Routes::new()
+        .route("/tidal/callback", get(tidal::callback))
+        .route("/spotify/callback", get(spotify::callback))
+        .route("/lastfm/callback", get(lastfm::callback))
+        .route("/drives/{provider}/callback", get(drives::callback))
+        .route("/jamendo/callback", get(jamendo::callback))
+        .route("/v1/auth/pubky/start", post(controller_login_start))
+        .route("/v1/auth/pubky/poll", get(controller_login_poll))
+        .route("/v1/auth/pubky/owner/avatar", get(profiles::owner_avatar))
+        // A party guest's link: the page, and joining it (party.rs)
+        .route("/party/{code}", get(party_page))
+        .route("/v1/party/join", post(party::join))
+        // LAN discovery: the SSDP LOCATION (pm-discovery); names the node, nothing more.
+        .route(pm_discovery::DESCRIPTION_PATH, get(upnp_description))
+        // Renderers fetch pull streams with the stream's own key (`?k=`), or the token.
+        .route("/v1/outputs/pull/{name}/{file}", get(pull_stream))
+        // A renderer's volume events (GENA NOTIFY), to the token the node handed it; LAN only
+        .route(
+            "/v1/upnp/events/{token}",
+            axum::routing::any(upnp_events::notify).layer(middleware::from_fn(peer::lan_only)),
+        )
+        // Album covers for TV screens, with that cover's key.
+        .route("/v1/art/{id}", get(keyed_cover))
+        // MusicBrainz caching proxy for Pinakes and the owner's tools.
+        .route("/mb/ws/2/{*path}", get(mbproxy::forward))
 }
 
 /// Bind and serve until the task is cancelled.
@@ -1010,6 +1019,7 @@ async fn auth(
     State(state): State<Arc<NodeState>>,
     headers: HeaderMap,
     query: Query<std::collections::HashMap<String, String>>,
+    params: Result<axum::extract::RawPathParams, axum::extract::rejection::RawPathParamsRejection>,
     mut req: axum::extract::Request,
     next: middleware::Next,
 ) -> Response {
@@ -1046,24 +1056,27 @@ async fn auth(
         // The web page knows this answer (app.js NODE_REFUSED): it means "log in again"
         return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     };
-    let refusal = match caller.role {
-        accounts::Role::Owner => None,
-        accounts::Role::Listener => accounts::listener_refusal(&state, req.method(), req.uri().path()),
-        accounts::Role::Guest => party::guest_refusal(req.method(), req.uri().path()),
-    };
+    // What the matched route needs, and whether this caller may: the one place that decides
+    let route = route.as_deref().unwrap_or_default();
+    let at = access::At::of(route, params.iter().flat_map(|p| p.iter()));
+    let refusal = access::decide(&state, &caller, access::required(req.method(), route), &at);
     if let Some(why) = refusal {
         return accounts::refused(why).into_response();
     }
-    // Who changed a zone last decides whether its plays are the owner's listens (listens.rs)
+    // Who changed a zone last decides whether its plays are the owner's listens (listens.rs).
+    // The zone is the one the router found in the path, decoded: the one the handler acts on
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
-        if let Some(zone) = listens::zone_of_path(req.uri().path()) {
+        if let Some(zone) = at.zone.filter(|_| listens::zone_of_path(route).is_some()) {
             listens::zone_changed_by(&state, zone, caller.role == accounts::Role::Owner);
         }
     }
     // Listeners (and, to be safe, party guests) see file names, not where the owner keeps files
     let not_owner = caller.role != accounts::Role::Owner;
     // Who listens where (presence.rs): whoever plays on a zone
-    let played = presence::zone_written(req.method(), req.uri().path()).map(|z| (z, caller.clone()));
+    let played = at
+        .zone
+        .filter(|_| presence::zone_written(req.method(), route).is_some())
+        .map(|z| (z.to_string(), caller.clone()));
     // Under the node's source policy, a listener's catalogue reads may use the node's sign-ins
     let asking = match accounts::Who::of(&caller) {
         w @ accounts::Who::Listener(_) => w.resolved(&state.library.lock().expect("library poisoned")),
@@ -23754,7 +23767,7 @@ exec sleep 300
             );
         }
         assert_eq!(
-            accounts::listener_refusal(&s, &axum::http::Method::POST, "/v1/sources/tidal/login"),
+            accounts::listener_refusal(&s, &axum::http::Method::GET, "/v1/sources/tidal/login"),
             Some(accounts::NODE_SOURCES_ONLY),
             "their own sign-in stays refused under the node's"
         );
@@ -27415,4 +27428,113 @@ exec sleep 300
 
     /// Radio goes on when the queue runs out, not after a Stop (its own file).
     mod radio_stop;
+
+    /// A write to a zone marks the zone the handler acts on, however the request spells its
+    /// name (the router's decoded parameter, not the raw path).
+    #[tokio::test]
+    async fn a_zone_named_another_way_is_still_that_zone() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        let key = "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy";
+        let people = serde_json::json!({"people": [
+            {"key": key, "access": "music", "music_enabled": true, "added_at": 1}]});
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("people", &people.to_string())
+            .unwrap();
+        let tok = accounts::mint(&s, key).unwrap();
+        let (_, zones) = call_auth(&app, "GET", "/v1/zones", "s3cret").await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        assert!(listens::plays_are_the_owners(&s, &zid));
+        // The same zone, its name written another way in the address
+        let spelled = format!("%{:02x}{}", zid.as_bytes()[0], &zid[1..]);
+        let (st, v) = as_who(
+            &app,
+            "POST",
+            format!("/v1/zones/{spelled}/queue"),
+            &tok,
+            Some(serde_json::json!({"items": [{"uri": "https://example.com/a.mp3"}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(
+            !listens::plays_are_the_owners(&s, &zid),
+            "the zone is in the listener's hands"
+        );
+        let hands = s.zones_in_listeners_hands.lock().unwrap().clone();
+        assert_eq!(hands.len(), 1, "and under no other name: {hands:?}");
+    }
+
+    /// The sign-in check decides on what the router matched: the route, and the zone and source
+    /// as the handler gets them. A name written another way is the same name, one that can't be
+    /// read opens nothing, and a route's missing method is nobody's but the owner's to ask.
+    #[tokio::test]
+    async fn the_sign_in_check_reads_what_the_router_matched() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        let key = "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy";
+        let people = serde_json::json!({"people": [
+            {"key": key, "access": "music", "music_enabled": true, "added_at": 1}]});
+        let set = |name: &str, value: &str| s.library.lock().unwrap().set_setting(name, value).unwrap();
+        set("people", &people.to_string());
+        let tok = accounts::mint(&s, key).unwrap();
+        let (_, zones) = call_auth(&app, "GET", "/v1/zones", "s3cret").await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let spelled = format!("%{:02x}{}", zid.as_bytes()[0], &zid[1..]);
+        let status = |method: &'static str, uri: String, token: &str| {
+            let (app, token) = (app.clone(), token.to_string());
+            async move { call_auth(&app, method, &uri, &token).await.0 }
+        };
+        // A zone the owner opened is open under either spelling, one they did not under neither
+        for (open, refused) in [(zid.as_str(), false), ("another", true)] {
+            set("accounts.listener_zones", &serde_json::json!([open]).to_string());
+            for name in [&zid, &spelled] {
+                let uri = format!("/v1/zones/{name}/queue");
+                let st = status("GET", uri.clone(), &tok).await;
+                assert_eq!(st == StatusCode::FORBIDDEN, refused, "{uri}, open: {open}: {st}");
+                assert!(refused || st.is_success(), "{uri}: {st}");
+            }
+        }
+        // A source: the same answer however its name is written; one that can't be read, none
+        let plain = status("GET", "/v1/sources/tidal/signin".into(), &tok).await;
+        assert_ne!(
+            plain,
+            StatusCode::FORBIDDEN,
+            "their own TIDAL sign-in is theirs to see"
+        );
+        assert_eq!(
+            status("GET", "/v1/sources/tid%61l/signin".into(), &tok).await,
+            plain
+        );
+        let unread = status("GET", "/v1/sources/%FF/signin".into(), &tok).await;
+        assert!(unread.is_client_error(), "{unread}");
+        assert_eq!(
+            status("GET", "/v1/sources/lastfm/signin".into(), &tok).await,
+            StatusCode::FORBIDDEN,
+            "one sign-in for the whole node: the owner's"
+        );
+        // A method the route does not have: refused to a listener, the router's 405 for the owner
+        for (method, uri) in [("GET", "/v1/playlists/import"), ("POST", "/v1/me/prefs")] {
+            assert_eq!(
+                status(method, uri.into(), &tok).await,
+                StatusCode::FORBIDDEN,
+                "{method} {uri}"
+            );
+            assert_eq!(
+                status(method, uri.into(), "s3cret").await,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {uri}"
+            );
+        }
+        // No route at all: 404 for everyone, signed in or not
+        for token in [tok.as_str(), "s3cret", "nobody"] {
+            assert_eq!(
+                status("GET", "/v1/no/such/route".into(), token).await,
+                StatusCode::NOT_FOUND
+            );
+        }
+    }
 }
