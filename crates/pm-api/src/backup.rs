@@ -696,7 +696,9 @@ fn parse_within(bytes: &[u8], caps: &Caps) -> Result<Parsed, BackupError> {
         .min(left);
         match zip.by_name(name) {
             Ok(f) => {
-                let cap = cap.min(f.compressed_size().saturating_mul(caps.ratio).max(caps.floor));
+                // The packed size is the zip's own claim: never more than what was uploaded
+                let packed = f.compressed_size().min(bytes.len() as u64);
+                let cap = cap.min(packed.saturating_mul(caps.ratio).max(caps.floor));
                 // Read one byte past the cap: more than that is refused, never held
                 let mut v = Vec::new();
                 f.take(cap.saturating_add(1)).read_to_end(&mut v)?;
