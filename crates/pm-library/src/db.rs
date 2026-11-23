@@ -3568,46 +3568,73 @@ impl Library {
         immediately(&mut self.lock(), |conn| reject_on(conn, id))
     }
 
-    /// How identified the library is.
+    /// How identified the library is, in five statements:  the songs waiting for review, the open ones and how the identified ones
+    /// were identified are each one pass (one statement per count read the tracks 15 times).
     pub fn identity_counts(&self) -> Result<IdentityCounts> {
         let conn = self.lock();
-        let q = |sql: &str| -> rusqlite::Result<u64> {
-            conn.query_row(sql, [], |r| r.get::<_, i64>(0)).map(|n| n as u64)
-        };
+        let n = |v: i64| v as u64;
+        let total = n(conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?);
+        let identified = n(conn.query_row(
+            "SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?);
+        // Songs with options to confirm, not left as they are: `TRACK_PRESENT` is 0 or 1.
+        let (suggested, suggested_missing): (i64, i64) = conn.query_row(
+            &format!(
+                "SELECT COALESCE(SUM(p), 0), COALESCE(SUM(NOT p), 0) FROM (
+                   SELECT {TRACK_PRESENT} AS p FROM tracks t
+                   WHERE t.canonical_uri IS NULL
+                     AND EXISTS (SELECT 1 FROM identify_suggestions s WHERE s.track_id = t.id)
+                     AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped'))"
+            ),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        // The songs without an identity by their state (at most one row each: the key is the
+        // track); the file is looked at only for an outdated one.
+        let (skipped, unknown, unchecked, outdated): (i64, i64, i64, i64) = conn.query_row(
+            &format!(
+                "SELECT COALESCE(SUM(s.state = 'skipped'), 0),
+                        COALESCE(SUM(s.state IN ('unknown','error')), 0),
+                        COALESCE(SUM(s.track_id IS NULL), 0),
+                        COALESCE(SUM(CASE WHEN s.state = 'suggested' AND COALESCE(s.rules, 0) < ?1
+                                     THEN {TRACK_PRESENT} ELSE 0 END), 0)
+                 FROM tracks t LEFT JOIN identify_state s ON s.track_id = t.id
+                 WHERE t.canonical_uri IS NULL"
+            ),
+            params![crate::identify::RULES_VERSION],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        let mut by = IdentifiedBy::default();
+        let mut stmt = conn.prepare(
+            "SELECT canonical_confidence_source, COUNT(*) FROM tracks
+             WHERE canonical_uri IS NOT NULL GROUP BY canonical_confidence_source",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let count = n(row.get(1)?);
+            let slot = match row.get::<_, Option<String>>(0)?.as_deref() {
+                Some("tagged_mbid" | "tagged_isrc") => &mut by.tags,
+                Some("album_fit") => &mut by.album,
+                Some("fingerprint" | "fingerprint+release") => &mut by.fingerprint,
+                Some("confirmed_by_user") => &mut by.you,
+                Some("tag_match") => &mut by.title_artist,
+                Some("auto") => &mut by.auto,
+                _ => continue,
+            };
+            *slot += count;
+        }
         Ok(IdentityCounts {
-            total: q("SELECT COUNT(*) FROM tracks")?,
-            identified: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL")?,
-            suggested: q(&format!(
-                "SELECT COUNT(DISTINCT s.track_id) FROM identify_suggestions s JOIN tracks t ON t.id = s.track_id WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped') AND {TRACK_PRESENT}"
-            ))?,
-            suggested_missing: q(&format!(
-                "SELECT COUNT(DISTINCT s.track_id) FROM identify_suggestions s JOIN tracks t ON t.id = s.track_id WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped') AND NOT {TRACK_PRESENT}"
-            ))?,
-            skipped: q(
-                "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id WHERE t.canonical_uri IS NULL AND s.state = 'skipped'",
-            )?,
-            outdated: conn.query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id
-                     WHERE t.canonical_uri IS NULL AND s.state = 'suggested' AND COALESCE(s.rules, 0) < ?1 AND {TRACK_PRESENT}"
-                ),
-                params![crate::identify::RULES_VERSION],
-                |r| r.get::<_, i64>(0),
-            )? as u64,
-            unknown: q(
-                "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id WHERE t.canonical_uri IS NULL AND s.state IN ('unknown','error')",
-            )?,
-            unchecked: q(
-                "SELECT COUNT(*) FROM tracks t WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state s WHERE s.track_id = t.id)",
-            )?,
-            by: IdentifiedBy {
-                tags: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source IN ('tagged_mbid','tagged_isrc')")?,
-                album: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'album_fit'")?,
-                fingerprint: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release')")?,
-                you: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'confirmed_by_user'")?,
-                title_artist: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'tag_match'")?,
-                auto: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'auto'")?,
-            },
+            total,
+            identified,
+            suggested: n(suggested),
+            suggested_missing: n(suggested_missing),
+            skipped: n(skipped),
+            outdated: n(outdated),
+            unknown: n(unknown),
+            unchecked: n(unchecked),
+            by,
         })
     }
 
@@ -7953,5 +7980,119 @@ mod identify_tests {
         let names: Vec<String> = lib.list_artists().unwrap().into_iter().map(|a| a.name).collect();
         assert_eq!(names, ["Artist 0", "Artist 1"]);
         assert_eq!(lib.list_genres().unwrap().len(), 2);
+    }
+
+    /// Every count of `identity_counts`, each against a song made for it (the counts are three
+    /// combined statements: a slip in one sum would move one number).
+    #[test]
+    fn identity_counts_count_each_kind_once() {
+        let lib = Library::open_in_memory().unwrap();
+        let add = |name: &str| {
+            lib.upsert_track(&untagged(&format!("/m/{name}.flac"), name))
+                .unwrap()
+                .0
+        };
+        let sql = |q: &str, p: &[&dyn rusqlite::ToSql]| {
+            lib.lock().execute(q, p).unwrap();
+        };
+        let sources = [
+            "tagged_mbid",
+            "tagged_isrc",
+            "album_fit",
+            "fingerprint",
+            "fingerprint+release",
+            "confirmed_by_user",
+            "tag_match",
+            "auto",
+            "auto",
+            "some_new_source",
+        ];
+        for (i, src) in sources.iter().enumerate() {
+            let id = add(&format!("known{i}"));
+            sql(
+                "UPDATE tracks SET canonical_uri = ?1, canonical_confidence_source = ?2 WHERE id = ?3",
+                &[&format!("mb:{i}"), src, &id],
+            );
+        }
+        // Identified with a stale option: not waiting.
+        let stale = add("known-with-option");
+        sql(
+            "UPDATE tracks SET canonical_uri = 'mb:x', canonical_confidence_source = NULL WHERE id = ?1",
+            &[&stale],
+        );
+        let option = |id: i64| {
+            sql(
+                "INSERT INTO identify_suggestions(track_id, recording_mbid, title, artist, score, source, created_at)
+                 VALUES (?1, ?2, 't', 'a', 0.5, 'fingerprint', 0)",
+                &[&id, &format!("rec-{id}")],
+            );
+        };
+        option(stale);
+        let state = |id: i64, st: &str, rules: u32| {
+            sql(
+                "INSERT INTO identify_state(track_id, state, checked_at, rules) VALUES (?1, ?2, 0, ?3)",
+                &[&id, &st, &rules],
+            );
+        };
+        let now = crate::identify::RULES_VERSION;
+        // Waiting, checked by today's rules, two options: one song.
+        let a = add("waiting");
+        state(a, "suggested", now);
+        option(a);
+        sql(
+            "INSERT INTO identify_suggestions(track_id, recording_mbid, title, artist, score, source, created_at)
+             VALUES (?1, 'second', 't', 'a', 0.4, 'fingerprint', 0)",
+            &[&a],
+        );
+        // Waiting, checked by older rules: waiting and outdated.
+        let b = add("outdated");
+        state(b, "suggested", 0);
+        option(b);
+        // Waiting, older rules, file gone: missing, not outdated.
+        let c = add("gone");
+        state(c, "suggested", 0);
+        option(c);
+        sql("UPDATE files SET missing = 1 WHERE track_id = ?1", &[&c]);
+        // Waiting, file hidden: missing.
+        let d = add("hidden");
+        state(d, "suggested", now);
+        option(d);
+        sql(
+            "INSERT INTO hidden_files(path, hidden_at) VALUES ('/m/hidden.flac', 0)",
+            &[],
+        );
+        // Older rules, no options left: outdated only.
+        let e = add("outdated-no-option");
+        state(e, "suggested", 0);
+        // Left as it is, with an option.
+        let f = add("skipped");
+        state(f, "skipped", now);
+        option(f);
+        state(add("unknown"), "unknown", now);
+        state(add("error"), "error", now);
+        add("unchecked-1");
+        add("unchecked-2");
+        let c = lib.identity_counts().unwrap();
+        assert_eq!(
+            c,
+            IdentityCounts {
+                total: 21,
+                identified: 11,
+                suggested: 2,
+                suggested_missing: 2,
+                unknown: 2,
+                unchecked: 2,
+                skipped: 1,
+                outdated: 2,
+                by: IdentifiedBy {
+                    tags: 2,
+                    album: 1,
+                    fingerprint: 2,
+                    you: 1,
+                    title_artist: 1,
+                    auto: 2,
+                },
+            }
+        );
     }
 }
