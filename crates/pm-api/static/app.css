@@ -567,6 +567,14 @@ html[data-shell="phone"] .notice[data-failed] .btn.sm { min-height: 44px; }
   transition: background var(--dur-fast) var(--ease);
 }
 .track:last-child { border-bottom: 0; }
+/* ---- long lists ---- */
+/* A song row that is off screen is not styled, laid out or painted until it comes near: the Songs
+   list is thousands of rows, each about 33 elements. Its height is fixed, so the list is as long
+   and the scroll position as exact as before. */
+.track { content-visibility: auto; contain-intrinsic-size: auto 54px; }
+/* (a row that follows a finger shows its label in the gap it leaves, outside its own box: it is on
+   screen then, and paints as it did) */
+.track.swiping { content-visibility: visible; }
 .track:hover, .track:focus-within { background: var(--surface-2); }
 /* A click on a library song row (or a service album's) plays from there, as on a playlist's (.list-row.clickable) */
 :is([data-list], .src-tracks) > .track { cursor: pointer; }
@@ -2354,7 +2362,7 @@ html:not([data-shell="desktop"]) .main:has(> .libnav) .set-nav { top: 46px; }
    (60 px tall: 44 px chips, 8 px above and below; app.js measures them, larger text makes them taller) */
 html:not([data-shell="desktop"]) .main:has(> .libnav) { scroll-padding-top: calc(var(--libnav-h, 60px) + 8px); }
 /* Dense lists in the desktop layout (tablets too): shorter rows, smaller covers */
-:where(html[data-dense]:not([data-shell="phone"])) .track { height: 42px; }
+:where(html[data-dense]:not([data-shell="phone"])) .track { height: 42px; contain-intrinsic-size: auto 42px; }
 :where(html[data-dense]:not([data-shell="phone"])) .list-row { padding-top: 8px; padding-bottom: 8px; }
 :where(html[data-dense]:not([data-shell="phone"])) .grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 14px 12px; }
 

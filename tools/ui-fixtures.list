@@ -179,3 +179,4 @@ ui-listener-buttons.js listener-buttons-shots
 ui-boot.js boot-shots
 ui-bar-ticks.js bar-ticks-shots
 ui-failed-reads.js failed-reads-shots
+ui-long-list.js long-list-shots
