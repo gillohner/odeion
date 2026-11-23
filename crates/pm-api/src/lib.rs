@@ -27936,6 +27936,24 @@ exec sleep 300
                 Ok(Some("42".to_string()))
             );
         }
+        // Sign in with TIDAL and the code sign-in read the account as renewals do: a number or
+        // text, and the token's own when the answer names none
+        assert_eq!(
+            tidal_unofficial::answer_account(&serde_json::json!({"user_id": "0043"})),
+            Some("43".to_string())
+        );
+        assert_eq!(
+            tidal_unofficial::answer_account(&serde_json::json!({"user": {"userId": 44}})),
+            Some("44".to_string())
+        );
+        let named_by_its_token = tidal_unofficial::Session {
+            access_token: jwt(r#"{"uid":45}"#),
+            ..Default::default()
+        };
+        let held = tidal_unofficial::held_to_its_person(&s, &ben_who, named_by_its_token, true)
+            .await
+            .unwrap();
+        assert_eq!(held.user_id.as_deref(), Some("45"));
         *imports::HOME_OVERRIDE.write().unwrap() = None;
     }
 

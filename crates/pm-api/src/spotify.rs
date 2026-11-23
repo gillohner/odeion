@@ -375,8 +375,15 @@ async fn account_known(s: &NodeState, holder: &Who) -> Kept {
     let token = match user_token(s, holder).await {
         Ok(Some(token)) => token,
         Ok(None) => return Kept::Dead,
-        // (Spotify's own refusal of the renewal, as `token_request` says it)
-        Err(e) if e.message.contains("token endpoint 4") => return Kept::Dead,
+        // (Spotify's own refusal of the renewal, as `token_request` says it: 400 invalid_grant or
+        // 401; a 429 or 408 passes and is asked again)
+        Err(e)
+            if ["token endpoint 400", "token endpoint 401"]
+                .iter()
+                .any(|r| e.message.contains(r)) =>
+        {
+            return Kept::Dead
+        }
         Err(_) => return Kept::NotNow,
     };
     let Some(mut u) = load_user(s, holder) else {

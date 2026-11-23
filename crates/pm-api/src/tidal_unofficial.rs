@@ -414,7 +414,12 @@ pub(crate) async fn held_to_its_person(
             .or_else(|| token_account(&sess.access_token))
             .or(stated);
     }
-    sess.user_id = sess.user_id.as_deref().and_then(crate::accounts::account_id);
+    // (an answer that names nobody next to its token: the token names the account)
+    sess.user_id = sess
+        .user_id
+        .as_deref()
+        .and_then(crate::accounts::account_id)
+        .or_else(|| token_account(&sess.access_token));
     let Some(account) = sess.user_id.as_deref() else {
         return Err(if asked {
             crate::accounts::account_unknown("TIDAL")
@@ -426,6 +431,17 @@ pub(crate) async fn held_to_its_person(
     };
     who.account_free(&s.library.lock().expect("library poisoned"), STATE_KEY, account)?;
     Ok(sess)
+}
+
+/// The account a TIDAL token answer names (`user_id`, or `user.userId`), a number or text, read
+/// one way (`accounts::account_id`). Renewals read theirs the same way ([`renewed_for`]).
+pub(crate) fn answer_account(v: &Value) -> Option<String> {
+    let id = |v: &Value| match v {
+        Value::Number(n) => crate::accounts::account_id(&n.to_string()),
+        Value::String(s) => crate::accounts::account_id(s),
+        _ => None,
+    };
+    id(&v["user_id"]).or_else(|| id(&v["user"]["userId"]))
 }
 
 /// The account a TIDAL token names itself (its `uid` claim).
@@ -846,10 +862,7 @@ async fn wait_for_approval(s: &Arc<NodeState>, who: &Who, c: Client, p: Pending)
         if ok {
             if let Some(mut sess) = session_from(&v, None) {
                 // The token answer names the user; /sessions adds the session id and country
-                sess.user_id = v["user_id"]
-                    .as_i64()
-                    .or(v["user"]["userId"].as_i64())
-                    .map(|u| u.to_string());
+                sess.user_id = answer_account(&v);
                 let sess = fill_session(s, sess).await;
                 // Someone else's account on this node, or one TIDAL did not name, is not kept
                 // for a person (accounts.rs): the code is given up, and the page says why
@@ -1156,10 +1169,7 @@ pub(crate) async fn finish_browser(
     };
     sess.client = ClientKind::Pkce;
     // The token answer names the user; /sessions adds the session id and country
-    sess.user_id = v["user_id"]
-        .as_i64()
-        .or(v["user"]["userId"].as_i64())
-        .map(|u| u.to_string());
+    sess.user_id = answer_account(&v);
     if let Some(cc) = v["user"]["countryCode"].as_str() {
         sess.country = cc.to_string();
     }
@@ -1346,7 +1356,8 @@ fn token_blocking(
             Ok(Some(account)) => fresh.user_id = Some(account),
             Ok(None) => {}
             // (a store that can't be read now ends nothing: the renewal fails and is tried again)
-            Err((status, why)) if status != StatusCode::CONFLICT => return Err(FullError::Mode(why)),
+            // (as a failed renewal: full tracks stay on, the next play tries again)
+            Err((status, why)) if status != StatusCode::CONFLICT => return Err(FullError::Track(why)),
             Err((_, why)) => {
                 if st
                     .session
