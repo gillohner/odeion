@@ -1493,11 +1493,12 @@ impl NodeHomeserver {
         if !storage.exists(NODE_SETTINGS_PATH).await? {
             return Ok(None);
         }
-        let resp = within(OBJECT_TIMEOUT, async {
-            Ok(storage.get(NODE_SETTINGS_PATH).await?)
+        // The whole read within one limit (a body sent a byte now and then too)
+        let bytes = within(OBJECT_TIMEOUT, async {
+            let resp = storage.get(NODE_SETTINGS_PATH).await?;
+            read_capped(resp, NODE_SETTINGS_MAX, OBJECT_TIMEOUT).await
         })
         .await?;
-        let bytes = read_capped(resp, NODE_SETTINGS_MAX, OBJECT_TIMEOUT).await?;
         Ok(Some(
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
         ))

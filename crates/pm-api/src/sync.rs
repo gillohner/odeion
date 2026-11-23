@@ -1447,6 +1447,11 @@ impl PubkySync {
                 }
             },
             Ok(None) => None,
+            // Too large to be one a node wrote: nothing can restore from it either
+            Err(HomeserverError::TooLarge { max }) => {
+                tracing::warn!("the settings copy on the homeserver is over {max} bytes: replaced");
+                None
+            }
             Err(e) if !taken_in => {
                 tracing::warn!(
                     "the settings copy on the homeserver could not be read ({e}): not replaced yet"
@@ -1484,8 +1489,13 @@ impl PubkySync {
                     tracing::warn!(error = %e.message, "history deleted on another node");
                 }
             }
+            // Read again under this lock: a backup that ran meanwhile may have taken the copy in,
+            // and what was deleted since must not come back from it
+            let taken_in =
+                taken_in || lib.get_setting(COPY_TAKEN_IN).ok().flatten().as_deref() == Some(self.z32());
             if !taken_in {
-                // Not fresh: the settings it does not have (folders and contact stay its own)
+                // The settings it does not have (a fresh node got the whole copy just above; any
+                // other keeps its own folders and contact)
                 if let Some(copy) = &copy {
                     let n = take_in_settings(&lib, &copy.settings);
                     if n > 0 {
