@@ -62,6 +62,10 @@ const SHELL = new Set(['/', '/app.js', '/app.css', '/pwa.js', '/pwa.css', '/feed
 const failures = [];
 let checks = 0;
 const ok = (cond, what) => { checks++; console.log(`${cond ? 'ok  ' : 'FAIL'} ${what}`); if (!cond) failures.push(what); };
+// A test proxy that rewrites a file asks the node for it whole and plain (no gzip, no 304), and
+// passes its own version on without the node's ETag: a changed file is a different file
+const wholeFile = (h) => { const o = { ...h }; delete o['accept-encoding']; delete o['if-none-match']; delete o['if-modified-since']; return o; };
+const rewritten = (h, body) => { const o = { ...h, 'content-length': body.length }; delete o.etag; delete o['content-encoding']; return o; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const report = {};
 const save = (name, v) => { report[name] = v; fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify(report, null, 2)); };
@@ -447,10 +451,11 @@ ${checks - failures.length}/${checks} browser checks passed (launch safety only)
         const a = Number(m[1]); const z = m[2] ? Math.min(Number(m[2]), TONE.length - 1) : TONE.length - 1;
         res.writeHead(206, { 'content-type': 'audio/wav', 'content-length': z - a + 1, 'content-range': `bytes ${a}-${z}/${TONE.length}`, 'accept-ranges': 'bytes' }); res.end(TONE.subarray(a, z + 1)); return;
       }
-      const out = http.request({ host: up.hostname, port: up.port, path: req.url, method: req.method, headers: req.headers }, (r) => {
-        if (slowApp && req.url === '/app.js') { const parts = []; r.on('data', (d) => parts.push(d)); r.on('end', () => setTimeout(() => { const body = Buffer.concat([...parts, Buffer.from("\n;window.pwaAppVersion = 'new';\n")]); res.writeHead(r.statusCode, { ...r.headers, 'content-length': body.length }); res.end(body); }, 5500)); return; }
-        if (samelen && req.url === '/pwa.css') { const parts = []; r.on('data', (d) => parts.push(d)); r.on('end', () => { const body = Buffer.from(Buffer.concat(parts).toString('utf8').replace('Odeion', 'ODEION')); res.writeHead(r.statusCode, { ...r.headers, 'content-length': body.length }); res.end(body); }); return; }
-        if (v2 && req.url === '/sw.js') { const parts = []; r.on('data', (d) => parts.push(d)); r.on('end', () => { const body = Buffer.concat([...parts, Buffer.from('\n// next version\n')]); const h = { ...r.headers, 'content-length': body.length }; res.writeHead(r.statusCode, h); res.end(body); }); return; }
+      const changed = (slowApp && req.url === '/app.js') || (samelen && req.url === '/pwa.css') || (v2 && req.url === '/sw.js');
+      const out = http.request({ host: up.hostname, port: up.port, path: req.url, method: req.method, headers: changed ? wholeFile(req.headers) : req.headers }, (r) => {
+        if (slowApp && req.url === '/app.js') { const parts = []; r.on('data', (d) => parts.push(d)); r.on('end', () => setTimeout(() => { const body = Buffer.concat([...parts, Buffer.from("\n;window.pwaAppVersion = 'new';\n")]); res.writeHead(r.statusCode, rewritten(r.headers, body)); res.end(body); }, 5500)); return; }
+        if (samelen && req.url === '/pwa.css') { const parts = []; r.on('data', (d) => parts.push(d)); r.on('end', () => { const body = Buffer.from(Buffer.concat(parts).toString('utf8').replace('Odeion', 'ODEION')); res.writeHead(r.statusCode, rewritten(r.headers, body)); res.end(body); }); return; }
+        if (v2 && req.url === '/sw.js') { const parts = []; r.on('data', (d) => parts.push(d)); r.on('end', () => { const body = Buffer.concat([...parts, Buffer.from('\n// next version\n')]); res.writeHead(r.statusCode, rewritten(r.headers, body)); res.end(body); }); return; }
         res.writeHead(r.statusCode, r.headers); r.pipe(res);
       });
       out.on('error', () => { res.writeHead(502); res.end(); });
@@ -691,12 +696,12 @@ ${checks - failures.length}/${checks} browser checks passed (launch safety only)
       if (!/(?:^|;\s*)pwaauth=1/.test(req.headers.cookie || '')) return signIn(res); // no cookie: its sign-in page, for everything
       if (u.pathname === '/library') { res.writeHead(302, { location: `/?next=%2Flibrary&ticket=${CANARY.redirect}` }); res.end(); return; }
       const html = req.method === 'GET' && /text\/html/.test(req.headers.accept || '');
-      const out = http.request({ host: up.hostname, port: up.port, path: req.url, method: req.method, headers: req.headers }, (r) => {
+      const out = http.request({ host: up.hostname, port: up.port, path: req.url, method: req.method, headers: html ? wholeFile(req.headers) : req.headers }, (r) => {
         if (!html || !/text\/html/.test(r.headers['content-type'] || '')) { res.writeHead(r.statusCode, r.headers); r.pipe(res); return; }
         const parts = []; r.on('data', (d) => parts.push(d)); r.on('end', () => {
           // A signed-in page, personalised by the proxy and marked private
           const body = Buffer.from(Buffer.concat(parts).toString('utf8').replace('</body>', `<!-- ${CANARY.priv} user=alice -->\n</body>`));
-          const h = { ...r.headers, 'content-length': body.length, 'cache-control': 'private, no-store' }; res.writeHead(r.statusCode, h); res.end(body);
+          const h = { ...rewritten(r.headers, body), 'cache-control': 'private, no-store' }; res.writeHead(r.statusCode, h); res.end(body);
         });
       });
       out.on('error', () => { res.writeHead(502); res.end(); });
