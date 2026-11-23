@@ -201,8 +201,8 @@ pub(crate) async fn network(s: &Arc<NodeState>, r: &Rules) -> Result<Vec<Network
     let found = match d.pinakes().search(&query).await {
         Ok(f) => f,
         Err(e) => {
-            // What it said last time, while it is kept (FALLBACK_KEPT), beats nothing: the
-            // playlist doesn't empty
+            // What it said last time, however old, until a full cache drops it (FALLBACK_KEPT),
+            // beats nothing: the playlist doesn't empty
             let last = cache().lock().expect("network cache").get(&key).cloned();
             return Err(match last {
                 Some((at, items)) => NoAnswer {
