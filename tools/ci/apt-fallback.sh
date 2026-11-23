@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Run before `apt-get update` (and Playwright's `install --with-deps`) on a GitHub runner.
 #
-# When the runner can't resolve the Ubuntu archive hosts (*.ubuntu.com), apt is pointed at
-# another Ubuntu mirror that serves the same suites (release, -updates, -security, -backports).
-# When the hosts resolve, nothing changes. Prints what it did. The mirror it picked goes to
+# When the runner can't resolve the Ubuntu archive hosts (*.ubuntu.com), or one of them doesn't
+# serve its -security InRelease over plain HTTP within 15 s (resolving but hanging), apt is
+# pointed at another Ubuntu mirror that serves the same suites (release, -updates, -security,
+# -backports). When every host answers, nothing changes. Prints what it did. The mirror it picked goes to
 # $GITHUB_ENV as APT_FALLBACK_MIRROR, for later steps that run apt in an Ubuntu container.
 set -euo pipefail
 
@@ -15,23 +16,29 @@ codename=${VERSION_CODENAME:?}
 
 if [ "$(dpkg --print-architecture)" = amd64 ]; then
   hosts="azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com"
+  path=ubuntu
   pattern='https?://([a-z0-9.-]+\.)?(archive|security)\.ubuntu\.com/ubuntu'
   mirrors="http://mirrors.edge.kernel.org/ubuntu http://mirror.leaseweb.net/ubuntu http://mirrors.ocf.berkeley.edu/ubuntu"
 else
   hosts="ports.ubuntu.com"
+  path=ubuntu-ports
   pattern='https?://ports\.ubuntu\.com/ubuntu-ports'
   mirrors="http://mirror.leaseweb.net/ubuntu-ports http://mirrors.ocf.berkeley.edu/ubuntu-ports http://ftp.tu-chemnitz.de/pub/linux/ubuntu-ports"
 fi
 
 down=""
 for h in $hosts; do
-  getent hosts "$h" >/dev/null || down="$down $h"
+  if ! getent hosts "$h" >/dev/null; then
+    down="$down $h(dns)"
+  elif ! curl -fsS -o /dev/null --connect-timeout 10 --max-time 15 "http://$h/$path/dists/$codename-security/InRelease"; then
+    down="$down $h(http)"
+  fi
 done
 if [ -z "$down" ]; then
-  echo "apt-fallback: Ubuntu archive resolves, apt sources unchanged"
+  echo "apt-fallback: Ubuntu archive answers, apt sources unchanged"
   exit 0
 fi
-echo "apt-fallback: can't resolve:$down"
+echo "apt-fallback: not answering:$down"
 
 mirror=""
 for m in $mirrors; do
