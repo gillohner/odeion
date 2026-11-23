@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **Playing a long list no longer holds up the rest of the node.** Queuing songs by id (Play on a list, Play all) looked every song up in one hold of the library, on the thread that answers requests: with 50,000 songs every other library request waited about 1.5 s (measured on a debug build). The songs are now looked up 500 at a time, away from that thread, and the library is let go between turns.
+
 ### 2026-11-22
 
 - **A zone's queue holds at most 100,000 items.** A queue had no limit, and every state update of a zone carries its queue, so requests that kept adding (anyone who may queue can send them) made the node use memory and time without end. `POST /v1/zones/{id}/queue` now answers 400 when the queue and what is sent come to more than 100,000 items, before it looks up any song; every other way into a queue takes what still fits (a party guest's add and an announcement on a full queue are refused with a message). The saved order of a shuffled queue is worked out in one pass instead of one pass per song, which took seconds per song change on a very long shuffled queue. A sleep timer with a very large `seconds` no longer overflows the sum for its end time.

@@ -2012,17 +2012,12 @@ async fn enqueue(
         )));
     }
     let mut items = Vec::with_capacity(asked);
-    {
-        let lib = s.library.lock().expect("library poisoned");
-        for tid in &body.track_ids {
-            let track = lib
-                .get_track(TrackId(*tid))?
-                .ok_or_else(|| ApiError::not_found(format!("no track {tid}")))?;
-            if let Some(item) = NodeSources::item_for(&track) {
-                items.push(item);
-            }
-        }
-    }
+    let (lib, ids) = (s.library.clone(), body.track_ids);
+    items.extend(
+        tokio::task::spawn_blocking(move || queue_items_of(&lib, &ids, || {}))
+            .await
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??,
+    );
     for mut it in body.items {
         it.uri = it.uri.trim().to_string();
         if it.uri.is_empty() {
@@ -2064,6 +2059,35 @@ async fn enqueue(
     }
     settle(&zone).await;
     Ok(Json(Enqueued { ids }))
+}
+
+/// How many songs [`queue_items_of`] looks up per hold of the library.
+const LOOKUP_TURN: usize = 500;
+
+/// Queue items for library songs, in the order asked; 404 for an id that is no song. The library
+/// is held for [`LOOKUP_TURN`] songs at a time and let go in between (`between` runs then), so a
+/// queue of 50,000 songs does not hold every other library request until all are looked up.
+fn queue_items_of(
+    lib: &pm_library::LibraryLock,
+    ids: &[i64],
+    mut between: impl FnMut(),
+) -> Result<Vec<QueueItem>, ApiError> {
+    let mut items = Vec::with_capacity(ids.len());
+    for turn in ids.chunks(LOOKUP_TURN) {
+        {
+            let lib = lib.lock().expect("library poisoned");
+            for tid in turn {
+                let track = lib
+                    .get_track(TrackId(*tid))?
+                    .ok_or_else(|| ApiError::not_found(format!("no track {tid}")))?;
+                if let Some(item) = NodeSources::item_for(&track) {
+                    items.push(item);
+                }
+            }
+        }
+        between();
+    }
+    Ok(items)
 }
 
 async fn clear_queue(
@@ -28223,5 +28247,38 @@ exec sleep 300
         )
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
+    }
+
+    /// Songs for a queue are looked up LOOKUP_TURN at a time, in the order asked, with the
+    /// library let go between turns; an id that is no song is a 404.
+    #[test]
+    fn queue_lookups_let_the_library_go_between_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = pm_library::LibraryLock::new(Library::open(&dir.path().join("l.db")).unwrap());
+        let n = LOOKUP_TURN * 2 + 3;
+        let ids: Vec<i64> = {
+            let l = lib.lock().unwrap();
+            (0..n)
+                .map(|i| {
+                    let t = untagged_track(dir.path().join(format!("{i}.flac")), &format!("Song {i}"), "A");
+                    l.upsert_track(&t).unwrap().0
+                })
+                .collect()
+        };
+        let mut turns = 0;
+        let items = queue_items_of(&lib, &ids, || {
+            assert!(lib.try_lock().is_ok(), "the library is held between turns");
+            turns += 1;
+        })
+        .unwrap();
+        assert_eq!(turns, 3);
+        assert_eq!(items.len(), n);
+        let titles: Vec<String> = items
+            .iter()
+            .map(|i| i.title.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(titles, (0..n).map(|i| format!("Song {i}")).collect::<Vec<_>>());
+        let e = queue_items_of(&lib, &[ids[0], 9_999_999], || {}).unwrap_err();
+        assert_eq!(e.status, StatusCode::NOT_FOUND);
     }
 }
