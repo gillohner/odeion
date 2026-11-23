@@ -2083,7 +2083,7 @@ pub(crate) fn in_turns<E>(
     ids: &[i64],
     per_turn: usize,
     mut between: impl FnMut(),
-    mut each: impl FnMut(&Library, i64) -> Result<(), E>,
+    mut each: impl FnMut(&pm_library::Library, i64) -> Result<(), E>,
 ) -> Result<(), E> {
     for (i, turn) in ids.chunks(per_turn.max(1)).enumerate() {
         if i > 0 {
