@@ -87,6 +87,7 @@ const NODE_OWN: &[&str] = &[
     crate::accounts::OWNER_SESSIONS_TOKEN,
     crate::accounts::OWNER_SESSIONS,
     crate::accounts::DEVICE_SESSIONS,
+    crate::app_passwords::KEY,
     crate::access_token::PUBLISHED_TOKEN_KEY,
     crate::accounts::API_TOKEN_EXPOSED,
     crate::accounts::QUEUE_CLEANUP_PENDING,

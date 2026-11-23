@@ -53,6 +53,9 @@ pub(crate) const QUEUE_CLEANUP_PENDING: &str = "accounts.queue_cleanup_pending";
 pub enum Role {
     Owner,
     Listener,
+    /// An app the owner gave an app password (app_passwords.rs): plays, controls zones and
+    /// browses as the owner, and nothing else (`access.rs`).
+    App,
     /// A party guest (party.rs): adds songs to one party, nothing else.
     Guest,
 }
@@ -256,7 +259,8 @@ impl Who {
     /// The person making a request.
     pub fn of(c: &Caller) -> Who {
         match (c.role, &c.key) {
-            (Role::Owner, _) => Who::Owner,
+            // An app password's plays and collections are the owner's
+            (Role::Owner | Role::App, _) => Who::Owner,
             (Role::Listener, Some(k)) => Who::Listener(k.clone()),
             _ => Who::Nobody,
         }
@@ -1067,11 +1071,12 @@ pub(crate) fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
     }
 }
 
-/// Whether this caller may see and play on `zone`: the owner every zone; a listener the zones
-/// the owner opened to listeners (every zone when none are chosen); a party guest none.
+/// Whether this caller may see and play on `zone`: the owner and an app password every zone; a
+/// listener the zones the owner opened to listeners (every zone when none are chosen); a party
+/// guest none.
 pub fn may_use_zone(s: &NodeState, c: &Caller, zone: &str) -> bool {
     match c.role {
-        Role::Owner => true,
+        Role::Owner | Role::App => true,
         Role::Listener => zone_refusal(s, zone).is_none(),
         Role::Guest => false,
     }
@@ -1088,8 +1093,8 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     crate::access::decide_path(s, &listener, method, path)
 }
 
-/// [`caller`] for a request being let in: the sign-in it came with is noted as used today
-/// ([`PersonToken::last_used`]). The API token and party guests have no such note.
+/// [`caller`] for a request being let in: the sign-in or app password it came with is noted as
+/// used today ([`PersonToken::last_used`]). The API token and party guests have no such note.
 pub fn caller_seen(s: &NodeState, token: Option<&str>) -> Option<Caller> {
     let c = caller(s, token)?;
     if let Some(t) = token.filter(|t| s.token().as_deref() != Some(*t)) {
@@ -1103,7 +1108,15 @@ pub fn caller_seen(s: &NodeState, token: Option<&str>) -> Option<Caller> {
                 (Role::Listener, _) => Some(TOKENS),
                 _ => None,
             };
-            if list.is_some_and(|list| used_today(s, list, &h, today)) {
+            let app = || {
+                crate::app_passwords::of(s, t)
+                    .is_some_and(|id| crate::app_passwords::used_today(s, &id, today))
+            };
+            let used = match list {
+                Some(list) => used_today(s, list, &h, today),
+                None => c.role == Role::App && app(),
+            };
+            if used {
                 s.sign_ins_seen.lock().expect("sign-ins seen").insert(h, today);
             }
         }
@@ -1139,6 +1152,12 @@ pub fn caller(s: &NodeState, token: Option<&str>) -> Option<Caller> {
         return owner_session(s, t, &key).then_some(Caller {
             role: Role::Owner,
             key: Some(key),
+        });
+    }
+    if t.starts_with(crate::app_passwords::PREFIX) {
+        return crate::app_passwords::of(s, t).map(|_| Caller {
+            role: Role::App,
+            key: None,
         });
     }
     if t.starts_with(crate::party::GUEST_PREFIX) {
@@ -1246,6 +1265,14 @@ pub(crate) async fn sign_out(
         }
         Role::Owner if token.starts_with(OWNER_PREFIX) => {
             let ended = end_owner_session(&s, &token)?;
+            return Ok(Json(serde_json::json!({"signed_out": true, "ended": ended})));
+        }
+        // An app signing out gives up its password
+        Role::App => {
+            let ended = match crate::app_passwords::of(&s, &token) {
+                Some(id) => crate::app_passwords::remove(&s, &id)?,
+                None => false,
+            };
             return Ok(Json(serde_json::json!({"signed_out": true, "ended": ended})));
         }
         _ => return Ok(Json(serde_json::json!({"signed_out": true, "ended": false}))),
@@ -1425,23 +1452,7 @@ pub fn check_listener_item(it: &mut pm_zones::QueueItem) -> Result<(), ApiError>
     it.limit = Some(it.limit.map_or(FetchLimit::PUBLIC, |l| l.and(FetchLimit::PUBLIC)));
     let uri = it.uri.clone();
     let uri = uri.as_str();
-    use crate::*;
-    const SERVICES: [&str; 13] = [
-        sources::TRACK_SCHEME,
-        tidal::TRACK_URI_PREFIX,
-        deezer::TRACK_URI_PREFIX,
-        qobuz::TRACK_URI_PREFIX,
-        bandcamp::TRACK_URI_PREFIX,
-        soundcloud::TRACK_URI_PREFIX,
-        jamendo::TRACK_URI_PREFIX,
-        opensubsonic::TRACK_URI_PREFIX,
-        jellyfin::TRACK_URI_PREFIX,
-        plex::TRACK_URI_PREFIX,
-        audiobookshelf::TRACK_URI_PREFIX,
-        youtube::VIDEO_URI_PREFIX,
-        librespot::LIVE_URI,
-    ];
-    if SERVICES.iter().any(|p| uri.starts_with(p)) {
+    if is_service_track(uri) {
         return Ok(());
     }
     let public = FetchLimit::PUBLIC;
@@ -1458,13 +1469,83 @@ pub fn check_listener_item(it: &mut pm_zones::QueueItem) -> Result<(), ApiError>
         Some(url::Host::Ipv6(ip)) => Some(std::net::IpAddr::from(ip)),
         _ => None,
     };
-    if literal.is_some_and(|ip| !sources::allows(public, ip)) || url.host_str() == Some("localhost") {
+    if literal.is_some_and(|ip| !crate::sources::allows(public, ip)) || url.host_str() == Some("localhost") {
         return Err(refused("that address is on the node's own network"));
     }
     // The URL as parsed is what is queued: `HTTP://…` or `http:\\…` would not be taken for a web
     // link when it plays (review of #177)
     it.uri = url.to_string();
     Ok(())
+}
+
+/// Where the node fetches an app password's web links: public addresses and the home network,
+/// not loopback.
+pub const APP_FETCH: FetchLimit = FetchLimit {
+    peer: None,
+    lan: true,
+};
+
+/// What an app password may queue (or announce): library songs, the services' own track ids, and
+/// http(s) links, on the home network too (Home Assistant's spoken announcements come from
+/// there), fetched only where [`APP_FETCH`] allows. Never a path or a `file:` URL: the node's own
+/// files go in as library songs. The URI is trimmed: the one checked is the one queued.
+pub fn check_app_item(it: &mut pm_zones::QueueItem) -> Result<(), ApiError> {
+    it.uri = it.uri.trim().to_string();
+    if is_service_track(&it.uri) {
+        return Ok(());
+    }
+    let url = url::Url::parse(&it.uri)
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::FORBIDDEN,
+                "An app password queues library songs, the services' tracks and web links, not files.",
+            )
+        })?;
+    it.limit = Some(it.limit.map_or(APP_FETCH, |l| l.and(APP_FETCH)));
+    it.uri = url.to_string();
+    Ok(())
+}
+
+/// What `c` may queue: anything for the owner, [`check_app_item`] for an app password,
+/// [`check_listener_item`] for everyone else.
+pub fn check_item(c: &Caller, it: &mut pm_zones::QueueItem) -> Result<(), ApiError> {
+    match c.role {
+        Role::Owner => Ok(()),
+        Role::App => check_app_item(it),
+        _ => check_listener_item(it),
+    }
+}
+
+/// Where the node may fetch a web link `c` queues: anywhere for the owner (`None`).
+pub fn fetch_limit(c: &Caller) -> Option<FetchLimit> {
+    match c.role {
+        Role::Owner => None,
+        Role::App => Some(APP_FETCH),
+        _ => Some(FetchLimit::PUBLIC),
+    }
+}
+
+/// A library song or one of the services' own track ids: no address to fetch.
+fn is_service_track(uri: &str) -> bool {
+    use crate::*;
+    const SERVICES: [&str; 13] = [
+        sources::TRACK_SCHEME,
+        tidal::TRACK_URI_PREFIX,
+        deezer::TRACK_URI_PREFIX,
+        qobuz::TRACK_URI_PREFIX,
+        bandcamp::TRACK_URI_PREFIX,
+        soundcloud::TRACK_URI_PREFIX,
+        jamendo::TRACK_URI_PREFIX,
+        opensubsonic::TRACK_URI_PREFIX,
+        jellyfin::TRACK_URI_PREFIX,
+        plex::TRACK_URI_PREFIX,
+        audiobookshelf::TRACK_URI_PREFIX,
+        youtube::VIDEO_URI_PREFIX,
+        librespot::LIVE_URI,
+    ];
+    SERVICES.iter().any(|p| uri.starts_with(p))
 }
 
 /// A listener's JSON answers show a library file by its name, not by where the owner keeps it
@@ -1630,6 +1711,7 @@ impl KnownSet {
                 hashes.extend(all.into_iter().map(|t| t.hash));
             }
         }
+        hashes.extend(crate::app_passwords::passwords(lib).iter().map(|p| hash(p)));
         Self { api, hashes }
     }
 

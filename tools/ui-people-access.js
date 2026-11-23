@@ -6,7 +6,8 @@
 //   limit and Remove, each asked first where it takes something away and sent once; Add someone and
 //   what to send them; the can / can't lists; zones "Every zone / Only these" (none ticked is refused);
 //   the three choices of whose music services; the browsers and apps signed in as you, with Log out,
-//   Sign out and Sign out all others; the password for apps; a party list that failed says so; a
+//   Sign out and Sign out all others; apps with their own password (listed, removed after asking, a
+//   new one made by name and shown once); the password for apps; a party list that failed says so; a
 //   people list that failed says so and leaves the rest of the screen working; a removal that did not
 //   finish keeps Remove on the person; opened at an address of the node's own machine, the page says
 //   to send the node's address on the network instead of offering its own to copy;
@@ -41,8 +42,9 @@ const NEW_TOKEN = 'f'.repeat(64);
 // What GET /v1/me lists for each caller (crates/pm-api/src/access.rs: the owner has every capability
 // but a party guest's; someone the owner added has these, `own_sign_in` unless the node plays
 // everyone through its own sign-ins)
-const PERSON_CAN = ['artwork', 'session', 'library', 'zone_list', 'zone_use', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in'];
-const OWNER_CAN = [...PERSON_CAN, 'owner_music', 'zone_manage', 'library_manage', 'settings', 'service_logins', 'people', 'tokens', 'vault', 'backup', 'identity', 'remote_access', 'party', 'diagnostics'];
+const PERSON_CAN = ['artwork', 'session', 'library', 'zone_list', 'zone_use', 'collections', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in'];
+const APP_PASSWORD = `pma_${'k'.repeat(43)}`;
+const OWNER_CAN = [...PERSON_CAN, 'owner_music', 'zone_manage', 'zone_group', 'library_manage', 'settings', 'service_logins', 'people', 'tokens', 'vault', 'backup', 'identity', 'remote_access', 'party', 'diagnostics'];
 // The words a person reads: none of the old or inside names, wherever they show (the screen, a
 // dialog, a toast). "token" only as the heading's "(API token)".
 const plainWords = (text, where) => {
@@ -85,6 +87,7 @@ const node = (over = {}) => ({
     ] },
   ],
   invites: [{ id: 'inv1', access: 'homeserver_music', name: 'Eve', token: 'AAAA-BBBB-CCCC', storage_quota_mb: 200, created_at: T0, url: `pubkyauth://direct_signup?hs=${HS}&st=AAAA-BBBB-CCCC`, qr_svg: QR }],
+  apps: [{ id: 'ha', name: 'Home Assistant', created_at: T0 - 2 * DAY, last_used: T0 - (T0 % DAY) }, { id: 'sy', name: 'Symfonium', created_at: T0 - 5 * DAY }],
   mine: [
     { id: 'm1', kind: 'browser', label: 'Chromium on Linux', remote: false, created_at: T0, last_used: T0 - (T0 % DAY), current: true },
     { id: 'm2', kind: 'app', label: 'Odeion app 0.2.4', remote: true, created_at: T0 - DAY, current: false },
@@ -96,7 +99,7 @@ const node = (over = {}) => ({
 // answers 500 with this message; `n.gate['PUT /people/zones']`: it waits for this promise first.
 const serve = async (context, n) => {
   await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: ZONES })); });
-  await context.route(/\/v1\/(people|party|me\/sign-ins|node\/settings|node\/token)(\/|\?|$)/, async (r) => {
+  await context.route(/\/v1\/(people|party|me\/sign-ins|node\/settings|node\/token|node\/app-passwords)(\/|\?|$)/, async (r) => {
     const req = r.request(); const v = new URL(req.url()).pathname.slice(3); const m = req.method();
     const body = req.postData() ? JSON.parse(req.postData()) : undefined;
     const call = `${m} ${v}`;
@@ -109,6 +112,9 @@ const serve = async (context, n) => {
     if (call === 'PUT /node/settings') { if (body.sources_policy) n.policy = body.sources_policy; return json({}); }
     if (call === 'POST /node/token') return json({ token: NEW_TOKEN });
     if (call === 'GET /me/sign-ins') return json(n.mine);
+    if (call === 'GET /node/app-passwords') return json(n.apps);
+    if (call === 'POST /node/app-passwords') { const a = { id: `new${n.apps.length}`, name: body.name, created_at: T0 }; n.apps.unshift(a); return json({ ...a, password: APP_PASSWORD }); }
+    if (m === 'DELETE' && seg[1] === 'app-passwords' && seg.length === 3) { const had = n.apps.some((a) => a.id === seg[2]); n.apps = n.apps.filter((a) => a.id !== seg[2]); return had ? json({ removed: true }) : json({ error: 'no such app password' }, 404); }
     if (call === 'DELETE /me/sign-ins') { const before = n.mine.length; n.mine = n.mine.filter((s) => s.current); return json({ ended: before - n.mine.length }); }
     if (m === 'DELETE' && seg[0] === 'me' && seg.length === 3) { const had = n.mine.some((s) => s.id === seg[2]); n.mine = n.mine.filter((s) => s.id !== seg[2]); return had ? json({ ended: 1 }) : json({ error: 'no such sign-in' }, 404); }
     if (call === 'GET /party') return json(n.parties);
@@ -219,9 +225,9 @@ const atLoopback = async (context) => {
         if (!phone) assert.equal((await page.locator('#settab-people').innerText()).trim(), 'People & access');
         assert.equal(await page.locator('#set-people .set-title').innerText(), 'People & access');
         const heads = await box.locator('h3.set-h').allInnerTexts();
-        assert.deepEqual(heads.map((h) => h.toLowerCase()), ['who can use this node', 'add someone', 'what people you add can do', 'zones they can play on', 'whose music services they play with', 'browsers and apps signed in as you', 'password for apps (api token)', 'party', 'also in settings'], 'the sections, in order');
+        assert.deepEqual(heads.map((h) => h.toLowerCase()), ['who can use this node', 'add someone', 'what people you add can do', 'zones they can play on', 'whose music services they play with', 'browsers and apps signed in as you', 'apps with their own password', 'password for apps (api token)', 'party', 'also in settings'], 'the sections, in order');
         if (phone) {
-          assert.equal(await box.locator('details[data-fold]').count(), 8, 'on a phone each section is a fold');
+          assert.equal(await box.locator('details[data-fold]').count(), 9, 'on a phone each section is a fold');
           assert.equal(await box.locator('details[data-fold="who"]').getAttribute('open'), '', 'the people are open');
           assert.equal(await box.locator('details[data-fold="party"][open]').count(), 0, 'Party is shut');
         } else assert.equal(await box.locator('[data-fold]').count(), 0, 'no folds off phones');
@@ -553,6 +559,35 @@ const atLoopback = async (context) => {
         assert.equal(calls(n, 'DELETE /me/sign-ins').length, 1);
         assert.equal(await mine.locator('[data-si-all]').count(), 0, 'nothing to sign out when there are no others');
 
+        // 7a. Apps with their own password: listed, one removed after asking, a new one shown once
+        await openSec('apps');
+        const apps = box.locator('#papps');
+        await apps.locator('[data-ap="ha"]').waitFor();
+        assert.match(await apps.locator('[data-ap="ha"]').innerText(), /Home Assistant[\s\S]*made 11\/18\/2026 · last used 11\/20\/2026/);
+        assert.match(await apps.locator('[data-ap="sy"]').innerText(), /Symfonium[\s\S]*not used yet/);
+        await apps.locator('[data-ap-del="sy"]').click();
+        assert.match(await dialog.innerText(), /Remove the password of Symfonium\?[\s\S]*Symfonium stops working with this node at once/);
+        await dialog.locator('[data-ci="-1"]').click();
+        await settled();
+        assert.equal(calls(n, 'DELETE /node/app-passwords/sy').length, 0, 'Cancel sent nothing');
+        await apps.locator('[data-ap-del="sy"]').click();
+        await dialog.locator('.choice', { hasText: 'Remove' }).click();
+        await apps.locator('[data-ap="sy"]').waitFor({ state: 'detached' });
+        await settled();
+        assert.equal(calls(n, 'DELETE /node/app-passwords/sy').length, 1);
+        await apps.locator('#apgo').click();
+        assert.equal(await apps.locator('#apnameerr').isVisible(), true, 'a name is asked for first');
+        assert.equal(calls(n, 'POST /node/app-passwords').length, 0);
+        await apps.locator('#apname').fill('Kitchen tablet');
+        await apps.locator('#apgo').click();
+        await apps.locator('[data-ap-made]').waitFor();
+        await settled();
+        assert.deepEqual(calls(n, 'POST /node/app-passwords').map((c) => c.body), [{ name: 'Kitchen tablet' }], 'made once');
+        assert.equal(await apps.locator('[data-ap-made]').innerText(), APP_PASSWORD);
+        assert.match(await apps.locator('[data-ap="new1"]').innerText(), /Kitchen tablet[\s\S]*not used yet/);
+        assert.equal(await apps.locator('#apname').inputValue(), '', 'the name field is empty again');
+        assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.textContent.trim()), 'Copy', 'the focus on Copy');
+
         // 8. Party: a list that can't be read says so, with Retry (not "no parties")
         await openSec('party');
         await box.locator('#ptgo').click();
@@ -576,7 +611,7 @@ const atLoopback = async (context) => {
         assert.equal(await box.locator('[data-settab="remote"]').count(), 0, 'no row for a tab this node doesn’t have');
 
         // The words: no jargon in what a person reads, Bookmarks and Collections
-        for (const id of ['who', 'invite', 'cando', 'zones', 'services', 'mine', 'password', 'party']) await openSec(id);
+        for (const id of ['who', 'invite', 'cando', 'zones', 'services', 'mine', 'apps', 'password', 'party']) await openSec(id);
         plainWords(await box.innerText(), 'the owner’s screen');
         await cleanCopy(page);
         await shot(page, width, `owner-${width}-all-sections.png`);
@@ -851,7 +886,7 @@ const atLoopback = async (context) => {
           assert.deepEqual(state.errors, [], 'no page errors');
           await context.close();
         }
-        // What the node says the caller can do decides the controls: Ungroup needs `zone_manage`, the
+        // What the node says the caller can do decides the controls: Ungroup needs `zone_group`, the
         // owner's chores in the status chip need `settings`
         for (const [who, me, ungroup, chip] of [
           ['the owner', { role: 'owner', key: null, zones: null, can: OWNER_CAN }, 1, /^Change the API token · 1 more$/],

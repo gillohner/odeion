@@ -1,17 +1,19 @@
 //! Who may do what on the node, decided in one place.
 //!
-//! A request comes from a [`Caller`]: the owner, a listener or a party guest ([`Role`]). Every
+//! A request comes from a [`Caller`]: the owner, a listener, an app the owner gave an app password,
+//! or a party guest ([`Role`]). Every
 //! `/v1` route behind the sign-in check names, per method, the one [`Capability`] it needs
 //! ([`ROUTES`]). The check in front of the handlers asks [`decide`] and nothing else. A route that
 //! names no capability is the owner's alone, and the `every_route_names_its_capability` test fails
 //! until it names one. The routes that take no sign-in are a fixed list ([`OPEN`]), held by a test
-//! too. Subsonic (`/rest`, the API token as its password) and the UPnP renderer (LAN peers only)
-//! are surfaces of their own, outside both.
+//! too. Subsonic (`/rest`, the API token or an app password as its password) and the UPnP renderer
+//! (LAN peers only) are surfaces of their own, outside both.
 //!
 //! | Role | Has |
 //! | :-- | :-- |
 //! | owner | everything |
-//! | listener | [`Capability::Artwork`], [`Capability::Session`], [`Capability::Library`], [`Capability::ZoneList`], [`Capability::ZoneUse`] on the zones the owner opened, [`Capability::Own`], [`Capability::OwnPlay`], [`Capability::OwnSignInState`], and [`Capability::OwnSignIn`] unless the node plays everyone through its own sign-ins |
+//! | listener | [`Capability::Artwork`], [`Capability::Session`], [`Capability::Library`], [`Capability::ZoneList`], [`Capability::ZoneUse`] on the zones the owner opened, [`Capability::Collections`], [`Capability::Own`], [`Capability::OwnPlay`], [`Capability::OwnSignInState`], and [`Capability::OwnSignIn`] unless the node plays everyone through its own sign-ins |
+//! | app | [`Capability::Artwork`], [`Capability::Session`], [`Capability::Library`], [`Capability::ZoneList`], [`Capability::ZoneUse`] on every zone, [`Capability::ZoneGroup`], [`Capability::Collections`] and [`Capability::OwnPlay`], all as the owner's |
 //! | party guest | [`Capability::Artwork`], [`Capability::PartyGuest`] |
 //!
 //! Handlers that take a zone from the body instead of the path ask
@@ -46,8 +48,10 @@ pub enum Capability {
     /// See and control one zone: queue, transport, volume, sleep. For a listener only a zone the
     /// owner opened to listeners.
     ZoneUse,
-    /// The caller's own things: bookmarks, collections, preferences, devices and downloads,
-    /// presence, problem reports, their usage choice and their own homeserver link.
+    /// The caller's bookmarks and collections, and the order they play in.
+    Collections,
+    /// The caller's other own things: preferences, devices and downloads, presence, problem
+    /// reports, their usage choice, their sign-ins on this node and their own homeserver link.
     Own,
     /// Play with the caller's own streaming sign-ins.
     OwnPlay,
@@ -64,6 +68,8 @@ pub enum Capability {
     OwnerMusic,
     /// Add, remove and tune zones and speakers (outputs, DSP, crossfade).
     ZoneManage,
+    /// See the speakers, and group them into a zone and ungroup it (what a home automation does).
+    ZoneGroup,
     /// Change the library: folders, shares and drives, scans, uploads, edits, hiding and deleting
     /// songs, identification, homeserver files, storage.
     LibraryManage,
@@ -98,12 +104,14 @@ impl Capability {
         Capability::Library,
         Capability::ZoneList,
         Capability::ZoneUse,
+        Capability::Collections,
         Capability::Own,
         Capability::OwnPlay,
         Capability::OwnSignInState,
         Capability::OwnSignIn,
         Capability::OwnerMusic,
         Capability::ZoneManage,
+        Capability::ZoneGroup,
         Capability::LibraryManage,
         Capability::Settings,
         Capability::ServiceLogins,
@@ -133,6 +141,8 @@ impl Capability {
 const OWNERS: &str = "that is the owner's";
 /// The refusal a party guest gets for everything else.
 const GUESTS: &str = "a party guest can only add songs to the party";
+/// The refusal an app password gets for everything else.
+const APPS: &str = "an app password plays, controls zones and browses; for this, sign in as the owner";
 
 impl Role {
     /// Whether this role has `cap` at all. A listener's [`Capability::ZoneUse`] and
@@ -143,7 +153,22 @@ impl Role {
             Role::Owner => true,
             Role::Listener => matches!(
                 cap,
-                Artwork | Session | Library | ZoneList | ZoneUse | Own | OwnPlay | OwnSignInState | OwnSignIn
+                Artwork
+                    | Session
+                    | Library
+                    | ZoneList
+                    | ZoneUse
+                    | Collections
+                    | Own
+                    | OwnPlay
+                    | OwnSignInState
+                    | OwnSignIn
+            ),
+            // What a home automation or a Subsonic app needs, and nothing that changes the node's
+            // settings or speakers, its people, its sign-ins or the library
+            Role::App => matches!(
+                cap,
+                Artwork | Session | Library | ZoneList | ZoneUse | ZoneGroup | Collections | OwnPlay
             ),
             Role::Guest => matches!(cap, Artwork | PartyGuest),
         }
@@ -200,6 +225,7 @@ pub fn decide(s: &NodeState, caller: &Caller, cap: Option<Capability>, at: &At<'
     if !caller.role.has(cap) {
         return Some(match caller.role {
             Role::Guest => GUESTS,
+            Role::App => APPS,
             _ => cap.owners(),
         });
     }
@@ -554,11 +580,8 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
         ],
     ),
     (
-        Own,
+        Collections,
         &[
-            (Get, "/me/sign-ins"),
-            (Delete, "/me/sign-ins"),
-            (Delete, "/me/sign-ins/{id}"),
             (Get, "/collections"),
             (Post, "/collections"),
             (Get, "/collections/{id}"),
@@ -585,6 +608,14 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
             (Put, "/playlists/{id}/visibility"),
             (Get, "/play-order"),
             (Put, "/play-order"),
+        ],
+    ),
+    (
+        Own,
+        &[
+            (Get, "/me/sign-ins"),
+            (Delete, "/me/sign-ins"),
+            (Delete, "/me/sign-ins/{id}"),
             (Get, "/me/prefs"),
             (Put, "/me/prefs"),
             (Get, "/me/presence"),
@@ -776,9 +807,12 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
         ],
     ),
     (
+        ZoneGroup,
+        &[(Get, "/outputs"), (Post, "/zones"), (Delete, "/zones/{id}")],
+    ),
+    (
         ZoneManage,
         &[
-            (Get, "/outputs"),
             (Post, "/outputs/rescan"),
             (Post, "/outputs/upnp"),
             (Delete, "/outputs/upnp/{address}"),
@@ -787,8 +821,6 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
             (Post, "/outputs/pull"),
             (Put, "/outputs/{id}/device"),
             (Get, "/outputs/pull/{name}/url"),
-            (Post, "/zones"),
-            (Delete, "/zones/{id}"),
             (Put, "/zones/{id}/crossfade"),
             (Put, "/zones/{id}/dsp"),
             (Delete, "/zones/{id}/dsp"),
@@ -940,7 +972,15 @@ pub static ROUTES: &[(Capability, &[(Verb, &str)])] = &[
             (Delete, "/people/{key}"),
         ],
     ),
-    (Tokens, &[(Post, "/node/token")]),
+    (
+        Tokens,
+        &[
+            (Post, "/node/token"),
+            (Get, "/node/app-passwords"),
+            (Post, "/node/app-passwords"),
+            (Delete, "/node/app-passwords/{id}"),
+        ],
+    ),
     (
         Vault,
         &[
@@ -1019,6 +1059,10 @@ mod tests {
     };
     const GUEST: Caller = Caller {
         role: Role::Guest,
+        key: None,
+    };
+    const APP: Caller = Caller {
+        role: Role::App,
         key: None,
     };
 
@@ -1119,8 +1163,12 @@ mod tests {
                 let zone = *route == "/zones/{id}" || route.starts_with("/zones/{id}/");
                 match cap {
                     Capability::ZoneUse => assert!(zone, "{route} needs a zone in its path"),
-                    // A zone route that isn't ZoneUse is the owner's (adding, removing, tuning)
-                    _ if zone => assert_eq!(*cap, Capability::ZoneManage, "{route}"),
+                    // A zone route that isn't ZoneUse is the owner's (adding, removing, tuning), or
+                    // ungrouping one
+                    _ if zone => assert!(
+                        matches!(cap, Capability::ZoneManage | Capability::ZoneGroup),
+                        "{route}"
+                    ),
                     _ => {}
                 }
                 if route.contains("{source}") {
@@ -1133,8 +1181,8 @@ mod tests {
         }
     }
 
-    /// The owner has every capability; a listener and a guest exactly the ones the module's table
-    /// says; a route without a capability is the owner's alone.
+    /// The owner has every capability; a listener, an app password and a guest exactly the ones
+    /// the module's table says; a route without a capability is the owner's alone.
     #[tokio::test]
     async fn roles_have_what_the_table_says() {
         use Capability::*;
@@ -1150,25 +1198,68 @@ mod tests {
             Library,
             ZoneList,
             ZoneUse,
+            Collections,
             Own,
             OwnPlay,
             OwnSignInState,
             OwnSignIn,
         ]
         .into();
+        let app: HashSet<Capability> = [
+            Artwork,
+            Session,
+            Library,
+            ZoneList,
+            ZoneUse,
+            ZoneGroup,
+            Collections,
+            OwnPlay,
+        ]
+        .into();
         let guest: HashSet<Capability> = [Artwork, PartyGuest].into();
         for cap in Capability::ALL {
             assert!(Role::Owner.has(*cap) && owner.can(*cap), "{cap:?}");
             assert_eq!(Role::Listener.has(*cap), listener.contains(cap), "{cap:?}");
+            assert_eq!(Role::App.has(*cap), app.contains(cap), "{cap:?}");
             assert_eq!(Role::Guest.has(*cap), guest.contains(cap), "{cap:?}");
             assert_eq!(decide(&s, &owner, Some(*cap), &At::default()), None);
             if !guest.contains(cap) {
                 assert_eq!(decide(&s, &GUEST, Some(*cap), &At::default()), Some(GUESTS));
             }
+            // An app password on any zone, with any source: it plays as the owner
+            let anywhere = At {
+                zone: Some("any-zone"),
+                source: Some("plex"),
+                names_source: true,
+            };
+            let want = (!app.contains(cap)).then_some(APPS);
+            assert_eq!(decide(&s, &APP, Some(*cap), &anywhere), want, "{cap:?}");
         }
         assert_eq!(decide(&s, &owner, None, &At::default()), None);
         assert_eq!(decide(&s, &LISTENER, None, &At::default()), Some(OWNERS));
+        assert_eq!(decide(&s, &APP, None, &At::default()), Some(OWNERS));
         assert_eq!(decide(&s, &GUEST, None, &At::default()), Some(OWNERS));
+        // Nothing an app password may do changes the node, its people or anyone's sign-ins
+        for cap in [
+            Settings,
+            People,
+            Tokens,
+            ServiceLogins,
+            Own,
+            OwnSignIn,
+            OwnSignInState,
+            LibraryManage,
+            ZoneManage,
+            Backup,
+            Vault,
+            Identity,
+            RemoteAccess,
+            OwnerMusic,
+            Diagnostics,
+            Party,
+        ] {
+            assert!(!Role::App.has(cap), "{cap:?}");
+        }
         // A path no route lists, and a method a route doesn't have
         assert_eq!(decide_path(&s, &owner, &Method::GET, "/v1/nothing/here"), None);
         assert!(decide_path(&s, &LISTENER, &Method::GET, "/v1/nothing/here").is_some());
@@ -1201,10 +1292,13 @@ mod tests {
         for (row, cap) in rows.iter().zip(Capability::ALL) {
             assert_eq!(
                 row.len(),
-                5,
-                "{cap:?}: capability, what it covers, owner, listener, guest"
+                6,
+                "{cap:?}: capability, what it covers, owner, listener, app, guest"
             );
-            for (cell, role) in row[2..].iter().zip([Role::Owner, Role::Listener, Role::Guest]) {
+            for (cell, role) in row[2..]
+                .iter()
+                .zip([Role::Owner, Role::Listener, Role::App, Role::Guest])
+            {
                 assert_eq!(!cell.is_empty(), role.has(*cap), "{cap:?} for {role:?}: `{cell}`");
             }
         }

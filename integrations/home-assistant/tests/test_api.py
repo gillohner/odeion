@@ -68,6 +68,50 @@ def run(coro):
     return asyncio.run(coro)
 
 
+class _Status(_Resp):
+    content_type = "application/json"
+
+    def __init__(self, status: int, error: str) -> None:
+        self.status = status
+        self._error = error
+
+    async def json(self):
+        return {"error": self._error}
+
+
+class StatusSession(FakeSession):
+    def __init__(self, status: int, error: str) -> None:
+        super().__init__()
+        self._resp = _Status(status, error)
+
+    def request(self, method, url, headers=None, **kw):
+        resp = self._resp
+
+        class Ctx(_Ctx):
+            async def __aenter__(self):
+                return resp
+
+        return Ctx()
+
+
+class Refusals(unittest.TestCase):
+    """A token the node refuses (401) asks for a new one; a call it refuses (403, e.g. one an app
+    password can't make) says the node's reason and leaves the token alone."""
+
+    def test_401_is_the_token(self):
+        a = api.PubkyMusicApi(StatusSession(401, "missing or wrong bearer token"), BASE, TOKEN)
+        with self.assertRaises(api.AuthError):
+            run(a.get("/zones"))
+
+    def test_403_is_that_call(self):
+        why = "an app password plays, controls zones and browses; for this, sign in as the owner"
+        a = api.PubkyMusicApi(StatusSession(403, why), BASE, TOKEN)
+        with self.assertRaises(api.NodeError) as caught:
+            run(a.get("/library/home"))
+        self.assertNotIsInstance(caught.exception, api.AuthError)
+        self.assertIn(why, str(caught.exception))
+
+
 class SameOrigin(unittest.TestCase):
     def test_the_nodes_own_urls(self):
         for url in (

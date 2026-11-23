@@ -253,31 +253,50 @@ async fn rest(
     }
     let method = method.trim_end_matches(".view").to_string();
     let fmt = fmt_of(&params);
-    if let Err(e) = authenticate(&s, &params) {
-        return error_response(fmt, e);
+    let app = match authenticate(&s, &params) {
+        Ok(app) => app,
+        Err(e) => return error_response(fmt, e),
+    };
+    if app && !app_may(&method) {
+        return error_response(
+            fmt,
+            SubErr::new(50, "An app password can't do that: use the node's API token"),
+        );
     }
     match dispatch(&s, &method, &params, &ids, &headers).await {
+        // An app password reads file names, not where the owner keeps files (as on /v1)
+        Ok(Reply::Json(mut m)) if app => {
+            drop_paths(&mut m);
+            envelope(fmt, "ok", m)
+        }
         Ok(Reply::Json(m)) => envelope(fmt, "ok", m),
         Ok(Reply::Raw(r)) => r,
         Err(e) => error_response(fmt, e),
     }
 }
 
-fn authenticate(s: &NodeState, p: &Params) -> Result<(), SubErr> {
+/// Who is asking: the API token (or a node without one) is `Ok(false)`; one of the owner's app
+/// passwords `Ok(true)` ([`app_may`]).
+fn authenticate(s: &NodeState, p: &Params) -> Result<bool, SubErr> {
     let Some(token) = s.token() else {
-        return Ok(());
+        return Ok(false);
     };
     let user = p.get("u").map(String::as_str).unwrap_or("");
     if user != s.subsonic_user {
         return Err(SubErr::new(40, "Wrong username or password"));
     }
+    let same = crate::app_passwords::same;
     if let (Some(t), Some(salt)) = (p.get("t"), p.get("s")) {
         let mut h = Md5::new();
         h.update(token.as_bytes());
         h.update(salt.as_bytes());
         let want = hex::encode(h.finalize());
-        if want.eq_ignore_ascii_case(t) {
-            return Ok(());
+        if same(want.as_bytes(), t.to_ascii_lowercase().as_bytes()) {
+            return Ok(false);
+        }
+        if let Some(id) = crate::app_passwords::of_subsonic_token(s, salt, t) {
+            crate::app_passwords::note_used_now(s, &id);
+            return Ok(true);
         }
         return Err(SubErr::new(40, "Wrong username or password"));
     }
@@ -289,11 +308,40 @@ fn authenticate(s: &NodeState, p: &Params) -> Result<(), SubErr> {
                 .unwrap_or_default(),
             None => pw.clone(),
         };
-        if plain == *token {
-            return Ok(());
+        if same(plain.as_bytes(), token.as_bytes()) {
+            return Ok(false);
+        }
+        if let Some(id) = crate::app_passwords::of(s, &plain) {
+            crate::app_passwords::note_used_now(s, &id);
+            return Ok(true);
         }
     }
     Err(SubErr::new(40, "Wrong username or password"))
+}
+
+/// Takes every `path` (a song's file on the node's disk) out of an answer.
+fn drop_paths(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            o.remove("path");
+            o.values_mut().for_each(drop_paths);
+        }
+        Value::Array(a) => a.iter_mut().for_each(drop_paths),
+        _ => {}
+    }
+}
+
+/// What an app password may ask of Subsonic: everything a player does (browse, search, stream,
+/// stars and ratings, playlists, bookmarks, the play queue, scrobbles, the jukebox), not what
+/// changes the node: scanning the library, the radio station list.
+fn app_may(method: &str) -> bool {
+    !matches!(
+        method,
+        "startScan"
+            | "createInternetRadioStation"
+            | "updateInternetRadioStation"
+            | "deleteInternetRadioStation"
+    )
 }
 
 fn want(p: &Params, k: &str) -> Result<String, SubErr> {

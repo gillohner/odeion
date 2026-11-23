@@ -2099,7 +2099,7 @@
   // `can`: the capability names of crates/pm-api/src/access.rs, in snake case). Without the list
   // (the offline app, a backend that has no roles) it is the role as before: the owner everything,
   // someone with music access what the node gives them.
-  const LISTENER_CAN = new Set(['artwork', 'session', 'library', 'zone_list', 'zone_use', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in']);
+  const LISTENER_CAN = new Set(['artwork', 'session', 'library', 'zone_list', 'zone_use', 'collections', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in']);
   const can = (cap) => { const me = state.me; return me && Array.isArray(me.can) ? me.can.includes(cap) : !isListener() || LISTENER_CAN.has(cap); };
   // ---- people & access: the words the owner's screen and a person's own Settings share ----
   // "Kitchen", "Kitchen and Den", "Kitchen, Den and Hall", "Kitchen, Den, Hall and 2 more"
@@ -2110,7 +2110,7 @@
   const CAN_WORDS = [
     ['library', () => 'Play and search this node’s library'],
     ['zone_use', (o) => o.zones],
-    ['own', (o) => `Keep ${o.their} own bookmarks and collections, on ${o.their} own Pubky account`],
+    ['collections', (o) => `Keep ${o.their} own bookmarks and collections, on ${o.their} own Pubky account`],
     ['own_sign_in', (o) => `Sign in to ${o.their} own TIDAL, Qobuz or Spotify`],
     ['own', () => 'Report a problem'],
   ];
@@ -2191,6 +2191,61 @@
   };
   // The last list this log in was shown (another log in in the same tab starts without one)
   const keptSignIns = () => { if (!state.mySignIns || state.mySignIns.by !== state.token) state.mySignIns = { by: state.token, list: null }; return state.mySignIns; };
+  // The apps the owner gave a password of their own (GET /v1/node/app-passwords), drawn into `host`:
+  // each with when it was made and last used, and Remove (asked first); then a name field and
+  // "Make a password", whose password shows once, with Copy, until the page is drawn again.
+  // Loading, none yet, and an error with Retry.
+  const mountAppPasswords = (host) => {
+    if (!host) return;
+    const row = (name, note, ctl, attr = '') => `<div class="set-row" ${attr}><div class="set-label"><div class="set-name">${name}</div>${note ? `<p class="set-help">${note}</p>` : ''}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+    const note = (a) => [
+      a.created_at ? `made ${new Date(a.created_at * 1000).toLocaleDateString()}` : '',
+      a.last_used == null ? 'not used yet' : a.last_used >= Math.floor(Date.now() / 86400000) * 86400 ? 'last used today' : `last used ${new Date(a.last_used * 1000).toLocaleDateString(undefined, { timeZone: 'UTC' })}`,
+    ].filter(Boolean).join(' · ');
+    const form = '<div class="set-row set-block" data-ap-new><div class="set-label"><label class="set-name" for="apname">Give an app its own password</label><p class="set-help">Name the app, then copy its password into it.</p><div class="toolbar"><input class="input" id="apname" maxlength="60" placeholder="The app’s name, e.g. Home Assistant" autocomplete="off"><button class="btn" id="apgo">Make a password</button></div><p class="field-err small" id="apnameerr" role="alert" hidden></p><div id="apout" aria-live="polite"></div></div></div>';
+    let shown = '';
+    const draw = (list, error) => {
+      const typed = $('#apname', host) ? $('#apname', host).value : '';
+      host.innerHTML = (error
+        ? `<div class="set-row" data-ap-error><div class="set-label"><p class="set-help pa-err" role="alert">Couldn’t read the apps: ${esc(error)}</p></div><div class="set-ctl"><button class="btn sm" data-ap-retry>Retry</button></div></div>`
+        : !list ? '<div class="set-row" data-ap-loading aria-busy="true"><div class="skeleton pa-skel"></div></div>'
+          : !list.length ? '<div class="set-row" data-ap-none><div class="set-label"><p class="set-help">No app has a password of its own yet.</p></div></div>'
+            : list.map((a) => row(esc(a.name), esc(note(a)), `<button class="btn sm danger" data-ap-del="${esc(a.id)}" aria-label="Remove the password of ${esc(a.name)}">Remove…</button>`, `data-ap="${esc(a.id)}"`)).join(''))
+        + form;
+      $('#apname', host).value = typed;
+      $('#apout', host).innerHTML = shown;
+      $$('[data-ap-del]', host).forEach((b) => b.onclick = async () => {
+        const a = (list || []).find((x) => x.id === b.dataset.apDel); const name = a ? a.name : 'this app';
+        const go = await choiceDialog({ title: `Remove the password of ${name}?`, text: `${name} stops working with this node at once. Your other apps go on.`, choices: [{ label: 'Remove', value: true, primary: true, danger: true }] });
+        if (!go) { b.focus(); return; }
+        try { await api('DELETE', `/node/app-passwords/${encodeURIComponent(b.dataset.apDel)}`); toast(`Removed the password of ${name}`); } catch (e) { toast(e.message, 'error'); }
+        await load();
+        const next = $('[data-ap-del]', host) || $('#apname', host); if (next) next.focus();
+      });
+      const err = $('#apnameerr', host);
+      $('#apname', host).oninput = () => { err.hidden = true; };
+      $('#apgo', host).onclick = async () => {
+        const name = $('#apname', host).value.trim();
+        if (!name) { err.textContent = 'Name the app first.'; err.hidden = false; $('#apname', host).focus(); return; }
+        let made;
+        try { made = await api('POST', '/node/app-passwords', { name }); } catch (e) { toast(e.message, 'error'); return; }
+        shown = `<p class="small pa-newpass">The password of ${esc(made.name)}, shown only now. Copy it into the app (a Subsonic app takes it as its password).</p><div class="toolbar"><code class="pa-code" data-ap-made>${esc(made.password)}</code><button class="btn sm primary" data-copylink="${esc(made.password)}">Copy</button></div>`;
+        $('#apname', host).value = '';
+        await load();
+        const copy = $('#apout [data-copylink]', host); if (copy) copy.focus();
+      };
+      const again = $('[data-ap-retry]', host); if (again) again.onclick = () => load();
+    };
+    const load = async () => {
+      let list = null; let error = null;
+      try { list = await api('GET', '/node/app-passwords'); if (!Array.isArray(list)) throw new Error('The node’s answer was not a list.'); } catch (e) { list = null; error = e.message; }
+      if (!host.isConnected) return;
+      draw(list, error);
+    };
+    host.tabIndex = -1;
+    draw(null, null);
+    return load();
+  };
   // Offline (the app's local server, pm-offline): only what this device keeps, played here
   const isOffline = () => !!(state.info && state.info.offline);
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
@@ -10385,7 +10440,7 @@
             const pick = z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}" aria-label="Play to ${esc(z.name)}">Play to</button>`;
             const wayChips = ways ? `<div class="chips zc-ways" role="group" aria-label="Ways to play to ${esc(familyName(z))}">${ways.map((m) => `<button class="chip ${m.id === state.zone ? 'on' : ''}" data-zsel="${esc(m.id)}" aria-pressed="${m.id === state.zone}" title="Play to ${esc(m.name)}">${esc(PROTO_WORDS[protoOf(m)] || protoOf(m))}</button>`).join('')}</div>` : '';
             const vol = zv ? `<div class="zc-vol"><button class="icon-btn zc-mute" data-volmute="${esc(z.id)}" aria-pressed="${!!zv.muted}" title="${zv.muted ? 'Unmute' : 'Mute'}" aria-label="Mute ${esc(z.name)}">${icon('volume')}</button><input type="range" data-zvol="${esc(z.id)}" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : `<span class="${phone ? 'sr-only' : 'muted small'}">Volume: set on the device</span>`;
-            const ungroup = String(z.id).startsWith('group:') && can('zone_manage') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''; // (only who may change zones: for anyone else the node refuses it)
+            const ungroup = String(z.id).startsWith('group:') && can('zone_group') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''; // (only who may change zones: for anyone else the node refuses it)
             // (a wider card's volume and its Play to go together: beside the transport when the slider
             // gets 80 px there, else under it as one, the slider then the line's width. Before, the
             // volume could stay beside the transport with a 56 px slider and Play to went under it
@@ -11095,9 +11150,10 @@
             // 6. The browsers and apps signed in as the owner; this one first, with Log out
             const mineBody = '<div id="pmine" class="pa-rows"></div>';
 
-            // 7. The password for apps (the node's API token)
+            // 7. Apps with a password of their own, then the password for apps (the node's API token)
+            const appsBody = block('', 'Each app you connect (Home Assistant, a Subsonic app, a script) can have a password of its own. With it the app plays, controls and groups zones and browses the library and your collections; it can’t change settings, people or the library. Removing one stops that app alone.', '<div id="papps" class="pa-rows"></div>');
             const exposed = ns.api_token_exposed_at ? `<div class="notice warn" role="alert">This password was in a saved queue’s links, where everyone who could use that zone could read it (noticed ${esc(new Date(ns.api_token_exposed_at * 1000).toLocaleString())}). ${ns.token_replaceable ? 'Make a new one.' : 'Change <code>PM_TOKEN</code> (or <code>[api] token</code>) and restart the node.'}</div>` : '';
-            const APPS_USE = 'Apps and scripts that connect to this node log in with it: Subsonic apps, Home Assistant, your own scripts.';
+            const APPS_USE = 'It can do everything you can. Apps can log in with it, but one with a password of its own (above) can do only what an app needs.';
             const passBody = ns.unread ? settingsErr('reload-password') : ns.token_replaceable
               ? block('', `${APPS_USE} A new one stops the old one at once: every app then needs the new one, and your other browsers are logged out (log in again with Pubky Ring). The people you added stay signed in.`, `${exposed}<div class="actions"><button class="btn" id="tokennew">Make a new password</button></div><div id="tokenout" aria-live="polite"></div>`)
               : block('', `${APPS_USE} Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): it is changed there.`, `${exposed}<div class="actions"><a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a></div>`);
@@ -11118,6 +11174,7 @@
               + sec('zones', 'Zones they can play on', zonesBody, !!zl.error)
               + sec('services', 'Whose music services they play with', srcBody, false)
               + sec('mine', 'Browsers and apps signed in as you', mineBody, false)
+              + sec('apps', 'Apps with their own password', appsBody, false)
               + sec('password', 'Password for apps (API token)', passBody, !!ns.api_token_exposed_at)
               + sec('party', 'Party', partyBody, false)
               + group('Also in Settings', moreBody);
@@ -11128,6 +11185,7 @@
             $$('[data-pa-retry]', box).forEach((b) => b.onclick = () => loadPeople());
             // (the node's settings are read with the rest of Settings: the page is drawn again)
             $$('[data-pa-reload]', box).forEach((b) => b.onclick = () => render());
+            mountAppPasswords($('#papps', box));
             mountSignIns($('#pmine', box), {
               control: state.token ? `<button class="btn" id="logout">${icon('logout')} Log out</button>` : '',
               kept: keptSignIns(),

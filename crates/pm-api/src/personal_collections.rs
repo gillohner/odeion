@@ -1770,10 +1770,11 @@ mod tests {
         }
     }
 
-    /// Whether the route this path matches is one of a person's own (`access::ROUTES`).
+    /// Whether the route this path matches is one of a person's own collection routes
+    /// (`access::ROUTES`).
     fn is_own_route(m: &Method, p: &str) -> bool {
         use crate::access::{required, route_of, Capability};
-        route_of(p).and_then(|(route, _)| required(m, route)) == Some(Capability::Own)
+        route_of(p).and_then(|(route, _)| required(m, route)) == Some(Capability::Collections)
     }
 
     #[test]
