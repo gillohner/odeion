@@ -28139,4 +28139,33 @@ exec sleep 300
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
     }
+
+    /// A song on a WebDAV share or a drive folder is `<scheme><id>/<path>` in the library, and
+    /// its open error names that key: a listener sees the file name only, as for a local folder.
+    #[tokio::test]
+    async fn shares_and_drive_folders_are_library_roots_for_listeners() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.webdav.write().unwrap().push(webdav::Share {
+            id: "nas1".into(),
+            name: "NAS".into(),
+            url: "https://nas.example/dav/Music/".into(),
+            user: String::new(),
+            password: String::new(),
+        });
+        s.drives.write().unwrap().roots.push(drives::Root {
+            id: "g7".into(),
+            provider: drives::Provider::Google,
+            name: "Music".into(),
+            folder_id: "F1".into(),
+        });
+        let roots = accounts::library_roots(&s);
+        let mut v = serde_json::json!({
+            "error": "cannot open webdav://nas1/Owner/Album/01 x.flac: 404",
+            "reason": "cannot open gdrive://g7/Owner/Other/02 y.flac: gone",
+        });
+        assert!(accounts::hide_paths_under(&mut v, &roots), "{roots:?}");
+        assert_eq!(v["error"], "cannot open 01 x.flac: 404");
+        assert_eq!(v["reason"], "cannot open 02 y.flac: gone");
+    }
 }

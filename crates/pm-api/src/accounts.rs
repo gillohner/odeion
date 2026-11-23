@@ -1851,7 +1851,8 @@ pub fn hide_file_paths(v: &mut serde_json::Value) -> bool {
     changed
 }
 
-/// The folders the owner keeps music in (library folders and the homeserver's files), for
+/// The folders the owner keeps music in (library folders, the homeserver's files, WebDAV shares
+/// and drive folders: `webdav://<id>`, `gdrive://<id>`, `onedrive://<id>`), for
 /// [`hide_paths_under`].
 pub fn library_roots(s: &NodeState) -> Vec<String> {
     let mut roots: Vec<String> = s
@@ -1865,6 +1866,13 @@ pub fn library_roots(s: &NodeState) -> Vec<String> {
         .collect();
     if let Some(hs) = s.homeserver_files_dir() {
         roots.push(hs.to_string_lossy().into_owned());
+    }
+    // A song on a share or a drive is `<scheme><id>/<path>`, and its open error names that key
+    if let Ok(shares) = s.webdav.read() {
+        roots.extend(shares.iter().map(|sh| sh.root().to_string_lossy().into_owned()));
+    }
+    if let Ok(drives) = s.drives.read() {
+        roots.extend(drives.roots.iter().map(|r| r.key().to_string_lossy().into_owned()));
     }
     roots.retain(|r| r.len() > 1);
     roots
