@@ -1167,7 +1167,10 @@ mod tests {
         assert!(closed_within(&mut far, Duration::from_millis(200)), "closed");
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "no player");
         // And the default lets it in
-        let (addr, rx) = server(tight());
+        let (addr, rx) = server(Limits {
+            allow: Limits::default().allow,
+            ..tight()
+        });
         let mut near = TcpStream::connect(addr).unwrap();
         near.write_all(&hello(2)).unwrap();
         assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok(), "the player");

@@ -371,7 +371,11 @@ reconnects. Outputs found on the network (discovery and players together) stop b
 Players connect from this machine or a local network only: loopback, private addresses (10/8,
 172.16/12, 192.168/16), link-local, 100.64/10 (VPNs such as Tailscale) and IPv6 unique-local and
 link-local addresses. A connection from anywhere else is closed at once, and discovery requests
-from anywhere else get no answer. To take only players on this machine, set `[outputs] slimproto_bind = "127.0.0.1"` (the discovery
+from anywhere else get no answer. The check sees the address a connection reaches the node from:
+a port forward that rewrites it (Docker's userland proxy, rootless Docker or Podman) makes every
+peer look local. The bundle's compose files use host networking, which does not. On a cloud
+server, 10/8 and 100.64/10 may hold other customers' machines: set `slimproto_bind = "127.0.0.1"`
+there if no player is on the network. To take only players on this machine, set `[outputs] slimproto_bind = "127.0.0.1"` (the discovery
 responder is then off); any other address of the machine works too.
 
 ## Where the music can live
