@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **The event socket takes small messages only.** A client could send messages of up to 64 MiB on `/v1/events`, and the node read each one whole into memory, also from a listener's sign-in. Controllers only send `ping` and `resync`, so a message over 16 KiB now ends that socket.
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.
 - **A big library answers faster.** The node counted the whole library again for every page that shows its size, its artists or its genres (the app's start, Home, Artists, Genres, an artist's page, a library search), reading every song each time. It now keeps those answers until the library changes (a scan, an edit, a restore).
 - **Removing a folder takes only one of the library's folders.** `DELETE /v1/library/folders` now answers 400 without a path and 404 for a path that is not one of the library's folders (one added in Settings, or a folder of the config that was scanned), instead of forgetting the songs, and their plays, under whatever path it was given.

@@ -40,6 +40,10 @@ pub const SERVER_PING: Duration = Duration::from_secs(20);
 const RECHECK: Duration = Duration::from_secs(5);
 /// A pinging controller that is silent this long is gone.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+/// The largest message (and frame) a client may send. Controllers send only `ping` and
+/// `resync`, a few dozen bytes; without a limit, each socket would take up to 64 MiB (the
+/// library's default) into memory before it is read, for anyone with a listener's sign-in.
+pub const CLIENT_MSG_MAX: usize = 16 << 10;
 
 /// One event as it travels: its number and the event.
 #[derive(Debug, Clone)]
@@ -196,7 +200,9 @@ pub(crate) async fn events_ws(
         Err(e) => return e.into_response(),
     };
     let token = crate::bearer(&headers, &q);
-    ws.on_upgrade(move |socket| event_stream(socket, s, c, token))
+    ws.max_message_size(CLIENT_MSG_MAX)
+        .max_frame_size(CLIENT_MSG_MAX)
+        .on_upgrade(move |socket| event_stream(socket, s, c, token))
 }
 
 fn snapshot(s: &NodeState, c: &Caller, seq: u64) -> SnapshotMsg {

@@ -960,3 +960,62 @@ async fn search_finds_new_and_renamed_songs_right_after_a_scan_or_an_edit() {
     // Put back: lib.rs a_song_put_back_is_found_by_search_at_once_without_a_scan (it holds the
     // scan slot, so restore's own scan can't drop the kept answer first)
 }
+
+/// A client that sends a message over the size limit on the event socket loses that socket; the
+/// node goes on answering, and a socket that sends a normal ping gets its pong.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_event_socket_that_sends_too_much_is_closed() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("api-token");
+    std::fs::write(&file, OWNER).unwrap();
+    let s = node(dir.path(), vec![], just_null());
+    s.set_token_file(file);
+    let person = listener(&s);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(pm_api::serve_listener(s.clone(), l));
+    let open = || async {
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/events?token={person}"))
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .unwrap();
+        assert!(matches!(first, Some(Ok(Message::Text(_)))), "the snapshot");
+        ws
+    };
+    let mut big = open().await;
+    let mut fine = open().await;
+    // A ping padded far past the limit (still under the client library's own)
+    let padded = format!(r#"{{"type":"ping","id":"{}"}}"#, "x".repeat(1 << 20));
+    let _ = big.send(Message::Text(padded.into())).await;
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match big.next().await {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return true,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert_eq!(ended, Ok(true), "the socket that sent too much ended");
+    fine.send(Message::Text(r#"{"type":"ping","id":7}"#.into()))
+        .await
+        .unwrap();
+    let pong = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(Ok(Message::Text(t))) = fine.next().await {
+                if t.contains("pong") {
+                    return t.to_string();
+                }
+            }
+        }
+    })
+    .await
+    .expect("the other socket gets its pong");
+    assert!(pong.contains("\"id\":7"), "{pong}");
+    let (st, _) = call(&router(s.clone()), OWNER, "GET", "/v1/info", None).await;
+    assert_eq!(st, StatusCode::OK);
+}
