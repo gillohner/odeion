@@ -6,7 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-23
 
-- **Apps can ask for the queue only when it changes.** A playing zone's state goes to every open app about four times a second, and each one carried the whole queue: with 1,000 songs queued that was about 270 KiB a second per open app, nearly all of it the same queue again. An app that opens `/v1/events?zone_queue=changed` gets a zone's queue only when it changed (its `queue_version`), and keeps the one it has otherwise: about 2 KiB a second with the same 1,000 songs. Apps that do not ask get every message as before.
+- **Apps can ask for the queue only when it changes.** A playing zone's state goes to every open app about four times a second, and each one carried the whole queue: with 1,000 songs queued that was about 260 KiB a second per open app, nearly all of it the same queue again. An app that opens `/v1/events?zone_queue=changed` gets a zone's queue only when it changed (its `queue_version`, which also moves at each new song), and keeps the one it has otherwise: under 4 KiB a second with the same 1,000 songs. Apps that do not ask get every message as before.
 
 ### 2026-11-22
 
