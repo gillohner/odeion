@@ -653,14 +653,57 @@ pub struct Parsed {
     pub secrets: Option<Vec<u8>>,
 }
 
+/// The most a backup's parts may unpack to, each and all together, and against their packed
+/// size. The upload's own cap is on its packed size: a few MiB of deflated zeros would otherwise
+/// unpack into gigabytes in memory.
+struct Caps {
+    manifest: u64,
+    secrets: u64,
+    library: u64,
+    total: u64,
+    /// A part unpacks to at most this many times its packed size, or [`Caps::floor`]
+    /// (a library database deflates a few times; zeros a thousand times)
+    ratio: u64,
+    floor: u64,
+}
+
+const MANIFEST_MAX: u64 = 1 << 20;
+
+const CAPS: Caps = Caps {
+    manifest: MANIFEST_MAX,
+    secrets: 64 << 20,
+    // As big as the biggest upload (4 GiB): a backup that came in stored still fits
+    library: 4 << 30,
+    total: (4 << 30) + (64 << 20) + MANIFEST_MAX,
+    ratio: 100,
+    floor: 64 << 20,
+};
+
 pub fn parse(bytes: &[u8]) -> Result<Parsed, BackupError> {
+    parse_within(bytes, &CAPS)
+}
+
+fn parse_within(bytes: &[u8], caps: &Caps) -> Result<Parsed, BackupError> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|_| BackupError::NotABackup("not a zip file".into()))?;
+    let mut left = caps.total;
     let mut read = |name: &str| -> Result<Option<Vec<u8>>, BackupError> {
+        let cap = match name {
+            "manifest.json" => caps.manifest,
+            "secrets.bin" => caps.secrets,
+            _ => caps.library,
+        }
+        .min(left);
         match zip.by_name(name) {
-            Ok(mut f) => {
+            Ok(f) => {
+                let cap = cap.min(f.compressed_size().saturating_mul(caps.ratio).max(caps.floor));
+                // Read one byte past the cap: more than that is refused, never held
                 let mut v = Vec::new();
-                f.read_to_end(&mut v)?;
+                f.take(cap.saturating_add(1)).read_to_end(&mut v)?;
+                if v.len() as u64 > cap {
+                    return Err(BackupError::NotABackup(format!("{name} is too big")));
+                }
+                left -= v.len() as u64;
                 Ok(Some(v))
             }
             Err(zip::result::ZipError::FileNotFound) => Ok(None),
@@ -1456,6 +1499,42 @@ mod tests {
 
         let ok = zip_of(&[("manifest.json", &manifest_json()), ("library.db", &[0u8; 5000])]);
         assert_eq!(parse(&ok).unwrap().database.len(), 5000);
+        let caps = |member: u64, total: u64| Caps {
+            manifest: MANIFEST_MAX,
+            secrets: member,
+            library: member,
+            total,
+            ratio: CAPS.ratio,
+            floor: CAPS.floor,
+        };
+        assert!(parse_within(&ok, &caps(5000, 1 << 20)).is_ok());
+        let e = parse_within(&ok, &caps(4999, 1 << 20))
+            .err()
+            .expect("over the member cap");
+        assert!(e.to_string().contains("too big"), "{e}");
+        let two = zip_of(&[
+            ("manifest.json", &manifest_json()),
+            ("library.db", &[0u8; 5000]),
+            ("secrets.bin", &[0u8; 5000]),
+        ]);
+        let total = manifest_json().len() as u64 + 5000 + 5000;
+        assert!(parse_within(&two, &caps(5000, total)).is_ok());
+        let e = parse_within(&two, &caps(5000, total - 1))
+            .err()
+            .expect("over the total cap");
+        assert!(e.to_string().contains("too big"), "{e}");
+        // Against the packed size: 5000 zeros pack to a few bytes; varied bytes don't
+        let packed = Caps {
+            floor: 0,
+            ..caps(1 << 20, 1 << 20)
+        };
+        let e = parse_within(&ok, &packed).err().expect("zeros unpack too far");
+        assert!(e.to_string().contains("too big"), "{e}");
+        let varied: Vec<u8> = (0..5000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let fine = zip_of(&[("manifest.json", &manifest_json()), ("library.db", &varied)]);
+        assert!(parse_within(&fine, &packed).is_ok());
     }
 
     #[test]
