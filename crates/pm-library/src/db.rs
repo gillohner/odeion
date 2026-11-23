@@ -2454,6 +2454,11 @@ impl Library {
     /// one, in a folder named as the entry's nearest, and the entry is only a path; or when its
     /// title and artist agree with the entry's (without an artist: also that nearest folder).
     pub fn resolve_import(&self, t: &ImportedTrack) -> Result<Option<Track>> {
+        self.resolve_import_by(t, true)
+    }
+
+    /// [`Self::resolve_import`]; `by_title: false` stops after the file-name steps.
+    fn resolve_import_by(&self, t: &ImportedTrack, by_title: bool) -> Result<Option<Track>> {
         let path = t.path.as_deref().and_then(crate::import::local_path);
         // Without an artist, a file elsewhere must also be in a folder named as the entry's
         // nearest one, case aside (another album's "01 Intro.flac" is not it); a line naming no
@@ -2512,6 +2517,9 @@ impl Library {
                 turned_down.extend(hits.iter().map(|h| h.id));
             }
         }
+        if !by_title {
+            return Ok(None);
+        }
         // The title search too: without an artist, a line that names a folder needs it here; the
         // first song that passes is taken, not the first of the title
         let artist = Some(entry_artist(t.artist.as_deref())).filter(|a| !a.is_empty());
@@ -2534,15 +2542,15 @@ impl Library {
                         return Ok(Some(track));
                     }
                 }
-                // As that place: the two-folder rule and, for a line without an artist, the
-                // nearest-folder rule see the playlist's folders; nothing found there, the line
-                // as written
+                // As that place, by file name only: the two-folder rule and, for a line without
+                // an artist, the nearest-folder rule see the playlist's folders (a title search
+                // here would put a folder's name before a file's); nothing found, as written
                 if let Some(path) = at.to_str() {
                     let placed = ImportedTrack {
                         path: Some(path.to_owned()),
                         ..t.clone()
                     };
-                    if let Some(track) = self.resolve_import(&placed)? {
+                    if let Some(track) = self.resolve_import_by(&placed, false)? {
                         return Ok(Some(track));
                     }
                 }
@@ -8779,5 +8787,19 @@ mod identify_tests {
             .resolve_import_in(&line, Some(Path::new("/home/u/Downloads")))
             .unwrap()
             .is_some());
+        // The only file of the line's name, its title agreeing, is it: a song of that title in
+        // a folder named as the playlist's does not come first by the title search
+        let only = "/m/C/Other/track05.flac";
+        lib.upsert_track(&import_test_track(only, "Intro", Some("C"), 60))
+            .unwrap();
+        let named_file = entry("Intro", None, Some("track05.flac"), None);
+        assert_eq!(
+            path_of(
+                lib.resolve_import_in(&named_file, Some(Path::new("/old/X/Second")))
+                    .unwrap()
+            )
+            .as_deref(),
+            Some(only)
+        );
     }
 }
