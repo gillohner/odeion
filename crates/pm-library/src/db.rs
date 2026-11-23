@@ -2457,6 +2457,13 @@ impl Library {
                 .is_none_or(|f| nearest_folder(&h.file.path).as_ref() == Some(f))
         };
         let named = !entry_artist(t.artist.as_deref()).is_empty();
+        // "Various Artists" names no one; the title search then takes only a song of the
+        // entry's album (another compilation's or artist's "Intro" is not it)
+        let various = !named && t.artist.as_deref().is_some_and(|a| !a.trim().is_empty());
+        let on_album = |h: &Track| {
+            !various
+                || matches!((t.album.as_deref(), h.album.as_ref()), (Some(want), Some(have)) if same_title(want, &have.title))
+        };
         // Files of the entry's name looked at and turned down: the title search does not take them
         let mut turned_down: Vec<Option<TrackId>> = Vec::new();
         if let Some(p) = path {
@@ -2499,7 +2506,7 @@ impl Library {
         }
         let found = self.find_by_title_artist_except(&t.title, t.artist.as_deref(), &turned_down)?;
         // The title search too: without an artist, a line that names a folder needs it here
-        Ok(found.filter(|h| named || near(h)))
+        Ok(found.filter(|h| (named || near(h)) && on_album(h)))
     }
 
     /// [`Self::resolve_import`] for a playlist file in `base`: a relative line is first the
@@ -8622,5 +8629,38 @@ mod identify_tests {
         assert!(!by_artist(&duo, "Sefa Cyclon"));
         assert_eq!(entry_artist(Some(" VA ")), "");
         assert_eq!(entry_artist(Some(" !!! ")), "!!!");
+    }
+
+    /// A row naming "Various Artists" (a Roon row whose album artist stands in for its artist)
+    /// takes a song of that title only on the row's album: another artist's song of the same
+    /// title is not it, and a row without an album takes none.
+    #[test]
+    fn a_various_artists_row_takes_a_song_of_its_album_only() {
+        let lib = Library::open_in_memory().unwrap();
+        let path_of = |t: Option<Track>| t.map(|t| t.file.path.to_string_lossy().into_owned());
+        let mut theirs = import_test_track("/m/b/Intro.flac", "Intro", Some("Band"), 100);
+        theirs.album = sample_track("/m/b/x.flac", "x").album;
+        if let Some(a) = theirs.album.as_mut() {
+            a.title = "Band's Album".into();
+        }
+        lib.upsert_track(&theirs).unwrap();
+        let mut row = entry("Intro", Some("Various Artists"), None, None);
+        row.album = Some("Summer Hits".into());
+        assert_eq!(
+            path_of(lib.resolve_import(&row).unwrap()),
+            None,
+            "another album's Intro"
+        );
+        row.album = None;
+        assert_eq!(path_of(lib.resolve_import(&row).unwrap()), None, "no album named");
+        row.album = Some("BAND'S ALBUM".into());
+        assert_eq!(
+            path_of(lib.resolve_import(&row).unwrap()).as_deref(),
+            Some("/m/b/Intro.flac"),
+            "its own album"
+        );
+        // A row that names an artist is matched as before
+        let named = entry("Intro", Some("Band"), None, None);
+        assert!(lib.resolve_import(&named).unwrap().is_some());
     }
 }
