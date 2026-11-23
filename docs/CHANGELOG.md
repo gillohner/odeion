@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-23
+
+- **A computer's sound output that stops taking audio pauses its zone instead of freezing it.** On the desktop app and an endpoint playing through the system's output (not a USB DAC on a phone), a sound device that went away mid-song, or a stream that stopped taking audio without saying so, left the zone waiting for it for good: Stop, Pause and Next did nothing until the app was restarted. Now the zone pauses where it was, as it already did when a phone's USB DAC was unplugged: at once when the system says the device went away, and after 10 seconds in which the output took no audio otherwise.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.

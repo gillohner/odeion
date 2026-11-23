@@ -1,7 +1,8 @@
-//! The waits of the phone's shared (cpal) sink, apart from cpal so they are tested on every host:
+//! The waits of the shared (cpal) sink, apart from cpal so they are tested on every host:
 //! waiting for room in its queue and for it to play out never outlasts a USB DAC that went away
-//! (its stream stops taking audio, and the wait would never end), and a stream fault ends the
-//! stream for the sink only when it really did (a disconnect, not an underrun).
+//! (its stream stops taking audio, and the wait would never end), nor a stream that stopped
+//! taking audio by itself, and a stream fault ends the stream for the sink only when it really
+//! did (a disconnect, not an underrun).
 
 use pm_zones::SinkError;
 use std::time::{Duration, Instant};
@@ -38,12 +39,24 @@ pub fn ends_stream(fault: StreamFault, dac_at_open: bool) -> bool {
 
 const STEP: Duration = Duration::from_millis(5);
 
-/// Wait until `room()` (or `stopped()`); a `gone()` error ends the wait at once.
+/// How long a write waits for room while the stream takes no audio at all before the output counts
+/// as stopped. The sink's queue holds half a second, so a stream that plays frees room well within
+/// it; one whose device went away without saying so (or whose audio thread hangs) never does, and
+/// the zone would hold its commands (Stop, Pause, Next) for good.
+pub const STALL: Duration = Duration::from_secs(10);
+
+/// Wait until `room()` (or `stopped()`); a `gone()` error ends the wait at once, and so does a
+/// stream that took nothing (`taken()`, the frames it consumed, did not move) for `stall`: then
+/// the error is `stalled()`.
 pub fn wait_for_room(
     room: impl Fn() -> bool,
     stopped: impl Fn() -> bool,
     gone: impl Fn() -> Option<SinkError>,
+    taken: impl Fn() -> u64,
+    stall: Duration,
+    stalled: impl FnOnce() -> SinkError,
 ) -> Result<(), SinkError> {
+    let mut last = (taken(), Instant::now());
     while !room() {
         if stopped() {
             return Ok(());
@@ -51,9 +64,21 @@ pub fn wait_for_room(
         if let Some(e) = gone() {
             return Err(e);
         }
+        let now = taken();
+        if now != last.0 {
+            last = (now, Instant::now());
+        } else if last.1.elapsed() >= stall {
+            return Err(stalled());
+        }
         std::thread::sleep(STEP);
     }
     Ok(())
+}
+
+/// A stream that ended by itself (its error callback said the device went away), with or without a
+/// USB DAC: the sink's writes end with Gone, so the zone pauses instead of waiting on it.
+pub fn ended_by_itself(dead: bool, id: &pm_zones::OutputId) -> Option<SinkError> {
+    dead.then(|| SinkError::Gone(id.clone(), "the output's device went away".into()))
 }
 
 /// Wait until `empty()`, at most `within`; a `gone()` error ends the wait at once.
@@ -103,7 +128,14 @@ mod tests {
         let g = gone_after(&gone);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(wait_for_room(|| false, || false, g));
+            let _ = tx.send(wait_for_room(
+                || false,
+                || false,
+                g,
+                || 0,
+                STALL,
+                || unreachable!(),
+            ));
         });
         std::thread::sleep(Duration::from_millis(50));
         gone.store(true, Ordering::SeqCst);
@@ -112,8 +144,8 @@ mod tests {
             .expect("the wait ends once the DAC is gone");
         assert!(matches!(r, Err(SinkError::Gone(..))), "{r:?}");
         // And as before: room ends it, a stop ends it
-        assert!(wait_for_room(|| true, || false, || None).is_ok());
-        assert!(wait_for_room(|| false, || true, || None).is_ok());
+        assert!(wait_for_room(|| true, || false, || None, || 0, STALL, || unreachable!()).is_ok());
+        assert!(wait_for_room(|| false, || true, || None, || 0, STALL, || unreachable!()).is_ok());
     }
 
     #[test]
@@ -158,5 +190,63 @@ mod tests {
             !ends_stream(StreamFault::Rerouted, false),
             "the phone's own reroutes go on"
         );
+    }
+
+    fn stalled() -> SinkError {
+        SinkError::Gone(OutputId::new("cpal", "desk"), "it took no audio".into())
+    }
+
+    /// A stream that stops taking audio without saying so never holds a write for good.
+    #[test]
+    fn a_stream_that_takes_nothing_ends_the_wait() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(wait_for_room(
+                || false,
+                || false,
+                || None,
+                || 7,
+                Duration::from_millis(50),
+                stalled,
+            ));
+        });
+        let r = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the wait ends when the stream takes nothing");
+        assert!(matches!(r, Err(SinkError::Gone(..))), "{r:?}");
+    }
+
+    /// A stream that plays, however slowly, is waited for: only a stretch with nothing taken counts.
+    #[test]
+    fn a_stream_that_still_takes_audio_is_waited_for() {
+        let taken = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let room = Arc::new(AtomicBool::new(false));
+        let (t, r2) = (taken.clone(), room.clone());
+        // Takes a little every 20 ms for 300 ms (longer than the 100 ms stall), then there is room
+        std::thread::spawn(move || {
+            for _ in 0..15 {
+                std::thread::sleep(Duration::from_millis(20));
+                t.fetch_add(1, Ordering::SeqCst);
+            }
+            r2.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let r = wait_for_room(
+            || room.load(Ordering::SeqCst),
+            || false,
+            || None,
+            || taken.load(Ordering::SeqCst),
+            Duration::from_millis(100),
+            stalled,
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert!(started.elapsed() >= Duration::from_millis(250));
+    }
+
+    #[test]
+    fn a_stream_that_ended_by_itself_is_gone_without_a_dac_too() {
+        let id = OutputId::new("cpal", "desk");
+        assert!(ended_by_itself(false, &id).is_none());
+        assert!(matches!(ended_by_itself(true, &id), Some(SinkError::Gone(..))));
     }
 }

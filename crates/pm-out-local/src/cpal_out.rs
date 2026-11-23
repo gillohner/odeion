@@ -424,9 +424,12 @@ impl CpalSink {
     }
 
     /// Rule (b): the DAC this sink was opened for isn't Android's route any more, or its stream
-    /// ended by itself.
+    /// ended by itself. Without a DAC: the stream ended by itself (its device went away), which
+    /// otherwise left every write waiting for room that never came.
     fn gone(&self) -> Option<SinkError> {
-        let f = self.gate.opened_for()?;
+        let Some(f) = self.gate.opened_for() else {
+            return crate::sink_wait::ended_by_itself(self.shared.dead.load(Ordering::SeqCst), &self.id);
+        };
         if let Some(e) = self.gate.gone(&self.id) {
             return Some(e);
         }
@@ -437,12 +440,23 @@ impl CpalSink {
     }
 
     /// Wait until the queue has room for `frames` more; never past a DAC that went away (its
-    /// stream stops taking audio, and the wait would never end).
+    /// stream stops taking audio, and the wait would never end), nor past a stream that took no
+    /// audio for [`crate::sink_wait::STALL`].
     fn wait_for_room(&self, frames: u64) -> Result<(), SinkError> {
+        let stall = crate::sink_wait::STALL;
         crate::sink_wait::wait_for_room(
             || self.queued_frames() + frames <= self.capacity_frames * 2,
             || self.shared.stop.load(Ordering::Relaxed),
             || self.gone(),
+            || self.shared.played.load(Ordering::Relaxed),
+            stall,
+            || {
+                tracing::warn!(output = %self.id, "the output took no audio for {} s; pausing", stall.as_secs());
+                SinkError::Gone(
+                    self.id.clone(),
+                    format!("it took no audio for {} s", stall.as_secs()),
+                )
+            },
         )
     }
 }
