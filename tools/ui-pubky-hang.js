@@ -109,7 +109,7 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         await fx.go(page, '/playlist/c1');
         await until(async () => asks.length > a5, 3000); await sleep(300);
         await page.clock.fastForward(16000);
-        check(await until(async () => !!(await page.$('#plshare')), 3000), `${width}: no answer in 15 s: the playlist draws anyway`);
+        check(await until(async () => !!(await page.$('#plshare')), 3000), `${width}: no answer in 15 s: the collection draws anyway`);
         const a5b = asks.length;
         await page.click('#plshare');
         await until(async () => asks.length > a5b, 2000); await sleep(300);
@@ -125,7 +125,7 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         // past the question's 15 s too (before: only an answer within them did; Copy link stayed
         // missing till the next draw)
         await page.keyboard.press('Escape').catch(() => {});
-        check(JSON.stringify(await order()) === '["Journey","Bravo"]', `${width}: the playlist shows as the server has it (${await order()})`);
+        check(JSON.stringify(await order()) === '["Journey","Bravo"]', `${width}: the collection shows as the server has it (${await order()})`);
         lists = ['B', 'J'];
         const a6 = asks.length; const r6 = plReads.length;
         socket.send(JSON.stringify({ type: 'library_changed' }));
@@ -139,12 +139,12 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         const asked6 = [...held.keys()].filter((n) => n >= a6);
         check(asked6.length > 0, `${width}: the redraw still asks the node (${asked6.length} asked)`);
         // (the × draws the list again, its sources too: wait for those reads to end first)
-        check(await settled(() => plReads.length), `${width}: the playlist's reads stop after the ×`);
+        check(await settled(() => plReads.length), `${width}: the collection's reads stop after the ×`);
         await page.clock.fastForward(16000);
-        check(await settled(() => plReads.length), `${width}: the playlist's reads stop after the 15 s`);
+        check(await settled(() => plReads.length), `${width}: the collection's reads stop after the 15 s`);
         const r6b = plReads.length;
         asked6.forEach((n) => answer(n, SESSION));
-        check(await until(async () => plReads.length > r6b, 2000) && r6b > r6, `${width}: the node's answer after its 15 s draws the playlist again (${plReads.length - r6b} more reads)`);
+        check(await until(async () => plReads.length > r6b, 2000) && r6b > r6, `${width}: the node's answer after its 15 s draws the collection again (${plReads.length - r6b} more reads)`);
         // 7. Home's Get started, the node not answering: no "Sign in with Pubky Ring" as if signed out
         await fx.go(page, '/');
         const a7 = asks.length;
@@ -183,8 +183,8 @@ const pfOf = (keys) => ({ order: { order: ['library'], services: [{ id: 'library
         await until(async () => asks.length > a9, 3000); await sleep(300);
         const asked9 = [...held.keys()].filter((n) => n >= a9);
         await page.clock.fastForward(16000);
-        check(await until(async () => !!(await page.$('#plsongs [data-rm]')), 3000), `${width}: no answer in 15 s: the playlist draws anyway`);
-        check(await settled(() => plReads.length), `${width}: the playlist's reads stop once it draws anyway`);
+        check(await until(async () => !!(await page.$('#plsongs [data-rm]')), 3000), `${width}: no answer in 15 s: the collection draws anyway`);
+        check(await settled(() => plReads.length), `${width}: the collection's reads stop once it draws anyway`);
         const r9 = plReads.length;
         asked9.forEach((n) => answer(n, SESSION));
         check(asked9.length > 0 && await until(async () => plReads.length > r9, 2000), `${width}: the late answer draws the first draw again (${asked9.length} asked, ${plReads.length - r9} more reads)`);

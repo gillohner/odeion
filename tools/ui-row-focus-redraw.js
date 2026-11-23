@@ -23,7 +23,7 @@ const artists = Array.from({ length: 8 }, (_, i) => ({ id: i + 1, name: `Artist 
 const other = Array.from({ length: 4 }, (_, i) => ({ uri: `https://sefa.bandcamp.com/track/t${i}`, title: `Elsewhere ${i}`, artist: 'Sefa', kind: 'track', site: 'bandcamp' }));
 const pages = [
   { name: 'Artists', url: '/artists', row: (k) => `#main [data-artist="${k}"]`, list: '#artistlist' },
-  { name: 'Favourites', url: '/favourites', row: (k) => `#main [data-ditem="${k - 1}"]`, list: '#favother .list' },
+  { name: 'Bookmarks', url: '/favourites', row: (k) => `#main [data-ditem="${k - 1}"]`, list: '#favother .list' },
 ];
 
 const song = (n) => (typeof n === 'object' ? n : { uri: `https://sefa.bandcamp.com/track/t${n}`, title: `Elsewhere ${n}`, artist: 'Sefa', kind: 'track', site: 'bandcamp' });
@@ -43,22 +43,22 @@ async function bySong(browser, width) {
   // Where the keyboard is: the song of the row it is in (read from the row's own title), and the control
   const on = () => page.evaluate(() => { const a = document.activeElement; if (!a || a === document.body) return 'the page'; const row = a.closest('#favother .list-row'); if (!row) return a.id || a.tagName; const t = row.querySelector('.name').firstChild.textContent.trim(); return a === row ? t : `${t} ${a.getAttribute('title')}`; });
   const cases = [
-    { name: 'a favourite above it gone, its row', focus: 2, part: '', now: [1, 2, 3], want: 'Elsewhere 2' },
-    { name: 'a favourite above it gone, its Play', focus: 2, part: ' [data-dplay]', now: [1, 2, 3], want: 'Elsewhere 2 Play' },
-    { name: 'a favourite added above it, its row', focus: 2, part: '', now: [9, 0, 1, 2, 3], want: 'Elsewhere 2' },
+    { name: 'bookmarked above it gone, its row', focus: 2, part: '', now: [1, 2, 3], want: 'Elsewhere 2' },
+    { name: 'bookmarked above it gone, its Play', focus: 2, part: ' [data-dplay]', now: [1, 2, 3], want: 'Elsewhere 2 Play' },
+    { name: 'bookmarked added above it, its row', focus: 2, part: '', now: [9, 0, 1, 2, 3], want: 'Elsewhere 2' },
     { name: 'that song itself gone, its row', focus: 1, part: '', now: [0, 2, 3], want: 'Elsewhere 2' },
     { name: 'that song, the last, gone, its Play', focus: 3, part: ' [data-dplay]', now: [0, 1, 2], want: 'Elsewhere 2 Play' },
     { name: 'the songs in another order, its More', focus: 1, part: ' [data-dmore]', now: [0, 2, 3, 1], want: 'Elsewhere 1 More', press: 'more', uri: 1 },
-    { name: 'a favourite above it gone, Enter on its Play', focus: 2, part: ' [data-dplay]', now: [1, 2, 3], want: 'Elsewhere 2 Play', press: 'play', uri: 2 },
+    { name: 'bookmarked above it gone, Enter on its Play', focus: 2, part: ' [data-dplay]', now: [1, 2, 3], want: 'Elsewhere 2 Play', press: 'play', uri: 2 },
     { name: 'an address with a quote, a backslash and ], its Play', start: [0, odd, 2, 3], focus: 1, part: ' [data-dplay]', now: [9, 0, odd, 2, 3], want: 'Elsewhere odd Play', press: 'play', uri: odd.uri },
-    { name: 'the same song hearted twice, the second one', start: [0, 1, twice, 2, 3], focus: 2, part: ' [data-dplay]', now: [9, 0, 1, twice, 2, 3], want: 'Elsewhere 1 again Play' },
+    { name: 'the same song bookmarked twice, the second one', start: [0, 1, twice, 2, 3], focus: 2, part: ' [data-dplay]', now: [9, 0, 1, twice, 2, 3], want: 'Elsewhere 1 again Play' },
     { name: 'the song moved far down the list, its row', start: many, focus: 2, part: '', now: [...many.filter((n) => n !== 2), 2], want: 'Elsewhere 2', sight: true },
     { name: 'the song moved far up the list, its row', start: many, focus: 29, part: '', now: [29, ...many.filter((n) => n !== 29)], want: 'Elsewhere 29', sight: true, foot: true },
     { name: 'its row half off the foot and nothing moved, its Play', start: many, focus: 12, part: ' [data-dplay]', now: many, want: 'Elsewhere 12 Play', half: true },
   ];
   try {
     for (const c of cases) {
-      const at = `${width} Favourites by song, ${c.name}`;
+      const at = `${width} Bookmarks by song, ${c.name}`;
       const first = (c.start || [0, 1, 2, 3]).map(song);
       Object.assign(state.fixtures, favs(first));
       socket = null; // (the page's own socket, not the last load's)
@@ -108,7 +108,7 @@ async function bySong(browser, width) {
         await page.keyboard.press('Escape');
       }
     }
-    check(!state.errors.length, `${width} Favourites by song: no page errors ${state.errors.join(' | ')}`);
+    check(!state.errors.length, `${width} Bookmarks by song: no page errors ${state.errors.join(' | ')}`);
   } finally { await context.close(); }
 }
 

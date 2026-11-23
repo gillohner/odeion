@@ -195,7 +195,7 @@ async function connectLinks(browser, width) {
     await page.addInitScript(() => { window.__lateRows = []; document.addEventListener('DOMContentLoaded', () => { new MutationObserver((recs) => { for (const r of recs) for (const n of r.addedNodes) { if (n.nodeType !== 1) continue; for (const el of [n, ...n.querySelectorAll('.clickable')]) if (el.matches('.clickable:not(button):not(a)') && el.tabIndex < 0) window.__lateRows.push(el.className); } }).observe(document.body, { childList: true, subtree: true }); }); });
     for (const [from, box, label, want, where] of [
       ['/album/mb-nowhere', '#isongs', 'Connect TIDAL', '/sources/tidal', `album page Connect ${width}`],
-      ['/favourites', '#favother', 'Connect TIDAL', '/sources/tidal', `Favourites row Connect ${width}`],
+      ['/favourites', '#favother', 'Connect TIDAL', '/sources/tidal', `Bookmarks row Connect ${width}`],
       ['/album/mb-either', '#isongs', 'Connect TIDAL or Spotify', '/sources', `album page Connect two ${width}`],
     ]) {
       const sel = `${box} a[href="${want}"]`;

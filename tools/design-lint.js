@@ -8,6 +8,9 @@
 //      long-hand duration and delay properties too;
 //   5. every font-size and border-radius takes a step of the type or radius scale (--fs-*, --r-*);
 //      a radius of 3 px or less (bars, marks), 50%, relative units and a fluid clamp() are fine.
+//   6. Odeion's own words in the page's copy: Bookmarks, never Favourites; Collections, never
+//      Playlists (tools/refactor/wording.js has the table, what another product's own word is, and
+//      --write to put it right).
 //   node tools/design-lint.js [static dir]
 const fs = require('fs');
 const path = require('path');
@@ -133,6 +136,14 @@ for (const [file, src] of files) {
         if (first && !/var\(--dur-/.test(decl.slice(0, first.index + 1))) problems.push(`${f}:${src.slice(0, m.index).split('\n').length}  ${m[1]} with a raw duration: use var(--dur-fast|base|slow): ${decl.slice(0, 60)}`);
       }
     }
+  }
+}
+
+// 6. Odeion's own words
+{
+  const wording = require('./refactor/wording');
+  for (const f of wording.PAGE_FILES.map((x) => path.join(DIR, path.basename(x))).filter((x) => fs.existsSync(x))) {
+    for (const h of wording.run(f, 'check').found) problems.push(`${path.basename(f)}:${h.line}  says “${h.word}” (…${h.around}…): Odeion says Bookmarks and Collections; node tools/refactor/wording.js --write`);
   }
 }
 

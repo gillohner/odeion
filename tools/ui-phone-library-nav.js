@@ -17,14 +17,17 @@ const geometry = (page, section) => page.evaluate((section) => {
   const r = row.getBoundingClientRect(), c = chip.getBoundingClientRect();
   // The right-hand fade is not a readable part of the row.
   const edge = r.right - (row.classList.contains('more-right') ? 28 : 0);
-  return { visible: c.left >= r.left - 1 && c.right <= edge + 1, x: c.x + c.width / 2, y: c.y + c.height / 2,
+  // (tappable: its whole label is on the readable part, and so is its middle; only a neighbour's
+  // rounded end, its padding after the label, may reach under the fade)
+  const words = document.createRange(); words.selectNodeContents(chip); const t = words.getBoundingClientRect();
+  return { visible: c.left >= r.left - 1 && c.right <= edge + 1, tappable: t.width > 0 && t.left >= r.left - 1 && t.right <= edge + 1 && c.x + c.width / 2 >= r.left && c.x + c.width / 2 <= edge, x: c.x + c.width / 2, y: c.y + c.height / 2,
     left: row.scrollLeft, current: row.querySelector('[aria-current="page"]')?.dataset.libnav,
     targets: [...row.children].every((e) => e.getBoundingClientRect().height >= 44 && e.getBoundingClientRect().width >= 44) };
 }, section);
 const tap = async (page, section) => {
   const g = await geometry(page, section);
-  check(g?.visible, `${section} can be tapped without scrolling the navigation`);
-  if (!g?.visible) return false;
+  check(g?.tappable, `${section} can be tapped without scrolling the navigation`);
+  if (!g?.tappable) return false;
   // A coordinate tap cannot silently scroll the target into view like locator.click().
   await page.touchscreen.tap(g.x, g.y);
   await page.waitForURL(`**/${section}`);

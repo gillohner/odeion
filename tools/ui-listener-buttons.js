@@ -126,11 +126,11 @@ const clean = async (page, state, where) => {
         await page.locator('#shsongs .name', { hasText: track.title }).first().waitFor();
         row = await actionsRow(page);
         if (c.owner) {
-          assert.deepEqual(row.shown.map((b) => b.id), ['shplay', 'shcopy', 'shlink'], `${at}: the shared playlist's buttons`);
+          assert.deepEqual(row.shown.map((b) => b.id), ['shplay', 'shcopy', 'shlink'], `${at}: the shared collection's buttons`);
           assert.equal((await page.locator('#shcopy').innerText()).trim(), 'Save a copy', `${at}: Save a copy`);
-          noHoles(row, `${at}: the shared playlist's buttons`);
+          noHoles(row, `${at}: the shared collection's buttons`);
           await page.screenshot({ path: path.join(OUT, `${width}-${c.tag}-shared.png`) });
-          await clean(page, state, `${at}: the shared playlist's page`);
+          await clean(page, state, `${at}: the shared collection's page`);
           await page.locator('#shcopy').click();
           await until(() => new URL(page.url()).pathname === `/playlist/${detail.summary.id}`, `${at}: the copy opens`);
           await sleep(300);
@@ -139,15 +139,15 @@ const clean = async (page, state, where) => {
           assert.deepEqual(state.errors, [], `${at}: no page errors after the copy`);
         } else {
           assert.equal(await page.locator('#shcopy').count(), 0, `${at}: no Save a copy button`);
-          assert.deepEqual(row.shown.map((b) => b.id), ['shplay', 'shlink'], `${at}: the shared playlist's buttons`);
-          noHoles(row, `${at}: the shared playlist's buttons`);
+          assert.deepEqual(row.shown.map((b) => b.id), ['shplay', 'shlink'], `${at}: the shared collection's buttons`);
+          noHoles(row, `${at}: the shared collection's buttons`);
           assert.deepEqual((await controls(page)).filter((t) => /save a copy|duplicate/i.test(t)), [], `${at}: nothing offers a copy`);
           await page.screenshot({ path: path.join(OUT, `${width}-${c.tag}-shared.png`) });
           // What stays still answers: Copy link (the link itself where this browser has no clipboard)
           await page.locator('#shlink').click();
           const said = await until(async () => { const t = (await page.locator('#toast').textContent()).trim(); return t || null; }, `${at}: Copy link answers`);
           assert.ok(said === 'Link copied' || said === LINK, `${at}: Copy link answers (“${said}”)`);
-          await clean(page, state, `${at}: the shared playlist's page`);
+          await clean(page, state, `${at}: the shared collection's page`);
           assert.deepEqual(sent, [], `${at}: nothing the node would refuse was asked for`);
         }
 
