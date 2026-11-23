@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-22
 
+- **A removed zone no longer stays running in the background.** When a zone went (an output left or was ungrouped, a group was split), two of the node's tasks for it kept a hold on it: the one that saves its queue and the one that passes its events on. So the zone was never dropped, and its audio thread and both tasks ran until the node restarted, one set for every zone ever removed. They now hold it loosely, and everything for a zone ends with it.
+
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.
 - **A big library answers faster.** The node counted the whole library again for every page that shows its size, its artists or its genres (the app's start, Home, Artists, Genres, an artist's page, a library search), reading every song each time. It now keeps those answers until the library changes (a scan, an edit, a restore).
 - **Removing a folder takes only one of the library's folders.** `DELETE /v1/library/folders` now answers 400 without a path and 404 for a path that is not one of the library's folders (one added in Settings, or a folder of the config that was scanned), instead of forgetting the songs, and their plays, under whatever path it was given.

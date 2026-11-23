@@ -28139,4 +28139,31 @@ exec sleep 300
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
     }
+
+    /// A removed zone goes once its last handle does: nothing the node started for it (the
+    /// queue saver, the event relay) keeps it, so its engine thread and those tasks end too.
+    #[tokio::test]
+    async fn a_removed_zone_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let zone = s.create_zone("Leaky", Arc::new(NullOutput::new()));
+        zone.wait_acked().await;
+        // An event through the relay and a queue change through the saver first
+        zone.enqueue(
+            vec![pm_zones::QueueItem::new("file:///music/one.flac")],
+            pm_zones::Insert::End,
+        );
+        zone.wait_acked().await;
+        let gone = Arc::downgrade(&zone);
+        let id = zone.id().clone();
+        drop(zone);
+        drop(s.remove_zone(&id));
+        for _ in 0..100 {
+            if gone.upgrade().is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(gone.upgrade().is_none(), "something still holds the removed zone");
+    }
 }

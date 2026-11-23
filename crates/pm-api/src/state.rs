@@ -646,7 +646,9 @@ impl NodeState {
         let events = self.events.clone();
         let library = self.library.clone();
         let key = queue_key(zone.id());
-        let shuffled = zone.clone();
+        // The zone's tasks hold it weakly: a strong one would keep a removed zone (its engine
+        // thread, and these tasks waiting on its channels) alive for good
+        let shuffled = Arc::downgrade(&zone);
         let mut state_rx = zone.watch();
         // Every controller learns about the new zone at once, not on its first change.
         let initial = state_rx.borrow_and_update().clone();
@@ -716,7 +718,9 @@ impl NodeState {
                 if state.queue_version != saved_version {
                     // One look at the queue: the items and, while shuffled, their original
                     // order belong together (a change between two reads would save a wrong one)
-                    let snap = shuffled.queue_snapshot();
+                    let Some(z) = shuffled.upgrade() else { break };
+                    let snap = z.queue_snapshot();
+                    drop(z);
                     saved_version = snap.version;
                     let saved = SavedQueue {
                         items: snap.items,
@@ -739,12 +743,14 @@ impl NodeState {
         let mut ev_rx = zone.subscribe();
         let id = zone.id().clone();
         let library = self.library.clone();
-        let zone_for_radio = zone.clone();
+        let zone_for_radio = Arc::downgrade(&zone);
         let node = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
                 match ev_rx.recv().await {
                     Ok(event) => {
+                        // (gone: the event is still passed on, nothing else is done for it)
+                        let zone_now = zone_for_radio.upgrade();
                         if let pm_zones::ZoneEvent::TrackStarted { item, .. } = &event {
                             record_play(&library, &id, &item.uri);
                             // A listen only when the play is the owner's (listens.rs)
@@ -760,13 +766,12 @@ impl NodeState {
                             // Scrobbles too: a listener's or a party's plays never go to the owner's
                             // Last.fm or ListenBrainz
                             if let Some(n) = node.upgrade() {
-                                if crate::listens::play_is_the_owners(&n, &id.0, item) {
-                                    crate::listenbrainz::track_started(
-                                        &n,
-                                        zone_for_radio.clone(),
-                                        item.clone(),
-                                    );
-                                    crate::lastfm::track_started(&n, zone_for_radio.clone(), item.clone());
+                                if let Some(z) = zone_now
+                                    .as_ref()
+                                    .filter(|_| crate::listens::play_is_the_owners(&n, &id.0, item))
+                                {
+                                    crate::listenbrainz::track_started(&n, z.clone(), item.clone());
+                                    crate::lastfm::track_started(&n, z.clone(), item.clone());
                                 }
                             }
                         }
@@ -778,9 +783,13 @@ impl NodeState {
                         }
                         // Radio carries on when the queue ran out, not after a Stop (also the one
                         // before a queue is replaced, cleared or moved to another zone) or an error
-                        if matches!(event, pm_zones::ZoneEvent::Stopped { queue_ended: true }) {
-                            continue_radio(&library, &zone_for_radio);
+                        if let Some(z) = zone_now
+                            .as_ref()
+                            .filter(|_| matches!(event, pm_zones::ZoneEvent::Stopped { queue_ended: true }))
+                        {
+                            continue_radio(&library, z);
                         }
+                        drop(zone_now);
                         let _ = events.send(ApiEvent::ZoneEvent {
                             zone: id.clone(),
                             event,
