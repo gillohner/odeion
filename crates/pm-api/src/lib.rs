@@ -2014,7 +2014,7 @@ async fn enqueue(
     let mut items = Vec::with_capacity(asked);
     let (lib, ids) = (s.library.clone(), body.track_ids);
     items.extend(
-        tokio::task::spawn_blocking(move || queue_items_of(&lib, &ids, || {}))
+        tokio::task::spawn_blocking(move || queue_items_of(&lib, &ids, LOOKUP_TURN, || {}))
             .await
             .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??,
     );
@@ -2065,15 +2065,21 @@ async fn enqueue(
 const LOOKUP_TURN: usize = 500;
 
 /// Queue items for library songs, in the order asked; 404 for an id that is no song. The library
-/// is held for [`LOOKUP_TURN`] songs at a time and let go in between (`between` runs then), so a
-/// queue of 50,000 songs does not hold every other library request until all are looked up.
+/// is held for `per_turn` songs at a time and let go in between (`between` runs then), so a queue
+/// of 50,000 songs does not hold every other library request until all are looked up.
 fn queue_items_of(
     lib: &pm_library::LibraryLock,
     ids: &[i64],
+    per_turn: usize,
     mut between: impl FnMut(),
 ) -> Result<Vec<QueueItem>, ApiError> {
     let mut items = Vec::with_capacity(ids.len());
-    for turn in ids.chunks(LOOKUP_TURN) {
+    for (i, turn) in ids.chunks(per_turn.max(1)).enumerate() {
+        if i > 0 {
+            // The library's mutex is not fair: taken again at once, a request that waits for it
+            // stays asleep. A pause lets the one woken by the release in first.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         {
             let lib = lib.lock().expect("library poisoned");
             for tid in turn {
@@ -28266,7 +28272,7 @@ exec sleep 300
                 .collect()
         };
         let mut turns = 0;
-        let items = queue_items_of(&lib, &ids, || {
+        let items = queue_items_of(&lib, &ids, LOOKUP_TURN, || {
             assert!(lib.try_lock().is_ok(), "the library is held between turns");
             turns += 1;
         })
@@ -28278,7 +28284,37 @@ exec sleep 300
             .map(|i| i.title.clone().unwrap_or_default())
             .collect();
         assert_eq!(titles, (0..n).map(|i| format!("Song {i}")).collect::<Vec<_>>());
-        let e = queue_items_of(&lib, &[ids[0], 9_999_999], || {}).unwrap_err();
+        let e = queue_items_of(&lib, &[ids[0], 9_999_999], LOOKUP_TURN, || {}).unwrap_err();
         assert_eq!(e.status, StatusCode::NOT_FOUND);
+        // Another thread that waits for the library gets it while the lookup is under way (10
+        // songs a turn here: about 100 turns)
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let (done_turns, finished, got_in) = (
+            AtomicUsize::new(0),
+            AtomicBool::new(false),
+            AtomicBool::new(false),
+        );
+        let total = n.div_ceil(10);
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                while !finished.load(Ordering::SeqCst) {
+                    let _held = lib.lock().unwrap();
+                    let t = done_turns.load(Ordering::SeqCst);
+                    if t > 0 && t < total - 1 {
+                        got_in.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                }
+            });
+            queue_items_of(&lib, &ids, 10, || {
+                done_turns.fetch_add(1, Ordering::SeqCst);
+            })
+            .unwrap();
+            finished.store(true, Ordering::SeqCst);
+        });
+        assert!(
+            got_in.load(Ordering::SeqCst),
+            "a waiting thread never got the library mid-lookup"
+        );
     }
 }
