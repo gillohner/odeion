@@ -1311,7 +1311,8 @@ mod tests {
         let mut r = reader(serve("200 OK", vec![7; 1000], None), 1000);
         assert_eq!(r.read(&mut out).unwrap(), 16);
         assert_eq!(r.buf.len(), 1000);
-        // Room for at most one byte past what was asked for, however it grew
+        // Room for at most one byte past what was asked for, however it grew (std's with_capacity
+        // and reserve_exact allocate what they are asked for; not promised, but what they do)
         assert!(r.buf.capacity() <= 1001, "{} bytes held", r.buf.capacity());
         // Past the first room (one chunk) the buffer doubles, but not past the limit
         let mut r = reader(serve("200 OK", vec![7; 300_000], None), 300_000);
