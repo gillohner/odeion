@@ -34,6 +34,10 @@ pub enum SyncError {
     /// wrote anything more of the old identity's.
     #[error("another sign-in replaced this session")]
     Replaced,
+    /// The settings copy on the homeserver was left as it is (it could not be read before this
+    /// node took it in, or a newer version wrote it): nothing was written.
+    #[error("{0}")]
+    HeldBack(String),
 }
 
 impl SyncError {
@@ -146,7 +150,7 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
             }
             Err(e) => tracing::warn!(ms, "first sync failed: {e}"),
         }
-        sync.backup_settings(&s).await;
+        let _ = sync.backup_settings(&s).await;
         s.notify_library();
     });
 }
@@ -1424,23 +1428,27 @@ impl PubkySync {
     }
 
     /// Snapshot the owner's settings into the private folder (after every
-    /// sync and every change the API makes). Best effort; errors are logged.
+    /// sync and every change the API makes). Errors are logged and returned: the background
+    /// callers go on, `POST /v1/node/settings/backup` answers them.
     ///
     /// The copy is replaced whole, so a node takes in what an existing copy holds first, once per
     /// identity ([`COPY_TAKEN_IN`]): a fresh node all of it, as the restore at sign-in does
     /// ([`PubkySync::restore_settings`]), another node the settings it does not have. Until then
     /// a copy that could not be read is not replaced; one that does not parse is (nothing can
     /// restore from it).
-    pub async fn backup_settings(&self, s: &Arc<crate::state::NodeState>) {
+    pub async fn backup_settings(&self, s: &Arc<crate::state::NodeState>) -> Result<(), SyncError> {
         // One read: a history delete another node made since this one last synced is adopted
         // first, so this copy doesn't write over it
         let read = self.homeserver.read_node_settings(&self.session).await;
         // Tests stop here (the read done, nothing adopted) to replace the session meanwhile
         crate::test_hooks::pause(|| format!("sync.backup_after_read:{}", self.z32)).await;
-        let taken_in = match self.lib(&s.library) {
-            Ok(lib) => lib.get_setting(COPY_TAKEN_IN).ok().flatten().as_deref() == Some(self.z32()),
-            Err(_) => return,
-        };
+        let taken_in = self
+            .lib(&s.library)?
+            .get_setting(COPY_TAKEN_IN)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(self.z32());
         let copy = match read {
             // A newer version's copy (its format is past this one's): left to the node that wrote
             // it, as prefs.json is (`read_prefs`)
@@ -1449,8 +1457,9 @@ impl PubkySync {
                     .and_then(|n| n.as_u64())
                     .is_some_and(|n| n > u64::from(SETTINGS_FORMAT)) =>
             {
-                tracing::warn!("the settings copy on the homeserver is a newer version's: left as it is");
-                return;
+                let e = "the settings copy on the homeserver is a newer version's: left as it is";
+                tracing::warn!("{e}");
+                return Err(SyncError::HeldBack(e.into()));
             }
             Ok(Some(v)) => match serde_json::from_value::<SettingsBackup>(v) {
                 Ok(copy) => Some(copy),
@@ -1466,10 +1475,10 @@ impl PubkySync {
                 None
             }
             Err(e) if !taken_in => {
-                tracing::warn!(
-                    "the settings copy on the homeserver could not be read ({e}): not replaced yet"
-                );
-                return;
+                let e =
+                    format!("the settings copy on the homeserver could not be read ({e}): not replaced yet");
+                tracing::warn!("{e}");
+                return Err(SyncError::HeldBack(e));
             }
             Err(_) => None,
         };
@@ -1481,7 +1490,7 @@ impl PubkySync {
                         tracing::info!(?r, "settings restored from the homeserver before backing them up")
                     }
                     Ok(None) => {}
-                    Err(SyncError::Replaced) => return,
+                    Err(SyncError::Replaced) => return Err(SyncError::Replaced),
                     Err(e) => tracing::warn!("settings restore before the backup failed: {e}"),
                 }
             }
@@ -1490,9 +1499,7 @@ impl PubkySync {
         // its history delete is not this node's to adopt (nor to write into the new identity's
         // copy)
         let backup = {
-            let Ok(lib) = self.lib(&s.library) else {
-                return;
-            };
+            let lib = self.lib(&s.library)?;
             if let Some(theirs) = copy
                 .as_ref()
                 .and_then(|c| c.settings.get(crate::listens::CLEARED))
@@ -1517,7 +1524,7 @@ impl PubkySync {
                 }
                 if let Err(e) = lib.set_setting(COPY_TAKEN_IN, self.z32()) {
                     tracing::warn!("settings copy: {e}");
-                    return;
+                    return Err(e.into());
                 }
             }
             // The whole file is replaced, so a copy an older node wrote with sign-ins in it
@@ -1539,11 +1546,15 @@ impl PubkySync {
         };
         let v = serde_json::to_value(&backup).expect("serializes");
         if self.is_retired() {
-            return;
+            return Err(SyncError::Replaced);
         }
-        if let Err(e) = self.homeserver.write_node_settings(&self.session, &v).await {
-            tracing::warn!("settings backup failed: {e}");
-        }
+        self.homeserver
+            .write_node_settings(&self.session, &v)
+            .await
+            .map_err(|e| {
+                tracing::warn!("settings backup failed: {e}");
+                SyncError::from(e)
+            })
     }
 
     /// When the history was deleted, as the settings copy on the homeserver says (another node

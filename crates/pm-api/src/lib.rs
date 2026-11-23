@@ -3099,7 +3099,7 @@ async fn settings_backup_now(State(s): State<Arc<NodeState>>) -> ApiResult<serde
             "no Pubky session: sign in with Pubky Ring first",
         )
     })?;
-    sync.backup_settings(&s).await;
+    sync.backup_settings(&s).await.map_err(sync_error)?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -3888,7 +3888,7 @@ async fn pubky_sync(State(s): State<Arc<NodeState>>) -> ApiResult<SyncReport> {
         ));
     };
     let report = sync.sync(&s.library).await.map_err(sync_error)?;
-    sync.backup_settings(&s).await;
+    let _ = sync.backup_settings(&s).await;
     if report.pulled > 0 {
         s.notify_library();
     }

@@ -1699,7 +1699,7 @@ async fn the_settings_copy_never_carries_a_sign_in() {
         // Signed in to TIDAL on this node: still never copied
         lib.set_setting("tidal.user", &token).unwrap();
     }
-    sync.backup_settings(&n).await;
+    sync.backup_settings(&n).await.expect("backed up");
     let copy = homeserver
         .read_node_settings(sync.session())
         .await
@@ -2037,7 +2037,7 @@ async fn the_listen_history_lands_where_the_setting_says() {
 
     // After the delete, another node imports old plays (ListenBrainz): written now, played a year
     // ago. A second node that has the delete time (from the settings copy) pulls it and keeps it
-    sync.backup_settings(&a).await;
+    sync.backup_settings(&a).await.expect("backed up");
     // Review of #192: a node that hasn't synced since backs its settings up: it adopts the
     // delete (its listens from before go) rather than writing over it; one that restores the
     // copy deletes its listens from before too
@@ -2048,7 +2048,7 @@ async fn the_listen_history_lands_where_the_setting_says() {
             h["listens"].as_array().unwrap().len()
         }
     };
-    sync_f.backup_settings(&fresh).await;
+    sync_f.backup_settings(&fresh).await.expect("backed up");
     assert_eq!(mine(&fresh).await, 0, "adopted on backup");
     sync_f.restore_settings(&late, false).await.unwrap().unwrap();
     assert_eq!(mine(&late).await, 0, "adopted on restore");

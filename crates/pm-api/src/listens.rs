@@ -367,7 +367,9 @@ pub(crate) fn stats(
 fn back_up_settings(s: &Arc<NodeState>) {
     if let Some(sync) = s.sync_handle() {
         let s = s.clone();
-        tokio::spawn(async move { sync.backup_settings(&s).await });
+        tokio::spawn(async move {
+            let _ = sync.backup_settings(&s).await;
+        });
     }
 }
 

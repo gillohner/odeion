@@ -1246,7 +1246,10 @@ async fn a_replaced_settings_backup_adopts_no_history_delete() {
         b.pop().unwrap(),
     ))));
     let _ = release.send(());
-    backup.await.unwrap();
+    assert!(
+        matches!(backup.await.unwrap(), Err(pm_api::sync::SyncError::Replaced)),
+        "the backup of a replaced session answers so"
+    );
     assert_eq!(
         n.library
             .lock()
@@ -1318,7 +1321,10 @@ async fn a_replacement_while_the_backup_waits_for_the_library_adopts_nothing() {
     // The session is replaced while the backup waits (only the flag: the library is held here)
     sync_a.retire();
     drop(held);
-    backup.await.unwrap();
+    assert!(
+        matches!(backup.await.unwrap(), Err(pm_api::sync::SyncError::Replaced)),
+        "the backup of a replaced session answers so"
+    );
     let lib = n.library.lock().unwrap();
     assert_eq!(
         lib.get_setting("listens.cleared_before").unwrap(),
@@ -1783,7 +1789,7 @@ async fn a_new_node_takes_in_the_settings_copy_before_replacing_it() {
         .unwrap();
     let sync2 = Arc::new(PubkySync::from_session(homeserver.clone(), second.clone()));
     n2.set_sync(Some(sync2.clone()));
-    sync2.backup_settings(&n2).await;
+    sync2.backup_settings(&n2).await.expect("backed up");
     let copy = settings_copy(&homeserver, &second).await;
     assert!(
         copy["settings"]["smart.0035WKVKQDHSN"].is_string(),
@@ -1803,7 +1809,7 @@ async fn a_new_node_takes_in_the_settings_copy_before_replacing_it() {
         .unwrap()
         .delete_setting("smart.0035WKVKQDHSN")
         .unwrap();
-    sync2.backup_settings(&n2).await;
+    sync2.backup_settings(&n2).await.expect("backed up");
     let copy = settings_copy(&homeserver, &second).await;
     assert!(copy["settings"].get("smart.0035WKVKQDHSN").is_none(), "{copy}");
 }
