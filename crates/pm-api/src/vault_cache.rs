@@ -212,7 +212,7 @@ pub struct Synced {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub from_unsigned: bool,
     /// The vault lost its files since (no device list, none of the sign-ins this node synced
-    /// with it; [`a_lost_vault`]): gone from the vault is no sign-out, this copy goes back in.
+    /// with it; see `a_lost_vault`): gone from the vault is no sign-out, this copy goes back in.
     /// Cleared once the vault shows a copy again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lost: bool,
