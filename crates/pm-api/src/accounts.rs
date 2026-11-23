@@ -1868,10 +1868,13 @@ pub fn library_roots(s: &NodeState) -> Vec<String> {
         roots.push(hs.to_string_lossy().into_owned());
     }
     // A song on a share or a drive is `<scheme><id>/<path>`, and its open error names that key
-    if let Ok(shares) = s.webdav.read() {
+    // (a poisoned lock still lists them: a path must not reach a listener whole)
+    {
+        let shares = s.webdav.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         roots.extend(shares.iter().map(|sh| sh.root().to_string_lossy().into_owned()));
     }
-    if let Ok(drives) = s.drives.read() {
+    {
+        let drives = s.drives.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         roots.extend(
             drives
                 .roots
