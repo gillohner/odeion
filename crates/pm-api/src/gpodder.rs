@@ -246,8 +246,10 @@ fn sync_lock() -> &'static tokio::sync::Mutex<()> {
     L.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// The most one answer of the gPodder server may be (subscriptions or episode actions).
-const ANSWER_MAX: usize = 16 << 20;
+/// The most one answer of the gPodder server may be (subscriptions or episode actions): the first
+/// sync asks for every episode action since 0, years of plays and pauses, so it is the media
+/// servers' size.
+const ANSWER_MAX: usize = crate::capped::MEDIA_SERVER_MAX;
 
 async fn send<T: for<'de> Deserialize<'de> + Default>(
     a: &Account,

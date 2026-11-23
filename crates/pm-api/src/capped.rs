@@ -34,7 +34,8 @@ pub(crate) async fn bytes(mut resp: reqwest::Response, max: usize) -> Result<Vec
         return Err(Error::TooLong(max));
     }
     let mut out = Vec::new();
-    // Without the address: a media server's carries its sign-in in the query
+    // Without the address (none on a body error today; kept should one come): a media server's
+    // carries its sign-in in the query
     while let Some(chunk) = resp
         .chunk()
         .await
@@ -162,8 +163,9 @@ mod tests {
         );
     }
 
-    /// A media server's answer is read as JSON up to its size, and a failed read never names the
-    /// address (a Subsonic server's carries the sign-in in its query).
+    /// A media server's answer is read as JSON up to its size, and a failed read does not name
+    /// the address (a Subsonic server's carries the sign-in in its query). reqwest's body errors
+    /// carry no address today; `without_url` keeps it so if that changes.
     #[tokio::test]
     async fn json_is_read_up_to_its_size_and_errors_leave_the_address_out() {
         let url = serve(OPEN_ENDED, br#"{"ok": [1, 2]}"#.to_vec());
