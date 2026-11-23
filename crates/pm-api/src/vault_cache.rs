@@ -1201,6 +1201,7 @@ pub(crate) async fn sync_held(
         let theirs: Option<Opened> = match read {
             Ok(o) => o,
             Err(VaultStoreError::Vault(VaultError::NotARecipient)) => {
+                current()?;
                 found_again(
                     &s.library.lock().expect("library poisoned"),
                     b.service,
@@ -1765,6 +1766,10 @@ pub async fn pass(
 /// `POST /v1/vault/register`), which writes a new list. A list that is there, or one of
 /// those sign-ins still in the vault, is no lost vault: a sign-in gone from it was signed out.
 /// A copy the node took unsigned keeps its record (the node never signs it as its own).
+/// Limit: a node that was off through a sign-out everywhere, and finds the vault without its list
+/// afterwards (removed by a device the person signed out, which keeps write access until its grant
+/// is revoked in Ring), can't tell that from a lost vault: it puts its sign-ins back. A sign-out
+/// everywhere the node has seen is in its marks and still holds.
 pub(crate) async fn a_lost_vault(
     s: &NodeState,
     vault: &Vault<'_>,

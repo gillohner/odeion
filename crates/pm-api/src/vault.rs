@@ -201,10 +201,13 @@ pub(crate) async fn register(State(s): State<Arc<NodeState>>) -> ApiResult<Vault
     {
         let _pass = crate::vault_cache::take_pass(&s).await.map_err(vault_error)?;
         let still = || !sync.is_retired();
-        crate::vault_cache::a_lost_vault(&s, &vault, &still)
-            .await
-            .map_err(vault_error)?;
-        vault.touch(&s.name).await.map_err(vault_error)?;
+        // As long as a pass may take at most: a homeserver that doesn't answer holds no sync up
+        crate::vault_cache::within(async {
+            crate::vault_cache::a_lost_vault(&s, &vault, &still).await?;
+            vault.touch(&s.name).await
+        })
+        .await
+        .map_err(vault_error)?;
     }
     vault.share_with_trusted().await.map_err(vault_error)?;
     Ok(Json(view(&vault).await.map_err(vault_error)?))
