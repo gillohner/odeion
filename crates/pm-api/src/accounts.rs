@@ -374,15 +374,26 @@ impl Who {
                 tidal_account = (*service == TIDAL).then_some(account);
             }
         }
+        // (what ends below reads the people list: one that can't be read stops the write here, not
+        // after it)
+        if tidal_account.is_some() {
+            crate::people::listed_keys(lib)?;
+        }
         match value {
             Some(v) => lib.set_setting(&key, v)?,
             None => {
                 lib.delete_setting(&key)?;
             }
         }
-        // The account is someone's here now: a pasted sign-in that only claimed it ends
+        // The account is someone's here now: a pasted sign-in that only claimed it ends. The sign-in
+        // is kept either way: a claim that could not be ended is ended by its own next renewal
         if let Some(account) = tidal_account {
-            crate::tidal_unofficial::end_claims_on(lib, self, &account)?;
+            if let Err(e) = crate::tidal_unofficial::end_claims_on(lib, self, &account) {
+                tracing::warn!(
+                    "a pasted TIDAL sign-in claiming a kept account was not ended: {}",
+                    e.message
+                );
+            }
         }
         Ok(())
     }

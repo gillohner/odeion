@@ -28001,6 +28001,30 @@ exec sleep 300
             .await
             .unwrap();
         assert_eq!(held.user_id.as_deref(), Some("45"));
+        // A people list that can't be read stops a TIDAL sign-in before anything is kept (the
+        // claims it would end can't be found), the owner's too
+        let people = s.library.lock().unwrap().get_setting("people").unwrap().unwrap();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("people", "{not a list")
+            .unwrap();
+        let before = tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner).session;
+        let r = tidal_unofficial::update_signed_in(&s, &accounts::Who::Owner, "tidal", |st| {
+            st.session = Some(tidal_unofficial::Session {
+                access_token: jwt(r#"{"uid":46}"#),
+                user_id: Some("46".into()),
+                expires_at: 4_000_000_000,
+                ..Default::default()
+            })
+        });
+        assert!(r.is_err(), "refused");
+        assert_eq!(
+            tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner).session,
+            before,
+            "nothing kept"
+        );
+        s.library.lock().unwrap().set_setting("people", &people).unwrap();
         *imports::HOME_OVERRIDE.write().unwrap() = None;
     }
 
