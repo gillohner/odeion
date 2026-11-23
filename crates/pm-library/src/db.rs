@@ -10,7 +10,7 @@ use pm_model::AudioFormat;
 use pm_model::{Album, Artist, AudioFile, Confidence, Isrc, Mbid, MusicUri, SampleKind, Track, TrackId, Upc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -37,6 +37,34 @@ const MIGRATIONS: &[(i64, &str)] = &[
 
 pub struct Library {
     conn: Mutex<Connection>,
+    /// Answers about the whole library, kept until the database changes ([`Summaries`]).
+    summaries: Mutex<Summaries>,
+    /// Counts the times the database was replaced whole ([`Library::restore_from`]), which
+    /// neither of SQLite's own change counters sees.
+    replaced: std::sync::atomic::AtomicU64,
+    /// How often a summary was worked out rather than taken from [`Summaries`] (tests).
+    #[cfg(test)]
+    summary_builds: std::sync::atomic::AtomicU64,
+}
+
+/// The database's content as far as this connection can tell: `PRAGMA data_version` (moves when
+/// another connection commits), `total_changes` (rows this connection wrote) and
+/// [`Library::replaced`].
+type DbState = (i64, u64, u64);
+
+/// What every page asks about the whole library: its counts, its artists and genres, and which
+/// tracks are copies of one song. Each reads every track (0.1 s at 50,000 tracks, with the
+/// connection held), and a page load asks for several, so they are kept until the database
+/// changes ([`DbState`]). Only committed states are kept: inside an open transaction
+/// ([`Library::begin_batch`]) they are worked out each time.
+#[derive(Default)]
+struct Summaries {
+    at: Option<DbState>,
+    reps: Option<Arc<std::collections::HashMap<i64, i64>>>,
+    stats: Option<LibraryStats>,
+    artists: Option<Arc<Vec<ArtistSummary>>>,
+    unknown_artist: Option<Option<ArtistSummary>>,
+    genres: Option<Arc<Vec<GenreSummary>>>,
 }
 
 /// How far ahead of the node a device's clock may run for [`Library::record_play_at`] to keep a
@@ -506,6 +534,10 @@ impl Library {
         )?;
         let lib = Library {
             conn: Mutex::new(conn),
+            summaries: Mutex::default(),
+            replaced: Default::default(),
+            #[cfg(test)]
+            summary_builds: Default::default(),
         };
         lib.migrate()?;
         lib.tidy_file_name_titles()?;
@@ -673,6 +705,62 @@ impl Library {
 
     pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The state a summary may be kept for, or `None` inside an open transaction (its writes
+    /// may still be rolled back, which no counter shows).
+    fn db_state(&self, conn: &Connection) -> Result<Option<DbState>> {
+        if !conn.is_autocommit() {
+            return Ok(None);
+        }
+        let version: i64 = conn.pragma_query_value(None, "data_version", |r| r.get(0))?;
+        let replaced = self.replaced.load(std::sync::atomic::Ordering::Acquire);
+        Ok(Some((version, conn.total_changes(), replaced)))
+    }
+
+    /// One of the [`Summaries`]: the kept answer when the database is as it was, else `make`'s,
+    /// which is kept unless the database changed while it was worked out.
+    fn summary<T: Clone>(
+        &self,
+        conn: &Connection,
+        slot: fn(&mut Summaries) -> &mut Option<T>,
+        make: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        let Some(state) = self.db_state(conn)? else {
+            return make(conn);
+        };
+        {
+            let mut kept = self.summaries.lock().unwrap_or_else(|p| p.into_inner());
+            if kept.at != Some(state) {
+                *kept = Summaries {
+                    at: Some(state),
+                    ..Default::default()
+                };
+            }
+            if let Some(v) = slot(&mut kept) {
+                return Ok(v.clone());
+            }
+        }
+        #[cfg(test)]
+        self.summary_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let v = make(conn)?;
+        if self.db_state(conn)? == Some(state) {
+            let mut kept = self.summaries.lock().unwrap_or_else(|p| p.into_inner());
+            if kept.at == Some(state) {
+                *slot(&mut kept) = Some(v.clone());
+            }
+        }
+        Ok(v)
+    }
+
+    /// Which song each present track is ([`song_reps`]) over the whole library.
+    fn all_song_reps(&self, conn: &Connection) -> Result<Arc<std::collections::HashMap<i64, i64>>> {
+        self.summary(
+            conn,
+            |s| &mut s.reps,
+            |conn| Ok(Arc::new(song_reps(&song_rows(conn, "ORDER BY t.id", [])?))),
+        )
     }
 
     /// Start grouping writes into one commit (a scan writes thousands of rows; one commit per
@@ -1354,7 +1442,19 @@ impl Library {
     /// Every artist with how many albums and tracks they appear on, by name.
     pub fn list_artists(&self) -> Result<Vec<ArtistSummary>> {
         let conn = self.lock();
-        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        Ok(self.artists(&conn)?.as_ref().clone())
+    }
+
+    fn artists(&self, conn: &Connection) -> Result<Arc<Vec<ArtistSummary>>> {
+        self.summary(
+            conn,
+            |s| &mut s.artists,
+            |conn| self.read_artists(conn).map(Arc::new),
+        )
+    }
+
+    fn read_artists(&self, conn: &Connection) -> Result<Vec<ArtistSummary>> {
+        let reps = self.all_song_reps(conn)?;
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT a.id, a.name, a.mbid, t.id, t.album_id
              FROM artists a
@@ -1397,14 +1497,23 @@ impl Library {
     }
 
     pub fn get_artist(&self, id: i64) -> Result<Option<ArtistSummary>> {
-        Ok(self.list_artists()?.into_iter().find(|a| a.id == id))
+        let conn = self.lock();
+        Ok(self.artists(&conn)?.iter().find(|a| a.id == id).cloned())
     }
 
     /// Songs with no artist at all, shown as "Unknown artist" (second review: they were in no
     /// artist's list). `None` when every song has one.
     pub fn unknown_artist(&self) -> Result<Option<ArtistSummary>> {
         let conn = self.lock();
-        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        self.summary(
+            &conn,
+            |s| &mut s.unknown_artist,
+            |conn| self.read_unknown_artist(conn),
+        )
+    }
+
+    fn read_unknown_artist(&self, conn: &Connection) -> Result<Option<ArtistSummary>> {
+        let reps = self.all_song_reps(conn)?;
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT t.id, t.album_id FROM tracks t
              WHERE NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id) AND {TRACK_PRESENT}"
@@ -1490,7 +1599,7 @@ impl Library {
     pub fn random_tracks(&self, limit: u32) -> Result<Vec<Track>> {
         let conn = self.lock();
         // Songs drawn, not files: a song kept in two copies is no likelier than one kept once
-        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        let reps = self.all_song_reps(&conn)?;
         let songs: std::collections::BTreeSet<i64> = reps.values().copied().collect();
         let list = format!(
             "[{}]",
@@ -1722,7 +1831,10 @@ impl Library {
     pub fn restore_from(&self, path: &Path) -> Result<()> {
         {
             let mut conn = self.lock();
-            conn.restore(rusqlite::MAIN_DB, path, None::<fn(rusqlite::backup::Progress)>)?;
+            let restored = conn.restore(rusqlite::MAIN_DB, path, None::<fn(rusqlite::backup::Progress)>);
+            // Counted whether it went in or stopped part-way: what was kept is of the old content
+            self.replaced.fetch_add(1, std::sync::atomic::Ordering::Release);
+            restored?;
         }
         if let Err(e) = self.migrate() {
             tracing::error!("after a restore, the schema pass failed: {e}");
@@ -2025,7 +2137,19 @@ impl Library {
     /// Every genre with track and album counts, by name.
     pub fn list_genres(&self) -> Result<Vec<GenreSummary>> {
         let conn = self.lock();
-        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        Ok(self.genres(&conn)?.as_ref().clone())
+    }
+
+    fn genres(&self, conn: &Connection) -> Result<Arc<Vec<GenreSummary>>> {
+        self.summary(
+            conn,
+            |s| &mut s.genres,
+            |conn| self.read_genres(conn).map(Arc::new),
+        )
+    }
+
+    fn read_genres(&self, conn: &Connection) -> Result<Vec<GenreSummary>> {
+        let reps = self.all_song_reps(conn)?;
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT g.id, g.name, t.id, t.album_id
              FROM genres g JOIN track_genres tg ON tg.genre_id = g.id JOIN tracks t ON t.id = tg.track_id
@@ -2062,14 +2186,17 @@ impl Library {
     }
 
     pub fn get_genre(&self, id: i64) -> Result<Option<GenreSummary>> {
-        Ok(self.list_genres()?.into_iter().find(|g| g.id == id))
+        let conn = self.lock();
+        Ok(self.genres(&conn)?.iter().find(|g| g.id == id).cloned())
     }
 
     pub fn genre_by_name(&self, name: &str) -> Result<Option<GenreSummary>> {
+        let conn = self.lock();
         Ok(self
-            .list_genres()?
-            .into_iter()
-            .find(|g| g.name.eq_ignore_ascii_case(name.trim())))
+            .genres(&conn)?
+            .iter()
+            .find(|g| g.name.eq_ignore_ascii_case(name.trim()))
+            .cloned())
     }
 
     /// Albums with at least one track of the genre, by artist then title.
@@ -3980,12 +4107,16 @@ impl Library {
 
     pub fn stats(&self) -> Result<LibraryStats> {
         let conn = self.lock();
+        self.summary(&conn, |s| &mut s.stats, |conn| self.read_stats(conn))
+    }
+
+    fn read_stats(&self, conn: &Connection) -> Result<LibraryStats> {
         let count =
             |sql: &str| -> Result<u64> { Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64) };
         Ok(LibraryStats {
             // Songs and albums the lists show: copies of a song once, gone files left out
             tracks: {
-                let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+                let reps = self.all_song_reps(conn)?;
                 reps.values().collect::<std::collections::HashSet<_>>().len() as u64
             },
             albums: count(&format!("SELECT COUNT(*) FROM albums WHERE {ALBUM_PRESENT}"))?,
@@ -7418,5 +7549,155 @@ mod identify_tests {
         assert_eq!(lib.suggestions_for(a).unwrap().len(), 1);
         let c = lib.identity_counts().unwrap();
         assert_eq!((c.suggested, c.skipped), (2, 0));
+    }
+
+    /// A song of its own album, artist and genre (`n` tells them apart).
+    fn summary_track(n: u32) -> Track {
+        let mut t = sample_track(&format!("/m/a{n}/1.flac"), &format!("Song {n}"));
+        t.artists[0] = Artist {
+            id: None,
+            name: format!("Artist {n}"),
+            mbid: None,
+        };
+        let album = t.album.as_mut().unwrap();
+        album.title = format!("Album {n}");
+        album.release_mbid = None;
+        t.genres = vec![format!("Genre {n}")];
+        t.recording_mbid = None;
+        t.isrc = None;
+        t.canonical = None;
+        t
+    }
+
+    fn summary_builds(lib: &Library) -> u64 {
+        lib.summary_builds.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The counts, artists and genres of the whole library are worked out once and then kept:
+    /// every page asks for them, and each reads every track.
+    #[test]
+    fn whole_library_summaries_are_read_once_until_the_library_changes() {
+        let lib = Library::open_in_memory().unwrap();
+        for n in 0..3 {
+            lib.upsert_track(&summary_track(n)).unwrap();
+        }
+        let ask = |lib: &Library| {
+            let artists = lib.list_artists().unwrap();
+            (
+                lib.stats().unwrap(),
+                lib.get_artist(artists[0].id).unwrap(),
+                artists,
+                lib.unknown_artist().unwrap(),
+                lib.list_genres().unwrap(),
+                lib.genre_by_name("genre 1").unwrap().map(|g| g.tracks),
+                lib.random_tracks(10).unwrap().len(),
+            )
+        };
+        let first = ask(&lib);
+        assert_eq!(first.0.tracks, 3);
+        assert_eq!(
+            (first.2.len(), first.4.len(), first.5, first.6),
+            (3, 3, Some(1), 3)
+        );
+        let built = summary_builds(&lib);
+        for _ in 0..5 {
+            assert_eq!(ask(&lib), first);
+        }
+        assert_eq!(summary_builds(&lib), built, "asked again, nothing is read again");
+
+        // A write through this library shows at once
+        let added = lib.upsert_track(&summary_track(3)).unwrap();
+        let second = ask(&lib);
+        assert_eq!(second.0.tracks, 4);
+        assert_eq!((second.2.len(), second.4.len()), (4, 4));
+        // So does a song taken out of the library (its file then counts as missing; what is
+        // listed is as before it was added), and one put back
+        assert!(lib.hide_track(added).unwrap());
+        let hidden = ask(&lib);
+        assert_eq!(
+            hidden.0,
+            LibraryStats {
+                missing_files: 1,
+                ..first.0.clone()
+            }
+        );
+        assert_eq!(
+            (&hidden.1, &hidden.2, &hidden.3, &hidden.4, hidden.5, hidden.6),
+            (&first.1, &first.2, &first.3, &first.4, first.5, first.6)
+        );
+        assert!(lib.unhide("/m/a3/1.flac").unwrap());
+        assert_eq!(ask(&lib), second);
+        // And a song without an artist
+        let mut nameless = summary_track(4);
+        nameless.artists.clear();
+        lib.upsert_track(&nameless).unwrap();
+        assert_eq!(lib.unknown_artist().unwrap().map(|a| a.tracks), Some(1));
+        assert_eq!(lib.stats().unwrap().tracks, 5);
+    }
+
+    /// A scan writes from a connection of its own: what this one kept must not outlive that.
+    #[test]
+    fn whole_library_summaries_follow_another_connections_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let lib = Library::open(&path).unwrap();
+        let other = Library::open(&path).unwrap();
+        lib.upsert_track(&summary_track(0)).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 1);
+        assert_eq!(lib.list_artists().unwrap().len(), 1);
+        assert_eq!(other.stats().unwrap().tracks, 1);
+
+        other.upsert_track(&summary_track(1)).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 2);
+        assert_eq!(lib.list_artists().unwrap().len(), 2);
+        assert_eq!(lib.list_genres().unwrap().len(), 2);
+
+        // A batch of the other's is not seen until it is committed, then at once
+        other.begin_batch().unwrap();
+        other.upsert_track(&summary_track(2)).unwrap();
+        assert_eq!(other.stats().unwrap().tracks, 3, "the batch sees its own writes");
+        assert_eq!(lib.stats().unwrap().tracks, 2);
+        other.commit_batch().unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 3);
+        assert_eq!(other.stats().unwrap().tracks, 3);
+    }
+
+    /// Inside an open transaction nothing is kept: its writes may still be undone.
+    #[test]
+    fn whole_library_summaries_of_an_undone_batch_are_not_kept() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&summary_track(0)).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 1);
+        lib.begin_batch().unwrap();
+        lib.upsert_track(&summary_track(1)).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 2);
+        assert_eq!(lib.list_artists().unwrap().len(), 2);
+        lib.lock().execute_batch("ROLLBACK").unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 1);
+        assert_eq!(lib.list_artists().unwrap().len(), 1);
+        assert_eq!(lib.list_genres().unwrap().len(), 1);
+    }
+
+    /// A restore replaces the database under the connection: the summaries are the copy's.
+    #[test]
+    fn whole_library_summaries_are_the_restored_librarys() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("copy.db");
+        {
+            let source = Library::open_in_memory().unwrap();
+            for n in 0..2 {
+                source.upsert_track(&summary_track(n)).unwrap();
+            }
+            source.backup_to(&copy).unwrap();
+        }
+        let lib = Library::open(&dir.path().join("library.db")).unwrap();
+        lib.upsert_track(&summary_track(7)).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 1);
+        assert_eq!(lib.list_artists().unwrap()[0].name, "Artist 7");
+        lib.restore_from(&copy).unwrap();
+        assert_eq!(lib.stats().unwrap().tracks, 2);
+        let names: Vec<String> = lib.list_artists().unwrap().into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["Artist 0", "Artist 1"]);
+        assert_eq!(lib.list_genres().unwrap().len(), 2);
     }
 }
