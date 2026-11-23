@@ -668,7 +668,18 @@ async fn dispatch(
                         zone.clear();
                     }
                     if !items.is_empty() {
-                        zone.enqueue(items, Insert::End);
+                        // All or none, under the queue's lock (a Play since the check above)
+                        let sent = items.len();
+                        if zone.enqueue_whole(items, Insert::End).is_none() {
+                            return Err(SubErr::new(
+                                0,
+                                format!(
+                                    "a queue holds at most {} items (this one has {}, {sent} more were sent)",
+                                    pm_zones::MAX_QUEUE_ITEMS,
+                                    zone.queue_len()
+                                ),
+                            ));
+                        }
                         // A list set with shuffle on plays shuffled, as sent being the original order
                         if action == "set" {
                             zone.shuffle_replacement();

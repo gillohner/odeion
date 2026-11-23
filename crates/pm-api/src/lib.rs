@@ -2055,7 +2055,15 @@ async fn enqueue(
         QueueAt::End => Insert::End,
         QueueAt::Next => Insert::Next,
     };
-    let ids = zone.enqueue(items, at);
+    // All or none, under the queue's lock: a Play since the check above may have filled it
+    let sent = items.len();
+    let Some(ids) = zone.enqueue_whole(items, at) else {
+        return Err(ApiError::bad_request(format!(
+            "a queue holds at most {} items (this one has {}, {sent} more were sent)",
+            pm_zones::MAX_QUEUE_ITEMS,
+            zone.queue_len()
+        )));
+    };
     // A queue replaced with shuffle on plays shuffled, the order sent kept as the original one
     if body.replace {
         zone.shuffle_replacement();

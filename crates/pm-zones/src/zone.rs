@@ -328,6 +328,21 @@ impl Zone {
         self.with_queue(|q| q.add(items, at))
     }
 
+    /// [`Self::enqueue`] all or nothing, decided under the queue's lock: `None`, and nothing
+    /// added, when the queue has no room for every item (another request may have filled it
+    /// since the caller looked).
+    pub fn enqueue_whole(&self, items: Vec<QueueItem>, at: Insert) -> Option<Vec<u64>> {
+        let ids = {
+            let mut q = self.queue.lock().expect("queue poisoned");
+            if q.len() + items.len() > crate::queue::MAX_QUEUE_ITEMS {
+                return None;
+            }
+            q.add(items, at)
+        };
+        self.send(Command::QueueChanged);
+        Some(ids)
+    }
+
     pub fn remove(&self, id: u64) -> bool {
         self.with_queue(|q| q.remove(id))
     }

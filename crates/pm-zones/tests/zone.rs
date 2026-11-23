@@ -3128,3 +3128,19 @@ async fn stopped_says_whether_the_queue_ran_out() {
     r.zone.wait_stopped().await;
     assert_eq!(stops(drain_events(&mut r.events)), [true]);
 }
+
+/// `enqueue_whole` adds every item or none: a request that no longer fits (the queue filled
+/// since it looked) leaves the queue as it was, where `enqueue` would add the first that fit.
+#[tokio::test]
+async fn enqueue_whole_adds_all_or_nothing() {
+    let r = rig(&[("a", RATE, 100)]);
+    let max = pm_zones::MAX_QUEUE_ITEMS;
+    let many = |n: usize| (0..n).map(|_| QueueItem::new("a")).collect::<Vec<_>>();
+    assert_eq!(r.zone.enqueue(many(max - 2), Insert::End).len(), max - 2);
+    assert_eq!(r.zone.enqueue_whole(many(3), Insert::End), None);
+    assert_eq!(r.zone.queue_len(), max - 2, "nothing of the three was added");
+    let ids = r.zone.enqueue_whole(many(2), Insert::End).expect("two fit");
+    assert_eq!(ids.len(), 2);
+    assert_eq!(r.zone.queue_len(), max);
+    assert_eq!(r.zone.enqueue_whole(many(1), Insert::Next), None);
+}
