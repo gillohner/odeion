@@ -4410,7 +4410,7 @@
     const pausedBy = !waitHtml && !errHtml && z.transport === 'paused' && z.error ? z.error : '';
     const linked = !waitHtml && !errHtml && !barPlain();
     // (its name is the song, not only "Now playing": the label replaces what is inside it for a screen reader)
-    put(npEl, '_barName', waitHtml || errHtml ? 'Now playing' : `Now playing: ${[live || it.title, it.artist].filter(Boolean).join(', ')}`, (v) => { npEl.setAttribute('aria-label', v); });
+    put(npEl, '_barName', waitHtml || errHtml ? 'Now playing' : ((w) => (w ? `Now playing: ${w}` : 'Now playing'))([live || it.title, it.artist].filter(Boolean).join(', ')), (v) => { npEl.setAttribute('aria-label', v); });
     if (put(npEl, '_barHtml', `${npHtml}\n${pausedBy}\n${linked}`, () => { npEl.innerHTML = npHtml; })) {
       // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
       // its title there); with a mouse the bar's title and artist are links of their own
@@ -6538,7 +6538,21 @@
     menuAnchor = anchor;
     // (its name: its first heading, else what its opener is called)
     { const t = items.find((it) => it.title); menuEl.setAttribute('aria-label', (t && t.title) || anchor.getAttribute('aria-label') || anchor.title || 'Menu'); }
-    menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title" role="presentation">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : 'role="menuitem"'}>${it.face ? face(it.face) : it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
+    // (each titled part is a group named by its title, so a screen reader says which part an item is in:
+    // "Move to" before the zones; a title with nothing after it, "and 3 more on Pubky", describes the menu)
+    const item = (it, i) => `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : 'role="menuitem"'}>${it.face ? face(it.face) : it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`;
+    let html = ''; let open = false; let note = null;
+    items.forEach((it, i) => {
+      if (!it.title) { html += item(it, i); return; }
+      if (open) html += '</div>';
+      open = items.slice(i + 1).some((x) => !x.title) && !(items[i + 1] && items[i + 1].title);
+      const id = `mtitle${i}`;
+      if (open) html += `<div role="group" aria-labelledby="${id}"><div class="pop-title" id="${id}" aria-hidden="true">${esc(it.title)}</div>`;
+      else { html += `<div class="pop-title" id="${id}" aria-hidden="true">${esc(it.title)}</div>`; if (i > 0 && !items.slice(i + 1).some((x) => !x.title)) note = id; }
+    });
+    if (open) html += '</div>';
+    menuEl.innerHTML = html;
+    if (note) menuEl.setAttribute('aria-describedby', note); else menuEl.removeAttribute('aria-describedby');
     // The item runs first: a page it opens replaces the transient entry; otherwise it is popped. The menu
     // closes at once, so the control that opened it (its ⋯) shows the progress until the item is done.
     $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuBack(); menuEl.hidden = true; menuSaid(false); Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });

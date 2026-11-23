@@ -61,6 +61,21 @@ const dialogName = (page) => page.evaluate(() => { const d = document.querySelec
     check(await more.getAttribute('aria-haspopup') === 'menu' && await more.getAttribute('aria-expanded') === 'true', `${at}: its ⋯ says it has a menu, open`);
     await page.keyboard.press('Escape'); await sleep(150);
     check(await more.getAttribute('aria-expanded') === 'false', `${at}: closed again once it is`);
+    // (each titled part is a group named by its title; the title itself is not read a second time)
+    await page.focus('#me'); await page.keyboard.press('Enter'); await sleep(250);
+    const parts = await page.evaluate(() => {
+      const m = document.querySelector('.popover.menu:not([hidden])'); if (!m) return null;
+      const titles = [...m.querySelectorAll('.pop-title')]; const bad = [];
+      for (const b of m.querySelectorAll('.pop-item')) {
+        const before = titles.filter((t) => t.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).pop();
+        if (!before) continue;
+        const g = b.closest('[role="group"]'); const lab = g && document.getElementById(g.getAttribute('aria-labelledby'));
+        if (!g || lab !== before) bad.push(b.textContent.trim().slice(0, 30));
+      }
+      return { titles: titles.length, groups: m.querySelectorAll('[role="group"]').length, hidden: titles.every((t) => t.getAttribute('aria-hidden') === 'true'), bad };
+    });
+    check(!!parts && parts.titles > 0 && parts.groups > 0 && parts.hidden && !parts.bad.length, `${at}: each titled part of a menu (the account menu) is a group named by its title (${JSON.stringify(parts)})`);
+    await page.keyboard.press('Escape'); await sleep(150);
     await more.focus(); await page.keyboard.press('Enter'); await sleep(200);
     await page.locator('.popover.menu .pop-item', { hasText: /Add to (playlist|collection)/ }).first().click(); await sleep(350);
     check(await more.getAttribute('aria-expanded') === 'false', `${at}: and once an item is chosen`);
@@ -99,6 +114,9 @@ const dialogName = (page) => page.evaluate(() => { const d = document.querySelec
 
     // less motion (the fixture's pages ask for it), and without that wish
     check(await page.evaluate(() => getComputedStyle(document.getElementById('main')).scrollBehavior) === 'auto', `${at}: with less motion asked for, the page does not glide when it scrolls`);
+    // (what is drawn by ::before or ::after, a toast's spinner, stops too)
+    const pseudo = await page.evaluate(() => { const d = document.createElement('div'); d.className = 'toast wait show'; d.style.cssText = 'position:fixed;left:-999px'; d.textContent = 'x'; document.body.appendChild(d); const n = getComputedStyle(d, '::before').animationName; d.remove(); const k = document.createElement('style'); k.textContent = '.t-pseudo::after { content: ""; animation: spin 1s linear infinite; }'; document.head.appendChild(k); const e = document.createElement('i'); e.className = 't-pseudo'; document.body.appendChild(e); const m = getComputedStyle(e, '::after').animationName; e.remove(); k.remove(); return [n, m]; });
+    check(pseudo.every((x) => x === 'none'), `${at}: with less motion asked for, nothing drawn by ::before or ::after turns either (a waiting toast's spinner: ${pseudo.join(', ')})`);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     check(await page.evaluate(() => getComputedStyle(document.getElementById('main')).scrollBehavior) === 'smooth', `${at}: without that wish it still glides`);
     await page.emulateMedia({ reducedMotion: 'reduce' });

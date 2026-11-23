@@ -785,7 +785,7 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; --dur-step: 0ms; }
-  * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+  *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   /* (the last cover would sit over the new one with its fade off) */
   .np-big .np-prev { display: none; }
 }
@@ -2890,7 +2890,9 @@ html[data-shell="phone"] .pa-person { gap: var(--sp-1); }
 .btn.skip { position: fixed; z-index: var(--z-progress); left: 8px; top: 8px; transform: translateY(-200%); }
 .btn.skip:focus-visible { transform: none; }
 /* (no page behind Log in or on the full-screen dashboard) */
-body.signedout .skip, body.kiosk .skip, body:has(> #nowplaying:not([hidden])) .skip { display: none; } /* (nor over Now playing: the page behind it takes no focus) */
+body.signedout .skip, body.kiosk .skip { display: none; }
+/* (a rule of its own: a browser without :has() drops only this one) */
+body:has(> #nowplaying:not([hidden])) .skip { display: none; } /* (nor over Now playing: the page behind it takes no focus) */
 
 /* ---- placeholders ---- */
 /* (the browser's own grey, #757575, is about 3.9:1 on the dark theme's fields) */
