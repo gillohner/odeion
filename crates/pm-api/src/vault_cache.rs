@@ -10,7 +10,8 @@
 //!   "Sign out everywhere" starts at revision 1);
 //! - signing out of a source on the node removes it from the vault; a sign-in removed from the
 //!   vault elsewhere is moved aside on the node (`vault.signed_out.<key>`, never in a backup);
-//!   a vault that lost its files (no device list, none of the sign-ins the node synced with it)
+//!   a vault that lost its files (no device list, none of the sign-ins the node synced with it:
+//!   a new homeserver, or one restored from a copy older than the vault)
 //!   gets the node's sign-ins back instead;
 //! - two different copies meeting for the first time are a conflict when they are for different
 //!   accounts: both stay as they are, and the report names it (`POST /v1/vault/sync {service,
@@ -1710,7 +1711,8 @@ pub async fn pass(
     Ok(r)
 }
 
-/// A vault that has lost its files (a homeserver restored from an older copy, a new homeserver):
+/// A vault that has lost its files (a new homeserver, or one restored from a copy older than the
+/// vault):
 /// no device list, and none of the sign-ins this node synced with it. Each record of those then
 /// reads as a sign-in "signed out elsewhere", and every one would go aside while the vault stays
 /// empty. They become conflict records instead (nothing else in them changes), and a conflict
@@ -1739,8 +1741,11 @@ async fn a_lost_vault(
         v
     };
     for (service, _) in &records {
-        if vault.envelope(service).await?.is_some() {
-            return Ok(());
+        match vault.envelope(service).await {
+            Ok(None) => {}
+            // There, readable or not (its own failure is the pass's to report): no lost vault
+            Ok(Some(_)) | Err(VaultStoreError::Vault(_)) => return Ok(()),
+            Err(e) => return Err(e),
         }
     }
     let lib = s.library.lock().expect("library poisoned");
