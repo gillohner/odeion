@@ -59,7 +59,7 @@ Only fixed categories:
 | Browser | Phone, tablet or desktop, and whether it is the owner's or a listener's |
 
 **Never recorded:** anything you type (searches, tags, names, comments, passwords, keys), song,
-album, artist, playlist or tag names, addresses or links, ids of songs or people, error messages or
+album, artist, collection or tag names, addresses or links, ids of songs or people, error messages or
 stacks, what is on screen, screenshots, audio, keystrokes, IP addresses, the browser's name,
 cookies or sign-ins. Nothing other people do on a zone is recorded as yours.
 

@@ -111,7 +111,7 @@ const FIXTURES = { '/library/albums': { body: albums }, '/item/album/lib-7': { b
     // Add to favourites from the row's menu, twice in quick succession: one request (api() shares it)
     state.favs = []; await fx.go(p, '/tracks'); await p.waitForSelector('.track'); await p.hover('.track');
     const before = puts();
-    for (let i = 0; i < 2; i++) { await p.click('.track [data-act="more"]', { force: true }); await p.locator('.pop-item', { hasText: 'Add to favourites' }).click(); }
+    for (let i = 0; i < 2; i++) { await p.click('.track [data-act="more"]', { force: true }); await p.locator('.pop-item', { hasText: 'Add to Bookmarks' }).click(); }
     await sleep(80);
     const m = await attrs('.track [data-act="more"]');
     check(m.busy === 'true' && m.dis === null, "the row's ⋯ shows its menu's action on its way, and still opens its menu");

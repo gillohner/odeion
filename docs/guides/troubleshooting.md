@@ -37,13 +37,16 @@ its first start and keeps it in the `api-token` file in its data folder. Where i
   identities. Pick the node's owner in Pubky Ring and press **Try again**.
 - You set `PM_TOKEN` after the first start and it has no effect: the config is written only once.
   Add `PM_REWRITE_CONFIG: "1"`, run `docker compose up -d`, then remove the line again.
-- **Log out** (the account button, top right, or **Settings › About and updates**) ends this
-  browser's session and shows the Log in screen; the node's token stays as it is.
-- To give the node a new token: with a token the node made, **Settings › About and updates ›
-  Make a new token** (shown once; the old one stops working at once). With `PM_TOKEN` or on
+- **Log out** (the account button, top right, or **Settings › People & access › Browsers and apps
+  signed in as you**) ends this browser's session and shows the Log in screen; the node's token
+  stays as it is. The same list signs out any other browser or app of yours, one at a time or all
+  of them.
+- To give the node a new token (the screen calls it the password for apps): with a token the node
+  made, **Settings › People & access › Password for apps (API token) › Make a new password**
+  (shown once; the old one stops working at once). With `PM_TOKEN` or on
   Linux, change the token there and restart (Docker also needs `PM_REWRITE_CONFIG`, as above).
   Every app then needs the new one, and every browser of yours is logged out (log in again with
-  Pubky Ring); people you invited stay logged in.
+  Pubky Ring); people you added stay signed in.
 
 ## The library stays empty
 

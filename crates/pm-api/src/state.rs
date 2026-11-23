@@ -96,6 +96,9 @@ pub struct NodeState {
     /// The node's sign-ins as a queue's own check reads them (`accounts::known_tokens`): read
     /// without the library lock while they haven't changed.
     pub(crate) known_tokens: std::sync::RwLock<Option<crate::accounts::KnownCache>>,
+    /// The day each sign-in was last noted as used (`accounts::used_today`), by its hash: one
+    /// write a day per sign-in.
+    pub(crate) sign_ins_seen: Mutex<std::collections::HashMap<String, i64>>,
     pub name: String,
     /// Stable id of this node (a UUID kept in the library), for LAN discovery and controllers
     /// that remember a node across address changes.
@@ -130,7 +133,7 @@ pub struct NodeState {
     /// The API port those renderers' descriptions are served on.
     renderer_port: std::sync::OnceLock<u16>,
     pub version: String,
-    pub library: Arc<Mutex<Library>>,
+    pub library: Arc<pm_library::LibraryLock>,
     /// Path of the SQLite file, so a scan can use its own connection.
     pub db_path: PathBuf,
     pub scan_folders: Vec<PathBuf>,
@@ -177,8 +180,9 @@ pub struct NodeState {
         Option<Arc<dyn crate::copy_guard::Target>>,
         Option<Arc<dyn crate::copy_guard::Room>>,
     )>,
-    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`, for
-    /// a device of the owner's, the music access revision when it started).
+    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`,
+    /// what is signing in (an app of the owner's or a browser, and what it said it is), the music
+    /// access revision when it started).
     #[allow(clippy::type_complexity)]
     pub controller_logins: tokio::sync::Mutex<
         std::collections::HashMap<
@@ -187,7 +191,7 @@ pub struct NodeState {
                 pm_pubky::homeserver::LoginFlow,
                 std::time::Instant,
                 String,
-                bool,
+                crate::accounts::NewSignIn,
                 u64,
             ),
         >,
@@ -412,7 +416,7 @@ impl NodeState {
             .unwrap_or_else(|| settings.acoustid_key.clone());
         let node_id = node_id(&library);
         let stream_secret = stream_secret(&library);
-        let library = Arc::new(Mutex::new(library));
+        let library = Arc::new(pm_library::LibraryLock::new(library));
         let tidal: crate::tidal::SharedEndpoints =
             Arc::new(std::sync::RwLock::new(crate::tidal::TidalEndpoints {
                 creds: settings.tidal.clone(),
@@ -605,6 +609,7 @@ impl NodeState {
             return_page: std::sync::RwLock::new(crate::project_apps::RETURN_PAGE.to_string()),
             last_scan: Mutex::new(None),
             known_tokens: std::sync::RwLock::new(None),
+            sign_ins_seen: Mutex::new(Default::default()),
         });
         // A queue's links on the node lose their sign-in on the way in (pm_zones::node_link_path),
         // and a link under any other name loses the node's own sign-ins
@@ -760,7 +765,7 @@ impl NodeState {
                             record_play(&library, &id, &item.uri);
                             // A listen only when the play is the owner's (listens.rs)
                             if let Some(n) = node.upgrade() {
-                                if crate::listens::plays_are_the_owners(&n, &id.0) {
+                                if crate::listens::play_is_the_owners(&n, &id.0, item) {
                                     crate::listens::record_zone_play(
                                         &library.lock().expect("library poisoned"),
                                         &item.uri,
@@ -771,7 +776,7 @@ impl NodeState {
                             // Scrobbles too: a listener's or a party's plays never go to the owner's
                             // Last.fm or ListenBrainz
                             if let Some(n) = node.upgrade() {
-                                if crate::listens::plays_are_the_owners(&n, &id.0) {
+                                if crate::listens::play_is_the_owners(&n, &id.0, item) {
                                     crate::listenbrainz::track_started(
                                         &n,
                                         zone_for_radio.clone(),
@@ -787,7 +792,9 @@ impl NodeState {
                                 crate::lastfm::track_ended(&n, &id, item);
                             }
                         }
-                        if matches!(event, pm_zones::ZoneEvent::Stopped) {
+                        // Radio carries on when the queue ran out, not after a Stop (also the one
+                        // before a queue is replaced, cleared or moved to another zone) or an error
+                        if matches!(event, pm_zones::ZoneEvent::Stopped { queue_ended: true }) {
                             continue_radio(&library, &zone_for_radio);
                         }
                         let _ = events.send(ApiEvent::ZoneEvent {
@@ -2676,7 +2683,7 @@ struct SavedQueue {
 
 /// Library radio: when a zone with `radio` on runs out of queue, add tracks
 /// similar to the last library track it played and keep going.
-fn continue_radio(library: &Mutex<Library>, zone: &Arc<Zone>) {
+fn continue_radio(library: &pm_library::LibraryLock, zone: &Arc<Zone>) {
     let state = zone.state();
     if !state.radio || state.queue.is_empty() || state.repeat != pm_zones::Repeat::Off {
         return;
@@ -2705,9 +2712,15 @@ fn continue_radio(library: &Mutex<Library>, zone: &Arc<Zone>) {
         };
         lib.similar_tracks(&seed, &queued, 10).unwrap_or_default()
     };
+    // Queued for whoever queued the song they continue from: a listener's radio is never the
+    // owner's listens (listens.rs). They are library songs, so no one's sign-in plays them
     let items: Vec<pm_zones::QueueItem> = picks
         .iter()
         .filter_map(crate::sources::NodeSources::item_for)
+        .map(|mut it| {
+            it.by = last.by.clone();
+            it
+        })
         .collect();
     if items.is_empty() {
         return;
@@ -2730,7 +2743,7 @@ impl Drop for RequestInFlight<'_> {
 }
 
 /// Library tracks (`track:<id>`) go into the play history; other URIs do not.
-fn record_play(library: &Mutex<Library>, zone: &ZoneId, uri: &str) {
+fn record_play(library: &pm_library::LibraryLock, zone: &ZoneId, uri: &str) {
     let Some(id) = uri
         .strip_prefix(crate::sources::TRACK_SCHEME)
         .and_then(|s| s.parse::<i64>().ok())

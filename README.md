@@ -9,7 +9,7 @@
 Odeion runs on a computer at home that stays on, such as a NAS, a mini PC or a Raspberry Pi. It
 plays your music files and the streaming services you use (TIDAL, Qobuz, Spotify, internet radio
 and more) on the speakers you already have, room by room, and on your phone or computer. With a
-Pubky account your playlists, favourites and tags are kept in your own storage, and you see what
+Pubky account your collections, bookmarks and tags are kept in your own storage, and you see what
 people on Pubky play and tag and where else a song can be found. You don't need to be a developer.
 
 <table>
@@ -18,7 +18,7 @@ people on Pubky play and tag and where else a song can be found. You don't need 
     <td><img src="docs/images/readme/desktop-song.webp" alt="A song from the library on a desktop: its cover, tags on Pubky with the initials of who tagged them, and a link to the same song on TIDAL" width="420"><br><b>A song you have:</b> its tags on Pubky, and where else it is</td>
   </tr>
   <tr>
-    <td><img src="docs/images/readme/desktop-playlist.webp" alt="A playlist on a desktop, public on Pubky and synced to the homeserver: twelve songs from the library and TIDAL" width="420"><br><b>A shared playlist,</b> kept on your homeserver</td>
+    <td><img src="docs/images/readme/desktop-playlist.webp" alt="A collection on a desktop, public on Pubky and synced to the homeserver: twelve songs from the library and TIDAL" width="420"><br><b>A shared collection,</b> kept on your homeserver</td>
     <td><img src="docs/images/readme/desktop-now-playing.webp" alt="Now playing on a desktop: Mr. Brightside by The Killers, paused, with the next songs in the queue" width="420"><br><b>Now playing,</b> with the queue</td>
   </tr>
 </table>

@@ -101,7 +101,7 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
         await fx.go(page, '/playlist/c1');
         await until(async () => (await order()) === 'Alpha,Bravo,Charlie,Delta', 4000);
         await sleep(300);
-        check((await order()) === 'Alpha,Bravo,Charlie,Delta', `${width}: the playlist shows as the server has it (${await order()})`);
+        check((await order()) === 'Alpha,Bravo,Charlie,Delta', `${width}: the collection shows as the server has it (${await order()})`);
 
         // 1. x on Bravo, then x on Charlie before the list is drawn again
         let release = gate('c1');
@@ -248,7 +248,7 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
         await page.clock.fastForward(16000);
         await until(async () => !!(await page.$('#navretry')), 3000);
         const notice = await page.evaluate(() => { const n = document.querySelector('#main .notice'); return n ? n.textContent.trim() : ''; });
-        check(/Couldn.t load this playlist/.test(notice) && !!(await page.$('#navretry')), `${width}: after 15 s it says so with Try again ("${notice}")`);
+        check(/Couldn.t load this collection/.test(notice) && !!(await page.$('#navretry')), `${width}: after 15 s it says so with Try again ("${notice}")`);
         await page.screenshot({ path: path.join(SHOTS, `hung-read-${width}.png`) });
         if (mobile) await page.click('#navretry'); else { await page.focus('#navretry'); await page.keyboard.press('Enter'); }
         await until(async () => (await order()) === 'Bravo,Charlie' && !(await inert()), 3000);
@@ -283,14 +283,14 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
         await until(async () => /needs your approval/.test(await page.evaluate(() => [...document.querySelectorAll('.toast')].map((t) => t.textContent).join(' | '))), 3000);
         await page.evaluate(() => { const st = { v: 'playlist', arg: 'c13' }; history.pushState(st, '', '/playlist/c13'); dispatchEvent(new PopStateEvent('popstate', { state: st })); });
         await until(async () => pubkyWaits.length > 0, 3000);
-        check(hadSync && pubkyWaits.length > 0 && (await order()) === '', `${width}: Save now forgot the Pubky user and the playlist asks for it again (${pubkyWaits.length} waiting)`);
+        check(hadSync && pubkyWaits.length > 0 && (await order()) === '', `${width}: Save now forgot the Pubky user and the collection asks for it again (${pubkyWaits.length} waiting)`);
         // The page drawn again while that question is unanswered (as Try again does): it waits on
         // the same question, it doesn't ask a second time
         // (3 s on, so the question's 15 s end well before the redraw's own 15 s for its read)
         await page.clock.fastForward(3000);
         const asked11 = pubkyWaits.length; const g11 = gets.length;
         libraryChanged(); await sleep(400);
-        check(pubkyWaits.length === asked11 && (await order()) === '', `${width}: drawn again meanwhile, the playlist asks for the Pubky user no second time (${asked11} then ${pubkyWaits.length} waiting, ${gets.length - g11} playlist reads)`);
+        check(pubkyWaits.length === asked11 && (await order()) === '', `${width}: drawn again meanwhile, the collection asks for the Pubky user no second time (${asked11} then ${pubkyWaits.length} waiting, ${gets.length - g11} collection reads)`);
         await page.clock.fastForward(12500);
         await until(async () => (await order()) === 'Bravo', 3000);
         const notice11 = await page.evaluate(() => { const n = document.querySelector('#main .notice'); return n ? n.textContent.trim() : ''; });

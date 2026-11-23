@@ -218,7 +218,7 @@ fn signed_in(s: &NodeState) -> Result<(String, Fan), ApiError> {
 
 /// Bandcamp switched off, with why; with the node at hand, its cached search answers go too (a
 /// song that fails while it opens has only the library: they expire by themselves).
-fn mark_down(library: &std::sync::Mutex<pm_library::Library>, node: Option<&NodeState>, why: &str) {
+fn mark_down(library: &pm_library::LibraryLock, node: Option<&NodeState>, why: &str) {
     tracing::warn!("Bandcamp (unofficial) switched off: {why}");
     if let Ok(lib) = library.lock() {
         let mut st = load(&lib);
@@ -235,7 +235,7 @@ fn mark_down(library: &std::sync::Mutex<pm_library::Library>, node: Option<&Node
     }
 }
 
-fn mark_ok(library: &std::sync::Mutex<pm_library::Library>, what: &str) {
+fn mark_ok(library: &pm_library::LibraryLock, what: &str) {
     if let Ok(lib) = library.lock() {
         let mut st = load(&lib);
         st.health = Some(Health {
@@ -543,11 +543,7 @@ fn pick_track(d: &Value, n: u64) -> Result<String, Failure> {
     stream_of(t).ok_or_else(|| Failure::Item("the artist doesn't let Bandcamp stream this track".into()))
 }
 
-fn record(
-    library: &std::sync::Mutex<pm_library::Library>,
-    node: Option<&NodeState>,
-    r: &Result<String, Failure>,
-) {
+fn record(library: &pm_library::LibraryLock, node: Option<&NodeState>, r: &Result<String, Failure>) {
     match r {
         Ok(_) => mark_ok(library, "tracks are playing"),
         Err(Failure::Mode(m)) => mark_down(library, node, m),
@@ -557,7 +553,7 @@ fn record(
 
 /// A `bandcamp:track:…` for a zone.
 pub(crate) fn open_track_blocking(
-    library: &std::sync::Mutex<pm_library::Library>,
+    library: &pm_library::LibraryLock,
     key: &str,
 ) -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::SourceError> {
     let uri = format!("{TRACK_URI_PREFIX}{key}");

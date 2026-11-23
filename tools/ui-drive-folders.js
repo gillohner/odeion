@@ -85,7 +85,7 @@ const tree = {
           const ref = pick(p.firstChild); p.remove();
           return { ref, rows: [...box.querySelectorAll('[data-dfopen]')].map((b) => ({ ...pick(b), wide: Math.abs(b.getBoundingClientRect().width - box.clientWidth) <= 1 })) };
         });
-        for (const r of look.rows) { const { wide, ...s } = r; assert.equal(wide, true, 'the row is as wide as the list'); assert.deepEqual(s, look.ref, "drawn as Add to playlist's rows " + JSON.stringify([s, look.ref])); }
+        for (const r of look.rows) { const { wide, ...s } = r; assert.equal(wide, true, 'the row is as wide as the list'); assert.deepEqual(s, look.ref, "drawn as Add to collection's rows " + JSON.stringify([s, look.ref])); }
         if (width < 600) {
           const h = await page.$$eval('#dfbox [data-dfopen]', (l) => l.map((b) => b.getBoundingClientRect().height));
           for (const x of h) assert.ok(x >= 44, `a phone's folder row is ${x} px, under 44`);

@@ -26,7 +26,8 @@ const emptyNow = (page) => page.evaluate(() => {
   const r = b && b.getBoundingClientRect();
   return { shown: !!e, title: e ? e.querySelector('h3')?.textContent.trim() : null, button: b ? b.textContent.trim() : null, h: r ? r.height : 0, inView: r ? r.top >= 0 && r.bottom <= innerHeight : false };
 });
-const queueReady = (page) => page.waitForFunction(() => document.querySelector('#main .empty, #main .list.queue') && /^Queue/.test(document.querySelector('#main .page-head h2')?.textContent || ''));
+// (drawn: the empty state, the rows, or the notice of a queue that could not be read)
+const queueReady = (page) => page.waitForFunction(() => document.querySelector('#main .empty, #main .list.queue, #main [data-failed]') && /^Queue/.test(document.querySelector('#main .page-head h2')?.textContent || ''));
 
 async function browserZone(browser, width) {
   // 1. This browser, nothing queued: the page offers Shuffle my music; one tap plays the library
@@ -93,6 +94,8 @@ async function zoneNotKnownEmpty(browser, width, what, Z, queueAnswer) {
     await sleep(300);
     const e = await emptyNow(page);
     assert.equal(e.button, null, `${width}: ${what}: no Shuffle my music (${JSON.stringify(e)})`);
+    // (a queue that could not be read is not called empty: the page says so, with Try again)
+    if (queueAnswer.status === 500) assert.deepEqual(await page.evaluate(() => [!!document.querySelector('#main .empty'), /Couldn.t read the queue/.test(document.querySelector('#main [data-failed]')?.textContent || ''), !!document.querySelector('#main [data-failed] [data-retry]')]), [false, true, true], `${width}: ${what}: said, not shown as an empty queue`);
     assert.equal(state.hits.filter((h) => h.m === 'POST' && h.v === '/zones/z1/load').length, 0, `${width}: ${what}: nothing replaced`);
   } finally { await context.close(); }
 }

@@ -504,7 +504,8 @@ mod tests {
             ZoneEvent::Paused { position_ms: 1 },
             ZoneEvent::Resumed,
             ZoneEvent::Seeked { position_ms: 2 },
-            ZoneEvent::Stopped,
+            ZoneEvent::Stopped { queue_ended: false },
+            ZoneEvent::Stopped { queue_ended: true },
             ZoneEvent::QueueChanged,
             ZoneEvent::StreamTitle { title: "t".into() },
             ZoneEvent::Error {
@@ -519,7 +520,7 @@ mod tests {
                 | ZoneEvent::Paused { .. }
                 | ZoneEvent::Resumed
                 | ZoneEvent::Seeked { .. }
-                | ZoneEvent::Stopped
+                | ZoneEvent::Stopped { .. }
                 | ZoneEvent::QueueChanged
                 | ZoneEvent::StreamTitle { .. }
                 | ZoneEvent::Error { .. } => {}
