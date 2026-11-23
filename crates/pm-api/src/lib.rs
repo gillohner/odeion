@@ -14245,6 +14245,7 @@ exec sleep 300
                 session_id: None,
                 from: None,
                 client: Default::default(),
+                unconfirmed: false,
                 named_client: None,
             });
             lib.set_setting(tidal_unofficial::STATE_KEY, &serde_json::to_string(&m).unwrap())
@@ -27804,7 +27805,7 @@ exec sleep 300
         // TIDAL answers every sign-in and every "who is this" with account 77
         let (base, _) = full_tracks_mock(Vec::new()).await;
         let dir = tempfile::tempdir().unwrap();
-        let (s, _anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
         point_tidal_at(&s, &base, true);
         let app = router(s.clone());
         let ben_tok = accounts::mint(&s, ben).unwrap();
@@ -27883,6 +27884,28 @@ exec sleep 300
         assert_eq!(st, StatusCode::OK, "{r}");
         let kept = bens().unwrap();
         assert_eq!(kept.user_id.as_deref(), Some("5"));
+        // Only the paste says it is 5: that holds no account for anyone else yet, and its renewal
+        // is checked even when it names 5 again
+        assert!(kept.unconfirmed, "TIDAL didn't answer for it");
+        {
+            let lib = s.library.lock().unwrap();
+            let anna_who = accounts::Who::Listener(anna.to_string());
+            assert!(anna_who.account_free(&lib, "tidal.unofficial", "5").is_ok());
+        }
+        owner_is("5");
+        {
+            let lib = s.library.lock().unwrap();
+            let (status, _) =
+                tidal_unofficial::renewed_for(&lib, &ben_who, &serde_json::json!({"user_id": 5}), &kept)
+                    .unwrap_err();
+            assert_eq!(status, StatusCode::CONFLICT, "the same account, checked now");
+        }
+        owner_is("1");
+        // (the steps below are a sign-in a renewal has named: confirmed)
+        let kept = tidal_unofficial::Session {
+            unconfirmed: false,
+            ..kept
+        };
 
         // Its renewal names the account: the same one, another that is nobody's, or the owner's
         {

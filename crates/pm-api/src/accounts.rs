@@ -405,6 +405,10 @@ pub(crate) fn account_unknown(service: &str) -> ApiError {
 /// sign-in or of its `session`.
 fn account_of(stored: &str, tidal: bool) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(stored).ok()?;
+    // A pasted TIDAL sign-in TIDAL never vouched for holds nothing yet (tidal_unofficial.rs)
+    if v["session"]["unconfirmed"].as_bool() == Some(true) {
+        return None;
+    }
     let named = |v: &serde_json::Value| match v {
         serde_json::Value::String(s) => account_id_of(s, tidal),
         serde_json::Value::Number(n) => account_id_of(&n.to_string(), tidal),

@@ -115,6 +115,11 @@ pub struct Session {
     /// a device session.
     #[serde(default, skip_serializing_if = "ClientKind::is_device")]
     pub client: ClientKind,
+    /// A pasted sign-in TIDAL did not answer for: its account is only what the paste claims. It
+    /// holds no account in other people's checks (`accounts::account_of`) until a renewal names
+    /// one, which is then checked whatever it is (`renewed_for`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfirmed: bool,
     /// The client an imported file says made it, when it names one (only for the import's
     /// "renews here" check; never stored).
     #[serde(skip)]
@@ -385,6 +390,7 @@ fn session_from(v: &Value, previous: Option<&Session>) -> Option<Session> {
         session_id: previous.and_then(|p| p.session_id.clone()),
         from: previous.and_then(|p| p.from.clone()),
         client: previous.map(|p| p.client).unwrap_or_default(),
+        unconfirmed: previous.is_some_and(|p| p.unconfirmed),
         named_client: None,
     })
 }
@@ -409,6 +415,7 @@ pub(crate) async fn held_to_its_person(
         // says next to it only when neither does
         let stated = sess.user_id.take();
         sess = fill_session(s, sess).await;
+        sess.unconfirmed = sess.user_id.is_none();
         sess.user_id = sess
             .user_id
             .or_else(|| token_account(&sess.access_token))
@@ -474,7 +481,8 @@ pub(crate) fn renewed_for(
         .or_else(|| answer["access_token"].as_str().and_then(token_account));
     let was = kept.user_id.as_deref().and_then(crate::accounts::account_id);
     match named {
-        Some(account) if was.as_deref() != Some(account.as_str()) => {
+        // (one only the paste vouched for is checked now, the same account or not)
+        Some(account) if kept.unconfirmed || was.as_deref() != Some(account.as_str()) => {
             if !who.is_owner() {
                 who.account_free(lib, STATE_KEY, &account)
                     .map_err(|e| (e.status, e.message))?;
@@ -1353,7 +1361,10 @@ fn token_blocking(
         // The renewal names another account than the sign-in was kept under: held to the same
         // rule as a sign-in (accounts.rs). Someone else's is not kept: the sign-in ends here
         match renewed_for(&lib, who, &v, &sess) {
-            Ok(Some(account)) => fresh.user_id = Some(account),
+            Ok(Some(account)) => {
+                fresh.user_id = Some(account);
+                fresh.unconfirmed = false;
+            }
             Ok(None) => {}
             // (a store that can't be read now ends nothing: the renewal fails and is tried again)
             // (as a failed renewal: full tracks stay on, the next play tries again)

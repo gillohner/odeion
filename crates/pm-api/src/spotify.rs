@@ -423,18 +423,13 @@ async fn others_accounts_known(s: &NodeState, who: &Who) -> Result<(), ApiError>
             continue;
         }
         let (whose, fix) = match &holder {
-            Who::Listener(k) => {
-                let name = crate::people::load(s)
-                    .people
-                    .into_iter()
-                    .find(|p| p.key == *k)
-                    .and_then(|p| p.name)
-                    .unwrap_or_else(|| format!("{}…", k.chars().take(8).collect::<String>()));
-                (
-                    format!("{name}'s"),
-                    format!("{name} signs out of Spotify and in again in their Settings"),
-                )
-            }
+            // (the one asking is someone the owner added: no other person is named to them)
+            Who::Listener(_) => (
+                "another person's".to_string(),
+                "that person signs out of Spotify and in again in their Settings, or the node's owner \
+                 removes their music access"
+                    .to_string(),
+            ),
             _ => (
                 "the owner's".to_string(),
                 "the node's owner signs out of Spotify and in again".to_string(),
