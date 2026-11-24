@@ -99,6 +99,7 @@ These go under `environment`. They are written into `/data/node.toml` on the fir
 | `PM_CONTACT` | an email or website for MusicBrainz and Discover (also in Settings › Discover) |
 | `PM_FOLDERS` | music folders inside the container, separated by `:` (default `/music`) |
 | `PM_LISTEN` | address and port of the web page and API (default `0.0.0.0:7788`) |
+| `PM_BEHIND_PROXY` | `true` when a reverse proxy in this container's network forwards to the node (`[api] behind_proxy`, see [remote access](remote-access.md)) |
 
 The file is only written on the first start. To apply changed variables later, add
 `PM_REWRITE_CONFIG: "1"`, run `docker compose up -d` once, then remove the line again. This
