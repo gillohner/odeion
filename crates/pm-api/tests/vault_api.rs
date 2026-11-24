@@ -1871,8 +1871,8 @@ async fn a_settings_copy_is_taken_in_once_per_identity() {
     assert_eq!(n.contact(), "https://example.org/old-node");
     assert!(setting(smart).is_some());
 
-    // 2. B (no copy of its own): its backup notes B; the owner removes the contact and the
-    // collection meanwhile
+    // 2. B (no copy of its own): its backup notes B. The contact taken from A's copy goes (B's
+    // derived one is in its place) and the owner removes the collection meanwhile
     sync_a.retire();
     let sync_b = Arc::new(PubkySync::from_session(homeserver.clone(), b.clone()));
     n.set_contact(&derived(&sync_b)).unwrap();
@@ -1893,6 +1893,39 @@ async fn a_settings_copy_is_taken_in_once_per_identity() {
     let copy = settings_copy(&homeserver, &a).await;
     assert!(copy["settings"].get(smart).is_none(), "{copy}");
     assert_eq!(copy["contact"], derived(&sync_a), "{copy}");
+}
+
+/// A node that has folders of its own but no contact chosen (the one derived at sign-in) takes
+/// the settings copy's contact at its first backup instead of writing the derived one over it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_with_folders_keeps_the_copys_contact() {
+    let Some(mut ids) = identities_with_sessions(1, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let a = ids.pop().unwrap().pop().unwrap();
+    let homeserver = signing_in();
+    homeserver
+        .write_node_settings(
+            &a,
+            &json!({"version": 1, "saved_at": 1, "node": "the old node",
+                "contact": "mailto:owner@example.org", "folders": [], "settings": {}}),
+        )
+        .await
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let music = d.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    n.library.lock().unwrap().add_folder(&music).unwrap();
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), a.clone()));
+    n.set_contact(&format!("https://pubky.app/profile/{}", sync.z32()))
+        .unwrap();
+    sync.backup_settings(&n).await.expect("backed up");
+    assert_eq!(n.contact(), "mailto:owner@example.org");
+    let copy = settings_copy(&homeserver, &a).await;
+    assert_eq!(copy["contact"], "mailto:owner@example.org", "{copy}");
+    assert_eq!(copy["folders"][0], music.to_string_lossy().as_ref(), "{copy}");
 }
 
 async fn settings_copy(homeserver: &NodeHomeserver, session: &pubky::PubkySession) -> Value {
