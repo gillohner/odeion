@@ -260,28 +260,6 @@ impl NexusClient {
         Self::json(resp).await
     }
 
-    pub async fn resource_tags(&self, resource_id: &str) -> Result<ResourceView, NexusError> {
-        let resp = self
-            .http
-            .get(self.url(&format!("/resource/{resource_id}/tags")))
-            .send()
-            .await?;
-        Self::json(resp).await
-    }
-
-    pub async fn resource_taggers(
-        &self,
-        resource_id: &str,
-        label: &str,
-        limit: Option<u32>,
-    ) -> Result<Taggers, NexusError> {
-        let mut url = self.url(&format!("/resource/{resource_id}/tags/{label}/taggers"));
-        if let Some(l) = limit {
-            url = with_query(&url, &[("limit", &l.clamp(1, 100).to_string())]);
-        }
-        Self::json(self.http.get(url).send().await?).await
-    }
-
     /// Profiles in one call (`POST /v0/stream/users/by_ids`); people Nexus doesn't know are
     /// left out.
     pub async fn users_by_ids(
@@ -411,14 +389,6 @@ impl NexusClient {
             &self.url(&format!("/search/tags/by_prefix/{p}")),
             &[("limit", &limit.clamp(1, 40).to_string())],
         );
-        Self::json(self.http.get(url).send().await?).await
-    }
-
-    pub async fn tags_hot(&self, limit: Option<u32>) -> Result<Vec<HotTag>, NexusError> {
-        let mut url = self.url("/tags/hot");
-        if let Some(l) = limit {
-            url = with_query(&url, &[("limit", &l.clamp(1, 40).to_string())]);
-        }
         Self::json(self.http.get(url).send().await?).await
     }
 

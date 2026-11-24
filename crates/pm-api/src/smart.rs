@@ -282,12 +282,8 @@ fn keeps(r: &Rules, t: &Track, facts: &Facts) -> bool {
     rules_ok && !excluded(&r.exclude, t, facts)
 }
 
-pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
-    evaluate_within(s, r, None)
-}
-
-/// [`evaluate`], keeping only the songs whose canonical URL is in `only` (the ones a network
-/// reach tagged) when it is given.
+/// The songs the rules keep; with `only`, just those whose canonical URL is in it (the ones a
+/// network reach tagged).
 fn evaluate_within(
     s: &NodeState,
     r: &Rules,
