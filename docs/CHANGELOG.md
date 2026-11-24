@@ -17,6 +17,10 @@ Newest first. Dates are when the change landed on `main`.
 - **Zones: Ungroup shows on a group of speakers again.** The button looked for a zone id starting with `group:`, but a zone's id is made from its name; it now goes by the zone's speakers.
 - **Home Assistant: a refused call is not a refused password.** The integration treated every 403 as a wrong token; it now shows the node's reason, and only a 401 asks for a new password.
 
+### 2026-11-23
+
+- **Songs stays where you are when the library changes, and long lists load ahead of you.** When a scan ended or anyone edited a song or a collection, Songs emptied to its loading boxes, came back at the top with its first 300 songs, and lost what was typed in its filter. It is now drawn again in place: the same songs at the same scroll position, the filter with its text, caret and matches. While changes keep coming (an import sends one per file), Songs, Albums, Artists, Home and Bookmarks are drawn again about once a second at most instead of once per change, and a tab in the background draws nothing until you look at it again. Songs, Albums and Artists now fetch or draw their next part while the end of the list is still about a screen away; before, the next part only came once the end was on screen, so a fast scroll stopped at the end of each part. Albums and Artists also open about twice as fast on a big library (3,000 albums on a slowed-down phone: 0.75 s to 0.37 s), because sorting by name no longer sets up the language rules for every comparison.
+
 ### 2026-11-22
 
 - **The node stops when asked.** On SIGTERM (`docker stop`, a restart, an update, systemd) or Ctrl-C the node now takes no new request, finishes the ones it is answering, also those that came in through remote access (up to 2 seconds; one that takes longer is ended), stops its zones for good (nothing starts one again while the node winds down, and a zone that appears in that time is closed too), folds the library's write-ahead log into its file and exits. In a container it used to ignore SIGTERM (it is the container's first process), so every stop waited out Docker's 10 seconds and ended in a kill.

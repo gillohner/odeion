@@ -812,7 +812,7 @@
     const v = await editTagsDialog(cur); if (!v) return;
     try {
       if (v.undo) await api('DELETE', `/library/tracks/${id}/edit`); else await api('PUT', `/library/tracks/${id}/edit`, v);
-      toast(v.undo ? 'Back to the file’s tags' : 'Saved on this node'); onLibraryChanged(); if (state.view === 'library') render();
+      toast(v.undo ? 'Back to the file’s tags' : 'Saved on this node'); libraryChangedNow(); if (state.view === 'library') render();
     } catch (e) { toast(e.message, 'error'); }
   };
   // (anchor: the ⋯ it was chosen from; on a search result, the focus goes on to the next result's ⋯
@@ -832,7 +832,7 @@
       for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) r.answers[src] = withoutTrack(a, src, id);
       const at = anchor ? $$('#sresults [data-smore]').indexOf(anchor) : -1;
       const focused = at >= 0 && document.activeElement === anchor;
-      onLibraryChanged();
+      libraryChangedNow();
       // (waited for only then: another page's redraw can take long, or never end when left meanwhile)
       const drawn = render();
       if (focused) { await drawn; if ((!document.activeElement || document.activeElement === document.body) && state.view === 'search') ($$('#sresults [data-smore]')[at] || search).focus(); }
@@ -841,7 +841,7 @@
   const editAlbumTags = async (albumId, title, artist) => {
     const v = await choiceDialog({ title: 'Rename the album', text: 'Kept on this node; the files stay as they are.', field: { label: 'Album title', value: title || '' }, choices: [{ label: 'Save', value: 'save', primary: true }] });
     if (!v || !v.text) return;
-    try { await api('PUT', `/library/albums/${albumId}/edit`, { title: v.text, ...(artist != null ? { album_artist: artist } : {}) }); toast('Album renamed on this node'); onLibraryChanged(); render(); } catch (e) { toast(e.message, 'error'); }
+    try { await api('PUT', `/library/albums/${albumId}/edit`, { title: v.text, ...(artist != null ? { album_artist: artist } : {}) }); toast('Album renamed on this node'); libraryChangedNow(); render(); } catch (e) { toast(e.message, 'error'); }
   };
   // "Add music": one button, three ways in
   const addMusicDialog = async () => {
@@ -7861,6 +7861,9 @@
   let plGen = 0;
   // The latest favourites load, so a page that lists favourites can wait for it on a cold start
   let favLoad = null; let favRedraw = null; let favRetryFocus = false;
+  // Songs: each draw's number and the newest one shown (an older draw's answer is not put in over
+  // a newer one's), and the read under way while the page is drawn again where it stands
+  let songsDraw = 0; let songsShown = 0; let songsReading = null;
   // Only the latest load's answer counts: on a cold start a slow first answer that lands after a
   // heart was pressed would otherwise put back the list without that bookmark. An older load
   // waits for the latest and answers with it.
@@ -7985,7 +7988,9 @@
       try { done = !(await more()); } catch (e) { done = true; toast(e.message, 'error'); }
       busy = false;
       if (done) { io.disconnect(); sentinel.remove(); } else { io.unobserve(sentinel); io.observe(sentinel); }
-    }, { rootMargin: '1200px 0px' });
+      // (measured from the page's own scrolling box: a margin around the window is cut off by that
+      // box, so the next part was only asked for once the list's end was on screen)
+    }, { root: /auto|scroll/.test(getComputedStyle(main).overflowY) ? main : null, rootMargin: '1200px 0px' });
     io.observe(sentinel);
     return () => { done = true; io.disconnect(); sentinel.remove(); };
   };
@@ -8070,8 +8075,11 @@
   // An album's heart: kept on the node (album:<id>), or on its release or its release group (the
   // album page and Discover heart the group)
   const albumFav = (a) => !!(state.favUris && (state.favUris.has(`album:${a.id}`) || (a.release_mbid && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`)) || (a.release_group_mbid && state.favUris.has(`https://musicbrainz.org/release-group/${a.release_group_mbid}`))));
+  const NAME_ORDER = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
   const sortList = (kind, list, how) => {
-    const by = (f) => [...list].sort((a, b) => String(f(a) || '').localeCompare(String(f(b) || ''), undefined, { sensitivity: 'base', numeric: true }));
+    // (one collator for every comparison: localeCompare with options makes one per call, which was
+    // most of the time Albums and Artists took to open on a big library; each name's key once)
+    const by = (f) => list.map((x) => [String(f(x) || ''), x]).sort((a, b) => NAME_ORDER.compare(a[0], b[0])).map((p) => p[1]);
     if (kind === 'albums') {
       if (how === 'artist') return by((a) => `${a.album_artist || ''}\u0000${a.title}`);
       if (how === 'year') return [...list].sort((a, b) => (b.year || 0) - (a.year || 0));
@@ -8819,11 +8827,57 @@
           break;
         }
         case 'tracks': {
-          loading();
+          // Drawn again where it stands (the library changed: a scan ended, a playlist was edited
+          // on another device): the songs that were listed are read again and put in at once, a
+          // filter's matches too, so the page is neither emptied nor back at its top
+          const again = redrawing('tracks');
+          // One read at a time while it is drawn again: a change that comes during a read is drawn
+          // once that read is in (thrown away for each newer one, a read slower than the changes
+          // come would never show)
+          // (a read of an earlier visit, cut off when another page was opened, never ends: it doesn't count)
+          if (again && songsReading && songsReading.nav === navGen) { songsReading.again = true; return; }
+          if (!again) { loading(); songsReading = null; }
+          const drawn = ++songsDraw; const reading = again ? (songsReading = { again: false, nav: navGen }) : null;
+          drawStale = () => drawn < songsShown || state.view !== 'tracks';
           // Pages from the node as the list scrolls; the filter is a library search on the node.
           const PAGE = 300;
-          const [first, stats] = await Promise.all([api('GET', `/library/tracks?limit=${PAGE}`), api('GET', '/library/stats').catch(() => null)]);
-          if (state.view !== 'tracks') return;
+          const findSongs = (q) => api('GET', `/library/search?${new URLSearchParams({ q, sources: 0, limit: 500 })}`);
+          // (what the page on screen lists and has in its filter, when it is Songs drawn already)
+          const listed = () => (redrawing('tracks') ? $$('#tracklist .track', main).length : 0);
+          const typed = () => (redrawing('tracks') ? ($('#filter', main)?.value || '').trim() : '');
+          const q0 = typed();
+          // (the first `n` songs, a page at least, a thousand per answer, and whether more follow;
+          // `from`: going on from what was read)
+          const readSongs = async (n, from = { tracks: [], more: true }) => {
+            const tracks = from.tracks; let more = from.more;
+            while (more && tracks.length < n && !drawStale()) {
+              const limit = Math.min(1000, Math.max(PAGE, n - tracks.length));
+              const r = await api('GET', `/library/tracks?limit=${limit}${tracks.length ? `&after=${tracks[tracks.length - 1].id}` : ''}`);
+              tracks.push(...r.tracks); more = r.tracks.length === limit;
+            }
+            return { tracks, more };
+          };
+          let first; let stats; let found;
+          try {
+            [first, stats, found] = await Promise.all([readSongs(q0 ? PAGE : Math.max(PAGE, listed())), api('GET', '/library/stats').catch(() => null), q0 ? findSongs(q0).catch(() => null) : null]);
+            // (the list grew on the page while it was read: up to there too, so the new page is not shorter)
+            for (let i = 0; i < 3 && !drawStale() && !typed() && first.more && listed() > first.tracks.length; i++) first = await readSongs(listed(), first);
+          } catch (e) {
+            // Drawn again in place and the read failed: the page stays as it is and says why (the
+            // error page would take the list and its place); a change that waited is read a second later
+            if (!reading || drawStale()) throw e;
+            toast(e.message, 'error');
+            if (reading.again) setTimeout(() => { if (state.view === 'tracks') render(); }, 1000);
+            return;
+          } finally { if (reading && songsReading === reading) songsReading = null; }
+          // (a newer draw is on the page, or another page: this answer is not put in; a change
+          // that waited for this read is drawn by a read of its own)
+          if (drawStale()) { if (reading && reading.again && state.view === 'tracks') setTimeout(() => { if (state.view === 'tracks') render(); }); return; }
+          songsShown = drawn;
+          // (in place whenever Songs is on the page by now, also when an older read drew it meanwhile)
+          const inPlace = redrawing('tracks');
+          const oldFilter = inPlace ? $('#filter', main) : null; const place = inPlace ? keepPlace() : null;
+          const nowTyped = oldFilter ? oldFilter.value.trim() : '';
           const total = Math.max(stats ? stats.tracks : 0, first.tracks.length);
           main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + headAddMusic(total)) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', ...noMusicYet('Songs')));
           const box = $('#tracklist');
@@ -8834,7 +8888,7 @@
             const append = (rows) => { box.insertAdjacentHTML('beforeend', trackRows(rows, { key: 'all', start: shown.length, bare: true })); shown.push(...rows); };
             const browse = () => {
               reset(); append(first.tracks); $('#tracknote').hidden = true;
-              if (first.tracks.length === PAGE) {
+              if (first.more) {
                 const mine = run;
                 stop = growList(box, async () => {
                   const r = await api('GET', `/library/tracks?limit=${PAGE}&after=${shown[shown.length - 1].id}`);
@@ -8843,10 +8897,23 @@
                 });
               }
             };
-            browse();
             const f = $('#filter'); let timer = null;
+            const matched = (r) => {
+              reset(); append(r.tracks);
+              const note = $('#tracknote'); note.hidden = r.tracks.length < 500; note.textContent = 'The first 500 matches: type more to narrow them down.';
+              const c = $('.page-head .count'); if (c) c.dataset.filtered = `${r.tracks.length}${r.tracks.length === 500 ? '+' : ''} shown`;
+            };
+            // (drawn again with a filter typed: its text, and its matches as read with the page)
+            // (the box emptied while they were read: the whole list, not the old matches)
+            const refound = !!(f && found && nowTyped);
+            if (f && oldFilter && oldFilter.value) f.value = oldFilter.value;
+            if (refound) matched(found); else browse();
             if (f) {
               const none = filterNone(box, 'song');
+              if (refound && nowTyped === q0) none(q0, found.tracks.length);
+              // (the matches could not be read again, or the box says something else by now: the
+              // filter asks for what it says, and says so if that fails)
+              if (nowTyped !== (refound ? q0 : '')) setTimeout(() => { if (f.isConnected) f.oninput(); });
               // Each keystroke empties the no-match line and outdates the search in flight, so only the
               // answer for the text in the box can say "No song matches".
               f.oninput = () => {
@@ -8854,31 +8921,42 @@
                 timer = setTimeout(async () => {
                   const q = f.value.trim(); const c = $('.page-head .count');
                   if (!q) { browse(); none('', 0); if (c) c.dataset.filtered = ''; return; }
-                  const r = await api('GET', `/library/search?${new URLSearchParams({ q, sources: 0, limit: 500 })}`).catch((e) => { toast(e.message, 'error'); return null; });
+                  const r = await findSongs(q).catch((e) => { toast(e.message, 'error'); return null; });
                   if (!r && mine === run) none('', 1);
-                  if (!r || mine !== run || state.view !== 'tracks') return;
-                  reset(); append(r.tracks); none(q, r.tracks.length);
-                  const note = $('#tracknote'); note.hidden = r.tracks.length < 500; note.textContent = 'The first 500 matches: type more to narrow them down.';
-                  if (c) c.dataset.filtered = `${r.tracks.length}${r.tracks.length === 500 ? '+' : ''} shown`;
+                  // (the page drawn again meanwhile: this filter box is the old page's)
+                  if (!r || mine !== run || state.view !== 'tracks' || !f.isConnected) return;
+                  matched(r); none(q, r.tracks.length);
                 }, 200);
               };
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
             // Play all: what is shown when filtered, else every track (fetched on the press).
+            // (one load at a time, also across the page drawn again in place while it runs: the new
+            // button is drawn pressed then)
             const sh = $('#shuffle');
+            if (sh && state.playAllLoading) sh.disabled = true;
             if (sh) sh.onclick = async () => {
+              if (state.playAllLoading) return;
               if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true, 'end', { shuffle: false });
               // (the message stays while a big library loads, and goes when the songs play; a quick load
               // shows none, as Which song is this?'s lookup)
               // It counts up as each thousand comes (unless another message replaced it), and gives up
               // after 30 s without an answer: Play all can be pressed again
-              let loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true;
+              let loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true; state.playAllLoading = true;
               const slow = setTimeout(() => toast(loading, 'wait'), 400);
               const onPage = (n) => { const t = $('#toast'); const was = loading; loading = `Loading ${countOf(total, 'songs')}… ${fmtCount(n)} so far`; if (t.classList.contains('show') && t.textContent === was) toast(loading, 'wait'); };
               try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks, { onPage, wait: 30000 }), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
-              clearTimeout(slow); toastDone(loading); sh.disabled = false;
+              clearTimeout(slow); toastDone(loading); state.playAllLoading = false; sh.disabled = false;
+              { const now = $('#shuffle'); if (now && now !== sh && state.drawnPage === 'tracks') now.disabled = false; }
             };
           }
+          state.drawnPage = 'tracks';
+          if (place) {
+            place(); if (state.placeHold) state.placeHold();
+            const f = $('#filter', main);
+            if (oldFilter && f && f.value && document.activeElement === f) { try { f.setSelectionRange(oldFilter.selectionStart, oldFilter.selectionEnd, oldFilter.selectionDirection || 'none'); } catch { /* no caret */ } }
+          }
+          if (reading && reading.again) setTimeout(() => { if (state.view === 'tracks') render(); });
           break;
         }
         case 'search': {
@@ -11616,14 +11694,38 @@
   // (favWayOn: Open Songs or Add music, canShuffleMine: Shuffle my music); a new song count from
   // GET /info that turns "no songs" into "songs" or back draws the one on screen again
   const songsChanged = () => { const e = $('#main .empty[data-songs]'); if (e && ['favourites', 'queue'].includes(state.view) && e.dataset.songs !== String(hasSongs())) render(); };
-  const onLibraryChanged = () => {
+  // The library changed. What was kept from it goes at once (libraryForget); the page on screen is
+  // drawn again (libraryRedraw)
+  const libraryForget = () => {
     forgetAlbums(); forgetLibrarySearches();
     // (a playlist change cut after 30 s: the node changed something, so the next read ends its hold, plHolds)
     plHolds.forEach((h) => { if (h.cut) { h.cut = false; h.after = Math.min(h.after, plDraws + 1); } });
+  };
+  const libraryRedraw = () => {
     // (the redraw below comes before the new song count, songsChanged)
     api('GET', '/info').then((i) => { state.info = i; watchScan(i); if (link.up) setConn('ok', nodeLabel()); songsChanged(); }).catch(() => {});
     if (['albums', 'tracks', 'artists', 'home', 'favourites', 'album', 'artist', 'playlists', 'playlist'].includes(state.view)) render();
   };
+  const libraryChangedNow = () => { libraryForget(); libraryRedraw(); };
+  // The node says so after every write to the library (an import: once per file). A hidden tab
+  // draws nothing: once, when it is looked at again. On the library's long lists the first change
+  // is drawn at once and those that follow within a second with one redraw at its end; a
+  // playlist's or an album's own page answers each one (a playlist's rows wait for the read after it)
+  const LIBRARY_LISTS = ['albums', 'tracks', 'artists', 'home', 'favourites'];
+  // (by the page's own clock, which never goes back: a wall clock set back would hold every redraw)
+  let libActed = -1000; let libLater = null; let libMissed = false; let libLastNav = 0;
+  const onLibraryChanged = () => {
+    libraryForget();
+    if (document.visibilityState === 'hidden') { libMissed = true; return; }
+    if (!LIBRARY_LISTS.includes(state.view)) { libraryRedraw(); return; }
+    const wait = libActed + 1000 - performance.now();
+    if (wait <= 0) { libActed = performance.now(); libraryRedraw(); return; }
+    // (another page opened after the last change that waits: that page was drawn after it, nothing
+    // is owed; a change that came once that page was open is still drawn)
+    libLastNav = navGen;
+    if (!libLater) libLater = setTimeout(() => { libLater = null; if (libLastNav !== navGen) return; if (document.visibilityState === 'hidden') { libMissed = true; return; } libActed = performance.now(); libraryRedraw(); }, wait);
+  };
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible' || !libMissed) return; libMissed = false; clearTimeout(libLater); libLater = null; libActed = performance.now(); libraryRedraw(); });
   const applySnapshot = (ev) => {
     const first = link.boot == null;
     const restarted = !first && ev.boot != null && ev.boot !== link.boot;
@@ -11640,7 +11742,7 @@
       refreshQueue(false);
       if (!overlay.hidden) renderNowPlaying();
       if (state.view === 'zones') render();
-      if (libChanged) onLibraryChanged();
+      if (libChanged) libraryChangedNow();
       if (downFor > 5000) toast(restarted ? 'Reconnected: the node restarted' : 'Reconnected');
     }
   };
