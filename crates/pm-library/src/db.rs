@@ -4771,7 +4771,7 @@ fn folder_prefix(root: &Path) -> String {
     } else {
         std::path::MAIN_SEPARATOR
     };
-    let mut prefix = root.trim_end_matches(|c| c == sep || c == '/').to_string();
+    let mut prefix = root.trim_end_matches([sep, '/']).to_string();
     prefix.push(sep);
     prefix
 }
