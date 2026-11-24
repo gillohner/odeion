@@ -64,7 +64,14 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
         check(ra.length && ra.every(([bw, bh]) => bw >= 40 && bh >= 40), `${w}: a song row's actions are 40 px (${JSON.stringify(ra.slice(0, 3))})`);
         // A touch screen has no hover: ⋯ is shown without one (the pointer is moved away first)
         await p.mouse.move(0, 0); await sleep(200);
-        const op = await p.$eval('.track [data-act="more"]', (b) => { let o = 1; for (let e = b; e && e !== document.body; e = e.parentElement) o *= Number(getComputedStyle(e).opacity); return o; }).catch(() => 0);
+        // (read once its fades are over: a row drawn just now fades its actions in, var(--dur-fast),
+        // and a busy runner read 0.998 mid-way; a fade that never ends still fails after 3 s)
+        const op = await p.$eval('.track [data-act="more"]', async (b) => {
+          const up = []; for (let e = b; e && e !== document.body; e = e.parentElement) up.push(e);
+          const fades = up.flatMap((e) => e.getAnimations()).map((a) => a.finished.catch(() => {}));
+          await Promise.race([Promise.all(fades), new Promise((ok) => setTimeout(ok, 3000))]);
+          return up.reduce((o, e) => o * Number(getComputedStyle(e).opacity), 1);
+        }).catch(() => 0);
         check(op === 1, `${w}: a song row's ⋯ shows without hover (opacity ${op})`);
       }
       // ---- A10: the play-from order's grips, on touch ----
