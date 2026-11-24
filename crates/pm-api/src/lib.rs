@@ -943,6 +943,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
             state.clone(),
             peer::tokenless_direct_only,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            peer::not_while_stopping,
+        ))
 }
 
 /// The routes reached without a sign-in: the OAuth redirect targets and the Pubky Ring sign-in
@@ -1012,14 +1016,77 @@ pub fn bind_error(listen: &str, e: &std::io::Error) -> String {
 
 /// Serve on an already bound listener (tests bind port 0).
 pub async fn serve_listener(state: Arc<NodeState>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+    serve_listener_until(state, listener, std::future::pending()).await
+}
+
+/// How long requests being answered get to finish once the node is told to stop. Connections
+/// that stay open by design (the event stream, audio to a player) are not waited for beyond it:
+/// they end when the process does.
+pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`serve_listener`] until `stop` resolves (the node was asked to stop): no new connection is
+/// taken here and no new request on any of the node's listeners ([`NodeState::begin_stop`]),
+/// requests being answered, on this listener or another, get [`STOP_GRACE`] to finish, those
+/// that have not by then are ended ([`NodeState::end_requests`]), and the call returns.
+/// Connections still open then (the event stream, audio to a player) are left to end with the
+/// process.
+pub async fn serve_listener_until(
+    state: Arc<NodeState>,
+    listener: tokio::net::TcpListener,
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     // The page's files, hashed and gzipped before the first page load asks for them
     tokio::task::spawn_blocking(assets::prepare);
+    let app = router(state.clone());
+    serve_router_until(state, listener, app, stop).await
+}
+
+/// [`serve_listener_until`] for `app`, which carries the node's own layers (`router`).
+pub(crate) async fn serve_router_until(
+    state: Arc<NodeState>,
+    listener: tokio::net::TcpListener,
+    app: Router,
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let (told, mut was_told) = tokio::sync::watch::channel(false);
     // Peer addresses: the renderer answers LAN peers only (peer.rs)
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
+    let served = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown({
+            let state = state.clone();
+            async move {
+                stop.await;
+                // Every listener of this node, not only this one, stops taking requests
+                state.begin_stop();
+                let _ = told.send(true);
+            }
+        }),
+    );
+    let grace_over = async move {
+        // (an error: `stop` never resolved and the server ended by itself)
+        if was_told.wait_for(|t| *t).await.is_ok() {
+            tokio::time::sleep(STOP_GRACE).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    // Done when this listener's connections are, and no request is being answered on another
+    // of the node's listeners either (remote access has its own): those get the same time
+    let all_done = async {
+        let served = served.await;
+        state.requests_done().await;
+        served
+    };
+    tokio::select! {
+        r = all_done => r?,
+        () = grace_over => {
+            state.end_requests();
+            tracing::info!("requests not answered within the grace period were ended; open streams end with the node");
+        }
+    }
     Ok(())
 }
 
