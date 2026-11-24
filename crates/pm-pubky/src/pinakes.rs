@@ -768,18 +768,6 @@ impl PinakesClient {
         Ok(out)
     }
 
-    pub async fn lookup_ids(&self, ids: &[String]) -> Result<Vec<Card>, PinakesError> {
-        let mut out = Vec::new();
-        for chunk in ids.chunks(LOOKUP_CHUNK) {
-            let url = self.url("/resources/lookup");
-            let body = serde_json::json!({ "ids": chunk });
-            let resp = self.send(|| self.http.post(&url).json(&body)).await?;
-            let cards: Vec<Card> = Self::json(resp).await?;
-            out.extend(cards);
-        }
-        Ok(out)
-    }
-
     /// One card for one URI, or `None` if Pinakes has not seen it.
     pub async fn card_for_uri(&self, uri: &str) -> Result<Option<Card>, PinakesError> {
         Ok(self.lookup(&[uri.to_string()]).await?.into_iter().next())
@@ -880,39 +868,6 @@ impl PinakesClient {
         }
         let resp = self.send(|| self.http.post(&url).json(&body)).await?;
         Self::json(resp).await
-    }
-
-    /// `POST /v1/changes/lookup` with `{"uris": […]}` and an optional `since`,
-    /// the shape of the next core release (answers §2). On the previous
-    /// version the body is rejected (400) and this falls back to
-    /// [`changes_for_uris`](Self::changes_for_uris) with `since` defaulting
-    /// to `now-30d`.
-    pub async fn changes_lookup_uris(
-        &self,
-        uris: &[String],
-        since: Option<&str>,
-        cursor: Option<i64>,
-        limit: Option<usize>,
-    ) -> Result<ChangePage, PinakesError> {
-        let url = self.url("/changes/lookup");
-        let mut body = serde_json::json!({ "uris": uris });
-        if let Some(s) = since {
-            body["since"] = s.into();
-        }
-        if let Some(c) = cursor {
-            body["cursor"] = c.into();
-        }
-        if let Some(l) = limit {
-            body["limit"] = (l.min(MAX_LIMIT)).into();
-        }
-        let resp = self.send(|| self.http.post(&url).json(&body)).await?;
-        match Self::json(resp).await {
-            Err(PinakesError::BadRequest(_)) => {
-                tracing::debug!("uris body not accepted by this Pinakes yet; falling back to ids");
-                self.changes_for_uris(uris, since.unwrap_or("now-30d")).await
-            }
-            other => other,
-        }
     }
 
     /// Changes for URIs: one lookup to map URIs to ids, then the changes.

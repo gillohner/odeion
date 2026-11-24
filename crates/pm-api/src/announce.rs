@@ -143,14 +143,13 @@ pub(crate) async fn announce(
         if !(u.starts_with("http://") || u.starts_with("https://") || u.starts_with('/')) {
             return Err(ApiError::bad_request("uri is an http(s) URL or a file path"));
         }
-        // A listener's clip is a public web link, fetched only there (no files, no LAN)
+        // A listener's clip is a public web link, fetched only there (no files, no LAN); an app
+        // password's a web link on the home network or beyond
         if caller.role != crate::accounts::Role::Owner {
             if !(u.starts_with("http://") || u.starts_with("https://")) {
-                return Err(crate::accounts::refused(
-                    "a listener announces a web link, not a file",
-                ));
+                return Err(crate::accounts::refused("announce a web link, not a file"));
             }
-            crate::accounts::check_listener_item(&mut QueueItem::new(u))?;
+            crate::accounts::check_item(&caller, &mut QueueItem::new(u))?;
         }
     }
     if let Some(v) = req.volume_percent {
@@ -203,9 +202,7 @@ pub(crate) async fn announce(
     if let Some(u) = uri {
         let mut it = QueueItem::new(u);
         it.title = Some(req.title.clone().unwrap_or_else(|| "Announcement".into()));
-        if caller.role != crate::accounts::Role::Owner {
-            it.limit = Some(pm_zones::FetchLimit::PUBLIC);
-        }
+        it.limit = crate::accounts::fetch_limit(&caller);
         it.by = crate::accounts::Who::of(&caller).by();
         items.push(it);
     }

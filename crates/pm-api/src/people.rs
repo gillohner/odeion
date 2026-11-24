@@ -207,6 +207,26 @@ pub fn reports_of(s: &NodeState, key: &str) -> Option<String> {
         .and_then(|p| p.reports)
 }
 
+/// The stored roster, for a change to it: empty when none is stored yet, an error when what is
+/// stored can't be read (a damaged setting, or one a newer version wrote). Unlike [`load`], never
+/// an empty roster in its place: a change built on that would store a list without everyone the
+/// unread one holds.
+fn load_for_change(s: &NodeState) -> Result<Roster, ApiError> {
+    let stored = s.library.lock().expect("library poisoned").get_setting(SETTING)?;
+    let Some(json) = stored else {
+        return Ok(Roster::default());
+    };
+    serde_json::from_str(&json).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "the people list can't be read, so it is left as it is (a newer version may have \
+                 written it: update the node, or restore a backup): {e}"
+            ),
+        )
+    })
+}
+
 fn store(s: &NodeState, r: &Roster) -> Result<(), ApiError> {
     s.library
         .lock()
@@ -223,7 +243,7 @@ async fn update<T>(
     f: impl FnOnce(&mut Roster) -> Result<T, ApiError>,
 ) -> Result<(T, Roster), ApiError> {
     let _one = s.roster.lock().await;
-    let mut r = load(s);
+    let mut r = load_for_change(s)?;
     let before = r.clone();
     let out = f(&mut r)?;
     if r != before {
@@ -342,6 +362,8 @@ async fn finish_previous_removal(s: &NodeState, key: &str, started: u64) -> Resu
     if let Some(_removing) = cleanup {
         crate::accounts::forget_person(s, key).await?;
     }
+    // Whatever an earlier removal left is gone now (or nothing was): no longer "did not finish"
+    note_unfinished(s, key, false);
     Ok(())
 }
 
@@ -397,7 +419,8 @@ async fn used_tokens(s: &NodeState) -> Result<Vec<(String, String)>, ApiError> {
 /// then added to the roster as it is by then.
 async fn reconcile(s: &NodeState) -> Result<Roster, ApiError> {
     let started = access_started(s);
-    let r = load(s);
+    // (Checked: a list that can't be read is said, never shown or changed as an empty one)
+    let r = load_for_change(s)?;
     if r.invites.iter().all(|i| i.token.is_none()) || s.bundled_homeserver().is_none() {
         return Ok(r);
     }
@@ -456,6 +479,9 @@ pub struct PersonView {
     pub storage_quota_mb: Option<Value>,
     /// Devices signed in to the music service with their own token.
     pub sessions: usize,
+    /// Those sign-ins, newest first (`DELETE /v1/people/{key}/sign-ins/{id}` ends one).
+    #[serde(default)]
+    pub sign_ins: Vec<crate::accounts::SignIn>,
     /// Bytes their files take on the bundled homeserver, counted in its files folder when the node
     /// has it (`[homeserver] files_dir`); `None` otherwise.
     pub used_bytes: Option<u64>,
@@ -497,16 +523,56 @@ pub struct PeopleView {
     pub invites: Vec<InviteView>,
     /// The bundled homeserver as a whole (users, disk used): `GET /v1/homeserver/bundled`.
     pub homeserver: crate::bundled::BundledStatus,
+    /// The keys of people whose removal did not finish (the setting `people.unfinished`):
+    /// removing them again finishes it. Left out when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unfinished: Vec<String>,
+}
+
+/// The setting that keeps the keys of people whose removal did not finish (a JSON list): a
+/// removal can fail after the person is off the list, and then only this says that something of
+/// theirs is still on the node. Kept so the page can offer Remove again after a reload or a
+/// restart; the newest [`UNFINISHED_MAX`].
+const UNFINISHED: &str = "people.unfinished";
+const UNFINISHED_MAX: usize = 50;
+
+/// The keys of people whose removal did not finish.
+pub(crate) fn unfinished(lib: &pm_library::Library) -> Vec<String> {
+    lib.get_setting(UNFINISHED)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+        .unwrap_or_default()
+}
+
+/// Notes that `key`'s removal did not finish (`open`), or that nothing of theirs is left to
+/// remove. Best effort: the removal's own answer already says what happened.
+fn note_unfinished(s: &NodeState, key: &str, open: bool) {
+    let lib = s.library.lock().expect("library poisoned");
+    let mut keys = unfinished(&lib);
+    let had = keys.iter().any(|k| k == key);
+    if had == open {
+        return;
+    }
+    keys.retain(|k| k != key);
+    if open {
+        keys.push(key.to_string());
+        if keys.len() > UNFINISHED_MAX {
+            keys.remove(0);
+        }
+    }
+    let written = if keys.is_empty() {
+        lib.delete_setting(UNFINISHED).map(|_| ())
+    } else {
+        lib.set_setting(UNFINISHED, &serde_json::to_string(&keys).expect("serializes"))
+    };
+    if let Err(e) = written {
+        tracing::warn!("people: the list of removals that did not finish was not written: {e}");
+    }
 }
 
 async fn homeserver_key(s: &NodeState) -> Result<String, ApiError> {
-    let info = admin(s, Method::GET, "/info", None).await?;
-    info["public_key"].as_str().map(str::to_string).ok_or_else(|| {
-        ApiError::new(
-            StatusCode::BAD_GATEWAY,
-            "the bundled homeserver has no public key",
-        )
-    })
+    crate::bundled::key(s).await
 }
 
 fn invite_link(hs: &str, token: &str) -> String {
@@ -562,8 +628,11 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<PeopleVie
         } else {
             None
         };
+        let sign_ins = crate::accounts::sign_ins(&s, &crate::accounts::Whose::Person(p.key.clone()), None)
+            .unwrap_or_default();
         people.push(PersonView {
             sessions: crate::accounts::sessions_of(&s, &p.key),
+            sign_ins,
             person: p,
             storage_quota_mb: quota,
             used_bytes,
@@ -578,6 +647,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<PeopleVie
             .map(|i| invite_view(i, hs.as_deref()))
             .collect(),
         homeserver,
+        unfinished: unfinished(&s.library.lock().expect("library poisoned")),
     }))
 }
 
@@ -713,7 +783,7 @@ pub(crate) async fn change(
     let started = access_started(&s);
     // An already listed person's revocation (Music off) needn't wait for a homeserver invite
     // lookup. Every other change first turns used invites into people, as it always has.
-    let mut r = load(&s);
+    let mut r = load_for_change(&s)?;
     if b.music != Some(false) || !r.people.iter().any(|p| p.key == key) {
         r = reconcile(&s).await?;
     }
@@ -795,6 +865,30 @@ pub(crate) async fn change(
     Ok(Json(out))
 }
 
+/// `DELETE /v1/people/{key}/sign-ins/{id}`: end one sign-in of a person's (as `GET /v1/people`
+/// lists them). Its token stops working at once; their other sign-ins and their music access stay.
+pub(crate) async fn end_sign_in(
+    State(s): State<Arc<NodeState>>,
+    Path((key, id)): Path<(String, String)>,
+) -> ApiResult<Value> {
+    let whose = crate::accounts::Whose::Person(valid_key(&key)?);
+    if !crate::accounts::end_sign_in(&s, &whose, &id)? {
+        return Err(ApiError::not_found("no such sign-in"));
+    }
+    Ok(Json(serde_json::json!({"ended": 1})))
+}
+
+/// `DELETE /v1/people/{key}/sign-ins`: end every sign-in of a person's. They keep music access
+/// and can log in again with Pubky Ring.
+pub(crate) async fn end_sign_ins(
+    State(s): State<Arc<NodeState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Value> {
+    let whose = crate::accounts::Whose::Person(valid_key(&key)?);
+    let ended = crate::accounts::end_sign_ins(&s, &whose, None)?;
+    Ok(Json(serde_json::json!({"ended": ended})))
+}
+
 /// `DELETE /v1/people/{key}`: remove a person. Everything the node keeps for them goes: their own
 /// streaming sign-ins, tokens (signed out everywhere), preferences and devices. Someone with an
 /// account on this node's homeserver stays listed, without music access, so that account stays
@@ -804,12 +898,20 @@ pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<Stri
     // Own the entire removal independently of the request, including the interval between
     // revoking access and waiting for the operation lock. Cancelling the request can't abandon
     // cleanup or release the membership barrier early.
-    tokio::spawn(remove_person(s, key)).await.map_err(|_| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "the removal task did not finish: try again",
-        )
-    })?
+    // A removal that did not finish is remembered ([`note_unfinished`]), so Remove again is
+    // still offered after a reload or a restart (the person may be off the list already). The
+    // removal notes its own outcome while it holds the person's membership lock; only a task
+    // that broke off is noted here
+    match tokio::spawn(remove_person(s.clone(), key.clone())).await {
+        Ok(done) => done,
+        Err(_) => {
+            note_unfinished(&s, &key, true);
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the removal task did not finish: try again",
+            ))
+        }
+    }
 }
 
 async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
@@ -854,7 +956,9 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
         revoke_access(&s, &key);
         Ok(Removing::new(&s, &key))
     })
-    .await?;
+    .await
+    // (nobody by that key and nothing of theirs left: nothing to finish, nothing remembered)
+    .inspect_err(|e| note_unfinished(&s, &key, e.status != StatusCode::NOT_FOUND))?;
     // Their problem reports go while no one can give them music again: a re-add waits for the
     // membership lock held here, a restore for the removal marker. The roster is held around the
     // inbox delete as housekeeping holds it (roster, then inbox), and the library lock isn't held
@@ -878,6 +982,9 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
     if let Err(e) = crate::accounts::forget_person_locked(&s, &key).await {
         discovery_problems.insert(0, e.message);
     }
+    // Noted while the membership lock is held: two removals of one person can't note in the
+    // wrong order
+    note_unfinished(&s, &key, !discovery_problems.is_empty());
     if !discovery_problems.is_empty() {
         return Err(ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,

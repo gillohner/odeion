@@ -77,15 +77,6 @@ impl CastOutput {
         self
     }
 
-    /// What the current session has seen (resumes, takeover), if one is open.
-    pub fn session_status(&self) -> Option<crate::session::SessionStatus> {
-        self.session
-            .lock()
-            .expect("session")
-            .as_ref()
-            .map(Session::status)
-    }
-
     pub fn device(&self) -> &Device {
         &self.device
     }

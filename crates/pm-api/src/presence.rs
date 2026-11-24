@@ -120,17 +120,18 @@ impl Presence {
 }
 
 /// Who this caller is for presence: their Pubky key, [`OWNER`] for an owner without one; a
-/// party guest is nobody.
+/// party guest and an app password are nobody.
 pub fn who(c: &Caller) -> Option<String> {
     match c.role {
-        Role::Guest => None,
+        // An app password plays for the owner, but no one listens through it
+        Role::Guest | Role::App => None,
         Role::Owner => Some(c.key.clone().unwrap_or_else(|| OWNER.into())),
         Role::Listener => c.key.clone(),
     }
 }
 
-/// The zone a request plays on, when it is one that makes the caller the zone's listener
-/// (queueing, transport, loading, radio); `None` for anything else.
+/// The zone segment of a request that makes the caller the zone's listener (queueing, transport,
+/// loading, radio), from its path or the route the router matched; `None` for anything else.
 pub fn zone_written(method: &axum::http::Method, path: &str) -> Option<String> {
     if *method == axum::http::Method::GET || *method == axum::http::Method::HEAD {
         return None;
@@ -499,6 +500,8 @@ async fn end_group(s: &Arc<NodeState>, a: &Along) -> Result<ZoneState, ApiError>
         h.transport == Transport::Stopped && h.queue_version == a.home_version
     };
     let st = if untouched {
+        // The music goes back home in the hands the group was in (listens.rs)
+        crate::listens::zone_follows(s, &a.group, &a.host_zone);
         move_music(&group, &home, true).await
     } else {
         group.stop();
@@ -510,6 +513,16 @@ async fn end_group(s: &Arc<NodeState>, a: &Along) -> Result<ZoneState, ApiError>
         host_plays(s, &a.host_zone, &a.host, since);
     }
     Ok(st)
+}
+
+/// Whether the zone `group` is a listen-along group.
+pub fn is_along(s: &NodeState, group: &str) -> bool {
+    s.presence
+        .along
+        .lock()
+        .expect("presence lock")
+        .iter()
+        .any(|a| a.group == group)
 }
 
 fn take_along(s: &NodeState, group: &str) -> Option<Along> {
@@ -666,6 +679,9 @@ pub async fn join(
     mine.stop();
     let _ = tokio::time::timeout(Duration::from_secs(5), mine.wait_stopped()).await;
     let regroup = existing.is_some();
+    // The group plays the host's music: its plays are whose the host zone's were (listens.rs).
+    // Before the music moves, so the song that starts there is judged by it
+    crate::listens::zone_follows(&s, &host_zone.id().0, &group.id().0);
     let st = move_music(&host_zone, &group, regroup).await;
     if !regroup {
         along.home_version = host_zone.state().queue_version;
@@ -739,6 +755,8 @@ pub async fn leave(
             return Ok(Json(end_group(&s, &along).await?));
         }
     };
+    // The group as it is rebuilt plays the same music, in the same hands (listens.rs)
+    crate::listens::zone_follows(&s, &group.id().0, &next.id().0);
     let st = move_music(&group, &next, true).await;
     along.group = next.id().0.clone();
     host_plays(&s, &along.group, &along.host, since);

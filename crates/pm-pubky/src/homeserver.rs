@@ -14,7 +14,8 @@
 //! behind the `json` feature.
 
 use crate::config::Network;
-use crate::schemas::{Activity, Bookmark, MusicPost, Playlist, Review, Visibility};
+use crate::public_reads::PublicReads;
+use crate::schemas::{Bookmark, MusicPost, Visibility};
 use pubky::Pubky;
 pub use pubky::PubkySession;
 /// A Pubky key (a person's or a homeserver's), for callers that don't depend on `pubky` themselves.
@@ -106,7 +107,7 @@ pub const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60
 /// A response's body, refused unread when it says it is over `max` bytes and given up as soon
 /// as more than `max` arrive (a body need not say its length), or when nothing arrives for
 /// `stall` ([`STALL_TIMEOUT`]).
-async fn read_capped(
+pub(crate) async fn read_capped(
     mut resp: reqwest::Response,
     max: usize,
     stall: std::time::Duration,
@@ -386,6 +387,11 @@ async fn list_page_within(
     max: usize,
 ) -> Result<Option<Page<String>>, HomeserverError> {
     let resp = request.send().await.map_err(pubky::Error::from)?;
+    list_page_of(resp, max).await
+}
+
+/// [`list_page_within`] for an answer already in.
+async fn list_page_of(resp: reqwest::Response, max: usize) -> Result<Option<Page<String>>, HomeserverError> {
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
@@ -419,6 +425,16 @@ fn parse_list_page(body: &[u8]) -> Result<Page<String>, HomeserverError> {
     Ok(page)
 }
 
+/// An answer that isn't a success, as the SDK's error for it (a 404 is [`is_not_found`]).
+fn server_status(resp: reqwest::Response) -> Result<reqwest::Response, HomeserverError> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let message = status.canonical_reason().unwrap_or("Unknown Error").to_string();
+    Err(pubky::Error::from(pubky::errors::RequestError::Server { status, message }).into())
+}
+
 /// Why a write stopped: the caller's session was replaced by another sign-in meanwhile.
 pub const REPLACED: &str = "another sign-in replaced this session";
 
@@ -431,6 +447,12 @@ pub struct NodeHomeserver {
     /// The relay inbox Ring sign-ins go through; `None`: pubky's public relay. Tests that run
     /// against a real homeserver bring a local relay, so a slow public relay can't fail them.
     auth_relay: Option<url::Url>,
+    /// On the public network, reads of other people's public data go through these clients:
+    /// no redirect followed, no local address reached ([`crate::public_reads`]).
+    public: Option<PublicReads>,
+    /// The node's signed-in owner: their own public data is read through the SDK, also by
+    /// calls that pass no session (sync, comments, tag moves). Clones share it.
+    owner: std::sync::Arc<std::sync::RwLock<Option<PublicKey>>>,
 }
 
 /// Pubky clients built in this process: each one starts its own DHT node and keeps its own
@@ -451,11 +473,7 @@ impl NodeHomeserver {
             Network::Mainnet => Pubky::new()?,
             Network::Testnet => Pubky::testnet()?,
         };
-        Ok(Self {
-            pubky,
-            network,
-            auth_relay: None,
-        })
+        Ok(Self::from_pubky_on(pubky, network))
     }
 
     /// Wrap a client the caller configured (timeouts, testnet host), on the public network.
@@ -465,11 +483,43 @@ impl NodeHomeserver {
 
     /// Wrap a client the caller configured, saying which network it is on.
     pub fn from_pubky_on(pubky: Pubky, network: Network) -> Self {
+        let public = (network == Network::Mainnet).then(|| PublicReads::new(pubky.client().pkarr()));
         Self {
             pubky,
             network,
             auth_relay: None,
+            public,
+            owner: Default::default(),
         }
+    }
+
+    /// The node's signed-in owner (`None` after sign-out): reads of their own public data keep
+    /// the SDK's path, as with their session.
+    pub fn set_owner(&self, owner: Option<PublicKey>) {
+        *self.owner.write().expect("owner lock") = owner;
+    }
+
+    /// Let reads of other people's data from `homeserver` (z32) reach local addresses: the
+    /// node's bundled homeserver, whose record names one by design. Redirects are still never
+    /// followed. Clones share the list.
+    pub fn allow_local_homeserver(&self, homeserver: &str) {
+        if let Some(p) = &self.public {
+            p.allow_local_homeserver(homeserver);
+        }
+    }
+
+    /// The clients for a public read of `user`'s data: `None` on a testnet, and for the
+    /// signed-in person's own data, by their session or as the node's owner ([`Self::set_owner`]):
+    /// their homeserver is theirs to trust.
+    fn public_reads_for(&self, user: &PublicKey, session: Option<&PubkySession>) -> Option<&PublicReads> {
+        if session.is_some_and(|s| s.public_key() == *user) || self.is_owner(user) {
+            return None;
+        }
+        self.public.as_ref()
+    }
+
+    fn is_owner(&self, user: &PublicKey) -> bool {
+        self.owner.read().expect("owner lock").as_ref() == Some(user)
     }
 
     /// Ring sign-ins and sign-ups started here go through the relay inbox `inbox` (e.g.
@@ -852,7 +902,19 @@ impl NodeHomeserver {
         } else {
             None
         };
+        let reads = match visibility {
+            Visibility::Public => self.public_reads_for(user, session),
+            Visibility::Private => None,
+        };
         list_within(bounds, dir, |cursor| async move {
+            if let Some(reads) = reads {
+                return within(OBJECT_TIMEOUT, async {
+                    let url = list_url(user.clone(), dir, shallow, bounds.newest_first, cursor.as_deref())?;
+                    let resp = reads.get(&self.pubky, user, dir, url.query()).await?;
+                    list_page_of(resp, capped.unwrap_or(usize::MAX)).await
+                })
+                .await;
+            }
             if let Some(max) = capped {
                 return within(OBJECT_TIMEOUT, async {
                     let (client, owner, bearer) = match (visibility, session) {
@@ -922,7 +984,10 @@ impl NodeHomeserver {
     ) -> Result<Vec<u8>, HomeserverError> {
         within(OBJECT_TIMEOUT, async {
             let resp = match (visibility, session) {
-                (Visibility::Public, _) => self.pubky.public_storage().get((user, path)).await?,
+                (Visibility::Public, _) => match self.public_reads_for(user, session) {
+                    Some(reads) => server_status(reads.get(&self.pubky, user, path, None).await?)?,
+                    None => self.pubky.public_storage().get((user, path)).await?,
+                },
                 (Visibility::Private, Some(session)) => session.storage().get(path).await?,
                 (Visibility::Private, None) => return Err(HomeserverError::NeedsSession),
             };
@@ -1135,51 +1200,6 @@ impl NodeHomeserver {
         Ok((moved, kept))
     }
 
-    /// Another user's public playlists.
-    pub async fn read_playlists_of(
-        &self,
-        user_z32: &str,
-    ) -> Result<Vec<(String, Playlist)>, HomeserverError> {
-        Ok(self
-            .read_music_posts(user_z32, Visibility::Public, None, ListBounds::SHARED)
-            .await?
-            .into_iter()
-            .filter_map(|(p, post)| post.as_playlist().cloned().map(|pl| (p, pl)))
-            .collect())
-    }
-
-    /// The signed-in user's private playlists.
-    pub async fn read_private_playlists(
-        &self,
-        session: &PubkySession,
-    ) -> Result<Vec<(String, Playlist)>, HomeserverError> {
-        let me = session.public_key().to_string();
-        Ok(self
-            .read_music_posts(&me, Visibility::Private, Some(session), ListBounds::OWNER)
-            .await?
-            .into_iter()
-            .filter_map(|(p, post)| post.as_playlist().cloned().map(|pl| (p, pl)))
-            .collect())
-    }
-
-    pub async fn read_reviews_of(&self, user_z32: &str) -> Result<Vec<(String, Review)>, HomeserverError> {
-        Ok(self
-            .read_music_posts(user_z32, Visibility::Public, None, ListBounds::SHARED)
-            .await?
-            .into_iter()
-            .filter_map(|(p, post)| post.as_review().cloned().map(|r| (p, r)))
-            .collect())
-    }
-
-    pub async fn read_activity_of(&self, user_z32: &str) -> Result<Vec<(String, Activity)>, HomeserverError> {
-        Ok(self
-            .read_music_posts(user_z32, Visibility::Public, None, ListBounds::SHARED)
-            .await?
-            .into_iter()
-            .filter_map(|(p, post)| post.as_activity().cloned().map(|a| (p, a)))
-            .collect())
-    }
-
     /// Write any object to its session-relative path (`Meta::path`).
     pub async fn write_object<T: Serialize + Sync + ?Sized>(
         &self,
@@ -1189,16 +1209,6 @@ impl NodeHomeserver {
     ) -> Result<(), HomeserverError> {
         session.storage().put_json(path, object).await?;
         Ok(())
-    }
-
-    /// Write a music post where its `Meta` says (private or public folder).
-    pub async fn write_post(
-        &self,
-        session: &PubkySession,
-        post: &MusicPost,
-        meta: &crate::schemas::Meta,
-    ) -> Result<(), HomeserverError> {
-        self.write_object(session, &meta.path, &post.post).await
     }
 
     /// Delete an object the user wrote (remove a playlist, retract a review).
@@ -1355,7 +1365,8 @@ impl NodeHomeserver {
         Ok(())
     }
 
-    /// Download a private file into `dest` as it arrives (no whole file in memory), no faster
+    /// Download a private file into a new file `dest` (an error when it is there) as it arrives
+    /// (no whole file in memory), no faster
     /// than `bytes_per_sec` when set; `progress` hears each chunk's size and returns `false` to
     /// stop (the partial file is removed). Returns the bytes written.
     pub async fn download_private_to(
@@ -1369,7 +1380,7 @@ impl NodeHomeserver {
         use tokio::io::AsyncWriteExt;
         let io = |e: std::io::Error| HomeserverError::Transport(format!("{}: {e}", dest.display()));
         let mut resp = within(STALL_TIMEOUT, async { Ok(session.storage().get(path).await?) }).await?;
-        let mut file = tokio::fs::File::create(dest).await.map_err(io)?;
+        let mut file = new_download_file(dest).await.map_err(io)?;
         let start = tokio::time::Instant::now();
         let mut written: u64 = 0;
         // No limit on the whole download (a big file at a paced rate takes long), only on a stall
@@ -2327,6 +2338,46 @@ mod object_tests {
             "read {} bytes of the one that didn't",
             sent[2]
         );
+    }
+}
+
+/// The file a download is written into: a new one only, never one that is there or what a link
+/// there leads to (`AlreadyExists` then, and that file is not touched).
+async fn new_download_file(dest: &std::path::Path) -> std::io::Result<tokio::fs::File> {
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .await
+}
+
+#[cfg(test)]
+mod download_file_tests {
+    use super::new_download_file;
+
+    /// A download never opens a file that is there, nor through a link there: neither is cut
+    /// short, and the error says it is there.
+    #[tokio::test]
+    async fn a_download_never_writes_into_a_file_that_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let there = dir.path().join("1.part");
+        std::fs::write(&there, b"kept").unwrap();
+        let e = new_download_file(&there).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&there).unwrap(), b"kept");
+        #[cfg(unix)]
+        {
+            let elsewhere = dir.path().join("elsewhere.flac");
+            std::fs::write(&elsewhere, b"a song").unwrap();
+            let link = dir.path().join("2.part");
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+            let e = new_download_file(&link).await.unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(&elsewhere).unwrap(), b"a song");
+        }
+        let fresh = dir.path().join("3.part");
+        drop(new_download_file(&fresh).await.unwrap());
+        assert!(fresh.is_file());
     }
 }
 

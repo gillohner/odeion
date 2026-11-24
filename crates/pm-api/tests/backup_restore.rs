@@ -839,8 +839,9 @@ async fn a_plain_backup_keeps_no_way_in() {
     );
 }
 
-/// The owner's browser sessions and device sign-ins never go into a backup, and a restore keeps
-/// the node's own: a backup from before Make a new token can't bring back a sign-in that ended.
+/// The owner's browser sessions, device sign-ins and app passwords never go into a backup, and a
+/// restore keeps the node's own: a backup from before Make a new token can't bring back a sign-in
+/// that ended, nor one from before an app password was removed that password.
 #[tokio::test]
 async fn a_restore_never_brings_back_ended_sign_ins() {
     let dir = tempfile::tempdir().unwrap();
@@ -854,6 +855,7 @@ async fn a_restore_never_brings_back_ended_sign_ins() {
         lib.set_setting("accounts.device_sessions", &list("device"))
             .unwrap();
     }
+    let app = pm_api::app_passwords::make(&a, "Home Assistant").unwrap();
     let pass = ["fixture", "passphrase"].join("-");
     let (plain, _) = pm_api::backup::make(&a, None).unwrap();
     let (locked, _) = pm_api::backup::make(&a, Some(&pass)).unwrap();
@@ -862,6 +864,11 @@ async fn a_restore_never_brings_back_ended_sign_ins() {
         for n in ["browser", "device"] {
             assert!(!raw.contains(&hash(n)), "{n} sign-in in the {name} backup");
         }
+        assert!(!raw.contains(&app.password), "app password in the {name} backup");
+        assert!(
+            !raw.contains("Home Assistant"),
+            "app password in the {name} backup"
+        );
     }
     // Make a new token ended them; the older backup is restored: they stay ended
     {
@@ -869,9 +876,180 @@ async fn a_restore_never_brings_back_ended_sign_ins() {
         lib.delete_setting("accounts.owner_sessions").unwrap();
         lib.delete_setting("accounts.device_sessions").unwrap();
     }
+    // A new app password after the backup: the restore keeps it, the node's own
+    let later = pm_api::app_passwords::make(&a, "Symfonium").unwrap();
+    assert!(pm_api::app_passwords::remove(&a, &app.listed.id).unwrap());
     let (st, r) = restore(&router(a.clone()), &locked, Some(&pass)).await;
     assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(
+        pm_api::app_passwords::list(&a).unwrap(),
+        vec![later.listed.clone()],
+        "the node's own app passwords, as they were"
+    );
     let lib = a.library.lock().unwrap();
     assert_eq!(lib.get_setting("accounts.owner_sessions").unwrap(), None);
     assert_eq!(lib.get_setting("accounts.device_sessions").unwrap(), None);
+}
+
+/// A listener's sign-ins are the node's own too: none goes into a backup, one that ended stays
+/// ended after an older backup is restored, and one made since the backup keeps working. Who may
+/// use them is still the restored people list's to say.
+#[tokio::test]
+async fn a_restore_keeps_listeners_sign_ins_as_the_node_has_them() {
+    const ANN: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+    const BEN: &str = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("a");
+    std::fs::create_dir_all(&data).unwrap();
+    let db = data.join("library.db");
+    // A node with a token, so that listeners sign in at all
+    let a = NodeState::new(
+        NodeSettings {
+            name: "a".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: Vec::new(),
+            art_dir: data.join("art"),
+            mirror_dir: data.join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: Some("fixture-owner".into()),
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    let person =
+        |key: &str| serde_json::json!({"key": key, "access": "music", "music_enabled": true, "added_at": 1});
+    let people = |keys: &[&str]| {
+        let list: Vec<_> = keys.iter().map(|k| person(k)).collect();
+        a.library
+            .lock()
+            .unwrap()
+            .set_setting("people", &serde_json::json!({"people": list}).to_string())
+            .unwrap();
+    };
+    let app = router(a.clone());
+    let me = |token: String| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder()
+                .uri("/v1/me")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            send(&app, req).await.0
+        }
+    };
+    let restore_as_owner = |bytes: Vec<u8>, pass: Option<String>| {
+        let app = app.clone();
+        async move {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/v1/restore")
+                .header("authorization", "Bearer fixture-owner")
+                .header("content-type", "application/octet-stream");
+            if let Some(p) = pass {
+                req = req.header(pm_api::backup::PASSPHRASE_HEADER, p);
+            }
+            send(&app, req.body(Body::from(bytes)).unwrap()).await
+        }
+    };
+    people(&[ANN]);
+    let ended = pm_api::accounts::mint(&a, ANN).unwrap();
+    let kept = pm_api::accounts::mint(&a, ANN).unwrap();
+    assert_eq!(me(ended.clone()).await, StatusCode::OK);
+
+    // Neither kind of backup holds a listener's sign-in
+    let pass = ["fixture", "passphrase"].join("-");
+    let (plain, _) = pm_api::backup::make(&a, None).unwrap();
+    let (locked, _) = pm_api::backup::make(&a, Some(&pass)).unwrap();
+    let stored = |lib: &Library| lib.get_setting("accounts.tokens").unwrap();
+    let hashes: Vec<String> =
+        serde_json::from_str::<Vec<serde_json::Value>>(&stored(&a.library.lock().unwrap()).unwrap())
+            .unwrap()
+            .iter()
+            .map(|t| t["hash"].as_str().unwrap().to_string())
+            .collect();
+    assert_eq!(hashes.len(), 2);
+    for (name, b) in [("plain", &plain), ("locked", &locked)] {
+        let bytes = library_db_of(b);
+        let raw = String::from_utf8_lossy(&bytes);
+        for h in &hashes {
+            assert!(
+                !raw.contains(h.as_str()),
+                "a listener's sign-in in the {name} backup"
+            );
+        }
+        let lib_file = dir.path().join(format!("{name}.db"));
+        std::fs::write(&lib_file, &bytes).unwrap();
+        let copy = Library::open(&lib_file).unwrap();
+        assert_eq!(stored(&copy), None, "listeners' sign-ins in the {name} backup");
+        assert!(
+            copy.get_setting("people").unwrap().is_some(),
+            "the people list is in the {name} backup"
+        );
+    }
+
+    // After the backup: Ann logs out of one browser, and Ben is added and signs in
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/v1/me/token")
+        .header("authorization", format!("Bearer {ended}"))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(send(&app, req).await.0, StatusCode::OK);
+    assert_eq!(me(ended.clone()).await, StatusCode::UNAUTHORIZED);
+    people(&[ANN, BEN]);
+    let bens = pm_api::accounts::mint(&a, BEN).unwrap();
+    assert_eq!(me(bens.clone()).await, StatusCode::OK);
+
+    // A backup made before the list was left out still holds one: what goes in from it is this
+    // node's list, or none where there is no node to keep it from
+    {
+        let old = Library::open(&dir.path().join("older.db")).unwrap();
+        old.set_setting(
+            "accounts.tokens",
+            r#"[{"hash":"fixture-older-hash","key":"k","created_at":1}]"#,
+        )
+        .unwrap();
+        let here = a.library.lock().unwrap();
+        pm_api::backup::keep_this_nodes(&here, &old).unwrap();
+        assert_eq!(stored(&old), stored(&here), "this node's list goes in");
+        assert!(stored(&old).is_some());
+        pm_api::backup::forget_node_own(&old).unwrap();
+        assert_eq!(stored(&old), None, "no node to keep it from: none");
+    }
+
+    // The older backup is restored, without its sign-ins and then with them
+    let (st, out) = restore_as_owner(plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&out));
+    assert_eq!(me(kept.clone()).await, StatusCode::OK);
+    let (st, out) = restore_as_owner(locked, Some(pass.clone())).await;
+    assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&out));
+    assert_eq!(
+        me(ended).await,
+        StatusCode::UNAUTHORIZED,
+        "a sign-in that ended stays ended"
+    );
+    assert_eq!(
+        me(kept).await,
+        StatusCode::OK,
+        "a sign-in the node has keeps working"
+    );
+    // Ben is not in the restored people list: his sign-in opens nothing
+    assert_eq!(me(bens.clone()).await, StatusCode::UNAUTHORIZED);
+    // Until a people list that has him is back (a newer backup restored: written here as that
+    // restore leaves it). Adding him again in People ends what he had and he logs in anew
+    people(&[ANN, BEN]);
+    assert_eq!(me(bens).await, StatusCode::OK);
 }

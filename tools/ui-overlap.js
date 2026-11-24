@@ -78,7 +78,7 @@ const inspect = () => {
 (async () => {
   const api = async (path) => { const r = await fetch(BASE + '/v1' + path, { headers: TOKEN ? { authorization: 'Bearer ' + TOKEN } : {} }); return r.ok ? r.json() : null; };
   const albums = (await api('/library/albums?limit=1')) || []; const artists = (await api('/library/artists')) || []; const tracks = ((await api('/library/tracks?limit=1')) || { tracks: [] }).tracks;
-  const screens = [['Home', '/'], ['Albums', '/albums'], ['Artists', '/artists'], ['Tracks', '/tracks'], ['Genres', '/genres'], ['Playlists', '/playlists'], ['Favourites', '/favourites'], ['Queue', '/queue'], ['Zones', '/zones'], ['Sources', '/sources'], ['Radio', '/radio'], ['Search', '/search?q=love&in=library'],
+  const screens = [['Home', '/'], ['Albums', '/albums'], ['Artists', '/artists'], ['Tracks', '/tracks'], ['Genres', '/genres'], ['Collections', '/playlists'], ['Bookmarks', '/favourites'], ['Queue', '/queue'], ['Zones', '/zones'], ['Sources', '/sources'], ['Radio', '/radio'], ['Search', '/search?q=love&in=library'],
     ...(albums[0] ? [['Album', `/album/lib-${albums[0].id}`]] : []), ...(artists[0] ? [['Artist', `/artist/lib-${artists[0].id}`]] : []), ...(tracks[0] ? [['Song', `/song/lib-${tracks[0].id}`]] : []),
     ['Settings', '/settings'], ...SETTINGS.map((t) => [`Settings › ${t}`, `/settings/${t}`]),
     // Every Sources tab (STEWARD-UX-SOURCES.md)

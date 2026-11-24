@@ -1,7 +1,8 @@
 //! Where a request came from. The renderer routes take no token (renderers never do), so they
 //! answer LAN peers only: a private or loopback source address on the node's own listener, not
 //! through iroh ([`Remote`], its own listener) and not through a proxy or tunnel (Cloudflare,
-//! a reverse proxy: any forwarding header). A node without an API token answers as the owner
+//! a reverse proxy: any forwarding header), and never to a page of another site through a
+//! visitor's browser. A node without an API token answers as the owner
 //! only to requests that did not come through iroh or a proxy.
 
 use crate::state::NodeState;
@@ -56,7 +57,9 @@ pub fn lan_peer(req: &Request) -> Option<IpAddr> {
     lan.then_some(ip)
 }
 
-/// Layer for the renderer routes: LAN peers only, and the handlers learn who asked.
+/// Layer for the renderer routes: LAN peers only, never a page of another site through a
+/// visitor's browser (in every auth mode: these routes take no token), and the handlers learn
+/// who asked.
 pub async fn lan_only(mut req: Request, next: Next) -> Response {
     let Some(ip) = lan_peer(&req) else {
         return (
@@ -65,8 +68,51 @@ pub async fn lan_only(mut req: Request, next: Next) -> Response {
         )
             .into_response();
     };
+    if from_another_site(req.headers(), req.uri()) {
+        return (
+            StatusCode::FORBIDDEN,
+            "the renderer does not answer requests from other websites",
+        )
+            .into_response();
+    }
     req.extensions_mut().insert(pm_renderer::Peer(ip));
     next.run(req).await
+}
+
+/// Layer for the zones' renderer routes: [`lan_only`], and only at an address, never by a name
+/// a DNS server elsewhere answers for ([`renderer_host`]): a page on another site whose name
+/// is made to resolve to the node (DNS rebinding) is the same origin as the node to the
+/// browser, and could otherwise send SOAP calls without a preflight.
+pub async fn renderer_only(req: Request, next: Next) -> Response {
+    if !renderer_host(req.headers(), req.uri()) {
+        return (
+            StatusCode::FORBIDDEN,
+            "the renderer answers at the node's address only",
+        )
+            .into_response();
+    }
+    lan_only(req, next).await
+}
+
+/// Whether a renderer request names the node as control points do (the SSDP `LOCATION`, an
+/// address): an IP address, `localhost`, a single-label LAN name, or a name under a suffix only
+/// local networks use (`.local`, `.home.arpa`, `.internal`, `.lan`, `.localdomain`); or no host
+/// at all (not a browser). Names in public DNS, which another site's owner can point at any
+/// address, are refused.
+pub fn renderer_host(h: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    match named_host(h, uri) {
+        Ok(None) => true,
+        Ok(Some(host)) => {
+            let name = host.name.trim_end_matches('.');
+            name.parse::<IpAddr>().is_ok()
+                || name == "localhost"
+                || !name.contains('.')
+                || [".local", ".home.arpa", ".internal", ".lan", ".localdomain"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+        }
+        Err(()) => false,
+    }
 }
 
 /// Layer for the whole API: a node without an API token answers only requests that reached its
@@ -94,6 +140,26 @@ pub async fn tokenless_direct_only(State(s): State<Arc<NodeState>>, req: Request
         }
     }
     next.run(req).await
+}
+
+/// Layer for every route on every listener: a node that was asked to stop takes no new request
+/// ([`NodeState::begin_stop`]), and a request it is still answering when the time for that is
+/// over is ended where it waits ([`NodeState::end_requests`]): the handler is dropped and does
+/// not go on while the node winds down. (Work a handler gave to a thread or to a task of its
+/// own is not ended by this.)
+pub async fn not_while_stopping(State(s): State<Arc<NodeState>>, req: Request, next: Next) -> Response {
+    let stopping = || (StatusCode::SERVICE_UNAVAILABLE, "the node is stopping").into_response();
+    if s.is_stopping() {
+        return stopping();
+    }
+    // (counted while the handler runs; a body that is sent afterwards, a stream, is not)
+    let _in_flight = s.request_began();
+    tokio::select! {
+        // (first: once the time is over, a handler that is ready in the same instant is ended too)
+        biased;
+        () = s.requests_ended() => stopping(),
+        answer = next.run(req) => answer,
+    }
 }
 
 /// A host and port as a request names them (`Host`, or the URI's authority as HTTP/2 sends it).
@@ -143,6 +209,23 @@ fn named_host(h: &HeaderMap, uri: &axum::http::Uri) -> Result<Option<Named>, ()>
     }
 }
 
+/// Whether a renderer's GENA NOTIFY names the node as the node told it to: as
+/// [`renderer_host`] allows, or by the host of `callback_base` (the node's `public_url`, which
+/// starts every CALLBACK URL the node hands out). A page on another site whose name was made to
+/// resolve to the node names its own host and is refused.
+pub fn gena_host(h: &HeaderMap, uri: &axum::http::Uri, callback_base: &str) -> bool {
+    if renderer_host(h, uri) {
+        return true;
+    }
+    let Ok(Some(host)) = named_host(h, uri) else {
+        return false;
+    };
+    url::Url::parse(callback_base)
+        .ok()
+        .and_then(|u| u.host_str().map(|n| n.trim_end_matches('.').to_ascii_lowercase()))
+        .is_some_and(|n| n == host.name.trim_end_matches('.'))
+}
+
 /// A name that only ever means this machine: `localhost`, 127.0.0.0/8, `::1`. (Not other
 /// `*.localhost` names: those go through a resolver.)
 fn is_loopback_name(name: &str) -> bool {
@@ -177,6 +260,22 @@ pub fn cross_site(h: &HeaderMap, method: &axum::http::Method, path: &str) -> boo
     let opens = matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD);
     let page = !NOT_PAGES.iter().any(|p| path.starts_with(p));
     !(navigation && opens && page)
+}
+
+/// A request a browser made for a page that is not this node: `Sec-Fetch-Site` says
+/// `cross-site` or `same-site` (another port of this machine is the same site), or the `Origin`
+/// is not the host the request names (`null` included). Renderers and control points send
+/// neither header.
+pub fn from_another_site(h: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    let site = h.get("sec-fetch-site").map(|v| v.to_str().unwrap_or("?"));
+    if matches!(site, Some(s) if s != "same-origin" && s != "none") {
+        return true;
+    }
+    match origin_of(h) {
+        Ok(None) => false,
+        Ok(Some(o)) => !matches!(named_host(h, uri), Ok(Some(host)) if origin_is(&o, &host)),
+        Err(()) => true,
+    }
 }
 
 /// The `Origin` a browser sent, parsed; `Err` for one that names no site (`null`) or can't be read.
@@ -478,6 +577,129 @@ mod tests {
         }
     }
 
+    /// A request the node is still answering when the time to finish is over is ended there:
+    /// it is answered with 503 and its handler is dropped where it waits.
+    #[tokio::test]
+    async fn a_request_still_being_answered_after_the_grace_period_is_ended() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        /// Says when the handler that holds it is gone.
+        struct Gone(Arc<AtomicBool>);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let s = crate::tests::state(dir.path(), None).await;
+        let (went_on, gone) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (started, mut has_started) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let app = axum::Router::new()
+            .route(
+                "/slow",
+                axum::routing::get({
+                    let (went_on, gone) = (went_on.clone(), gone.clone());
+                    move || async move {
+                        let _gone = Gone(gone);
+                        let _ = started.send(());
+                        // (far longer than the test: only the end of the grace period ends it)
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        went_on.store(true, Ordering::SeqCst);
+                        "done"
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                s.clone(),
+                not_while_stopping,
+            ));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (stop, asked) = tokio::sync::oneshot::channel::<()>();
+        let served = tokio::spawn(crate::serve_router_until(s.clone(), l, app, async move {
+            let _ = asked.await;
+        }));
+        let slow = tokio::spawn(reqwest::get(format!("http://{addr}/slow")));
+        tokio::time::timeout(Duration::from_secs(30), has_started.recv())
+            .await
+            .expect("the request is being answered");
+        assert!(!gone.load(Ordering::SeqCst));
+        let asked_at = Instant::now();
+        stop.send(()).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(30), served).await;
+        assert!(matches!(ended, Ok(Ok(Ok(())))), "the server returned: {ended:?}");
+        assert!(
+            asked_at.elapsed() >= crate::STOP_GRACE,
+            "the request got its time: {:?}",
+            asked_at.elapsed()
+        );
+        let answer = tokio::time::timeout(Duration::from_secs(10), slow)
+            .await
+            .expect("answered when the time was over")
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer.status().as_u16(), 503);
+        assert!(gone.load(Ordering::SeqCst), "the handler was dropped");
+        assert!(!went_on.load(Ordering::SeqCst), "and did not go on");
+    }
+
+    /// A request being answered on another listener of the node (remote access has its own)
+    /// when the node is told to stop gets its time too: the stop waits for it, within the
+    /// grace period, and it is answered in full.
+    #[tokio::test]
+    async fn a_request_on_another_listener_gets_its_time_to_finish() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let s = crate::tests::state(dir.path(), None).await;
+        let (started, mut has_started) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let layer = || axum::middleware::from_fn_with_state(s.clone(), not_while_stopping);
+        let other = axum::Router::new()
+            .route(
+                "/slow",
+                axum::routing::get(move || async move {
+                    let _ = started.send(());
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    "done"
+                }),
+            )
+            .layer(layer());
+        let other_l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_addr = other_l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(other_l, other).await });
+        // The listener that is told to stop has nothing to answer
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "here" }))
+            .layer(layer());
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (stop, asked) = tokio::sync::oneshot::channel::<()>();
+        let served = tokio::spawn(crate::serve_router_until(s.clone(), l, app, async move {
+            let _ = asked.await;
+        }));
+        let slow = tokio::spawn(reqwest::get(format!("http://{other_addr}/slow")));
+        tokio::time::timeout(Duration::from_secs(30), has_started.recv())
+            .await
+            .expect("the request is being answered");
+        let asked_at = Instant::now();
+        stop.send(()).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(30), served).await;
+        assert!(matches!(ended, Ok(Ok(Ok(())))), "the server returned: {ended:?}");
+        let took = asked_at.elapsed();
+        assert!(
+            took >= Duration::from_millis(300),
+            "the stop waited for it: {took:?}"
+        );
+        assert!(took < crate::STOP_GRACE, "and no longer than it took: {took:?}");
+        // What the node does next (`stop_for_exit`) ends nothing: the request was answered
+        s.end_requests();
+        let answer = tokio::time::timeout(Duration::from_secs(10), slow)
+            .await
+            .expect("answered")
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer.status().as_u16(), 200);
+        assert_eq!(answer.text().await.unwrap(), "done");
+    }
+
     /// Requests another site's page makes reach a node without a token only as top-level
     /// navigations to its pages (a sign-in callback); never its API, Subsonic or proxy, GET
     /// included, and never in a frame.
@@ -553,5 +775,54 @@ mod tests {
             !cross_site(&HeaderMap::new(), &Method::GET, "/v1/info"),
             "no Sec-Fetch headers"
         );
+    }
+
+    /// The renderer refuses what a browser sends for another site's page, and nothing a control
+    /// point or the node's own page sends.
+    #[test]
+    fn the_renderer_knows_a_browser_request_for_another_site() {
+        let uri: axum::http::Uri = "/upnp/zone/z/ctl/avt".parse().unwrap();
+        for refused in [
+            vec![("host", "192.168.1.5:7788"), ("sec-fetch-site", "cross-site")],
+            vec![("host", "192.168.1.5:7788"), ("sec-fetch-site", "same-site")],
+            vec![("host", "192.168.1.5:7788"), ("sec-fetch-site", "something-new")],
+            vec![("host", "192.168.1.5:7788"), ("origin", "http://evil.example")],
+            vec![
+                ("host", "192.168.1.5:7788"),
+                ("origin", "http://192.168.1.5:3000"),
+            ],
+            vec![("host", "192.168.1.5:7788"), ("origin", "null")],
+            vec![("origin", "http://192.168.1.5:7788")],
+        ] {
+            assert!(from_another_site(&heads(&refused), &uri), "{refused:?}");
+        }
+        for ok in [
+            vec![("host", "192.168.1.5:7788")],
+            vec![],
+            vec![("host", "192.168.1.5:7788"), ("sec-fetch-site", "same-origin")],
+            vec![("host", "192.168.1.5:7788"), ("sec-fetch-site", "none")],
+            vec![
+                ("host", "192.168.1.5:7788"),
+                ("origin", "http://192.168.1.5:7788"),
+            ],
+        ] {
+            assert!(!from_another_site(&heads(&ok), &uri), "{ok:?}");
+        }
+        // A name another site's owner can point at the node is refused (DNS rebinding)
+        for ok in [
+            "192.168.1.5:7788",
+            "[fd00::5]:7788",
+            "localhost:7788",
+            "nuc:7788",
+            "odeion.local:7788",
+            "nas.home.arpa:7788",
+            "node.lan",
+        ] {
+            assert!(renderer_host(&heads(&[("host", ok)]), &uri), "{ok}");
+        }
+        assert!(renderer_host(&HeaderMap::new(), &uri), "no host: not a browser");
+        for refused in ["evil.example:7788", "192.168.1.5.nip.io:7788", "[::1"] {
+            assert!(!renderer_host(&heads(&[("host", refused)]), &uri), "{refused}");
+        }
     }
 }

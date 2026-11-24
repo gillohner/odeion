@@ -78,7 +78,7 @@ const rowReport = () => [...document.querySelectorAll('#main .tracks[data-list="
           await fx.go(page, '/favourites');
           await page.waitForSelector('#main .tracks[data-list="fav"] .track', { timeout: 8000 });
           const fav = await page.evaluate(() => { const r = document.querySelector('#main .tracks[data-list="fav"] .track'); return { by: r.querySelector('.by').innerText.trim(), col: getComputedStyle(r.querySelector('.album-col')).display }; });
-          check(/· Journey$/.test(fav.by) && fav.col === 'none', `${T}: Favourites' rows too (${fav.by}; column ${fav.col})`);
+          check(/· Journey$/.test(fav.by) && fav.col === 'none', `${T}: Bookmarks' rows too (${fav.by}; column ${fav.col})`);
         }
         check(!state.errors.length, `${T}: no page errors (${state.errors.join(' | ')})`);
       } finally { await context.close(); }

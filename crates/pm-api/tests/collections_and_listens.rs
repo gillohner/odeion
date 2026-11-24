@@ -445,15 +445,20 @@ async fn only_the_owners_zone_plays_are_listens() {
     // Plays a song on the zone as `who`; waits until the zone's event task has taken the play
     // (it is in the node's play history), so the listen decision is made
     let mut plays = 0;
-    let mut play = async |who: &str| {
-        let (st, r) = call_as(
-            &app,
-            who,
-            "POST",
-            "/v1/zones/null-output/queue",
-            Some(serde_json::json!({"track_ids": [track_id], "replace": true, "play": true})),
-        )
-        .await;
+    // (`again`: starts the queue as it is from its first song, instead of queueing one)
+    let mut play_as = async |who: &str, again: bool| {
+        let (uri, body) = if again {
+            (
+                "/v1/zones/null-output/transport",
+                serde_json::json!({"action": "play", "index": 0}),
+            )
+        } else {
+            (
+                "/v1/zones/null-output/queue",
+                serde_json::json!({"track_ids": [track_id], "replace": true, "play": true}),
+            )
+        };
+        let (st, r) = call_as(&app, who, "POST", uri, Some(body)).await;
         assert_eq!(st, StatusCode::OK, "{r}");
         plays += 1;
         for _ in 0..500 {
@@ -479,12 +484,22 @@ async fn only_the_owners_zone_plays_are_listens() {
             .filter(|l| l["id"].is_string())
             .count()
     };
-    play(OWNER).await;
+    play_as(OWNER, false).await;
     assert_eq!(listens().await, 1, "the owner's play");
-    play(&listener).await;
+    play_as(&listener, false).await;
     assert_eq!(listens().await, 1, "a listener's play is not the owner's");
-    play(OWNER).await;
+    play_as(OWNER, false).await;
     assert_eq!(listens().await, 2, "the owner took the zone back");
+    // The song a listener queued stays theirs when the owner starts it again
+    play_as(&listener, false).await;
+    play_as(OWNER, true).await;
+    assert_eq!(
+        listens().await,
+        2,
+        "a song a listener queued is not the owner's listen, whoever starts it"
+    );
+    play_as(OWNER, false).await;
+    assert_eq!(listens().await, 3, "the owner's own song counts again");
     let (st, p) = call_as(
         &app,
         OWNER,
@@ -494,6 +509,6 @@ async fn only_the_owners_zone_plays_are_listens() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{p}");
-    play(OWNER).await;
-    assert_eq!(listens().await, 2, "a zone with a party open mixes guests' songs");
+    play_as(OWNER, false).await;
+    assert_eq!(listens().await, 3, "a zone with a party open mixes guests' songs");
 }

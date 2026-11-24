@@ -160,6 +160,8 @@ async fn a_saved_queue_with_a_sign_in_is_cleaned_at_start() {
     let s = state(dir.path(), Some("s3cret")).await;
     let app = router(s.clone());
     let listener = let_in(&s, LISTENER);
+    let ha = crate::app_passwords::make(&s, "Home Assistant").unwrap().password;
+    let other = crate::app_passwords::make(&s, "Symfonium").unwrap();
     let (_, zones) = call_as(&app, "s3cret", "/v1/zones").await;
     let zid = zones[0]["id"].as_str().unwrap().to_string();
     let key = format!("queue.{zid}");
@@ -170,7 +172,8 @@ async fn a_saved_queue_with_a_sign_in_is_cleaned_at_start() {
             {"id": 2, "uri": "/v1/library/tracks/2/file?token=s3cret", "image": "/v1/library/albums/2/cover?token=pmo_browser"},
             {"id": 3, "uri": "https://radio.example/live?token=theirs"},
             {"id": 4, "uri": "https://other-node.example/v1/library/tracks/9/file?token=pmo_theirs"},
-            {"id": 5, "uri": "track:5", "image": "http://localhost:7788/v1/library/albums/5/cover?token=pmo_phone"}
+            {"id": 5, "uri": "track:5", "image": "http://localhost:7788/v1/library/albums/5/cover?token=pmo_phone"},
+            {"id": 6, "uri": "track:6", "image": format!("/v1/library/albums/6/cover?token={ha}")}
         ],
         "repeat": "off", "radio": false, "shuffle": false, "order": []
     });
@@ -190,11 +193,18 @@ async fn a_saved_queue_with_a_sign_in_is_cleaned_at_start() {
     assert_eq!(
         cleaned,
         accounts::CleanedQueues {
-            items: 3,
+            items: 4,
             owner_sessions_ended: true,
             api_token_found: true,
             listener_tokens_ended: 1,
+            app_passwords_ended: 1,
         }
+    );
+    // The app password that was readable there is gone, the other one stays
+    assert_eq!(
+        crate::app_passwords::list(&s).unwrap(),
+        vec![other.listed.clone()],
+        "only the app whose password was in the queue needs a new one"
     );
     let setting = |k: &str| {
         s.library
@@ -205,7 +215,7 @@ async fn a_saved_queue_with_a_sign_in_is_cleaned_at_start() {
             .unwrap_or_default()
     };
     let json = setting(&key);
-    for t in ["s3cret", listener.as_str()] {
+    for t in ["s3cret", listener.as_str(), ha.as_str()] {
         assert!(!json.contains(t), "{t}: {json}");
     }
     assert!(

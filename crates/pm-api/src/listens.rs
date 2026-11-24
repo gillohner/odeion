@@ -15,12 +15,17 @@
 //! itself (`visibility: node`). The node's own play counts (Home's recently and most played)
 //! keep working whatever the setting.
 //!
-//! **Whose play it is.** The node does not know who queued each song on a zone, so a zone play
-//! is the owner's listen only when no party is open on that zone and the owner, not a listener,
-//! was the last to change the zone's queue or transport (`plays_are_the_owners`). Party guests'
-//! and listeners' plays never land in the owner's history, private or public. Two limits:
+//! **Whose play it is.** A zone play is the owner's listen only when no one else queued the song
+//! (a song a listener queued carries their key, wherever it plays: `play_is_the_owners`), no
+//! party is open on that zone, and the owner, not a listener, was the last to change the zone's
+//! queue or transport (`plays_are_the_owners`). A zone music was moved to is in the hands of
+//! whoever moved it, a listen-along group in the hands its host's zone was in, and radio that
+//! continues a queue is queued by whoever queued its last song. A listener's songs never land in
+//! the owner's history, private or public, and neither do a party's while the party is open on
+//! the zone (guests' songs carry no one: what is still waiting when the party ends plays as the
+//! zone's). Two limits:
 //! - the mark that a listener has a zone is kept in memory only: a node restart hands every
-//!   zone back to the owner;
+//!   zone back to the owner (a listener's own songs still carry their key);
 //! - only `/v1/zones/…` requests set it. Other controllers (the Subsonic jukebox, LMS players,
 //!   UPnP control points) don't, so their plays count as the owner's, as they are signed in
 //!   with the owner's credentials or sit on the owner's network.
@@ -135,12 +140,32 @@ pub(crate) fn zone_changed_by(s: &NodeState, zone: &str, owner: bool) {
 
 /// Whether a play on this zone goes into the owner's history: not while a party is open on it
 /// (guests' songs and the owner's are mixed), and not while a listener changed it last.
-pub(crate) fn plays_are_the_owners(s: &NodeState, zone: &str) -> bool {
+pub fn plays_are_the_owners(s: &NodeState, zone: &str) -> bool {
     !s.zones_in_listeners_hands
         .lock()
         .expect("zone hands")
         .contains(zone)
         && !crate::party::open_on(s, zone)
+}
+
+/// Whether this play of `item` on `zone` goes into the owner's history, Last.fm and ListenBrainz:
+/// the zone's plays are the owner's ([`plays_are_the_owners`]) and no one else queued the item.
+/// An item a listener queued carries their key and is never the owner's listen, wherever it
+/// plays and whoever pressed Play. An item that carries no one is the zone's: the owner's own, or
+/// one from a controller that counts as the owner (a UPnP control point, the Subsonic jukebox).
+pub fn play_is_the_owners(s: &NodeState, zone: &str, item: &pm_zones::QueueItem) -> bool {
+    item.by.is_none() && plays_are_the_owners(s, zone)
+}
+
+/// The music of `from` plays on `to` from now on (a listen-along group forms around it): `to` is
+/// in the same hands as `from`.
+pub(crate) fn zone_follows(s: &NodeState, from: &str, to: &str) {
+    let mut hands = s.zones_in_listeners_hands.lock().expect("zone hands");
+    if hands.contains(from) {
+        hands.insert(to.to_string());
+    } else {
+        hands.remove(to);
+    }
 }
 
 /// The zone a write request changes (`/v1/zones/{id}/…`), if any.

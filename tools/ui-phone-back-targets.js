@@ -105,13 +105,13 @@ async function noPush(page, selector, at, most) {
         await fx.go(page, '/playlist/c1');
         await page.waitForSelector('#main > .back');
         const pl = await reach(page, '#main > .back');
-        check(big(pl), `${at} playlist: Back takes a 44 px tap (${size(pl)})`);
-        check(await margins(page, '#main > .back') === '0px 14px', `${at} playlist: Back keeps its margins`);
-        await noPush(page, '#main > .back', `${at} playlist Back`, 51);
+        check(big(pl), `${at} collection: Back takes a 44 px tap (${size(pl)})`);
+        check(await margins(page, '#main > .back') === '0px 14px', `${at} collection: Back keeps its margins`);
+        await noPush(page, '#main > .back', `${at} collection Back`, 51);
         await page.screenshot({ path: path.join(SHOTS, `playlist-${at}.png`) });
         await tapReachEdge(page, '#main > .back');
         await page.waitForFunction(() => !location.pathname.startsWith('/playlist/'));
-        check(true, `${at} playlist: one edge tap goes back (${await page.evaluate(() => location.pathname)})`);
+        check(true, `${at} collection: one edge tap goes back (${await page.evaluate(() => location.pathname)})`);
 
         // An item page's Back, in the bar with its breadcrumbs.
         await fx.go(page, '/album/lib-7');
@@ -216,7 +216,7 @@ async function noPush(page, selector, at, most) {
         await page.locator('#main .srow a[href*="/album/"]').first().evaluate((a) => a.click());
         await page.waitForSelector('#main .pagebar > .back');
         const r = await oneLine(page, '#main .pagebar > .back');
-        check(r.text === LONG, `${at} album from a long-named playlist: Back reads the whole name (${r.text.slice(0, 30)}…)`);
+        check(r.text === LONG, `${at} album from a long-named collection: Back reads the whole name (${r.text.slice(0, 30)}…)`);
         check(r.labelHeight <= r.lh * 1.5, `${at} album: Back's name stays on one line (${r.labelHeight.toFixed(1)} px, line ${r.lh} px)`);
         check(r.cut, `${at} album: Back's name is cut with …`);
         check(r.left >= 0 && r.right <= width && r.wide <= 0, `${at} album: Back inside the screen, no sideways overflow (${r.left.toFixed(1)}–${r.right.toFixed(1)}, ${r.wide})`);
@@ -229,9 +229,9 @@ async function noPush(page, selector, at, most) {
         await page.waitForSelector('#main > .back');
         await page.locator('#main > .back').first().evaluate((b, t) => { const l = b.querySelector('.back-l') || [...b.childNodes].reverse().find((n) => n.nodeType === 3); l.textContent = t; }, `Results for “${LONG}”`);
         const p = await oneLine(page, '#main > .back');
-        check(p.labelHeight <= p.lh * 1.5 && p.cut, `${at} playlist: a long Back stays on one line, cut with … (${p.labelHeight.toFixed(1)} px)`);
-        check(p.left >= 0 && p.right <= width && p.wide <= 0, `${at} playlist: Back inside the screen (${p.left.toFixed(1)}–${p.right.toFixed(1)}, ${p.wide})`);
-        await noPush(page, '#main > .back', `${at} playlist under a long Back`, 51);
+        check(p.labelHeight <= p.lh * 1.5 && p.cut, `${at} collection: a long Back stays on one line, cut with … (${p.labelHeight.toFixed(1)} px)`);
+        check(p.left >= 0 && p.right <= width && p.wide <= 0, `${at} collection: Back inside the screen (${p.left.toFixed(1)}–${p.right.toFixed(1)}, ${p.wide})`);
+        await noPush(page, '#main > .back', `${at} collection under a long Back`, 51);
         check(!state.errors.length, `${at} long Back: no page errors (${state.errors.join('; ')})`);
       } finally { await context.close(); }
     }
