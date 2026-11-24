@@ -498,7 +498,7 @@ fn schema_to_upgrade(path: &Path) -> Option<(i64, Connection)> {
     if !std::fs::metadata(path).is_ok_and(|m| m.len() > 0) {
         return None;
     }
-    let conn = Connection::open(path).ok()?;
+    let mut conn = Connection::open(path).ok()?;
     conn.busy_handler(Some(wait_for_writer)).ok()?;
     let found = schema_version_of(&conn)?;
     let known = MIGRATIONS.last().map_or(0, |(v, _)| *v);
@@ -686,7 +686,7 @@ impl Library {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(mut conn: Connection) -> Result<Self> {
         // A scan writes from its own connection in batches of a few hundred files (and two scans
         // of large shares may run with the API writing too); a writer waits for the others instead
         // of failing with "database is locked".

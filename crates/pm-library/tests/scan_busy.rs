@@ -30,7 +30,7 @@ fn a_scan_loses_no_file_while_another_connection_writes() {
     let writer = {
         let (db, stop) = (db.clone(), stop.clone());
         std::thread::spawn(move || {
-            let conn = rusqlite::Connection::open(&db).unwrap();
+            let mut conn = rusqlite::Connection::open(&db).unwrap();
             conn.busy_handler(Some(|t| {
                 std::thread::sleep(std::time::Duration::from_millis(1));
                 t < 30_000
@@ -129,7 +129,7 @@ fn a_slow_read_never_keeps_another_writer_waiting() {
     let writer = {
         let (db, stop) = (db.clone(), stop.clone());
         std::thread::spawn(move || {
-            let conn = rusqlite::Connection::open(&db).unwrap();
+            let mut conn = rusqlite::Connection::open(&db).unwrap();
             conn.busy_handler(Some(|t| {
                 if LOCKED_SINCE.get().is_none() {
                     LOCKED_SINCE.set(Some(std::time::Instant::now()));
