@@ -2953,119 +2953,136 @@ fn legacy_pending_shelf(mut shelf: serde_json::Value) -> serde_json::Value {
     shelf
 }
 
+// Four scenarios of one legacy 32 MiB shelf, each its own test so that they run side by side
+// (one loop over all four held the test binary for 1.5-3 min on CI after every other test had ended).
 #[tokio::test]
 async fn pending_only_legacy_shelves_can_be_read_and_reduced_without_losing_other_intent() {
+    legacy_shelf_is_reduced(false, false).await;
+}
+
+#[tokio::test]
+async fn pending_only_legacy_shelves_can_be_read_and_deleted_without_losing_other_intent() {
+    legacy_shelf_is_reduced(false, true).await;
+}
+
+#[tokio::test]
+async fn pending_only_legacy_shelves_with_a_protected_checkpoint_are_reduced_without_losing_other_intent() {
+    legacy_shelf_is_reduced(true, false).await;
+}
+
+#[tokio::test]
+async fn pending_only_legacy_shelves_with_a_protected_checkpoint_are_deleted_without_losing_other_intent() {
+    legacy_shelf_is_reduced(true, true).await;
+}
+
+async fn legacy_shelf_is_reduced(protected_checkpoint: bool, delete: bool) {
     const CAP: usize = 32 * 1024 * 1024;
-    for protected_checkpoint in [false, true] {
-        for delete in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let (s, fake, ann, _) = node(dir.path());
-            fake.connected.lock().unwrap().insert(ANN.to_string());
-            let app = router(s.clone());
-            let mut uris = vec![SONG_A.to_string()];
-            uris.extend((0..40).map(|n| format!("https://example.com/{n}/{}", "a".repeat(900))));
-            let (st, made) = call(
-                &app,
-                &ann,
-                "POST",
-                "/v1/collections",
-                Some(serde_json::json!({
-                    "name":"Legacy collection", "description":"x", "uris":uris
-                })),
-            )
-            .await;
-            assert_eq!(st, StatusCode::OK, "{made}");
-            let mut shelf = legacy_pending_shelf(stored_shelf(&s));
-            let count = shelf["items"].as_array().unwrap().len();
-            let id = shelf["items"][1]["id"].as_str().unwrap().to_string();
-            fake.down.store(true, Ordering::SeqCst);
-            if protected_checkpoint {
-                // An older save-before-I/O release could persist a prepared first draft
-                // that fits, without reserving its 12-byte larger successful checkpoint.
-                // Keep that OTHER pending intent intact while reducing this collection.
-                let k = &mut shelf["items"][0];
-                let edit = k["id"].clone();
-                k["head"] = "".into();
-                k["writing"] = serde_json::json!({"edit":edit,"drafted":false,"published":false});
-                let grew = serde_json::to_vec(&shelf).unwrap().len() - (CAP - 8);
-                let d = shelf["items"][0]["playlist"]["description"]
-                    .as_str()
-                    .unwrap()
-                    .len();
-                assert!(d > grew);
-                shelf["items"][0]["playlist"]["description"] = "x".repeat(d - grew).into();
-                assert_eq!(serde_json::to_vec(&shelf).unwrap().len(), CAP - 8);
-            }
-            store_shelf(&s, &shelf);
-            if !protected_checkpoint {
-                let (st, list) = call(&app, &ann, "GET", "/v1/collections", None).await;
-                assert_eq!(st, StatusCode::OK, "an old shelf that fit must still load");
-                assert_eq!(list.as_array().unwrap().len(), count);
-                let saved = stored_shelf(&s);
-                assert!(serde_json::to_vec(&saved).unwrap().len() <= CAP);
-                assert!(saved["items"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|k| k.get("unshare").is_none()));
-                store_shelf(&s, &shelf); // Each mutation starts from the same old encoding.
-            }
-            fake.calls.lock().unwrap().clear();
-            let files = fake.files.lock().unwrap()[ANN].clone();
-            let (st, result) = call(
-                &app,
-                &ann,
-                if delete { "DELETE" } else { "PUT" },
-                &format!("/v1/collections/{id}"),
-                (!delete).then(|| serde_json::json!({"uris":[SONG_A]})),
-            )
-            .await;
-            assert_eq!(
-                st,
-                if delete {
-                    StatusCode::NO_CONTENT
-                } else {
-                    StatusCode::OK
-                },
-                "{result}"
-            );
-            if protected_checkpoint {
-                assert!(
-                    fake.calls.lock().unwrap().is_empty(),
-                    "form a bounded candidate before any I/O"
-                );
-            }
-            let saved = stored_shelf(&s);
-            assert!(serde_json::to_vec(&saved).unwrap().len() < CAP);
-            let by_id: std::collections::BTreeMap<_, _> = saved["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|k| (k["id"].as_str().unwrap(), k))
-                .collect();
-            assert_eq!(
-                by_id.len(),
-                count,
-                "even the offline deletion remains durable intent"
-            );
-            for before in shelf["items"].as_array().unwrap() {
-                let before_id = before["id"].as_str().unwrap();
-                if before_id != id {
-                    assert_eq!(by_id[before_id], before, "every other intent survives exactly");
-                }
-            }
-            let changed = by_id[id.as_str()];
-            assert_eq!(changed["pending"], true);
-            assert_eq!(changed["deleted"], delete);
-            if !delete {
-                assert_eq!(changed["playlist"]["items"].as_array().unwrap().len(), 1);
-            }
-            assert_eq!(fake.files.lock().unwrap()[ANN], files);
-            let (st, _) = call(&app, &ann, "GET", "/v1/collections", None).await;
-            assert_eq!(st, StatusCode::OK, "the reducing edit restores access");
-            assert_eq!(pending_count(&s), count);
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let mut uris = vec![SONG_A.to_string()];
+    uris.extend((0..40).map(|n| format!("https://example.com/{n}/{}", "a".repeat(900))));
+    let (st, made) = call(
+        &app,
+        &ann,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({
+            "name":"Legacy collection", "description":"x", "uris":uris
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{made}");
+    let mut shelf = legacy_pending_shelf(stored_shelf(&s));
+    let count = shelf["items"].as_array().unwrap().len();
+    let id = shelf["items"][1]["id"].as_str().unwrap().to_string();
+    fake.down.store(true, Ordering::SeqCst);
+    if protected_checkpoint {
+        // An older save-before-I/O release could persist a prepared first draft
+        // that fits, without reserving its 12-byte larger successful checkpoint.
+        // Keep that OTHER pending intent intact while reducing this collection.
+        let k = &mut shelf["items"][0];
+        let edit = k["id"].clone();
+        k["head"] = "".into();
+        k["writing"] = serde_json::json!({"edit":edit,"drafted":false,"published":false});
+        let grew = serde_json::to_vec(&shelf).unwrap().len() - (CAP - 8);
+        let d = shelf["items"][0]["playlist"]["description"]
+            .as_str()
+            .unwrap()
+            .len();
+        assert!(d > grew);
+        shelf["items"][0]["playlist"]["description"] = "x".repeat(d - grew).into();
+        assert_eq!(serde_json::to_vec(&shelf).unwrap().len(), CAP - 8);
+    }
+    store_shelf(&s, &shelf);
+    if !protected_checkpoint {
+        let (st, list) = call(&app, &ann, "GET", "/v1/collections", None).await;
+        assert_eq!(st, StatusCode::OK, "an old shelf that fit must still load");
+        assert_eq!(list.as_array().unwrap().len(), count);
+        let saved = stored_shelf(&s);
+        assert!(serde_json::to_vec(&saved).unwrap().len() <= CAP);
+        assert!(saved["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|k| k.get("unshare").is_none()));
+        store_shelf(&s, &shelf); // Each mutation starts from the same old encoding.
+    }
+    fake.calls.lock().unwrap().clear();
+    let files = fake.files.lock().unwrap()[ANN].clone();
+    let (st, result) = call(
+        &app,
+        &ann,
+        if delete { "DELETE" } else { "PUT" },
+        &format!("/v1/collections/{id}"),
+        (!delete).then(|| serde_json::json!({"uris":[SONG_A]})),
+    )
+    .await;
+    assert_eq!(
+        st,
+        if delete {
+            StatusCode::NO_CONTENT
+        } else {
+            StatusCode::OK
+        },
+        "{result}"
+    );
+    if protected_checkpoint {
+        assert!(
+            fake.calls.lock().unwrap().is_empty(),
+            "form a bounded candidate before any I/O"
+        );
+    }
+    let saved = stored_shelf(&s);
+    assert!(serde_json::to_vec(&saved).unwrap().len() < CAP);
+    let by_id: std::collections::BTreeMap<_, _> = saved["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| (k["id"].as_str().unwrap(), k))
+        .collect();
+    assert_eq!(
+        by_id.len(),
+        count,
+        "even the offline deletion remains durable intent"
+    );
+    for before in shelf["items"].as_array().unwrap() {
+        let before_id = before["id"].as_str().unwrap();
+        if before_id != id {
+            assert_eq!(by_id[before_id], before, "every other intent survives exactly");
         }
     }
+    let changed = by_id[id.as_str()];
+    assert_eq!(changed["pending"], true);
+    assert_eq!(changed["deleted"], delete);
+    if !delete {
+        assert_eq!(changed["playlist"]["items"].as_array().unwrap().len(), 1);
+    }
+    assert_eq!(fake.files.lock().unwrap()[ANN], files);
+    let (st, _) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(st, StatusCode::OK, "the reducing edit restores access");
+    assert_eq!(pending_count(&s), count);
 }
 
 #[tokio::test]
