@@ -546,6 +546,15 @@ fn noted_version(copy: &Path) -> Option<i64> {
         .ok()
 }
 
+/// Write `bytes` to `path` (made or emptied) and to disk, through the handle that wrote them
+/// (Windows flushes a file only for a handle that may write it).
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
 /// The schema version of the library file at `path`, read without changing it.
 fn file_schema_version(path: &Path) -> Option<i64> {
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
@@ -620,7 +629,10 @@ fn keep_copy_of(conn: &Connection, copy: &Path) -> Result<()> {
     drop(o.open(&part).map_err(io(&part))?);
     let made = (|| -> Result<()> {
         conn.execute("VACUUM INTO ?1", params![part.to_string_lossy()])?;
-        std::fs::File::open(&part)
+        // Through a write handle: Windows flushes a file only for a handle that may write it
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&part)
             .and_then(|f| f.sync_all())
             .map_err(io(&part))?;
         std::fs::rename(&part, copy).map_err(io(copy))?;
@@ -2000,8 +2012,7 @@ impl Library {
             } else {
                 // The note first, on disk, then the copy in place: an older copy left under the
                 // name (the copy failed, a stop between) is at another version than its note
-                std::fs::write(&note, found.to_string())
-                    .and_then(|()| std::fs::File::open(&note)?.sync_all())
+                write_synced(&note, found.to_string().as_bytes())
                     .map_err(|source| LibraryError::Io {
                         path: note.clone(),
                         source,
