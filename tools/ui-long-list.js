@@ -2,7 +2,7 @@
 // near, and nothing else changes. Real candidate assets on the fixture origin (tools/ui-fixture.js),
 // 1,200 songs:
 //   * a song row is content-visibility: auto, and a row far down is skipped while a row on screen
-//     is not;
+//     is not; the first 24 rows are drawn as they are put in, so a tap at once reaches a row's ⋯;
 //   * the list is exactly as long as its rows (the row's height is fixed), so the scrollbar and a
 //     jump to a far row are exact, and the far row is drawn when it is reached;
 //   * a far row's control takes the focus, and its row is drawn then;
@@ -27,7 +27,7 @@ const cost = async (browser, width, off) => {
   const cdp = await context.newCDPSession(page); await cdp.send('Performance.enable'); await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 });
   await fx.go(page, '/tracks'); await page.waitForFunction((n) => document.querySelectorAll('#main .track').length >= n, N, { timeout: 60000 }); await frames(page);
   const m = Object.fromEntries((await cdp.send('Performance.getMetrics')).metrics.map((x) => [x.name, x.value]));
-  const cv = await page.evaluate(() => getComputedStyle(document.querySelector('#main .track')).contentVisibility);
+  const cv = await page.evaluate(() => getComputedStyle(document.querySelectorAll('#main .track')[100]).contentVisibility);
   await context.close();
   if ((cv === 'auto') === !!off) throw new Error(`the rule is ${cv} with off=${!!off}`);
   return m.LayoutDuration + m.RecalcStyleDuration;
@@ -41,11 +41,12 @@ const cost = async (browser, width, off) => {
     await fx.go(page, '/tracks'); await page.waitForFunction((n) => document.querySelectorAll('#main .track').length >= n, N, { timeout: 60000 }); await frames(page);
     const a = await page.evaluate(() => {
       const rows = [...document.querySelectorAll('#main .track')]; const near = rows[1]; const far = rows[900];
+      const first = rows.slice(0, 24).every((r) => getComputedStyle(r).contentVisibility === 'visible');
       const seen = (row) => row.firstElementChild.checkVisibility({ contentVisibilityAuto: true });
       const h = near.getBoundingClientRect().height; const box = rows[0].parentElement;
-      return { n: rows.length, cv: getComputedStyle(near).contentVisibility, nearSeen: seen(near), farSeen: seen(far), h, span: rows[rows.length - 1].getBoundingClientRect().bottom - rows[0].getBoundingClientRect().top, farTop: far.getBoundingClientRect().top - rows[0].getBoundingClientRect().top, boxH: box.getBoundingClientRect().height };
+      return { n: rows.length, first, cv: getComputedStyle(rows[100]).contentVisibility, nearSeen: seen(near), farSeen: seen(far), h, span: rows[rows.length - 1].getBoundingClientRect().bottom - rows[0].getBoundingClientRect().top, farTop: far.getBoundingClientRect().top - rows[0].getBoundingClientRect().top, boxH: box.getBoundingClientRect().height };
     });
-    check(a.n === N && a.cv === 'auto', `${at}: ${a.n} song rows, each content-visibility: ${a.cv}`);
+    check(a.n === N && a.cv === 'auto' && a.first, `${at}: ${a.n} song rows, content-visibility: ${a.cv} but for the first 24, which are drawn as they come (${a.first})`);
     check(a.nearSeen === true && a.farSeen === false, `${at}: a row on screen is drawn, row 901 is skipped until it comes near (${a.nearSeen}, ${a.farSeen})`);
     check(Math.abs(a.span - N * a.h) < 1 && Math.abs(a.farTop - 900 * a.h) < 1, `${at}: the list is exactly as long as its rows (${a.span} = ${N} × ${a.h}; row 901 at ${a.farTop})`);
     // A jump to the far row is exact, and the row is drawn there
@@ -88,13 +89,26 @@ const cost = async (browser, width, off) => {
     // A row that follows a finger shows its label in the gap it leaves, outside its own box: drawn
     // (the same picture of the gap with and without the label's words must differ)
     if (width < 600) {
-      const gap = await page.evaluate(async () => { const row = document.querySelectorAll('#main .track')[2]; if (document.activeElement) document.activeElement.blur(); row.scrollIntoView({ block: 'center', behavior: 'instant' }); await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); row.classList.add('swiping'); row.dataset.swipeLabel = 'Play next'; row.style.transform = 'translateX(110px)'; const r = row.getBoundingClientRect(); return { cv: getComputedStyle(row).contentVisibility, x: Math.max(0, Math.round(r.left - 104)), y: Math.round(r.top + 8), w: 96, h: Math.round(r.height - 16) }; });
+      const gap = await page.evaluate(async () => { const row = document.querySelectorAll('#main .track')[30]; if (document.activeElement) document.activeElement.blur(); row.scrollIntoView({ block: 'center', behavior: 'instant' }); await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); row.classList.add('swiping'); row.dataset.swipeLabel = 'Play next'; row.style.transform = 'translateX(110px)'; const r = row.getBoundingClientRect(); return { cv: getComputedStyle(row).contentVisibility, x: Math.max(0, Math.round(r.left - 104)), y: Math.round(r.top + 8), w: 96, h: Math.round(r.height - 16) }; });
       const withLabel = await page.screenshot({ clip: { x: gap.x, y: gap.y, width: gap.w, height: gap.h } });
       await page.screenshot({ path: path.join(SHOTS, `swipe-label-${width}.png`) });
-      await page.evaluate(() => { document.querySelectorAll('#main .track')[2].dataset.swipeLabel = ''; });
+      await page.evaluate(() => { document.querySelectorAll('#main .track')[30].dataset.swipeLabel = ''; });
       const without = await page.screenshot({ clip: { x: gap.x, y: gap.y, width: gap.w, height: gap.h } });
-      await page.evaluate(() => { const row = document.querySelectorAll('#main .track')[2]; row.classList.remove('swiping'); delete row.dataset.swipeLabel; row.style.transform = ''; });
+      await page.evaluate(() => { const row = document.querySelectorAll('#main .track')[30]; row.classList.remove('swiping'); delete row.dataset.swipeLabel; row.style.transform = ''; });
       check(gap.cv === 'visible' && !withLabel.equals(without), `${at}: a row that follows a finger draws its label in the gap it leaves (content-visibility: ${gap.cv}; the gap's picture ${withLabel.equals(without) ? 'is the same without the words' : 'changes with the words'})`);
+    }
+    // A tap the instant Songs puts its rows in reaches the first row's ⋯ (its insides are drawn then;
+    // before, the tap landed on the row itself)
+    {
+      await page.evaluate(() => document.getElementById('main').scrollTo({ top: 0, behavior: 'instant' })); await frames(page);
+      const spot = await page.evaluate(() => { const b = document.querySelector('#main .track [data-act="more"]'); const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+      await page.evaluate(() => { history.pushState({}, '', '/albums'); dispatchEvent(new PopStateEvent('popstate')); });
+      await page.waitForFunction(() => !document.querySelector('#main .track'));
+      await page.evaluate((p) => { window.__hit = null; const mo = new MutationObserver(() => { const row = document.querySelector('#main .track'); if (!row || window.__hit) return; const el = document.elementFromPoint(p.x, p.y); window.__hit = { more: !!(el && el.closest('[data-act="more"]')), what: el ? `${el.tagName.toLowerCase()}.${el.className && el.className.baseVal == null ? el.className : ''}` : null }; mo.disconnect(); }); mo.observe(document.getElementById('main'), { childList: true, subtree: true }); }, spot);
+      await page.evaluate(() => { history.pushState({}, '', '/tracks'); dispatchEvent(new PopStateEvent('popstate')); });
+      await page.waitForFunction(() => !!window.__hit, null, { timeout: 8000 }).catch(() => {});
+      const hit = await page.evaluate(() => window.__hit);
+      check(!!hit && hit.more, `${at}: a tap the instant the rows are put in reaches the first row's ⋯ (${JSON.stringify(hit)})`);
     }
     check(!state.errors.length, `${at}: no page error (${state.errors.join(' | ') || 'none'})`);
     await context.close();
