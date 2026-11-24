@@ -70,7 +70,9 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
           const up = []; for (let e = b; e && e !== document.body; e = e.parentElement) up.push(e);
           const fades = up.flatMap((e) => e.getAnimations()).map((a) => a.finished.catch(() => {}));
           await Promise.race([Promise.all(fades), new Promise((ok) => setTimeout(ok, 3000))]);
-          return up.reduce((o, e) => o * Number(getComputedStyle(e).opacity), 1);
+          // (a row drawn again meanwhile: its new button)
+          const now = b.isConnected ? b : document.querySelector('.track [data-act="more"]'); if (!now) return 0;
+          let o = 1; for (let e = now; e && e !== document.body; e = e.parentElement) o *= Number(getComputedStyle(e).opacity); return o;
         }).catch(() => 0);
         check(op === 1, `${w}: a song row's ⋯ shows without hover (opacity ${op})`);
       }

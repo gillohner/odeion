@@ -110,7 +110,14 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
         performance.clearResourceTimings();
         const t0 = performance.now();
         document.querySelector(press).click();
-        await new Promise((ok) => { if (document.querySelector(want)) { ok(); return; } const mo = new MutationObserver(() => { if (document.querySelector(want)) { mo.disconnect(); ok(); } }); mo.observe(document.body, { childList: true, subtree: true }); });
+        // (a page that never comes, an error's Try again instead, fails after 5 s instead of hanging)
+        const came = await new Promise((ok) => {
+          if (document.querySelector(want)) { ok(true); return; }
+          const mo = new MutationObserver(() => { if (document.querySelector(want)) { mo.disconnect(); clearTimeout(late); ok(true); } });
+          const late = setTimeout(() => { mo.disconnect(); ok(false); }, 5000);
+          mo.observe(document.body, { childList: true, subtree: true });
+        });
+        if (!came) return null;
         // (drawn: the frame after the rows went in has had its style, layout and paint)
         await new Promise((ok) => requestAnimationFrame(() => setTimeout(ok, 0)));
         const total = performance.now() - t0;
@@ -119,17 +126,26 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
         return { total: Math.round(total), trip: Math.round(trip), page: Math.round(total - trip) };
       }, [press, want]);
       const firstLevel = await pageMs('.ctrow[data-cpath="/music"] [data-ccaret]', `.ctrow[data-cpath="/music/${artist(200)}"]`);
+      if (!firstLevel) throw new Error(`${W} the first 200 folders of /music did not come within 5 s`);
       const more = [];
-      for (let k = 1; k < 10; k++) { await p.waitForSelector('[data-cmore="/music"]:not([disabled])', { timeout: 5000 }); more.push(await pageMs('[data-cmore="/music"]', `.ctrow[data-cpath="/music/${artist(200 * (k + 1))}"]`)); }
+      for (let k = 1; k < 10; k++) {
+        await p.waitForSelector('[data-cmore="/music"]:not([disabled])', { timeout: 5000 });
+        const m = await pageMs('[data-cmore="/music"]', `.ctrow[data-cpath="/music/${artist(200 * (k + 1))}"]`);
+        if (!m) throw new Error(`${W} Show more's page ${k + 1} of /music did not come within 5 s`);
+        more.push({ ...m, rows: 200 * (k + 1) });
+      }
       check(await p.$$eval('.ctrow', (r) => r.length) === 2002 && !(await p.$('[data-cmore="/music"]')), `${W} 2 000 folders in one level, paged in`);
       // Each Show more draws the whole tree again, so a page takes longer the more rows are open,
       // and the last one (2 000 rows) follows the runner's speed: 0.5 s on a quiet machine, 1.0 to
       // 1.3 s on a busy CI runner for the same code. The 1 s budget is for the first level and the
-      // median page; the slowest page may take at most 2.5 times the median, so a page that grows
-      // faster than its rows (a redraw per row, a slow selector) still fails on any runner.
-      const pages = more.map((m) => m.page); const median = [...pages].sort((a, b) => a - b)[4];
+      // median page. A page that grows faster than its rows still fails on any runner: the time per
+      // row of the pages of 1 200 rows or more may be at most 1.5 times the median page's (a redraw
+      // that grows with the square of the rows gives 1.7 at the last page).
+      const pages = more.map((m) => m.page); const mid = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+      const median = mid(pages); const perRow = more.map((m) => m.page / m.rows); const perRowMid = mid(perRow);
+      const growth = Math.max(...perRow.filter((_, i) => more[i].rows >= 1200)) / Math.max(perRowMid, 0.01);
       const slowest = more.reduce((a, b) => (b.page > a.page ? b : a));
-      check(firstLevel.page < 1000 && median < 1000 && slowest.page <= 2.5 * Math.max(median, 100), `${W} each page of the level is quick (first ${firstLevel.page} ms, median ${median} ms, both within 1 s; slowest ${slowest.page} ms, within 2.5 times the median; every page ${pages.join(' ')}; with the mocked answer's trip ${firstLevel.total} and ${slowest.total} ms)`);
+      check(firstLevel.page < 1000 && median < 1000 && growth <= 1.5, `${W} each page of the level is quick (first ${firstLevel.page} ms, median ${median} ms, both within 1 s; slowest ${slowest.page} ms; time per row on the pages of 1 200 rows or more at most ${growth.toFixed(2)} times the median page's, within 1.5; every page ${pages.join(' ')}; in all, with the mocked answer's trip, ${firstLevel.total} and ${slowest.total} ms)`);
       // A tick with 2 000 rows: under 200 ms of work
       const tickMs = await p.evaluate(async (a) => { const r = document.querySelector(`.ctrow[data-cpath="/music/${a}"]`); const t1 = performance.now(); r.click(); await new Promise((ok) => requestAnimationFrame(() => ok())); return performance.now() - t1; }, artist(1));
       check(tickMs < 200, `${W} a tick among 2 000 rows takes ${Math.round(tickMs)} ms`);
