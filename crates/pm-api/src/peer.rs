@@ -1,7 +1,8 @@
 //! Where a request came from. The renderer routes take no token (renderers never do), so they
 //! answer LAN peers only: a private or loopback source address on the node's own listener, not
 //! through iroh ([`Remote`], its own listener) and not through a proxy or tunnel (Cloudflare,
-//! a reverse proxy: any forwarding header). A node without an API token answers as the owner
+//! a reverse proxy: any forwarding header), and never to a page of another site through a
+//! visitor's browser. A node without an API token answers as the owner
 //! only to requests that did not come through iroh or a proxy.
 
 use crate::state::NodeState;
@@ -56,7 +57,9 @@ pub fn lan_peer(req: &Request) -> Option<IpAddr> {
     lan.then_some(ip)
 }
 
-/// Layer for the renderer routes: LAN peers only, and the handlers learn who asked.
+/// Layer for the renderer routes: LAN peers only, never a page of another site through a
+/// visitor's browser (in every auth mode: these routes take no token), and the handlers learn
+/// who asked.
 pub async fn lan_only(mut req: Request, next: Next) -> Response {
     let Some(ip) = lan_peer(&req) else {
         return (
@@ -65,8 +68,51 @@ pub async fn lan_only(mut req: Request, next: Next) -> Response {
         )
             .into_response();
     };
+    if from_another_site(req.headers(), req.uri()) {
+        return (
+            StatusCode::FORBIDDEN,
+            "the renderer does not answer requests from other websites",
+        )
+            .into_response();
+    }
     req.extensions_mut().insert(pm_renderer::Peer(ip));
     next.run(req).await
+}
+
+/// Layer for the zones' renderer routes: [`lan_only`], and only at an address, never by a name
+/// a DNS server elsewhere answers for ([`renderer_host`]): a page on another site whose name
+/// is made to resolve to the node (DNS rebinding) is the same origin as the node to the
+/// browser, and could otherwise send SOAP calls without a preflight.
+pub async fn renderer_only(req: Request, next: Next) -> Response {
+    if !renderer_host(req.headers(), req.uri()) {
+        return (
+            StatusCode::FORBIDDEN,
+            "the renderer answers at the node's address only",
+        )
+            .into_response();
+    }
+    lan_only(req, next).await
+}
+
+/// Whether a renderer request names the node as control points do (the SSDP `LOCATION`, an
+/// address): an IP address, `localhost`, a single-label LAN name, or a name under a suffix only
+/// local networks use (`.local`, `.home.arpa`, `.internal`, `.lan`, `.localdomain`); or no host
+/// at all (not a browser). Names in public DNS, which another site's owner can point at any
+/// address, are refused.
+pub fn renderer_host(h: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    match named_host(h, uri) {
+        Ok(None) => true,
+        Ok(Some(host)) => {
+            let name = host.name.trim_end_matches('.');
+            name.parse::<IpAddr>().is_ok()
+                || name == "localhost"
+                || !name.contains('.')
+                || [".local", ".home.arpa", ".internal", ".lan", ".localdomain"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+        }
+        Err(()) => false,
+    }
 }
 
 /// Layer for the whole API: a node without an API token answers only requests that reached its
@@ -143,6 +189,23 @@ fn named_host(h: &HeaderMap, uri: &axum::http::Uri) -> Result<Option<Named>, ()>
     }
 }
 
+/// Whether a renderer's GENA NOTIFY names the node as the node told it to: as
+/// [`renderer_host`] allows, or by the host of `callback_base` (the node's `public_url`, which
+/// starts every CALLBACK URL the node hands out). A page on another site whose name was made to
+/// resolve to the node names its own host and is refused.
+pub fn gena_host(h: &HeaderMap, uri: &axum::http::Uri, callback_base: &str) -> bool {
+    if renderer_host(h, uri) {
+        return true;
+    }
+    let Ok(Some(host)) = named_host(h, uri) else {
+        return false;
+    };
+    url::Url::parse(callback_base)
+        .ok()
+        .and_then(|u| u.host_str().map(|n| n.trim_end_matches('.').to_ascii_lowercase()))
+        .is_some_and(|n| n == host.name.trim_end_matches('.'))
+}
+
 /// A name that only ever means this machine: `localhost`, 127.0.0.0/8, `::1`. (Not other
 /// `*.localhost` names: those go through a resolver.)
 fn is_loopback_name(name: &str) -> bool {
@@ -177,6 +240,22 @@ pub fn cross_site(h: &HeaderMap, method: &axum::http::Method, path: &str) -> boo
     let opens = matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD);
     let page = !NOT_PAGES.iter().any(|p| path.starts_with(p));
     !(navigation && opens && page)
+}
+
+/// A request a browser made for a page that is not this node: `Sec-Fetch-Site` says
+/// `cross-site` or `same-site` (another port of this machine is the same site), or the `Origin`
+/// is not the host the request names (`null` included). Renderers and control points send
+/// neither header.
+pub fn from_another_site(h: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    let site = h.get("sec-fetch-site").map(|v| v.to_str().unwrap_or("?"));
+    if matches!(site, Some(s) if s != "same-origin" && s != "none") {
+        return true;
+    }
+    match origin_of(h) {
+        Ok(None) => false,
+        Ok(Some(o)) => !matches!(named_host(h, uri), Ok(Some(host)) if origin_is(&o, &host)),
+        Err(()) => true,
+    }
 }
 
 /// The `Origin` a browser sent, parsed; `Err` for one that names no site (`null`) or can't be read.
@@ -553,5 +632,54 @@ mod tests {
             !cross_site(&HeaderMap::new(), &Method::GET, "/v1/info"),
             "no Sec-Fetch headers"
         );
+    }
+
+    /// The renderer refuses what a browser sends for another site's page, and nothing a control
+    /// point or the node's own page sends.
+    #[test]
+    fn the_renderer_knows_a_browser_request_for_another_site() {
+        let uri: axum::http::Uri = "/upnp/zone/z/ctl/avt".parse().unwrap();
+        for refused in [
+            vec![("host", "192.168.1.5:7788"), ("sec-fetch-site", "cross-site")],
+            vec![("host", "192.168.1.5:7788"), ("sec-fetch-site", "same-site")],
+            vec![("host", "192.168.1.5:7788"), ("sec-fetch-site", "something-new")],
+            vec![("host", "192.168.1.5:7788"), ("origin", "http://evil.example")],
+            vec![
+                ("host", "192.168.1.5:7788"),
+                ("origin", "http://192.168.1.5:3000"),
+            ],
+            vec![("host", "192.168.1.5:7788"), ("origin", "null")],
+            vec![("origin", "http://192.168.1.5:7788")],
+        ] {
+            assert!(from_another_site(&heads(&refused), &uri), "{refused:?}");
+        }
+        for ok in [
+            vec![("host", "192.168.1.5:7788")],
+            vec![],
+            vec![("host", "192.168.1.5:7788"), ("sec-fetch-site", "same-origin")],
+            vec![("host", "192.168.1.5:7788"), ("sec-fetch-site", "none")],
+            vec![
+                ("host", "192.168.1.5:7788"),
+                ("origin", "http://192.168.1.5:7788"),
+            ],
+        ] {
+            assert!(!from_another_site(&heads(&ok), &uri), "{ok:?}");
+        }
+        // A name another site's owner can point at the node is refused (DNS rebinding)
+        for ok in [
+            "192.168.1.5:7788",
+            "[fd00::5]:7788",
+            "localhost:7788",
+            "nuc:7788",
+            "odeion.local:7788",
+            "nas.home.arpa:7788",
+            "node.lan",
+        ] {
+            assert!(renderer_host(&heads(&[("host", ok)]), &uri), "{ok}");
+        }
+        assert!(renderer_host(&HeaderMap::new(), &uri), "no host: not a browser");
+        for refused in ["evil.example:7788", "192.168.1.5.nip.io:7788", "[::1"] {
+            assert!(!renderer_host(&heads(&[("host", refused)]), &uri), "{refused}");
+        }
     }
 }

@@ -931,12 +931,12 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .merge(open_routes().into_open_router().with_state(state.clone()))
         .merge(subsonic::router(state.clone()))
         // The zones as UPnP/DLNA renderers (no token, like any renderer; `[renderer] enabled`),
-        // to LAN peers only (peer.rs)
+        // to LAN peers at the node's address only, never another site's page (peer.rs)
         .merge(
             state
                 .renderer
                 .get()
-                .map(|r| r.router().layer(middleware::from_fn(peer::lan_only)))
+                .map(|r| r.router().layer(middleware::from_fn(peer::renderer_only)))
                 .unwrap_or_default(),
         )
         .layer(middleware::from_fn_with_state(

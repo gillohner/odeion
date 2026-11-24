@@ -191,7 +191,10 @@ fn next_sync_id() -> u64 {
 impl PubkySync {
     /// Restore a session from an exported secret and prepare to sync.
     pub async fn connect(network: Network, secret: &str) -> Result<Self, HomeserverError> {
-        Self::connect_with(NodeHomeserver::new(network)?, secret).await
+        let sync = Self::connect_with(NodeHomeserver::new(network)?, secret).await?;
+        // Its own client (the CLI): the signed-in person is its owner
+        sync.homeserver.set_owner(Some(sync.session.public_key()));
+        Ok(sync)
     }
 
     /// The same with the node's shared client ([`crate::state::NodeState::homeserver`]).

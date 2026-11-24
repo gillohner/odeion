@@ -524,13 +524,7 @@ pub struct PeopleView {
 }
 
 async fn homeserver_key(s: &NodeState) -> Result<String, ApiError> {
-    let info = admin(s, Method::GET, "/info", None).await?;
-    info["public_key"].as_str().map(str::to_string).ok_or_else(|| {
-        ApiError::new(
-            StatusCode::BAD_GATEWAY,
-            "the bundled homeserver has no public key",
-        )
-    })
+    crate::bundled::key(s).await
 }
 
 fn invite_link(hs: &str, token: &str) -> String {
