@@ -33,6 +33,10 @@ Newest first. Dates are when the change landed on `main`.
 
 - **A button that deletes looks like one.** When Odeion asks before it deletes a collection, a comment or a file on your homeserver, removes a song from the library or every download, clears usage events, or makes a new token, the button that goes ahead is now filled with the warning red instead of the accent colour that Save and Play have. A collection's own Delete button and Remove in the selection bar are red at rest, not only under the pointer. Nothing about what the buttons do has changed.
 
+### 2026-11-23
+
+- **Dimmed text is readable.** Several things were made faint by fading them, which put their words under the contrast a reader needs (4.5 to 1): a song that cannot play in a collection (its artist line was at 2.2 to 1, 2.0 in the light theme), a source that is switched off, the count on a tag, a menu line that cannot be pressed, the note under a dialog's main choice, Match on a song row on a touch screen, and the second line of a ticked row while selecting. Their words are no longer faded: they are in the secondary text colour (the note under a choice in the button's own), only pictures and marks still fade, and a tag's count is lighter in weight, not fainter. The full-screen Now playing for a TV shows the cover behind the text more faintly, so the album, the times, the zone line and the way back read over a white cover as over a dark one (they were at 1.6 to 1.9 to 1 over a white cover). Buttons that cannot be pressed stay faded.
+
 ### 2026-11-22
 
 - **The node stops when asked.** On SIGTERM (`docker stop`, a restart, an update, systemd) or Ctrl-C the node now takes no new request, finishes the ones it is answering, also those that came in through remote access (up to 2 seconds; one that takes longer is ended), stops its zones for good (nothing starts one again while the node winds down, and a zone that appears in that time is closed too), folds the library's write-ahead log into its file and exits. In a container it used to ignore SIGTERM (it is the container's first process), so every stop waited out Docker's 10 seconds and ended in a kill.
