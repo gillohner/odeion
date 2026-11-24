@@ -28501,8 +28501,8 @@ exec sleep 300
         assert!(unfinished.is_null(), "{unfinished}");
     }
 
-    /// A removal is noted as unfinished as soon as the person is off the list: a node that stops
-    /// during the cleanup still offers Remove after its restart. While it runs the page doesn't
+    /// A removal is noted as unfinished in the same write that takes the person off the list: a
+    /// node that stops during the cleanup still offers Remove after its restart. While it runs the page doesn't
     /// name them (it isn't over); when it ends well the note goes. The note is this node's own:
     /// a restore keeps it, and someone a restore lists with music again isn't named.
     #[tokio::test]
@@ -28534,6 +28534,22 @@ exec sleep 300
                 .unwrap()
                 .is_some_and(|r| r.contains(key))
         };
+        // The list and the note are one write: when the note can't be written, the list stays as
+        // it was (no one off the list and not noted) and the removal answers the error
+        let db = rusqlite::Connection::open(&s.db_path).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER no_note_i BEFORE INSERT ON settings WHEN NEW.key = 'people.unfinished'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;
+             CREATE TRIGGER no_note_u BEFORE UPDATE ON settings WHEN NEW.key = 'people.unfinished'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+        )
+        .unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+        assert!(listed(ben), "still listed");
+        assert_eq!(note(), None);
+        db.execute_batch("DROP TRIGGER no_note_i; DROP TRIGGER no_note_u;")
+            .unwrap();
         // Ben's removal is held up in its cleanup (another homeserver step of his runs)
         let lock = crate::personal::person_lock(&s, ben);
         let held = lock.lock().await;
