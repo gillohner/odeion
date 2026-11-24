@@ -831,7 +831,7 @@
     // (its file, asked while the question is open: Bring back names the file, not the song, and the
     // node has no file for it once it is out)
     const file = api('GET', `/library/tracks/${id}`).then((t) => (t && t.file && t.file.path) || null, () => null);
-    const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true }] });
+    const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true, danger: true }] });
     if (!ok) return;
     try {
       await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library');
@@ -921,7 +921,7 @@
   // `layer`: opened over Now playing, it gets a history entry of its own, so Back closes it alone
   const choiceDialog = ({ title, text, choices, field, layer }) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
-    d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}${field ? `<label class="dialog-field"><span class="muted small">${esc(field.label)}</span><input class="input" data-field value="${esc(field.value || '')}" aria-label="${esc(field.label)}"></label>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
+    d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}${field ? `<label class="dialog-field"><span class="muted small">${esc(field.label)}</span><input class="input" data-field value="${esc(field.value || '')}" aria-label="${esc(field.label)}"></label>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}${c.danger ? ' danger' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
     document.body.appendChild(d);
     const tr = { layer: !!layer, open: () => d.open, close: (fromBack) => done(null, fromBack) };
     const done = (v, fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(!!layer && transients.some((t) => t.open())); resolve(v); };
@@ -992,7 +992,7 @@
       const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
       const d = e.target.closest('[data-cdel]');
       if (d) {
-        const go = await choiceDialog({ title: 'Delete this comment?', text: 'It goes from your homeserver; apps that already showed it drop it once Nexus sees it gone.', choices: [{ label: 'Delete', value: true, primary: true }] });
+        const go = await choiceDialog({ title: 'Delete this comment?', text: 'It goes from your homeserver; apps that already showed it drop it once Nexus sees it gone.', choices: [{ label: 'Delete', value: true, primary: true, danger: true }] });
         if (!go) return;
         d.disabled = true;
         try { await api('DELETE', `/comments?post=${encodeURIComponent(d.dataset.cdel)}`); toast('Comment deleted'); d.closest('li.comment').remove(); } catch (err) { d.disabled = false; toast(err.message, 'error'); }
@@ -1340,7 +1340,7 @@
     const songRow = (f, k) => `<div class="list-row mrow" data-mrow="${k}">${cover(f)}<button class="icon-btn" data-mplay="${f.song.id}" aria-label="Play ${esc(f.song.title)}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(f.song.title)}${f.song.edited ? ' <span class="pill" title="Tags edited on this node">edited</span>' : ''}</div><div class="sub">${esc([f.song.artist, f.song.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${f.song.duration_ms ? fmt(f.song.duration_ms) : ''}</span><span class="muted small msize">${fileSize(f.size)}</span><button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-mmore="${k}" aria-label="More for ${esc(f.song.title)}" title="More">${icon('more')}</button></div>`;
     const looseRow = (f, k) => `<div class="list-row mrow"><div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.removed ? 'Taken out of the library: Node library brings it back.' : 'Not in the library yet: it is read with the next scan.'}</div></div><span class="muted small msize">${fileSize(f.size)}</span><button class="btn sm ghost" data-mdel="${k}" aria-label="Delete ${esc(f.name)} from your homeserver">Delete</button></div>`;
     const delFile = async (f) => {
-      const ok = await choiceDialog({ title: 'Delete from your homeserver?', text: `“${f.song ? f.song.title : f.name}” is deleted from your homeserver${ctx.bundled ? ' and leaves the library' : ''}. This can’t be undone.`, choices: [{ label: 'Delete', value: true, primary: true }] });
+      const ok = await choiceDialog({ title: 'Delete from your homeserver?', text: `“${f.song ? f.song.title : f.name}” is deleted from your homeserver${ctx.bundled ? ' and leaves the library' : ''}. This can’t be undone.`, choices: [{ label: 'Delete', value: true, primary: true, danger: true }] });
       if (!ok) return;
       try { await api('DELETE', '/pubky/files', { paths: [f.path] }); toast('Deleted'); st.local = null; load(); } catch (er) { toast(er.message, 'error'); }
     };
@@ -2062,7 +2062,7 @@
     if (listsOnly && lists) { lists.innerHTML = body; const h = $('.page-head', main); if (h) h.outerHTML = `<div class="page-head"><h2>Downloads${d.songs ? `<span class="count">${esc(fmtCount(d.songs))}</span>` : ''}</h2><div class="actions"></div></div>`; }
     else main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p><div id="dllists">${body}</div><div class="set-group">${limit}</div>`;
     $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; return x ? dlKeep(x.kind, x.id, false, x.title) : undefined; });
-    const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your collections stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
+    const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your collections stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true, danger: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
     if (listsOnly && lists) return;
     $('#dllimit', main).onchange = async (e) => { const v = e.target.value; try { dlSet(await dlCall('downloads_limit', { bytes: v === '' ? null : Number(v) })); if (state.view === 'downloads') storageUpdate(state.dl); } catch (er) { toast(String((er && er.message) || er), 'error'); } };
   };
@@ -2186,7 +2186,7 @@
         await load([ids[at + 1], ids[at - 1]].filter(Boolean).map((id) => () => $$('[data-si-end]', host).find((x) => x.dataset.siEnd === id)));
       });
       const all = $('[data-si-all]', host); if (all) all.onclick = async () => {
-        const go = await choiceDialog({ title: 'Sign out all other browsers and apps?', text: `Each of them has to log in again with Pubky Ring. ${hereName()} stays logged in.`, choices: [{ label: 'Sign out all others', value: true, primary: true }] });
+        const go = await choiceDialog({ title: 'Sign out all other browsers and apps?', text: `Each of them has to log in again with Pubky Ring. ${hereName()} stays logged in.`, choices: [{ label: 'Sign out all others', value: true, primary: true, danger: true }] });
         if (!go) { all.focus(); return; }
         try { const r = await api('DELETE', '/me/sign-ins'); toast(r && r.ended === 1 ? 'Signed out one other browser or app' : `Signed out ${r && r.ended != null ? r.ended : 'the'} other browsers and apps`); } catch (e) { toast(e.message, 'error'); }
         await load([]);
@@ -9481,7 +9481,7 @@
           $('#pldesc').onclick = () => editField('description', 'Description', d.playlist.description);
           $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, dl: { kind: 'playlist', id: d.summary.id, online: songs.filter((t) => t.track_id == null && !t.card).length }, extra: [{ label: 'Rename…', icon: 'notes', own: true, run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', own: true, run: () => editField('description', 'Description', d.playlist.description) },
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
-            ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete collection…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this collection?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Collection deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
+            ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete collection…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this collection?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true, danger: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Collection deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Collection deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
           // (Remove chosen from the keyboard in the row's ⋯ menu, as phones offer it: the menu gave the
           // focus back to that ⋯, so it goes on to the next song's ⋯, a card's if that one is a card)
@@ -11425,7 +11425,7 @@
               const on = b.dataset.to === 'on';
               // Off: the node refuses their sign-ins from now on (their pages go back to Log in) and forgets
               // their registered devices and what those keep for offline. Nothing here promises more.
-              if (!on && !(await choiceDialog({ title: `Switch music off for ${who(p)}?`, text: `They can’t ${p.access === 'music' ? 'use this node' : 'play music here'} until you switch it back on. Their browsers and apps go back to Log in, and the node forgets their devices and what those keep for offline.${p.access === 'music' ? '' : ' Their homeserver account is not touched.'}`, choices: [{ label: 'Switch music off', value: true, primary: true }] }))) return;
+              if (!on && !(await choiceDialog({ title: `Switch music off for ${who(p)}?`, text: `They can’t ${p.access === 'music' ? 'use this node' : 'play music here'} until you switch it back on. Their browsers and apps go back to Log in, and the node forgets their devices and what those keep for offline.${p.access === 'music' ? '' : ' Their homeserver account is not touched.'}`, choices: [{ label: 'Switch music off', value: true, primary: true, danger: true }] }))) return;
               await change(p, { music: on }, on ? `Music is on for ${who(p)}` : `Music is off for ${who(p)}`);
             });
             $$('[data-phs]', box).forEach((b) => b.onclick = async () => {
@@ -11454,7 +11454,7 @@
             $$('[data-premove]', box).forEach((b) => b.onclick = async () => {
               const p = personOf(b.dataset.premove); if (!p) return;
               const stays = p.access !== 'music';
-              const go = await choiceDialog({ title: `Remove ${who(p)}?`, text: `They are signed out everywhere, and what this node keeps for them goes: their music service sign-ins here, preferences, devices and problem reports. Their Pubky account and what is on their own homeserver are not touched.${stays ? ' Their account on this node’s homeserver stays, so they stay in this list without music.' : ''}`, choices: [{ label: stays ? 'Remove their music access' : 'Remove', value: true, primary: true }] });
+              const go = await choiceDialog({ title: `Remove ${who(p)}?`, text: `They are signed out everywhere, and what this node keeps for them goes: their music service sign-ins here, preferences, devices and problem reports. Their Pubky account and what is on their own homeserver are not touched.${stays ? ' Their account on this node’s homeserver stays, so they stay in this list without music.' : ''}`, choices: [{ label: stays ? 'Remove their music access' : 'Remove', value: true, primary: true, danger: true }] });
               if (!go) return;
               const keys = r ? r.people.map((x) => x.key) : []; const at = keys.indexOf(p.key);
               try {
@@ -11483,7 +11483,7 @@
             });
             $$('[data-psi-all]', box).forEach((b) => b.onclick = async () => {
               const p = personOf(b.dataset.psiAll); if (!p) return;
-              const go = await choiceDialog({ title: `Sign ${who(p)} out everywhere?`, text: 'Each of their browsers and apps has to log in again with Pubky Ring. What they can do here stays as it is.', choices: [{ label: 'Sign out everywhere', value: true, primary: true }] });
+              const go = await choiceDialog({ title: `Sign ${who(p)} out everywhere?`, text: 'Each of their browsers and apps has to log in again with Pubky Ring. What they can do here stays as it is.', choices: [{ label: 'Sign out everywhere', value: true, primary: true, danger: true }] });
               if (!go) return;
               try { const d = await api('DELETE', `/people/${encodeURIComponent(p.key)}/sign-ins`); toast(`Signed ${who(p)} out${d && d.ended === 1 ? ' of one browser or app' : d && d.ended != null ? ` of ${d.ended} browsers or apps` : ' everywhere'}`); } catch (e) { toast(e.message, 'error'); }
               await loadPeople({ focus: [`rename:${p.key}`] });
@@ -11597,7 +11597,7 @@
               if (tn) tn.disabled = true;
             };
             if (tn) tn.onclick = async () => {
-              const go = await choiceDialog({ title: 'Make a new password for apps?', text: 'The old one stops working at once. Every app then needs the new one, and your other browsers are logged out; this one goes on with the new one.', choices: [{ label: 'Make a new password', value: true, primary: true }] });
+              const go = await choiceDialog({ title: 'Make a new password for apps?', text: 'The old one stops working at once. Every app then needs the new one, and your other browsers are logged out; this one goes on with the new one.', choices: [{ label: 'Make a new password', value: true, primary: true, danger: true }] });
               if (!go) return;
               try {
                 const made = await api('POST', '/node/token');
@@ -12026,7 +12026,7 @@
       document.body.classList.toggle('listener', isListener());
       drawMe().catch(() => {});
       // Usage insights (usage.js): off unless the owner turned them on; asks the node once
-      if (window.PM_USAGE) PM_USAGE.mount({ token: () => state.token, view: () => state.view, shell: shellMode, offline: isOffline, open: () => setView('settings', isListener() ? undefined : 'privacy'), ask: (title, text, label) => choiceDialog({ title, text, choices: [{ label, value: true, primary: true }] }).then((v) => v === true) });
+      if (window.PM_USAGE) PM_USAGE.mount({ token: () => state.token, view: () => state.view, shell: shellMode, offline: isOffline, open: () => setView('settings', isListener() ? undefined : 'privacy'), ask: (title, text, label, danger) => choiceDialog({ title, text, choices: [{ label, value: true, primary: true, danger: !!danger }] }).then((v) => v === true) });
       if (isOwner()) {
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
