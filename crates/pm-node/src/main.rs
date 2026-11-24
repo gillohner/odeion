@@ -825,24 +825,29 @@ type HoldSlot = std::sync::Arc<std::sync::Mutex<Option<library::DataDirLock>>>;
 fn main() -> anyhow::Result<()> {
     // First, while this is the only thread: ODEION_ settings onto the PM_ names the code reads
     let env_compat = pm_model::brand::apply_env_compat();
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    // (before the runtime: a panic that unwinds out of it drops the runtime, which waits for its
+    // threads, before the hold)
     let hold = HoldSlot::default();
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let done = runtime.block_on(run(env_compat, hold.clone()));
     shut_down(runtime, &hold);
     done
 }
 
-/// Work still on a blocking thread (a scan, a copy) gets a second and is then cut, as a kill
-/// would cut it: a node asked to stop must exit. A scan and a copy carry on at the next start.
-/// Only then does the node let go of its data folder: `odeiond restore` or a new node takes it
-/// once nothing of this one writes there any more, however `serve` ended.
+/// Work still on a blocking thread (a scan, a copy) gets a second and is then left behind, as a
+/// kill would cut it: a node asked to stop must exit. A scan and a copy carry on at the next
+/// start. The node never lets go of its data folder itself: the hold ends with the process, so
+/// `odeiond restore` or a new node takes the folder only once nothing of this one can write
+/// there any more, however `serve` ended.
 fn shut_down(runtime: tokio::runtime::Runtime, hold: &HoldSlot) {
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
-    drop(
-        hold.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take(),
-    );
+    if let Some(lock) = hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        std::mem::forget(lock);
+    }
 }
 
 async fn run(env_compat: pm_model::brand::EnvPlan, hold: HoldSlot) -> anyhow::Result<()> {
@@ -981,7 +986,8 @@ mod tests {
     use super::*;
 
     /// The data folder stays held while work on a blocking thread still runs after the command
-    /// returned (a scan, a copy: given a second at the stop), and is let go once that is over.
+    /// returned (a scan, a copy: given a second at the stop), and after: only the process's end
+    /// lets go of it.
     #[test]
     fn the_data_folder_is_held_until_the_blocking_work_is_over() {
         let dir = tempfile::tempdir().unwrap();
@@ -1006,8 +1012,8 @@ mod tests {
         shut_down(runtime, &hold);
         assert!(saw.recv().unwrap(), "held while the writer ran");
         assert!(
-            matches!(library::lock_data_dir(dir.path()), Ok(library::Hold::Taken(_))),
-            "let go after"
+            matches!(library::lock_data_dir(dir.path()), Ok(library::Hold::Held)),
+            "held until the process ends"
         );
     }
 }
