@@ -952,17 +952,15 @@ pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<Stri
     // A removal that did not finish is remembered ([`note_unfinished`]), so Remove again is
     // still offered after a reload or a restart (the person may be off the list already). The
     // removal notes itself as unfinished in the same write as the list change, and its outcome
-    // at the end, both while it holds the person's membership lock; only a task that broke off
-    // is noted here
+    // at the end, both while it holds the person's membership lock. A task that broke off is
+    // noted already when it got as far as the list change, and had removed nothing before it
+    // (noting it here, after the lock, could bring back a note a re-add had just cleared)
     match tokio::spawn(remove_person(s.clone(), key.clone())).await {
         Ok(done) => done,
-        Err(_) => {
-            note_unfinished(&s, &key, true);
-            Err(ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "the removal task did not finish: try again",
-            ))
-        }
+        Err(_) => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the removal task did not finish: try again",
+        )),
     }
 }
 
@@ -1057,6 +1055,30 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_unfinished_list_keeps_the_newest_fifty() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = pm_library::Library::open(&dir.path().join("lib.sqlite")).unwrap();
+        let note = |key: &str, open: bool| {
+            if let Some(v) = unfinished_change(&lib, key, open) {
+                lib.update_settings_atomic(&[(UNFINISHED, v.as_deref())]).unwrap();
+            }
+        };
+        assert_eq!(unfinished_change(&lib, "k0", false), None, "already off it");
+        for i in 0..=UNFINISHED_MAX {
+            note(&format!("k{i}"), true);
+        }
+        let keys = unfinished(&lib);
+        assert_eq!(keys.len(), UNFINISHED_MAX);
+        assert_eq!(keys.first().map(String::as_str), Some("k1"), "the oldest went");
+        assert_eq!(keys.last().map(String::as_str), Some("k50"));
+        assert_eq!(unfinished_change(&lib, "k50", true), None, "already on it");
+        for k in keys {
+            note(&k, false);
+        }
+        assert_eq!(lib.get_setting(UNFINISHED).unwrap(), None, "the setting goes");
+    }
 
     #[test]
     fn access_kinds_and_keys() {
