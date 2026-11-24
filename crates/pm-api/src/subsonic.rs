@@ -699,6 +699,9 @@ async fn dispatch(
                 "get" => playlist = true,
                 "status" => {}
                 "set" | "add" => {
+                    // Whole or not at all, before a song is looked up or the zone is touched
+                    crate::queue_room(&zone, ids.len(), action == "set")
+                        .map_err(|e| SubErr::new(0, e.message))?;
                     let items: Vec<QueueItem> = {
                         let lib = s.library.lock().expect("library poisoned");
                         let mut items = Vec::new();
