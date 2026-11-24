@@ -200,6 +200,13 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     std::fs::create_dir_all(&cfg.data_dir)?;
     // First, so a port in use stops the start at once and says why (another node running)
     let listener = pm_api::bind(&cfg.api.listen).await?;
+    // The data folder is this node's while it runs: `odeiond restore` looks for this hold, and
+    // holds it itself while it replaces the database. Someone else has it (the node this one
+    // replaces, on its way out; a restore about to end): waited for, before the database is
+    // opened, and when it is still held after that this node does not start, so it never opens
+    // a database a restore is moving away or another node writes. A service manager or Docker
+    // starts it again.
+    let _data_dir_hold = library::wait_for_data_dir(&cfg.data_dir, library::HOLD_PATIENCE).await?;
     let db_path = cfg.db_path();
     // Sign-ins, keys and the token live in these: the node's alone, before the database is opened
     // (and migrated) and before anything reads them

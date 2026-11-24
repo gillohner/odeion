@@ -4052,6 +4052,7 @@ version = "0.2.4"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "pm-api",
  "pm-audio",
  "pm-discovery",
