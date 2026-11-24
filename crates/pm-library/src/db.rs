@@ -650,6 +650,13 @@ impl Library {
     /// Opens (or makes) the library at `path`. A new one is readable by the node's user alone
     /// (it holds sign-ins); SQLite gives its journal files the same permissions.
     pub fn open(path: &Path) -> Result<Self> {
+        #[cfg(test)]
+        if keep_copy_tests::FAILING_OPENS.with(|n| n.replace(n.get().saturating_sub(1)) > 0) {
+            return Err(LibraryError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::other("an open made to fail by a test"),
+            });
+        }
         // A new one is made empty and 0600 first, so it is never readable by others, not even
         // for the moment between SQLite creating it and the first write
         #[cfg(unix)]
@@ -1992,7 +1999,6 @@ impl Library {
     /// undone. A copy that cannot be made (a full disk) is logged and the upgrade goes on, as
     /// it did before there was one: a node that does not start is no safer.
     pub fn open_node_library(path: &Path) -> Result<Self> {
-        let mut made = None;
         if let Some((found, conn)) = schema_to_upgrade(path) {
             let copy = Self::before_upgrade_path(path);
             let known = MIGRATIONS.last().map_or(0, |(v, _)| *v);
@@ -2026,15 +2032,12 @@ impl Library {
                     copy = %copy.display(),
                     "upgrading the library's schema again: the copy from the first try stays"
                 ),
-                Ok(()) => {
-                    tracing::info!(
-                        from = found,
-                        to = known,
-                        copy = %copy.display(),
-                        "kept a copy of the library before upgrading its schema"
-                    );
-                    made = Some((copy, found));
-                }
+                Ok(()) => tracing::info!(
+                    from = found,
+                    to = known,
+                    copy = %copy.display(),
+                    "kept a copy of the library before upgrading its schema"
+                ),
                 Err(e) => {
                     // An older copy is from before an earlier upgrade: taken for this one's, it
                     // would bring back a library months old. Not when another process is making
@@ -2054,25 +2057,19 @@ impl Library {
                 }
             }
         }
-        let opened = match (Self::open(path), made) {
-            // The copy may have taken the room the upgrade needed. While the library is still at
-            // the version it was copied at (no migration went in), the copy holds nothing the
-            // library does not: without it, as before there was one. Once a migration went in,
-            // the copy is the only way back and stays
-            (Err(e), Some((copy, found))) if schema_to_upgrade(path).map(|(v, _)| v) == Some(found) => {
-                tracing::warn!(
-                    "the library did not open after its copy was made ({e}): trying again without the copy"
-                );
-                let _ = std::fs::remove_file(&copy);
-                let _ = std::fs::remove_file(copy_note_path(&copy));
-                Self::open(path)
-            }
-            (opened, _) => opened,
-        };
+        // A failed open leaves the copy: each migration goes in on its own, so another try (or
+        // the next start) may get one in and fail at a later one, and only the copy holds the
+        // library as it was. A copy from an upgrade that got nothing in is replaced at the next
+        // start (its note names the version the library is still at), or removed there when no
+        // new copy fits
+        let opened = Self::open(path);
         // Open, so at this version: the upgrade is over, and the next one's copy is a new one
         // (after a rollback to the copy, the library has changed since it was made)
         if opened.is_ok() {
-            let _ = std::fs::remove_file(copy_note_path(&Self::before_upgrade_path(path)));
+            let note = copy_note_path(&Self::before_upgrade_path(path));
+            if std::fs::remove_file(&note).is_ok() {
+                sync_folder_of(&note);
+            }
         }
         opened
     }
@@ -8301,6 +8298,11 @@ mod identify_tests {
 mod keep_copy_tests {
     use super::*;
 
+    thread_local! {
+        /// How many of this thread's next [`Library::open`] calls fail before they touch the file.
+        pub(super) static FAILING_OPENS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
     /// A library as the version before this one left it: every migration but the last.
     fn old_library(path: &Path) -> i64 {
         let conn = Connection::open(path).unwrap();
@@ -8412,8 +8414,8 @@ mod keep_copy_tests {
             .unwrap();
     }
 
-    /// An upgrade that fails: once a migration went in, the copy from before it is kept (it is
-    /// the only way back); when none did, the library is as it was and the copy goes.
+    /// An upgrade that fails keeps the copy from before it: once a migration went in it is the
+    /// only way back; when none did, the next start replaces it with a new one.
     #[test]
     fn a_failed_upgrade_keeps_the_copy_once_the_library_changed() {
         assert_eq!(MIGRATIONS.last().unwrap().0, 19, "the test breaks migration 19");
@@ -8439,10 +8441,11 @@ mod keep_copy_tests {
         // A copy whose note does not hold (not at the version it names) is replaced as before
         std::fs::write(copy_note_path(&copy), "16").unwrap();
         assert!(Library::open_node_library(&path).is_err());
-        assert!(
-            !copy.exists(),
-            "replaced by one at 18, then removed: nothing went in since"
-        );
+        let kept: i64 = Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 18, "replaced by one at 18, and kept");
         // Rolled back to the copy (as the guide says) and used: the next try copies it anew
         let path = dir.path().join("rolled.db");
         library_whose_upgrade_fails(&path, 17);
@@ -8469,12 +8472,39 @@ mod keep_copy_tests {
             Some("the rollback"),
             "a new copy, from after the rollback"
         );
-        // 18 -> 19 fails: nothing went in
+        // 18 -> 19 fails: nothing went in, the copy stays until an open goes through
         let path = dir.path().join("one.db");
         library_whose_upgrade_fails(&path, 18);
         assert!(Library::open_node_library(&path).is_err());
-        assert!(!Library::before_upgrade_path(&path).exists());
+        assert!(Library::before_upgrade_path(&path).exists());
         assert_eq!(schema_to_upgrade(&path).map(|(v, _)| v), Some(18));
+    }
+
+    /// An open that fails before any migration goes in keeps the copy: the next try may get a
+    /// migration in and fail at a later one, and then the copy is the only way back.
+    #[test]
+    fn a_failed_open_keeps_the_copy_for_the_next_try() {
+        assert_eq!(MIGRATIONS.last().unwrap().0, 19, "the test breaks migration 19");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let copy = Library::before_upgrade_path(&path);
+        // 17 -> 18 would go in, 19 fails; this open fails before either
+        library_whose_upgrade_fails(&path, 17);
+        let version_of = |file: &Path| -> i64 {
+            Connection::open(file)
+                .unwrap()
+                .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+                .unwrap()
+        };
+        FAILING_OPENS.with(|n| n.set(1));
+        assert!(Library::open_node_library(&path).is_err());
+        FAILING_OPENS.with(|n| n.set(0));
+        assert_eq!(version_of(&copy), 17, "the copy stays after the failed open");
+        assert_eq!(version_of(&path), 17, "nothing went in");
+        // The next start: 18 goes in, 19 fails, and the library at 17 is still in the copy
+        assert!(Library::open_node_library(&path).is_err());
+        assert_eq!(version_of(&path), 18);
+        assert_eq!(version_of(&copy), 17, "the copy from before 18 stays");
     }
 
     /// Once an upgrade is over its copy's note goes: after a rollback to the copy (as the guide
