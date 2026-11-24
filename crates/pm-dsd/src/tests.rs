@@ -252,3 +252,45 @@ fn in_diin_too_a_tag_fits_its_chunk_and_is_tried_once() {
         Some(tag(3))
     );
 }
+
+/// A DSF whose sample count or data chunk claims more than it holds reads as what is there:
+/// the data ends before the tag after it and at the file's end, and the samples in the last
+/// whole set of channel blocks.
+#[test]
+fn a_dsf_that_claims_more_than_it_holds_reads_as_what_is_there() {
+    let data = [0x55u8; 64];
+    let whole = dsf(52, &data, Some(&tag(5)));
+    // (the sample count at 28 + 36, the block size at 28 + 44, the data chunk's size at 28 + 52 + 4)
+    let put = |f: &mut Vec<u8>, at: usize, n: u64| f[at..at + 8].copy_from_slice(&n.to_le_bytes());
+    for (n, len) in [
+        (u64::MAX, None),
+        (64 * 4 + 1, None),
+        (u64::MAX, Some(u64::MAX)),
+        (64 * 4, Some(1 << 40)),
+    ] {
+        let mut f = whole.clone();
+        put(&mut f, 64, n);
+        if let Some(len) = len {
+            put(&mut f, 84, len);
+        }
+        let h = read(&mut Cursor::new(f), true).unwrap();
+        assert_eq!(h.data_len, 64, "{n} {len:?}");
+        assert_eq!(h.sample_count, n.min(64 * 4), "{n} {len:?}");
+        assert_eq!(h.id3.as_deref(), Some(&tag(5)[..]), "{n} {len:?}");
+    }
+    // No tag: the data ends at the file's end
+    let mut f = dsf(52, &data, None);
+    put(&mut f, 84, 1 << 40);
+    let h = read(&mut Cursor::new(f), false).unwrap();
+    assert_eq!((h.data_len, h.sample_count), (64, 64 * 4));
+    // Data that is not whole sets of blocks (84 bytes, blocks of 32 for 2 channels, no tag):
+    // the samples end with the last whole set
+    let mut f = dsf(52, &[0x55u8; 84], None);
+    f[72..76].copy_from_slice(&32u32.to_le_bytes());
+    put(&mut f, 64, u64::MAX);
+    let h = read(&mut Cursor::new(f), false).unwrap();
+    assert_eq!((h.data_len, h.sample_count), (84, 32 * 8));
+    // A file as written: as it says
+    let h = read(&mut Cursor::new(whole), false).unwrap();
+    assert_eq!((h.data_len, h.sample_count), (64, 64 * 4));
+}

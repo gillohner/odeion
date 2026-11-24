@@ -34,11 +34,11 @@ pub struct Header {
     pub container: Container,
     /// A DSD format that passed [`AudioFormat::validate`].
     pub format: AudioFormat,
-    /// One-bit samples per channel.
+    /// One-bit samples per channel (DSF: at most what its whole channel blocks hold).
     pub sample_count: u64,
     /// Byte offset of the first sample byte.
     pub data_offset: u64,
-    /// Length in bytes of the sample data (DFF: at most what the file holds).
+    /// Length in bytes of the sample data, at most what the file holds (DSF: and before its tag).
     pub data_len: u64,
     /// DSF: bytes per channel block (usually 4096). DFF: 1 (byte-interleaved).
     pub block_size: u32,
@@ -161,6 +161,21 @@ fn read_dsf<R: Read + Seek>(r: &mut R, tag: bool) -> Result<Header> {
     if &data[0..4] != b"data" {
         return Err(malformed("dsf: missing data chunk"));
     }
+    // No more audio than the data holds, whatever the data chunk's size and the sample count
+    // say: the data ends at the file's end and before the tag, and the samples in its last
+    // whole set of channel blocks (a player reads a set at a time)
+    let data_offset = data_hdr + 12;
+    let mut held = r.seek(SeekFrom::End(0))?.saturating_sub(data_offset);
+    if metadata_ptr >= data_offset {
+        held = held.min(metadata_ptr - data_offset);
+    }
+    let data_len = le64(&data[4..]).saturating_sub(12).min(held);
+    let ch = channels as u64;
+    let per_channel = match block_size as u64 {
+        0 => data_len / ch,
+        bs => data_len / (bs * ch) * bs,
+    };
+    let sample_count = sample_count.min(per_channel.saturating_mul(8));
     let id3 = if tag && metadata_ptr != 0 {
         read_tag(r, metadata_ptr, MAX_TAG)
     } else {
@@ -170,8 +185,8 @@ fn read_dsf<R: Read + Seek>(r: &mut R, tag: bool) -> Result<Header> {
         container: Container::Dsf,
         format,
         sample_count,
-        data_offset: data_hdr + 12,
-        data_len: le64(&data[4..]).saturating_sub(12),
+        data_offset,
+        data_len,
         block_size,
         lsb_first,
         compressed: false,

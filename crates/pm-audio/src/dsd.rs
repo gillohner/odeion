@@ -522,4 +522,37 @@ mod tests {
             );
         }
     }
+
+    /// A DSF whose sample count, or also its data chunk's size, claims more than its data plays
+    /// its data and stops: not the tag after it, and a seek to the end lands at the end.
+    #[test]
+    fn a_dsf_sample_count_past_its_data_ends_with_the_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let fmt = AudioFormat::dsd(AudioFormat::DSD64_RATE, 2);
+        let data = pattern(1000, 2);
+        let p = dir.path().join("long.dsf");
+        write_dsf(&p, fmt, &data, Some(&fake_id3())).unwrap();
+        let whole = std::fs::read(&p).unwrap();
+        // The sample count, and also the data chunk's size, far past what is there
+        for size in [None, Some(u64::MAX)] {
+            let mut bytes = whole.clone();
+            bytes[64..72].copy_from_slice(&u64::MAX.to_le_bytes());
+            if let Some(size) = size {
+                bytes[84..92].copy_from_slice(&size.to_le_bytes());
+            }
+            std::fs::write(&p, &bytes).unwrap();
+            let mut r = DsdReader::open(&p).unwrap();
+            // (one block of 4096 bytes a channel holds the 1000 frames and the block's padding)
+            assert_eq!(r.total_frames(), 4096, "{size:?}");
+            let all = r.read_all().unwrap();
+            assert_eq!(all.len(), 4096 * 2, "{size:?}");
+            assert_eq!(&all[..data.len()], &data[..], "{size:?}");
+            assert!(
+                all[data.len()..].iter().all(|b| *b == 0),
+                "{size:?}: the tag played"
+            );
+            r.seek_frames(u64::MAX).unwrap();
+            assert!(r.next_block().unwrap().is_none(), "{size:?}");
+        }
+    }
 }
