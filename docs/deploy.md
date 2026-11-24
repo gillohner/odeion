@@ -450,4 +450,5 @@ install and refuses to touch one that has containers or data. Details:
 From the command line: `odeiond -c node.toml backup <file>` writes a database snapshot (without
 sign-ins) while the node runs. `odeiond -c node.toml restore <file>`, with the node stopped, takes
 that snapshot or a `.pmbackup` file (its library only; the previous database is kept as
-`library.db.bak`). While a node runs on the data folder the command refuses and changes nothing; a node started during a restore waits up to 15 seconds for it, and does not start if it is still running then.
+`library.db.bak`, as a restore in Settings keeps it). While a node runs on the data folder the command refuses and changes nothing; a node started during a restore waits up to 15 seconds for it, and does not start if it is still running then. Before it upgrades the library's schema, a
+node keeps the file as it was as `library.db.before-upgrade` (the latest upgrade's only).
