@@ -117,6 +117,7 @@ cd pubky-music-node/deploy/bundle
 ./setup.sh                # writes .env with generated passwords
 nano .env                 # set MUSIC_DIR to your music folder
 docker compose up -d
+sudo ./start-at-boot.sh   # the node comes back after a reboot, also when a share answers late
 ```
 
 There the access token is `PM_TOKEN` in `.env`.
