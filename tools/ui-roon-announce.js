@@ -40,7 +40,8 @@ const away = async (page) => {
   await page.click('[data-view="tracks"]'); await page.waitForFunction(() => location.pathname === '/tracks', null, { timeout: 4000 }).catch(() => {});
   await page.goBack(); await page.waitForFunction(() => location.pathname === '/library/import' && !!document.querySelector('#roonfiles'), null, { timeout: 4000 }).catch(() => {});
 };
-const said = (page) => page.evaluate(() => window.__said.filter((x) => x.id !== 'toasts' && !/toast/.test(x.id)));
+// (the import's own words: not toasts, nor the page's name said by a navigation, #navstatus)
+const said = (page) => page.evaluate(() => window.__said.filter((x) => x.id !== 'toasts' && !/toast/.test(x.id) && x.id !== 'navstatus'));
 const reset = (page) => page.evaluate(() => { window.__said = []; });
 
 (async () => {

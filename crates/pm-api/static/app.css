@@ -148,6 +148,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
    on Android (it covers the box, not the radius): round buttons press with :active instead */
 html { -webkit-tap-highlight-color: transparent; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* (a page's heading takes the focus when a page opens from inside the old one: no ring, it is not a control) */
+#main [data-navfocus]:focus-visible { outline: none; }
 .ic { width: 20px; height: 20px; flex: none; display: inline-block; vertical-align: middle; }
 [hidden] { display: none !important; }
 
