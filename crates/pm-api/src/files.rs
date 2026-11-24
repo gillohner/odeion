@@ -336,11 +336,13 @@ pub(crate) async fn cancel_job(
         j.clone()
     };
     if job.kind == "bring" {
-        let _ = s
-            .library
-            .lock()
-            .expect("library poisoned")
-            .delete_setting(BRING_RESUME_KEY);
+        // Not started again after a restart; the record stays until the job has cleared its
+        // part folder (or, if the node stops first, the next start clears it)
+        let lib = s.library.lock().expect("library poisoned");
+        if let Some(mut v) = bring_record(&lib).filter(|v| v.is_object()) {
+            v["cancelled"] = true.into();
+            let _ = lib.set_setting(BRING_RESUME_KEY, &v.to_string());
+        }
     }
     Ok(Json(job))
 }
@@ -384,7 +386,9 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// A bring job that was running when the node stopped: `{dest}`; the node starts it again.
+/// A bring job that was running when the node stopped: `{dest, parts, cancelled?}` (`parts`: the
+/// name of its part folder in `dest`, which the next bring clears); the node starts it again,
+/// unless it was cancelled (then only its part folder is cleared).
 pub const BRING_RESUME_KEY: &str = "files.bring";
 
 /// What the homeserver has and what this node lacks.
@@ -486,6 +490,8 @@ async fn plan_bring(
         .files_of_sizes(&sizes)
         .map_err(|e| e.to_string())?;
     let mut have: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The local names this plan gives out
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (path, size, mtime) in candidates {
         let cached = s
             .library
@@ -527,21 +533,288 @@ async fn plan_bring(
             plan.present_bytes += size;
             continue;
         }
-        // Already brought (maybe not scanned yet): the same name and size in the folder
-        let mut local = original.clone();
-        match tokio::fs::metadata(plan.dest.join(&local)).await {
-            Ok(m) if m.len() == size => {
+        match local_name(&plan.dest, &original, &full, size, &mut taken).await {
+            Some(local) => plan.fetch.push((path, size, local)),
+            // Already brought (maybe not scanned yet)
+            None => {
                 plan.present += 1;
                 plan.present_bytes += size;
-                continue;
             }
-            // Another file under that name: keep the homeserver's full name instead
-            Ok(_) => local = full,
-            Err(_) => {}
         }
-        plan.fetch.push((path, size, local));
     }
     Ok(plan)
+}
+
+/// The name a file from the homeserver gets in `dest`, or `None` when the folder has it already
+/// (the same name and size). It is the file's `original` name, or the homeserver's `full` name
+/// (which starts with its hash) when the original name is another file's: one in the folder,
+/// or one this plan already brings (two albums each have a `01 Intro.flac`); when that one is
+/// another file's too, the full name with a number in front. `taken` holds the names the plan
+/// uses so far, in lower case: on a folder that ignores case, names that differ only in case
+/// are one file. No name is given to two files, and none that the folder has for another file.
+async fn local_name(
+    dest: &Path,
+    original: &str,
+    full: &str,
+    size: u64,
+    taken: &mut std::collections::HashSet<String>,
+) -> Option<String> {
+    let mut n = 0u32;
+    loop {
+        let name = match n {
+            0 => original.to_string(),
+            1 => full.to_string(),
+            n => format!("{n}-{full}"),
+        };
+        // (names run out only after 4 billion tries: then no name)
+        n = n.checked_add(1)?;
+        if taken.contains(&name.to_lowercase()) {
+            continue;
+        }
+        let at = dest.join(&name);
+        // (a link that leads nowhere has the name too)
+        if tokio::fs::symlink_metadata(&at).await.is_err() {
+            taken.insert(name.to_lowercase());
+            return Some(name);
+        }
+        if matches!(tokio::fs::metadata(&at).await, Ok(m) if m.is_file() && m.len() == size) {
+            // (the name is this file's: no other file of the plan gets it in another case)
+            taken.insert(name.to_lowercase());
+            return None;
+        }
+        // Another file under that name: the next one
+    }
+}
+
+/// The start of the name of a bring's part folder in its destination: `.odeion-bring-<job id>`,
+/// made new for each bring (never one that is there already), readable only to the node.
+const PARTS_PREFIX: &str = ".odeion-bring-";
+
+/// Clear the part folder `name` an earlier bring made in `dest` (it stopped midway): only its
+/// `<n>.part` files go, then the folder when nothing else is in it. A name that is not a part
+/// folder's, or a link at that name, is left alone (a link is never followed).
+async fn clear_parts(dest: &Path, name: &str) {
+    let ours = name.len() > PARTS_PREFIX.len()
+        && name.starts_with(PARTS_PREFIX)
+        && Path::new(name).file_name() == Some(std::ffi::OsStr::new(name));
+    if !ours {
+        return;
+    }
+    let dir = dest.join(name);
+    let at = dir.clone();
+    let _ = tokio::task::spawn_blocking(move || clear_numbered_parts(&at)).await;
+    let _ = tokio::fs::remove_dir(&dir).await;
+}
+
+/// `<n>.part` (digits only): a name a bring gave a part.
+fn numbered_part(n: &[u8]) -> bool {
+    n.strip_suffix(b".part")
+        .is_some_and(|k| !k.is_empty() && k.iter().all(u8::is_ascii_digit))
+}
+
+/// Remove the numbered part files in `dir`. On Unix the folder is opened once without following a
+/// link, and its entries are listed and removed through that handle, so a folder swapped for a link
+/// meanwhile cannot send the removals elsewhere. (Removing a name never touches what a link there
+/// leads to.)
+#[cfg(unix)]
+fn clear_numbered_parts(dir: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return;
+    };
+    // SAFETY: a NUL-terminated path that lives through the call
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return;
+    }
+    // SAFETY: `fd` is an open folder; on success the stream owns it, on failure it is closed here
+    let dirp = unsafe { libc::fdopendir(fd) };
+    if dirp.is_null() {
+        // SAFETY: `fd` is still ours
+        unsafe { libc::close(fd) };
+        return;
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `dirp` is an open stream; an entry is read before the next call
+        let ent = unsafe { libc::readdir(dirp) };
+        if ent.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is a NUL-terminated name inside the entry
+        let name = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
+        if numbered_part(name.to_bytes()) {
+            names.push(name.to_owned());
+        }
+    }
+    for n in &names {
+        // SAFETY: the stream's folder and a NUL-terminated name
+        unsafe { libc::unlinkat(libc::dirfd(dirp), n.as_ptr(), 0) };
+    }
+    // SAFETY: closes the stream and its folder, once
+    unsafe { libc::closedir(dirp) };
+}
+
+#[cfg(not(unix))]
+fn clear_numbered_parts(dir: &Path) {
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if m.is_dir() => {}
+        _ => return,
+    }
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if numbered_part(e.file_name().to_string_lossy().as_bytes()) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// The bring record ([`BRING_RESUME_KEY`]), if there is one that reads.
+fn bring_record(lib: &pm_library::Library) -> Option<serde_json::Value> {
+    lib.get_setting(BRING_RESUME_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+}
+
+/// A record's destination and part folder name.
+fn record_parts(v: &serde_json::Value) -> Option<(PathBuf, String)> {
+    Some((
+        PathBuf::from(v["dest"].as_str()?),
+        v["parts"].as_str()?.to_string(),
+    ))
+}
+
+/// The bring is over: its part folder is cleared and its record goes. `only`: only when the
+/// record still names that part folder (a job ending does not remove a later bring's record).
+async fn forget_bring(s: &NodeState, only: Option<&str>) {
+    let rec = bring_record(&s.library.lock().expect("library poisoned"));
+    let Some(rec) = rec else { return };
+    if only.is_some_and(|name| rec["parts"].as_str() != Some(name)) {
+        return;
+    }
+    if let Some((dest, name)) = record_parts(&rec) {
+        clear_parts(&dest, &name).await;
+    }
+    let lib = s.library.lock().expect("library poisoned");
+    // (unless a bring started meanwhile)
+    if bring_record(&lib).is_some_and(|now| now["parts"] == rec["parts"]) {
+        let _ = lib.delete_setting(BRING_RESUME_KEY);
+    }
+}
+
+/// Give a finished download (`part`, a file this bring made) its name (`target`) without
+/// replacing a file that got that name since the plan was made: such a file stays, the download
+/// is dropped and the error says so (the next bring gives it another name).
+async fn place_new(part: &Path, target: &Path) -> std::io::Result<()> {
+    use std::io::ErrorKind::AlreadyExists;
+    // A link is made only when the name is free, in one step
+    let placed = match tokio::fs::hard_link(part, target).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == AlreadyExists => Err(e),
+        // A folder that has no links (FAT, some shares): a move that never replaces (Linux),
+        // else a copy
+        Err(_) => match rename_noreplace(part, target).await {
+            Some(r) => r,
+            None => copy_new(part, target).await,
+        },
+    };
+    let _ = tokio::fs::remove_file(part).await;
+    placed.map_err(|e| {
+        if e.kind() == AlreadyExists {
+            std::io::Error::new(
+                AlreadyExists,
+                "a file of that name is there now; it was not replaced",
+            )
+        } else {
+            e
+        }
+    })
+}
+
+/// Move `from` to `to` in one step only when `to` is free (`renameat2` with RENAME_NOREPLACE).
+/// `None`: this system or file system has no such move.
+async fn rename_noreplace(from: &Path, to: &Path) -> Option<std::io::Result<()>> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).ok();
+        let (Some(from), Some(to)) = (c(from), c(to)) else {
+            return None;
+        };
+        let r = tokio::task::spawn_blocking(move || {
+            // SAFETY: two NUL-terminated paths that live through the call; no memory is shared
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    from.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        })
+        .await
+        .ok()?;
+        match r {
+            // No such move here (an old kernel, a file system without it): the copy
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS | libc::EPERM)) => None,
+            r => Some(r),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let _ = (from, to);
+        None
+    }
+}
+
+/// Copy `part` into a file made only when the name `target` is free (one step), never a
+/// rename, which would replace a file that appeared since. What a failed copy made goes, and
+/// only that: a file another put under the name meanwhile stays. (Between the look and the
+/// removal another process could still swap the file; that needs write access to the folder,
+/// which can remove or replace any file there anyway.)
+async fn copy_new(part: &Path, target: &Path) -> std::io::Result<()> {
+    let mut out = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .await?;
+    let copied = async {
+        let mut from = tokio::fs::File::open(part).await?;
+        tokio::io::copy(&mut from, &mut out).await?;
+        out.sync_all().await
+    }
+    .await;
+    if copied.is_err() {
+        #[cfg(unix)]
+        let still_ours = {
+            use std::os::unix::fs::MetadataExt;
+            match (out.metadata().await, tokio::fs::symlink_metadata(target).await) {
+                (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+                _ => false,
+            }
+        };
+        #[cfg(not(unix))]
+        let still_ours = true;
+        drop(out);
+        if still_ours {
+            let _ = tokio::fs::remove_file(target).await;
+        }
+    }
+    copied
 }
 
 /// `POST /v1/pubky/files/mirror {dest?, dry_run?}`: bring the homeserver's files this node does
@@ -591,10 +864,17 @@ pub(crate) async fn mirror(
 }
 
 fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: BringPlan, id: String) {
-    let _ = s.library.lock().expect("library poisoned").set_setting(
-        BRING_RESUME_KEY,
-        &serde_json::json!({"dest": plan.dest}).to_string(),
-    );
+    // The part folder of a bring that stopped midway (its record), cleared below
+    let earlier = {
+        let lib = s.library.lock().expect("library poisoned");
+        let earlier = bring_record(&lib).as_ref().and_then(record_parts);
+        let parts_name = format!("{PARTS_PREFIX}{id}");
+        let _ = lib.set_setting(
+            BRING_RESUME_KEY,
+            &serde_json::json!({"dest": plan.dest, "parts": parts_name}).to_string(),
+        );
+        earlier
+    };
     tokio::spawn(async move {
         let set = |f: &dyn Fn(&mut UploadProgress)| {
             if let Some(j) = s.upload_jobs.lock().expect("upload jobs").get_mut(&id) {
@@ -602,6 +882,11 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
             }
         };
         let dest = plan.dest.clone();
+        // What an earlier bring left (the node stopped) goes first; a part that is a link to a
+        // song already in place is only a second name for it
+        if let Some((at, name)) = &earlier {
+            clear_parts(at, name).await;
+        }
         if let Err(e) = tokio::fs::create_dir_all(&dest).await {
             let msg = format!("could not create {}: {e}", dest.display());
             set(&|j| {
@@ -611,13 +896,32 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
             return;
         }
         let mut fetched = 0usize;
+        // Part files: `.odeion-bring-<id>/<n>.part` in the destination, a folder made new here
+        // (never one that was there) that only the node can write in
+        let parts = dest.join(format!("{PARTS_PREFIX}{id}"));
+        #[allow(unused_mut)] // (only Unix sets a mode)
+        let mut mkdir = tokio::fs::DirBuilder::new();
+        #[cfg(unix)]
+        mkdir.mode(0o700);
+        if let Err(e) = mkdir.create(&parts).await {
+            let msg = format!("could not create {}: {e}", parts.display());
+            set(&|j| {
+                j.errors.push(msg.clone().into());
+                j.finished = true;
+            });
+            return;
+        }
+        let mut fetched_parts = 0u64;
         for (remote, size, local) in plan.fetch {
             if is_cancelled(&s, &id) {
                 break;
             }
             set(&|j| j.current = Some(local.clone()));
             let target = dest.join(&local);
-            let part = dest.join(format!(".{local}.part"));
+            // In a folder of its own, by number: never the name of a file this bring places.
+            // Made new by the download (never a file that is there)
+            fetched_parts += 1;
+            let part = parts.join(format!("{fetched_parts}.part"));
             let rate = copy_rate(&s);
             let mut got = 0u64;
             let r = sync
@@ -629,7 +933,7 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
                 .await;
             match r {
                 Ok(n) if n == size || size == 0 => {
-                    if let Err(e) = tokio::fs::rename(&part, &target).await {
+                    if let Err(e) = place_new(&part, &target).await {
                         let msg = format!("{local}: {e}");
                         set(&|j| {
                             j.failed += 1;
@@ -656,6 +960,8 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
                 }
             }
         }
+        // (nothing of an unfinished part is left in it)
+        clear_parts(&dest, &format!("{PARTS_PREFIX}{id}")).await;
         // Into the library: a folder outside the library folders becomes one
         if fetched > 0 {
             let inside = s
@@ -678,13 +984,8 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
                 }
             }
         }
-        if !is_cancelled(&s, &id) {
-            let _ = s
-                .library
-                .lock()
-                .expect("library poisoned")
-                .delete_setting(BRING_RESUME_KEY);
-        }
+        // Done or cancelled: not started again (the part folder is clear already)
+        forget_bring(&s, Some(&format!("{PARTS_PREFIX}{id}"))).await;
         set(&|j| {
             j.current = None;
             j.finished = true;
@@ -702,14 +1003,12 @@ pub fn resume_jobs(s: &Arc<NodeState>) {
     // The copies the node had are back in place now (a copy started meanwhile queues behind
     // them); they run once the rest is done
     crate::copy_jobs::resume_after_restart(s);
-    let dest = s
-        .library
-        .lock()
-        .expect("library poisoned")
-        .get_setting(BRING_RESUME_KEY)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+    let rec = bring_record(&s.library.lock().expect("library poisoned"));
+    // A cancelled bring is not started again
+    let cancelled = rec.as_ref().is_some_and(|v| v["cancelled"] == true);
+    let dest = rec
+        .as_ref()
+        .filter(|_| !cancelled)
         .and_then(|v| v["dest"].as_str().map(PathBuf::from));
     let s = s.clone();
     tokio::spawn(async move {
@@ -719,6 +1018,8 @@ pub fn resume_jobs(s: &Arc<NodeState>) {
         // A bring job before the copies, which would otherwise find a copy in its place
         if let Some(dest) = dest {
             resume_bring(&s, dest).await;
+        } else if cancelled {
+            forget_bring(&s, None).await;
         }
         crate::copy_jobs::release_after_restart(&s);
     });
@@ -746,11 +1047,7 @@ async fn resume_bring(s: &Arc<NodeState>, dest: PathBuf) {
             }
         };
         if plan.fetch.is_empty() {
-            let _ = s
-                .library
-                .lock()
-                .expect("library poisoned")
-                .delete_setting(BRING_RESUME_KEY);
+            forget_bring(&s, None).await;
             return;
         }
         let progress = UploadProgress {
@@ -860,5 +1157,166 @@ mod tests {
         let paths: Vec<&str> = wanted.iter().map(|(p, _, _)| p.as_str()).collect();
         assert_eq!(paths, ["/priv/pubky.music/files/0123456789abcdef-a.flac"]);
         assert_eq!((broken, unchecked), (1, 2));
+    }
+
+    /// Files from the homeserver that share an original name (a `01 Intro.flac` in two albums)
+    /// each get a name of their own in the folder, also when the names differ only in case; a
+    /// file that is in the folder under the name is never planned over, and one of the same
+    /// name and size counts as brought.
+    #[tokio::test]
+    async fn files_of_the_same_name_are_brought_under_names_of_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let mut taken = std::collections::HashSet::new();
+        let a = local_name(
+            d,
+            "01 Intro.flac",
+            "aaaaaaaaaaaaaaaa-01_Intro.flac",
+            10,
+            &mut taken,
+        )
+        .await;
+        let b = local_name(
+            d,
+            "01 Intro.flac",
+            "bbbbbbbbbbbbbbbb-01_Intro.flac",
+            20,
+            &mut taken,
+        )
+        .await;
+        let c = local_name(
+            d,
+            "01 INTRO.flac",
+            "cccccccccccccccc-01_INTRO.flac",
+            30,
+            &mut taken,
+        )
+        .await;
+        assert_eq!(a.as_deref(), Some("01 Intro.flac"));
+        assert_eq!(b.as_deref(), Some("bbbbbbbbbbbbbbbb-01_Intro.flac"));
+        assert_eq!(c.as_deref(), Some("cccccccccccccccc-01_INTRO.flac"));
+        // In the folder: another file under the original name, and this file under the full one
+        std::fs::write(d.join("Song.flac"), [0u8; 7]).unwrap();
+        std::fs::write(d.join("dddddddddddddddd-Song.flac"), [0u8; 9]).unwrap();
+        let mut taken = std::collections::HashSet::new();
+        assert_eq!(
+            local_name(d, "Song.flac", "dddddddddddddddd-Song.flac", 9, &mut taken).await,
+            None
+        );
+        assert!(
+            taken.contains("dddddddddddddddd-song.flac"),
+            "a brought file's name is its own"
+        );
+        assert_eq!(
+            local_name(d, "Song.flac", "eeeeeeeeeeeeeeee-Song.flac", 7, &mut taken).await,
+            None
+        );
+        // Both names are other files': a third name, and none of the three is given out twice
+        let f = local_name(d, "Song.flac", "dddddddddddddddd-Song.flac", 5, &mut taken).await;
+        let g = local_name(d, "Song.flac", "dddddddddddddddd-Song.flac", 6, &mut taken).await;
+        assert_eq!(f.as_deref(), Some("2-dddddddddddddddd-Song.flac"));
+        assert_eq!(g.as_deref(), Some("3-dddddddddddddddd-Song.flac"));
+        // A folder under the name is no copy of the file
+        std::fs::create_dir(d.join("Live.flac")).unwrap();
+        let h = local_name(d, "Live.flac", "ffffffffffffffff-Live.flac", 4096, &mut taken).await;
+        assert_eq!(h.as_deref(), Some("ffffffffffffffff-Live.flac"));
+    }
+
+    /// Where no link can be made, the download is copied into a file made only when the name
+    /// is free: a copy that fails (here: the part is a folder) leaves no file of that name, and a
+    /// file of that name stays.
+    #[tokio::test]
+    async fn without_links_a_failed_copy_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (part, target) = (dir.path().join("1.part"), dir.path().join("Song.flac"));
+        std::fs::create_dir(&part).unwrap();
+        assert!(copy_new(&part, &target).await.is_err());
+        assert!(!target.exists(), "what the failed copy made is gone");
+        std::fs::write(&target, b"the owner's").unwrap();
+        let e = copy_new(&part, &target).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&target).unwrap(), b"the owner's");
+        // A copy that works
+        let (part, other) = (dir.path().join("2.part"), dir.path().join("Other.flac"));
+        std::fs::write(&part, b"from the homeserver").unwrap();
+        copy_new(&part, &other).await.unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"from the homeserver");
+    }
+
+    /// The move used where no link can be made never replaces a file.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[tokio::test]
+    async fn the_move_without_links_never_replaces_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (part, target) = (dir.path().join("1.part"), dir.path().join("Song.flac"));
+        std::fs::write(&part, b"from the homeserver").unwrap();
+        std::fs::write(&target, b"the owner's").unwrap();
+        // (a temp folder whose file system has no such move: nothing to test here)
+        let Some(r) = rename_noreplace(&part, &target).await else {
+            return;
+        };
+        let e = r.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&target).unwrap(), b"the owner's");
+        assert!(part.exists());
+        std::fs::remove_file(&target).unwrap();
+        rename_noreplace(&part, &target).await.unwrap().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"from the homeserver");
+        assert!(!part.exists());
+    }
+
+    /// Clearing an earlier bring's part folder takes only its numbered part files, follows no
+    /// link at the folder's name, and ignores a name that is not a part folder's.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clearing_parts_takes_only_a_bring_s_own_part_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(dest.join(".odeion-bring-abc")).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(dest.join(".odeion-bring-abc/1.part"), b"x").unwrap();
+        std::fs::write(dest.join(".odeion-bring-abc/notes.part.txt"), b"x").unwrap();
+        std::fs::write(elsewhere.join("1.part"), b"x").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dest.join(".odeion-bring-link")).unwrap();
+
+        clear_parts(&dest, ".odeion-bring-abc").await;
+        assert!(!dest.join(".odeion-bring-abc/1.part").exists());
+        assert!(
+            dest.join(".odeion-bring-abc/notes.part.txt").exists(),
+            "not a part file"
+        );
+        assert!(dest.join(".odeion-bring-abc").is_dir(), "not empty: kept");
+
+        clear_parts(&dest, ".odeion-bring-link").await;
+        assert!(elsewhere.join("1.part").exists(), "a link is not followed");
+        assert!(dest.join(".odeion-bring-link").exists());
+
+        for name in ["../elsewhere", ".odeion-bring-", "elsewhere"] {
+            clear_parts(&dest, name).await;
+            clear_parts(dir.path(), name).await;
+        }
+        assert!(elsewhere.join("1.part").exists(), "not a part folder's name");
+
+        std::fs::remove_file(dest.join(".odeion-bring-abc/notes.part.txt")).unwrap();
+        clear_parts(&dest, ".odeion-bring-abc").await;
+        assert!(!dest.join(".odeion-bring-abc").exists(), "empty: gone");
+    }
+
+    /// A finished download gets its name only when no file has it: a file that came to be
+    /// there since the plan stays as it is, and the download is dropped.
+    #[tokio::test]
+    async fn a_finished_download_does_not_replace_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (part, target) = (dir.path().join(".Song.flac.part"), dir.path().join("Song.flac"));
+        std::fs::write(&part, b"from the homeserver").unwrap();
+        place_new(&part, &target).await.unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"from the homeserver");
+        assert!(!part.exists());
+        std::fs::write(&part, b"another file of that name").unwrap();
+        let e = place_new(&part, &target).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&target).unwrap(), b"from the homeserver");
+        assert!(!part.exists(), "the download is dropped");
     }
 }
