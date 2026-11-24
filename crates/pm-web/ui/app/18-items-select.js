@@ -277,7 +277,7 @@
   const plFocusOf = (a) => {
     const box = a && a.closest ? a.closest('#plsongs, #pllocal') : null; if (!box) return null;
     const row = a.closest('[data-srow]');
-    if (row && box.contains(row)) { const f = plSongFocus(box.id, plKeysOf(box.id), Number(row.dataset.srow), a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => (x.value === row.dataset.srow ? `[${x.name}]` : `[${x.name}="${CSS.escape(x.value)}"]`)).join(''), a.dataset.pup != null ? 'button[data-pdown]' : a.dataset.pdown != null ? 'button[data-pup]' : undefined); if (f) return f; } // (Move up at the top: Move down)
+    if (row && box.contains(row)) { const f = plSongFocus(box.id, plKeysOf(box.id), Number(row.dataset.srow), a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => (x.value === row.dataset.srow ? `[${x.name}]` : `[${x.name}="${CSS.escape(x.value)}"]`)).join(''), a.dataset.pup != null ? 'button[data-pdown]' : a.dataset.pdown != null ? 'button[data-pup]' : undefined); if (f) { if (a === row) f.row = true; return f; } } // (Move up at the top: Move down; f.row: the row itself)
     const sel = a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
     return { box: box.id, sel, i: $$(sel, box).indexOf(a) };
   };
