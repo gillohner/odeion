@@ -18549,6 +18549,8 @@ exec sleep 300
         fail_after: Option<usize>,
         /// Checking a file's size fails (the homeserver went away after an upload).
         stat_fails: std::sync::atomic::AtomicBool,
+        /// `stat_fails` is set by the first upload (checks before it go through).
+        stat_fails_after_upload: bool,
         /// Files whose size the homeserver doesn't say (no Content-Length).
         no_size: std::sync::Mutex<std::collections::HashSet<String>>,
         /// How long each upload takes.
@@ -18576,6 +18578,9 @@ exec sleep 300
                 tokio::time::sleep(d).await;
             }
             self.ops.lock().unwrap().push(format!("up:{remote}"));
+            if self.stat_fails_after_upload {
+                self.stat_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             let n = {
                 let mut u = self.uploads.lock().unwrap();
                 u.push(remote.to_string());
@@ -19264,8 +19269,10 @@ exec sleep 300
     /// and its in-flight record stays for the next start to settle (#224 review).
     #[tokio::test]
     async fn an_upload_whose_size_cant_be_checked_is_failed_and_kept_in_flight() {
-        let hs = Arc::new(FakeHomeserver::default());
-        hs.stat_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let hs = Arc::new(FakeHomeserver {
+            stat_fails_after_upload: true,
+            ..Default::default()
+        });
         let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
             free: 500 * GB,
             total: 1000 * GB,
@@ -28349,6 +28356,34 @@ exec sleep 300
         let sent = files::send_one(&s, &*hs, &*disk, &mut present, other, b"123".to_vec()).await;
         assert!(matches!(sent, Ok(true)));
         assert_eq!(*hs.uploads.lock().unwrap(), [other.to_string()]);
+    }
+
+    /// A file the copy's listing did not have, whose check fails when the copy reaches it, is
+    /// not sent: a good copy may have been written there since, and a failed upload's clean-up
+    /// would remove it.
+    #[tokio::test]
+    async fn a_copy_does_not_send_a_file_it_cannot_check() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, _app, _src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let disk = roomy();
+        let remote = "/pub/pubky.app/files/music/abcd-song.flac";
+        hs.sizes.lock().unwrap().insert(remote.into(), 5);
+        hs.stat_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut present = std::collections::HashMap::new();
+        let sent = files::send_one(&s, &*hs, &*disk, &mut present, remote, b"12345".to_vec()).await;
+        assert!(
+            matches!(&sent, Err(copy_guard::Refused::Other(e)) if e.starts_with("couldn't check the copy there")),
+            "{sent:?}"
+        );
+        assert!(hs.uploads.lock().unwrap().is_empty(), "nothing sent");
+        assert!(hs.deletes.lock().unwrap().is_empty(), "nothing removed");
+        assert_eq!(
+            hs.sizes.lock().unwrap().get(remote),
+            Some(&5),
+            "the copy there stays whole"
+        );
+        assert!(present.is_empty());
     }
 
     /// A bring that was cancelled is not started again after a restart; the part folder its

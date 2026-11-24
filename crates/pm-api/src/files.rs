@@ -212,7 +212,7 @@ pub(crate) async fn copy_one(
 /// nothing good is (what is there now is checked first, unless `present` lists the path with
 /// this size: a path the start's listing did not have may have been written since, by another
 /// node or an upload, and an upload that failed over it would be removed as half written; one
-/// whose check fails is sent, as before), guarded (the reserve with what is
+/// whose check fails is not sent), guarded (the reserve with what is
 /// really sent, recorded while in flight, checked after, nothing half written left there), and
 /// added to `present` once there.
 pub(crate) async fn send_one(
@@ -226,17 +226,21 @@ pub(crate) async fn send_one(
     let len = bytes.len() as u64;
     match present.get(remote) {
         Some(sz) if *sz == Some(len) => return Ok(false),
-        // Not listed: a good copy there now is kept; sent when there is none, or when that
-        // cannot be checked (as before the check)
-        None => {
+        // Not listed: a good copy there now is kept; sent when there is none. Not when that
+        // cannot be checked: a failed upload's clean-up could remove a good copy written since
+        None => match target.stat(remote).await {
             // (only a copy of this very size counts: one whose size is not said may be half written)
-            if let Ok(Some(Some(n))) = target.stat(remote).await {
-                if n == len {
-                    present.insert(remote.to_string(), Some(len));
-                    return Ok(false);
-                }
+            Ok(Some(Some(n))) if n == len => {
+                present.insert(remote.to_string(), Some(len));
+                return Ok(false);
             }
-        }
+            Ok(_) => {}
+            Err(e) => {
+                return Err(crate::copy_guard::Refused::Other(format!(
+                    "couldn't check the copy there ({e})"
+                )))
+            }
+        },
         // Listed with its size unknown or another: what is there now decides
         Some(_) => match crate::copy_guard::needs_sending(target, remote, len).await {
             Ok(true) => {}
