@@ -28387,6 +28387,77 @@ exec sleep 300
         assert!(present.is_empty());
     }
 
+    /// An import (a folder, or files from a browser) checks a file its listing did not have
+    /// right before it sends it, as a copy does: a whole copy written there since is kept as it
+    /// is, and when the check fails nothing is sent (a failed upload's clean-up would remove a
+    /// good copy written since).
+    #[tokio::test]
+    async fn an_import_checks_a_file_its_listing_did_not_have() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, _app, _src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let disk = roomy();
+        let bytes = b"12345".to_vec();
+        let h16 = blake3::hash(&bytes).to_hex()[..16].to_string();
+        let remote = format!("{}{h16}-song.flac", pm_pubky::homeserver::PRIVATE_FILES_DIR);
+        let said = |r: &Result<add_music::Stored, String>| match r {
+            Ok(add_music::Stored::Sent(p)) => format!("sent {p}"),
+            Ok(add_music::Stored::Already(p)) => format!("already {p}"),
+            Err(e) => format!("refused: {e}"),
+        };
+        // Written there since the listing: kept, nothing sent over it
+        hs.sizes.lock().unwrap().insert(remote.clone(), 5);
+        let mut have = std::collections::HashMap::new();
+        let stored = add_music::store(
+            &s,
+            &*hs,
+            &*disk,
+            &mut have,
+            "song.flac",
+            None,
+            bytes.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(said(&stored), format!("already {remote}"));
+        assert!(hs.uploads.lock().unwrap().is_empty(), "nothing sent over it");
+        assert_eq!(have.get(&h16), Some(&Some(5)), "noted as there");
+        // The check fails: refused, nothing sent, the copy there stays
+        hs.stat_fails.store(true, SeqCst);
+        hs.fails.store(true, SeqCst);
+        let mut have = std::collections::HashMap::new();
+        let stored = add_music::store(
+            &s,
+            &*hs,
+            &*disk,
+            &mut have,
+            "song.flac",
+            None,
+            bytes.clone(),
+            None,
+        )
+        .await;
+        assert!(
+            said(&stored).starts_with("refused: song.flac: couldn't check the copy there"),
+            "{}",
+            said(&stored)
+        );
+        assert!(hs.uploads.lock().unwrap().is_empty(), "nothing sent");
+        assert!(hs.deletes.lock().unwrap().is_empty(), "nothing removed");
+        assert_eq!(
+            hs.sizes.lock().unwrap().get(&remote),
+            Some(&5),
+            "the copy there stays whole"
+        );
+        // Not there: sent
+        hs.stat_fails.store(false, SeqCst);
+        hs.fails.store(false, SeqCst);
+        hs.sizes.lock().unwrap().clear();
+        let stored = add_music::store(&s, &*hs, &*disk, &mut have, "song.flac", None, bytes, None).await;
+        assert_eq!(said(&stored), format!("sent {remote}"));
+        assert_eq!(*hs.uploads.lock().unwrap(), [remote]);
+    }
+
     /// A bring that was cancelled is not started again after a restart; the part folder its
     /// record names is cleared and the record goes. A part folder of another name stays.
     #[tokio::test]

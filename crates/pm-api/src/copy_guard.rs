@@ -369,6 +369,15 @@ pub async fn needs_sending(target: &dyn Target, remote: &str, len: u64) -> Resul
     })
 }
 
+/// Whether a whole copy of `len` bytes is at `remote` now, asked right before a copy or an import
+/// sends a file its listing did not have: one written there since (another node of the owner's,
+/// an upload) is kept, since a failed upload over it would be removed as half written. Only a
+/// copy of this very size counts (one whose size the homeserver doesn't say may be half written).
+/// An error when that can't be told: the file is then not sent.
+pub async fn whole_copy_there(target: &dyn Target, remote: &str, len: u64) -> Result<bool, String> {
+    Ok(matches!(target.stat(remote).await?, Some(Some(n)) if n == len))
+}
+
 /// Why an upload didn't go through.
 #[derive(Debug)]
 pub enum Refused {

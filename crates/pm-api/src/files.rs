@@ -228,13 +228,12 @@ pub(crate) async fn send_one(
         Some(sz) if *sz == Some(len) => return Ok(false),
         // Not listed: a good copy there now is kept; sent when there is none. Not when that
         // cannot be checked: a failed upload's clean-up could remove a good copy written since
-        None => match target.stat(remote).await {
-            // (only a copy of this very size counts: one whose size is not said may be half written)
-            Ok(Some(Some(n))) if n == len => {
+        None => match crate::copy_guard::whole_copy_there(target, remote, len).await {
+            Ok(true) => {
                 present.insert(remote.to_string(), Some(len));
                 return Ok(false);
             }
-            Ok(_) => {}
+            Ok(false) => {}
             Err(e) => {
                 return Err(crate::copy_guard::Refused::Other(format!(
                     "couldn't check the copy there ({e})"
