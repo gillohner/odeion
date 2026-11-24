@@ -8582,6 +8582,86 @@ mod tests {
         assert_eq!(resolves.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    /// A page that goes away while its link waits to be read (its request is dropped) does not
+    /// hold up the reader: that read is finished all the same, and the next link is read after
+    /// it. (Before, the read stood still with its turn taken, and no other link was read until
+    /// someone asked for the same one again.)
+    #[tokio::test]
+    async fn a_page_that_goes_away_does_not_hold_up_the_link_reader() {
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::time::Duration;
+        // (Pinakes answers every read with a card it is still reading)
+        let mut pending: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../pm-pubky/tests/fixtures/pinakes/music/card-deezer-album-cut-to-the-feeling.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        pending["status"] = "pending".into();
+        pending["also_on"] = serde_json::json!([]);
+        let pending = pending.to_string();
+        let resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let r2 = resolves.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/v1/resources/by-uri",
+                get(|| async { (StatusCode::NOT_FOUND, r#"{"error":"not found"}"#) }),
+            )
+            .route(
+                "/v1/resolve",
+                post(move || {
+                    r2.fetch_add(1, SeqCst);
+                    let pending = pending.clone();
+                    async move {
+                        (
+                            StatusCode::ACCEPTED,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            pending,
+                        )
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let link = |n: u32| format!("https://www.deezer.com/album/{n}");
+        let (two, three) = (link(2), link(3));
+        // A first link is read: from now on the next read waits its turn
+        crate::pinakes_reader::card(&s, &link(1)).await;
+        assert_eq!(resolves.load(SeqCst), 1);
+        // Whoever asked for a second link goes away while that read waits
+        let gone = tokio::time::timeout(
+            Duration::from_millis(100),
+            crate::pinakes_reader::resolve(&s, &two),
+        );
+        assert!(gone.await.is_err(), "the second read waits its turn");
+        assert_eq!(resolves.load(SeqCst), 1);
+        // A third link is read after it
+        let third = tokio::time::timeout(
+            crate::pinakes_reader::RESOLVE_INTERVAL * 4,
+            crate::pinakes_reader::card(&s, &three),
+        );
+        assert!(
+            third.await.is_ok(),
+            "the reader is held up by a page that went away"
+        );
+        assert_eq!(resolves.load(SeqCst), 3, "the second link was read too");
+        // and its answer is kept: asking again reads nothing
+        crate::pinakes_reader::card(&s, &two).await;
+        assert_eq!(resolves.load(SeqCst), 3);
+    }
+
     /// Deep links and reloads of web UI paths land on the UI (SPA fallback).
     #[tokio::test]
     async fn web_ui_paths_serve_the_app() {
