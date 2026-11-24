@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const ORIGIN = 'http://odeion-fixture.test';
 const ROOT = path.resolve(process.argv[2] || path.join(__dirname, '..'));
 const STATIC = path.join(ROOT, 'crates/pm-web/static');
+const ui = require('./ui-src'); // app.js is joined from its parts, as the node's build does
 const SONG = 'https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69';
 const LINK = 'https://example.com/liner-notes';
 const artists = [{id: 11, name: 'Sefa'}, {id: 22, name: 'Dr. Peacock'}];
@@ -54,7 +55,7 @@ async function create(browser, width, opts={}) {
  await context.route('**/*', async r => {
   const req=r.request(), u=new URL(req.url()), p=u.pathname;
   if(u.origin!==ORIGIN) return r.abort();
-  if(!p.startsWith('/v1/')) {const f=path.join(STATIC, p==='/'||!path.extname(p)?'index.html':p.slice(1));return fs.existsSync(f)?r.fulfill({body:fs.readFileSync(f),contentType:({'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'})[path.extname(f)]||'application/octet-stream'}):r.fulfill({status:404,body:''});}
+  if(!p.startsWith('/v1/')) {const f=path.join(STATIC, p==='/'||!path.extname(p)?'index.html':p.slice(1));return ui.has(STATIC,path.basename(f))&&(fs.existsSync(f)||p==='/app.js')?r.fulfill({body:ui.read(STATIC,path.basename(f)),contentType:({'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'})[path.extname(f)]||'application/octet-stream'}):r.fulfill({status:404,body:''});}
   const v=p.slice(3), m=req.method();state.hits.push({v,m,q:u.search,body:req.postData(),at:Date.now()});
   // opts.delay: ms (or (path, method) => ms) before the answer, for loading states (ui-busy.js)
   const wait=typeof state.delay==='function'?state.delay(v,m):state.delay; if(wait) await new Promise(res=>setTimeout(res,wait));

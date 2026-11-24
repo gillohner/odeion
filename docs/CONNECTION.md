@@ -52,7 +52,7 @@ One WebSocket per controller carries every change. The REST API (`/v1/...`) carr
   after 45 s of silence, so the half-open socket of a laptop that went to sleep does not linger.
   Controllers that never ping (`pm-client`, older UIs) are not held to this.
 
-**The web UI** (`crates/pm-web/static/app.js`, "connection + events"):
+**The web UI** (`crates/pm-web/ui/app/28-connection-identify-events.js`, "connection + events"):
 - **Reconnects** with backoff and jitter:
   - For the first 20 s of an outage, and while a change is held, it retries at most every 1.5 s, so a restarted node is picked up within about a second.
   - After that, the delay doubles from 2 s up to 30 s.

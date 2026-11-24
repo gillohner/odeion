@@ -115,7 +115,8 @@ manifest = json_of("crates/pm-web/static/manifest.webmanifest")
 check(manifest.get("name") == "Odeion", "PWA manifest name is Odeion")
 check(manifest.get("short_name") == "Odeion", "PWA manifest short_name is Odeion")
 check("Pubky Music" not in json.dumps(manifest), "PWA manifest has no old name")
-app_js = text("crates/pm-web/static/app.js")
+# app.js is kept as ordered parts (crates/pm-web/ui/app/NN-name.js); the node serves them joined
+app_js = "".join(p.read_text(encoding="utf-8") for p in sorted((ROOT / "crates/pm-web/ui/app").glob("[0-9][0-9]-*.js")))
 check("‹ Odeion</a>" in app_js, "the dashboard's way home says Odeion")
 check(app_js.startswith("/* Odeion web UI."), "app.js names Odeion")
 
@@ -268,7 +269,7 @@ check('name = "pm-node"' in node_toml, "the pm-node executable still builds")
 check(re.search(r'\[package\]\nname = "pm-node"', node_toml) is not None, "the pm-node package id is unchanged")
 check("PM_DATA_DIR" in ep and "PM_TOKEN" in ep and "PM_FOLDERS" in ep, "the entrypoint still reads PM_ settings")
 has("crates/pm-api/src/opensubsonic.rs", 'Some("pubky-music-node")', "OpenSubsonic server type is unchanged")
-has("crates/pm-web/static/app.js", "localStorage.getItem('pm.token')", "the web page keeps its stored token key")
+check("localStorage.getItem('pm.token')" in app_js, "the web page keeps its stored token key")
 
 # ---------------------------------------------------------------- 3. legacy names only where allowed
 ALLOWED_PREFIXES = (

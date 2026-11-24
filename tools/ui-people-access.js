@@ -20,6 +20,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const ui = require('./ui-src');
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const { create, go, cleanCopy, ORIGIN } = require('./ui-fixture');
 const OUT = process.argv[3] || '/tmp/ui-people-access';
@@ -192,7 +193,8 @@ const atLoopback = async (context) => {
   const quiet = { '/info': { name: 'Fixture node', offline: false, library: { tracks: 1, albums: 1, artists: 2, files: 1, missing_files: 0 } }, '/me': { role: 'owner', key: null, zones: null, can: OWNER_CAN }, '/zones': ZONES, '/outputs': [], '/sources': [], '/presence': [], '/node/apps': [], '/pubky': { user: null }, '/me/prefs': {} };
   await context.route(`${LOOPBACK}/**`, (r) => {
     const p = new URL(r.request().url()).pathname;
-    if (!p.startsWith('/v1/')) { const f = path.join(STATIC, p === '/' || !path.extname(p) ? 'index.html' : p.slice(1)); return fs.existsSync(f) ? r.fulfill({ body: fs.readFileSync(f), contentType: types[path.extname(f)] || 'application/octet-stream' }) : r.fulfill({ status: 404, body: '' }); }
+    // (app.js is kept as parts beside the static folder: ui-src joins them as the node does)
+    if (!p.startsWith('/v1/')) { const name = p === '/' || !path.extname(p) ? 'index.html' : p.slice(1); return ui.has(STATIC, name) ? r.fulfill({ body: ui.read(STATIC, name), contentType: types[path.extname(name)] || 'application/octet-stream' }) : r.fulfill({ status: 404, body: '' }); }
     const v = p.slice(3);
     return v in quiet ? r.fulfill({ contentType: 'application/json', body: JSON.stringify(quiet[v]) }) : r.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'Fixture endpoint unavailable' }) });
   });

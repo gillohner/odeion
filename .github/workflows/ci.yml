@@ -30,8 +30,9 @@ jobs:
   # the release tooling or a workflow; always on main and by hand. A code change that breaks the
   # build fails `check` and `node` on the same pull request.
   # `rust` is false for a pull request that changes the web UI alone: nothing but the page's files
-  # (crates/pm-web/static), the fixture pages (tools/ui-*.js and their list) and docs. No Rust code
-  # or test can tell such a head from its base, apart from the tests that read the page's files,
+  # (crates/pm-web/static and the script's parts in crates/pm-web/ui/app), the fixture pages
+  # (tools/ui-*.js and their list) and docs. No Rust code or test can tell such a head from its
+  # base, apart from the tests that read the page's files,
   # so the jobs that only build and test Rust are skipped (check, desktop, alsa-loopback, slimproto,
   # plex, audiobookshelf, bundle, webdav) and `pages` runs those tests. The node is still built
   # (the files are compiled into it) and every browser job runs. Main and runs by hand do everything.
@@ -64,7 +65,7 @@ jobs:
           if [ "$code" -gt 0 ] || [ "$held" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
           # Anything that is not the page's files, a fixture page or docs can reach Rust code
           # (docs/APP-DATA.md, docs/access.md and a crate's own README are read by Rust tests, so they are not "docs" here)
-          rust=$(printf '%s\n' "$files" | sed -E 's#^docs/(APP-DATA|access)\.md$#rust:&#' | grep -Ev '^(crates/pm-web/static/|tools/ui-[^/]+\.js$|tools/ui-fixtures\.list$|docs/|NOTICE$|LICENSE$|[^/]+\.md$)' | grep -c . || true)
+          rust=$(printf '%s\n' "$files" | sed -E 's#^docs/(APP-DATA|access)\.md$#rust:&#' | grep -Ev '^(crates/pm-web/static/|crates/pm-web/ui/app/[^/]+\.js$|tools/ui-[^/]+\.js$|tools/ui-fixtures\.list$|docs/|NOTICE$|LICENSE$|[^/]+\.md$)' | grep -c . || true)
           echo "$rust outside the web UI's files, the fixture pages and the docs"
           if [ "$EVENT" = push ] || [ "$rust" -gt 0 ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi
           image=$(printf '%s\n' "$files" | grep -Ec '^(Dockerfile|\.dockerignore|Cargo\.(toml|lock)|crates/[^/]+/Cargo\.toml|rust-toolchain(\.toml)?|deploy/docker/|tools/release/|\.github/workflows/)' || true)

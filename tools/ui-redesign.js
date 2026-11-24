@@ -42,7 +42,7 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
     check(lintOk && !/off the/.test(lint), `design lint passes, every font-size and radius on its scale (rule 5)${lintOk ? '' : `: ${probs.slice(0, 3).join(' | ')}${probs.length > 3 ? ` (+${probs.length - 3} more)` : ''}`}`);
     // (the words in app.js's string literals: a small scan that knows quotes, template strings and
     // their ${} holes, and reads the code inside a hole for strings of its own)
-    const js = fs.readFileSync(path.join(REPO, 'crates/pm-web/static/app.js'), 'utf8');
+    const js = require('./ui-src').appJs(path.join(REPO, 'crates/pm-web/static')).toString('utf8');
     const strings = [];
     const scan = (code, base) => {
       let q = null; let buf = ''; let line = base; let at = base;

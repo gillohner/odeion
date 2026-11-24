@@ -36,7 +36,7 @@ const heading = (page) => page.locator('main .page-head h2').first().evaluate((h
 // Counts said where a page can't easily be driven here (toasts after an import or a bulk tag, a
 // restored backup), read from the app's code: none counts "tracks"
 function countWords() {
-  const app = fs.readFileSync(path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-web/static/app.js'), 'utf8');
+  const app = require('./ui-src').appJs(path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-web/static')).toString('utf8');
   const counts = [...app.matchAll(/countOf\([^;]*?,\s*'tracks?'\)|nOf\([^;]*?,\s*'tracks?',/g)].map((m) => m[0]);
   assert.deepEqual(counts, [], 'no count says "tracks"');
   console.log('PASS counts said elsewhere (songs added, a restored backup, bulk tags) say songs');

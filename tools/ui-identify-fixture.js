@@ -24,6 +24,7 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const STATIC = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-web', 'static');
+const ui = require('./ui-src'); // app.js is joined from its parts, as the node's build does
 const SHOTS = process.argv[3] || '';
 const problems = [];
 let checks = 0;
@@ -70,11 +71,11 @@ const server = http.createServer(async (req, res) => {
   }
   // A file of the static folder by its name (app.js, pwa.js, icons…), else the page itself
   const name = u.pathname.slice(1);
-  const file = /^[\w.-]+$/.test(name) && name !== 'index.html' && fs.existsSync(path.join(STATIC, name)) ? name : 'index.html';
+  const file = /^[\w.-]+$/.test(name) && name !== 'index.html' && ui.has(STATIC, name) ? name : 'index.html';
   const ext = path.extname(file);
   const type = { '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.html': 'text/html; charset=utf-8' }[ext] || 'application/octet-stream';
   res.writeHead(200, { 'content-type': type, 'cache-control': 'no-cache' });
-  res.end(fs.readFileSync(path.join(STATIC, file)));
+  res.end(ui.read(STATIC, file));
 });
 
 (async () => {
