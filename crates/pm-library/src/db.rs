@@ -1006,6 +1006,18 @@ impl Library {
         self.tracks_where("t.recording_mbid = ?1", mbid.to_string())
     }
 
+    /// [`Self::tracks_where`] with two arguments.
+    fn tracks_where2(&self, clause: &str, a: String, b: String) -> Result<Vec<Track>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "{TRACK_SELECT} WHERE {clause} ORDER BY fi.missing, t.id"
+        ))?;
+        let raws: Vec<RawTrack> = stmt
+            .query_map(params![a, b], row_to_track_raw)?
+            .collect::<std::result::Result<_, _>>()?;
+        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+    }
+
     fn tracks_where(&self, clause: &str, arg: String) -> Result<Vec<Track>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
@@ -1954,15 +1966,10 @@ impl Library {
     /// a share's or a drive's key ending in `/`), by path: its size and the first 16 hex digits of
     /// its content hash when one is kept for that size. The range on the path uses its index.
     pub fn files_under(&self, prefix: &str) -> Result<Vec<(String, u64, Option<String>)>> {
-        let Some(last) = prefix.chars().last() else {
+        if prefix.is_empty() {
             return Ok(Vec::new());
-        };
-        // Every path with this prefix sorts before the prefix with its last character raised by one
-        let upper = format!(
-            "{}{}",
-            &prefix[..prefix.len() - last.len_utf8()],
-            char::from_u32(last as u32 + 1).unwrap_or(char::MAX)
-        );
+        }
+        let (_, upper) = under(prefix);
         let conn = self.lock();
         let v = conn
             .prepare(
@@ -1980,19 +1987,16 @@ impl Library {
     /// Every present file under `root` with its album's id and title. The scanner uses it to
     /// find albums that one folder's files were split into.
     pub fn album_files_under(&self, root: &Path) -> Result<Vec<(PathBuf, i64, String)>> {
-        let mut prefix = root.to_string_lossy().to_string();
-        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
-            prefix.push(std::path::MAIN_SEPARATOR);
-        }
+        let prefix = folder_prefix(root);
         let conn = self.lock();
         let v = conn
             .prepare(
                 "SELECT f.path, al.id, al.title FROM files f
                  JOIN tracks t ON t.id = f.track_id
                  JOIN albums al ON al.id = t.album_id
-                 WHERE +f.missing = 0 AND f.path LIKE ?1 ESCAPE '\\'",
+                 WHERE +f.missing = 0 AND f.path >= ?1 AND f.path < ?2",
             )?
-            .query_map(params![format!("{}%", like_escape(&prefix))], |r| {
+            .query_map(params![under(&prefix).0, under(&prefix).1], |r| {
                 Ok((PathBuf::from(r.get::<_, String>(0)?), r.get(1)?, r.get(2)?))
             })?
             .collect::<std::result::Result<_, _>>()?;
@@ -2909,8 +2913,8 @@ impl Library {
 
     /// Audio files in the folder of `path` that the library knows.
     pub fn tracks_in_folder(&self, dir: &std::path::Path) -> Result<Vec<Track>> {
-        let prefix = format!("{}/", dir.to_string_lossy().trim_end_matches('/'));
-        let all = self.tracks_where("fi.path LIKE ?1 || '%'", prefix)?;
+        let (lo, hi) = under(&folder_prefix(dir));
+        let all = self.tracks_where2("fi.path >= ?1 AND fi.path < ?2", lo, hi)?;
         Ok(all
             .into_iter()
             .filter(|t| t.file.path.parent() == Some(dir))
@@ -4185,14 +4189,10 @@ impl Library {
         let mut conn = self.lock();
         let tx = conn.savepoint()?;
         let root_s = root.to_string_lossy().into_owned();
-        let prefix = format!("{}/", root_s.trim_end_matches('/'));
-        let escaped = prefix
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
+        let (lo, hi) = under(&folder_prefix(root));
         let files = tx.execute(
-            "DELETE FROM files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-            params![root_s, format!("{escaped}%")],
+            "DELETE FROM files WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
+            params![root_s, lo, hi],
         )? as u64;
         tx.execute(
             "DELETE FROM plays WHERE track_id IN (SELECT id FROM tracks WHERE id NOT IN (SELECT track_id FROM files))",
@@ -4249,14 +4249,11 @@ impl Library {
     /// Tracks and bytes of the present files under `root` (a library folder), for the storage
     /// status line.
     pub fn folder_totals(&self, root: &Path) -> Result<(u64, u64)> {
-        let mut prefix = root.to_string_lossy().to_string();
-        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
-            prefix.push(std::path::MAIN_SEPARATOR);
-        }
+        let prefix = folder_prefix(root);
         let conn = self.lock();
         Ok(conn.query_row(
-            "SELECT COUNT(DISTINCT track_id), COALESCE(SUM(size_bytes), 0) FROM files WHERE +missing = 0 AND path LIKE ?1 ESCAPE '\\'",
-            params![format!("{}%", like_escape(&prefix))],
+            "SELECT COUNT(DISTINCT track_id), COALESCE(SUM(size_bytes), 0) FROM files WHERE +missing = 0 AND path >= ?1 AND path < ?2",
+            params![under(&prefix).0, under(&prefix).1],
             |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
         )?)
     }
@@ -4311,13 +4308,10 @@ impl Library {
     /// Flag every file under `root` that this scan did not see. Returns how
     /// many changed state.
     pub fn mark_missing_under(&self, root: &Path, scan_id: i64) -> Result<u64> {
-        let mut prefix = root.to_string_lossy().to_string();
-        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
-            prefix.push(std::path::MAIN_SEPARATOR);
-        }
+        let prefix = folder_prefix(root);
         let n = self.lock().execute(
-            "UPDATE files SET missing = 1 WHERE +missing = 0 AND path LIKE ?1 ESCAPE '\\' AND (last_seen_scan_id IS NULL OR last_seen_scan_id <> ?2)",
-            params![format!("{}%", like_escape(&prefix)), scan_id],
+            "UPDATE files SET missing = 1 WHERE +missing = 0 AND path >= ?1 AND path < ?2 AND (last_seen_scan_id IS NULL OR last_seen_scan_id <> ?3)",
+            params![under(&prefix).0, under(&prefix).1, scan_id],
         )?;
         Ok(n as u64)
     }
@@ -4767,8 +4761,36 @@ fn recording_uri(mbid: &str) -> Result<MusicUri> {
     Ok(MusicUri::Recording { mbid })
 }
 
-fn like_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+/// `root` with its separator at the end, as the paths under it are kept: `/` for a share's or a
+/// drive's key (`webdav://…`, `drive://…`, `/`-separated on every platform), the platform's own
+/// for a local folder (`\` on Windows). Separators already at its end count once.
+fn folder_prefix(root: &Path) -> String {
+    let root = root.to_string_lossy();
+    let sep = if root.contains("://") {
+        '/'
+    } else {
+        std::path::MAIN_SEPARATOR
+    };
+    let mut prefix = root.trim_end_matches([sep, '/']).to_string();
+    prefix.push(sep);
+    prefix
+}
+
+/// The paths that start with `prefix` (a folder with its separator at the end) as a range of
+/// the `files.path` index: `(lo, hi)` for `path >= lo AND path < hi`. Exact and case-sensitive,
+/// as paths are (`LIKE` ignores the case of ASCII letters, so `/music/` also matched every path
+/// under `/Music/`), and the index is used. Every such path sorts before the prefix with its
+/// last character raised by one; an empty prefix takes every path.
+fn under(prefix: &str) -> (String, String) {
+    let Some(last) = prefix.chars().last() else {
+        return (String::new(), char::MAX.to_string());
+    };
+    let hi = format!(
+        "{}{}",
+        &prefix[..prefix.len() - last.len_utf8()],
+        char::from_u32(last as u32 + 1).unwrap_or(char::MAX)
+    );
+    (prefix.to_string(), hi)
 }
 
 /// Turn free text into an FTS5 query: each word a prefix term, ANDed.
@@ -5498,6 +5520,50 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::{sample_track, MB};
     use super::*;
+
+    /// Two folders whose names differ only in case are two folders: removing, scanning or
+    /// counting one leaves the other's songs alone (`LIKE` ignored the case). A folder name with
+    /// `_` or `%` in it matches only itself. (Unix: its paths are written with `/`, and folder
+    /// names differ only in case only where the file system tells case apart.)
+    #[cfg(unix)]
+    #[test]
+    fn folders_that_differ_only_in_case_are_kept_apart() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut ids = std::collections::HashMap::new();
+        for p in [
+            "/m/Music/a.flac",
+            "/m/music/b.flac",
+            "/m/music/sub/c.flac",
+            "/m/a_b/d.flac",
+            "/m/axb/e.flac",
+        ] {
+            ids.insert(p, lib.upsert_track(&sample_track(p, p)).unwrap());
+        }
+        let present = |lib: &Library, p: &str| {
+            lib.get_track(ids[p])
+                .unwrap()
+                .is_some_and(|t| t.file.path == Path::new(p))
+        };
+        assert_eq!(lib.folder_totals(Path::new("/m/music")).unwrap().0, 2);
+        assert_eq!(lib.folder_totals(Path::new("/m/Music")).unwrap().0, 1);
+        assert_eq!(lib.folder_totals(Path::new("/m/a_b")).unwrap().0, 1);
+        assert_eq!(lib.album_files_under(Path::new("/m/Music")).unwrap().len(), 1);
+        assert_eq!(lib.tracks_in_folder(Path::new("/m/music")).unwrap().len(), 1);
+        // A scan of /m/music that saw nothing marks only its own two missing
+        assert_eq!(lib.mark_missing_under(Path::new("/m/music"), 99).unwrap(), 2);
+        assert_eq!(
+            lib.folder_totals(Path::new("/m/Music")).unwrap().0,
+            1,
+            "still there"
+        );
+        // Removing /m/music takes its own two songs only
+        let (files, _) = lib.remove_folder(Path::new("/m/music")).unwrap();
+        assert_eq!(files, 2);
+        assert!(present(&lib, "/m/Music/a.flac"));
+        assert!(lib.get_track(ids["/m/music/b.flac"]).unwrap().is_none());
+        lib.remove_folder(Path::new("/m/a_b")).unwrap();
+        assert!(present(&lib, "/m/axb/e.flac"), "`_` is no wildcard");
+    }
 
     #[test]
     fn a_settings_size_is_its_bytes_without_reading_it() {
@@ -8032,5 +8098,39 @@ mod identify_tests {
         let names: Vec<String> = lib.list_artists().unwrap().into_iter().map(|a| a.name).collect();
         assert_eq!(names, ["Artist 0", "Artist 1"]);
         assert_eq!(lib.list_genres().unwrap().len(), 2);
+    }
+
+    /// A folder's range ends in the separator its paths have: `/` for a drive's or a share's key
+    /// on every platform, the platform's own for a local folder. A drive's songs are counted,
+    /// listed by folder and removed under its key, and another key that starts the same stays.
+    #[test]
+    fn a_folder_range_ends_in_the_separator_its_paths_have() {
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(folder_prefix(Path::new("drive://abc")), "drive://abc/");
+        assert_eq!(folder_prefix(Path::new("webdav://s1/")), "webdav://s1/");
+        assert_eq!(folder_prefix(Path::new("/m/music")), format!("/m/music{sep}"));
+        assert_eq!(folder_prefix(Path::new("/m/music/")), format!("/m/music{sep}"));
+        #[cfg(windows)]
+        assert_eq!(folder_prefix(Path::new(r"C:\Music\")), r"C:\Music\");
+        let lib = Library::open_in_memory().unwrap();
+        for p in [
+            "drive://abc/Album/a.flac",
+            "drive://abc/Album/b.flac",
+            "drive://abcd/x.flac",
+        ] {
+            lib.upsert_track(&sample_track(p, p)).unwrap();
+        }
+        assert_eq!(lib.folder_totals(Path::new("drive://abc")).unwrap().0, 2);
+        assert_eq!(lib.album_files_under(Path::new("drive://abc")).unwrap().len(), 2);
+        assert_eq!(
+            lib.tracks_in_folder(Path::new("drive://abc/Album"))
+                .unwrap()
+                .len(),
+            2
+        );
+        let (files, _) = lib.remove_folder(Path::new("drive://abc")).unwrap();
+        assert_eq!(files, 2);
+        assert_eq!(lib.folder_totals(Path::new("drive://abcd")).unwrap().0, 1);
+        assert_eq!(lib.mark_missing_under(Path::new("drive://abcd"), 99).unwrap(), 1);
     }
 }
