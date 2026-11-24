@@ -1,7 +1,8 @@
 //! Backup and restore (steward next-4, item 1): one file with everything needed to rebuild the
 //! node, never the audio.
 //!
-//! The file (`pubky-music-<date>.pmbackup`) is a zip:
+//! The file (`pubky-music-YYYY-MM-DD-HHMMSS.pmbackup` when downloaded, with `-<node tag>` before
+//! `.pmbackup` from the schedule) is a zip:
 //! - `manifest.json`: what it is, when, from which node, and counts (tracks, matches, playlists…);
 //! - `library.db`: a snapshot of the library database (matches and corrections, playlists,
 //!   bookmarks, tags, play history, queues, settings) with every sign-in taken out;
