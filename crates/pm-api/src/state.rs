@@ -2837,9 +2837,8 @@ fn stream_secret(lib: &Library) -> [u8; 32] {
 }
 
 /// Whether `given` is the secret `want`, in time that does not depend on where they differ (a
-/// secret is sent by whoever asks, over and over). A different length is no match; an empty
-/// `want` matches nothing.
+/// secret is sent by whoever asks, over and over; [`crate::app_passwords::same`]). A different
+/// length is no match; an empty `want` matches nothing.
 pub(crate) fn same_secret(want: &str, given: &str) -> bool {
-    let (a, b) = (want.as_bytes(), given.as_bytes());
-    !a.is_empty() && a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+    !want.is_empty() && crate::app_passwords::same(want.as_bytes(), given.as_bytes())
 }
