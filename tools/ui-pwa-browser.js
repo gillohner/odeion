@@ -364,7 +364,14 @@ ${checks - failures.length}/${checks} browser checks passed (launch safety only)
     await swReady(page);
     await page.reload({ waitUntil: 'load' }); await sleep(1500);
     ok(await page.evaluate(() => !!navigator.serviceWorker.controller), 'worker: controls the page after a reload');
-    await page.goto(BASE + '/albums', { waitUntil: 'load' }); await sleep(1200);
+    const albumsNav = await page.goto(BASE + '/albums', { waitUntil: 'load' }); await sleep(1200);
+    const navHeaders = albumsNav ? albumsNav.headers() : {};
+    const navBody = albumsNav && await albumsNav.body().catch(() => null);
+    const navBytes = navBody ? navBody.length : -1;
+    // (a length the browser itself puts on the body is fine; the node's compressed one is not)
+    const navLength = navHeaders['content-length'];
+    save('pageFromWorkerHeaders', { fromWorker: albumsNav && albumsNav.fromServiceWorker(), encoding: navHeaders['content-encoding'] || null, length: navLength || null, bytes: navBytes });
+    ok(!!albumsNav && albumsNav.fromServiceWorker() && !navHeaders['content-encoding'] && (!navLength || Number(navLength) === navBytes), 'worker: the page it hands on (body already decoded) carries no gzip Content-Encoding, and no length but its own ' + JSON.stringify([navHeaders['content-encoding'] || null, navLength || null, navBytes]));
     const albums = await page.evaluate(() => document.querySelector('#main').textContent.replace(/\s+/g, ' ').trim());
     ok(albums.length > 20 && !/error|went wrong/i.test(albums), 'populated: the fixture library shows on /albums: ' + albums.slice(0, 90));
     // Browse a few views: the API, covers and the queue go through the network, never the cache

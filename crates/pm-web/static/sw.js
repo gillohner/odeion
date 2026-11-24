@@ -125,7 +125,9 @@ async function pageFromNode(request) {
   if (!r || r.status !== 200 || r.type !== 'basic' || !r.body || !/^text\/html/i.test(r.headers.get('content-type') || '')) return r;
   const reader = r.body.getReader();
   const parts = []; let size = 0;
-  const init = { status: r.status, statusText: r.statusText, headers: r.headers };
+  // (the body is read here already decoded: the node's gzip and its length no longer describe it)
+  const headers = new Headers(r.headers); headers.delete('content-encoding'); headers.delete('content-length');
+  const init = { status: r.status, statusText: r.statusText, headers };
   try {
     for (;;) {
       const step = await Promise.race([reader.read(), timeout(Math.max(0, until - Date.now()))]);
