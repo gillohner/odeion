@@ -855,8 +855,10 @@ html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
 /* ---- artist hero ---- */
 .artist-hero { display: flex; gap: var(--sp-5); align-items: flex-start; margin-bottom: var(--sp-2); }
 .artist-hero .grow { flex: 1; min-width: 0; }
-.portrait { width: 140px; height: 140px; border-radius: 50%; flex: none; overflow: hidden; display: flex; align-items: center; justify-content: center; font-weight: var(--fw-bold); font-size: var(--fs-display); color: rgba(255,255,255,0.85); box-shadow: var(--shadow); }
-.portrait img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.portrait { position: relative; width: 140px; height: 140px; border-radius: 50%; flex: none; overflow: hidden; display: flex; align-items: center; justify-content: center; font-weight: var(--fw-bold); font-size: var(--fs-display); color: rgba(255,255,255,0.85); box-shadow: var(--shadow); }
+/* A service album's or artist's picture lies over its initials, so one that fails to load (removed) leaves the initials */
+.portrait > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.portrait > img.loaded { background: var(--surface-3); }
 .bio { color: var(--fg-2); max-width: 72ch; margin-top: var(--sp-3); line-height: 1.55; }
 .artist-hero a { color: var(--fg-2); }
 .artist-hero a:hover { color: var(--accent-strong); }
@@ -978,8 +980,8 @@ html[data-shell="phone"] #iversions .list-row .icon-btn { width: 44px; height: 4
 .src-badge.ico.cover svg { width: 13px; height: 13px; }
 .art.sm .src-badge.ico.cover, .thumbwrap .src-badge.ico.cover { left: 3px; bottom: 3px; width: 16px; height: 16px; }
 .art.sm .src-badge.ico.cover svg, .thumbwrap .src-badge.ico.cover svg { width: 10px; height: 10px; }
-.hero .art .src-badge.ico.cover { left: 10px; bottom: 10px; width: 28px; height: 28px; }
-.hero .art .src-badge.ico.cover svg { width: 16px; height: 16px; }
+.hero .art .src-badge.ico.cover, .portrait .src-badge.ico.cover { left: 10px; bottom: 10px; width: 28px; height: 28px; }
+.hero .art .src-badge.ico.cover svg, .portrait .src-badge.ico.cover svg { width: 16px; height: 16px; }
 .np-big .src-badge.ico.cover { left: 12px; bottom: 12px; width: 32px; height: 32px; }
 .np-big .src-badge.ico.cover svg { width: 18px; height: 18px; }
 .list-row .thumbwrap { position: relative; display: block; flex: none; margin-right: var(--sp-2h); line-height: 0; }
