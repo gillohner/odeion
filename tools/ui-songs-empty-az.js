@@ -5,6 +5,7 @@
 // 2. The A–Z row on Albums and Artists put "#" between O and P (and other letters) when a name began
 //    with a letter that doesn't split into a base letter (Œ, Æ, Ø, Ł, Đ, Ħ, Ŋ, Ŧ…): those sort with their
 //    base letter but were filed under "#". Now they are under that letter, and "#" is first or last.
+//    Each such name is checked for its own letter (filtered to it, only that letter stays on).
 // At 1280, 1024, 768 and 360 px. Isolated API fixtures; no node needed.
 //   node tools/ui-songs-empty-az.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -17,7 +18,9 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
 
 const stats = (tracks) => ({ tracks, albums: 0, artists: 0, files: tracks, missing_files: 0, total_duration_ms: 0 });
 // 45 names (the A–Z row shows from 41), some starting with letters NFKD leaves whole
-const NAMES = ['Aaron', 'Æon Flux', 'Apple', 'Bee', 'Đorđe', 'Ħal', 'Ibis', 'Lima', 'Łódź', 'Ŋoro', 'Oasis', 'Œuvre', 'Opus', 'Ørsted', 'Pink', 'Ŧana', 'Ulm', 'Zed', 'Ωmega'];
+const NAMES = ['Aaron', 'Æon Flux', 'Apple', 'Bee', 'Ɓaba', 'Đorđe', 'Ðan', 'Ɗodo', 'Əli', 'Ħal', 'Ibis', 'Ɨtu', 'Lima', 'Łódź', 'Ŋoro', 'Oasis', 'Œuvre', 'Opus', 'Ørsted', 'Pink', 'Ŧana', 'Ulm', 'Zed', 'Ƶebra', 'Ωmega'];
+// the letter each name that NFKD leaves whole is filed under (one name per mapped letter)
+const FILED = { 'Æon Flux': 'A', 'Ɓaba': 'B', 'Đorđe': 'D', 'Ðan': 'D', 'Ɗodo': 'D', 'Əli': 'E', 'Ħal': 'H', 'Ɨtu': 'I', 'Łódź': 'L', 'Ŋoro': 'N', 'Œuvre': 'O', 'Ørsted': 'O', 'Ŧana': 'T', 'Ƶebra': 'Z', 'Ωmega': '#' };
 const names = [...NAMES, ...Array.from({ length: 45 - NAMES.length }, (_, i) => `Mid ${i + 1}`)];
 const albums = names.map((t, i) => ({ id: i + 1, title: t, album_artist: `Band ${i + 1}`, year: 2000, tracks: 1 }));
 const artists = names.map((n, i) => ({ id: i + 1, name: n, albums: 1, tracks: 1 }));
@@ -71,7 +74,14 @@ const artists = names.map((n, i) => ({ id: i + 1, name: n, albums: 1, tracks: 1 
           check(at === 0 || at === letters.length - 1, `${width} ${view}: "#" is first or last (${letters.join(' ')})`);
           const az = letters.filter((l) => l !== '#');
           check(az.join('') === [...az].sort().join(''), `${width} ${view}: the letters are in A–Z order (${az.join('')})`);
-          for (const l of ['A', 'D', 'H', 'L', 'N', 'O', 'T']) check(az.includes(l), `${width} ${view}: ${l} is in the row`);
+          for (const l of ['A', 'B', 'D', 'E', 'H', 'I', 'L', 'N', 'O', 'T', 'Z']) check(az.includes(l), `${width} ${view}: ${l} is in the row`);
+          // Each name's own letter: filtered to that one name, only its letter stays on in the row
+          for (const [n, want] of Object.entries(FILED)) {
+            await page.evaluate((q) => { const f = document.querySelector('#filter'); f.value = q; f.dispatchEvent(new Event('input')); }, n);
+            const on = await page.$$eval('[data-az]', (bs) => bs.filter((b) => !b.disabled).map((b) => b.dataset.az));
+            check(on.join(' ') === want, `${width} ${view}: ${n} is under ${want} (${on.join(' ') || 'none on'})`);
+          }
+          await page.evaluate(() => { const f = document.querySelector('#filter'); f.value = ''; f.dispatchEvent(new Event('input')); });
           // O jumps to the first O name; Œuvre and Ørsted are in the O run
           await page.locator('[data-az="O"]').click();
           await page.waitForTimeout(150);
@@ -79,6 +89,13 @@ const artists = names.map((n, i) => ({ id: i + 1, name: n, albums: 1, tracks: 1 
           const first = await page.$$eval(sel, (els) => els.slice(0, 4).map((e) => e.textContent));
           check(first[0] && first[0].includes('Oasis'), `${width} ${view}: O starts at Oasis (${(first[0] || '').trim().slice(0, 40)})`);
           check(first.some((t) => t.includes('Œuvre')) && first.some((t) => t.includes('Ørsted')), `${width} ${view}: Œuvre and Ørsted come under O`);
+          // P and B start at their own first name, not at a name filed under the letter before
+          for (const [l, want] of [['P', 'Pink'], ['B', 'Bee']]) {
+            await page.locator(`[data-az="${l}"]`).click();
+            await page.waitForTimeout(150);
+            const t = await page.$eval(sel, (e) => e.textContent).catch(() => '');
+            check(t.includes(want), `${width} ${view}: ${l} starts at ${want} (${t.trim().slice(0, 40)})`);
+          }
           // "#" jumps to a name that is no letter (Ωmega sorts after the Latin names)
           await page.locator('[data-az="#"]').click();
           await page.waitForTimeout(150);
