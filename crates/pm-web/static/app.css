@@ -731,6 +731,10 @@ html:not([data-shell="phone"]) .zone-card .zc-mute ~ input[type=range] { min-wid
 .zone-card .zc-tail > .zc-vol { flex: 1 1 auto; min-width: 0; }
 .zone-card .zc-tail > [data-zsel], .zone-card .zc-tail > .pill { flex: none; }
 .zone-card .zc-tail input[type=range] { flex: 1 1 auto; width: 80px; }
+/* A card's level has one width whatever it reads ("40 %", "Muted", "Level unknown" on two short
+   lines, 30 px, under the 40 px Play), so a level going known, unknown or muted never moves the
+   card's slider or its volume between beside and under the transport */
+html:not([data-shell="phone"]) .zone-card .zc-vol > .vol-level { flex: none; width: 56px; line-height: 1.25; }
 html[data-shell="phone"] .zone-card .zc-mute { display: none; }
 /* A Home row that didn't answer: its words and Try again on one line of whole pixels, so the
    height kept for its next placeholder is the height it draws (no jump when Home opens again) */
