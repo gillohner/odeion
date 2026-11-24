@@ -208,6 +208,7 @@ that restore. With the bundle:
 
 ```sh
 cd ~/pubky-music-node/deploy/bundle
+sudo systemctl stop odeion-bundle 2>/dev/null   # no start at boot try while the library is put back
 docker compose stop music
 docker run --rm -v pubky-music_music-node:/v alpine:3.22 sh -c \
   'cp -p /v/library.db /v/library.db.newer && cp /v/library.db.before-upgrade /v/library.db && rm -f /v/library.db-wal /v/library.db-shm && chown "$(stat -c %u:%g /v)" /v/library.db'
