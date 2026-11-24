@@ -6728,13 +6728,17 @@
     showMenu(at instanceof Element ? at : anchor, [...head, ...items.map((it) => (it.run ? { ...it, run: guard(it.run) } : it))]);
   };
   const BAND_KINDS = ['peaking', 'low_shelf', 'high_shelf', 'low_pass', 'high_pass'];
+  // How a zone gets DSD: only what the node can do. (Its setting has a fourth value, to_pcm, which
+  // the engine refuses: "DSD to PCM conversion is not implemented yet". It is not offered; a zone
+  // saved with it shows that, and that its DSD files won't play, until another is chosen.)
+  const DSD_MODES = [['auto', 'Automatic'], ['native', 'Native DSD'], ['do_p', 'DoP']];
   const dspEditor = (zone, cfg) => `<div class="card dsp" style="margin-top:12px"><div class="section-head"><h3>DSP · ${esc(zone.name)}</h3><span class="muted small">Every stage shows in the signal path; defaults keep the path bit-perfect.</span></div>
     <div class="dsp-grid">
       <label><span>Headroom (dB)</span><input class="input" id="d-headroom" type="number" step="0.5" min="-30" max="0" value="${cfg.headroom_db ?? ''}" placeholder="off"></label>
       <label><span>Software volume (dB)</span><input class="input" id="d-volume" type="number" step="0.5" min="-60" max="0" value="${cfg.volume_db ?? ''}" placeholder="off"></label>
       <label><span>Volume limit (dB)</span><input class="input" id="d-maxvol" type="number" step="0.5" min="-90" max="0" value="${cfg.max_volume_db ?? ''}" placeholder="none" title="Every volume request for this zone, hardware or software, is capped here"></label>
       <label><span>Loudness (ReplayGain)</span><select class="input" id="d-loudness">${['off', 'track', 'album'].map((v) => `<option value="${v}" ${cfg.loudness === v ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
-      <label><span>DSD</span><select class="input" id="d-dsd">${['auto', 'native', 'do_p', 'to_pcm'].map((v) => `<option value="${v}" ${cfg.dsd_mode === v ? 'selected' : ''}>${v === 'do_p' ? 'DoP' : v}</option>`).join('')}</select></label>
+      <label><span id="d-dsdlabel">DSD</span><select class="input" id="d-dsd"${cfg.dsd_mode === 'to_pcm' ? ' aria-labelledby="d-dsdlabel" aria-describedby="d-dsdnote"' : ''}>${[...DSD_MODES, ...(cfg.dsd_mode === 'to_pcm' ? [['to_pcm', 'To PCM (not possible yet)']] : [])].map(([v, l]) => `<option value="${v}" ${cfg.dsd_mode === v ? 'selected' : ''}>${l}</option>`).join('')}</select>${cfg.dsd_mode === 'to_pcm' ? '<span class="warn-text small" id="d-dsdnote">DSD files won’t play on this zone: the node can’t turn DSD into PCM yet. Choose another.</span>' : ''}</label>
       <label class="check"><input type="checkbox" id="d-dither" ${cfg.dither ? 'checked' : ''}> TPDF dither when reducing bit depth</label>
       <label class="check"><input type="checkbox" id="d-resample" ${cfg.resample ? 'checked' : ''}> Resample when the output cannot take the rate (shown as Lossy)</label>
       <label class="check"><input type="checkbox" id="d-cf" ${cfg.crossfeed && cfg.crossfeed.enabled !== false ? 'checked' : ''}> Headphone crossfeed</label>
@@ -6760,6 +6764,7 @@
     $('#d-save').onclick = async () => { try { await api('PUT', `/zones/${encodeURIComponent(zoneId)}/dsp`, collect()); toast('DSP saved; applies from the next song'); } catch (e) { toast(e.message, 'error'); } };
     $('#d-reset').onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(zoneId)}/dsp`); toast('DSP reset'); render(); } catch (e) { toast(e.message, 'error'); } };
     $('#d-close').onclick = () => { state.dspOpen = null; render(); };
+    $('#d-dsd').onchange = () => { const sel = $('#d-dsd'); const n = $('#d-dsdnote'); if (!n) return; const on = sel.value === 'to_pcm'; n.hidden = !on; if (on) sel.setAttribute('aria-describedby', 'd-dsdnote'); else sel.removeAttribute('aria-describedby'); }; // (a hidden note is still read through aria-describedby: it goes with it)
   };
   // "New releases from your artists": release groups MusicBrainz lists for tagged artists.
   const newReleasesSection = (nr) => {
