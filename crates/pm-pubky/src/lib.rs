@@ -29,6 +29,7 @@ pub mod homeserver;
 pub mod ids;
 pub mod nexus;
 pub mod pinakes;
+pub mod public_reads;
 pub mod records;
 pub mod schemas;
 pub mod v1;

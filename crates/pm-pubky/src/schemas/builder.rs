@@ -1,5 +1,5 @@
 use super::post::{MusicContent, MusicPost, Visibility};
-use super::{Activity, ActivitySource, Playlist, PlaylistItem, Review, SchemaError, PROTOCOL};
+use super::{Playlist, PlaylistItem, Review, SchemaError, PROTOCOL};
 use pm_model::MusicUri;
 
 /// Where an object was written: its id, session-relative path, full URL and
@@ -105,15 +105,6 @@ impl MusicSpecsBuilder {
         text: &str,
     ) -> Result<(MusicPost, Meta), SchemaError> {
         self.finish(MusicContent::Review(Review::new(target, rating, text)))
-    }
-
-    pub fn create_activity(
-        &self,
-        uri: &MusicUri,
-        source: ActivitySource,
-        duration_ms: Option<u64>,
-    ) -> Result<(MusicPost, Meta), SchemaError> {
-        self.finish(MusicContent::Activity(Activity::new(uri, source, duration_ms)))
     }
 
     /// A tag on a canonical music URL: a social v1 tag at

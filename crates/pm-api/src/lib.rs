@@ -13,6 +13,7 @@ pub mod about;
 pub mod access;
 pub mod access_token;
 pub mod activity;
+pub mod app_passwords;
 pub mod archive;
 pub mod art;
 pub mod artist_info;
@@ -237,6 +238,12 @@ fn v1_routes() -> access::Routes {
         .route("/node/apps/{id}", put(apps::put))
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/node/token", post(access_token::replace))
+        // App passwords: one per app, instead of the API token (app_passwords.rs)
+        .route(
+            "/node/app-passwords",
+            get(app_passwords::get).post(app_passwords::post),
+        )
+        .route("/node/app-passwords/{id}", delete(app_passwords::delete))
         // Usage insights, the owner's side (usage.rs; listeners are refused under /node too)
         .route("/node/usage", get(usage::status).put(usage::set_gate))
         .route("/node/usage/clear", post(usage::clear_all))
@@ -931,22 +938,29 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .merge(open_routes().into_open_router().with_state(state.clone()))
         .merge(subsonic::router(state.clone()))
         // The zones as UPnP/DLNA renderers (no token, like any renderer; `[renderer] enabled`),
-        // to LAN peers only (peer.rs)
+        // to LAN peers at the node's address only, never another site's page (peer.rs)
         .merge(
             state
                 .renderer
                 .get()
-                .map(|r| r.router().layer(middleware::from_fn(peer::lan_only)))
+                .map(|r| r.router().layer(middleware::from_fn(peer::renderer_only)))
                 .unwrap_or_default(),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             peer::tokenless_direct_only,
         ))
-        // Outermost: `[api] behind_proxy` for the layers built without the state (peer::lan_only)
+        // `[api] behind_proxy` for the layers built without the state (peer::lan_only): outside
+        // every one of them
         .layer(middleware::from_fn_with_state(
             state.clone(),
             peer::mark_behind_proxy,
+        ))
+        // Outermost: a node that is stopping answers 503 before any other layer runs, and the
+        // request counts as in flight through all of them
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            peer::not_while_stopping,
         ))
 }
 
@@ -1017,14 +1031,77 @@ pub fn bind_error(listen: &str, e: &std::io::Error) -> String {
 
 /// Serve on an already bound listener (tests bind port 0).
 pub async fn serve_listener(state: Arc<NodeState>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+    serve_listener_until(state, listener, std::future::pending()).await
+}
+
+/// How long requests being answered get to finish once the node is told to stop. Connections
+/// that stay open by design (the event stream, audio to a player) are not waited for beyond it:
+/// they end when the process does.
+pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`serve_listener`] until `stop` resolves (the node was asked to stop): no new connection is
+/// taken here and no new request on any of the node's listeners ([`NodeState::begin_stop`]),
+/// requests being answered, on this listener or another, get [`STOP_GRACE`] to finish, those
+/// that have not by then are ended ([`NodeState::end_requests`]), and the call returns.
+/// Connections still open then (the event stream, audio to a player) are left to end with the
+/// process.
+pub async fn serve_listener_until(
+    state: Arc<NodeState>,
+    listener: tokio::net::TcpListener,
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     // The page's files, hashed and gzipped before the first page load asks for them
     tokio::task::spawn_blocking(assets::prepare);
+    let app = router(state.clone());
+    serve_router_until(state, listener, app, stop).await
+}
+
+/// [`serve_listener_until`] for `app`, which carries the node's own layers (`router`).
+pub(crate) async fn serve_router_until(
+    state: Arc<NodeState>,
+    listener: tokio::net::TcpListener,
+    app: Router,
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let (told, mut was_told) = tokio::sync::watch::channel(false);
     // Peer addresses: the renderer answers LAN peers only (peer.rs)
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
+    let served = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown({
+            let state = state.clone();
+            async move {
+                stop.await;
+                // Every listener of this node, not only this one, stops taking requests
+                state.begin_stop();
+                let _ = told.send(true);
+            }
+        }),
+    );
+    let grace_over = async move {
+        // (an error: `stop` never resolved and the server ended by itself)
+        if was_told.wait_for(|t| *t).await.is_ok() {
+            tokio::time::sleep(STOP_GRACE).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    // Done when this listener's connections are, and no request is being answered on another
+    // of the node's listeners either (remote access has its own): those get the same time
+    let all_done = async {
+        let served = served.await;
+        state.requests_done().await;
+        served
+    };
+    tokio::select! {
+        r = all_done => r?,
+        () = grace_over => {
+            state.end_requests();
+            tracing::info!("requests not answered within the grace period were ended; open streams end with the node");
+        }
+    }
     Ok(())
 }
 
@@ -1074,13 +1151,19 @@ async fn auth(
     let at = access::At::of(route, params.iter().flat_map(|p| p.iter()));
     let refusal = access::decide(&state, &caller, access::required(req.method(), route), &at);
     if let Some(why) = refusal {
+        // (an app is told as it is, not as a person would be)
+        if caller.role == accounts::Role::App {
+            return ApiError::new(StatusCode::FORBIDDEN, format!("{why}.")).into_response();
+        }
         return accounts::refused(why).into_response();
     }
     // Who changed a zone last decides whether its plays are the owner's listens (listens.rs).
     // The zone is the one the router found in the path, decoded: the one the handler acts on
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
         if let Some(zone) = at.zone.filter(|_| listens::zone_of_path(route).is_some()) {
-            listens::zone_changed_by(&state, zone, caller.role == accounts::Role::Owner);
+            // (An app password's are the owner's)
+            let owners = accounts::Who::of(&caller) == accounts::Who::Owner;
+            listens::zone_changed_by(&state, zone, owners);
         }
     }
     // Listeners (and, to be safe, party guests) see file names, not where the owner keeps files
@@ -1850,7 +1933,11 @@ async fn zones(
     Json(events::visible(&s, &c, s.zones.list()))
 }
 
-async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZone>) -> ApiResult<ZoneState> {
+async fn create_zone(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<accounts::Caller>,
+    Json(body): Json<CreateZone>,
+) -> ApiResult<ZoneState> {
     if body.name.trim().is_empty() {
         return Err(ApiError::bad_request("zone name is empty"));
     }
@@ -1862,6 +1949,13 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
     }
     if ids.is_empty() {
         return Err(ApiError::bad_request("give `output` or `outputs`"));
+    }
+    // An app password groups speakers (and ungroups them, `delete_zone`): two or more
+    if caller.role == accounts::Role::App && ids.iter().collect::<std::collections::HashSet<_>>().len() < 2 {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "An app password groups two speakers or more; it doesn't add a zone.",
+        ));
     }
     let output = zone_output(&s, body.name.trim(), &ids).await?;
     let zone = s.create_zone(body.name.trim(), output);
@@ -1952,7 +2046,24 @@ async fn zone(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiRes
 async fn delete_zone(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    axum::Extension(caller): axum::Extension<accounts::Caller>,
 ) -> Result<StatusCode, ApiError> {
+    // An app password ungroups (`access::Capability::ZoneGroup`): a zone on a group of speakers
+    // (an output that is no one speaker), not a speaker's own zone or someone's listen-along group
+    if caller.role == accounts::Role::App {
+        let out = zone_of(&s, &id)?.output().id();
+        // (the node's groups are `group:…`; Sonos, HEOS and BluOS groups `<kind>-group:…`)
+        let group = out
+            .0
+            .split_once(':')
+            .is_some_and(|(kind, _)| kind == "group" || kind.ends_with("-group"));
+        if !group || presence::is_along(&s, &id) {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "An app password ungroups speakers; it doesn't remove a zone.",
+            ));
+        }
+    }
     // A listen-along group ends as when its host ends it: the music goes back, not lost
     if presence::delete_group(&s, &id).await? {
         return Ok(StatusCode::NO_CONTENT);
@@ -2022,9 +2133,7 @@ async fn enqueue(
         if it.uri.is_empty() {
             return Err(ApiError::bad_request("item uri is empty"));
         }
-        if caller.role != accounts::Role::Owner {
-            accounts::check_listener_item(&mut it)?;
-        }
+        accounts::check_item(&caller, &mut it)?;
         items.push(it);
     }
     if items.is_empty() {
@@ -2300,7 +2409,8 @@ async fn transfer(
     from.clear();
     presence::played(&s, &body.to, &c);
     // The target is in the hands of whoever moved the music there, as the source is (listens.rs)
-    listens::zone_changed_by(&s, &body.to, c.role == accounts::Role::Owner);
+    // (an app password's are the owner's, as in `auth`)
+    listens::zone_changed_by(&s, &body.to, accounts::Who::of(&c) == accounts::Who::Owner);
     let moved = load_zone(
         &to,
         st.queue,
@@ -2415,9 +2525,7 @@ async fn load(
         if it.uri.is_empty() {
             return Err(ApiError::bad_request("item uri is empty"));
         }
-        if caller.role != accounts::Role::Owner {
-            accounts::check_listener_item(it)?;
-        }
+        accounts::check_item(&caller, it)?;
         // Moved by this person from their browser: played with their accounts (the owner's
         // whole: no fetch limit left from someone else's queue either)
         it.by = accounts::Who::of(&caller).by();
@@ -8507,6 +8615,86 @@ mod tests {
         *s.pinakes_reader.retry_after.lock().unwrap() = crate::pinakes_reader::RETRY_AFTER;
         call(&app, "GET", q, None).await;
         assert_eq!(resolves.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A page that goes away while its link waits to be read (its request is dropped) does not
+    /// hold up the reader: that read is finished all the same, and the next link is read after
+    /// it. (Before, the read stood still with its turn taken, and no other link was read until
+    /// someone asked for the same one again.)
+    #[tokio::test]
+    async fn a_page_that_goes_away_does_not_hold_up_the_link_reader() {
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::time::Duration;
+        // (Pinakes answers every read with a card it is still reading)
+        let mut pending: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../pm-pubky/tests/fixtures/pinakes/music/card-deezer-album-cut-to-the-feeling.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        pending["status"] = "pending".into();
+        pending["also_on"] = serde_json::json!([]);
+        let pending = pending.to_string();
+        let resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let r2 = resolves.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/v1/resources/by-uri",
+                get(|| async { (StatusCode::NOT_FOUND, r#"{"error":"not found"}"#) }),
+            )
+            .route(
+                "/v1/resolve",
+                post(move || {
+                    r2.fetch_add(1, SeqCst);
+                    let pending = pending.clone();
+                    async move {
+                        (
+                            StatusCode::ACCEPTED,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            pending,
+                        )
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let link = |n: u32| format!("https://www.deezer.com/album/{n}");
+        let (two, three) = (link(2), link(3));
+        // A first link is read: from now on the next read waits its turn
+        crate::pinakes_reader::card(&s, &link(1)).await;
+        assert_eq!(resolves.load(SeqCst), 1);
+        // Whoever asked for a second link goes away while that read waits
+        let gone = tokio::time::timeout(
+            Duration::from_millis(100),
+            crate::pinakes_reader::resolve(&s, &two),
+        );
+        assert!(gone.await.is_err(), "the second read waits its turn");
+        assert_eq!(resolves.load(SeqCst), 1);
+        // A third link is read after it
+        let third = tokio::time::timeout(
+            crate::pinakes_reader::RESOLVE_INTERVAL * 4,
+            crate::pinakes_reader::card(&s, &three),
+        );
+        assert!(
+            third.await.is_ok(),
+            "the reader is held up by a page that went away"
+        );
+        assert_eq!(resolves.load(SeqCst), 3, "the second link was read too");
+        // and its answer is kept: asking again reads nothing
+        crate::pinakes_reader::card(&s, &two).await;
+        assert_eq!(resolves.load(SeqCst), 3);
     }
 
     /// Deep links and reloads of web UI paths land on the UI (SPA fallback).
@@ -28143,5 +28331,627 @@ exec sleep 300
         )
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
+    }
+
+    /// A bring that was cancelled is not started again after a restart; the part folder its
+    /// record names is cleared and the record goes. A part folder of another name stays.
+    #[tokio::test]
+    async fn a_cancelled_bring_is_not_started_again_and_its_parts_go() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let dest = src.join("brought");
+        for name in [".odeion-bring-old", ".odeion-bring-other"] {
+            std::fs::create_dir_all(dest.join(name)).unwrap();
+            std::fs::write(dest.join(name).join("1.part"), b"x").unwrap();
+        }
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                files::BRING_RESUME_KEY,
+                &serde_json::json!({"dest": dest, "parts": ".odeion-bring-old", "cancelled": true})
+                    .to_string(),
+            )
+            .unwrap();
+        files::resume_jobs(&s);
+        let mut gone = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if s.library
+                .lock()
+                .unwrap()
+                .get_setting(files::BRING_RESUME_KEY)
+                .unwrap()
+                .is_none()
+            {
+                gone = true;
+                break;
+            }
+        }
+        assert!(gone, "the record of the cancelled bring went");
+        assert!(
+            !dest.join(".odeion-bring-old").exists(),
+            "its part folder was cleared"
+        );
+        assert!(
+            dest.join(".odeion-bring-other/1.part").exists(),
+            "another folder stays"
+        );
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert!(jobs["current"].is_null(), "not started again: {jobs}");
+    }
+
+    /// A removal that does not finish is remembered: `GET /v1/people` names the person under
+    /// `unfinished` (they may be off the list already), so Remove again is still offered after a
+    /// reload or a restart. It is forgotten when the removal finishes, or nothing of theirs is left.
+    #[tokio::test]
+    async fn a_removal_that_did_not_finish_is_remembered_until_it_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let app = router(s.clone());
+        let owner = Some("s3cret");
+        let people = || {
+            let app = app.clone();
+            async move {
+                let (st, v, _) = send_as(&app, "GET", "/v1/people", owner, &[], None).await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                let listed: Vec<String> = v["people"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p["key"].as_str().unwrap().to_string())
+                    .collect();
+                (listed, v["unfinished"].clone())
+            }
+        };
+        // (Cy has an account on this node's homeserver too: removed, they stay listed without music)
+        let cy = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "people",
+                &serde_json::json!({"people": [
+                    {"key": anna, "access": "music", "music_enabled": true, "added_at": 1},
+                    {"key": ben, "access": "music", "music_enabled": true, "added_at": 1},
+                    {"key": cy, "access": "homeserver_music", "music_enabled": true, "added_at": 1}]})
+                .to_string(),
+            )
+            .unwrap();
+        let (listed, unfinished) = people().await;
+        assert!(
+            listed.contains(&ben.to_string()) && unfinished.is_null(),
+            "{listed:?} {unfinished}"
+        );
+        // Ben's homeserver approval can't be taken off the node (a folder stands where its file is)
+        let grants = s.db_path.parent().unwrap().join("grants");
+        let in_the_way = |key: &str| grants.join(format!("{key}.session"));
+        std::fs::create_dir_all(in_the_way(ben).join("x")).unwrap();
+        for _ in 0..2 {
+            let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+            assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+            assert!(v["error"].as_str().unwrap().contains("remove them again"), "{v}");
+            // Off the list, and named as not finished (once)
+            let (listed, unfinished) = people().await;
+            assert!(!listed.contains(&ben.to_string()), "{listed:?}");
+            assert_eq!(unfinished, serde_json::json!([ben]));
+        }
+        // Adding Ben again has to finish the removal first: not while it can't
+        let add_ben = serde_json::json!({"access": "music", "key": ben});
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/people/invites",
+            owner,
+            &[],
+            Some(add_ben.clone()),
+        )
+        .await;
+        assert!(!st.is_success(), "{st} {v}");
+        assert_eq!(people().await.1, serde_json::json!([ben]));
+        // What was in the way is gone: adding Ben again finishes it, and Ben is no longer named
+        // as someone whose removal did not finish
+        std::fs::remove_dir_all(in_the_way(ben)).unwrap();
+        let (st, v, _) = send_as(&app, "POST", "/v1/people/invites", owner, &[], Some(add_ben)).await;
+        assert!(st.is_success(), "{st} {v}");
+        let (listed, unfinished) = people().await;
+        assert!(
+            listed.contains(&ben.to_string()) && unfinished.is_null(),
+            "{listed:?} {unfinished}"
+        );
+        // Cy's removal fails the same way: still listed (the homeserver account), and named
+        std::fs::create_dir_all(in_the_way(cy).join("x")).unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{cy}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+        let (listed, unfinished) = people().await;
+        assert!(listed.contains(&cy.to_string()), "{listed:?}");
+        assert_eq!(unfinished, serde_json::json!([cy]));
+        // Removing again, when it can finish, answers 200 and it is forgotten
+        std::fs::remove_dir_all(in_the_way(cy)).unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{cy}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (listed, unfinished) = people().await;
+        assert!(
+            listed.contains(&cy.to_string()) && unfinished.is_null(),
+            "{listed:?} {unfinished}"
+        );
+        // Ben again, off the list with something left: the next Remove finishes it (the grant
+        // file is there this time, and goes)
+        std::fs::create_dir_all(in_the_way(ben).join("x")).unwrap();
+        let (st, _, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
+        std::fs::remove_dir_all(in_the_way(ben)).unwrap();
+        std::fs::write(in_the_way(ben), b"left over").unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(!in_the_way(ben).exists());
+        assert!(people().await.1.is_null());
+        // A removal that works leaves nothing to remember
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{anna}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (listed, unfinished) = people().await;
+        assert!(
+            !listed.contains(&anna.to_string()) && unfinished.is_null(),
+            "{listed:?} {unfinished}"
+        );
+        // A name that was remembered for someone of whom nothing is left (a restored list, say)
+        // goes at the next Remove, which answers that there is nobody
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("people.unfinished", &serde_json::json!([ben]).to_string())
+            .unwrap();
+        let (_, unfinished) = people().await;
+        assert_eq!(unfinished, serde_json::json!([ben]));
+        let (st, _, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (_, unfinished) = people().await;
+        assert!(unfinished.is_null(), "{unfinished}");
+    }
+
+    /// An app password (Settings › People & access › Apps) plays, controls zones and browses as
+    /// the owner, and nothing else: no settings, people, tokens, sign-ins or library changes, never
+    /// a file path in a queue, and never the API token in what it reads. Subsonic takes it as a
+    /// password too. Removing it, or the app signing out, stops it at once; the API token stays.
+    #[tokio::test]
+    async fn an_app_password_plays_and_browses_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("music")).unwrap();
+        write_wav(&dir.path().join("music/one.wav"), 4410);
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        let owner = Some("s3cret");
+        // One song in the library
+        let (st, _, _) = send_as(
+            &app,
+            "POST",
+            "/v1/library/scan",
+            owner,
+            &[],
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        for _ in 0..500 {
+            if !s.is_scanning() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!s.is_scanning());
+        // Old nodes have none: the list is empty, nothing else changes
+        let (st, v, _) = send_as(&app, "GET", "/v1/node/app-passwords", owner, &[], None).await;
+        assert_eq!((st, &v), (StatusCode::OK, &serde_json::json!([])));
+        let make = |name: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                send_as(
+                    &app,
+                    "POST",
+                    "/v1/node/app-passwords",
+                    owner,
+                    &[],
+                    Some(serde_json::json!({"name": name})),
+                )
+                .await
+            }
+        };
+        let (st, _, _) = make(serde_json::json!("  ")).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "a name is needed");
+        let (st, ha, _) = make(serde_json::json!(" Home Assistant ")).await;
+        assert_eq!(st, StatusCode::OK, "{ha}");
+        let pw = ha["password"].as_str().unwrap().to_string();
+        let id = ha["id"].as_str().unwrap().to_string();
+        assert!(pw.starts_with(app_passwords::PREFIX) && pw.len() > 40, "{ha}");
+        assert_eq!(ha["name"], "Home Assistant");
+        let (_, sub, _) = make(serde_json::json!("Symfonium")).await;
+        let sub_pw = sub["password"].as_str().unwrap().to_string();
+        // Listed without the password
+        let (_, listed, _) = send_as(&app, "GET", "/v1/node/app-passwords", owner, &[], None).await;
+        assert_eq!(listed.as_array().unwrap().len(), 2, "{listed}");
+        assert!(!listed.to_string().contains(&pw) && !listed.to_string().contains(&sub_pw));
+        assert_eq!(listed[0]["name"], "Symfonium", "newest first: {listed}");
+        assert!(listed[1]["last_used"].is_null());
+
+        let mine = Some(pw.as_str());
+        // Who it is, and what it can do
+        let (st, me, _) = send_as(&app, "GET", "/v1/me", mine, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{me}");
+        assert_eq!(me["role"], "app");
+        let can: Vec<&str> = me["can"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            can,
+            [
+                "artwork",
+                "session",
+                "library",
+                "zone_list",
+                "zone_use",
+                "collections",
+                "own_play",
+                "zone_group"
+            ],
+            "{me}"
+        );
+        // Plays and browses: every zone, the library, the owner's collections and play order
+        let (st, zones, _) = send_as(&app, "GET", "/v1/zones", mine, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{zones}");
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        for (method, uri) in [
+            ("GET", "/v1/library/albums".to_string()),
+            ("GET", "/v1/outputs".to_string()),
+            ("GET", "/v1/playlists".to_string()),
+            ("GET", "/v1/play-order".to_string()),
+            ("GET", format!("/v1/zones/{zid}")),
+            ("POST", format!("/v1/zones/{zid}/shuffle")),
+        ] {
+            let (st, v, _) = send_as(&app, method, &uri, mine, &[], Some(serde_json::json!({}))).await;
+            assert!(st.is_success(), "{method} {uri}: {st} {v}");
+        }
+        // Noted as used today
+        let (_, listed, _) = send_as(&app, "GET", "/v1/node/app-passwords", owner, &[], None).await;
+        let used = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id.as_str())
+            .unwrap();
+        assert!(used["last_used"].is_i64(), "{listed}");
+        // Nothing else: settings, people, tokens and app passwords, sign-ins, the library, backups
+        for (method, uri) in [
+            ("GET", "/v1/node/settings"),
+            ("POST", "/v1/node/token"),
+            ("GET", "/v1/node/app-passwords"),
+            ("POST", "/v1/node/app-passwords"),
+            ("GET", "/v1/people"),
+            ("GET", "/v1/me/sign-ins"),
+            ("DELETE", "/v1/me/sign-ins"),
+            ("GET", "/v1/me/prefs"),
+            ("PUT", "/v1/tags"),
+            ("DELETE", "/v1/me/listens"),
+            ("POST", "/v1/library/scan"),
+            ("POST", "/v1/node/settings/backup"),
+        ] {
+            let (st, v, _) = send_as(&app, method, uri, mine, &[], Some(serde_json::json!({}))).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{method} {uri}: {v}");
+        }
+        let (_, v, _) = send_as(&app, "GET", "/v1/people", mine, &[], None).await;
+        let why = v["error"].as_str().unwrap();
+        assert!(why.contains("app password") && !why.contains("listener"), "{v}");
+        // A queue takes library songs and web links, on the home network too (an announcement
+        // from Home Assistant), fetched only where an app's may be; never a file
+        let queue = format!("/v1/zones/{zid}/queue");
+        for uri in ["/etc/hosts", "file:///etc/hosts", "relative/song.flac"] {
+            let (st, v, _) = send_as(
+                &app,
+                "POST",
+                &queue,
+                mine,
+                &[],
+                Some(serde_json::json!({"items": [{"uri": uri}]})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{uri}: {v}");
+        }
+        let tts = "http://192.168.1.20:8123/api/tts_proxy/hello.mp3";
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            &queue,
+            mine,
+            &[],
+            Some(serde_json::json!({"items": [{"uri": format!(" {tts} ")}], "at": "end"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let queued = s.zones.get(&pm_zones::ZoneId::new(&zid)).unwrap().state();
+        let it = queued
+            .queue
+            .iter()
+            .find(|q| q.uri == tts)
+            .expect("queued as checked");
+        assert_eq!(it.limit, Some(accounts::APP_FETCH));
+        assert_eq!(it.by, None, "the owner's");
+        // An app's answers go through what people's do (file names, not the owner's folders; and
+        // no sign-in of the node's in a link, which accounts::KnownSet now names app passwords in)
+        let folder = dir.path().join("music").to_string_lossy().into_owned();
+        let (_, t, _) = send_as(&app, "GET", "/v1/library/tracks?limit=5", owner, &[], None).await;
+        assert!(
+            t.to_string().contains(&folder),
+            "the owner's answer names the folder: {t}"
+        );
+        let (_, t, _) = send_as(&app, "GET", "/v1/library/tracks?limit=5", mine, &[], None).await;
+        assert!(
+            t.to_string().contains("one.wav") && !t.to_string().contains(&folder),
+            "{t}"
+        );
+        let (_, z, _) = send_as(&app, "GET", &format!("/v1/zones/{zid}"), mine, &[], None).await;
+        assert!(
+            !z.to_string().contains("s3cret") && !z.to_string().contains(&sub_pw),
+            "{z}"
+        );
+        let known = accounts::KnownTokens::lazy(&s);
+        assert!(
+            known.has(&sub_pw) && known.has("s3cret"),
+            "an app password is hidden like a sign-in"
+        );
+        // The speakers, and grouping them: yes; adding a speaker by address or tuning one: no
+        let (st, _, _) = send_as(
+            &app,
+            "POST",
+            "/v1/outputs/upnp",
+            mine,
+            &[],
+            Some(serde_json::json!({"address": "127.0.0.1:1"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _, _) = send_as(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/dsp"),
+            mine,
+            &[],
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        // Removing a speaker's own zone, no; grouping two speakers and ungrouping them, yes
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/zones/{zid}"), mine, &[], None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        assert!(
+            s.zones.get(&pm_zones::ZoneId::new(&zid)).is_some(),
+            "the zone is still there"
+        );
+        let a: Arc<dyn Output> = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        let b: Arc<dyn Output> = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }));
+        let (aid, bid) = (a.id(), b.id());
+        s.outputs.register(a);
+        s.outputs.register(b);
+        let (st, pair, _) = send_as(
+            &app,
+            "POST",
+            "/v1/zones",
+            mine,
+            &[],
+            Some(serde_json::json!({"name": "Kitchen + Den", "outputs": [aid.0, bid.0]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{pair}");
+        let pid = pair["id"].as_str().unwrap().to_string();
+        assert!(!pid.starts_with("group:"), "a zone's id is its name's: {pid}");
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/zones/{pid}"), mine, &[], None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+        assert!(s.zones.get(&pm_zones::ZoneId::new(&pid)).is_none());
+        // Making a collection public is the owner's (it is posted under their name)
+        for uri in ["/v1/collections/x/visibility", "/v1/playlists/x/visibility"] {
+            let (st, v, _) = send_as(
+                &app,
+                "PUT",
+                uri,
+                mine,
+                &[],
+                Some(serde_json::json!({"public": true})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{uri}: {v}");
+        }
+        // The live Spotify item is that exact link, nothing after it
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            &queue,
+            mine,
+            &[],
+            Some(serde_json::json!({"items": [{"uri": "librespot:connect/../etc/hosts"}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        // (and for a person, the same check)
+        let mut theirs = pm_zones::QueueItem::new("librespot:connect/../etc/hosts");
+        assert!(accounts::check_listener_item(&mut theirs).is_err());
+        let mut live = pm_zones::QueueItem::new(librespot::LIVE_URI);
+        assert!(accounts::check_listener_item(&mut live).is_ok());
+        // One speaker is no group: an app doesn't add zones it couldn't take away
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/zones",
+            mine,
+            &[],
+            Some(serde_json::json!({"name": "Alone", "outputs": [aid.0]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        // A collection an app makes is private, whatever it asks
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/collections",
+            mine,
+            &[],
+            Some(serde_json::json!({"name": "From the app", "public": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(
+            v.to_string().contains(r#""visibility":"private""#)
+                && !v.to_string().contains(r#""visibility":"public""#),
+            "{v}"
+        );
+
+        // Subsonic: the password, plain, hex or as a salted md5; not for a scan
+        let rest = |q: String| {
+            let app = app.clone();
+            async move {
+                let (_, v, _) = send_as(
+                    &app,
+                    "GET",
+                    &format!("/rest/{q}&u=pubky&v=1.16.1&c=t&f=json"),
+                    None,
+                    &[],
+                    None,
+                )
+                .await;
+                v["subsonic-response"].clone()
+            }
+        };
+        let salted = |pw: &str, salt: &str| {
+            use md5::Digest;
+            let mut h = md5::Md5::new();
+            h.update(pw.as_bytes());
+            h.update(salt.as_bytes());
+            hex::encode(h.finalize())
+        };
+        assert_eq!(rest(format!("ping?p={sub_pw}")).await["status"], "ok");
+        // (its answers name no file on the node's disk)
+        let songs = rest(format!("getRandomSongs?p={sub_pw}")).await;
+        assert_eq!(songs["status"], "ok", "{songs}");
+        assert!(
+            songs.to_string().contains(r#""title":"One""#),
+            "the song: {songs}"
+        );
+        assert!(!songs.to_string().contains("\"path\""), "{songs}");
+        let theirs = rest("getRandomSongs?p=s3cret".into()).await;
+        assert!(
+            theirs.to_string().contains("\"path\""),
+            "the owner's answer has it: {theirs}"
+        );
+        assert_eq!(
+            rest(format!("ping?p=enc:{}", hex::encode(&sub_pw))).await["status"],
+            "ok"
+        );
+        assert_eq!(
+            rest(format!("ping?t={}&s=abc123", salted(&sub_pw, "abc123"))).await["status"],
+            "ok"
+        );
+        assert_eq!(
+            rest(format!("ping?t={}&s=abc123", salted("s3cret", "abc123"))).await["status"],
+            "ok"
+        );
+        let wrong = rest(format!("ping?t={}&s=abc123", salted("pma_nope", "abc123"))).await;
+        assert_eq!(wrong["error"]["code"], 40, "{wrong}");
+        let scan = rest(format!("startScan?p={sub_pw}")).await;
+        assert_eq!(scan["error"]["code"], 50, "{scan}");
+        assert_eq!(rest("startScan?p=s3cret".into()).await["status"], "ok");
+        // A saved radio station's link on the node with the other app's password in it: the
+        // owner's Subsonic answer shows it, an app's never
+        let origin = s.node_origins().first().cloned().expect("the node's own address");
+        let link = format!("{origin}/v1/library/tracks/1/file?token={pw}");
+        let enc: String = url::form_urlencoded::byte_serialize(link.as_bytes()).collect();
+        let made = rest(format!(
+            "createInternetRadioStation?p=s3cret&name=Home&streamUrl={enc}"
+        ))
+        .await;
+        assert_eq!(made["status"], "ok", "{made}");
+        let theirs = rest("getInternetRadioStations?p=s3cret".into()).await;
+        assert!(
+            theirs.to_string().contains(&pw),
+            "the owner's answer has it: {theirs}"
+        );
+        let seen = rest(format!("getInternetRadioStations?p={sub_pw}")).await;
+        assert!(
+            seen.to_string().contains("/v1/library/tracks/1/file") && !seen.to_string().contains(&pw),
+            "{seen}"
+        );
+
+        // Search's stream is not JSON (the `auth` filter leaves it): each line is filtered for
+        // anyone but the owner, a link with a sign-in in it included
+        let hit = search::SearchHit {
+            kind: "song".into(),
+            title: "One".into(),
+            image: Some(format!("/v1/library/albums/1/cover?token={sub_pw}")),
+            ..Default::default()
+        };
+        let answer = search::SourceAnswer {
+            source: "library".into(),
+            status: "ok".into(),
+            hits: vec![hit],
+            ..Default::default()
+        };
+        let hide = (accounts::library_roots(&s), s.node_origins(), s.clone());
+        let line = String::from_utf8(search::ndjson_line(&answer, Some(&hide))).unwrap();
+        assert!(
+            line.contains("/v1/library/albums/1/cover") && !line.contains(&sub_pw),
+            "{line}"
+        );
+        assert!(String::from_utf8(search::ndjson_line(&answer, None))
+            .unwrap()
+            .contains(&sub_pw));
+        let (st, _, _) = send_as(&app, "GET", "/v1/search?q=one", mine, &[], None).await;
+        assert_eq!(st, StatusCode::OK);
+
+        // Removed: that app stops at once, the other and the API token go on
+        let (st, _, _) = send_as(
+            &app,
+            "DELETE",
+            &format!("/v1/node/app-passwords/{id}"),
+            owner,
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _, _) = send_as(
+            &app,
+            "DELETE",
+            &format!("/v1/node/app-passwords/{id}"),
+            owner,
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _, _) = send_as(&app, "GET", "/v1/zones", mine, &[], None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _, _) = send_as(&app, "GET", "/v1/zones", Some(&sub_pw), &[], None).await;
+        assert_eq!(st, StatusCode::OK);
+        // An app that signs out gives its password up
+        let (st, v, _) = send_as(&app, "DELETE", "/v1/me/token", Some(&sub_pw), &[], None).await;
+        assert_eq!(
+            (st, &v["ended"]),
+            (StatusCode::OK, &serde_json::json!(true)),
+            "{v}"
+        );
+        assert_eq!(rest(format!("ping?p={sub_pw}")).await["error"]["code"], 40);
+        let (st, v, _) = send_as(&app, "GET", "/v1/node/app-passwords", owner, &[], None).await;
+        assert_eq!((st, v), (StatusCode::OK, serde_json::json!([])));
+        // At most 20 at once
+        for n in 0..20 {
+            assert_eq!(
+                make(serde_json::json!(format!("app {n}"))).await.0,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(make(serde_json::json!("one more")).await.0, StatusCode::CONFLICT);
     }
 }

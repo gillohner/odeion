@@ -102,3 +102,74 @@ async fn a_node_without_a_token_answers_only_directly() {
         "Subsonic too"
     );
 }
+
+async fn post_status(url: &str, headers: &[(&str, &str)]) -> u16 {
+    let mut r = reqwest::Client::new().post(url).body("<s:Envelope/>");
+    for (k, v) in headers {
+        r = r.header(*k, *v);
+    }
+    r.send().await.unwrap().status().as_u16()
+}
+
+/// A page on another site, opened by someone on the LAN, must not drive the renderer through
+/// their browser, also when the node has an API token (the renderer routes take none).
+#[tokio::test]
+async fn other_sites_never_reach_the_renderer_through_a_browser() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some("owner-token"));
+    let _ssdp = s.start_renderer(0, false);
+    let (direct, _) = serve(s).await;
+    let host = direct.trim_start_matches("http://").to_string();
+    // No zones here, so a request that gets through is a 404; one refused is a 403
+    let ctl = format!("{direct}/upnp/zone/kitchen/ctl/avt");
+    let desc = format!("{direct}/upnp/zone/kitchen/desc.xml");
+    let soap = [
+        ("content-type", "text/xml"),
+        (
+            "soapaction",
+            "\"urn:schemas-upnp-org:service:AVTransport:1#Play\"",
+        ),
+    ];
+    for site in ["cross-site", "same-site"] {
+        let h = [("sec-fetch-site", site), ("sec-fetch-mode", "no-cors")];
+        assert_eq!(post_status(&ctl, &h).await, 403, "a POST ({site})");
+        assert_eq!(status(&desc, &h).await, 403, "a GET ({site})");
+    }
+    for origin in ["http://evil.example", "null", "http://127.0.0.1:1"] {
+        assert_eq!(
+            post_status(&ctl, &[("origin", origin)]).await,
+            403,
+            "Origin {origin}"
+        );
+    }
+    // A page on another site whose name was made to resolve to the node (DNS rebinding): to
+    // the browser it is the same origin, so only the name it is reached by tells
+    let rebound = [
+        soap[0],
+        soap[1],
+        ("host", "evil.example"),
+        ("origin", "http://evil.example"),
+        ("sec-fetch-site", "same-origin"),
+    ];
+    assert_eq!(post_status(&ctl, &rebound).await, 403, "DNS rebinding");
+    // A control point (no Sec-Fetch headers, no Origin), and the node's own pages
+    assert_eq!(post_status(&ctl, &soap).await, 404);
+    assert_eq!(status(&desc, &[]).await, 404);
+    let own = format!("http://{host}");
+    let from_own_page = [soap[0], soap[1], ("origin", own.as_str())];
+    assert_eq!(post_status(&ctl, &from_own_page).await, 404);
+    assert_eq!(status(&desc, &[("sec-fetch-site", "same-origin")]).await, 404);
+    // GENA NOTIFY from renderers takes the same layer
+    let notify = format!("{direct}/v1/upnp/events/nope");
+    assert_eq!(
+        post_status(&notify, &[("sec-fetch-site", "cross-site")]).await,
+        403
+    );
+    // ... and refuses a rebound name too; by the node's address it gets as far as the method
+    assert_eq!(
+        post_status(&notify, &rebound[2..]).await,
+        403,
+        "GENA, DNS rebinding"
+    );
+    assert_eq!(post_status(&notify, &[]).await, 405);
+}

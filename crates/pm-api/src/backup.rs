@@ -90,6 +90,7 @@ const NODE_OWN: &[&str] = &[
     crate::accounts::OWNER_SESSIONS,
     crate::accounts::DEVICE_SESSIONS,
     crate::accounts::TOKENS,
+    crate::app_passwords::KEY,
     crate::access_token::PUBLISHED_TOKEN_KEY,
     crate::accounts::API_TOKEN_EXPOSED,
     crate::accounts::QUEUE_CLEANUP_PENDING,
@@ -653,14 +654,59 @@ pub struct Parsed {
     pub secrets: Option<Vec<u8>>,
 }
 
+/// The most a backup's parts may unpack to, each and all together, and against their packed
+/// size. The upload's own cap is on its packed size: a few MiB of deflated zeros would otherwise
+/// unpack into gigabytes in memory.
+struct Caps {
+    manifest: u64,
+    secrets: u64,
+    library: u64,
+    total: u64,
+    /// A part unpacks to at most this many times its packed size, or [`Caps::floor`]
+    /// (a library database deflates a few times; zeros a thousand times)
+    ratio: u64,
+    floor: u64,
+}
+
+const MANIFEST_MAX: u64 = 1 << 20;
+
+const CAPS: Caps = Caps {
+    manifest: MANIFEST_MAX,
+    secrets: 64 << 20,
+    // As big as the biggest upload (4 GiB): a backup that came in stored still fits
+    library: 4 << 30,
+    total: (4 << 30) + (64 << 20) + MANIFEST_MAX,
+    ratio: 100,
+    floor: 64 << 20,
+};
+
 pub fn parse(bytes: &[u8]) -> Result<Parsed, BackupError> {
+    parse_within(bytes, &CAPS)
+}
+
+fn parse_within(bytes: &[u8], caps: &Caps) -> Result<Parsed, BackupError> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|_| BackupError::NotABackup("not a zip file".into()))?;
+    let mut left = caps.total;
     let mut read = |name: &str| -> Result<Option<Vec<u8>>, BackupError> {
+        let cap = match name {
+            "manifest.json" => caps.manifest,
+            "secrets.bin" => caps.secrets,
+            _ => caps.library,
+        }
+        .min(left);
         match zip.by_name(name) {
-            Ok(mut f) => {
+            Ok(f) => {
+                // The packed size is the zip's own claim: never more than what was uploaded
+                let packed = f.compressed_size().min(bytes.len() as u64);
+                let cap = cap.min(packed.saturating_mul(caps.ratio).max(caps.floor));
+                // Read one byte past the cap: more than that is refused, never held
                 let mut v = Vec::new();
-                f.read_to_end(&mut v)?;
+                f.take(cap.saturating_add(1)).read_to_end(&mut v)?;
+                if v.len() as u64 > cap {
+                    return Err(BackupError::NotABackup(format!("{name} is too big")));
+                }
+                left -= v.len() as u64;
                 Ok(Some(v))
             }
             Err(zip::result::ZipError::FileNotFound) => Ok(None),
@@ -1415,6 +1461,84 @@ pub(crate) async fn run_schedule(State(s): State<Arc<NodeState>>) -> ApiResult<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn zip_of(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let deflate =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in members {
+            zip.start_file(*name, deflate).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn manifest_json() -> Vec<u8> {
+        serde_json::to_vec(&Manifest {
+            format: FORMAT.into(),
+            version: VERSION,
+            created_at: 0,
+            node_name: "n".into(),
+            node_version: "0".into(),
+            counts: BackupCounts::default(),
+            folders: vec![],
+            secrets: None,
+            left_out: vec![],
+        })
+        .unwrap()
+    }
+
+    /// A restore reads a backup's parts only up to what they may unpack to: a small upload
+    /// (deflated zeros) must not unpack into gigabytes in memory.
+    #[test]
+    fn a_backup_unpacks_only_up_to_its_caps() {
+        // A manifest padded past its cap: a few KiB deflated
+        let mut big = manifest_json();
+        big.extend(std::iter::repeat_n(b' ', 2 << 20));
+        let bytes = zip_of(&[("manifest.json", &big), ("library.db", b"db")]);
+        assert!(bytes.len() < 64 * 1024);
+        let e = parse(&bytes).err().expect("refused");
+        assert!(e.to_string().contains("too big"), "{e}");
+
+        let ok = zip_of(&[("manifest.json", &manifest_json()), ("library.db", &[0u8; 5000])]);
+        assert_eq!(parse(&ok).unwrap().database.len(), 5000);
+        let caps = |member: u64, total: u64| Caps {
+            manifest: MANIFEST_MAX,
+            secrets: member,
+            library: member,
+            total,
+            ratio: CAPS.ratio,
+            floor: CAPS.floor,
+        };
+        assert!(parse_within(&ok, &caps(5000, 1 << 20)).is_ok());
+        let e = parse_within(&ok, &caps(4999, 1 << 20))
+            .err()
+            .expect("over the member cap");
+        assert!(e.to_string().contains("too big"), "{e}");
+        let two = zip_of(&[
+            ("manifest.json", &manifest_json()),
+            ("library.db", &[0u8; 5000]),
+            ("secrets.bin", &[0u8; 5000]),
+        ]);
+        let total = manifest_json().len() as u64 + 5000 + 5000;
+        assert!(parse_within(&two, &caps(5000, total)).is_ok());
+        let e = parse_within(&two, &caps(5000, total - 1))
+            .err()
+            .expect("over the total cap");
+        assert!(e.to_string().contains("too big"), "{e}");
+        // Against the packed size: 5000 zeros pack to a few bytes; varied bytes don't
+        let packed = Caps {
+            floor: 0,
+            ..caps(1 << 20, 1 << 20)
+        };
+        let e = parse_within(&ok, &packed).err().expect("zeros unpack too far");
+        assert!(e.to_string().contains("too big"), "{e}");
+        let varied: Vec<u8> = (0..5000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let fine = zip_of(&[("manifest.json", &manifest_json()), ("library.db", &varied)]);
+        assert!(parse_within(&fine, &packed).is_ok());
+    }
 
     #[test]
     fn scratch_collisions_preserve_existing_folders_and_repeated_clock_allocations() {

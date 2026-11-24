@@ -248,7 +248,7 @@ class ThisPhoneTests(unittest.TestCase):
         row = 'text="This phone" bounds="[0,{}][320,{}]"'
         dumps = [[row.format(300, 360)], [row.format(374, 434)], [row.format(374, 434)]]
         with patch.object(ep, "open_picker", return_value=False), \
-                patch.object(ep, "ui_nodes", side_effect=lambda: dumps.pop(0) if len(dumps) > 1 else dumps[0]), \
+                patch.object(ep, "ui_nodes", side_effect=lambda **_: dumps.pop(0) if len(dumps) > 1 else dumps[0]), \
                 patch.object(ep, "adb") as adb, patch.object(ep, "log"), patch.object(ep.time, "sleep"):
             ep.pick('="This phone', "the page's “This phone”")
         taps = [c.args for c in adb.call_args_list if c.args[:3] == ("shell", "input", "tap")]

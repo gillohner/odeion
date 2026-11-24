@@ -5,6 +5,16 @@
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
   const BROWSER = 'browser';
+  // A dialog is named by its heading, so a screen reader says what it asks ("Delete this collection?")
+  // and not only "dialog"; `described`: its first paragraph is read with it (a confirmation's words)
+  let dialogNames = 0;
+  const nameDialog = (d, described) => {
+    const h = d.querySelector('h1, h2, h3');
+    if (h && !d.hasAttribute('aria-label') && !d.hasAttribute('aria-labelledby')) { if (!h.id) h.id = `dialogname${++dialogNames}`; d.setAttribute('aria-labelledby', h.id); }
+    const p = described && d.querySelector('p');
+    if (p && !d.hasAttribute('aria-describedby')) { if (!p.id) p.id = `dialogwords${++dialogNames}`; d.setAttribute('aria-describedby', p.id); }
+    return d;
+  };
   // Where the page's own player is, in words. The apps (window.pmDesktop, set by pm-desktop before
   // this script) never say "browser": on Android the in-app player is "This phone", on a desktop app
   // "This computer"; the plain web UI keeps "This browser". Every string that names it goes through
@@ -784,7 +794,7 @@
       h.tabIndex = -1;
       h.onkeydown = (e) => { e.stopPropagation(); if ((e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v')) field.focus(); };
     }
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     (h || field).focus();
   };
   // Edit a song's tags on the node (the file is not touched)
@@ -812,7 +822,7 @@
     const v = await editTagsDialog(cur); if (!v) return;
     try {
       if (v.undo) await api('DELETE', `/library/tracks/${id}/edit`); else await api('PUT', `/library/tracks/${id}/edit`, v);
-      toast(v.undo ? 'Back to the file’s tags' : 'Saved on this node'); onLibraryChanged(); if (state.view === 'library') render();
+      toast(v.undo ? 'Back to the file’s tags' : 'Saved on this node'); libraryChangedNow(); if (state.view === 'library') render();
     } catch (e) { toast(e.message, 'error'); }
   };
   // (anchor: the ⋯ it was chosen from; on a search result, the focus goes on to the next result's ⋯
@@ -821,7 +831,7 @@
     // (its file, asked while the question is open: Bring back names the file, not the song, and the
     // node has no file for it once it is out)
     const file = api('GET', `/library/tracks/${id}`).then((t) => (t && t.file && t.file.path) || null, () => null);
-    const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true }] });
+    const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true, danger: true }] });
     if (!ok) return;
     try {
       await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library');
@@ -832,7 +842,7 @@
       for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) r.answers[src] = withoutTrack(a, src, id);
       const at = anchor ? $$('#sresults [data-smore]').indexOf(anchor) : -1;
       const focused = at >= 0 && document.activeElement === anchor;
-      onLibraryChanged();
+      libraryChangedNow();
       // (waited for only then: another page's redraw can take long, or never end when left meanwhile)
       const drawn = render();
       if (focused) { await drawn; if ((!document.activeElement || document.activeElement === document.body) && state.view === 'search') ($$('#sresults [data-smore]')[at] || search).focus(); }
@@ -841,7 +851,7 @@
   const editAlbumTags = async (albumId, title, artist) => {
     const v = await choiceDialog({ title: 'Rename the album', text: 'Kept on this node; the files stay as they are.', field: { label: 'Album title', value: title || '' }, choices: [{ label: 'Save', value: 'save', primary: true }] });
     if (!v || !v.text) return;
-    try { await api('PUT', `/library/albums/${albumId}/edit`, { title: v.text, ...(artist != null ? { album_artist: artist } : {}) }); toast('Album renamed on this node'); onLibraryChanged(); render(); } catch (e) { toast(e.message, 'error'); }
+    try { await api('PUT', `/library/albums/${albumId}/edit`, { title: v.text, ...(artist != null ? { album_artist: artist } : {}) }); toast('Album renamed on this node'); libraryChangedNow(); render(); } catch (e) { toast(e.message, 'error'); }
   };
   // "Add music": one button, three ways in
   const addMusicDialog = async () => {
@@ -893,7 +903,7 @@
     transients.push(tr); pushTransient();
     $('[data-scanclose]', d).onclick = () => done(null);
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     (async () => {
       try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); } catch (e) { msg.textContent = `The camera isn’t available (${e.message || e.name}). Paste their key instead.`; return; }
       if (over) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -911,14 +921,14 @@
   // `layer`: opened over Now playing, it gets a history entry of its own, so Back closes it alone
   const choiceDialog = ({ title, text, choices, field, layer }) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
-    d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}${field ? `<label class="dialog-field"><span class="muted small">${esc(field.label)}</span><input class="input" data-field value="${esc(field.value || '')}" aria-label="${esc(field.label)}"></label>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
+    d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}${field ? `<label class="dialog-field"><span class="muted small">${esc(field.label)}</span><input class="input" data-field value="${esc(field.value || '')}" aria-label="${esc(field.label)}"></label>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}${c.danger ? ' danger' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
     document.body.appendChild(d);
     const tr = { layer: !!layer, open: () => d.open, close: (fromBack) => done(null, fromBack) };
     const done = (v, fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(!!layer && transients.some((t) => t.open())); resolve(v); };
     transients.push(tr); pushTransient(!!layer);
     $$('[data-ci]', d).forEach((b) => b.onclick = () => { const i = Number(b.dataset.ci); if (i < 0) return done(null); const v = choices[i].value; done(field ? { value: v, text: $('[data-field]', d).value.trim() } : v); });
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
-    if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
+    nameDialog(d, true); if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
   });
   // Comments (TASK-pinakes-social-ux.md B1): social v1 notes whose parent is the item's link, read
   // from Nexus by parent; reply to one, delete your own. One handler per section, by delegation.
@@ -982,7 +992,7 @@
       const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
       const d = e.target.closest('[data-cdel]');
       if (d) {
-        const go = await choiceDialog({ title: 'Delete this comment?', text: 'It goes from your homeserver; apps that already showed it drop it once Nexus sees it gone.', choices: [{ label: 'Delete', value: true, primary: true }] });
+        const go = await choiceDialog({ title: 'Delete this comment?', text: 'It goes from your homeserver; apps that already showed it drop it once Nexus sees it gone.', choices: [{ label: 'Delete', value: true, primary: true, danger: true }] });
         if (!go) return;
         d.disabled = true;
         try { await api('DELETE', `/comments?post=${encodeURIComponent(d.dataset.cdel)}`); toast('Comment deleted'); d.closest('li.comment').remove(); } catch (err) { d.disabled = false; toast(err.message, 'error'); }
@@ -1287,7 +1297,7 @@
       toast(r.json.state === 'queued' ? 'Queued: it starts when the copy before it is done' : 'Copying in the background: the chip in the player bar shows how far it is');
       watchJob(r.json.id);
     };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     drawPanel();
     const first = $('[data-cpick].on', d); if (first) first.focus();
   });
@@ -1327,10 +1337,10 @@
     const list = $('#mmlist', box);
     const match = (f) => { const q = st.q.toLowerCase(); return [f.name, f.song && f.song.title, f.song && f.song.artist, f.song && f.song.album].some((x) => x && String(x).toLowerCase().includes(q)); };
     const cover = (f) => (f.song.album_id ? `<img class="thumb" src="${esc(imgSrc(`/v1/library/albums/${f.song.album_id}/cover`))}" alt="" loading="lazy" data-err="hide">` : '<span class="thumb"></span>');
-    const songRow = (f, k) => `<div class="list-row mrow" data-mrow="${k}">${cover(f)}<button class="icon-btn" data-mplay="${f.song.id}" aria-label="Play ${esc(f.song.title)}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(f.song.title)}${f.song.edited ? ' <span class="pill" title="Tags edited on this node">edited</span>' : ''}</div><div class="sub">${esc([f.song.artist, f.song.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${f.song.duration_ms ? fmt(f.song.duration_ms) : ''}</span><span class="muted small msize">${fileSize(f.size)}</span><button class="icon-btn" data-mmore="${k}" aria-label="More for ${esc(f.song.title)}" title="More">${icon('more')}</button></div>`;
+    const songRow = (f, k) => `<div class="list-row mrow" data-mrow="${k}">${cover(f)}<button class="icon-btn" data-mplay="${f.song.id}" aria-label="Play ${esc(f.song.title)}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(f.song.title)}${f.song.edited ? ' <span class="pill" title="Tags edited on this node">edited</span>' : ''}</div><div class="sub">${esc([f.song.artist, f.song.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${f.song.duration_ms ? fmt(f.song.duration_ms) : ''}</span><span class="muted small msize">${fileSize(f.size)}</span><button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-mmore="${k}" aria-label="More for ${esc(f.song.title)}" title="More">${icon('more')}</button></div>`;
     const looseRow = (f, k) => `<div class="list-row mrow"><div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.removed ? 'Taken out of the library: Node library brings it back.' : 'Not in the library yet: it is read with the next scan.'}</div></div><span class="muted small msize">${fileSize(f.size)}</span><button class="btn sm ghost" data-mdel="${k}" aria-label="Delete ${esc(f.name)} from your homeserver">Delete</button></div>`;
     const delFile = async (f) => {
-      const ok = await choiceDialog({ title: 'Delete from your homeserver?', text: `“${f.song ? f.song.title : f.name}” is deleted from your homeserver${ctx.bundled ? ' and leaves the library' : ''}. This can’t be undone.`, choices: [{ label: 'Delete', value: true, primary: true }] });
+      const ok = await choiceDialog({ title: 'Delete from your homeserver?', text: `“${f.song ? f.song.title : f.name}” is deleted from your homeserver${ctx.bundled ? ' and leaves the library' : ''}. This can’t be undone.`, choices: [{ label: 'Delete', value: true, primary: true, danger: true }] });
       if (!ok) return;
       try { await api('DELETE', '/pubky/files', { paths: [f.path] }); toast('Deleted'); st.local = null; load(); } catch (er) { toast(er.message, 'error'); }
     };
@@ -2052,7 +2062,7 @@
     if (listsOnly && lists) { lists.innerHTML = body; const h = $('.page-head', main); if (h) h.outerHTML = `<div class="page-head"><h2>Downloads${d.songs ? `<span class="count">${esc(fmtCount(d.songs))}</span>` : ''}</h2><div class="actions"></div></div>`; }
     else main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p><div id="dllists">${body}</div><div class="set-group">${limit}</div>`;
     $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; return x ? dlKeep(x.kind, x.id, false, x.title) : undefined; });
-    const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your collections stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
+    const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your collections stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true, danger: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
     if (listsOnly && lists) return;
     $('#dllimit', main).onchange = async (e) => { const v = e.target.value; try { dlSet(await dlCall('downloads_limit', { bytes: v === '' ? null : Number(v) })); if (state.view === 'downloads') storageUpdate(state.dl); } catch (er) { toast(String((er && er.message) || er), 'error'); } };
   };
@@ -2110,7 +2120,7 @@
   // `can`: the capability names of crates/pm-api/src/access.rs, in snake case). Without the list
   // (the offline app, a backend that has no roles) it is the role as before: the owner everything,
   // someone with music access what the node gives them.
-  const LISTENER_CAN = new Set(['artwork', 'session', 'library', 'zone_list', 'zone_use', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in']);
+  const LISTENER_CAN = new Set(['artwork', 'session', 'library', 'zone_list', 'zone_use', 'collections', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in']);
   const can = (cap) => { const me = state.me; return me && Array.isArray(me.can) ? me.can.includes(cap) : !isListener() || LISTENER_CAN.has(cap); };
   // ---- people & access: the words the owner's screen and a person's own Settings share ----
   // "Kitchen", "Kitchen and Den", "Kitchen, Den and Hall", "Kitchen, Den, Hall and 2 more"
@@ -2121,7 +2131,7 @@
   const CAN_WORDS = [
     ['library', () => 'Play and search this node’s library'],
     ['zone_use', (o) => o.zones],
-    ['own', (o) => `Keep ${o.their} own bookmarks and collections, on ${o.their} own Pubky account`],
+    ['collections', (o) => `Keep ${o.their} own bookmarks and collections, on ${o.their} own Pubky account`],
     ['own_sign_in', (o) => `Sign in to ${o.their} own TIDAL, Qobuz or Spotify`],
     ['own', () => 'Report a problem'],
   ];
@@ -2176,7 +2186,7 @@
         await load([ids[at + 1], ids[at - 1]].filter(Boolean).map((id) => () => $$('[data-si-end]', host).find((x) => x.dataset.siEnd === id)));
       });
       const all = $('[data-si-all]', host); if (all) all.onclick = async () => {
-        const go = await choiceDialog({ title: 'Sign out all other browsers and apps?', text: `Each of them has to log in again with Pubky Ring. ${hereName()} stays logged in.`, choices: [{ label: 'Sign out all others', value: true, primary: true }] });
+        const go = await choiceDialog({ title: 'Sign out all other browsers and apps?', text: `Each of them has to log in again with Pubky Ring. ${hereName()} stays logged in.`, choices: [{ label: 'Sign out all others', value: true, primary: true, danger: true }] });
         if (!go) { all.focus(); return; }
         try { const r = await api('DELETE', '/me/sign-ins'); toast(r && r.ended === 1 ? 'Signed out one other browser or app' : `Signed out ${r && r.ended != null ? r.ended : 'the'} other browsers and apps`); } catch (e) { toast(e.message, 'error'); }
         await load([]);
@@ -2202,6 +2212,61 @@
   };
   // The last list this log in was shown (another log in in the same tab starts without one)
   const keptSignIns = () => { if (!state.mySignIns || state.mySignIns.by !== state.token) state.mySignIns = { by: state.token, list: null }; return state.mySignIns; };
+  // The apps the owner gave a password of their own (GET /v1/node/app-passwords), drawn into `host`:
+  // each with when it was made and last used, and Remove (asked first); then a name field and
+  // "Make a password", whose password shows once, with Copy, until the page is drawn again.
+  // Loading, none yet, and an error with Retry.
+  const mountAppPasswords = (host) => {
+    if (!host) return;
+    const row = (name, note, ctl, attr = '') => `<div class="set-row" ${attr}><div class="set-label"><div class="set-name">${name}</div>${note ? `<p class="set-help">${note}</p>` : ''}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+    const note = (a) => [
+      a.created_at ? `made ${new Date(a.created_at * 1000).toLocaleDateString()}` : '',
+      a.last_used == null ? 'not used yet' : a.last_used >= Math.floor(Date.now() / 86400000) * 86400 ? 'last used today' : `last used ${new Date(a.last_used * 1000).toLocaleDateString(undefined, { timeZone: 'UTC' })}`,
+    ].filter(Boolean).join(' · ');
+    const form = '<div class="set-row set-block" data-ap-new><div class="set-label"><label class="set-name" for="apname">Give an app its own password</label><p class="set-help">Name the app, then copy its password into it.</p><div class="toolbar"><input class="input" id="apname" maxlength="60" placeholder="The app’s name, e.g. Home Assistant" autocomplete="off"><button class="btn" id="apgo">Make a password</button></div><p class="field-err small" id="apnameerr" role="alert" hidden></p><div id="apout" aria-live="polite"></div></div></div>';
+    let shown = '';
+    const draw = (list, error) => {
+      const typed = $('#apname', host) ? $('#apname', host).value : '';
+      host.innerHTML = (error
+        ? `<div class="set-row" data-ap-error><div class="set-label"><p class="set-help pa-err" role="alert">Couldn’t read the apps: ${esc(error)}</p></div><div class="set-ctl"><button class="btn sm" data-ap-retry>Retry</button></div></div>`
+        : !list ? '<div class="set-row" data-ap-loading aria-busy="true"><div class="skeleton pa-skel"></div></div>'
+          : !list.length ? '<div class="set-row" data-ap-none><div class="set-label"><p class="set-help">No app has a password of its own yet.</p></div></div>'
+            : list.map((a) => row(esc(a.name), esc(note(a)), `<button class="btn sm danger" data-ap-del="${esc(a.id)}" aria-label="Remove the password of ${esc(a.name)}">Remove…</button>`, `data-ap="${esc(a.id)}"`)).join(''))
+        + form;
+      $('#apname', host).value = typed;
+      $('#apout', host).innerHTML = shown;
+      $$('[data-ap-del]', host).forEach((b) => b.onclick = async () => {
+        const a = (list || []).find((x) => x.id === b.dataset.apDel); const name = a ? a.name : 'this app';
+        const go = await choiceDialog({ title: `Remove the password of ${name}?`, text: `${name} stops working with this node at once. Your other apps go on.`, choices: [{ label: 'Remove', value: true, primary: true, danger: true }] });
+        if (!go) { b.focus(); return; }
+        try { await api('DELETE', `/node/app-passwords/${encodeURIComponent(b.dataset.apDel)}`); toast(`Removed the password of ${name}`); } catch (e) { toast(e.message, 'error'); }
+        await load();
+        const next = $('[data-ap-del]', host) || $('#apname', host); if (next) next.focus();
+      });
+      const err = $('#apnameerr', host);
+      $('#apname', host).oninput = () => { err.hidden = true; };
+      $('#apgo', host).onclick = async () => {
+        const name = $('#apname', host).value.trim();
+        if (!name) { err.textContent = 'Name the app first.'; err.hidden = false; $('#apname', host).focus(); return; }
+        let made;
+        try { made = await api('POST', '/node/app-passwords', { name }); } catch (e) { toast(e.message, 'error'); return; }
+        shown = `<p class="small pa-newpass">The password of ${esc(made.name)}, shown only now. Copy it into the app (a Subsonic app takes it as its password).</p><div class="toolbar"><code class="pa-code" data-ap-made>${esc(made.password)}</code><button class="btn sm primary" data-copylink="${esc(made.password)}">Copy</button></div>`;
+        $('#apname', host).value = '';
+        await load();
+        const copy = $('#apout [data-copylink]', host); if (copy) copy.focus();
+      };
+      const again = $('[data-ap-retry]', host); if (again) again.onclick = () => load();
+    };
+    const load = async () => {
+      let list = null; let error = null;
+      try { list = await api('GET', '/node/app-passwords'); if (!Array.isArray(list)) throw new Error('The node’s answer was not a list.'); } catch (e) { list = null; error = e.message; }
+      if (!host.isConnected) return;
+      draw(list, error);
+    };
+    host.tabIndex = -1;
+    draw(null, null);
+    return load();
+  };
   // Offline (the app's local server, pm-offline): only what this device keeps, played here
   const isOffline = () => !!(state.info && state.info.offline);
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
@@ -3502,7 +3567,8 @@
   $('#next').onclick = () => transport({ action: 'next' });
   $('#prev').onclick = () => transport({ action: 'previous' });
   const seek = $('#seek');
-  seek.addEventListener('input', () => { seek.dataset.dragging = '1'; setFill(seek); });
+  // (read out as the time it is moved to; renderBar writes the playing time again once it is let go)
+  seek.addEventListener('input', () => { seek.dataset.dragging = '1'; setFill(seek); const z = currentZone(); const d = z && z.now_playing ? z.now_playing.duration_ms : 0; if (d) { seek._barWords = `${fmt((seek.value / 1000) * d)} of ${fmt(d)}`; seek.setAttribute('aria-valuetext', seek._barWords); } });
   // (a drag let go on its start value sends no change: the bar's seek let go too)
   for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) seek.addEventListener(ev, () => { setTimeout(() => { delete seek.dataset.dragging; }, 0); }, { passive: true });
   seek.addEventListener('change', () => {
@@ -4381,7 +4447,8 @@
       // A zone that stopped on an error says so here, until the next track starts (the node clears it)
       const err = z && z.transport === 'stopped' && z.error;
       putHtml(npEl, waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`);
-      putText($('#pos'), '0:00'); putText($('#dur'), '0:00'); seek.value = 0; setFill(seek); miniProgress(0);
+      put(npEl, '_barName', 'Now playing', (v) => { npEl.setAttribute('aria-label', v); });
+      putText($('#pos'), '0:00'); putText($('#dur'), '0:00'); seek.value = 0; setFill(seek); miniProgress(0); put(seek, '_barWords', '', () => { seek.removeAttribute('aria-valuetext'); });
       pill('quality idle', '', '—', false, `<span class="qdev">${esc(z ? z.name : '')}</span>`, `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`, 'Sound: where it plays from, how it gets to you, and DSP');
       syncQPanel();
       return;
@@ -4397,6 +4464,8 @@
     const npHtml = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
     const pausedBy = !waitHtml && !errHtml && z.transport === 'paused' && z.error ? z.error : '';
     const linked = !waitHtml && !errHtml && !barPlain();
+    // (its name is the song, not only "Now playing": the label replaces what is inside it for a screen reader)
+    put(npEl, '_barName', waitHtml || errHtml ? 'Now playing' : ((w) => (w ? `Now playing: ${w}` : 'Now playing'))([live || it.title, it.artist].filter(Boolean).join(', ')), (v) => { npEl.setAttribute('aria-label', v); });
     if (put(npEl, '_barHtml', `${npHtml}\n${pausedBy}\n${linked}`, () => { npEl.innerHTML = npHtml; })) {
       // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
       // its title there); with a mouse the bar's title and artist are links of their own
@@ -4405,6 +4474,8 @@
       if (pausedBy) { const sub = $('.np-sub', npEl); if (sub) sub.innerHTML = `<span class="warn-text" role="alert">${esc(pausedBy)}</span>`; }
     } else if (linked && !pausedBy) hydrateArtistCredits(npEl);
     putText($('#pos'), fmt(np.position_ms)); putText($('#dur'), fmt(np.duration_ms));
+    // (the seek bar read out as a time, not as a number of a thousand)
+    if (!seek.dataset.dragging) put(seek, '_barWords', `${fmt(np.position_ms)} of ${fmt(np.duration_ms)}`, (v) => { seek.setAttribute('aria-valuetext', v); });
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     miniProgress(np.duration_ms ? np.position_ms / np.duration_ms : 0);
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
@@ -4500,8 +4571,12 @@
   // The browser's own player: it starts (or fails) by itself
   audio.addEventListener('playing', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); if (state.startError && state.startError.zone === BROWSER) { state.startError = null; renderBar(); } });
   audio.addEventListener('pause', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); });
+  // The first Tab stop: past the menu and the top bar, to the page
+  { const sk = $('#skip'); if (sk) sk.onclick = () => { main.focus({ preventScroll: true }); }; }
   $('#np').onclick = () => toggleNowPlaying();
-  $('#np').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
+  // (Enter or Space on the bar itself; on its title, artist or cover the key is that control's own.
+  // A link has no Space of its own: there it opens Now playing, as it did)
+  $('#np').onkeydown = (e) => { const inner = e.target !== e.currentTarget; if (inner && !(e.key === ' ' && e.target.closest('a'))) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
   // The quality sheet needs to know what is streaming (now_playing.format); without it (This browser,
   // an older node) the label opens Now playing, where the signal path is
   // ---- the sound panel (owner, 2026-10-29): the pill in full ----
@@ -4678,6 +4753,8 @@
   // `right` runs as it slides out, else it snaps back; up and down run `up` / `down` past 40 / 60 px.
   // A drag that starts on a slider or a field is the slider's. The tap a swipe leaves is dropped.
   const calmMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // (how a scripted scroll moves: at once for people who asked for less motion)
+  const glide = () => (calmMotion() ? 'auto' : 'smooth');
   const swipeable = (el, o) => {
     let s = null;
     const reset = () => { if (s && s.move) { s.move.classList.remove('dragging'); s.move.style.transform = ''; s.move.style.opacity = ''; } s = null; };
@@ -4842,7 +4919,7 @@
     const under = one && sheet ? ' inert' : ''; // (what the phone's sheet covers)
     overlay.innerHTML = `
       <div class="np-page np2${sheet && !one ? ' has-sheet' : ''}${one ? ' compact' : ''}">
-        <div class="np-top"${under}><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
+        <div class="np-top"${under}><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button aria-haspopup="menu" aria-expanded="false" class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
         <div class="np-body"${under}>
           <section class="np-player" aria-label="Now playing">
             <div class="np-big">${itemArt(it, '', npSvc(np))}</div>
@@ -4897,7 +4974,7 @@
     const npAct = { shuffle: toggleShuffle, repeat: cycleRepeat, prev: () => transport({ action: 'previous' }), toggle: () => transport({ action: 'toggle' }), next: () => transport({ action: 'next' }) };
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => npAct[b.dataset.npt]());
     renderModes();
-    sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
+    sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); sk.setAttribute('aria-valuetext', `${fmt((sk.value / 1000) * (np.duration_ms || 0))} of ${fmt(np.duration_ms)}`); });
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
     // (a drag that ends without a change, or is cancelled, lets go too)
     for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) sk.addEventListener(ev, () => { setTimeout(() => { delete sk.dataset.dragging; }, 0); }, { passive: true });
@@ -5150,6 +5227,7 @@
   setInterval(() => {
     if (overlay.hidden) return;
     const z = currentZone(); const np = z && z.now_playing; const s = $('#npseek');
+    if (np && s && !s.dataset.dragging) { const words = `${fmt(np.position_ms)} of ${fmt(np.duration_ms)}`; if (s.getAttribute('aria-valuetext') !== words) s.setAttribute('aria-valuetext', words); }
     if (!np || !s || s.dataset.dragging) return;
     if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle || JSON.stringify(outputFacts(z)) !== renderNowPlaying.lastOutput) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
     if ((z.transport || '') !== (overlay.dataset.transport || '')) {
@@ -5411,7 +5489,9 @@
     state.drawnPage = null; endSelect(); // (opening a page, the same one too, ends Select)
     state.zoneInView = v === 'zones' && how !== 'pop'; // Zones opened (not Back): show the zone in use
     // (a page that drew nothing, its code done or failed: at its top then, unless a newer page waits)
-    return navigate(fresh).finally(() => { if (top && topLater === top) topNow(); });
+    // (not for a change inside the page, 'replace': a tag taken off, a tab, the next page of a list;
+    // nor before the person has pressed or typed anything: a page the app opens by itself)
+    return navigate(fresh, fresh && !firstPage && how !== 'replace' && personActed).finally(() => { if (top && topLater === top) topNow(); });
   };
   // (a post that is no playlist pasted over a search with a query: that search's entry takes its
   // search, as a new query there does, so Back and Escape go where Search was opened from: { q, in, depth
@@ -5971,7 +6051,7 @@
           <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" aria-pressed="${fav}" title="${fav ? 'Remove from Bookmarks' : 'Add to Bookmarks'}" aria-label="${esc(heartWords(fav, t.title))}">${icon(fav ? 'heart-fill' : 'heart')}</button>
           <button class="icon-btn" data-act="next" title="Play next" aria-label="${esc(rowWords.next(t.title))}">${icon('playnext')}</button>
           <button class="icon-btn" data-act="add" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>
-          <button class="icon-btn" data-act="more" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>
+          <button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-act="more" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>
         </div>
       </div>`;
     }).join('');
@@ -6109,7 +6189,7 @@
         $('[data-hsagain]', d).onclick = start;
       }
     };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     start();
   });
   const tagRgba = (hex, a) => { const [r, g, b] = hex.match(/\w\w/g).map((x) => parseInt(x, 16)); return `rgba(${r}, ${g}, ${b}, ${a})`; };
@@ -6180,7 +6260,7 @@
       const here = trail[trail.length - 1];
       try { done(false, await api('POST', '/library/drives', { provider, folder_id: here.id, name: here.name })); } catch (e) { $('#dfmsg', d).textContent = e.message; }
     };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     show();
   });
   // Your library › Node library › Add a WebDAV share: the folder's address, user and password; the node
@@ -6380,7 +6460,17 @@
     $('#notessave').onclick = () => save(r ? r.rating : null, $('#notestext').value.trim());
   };
   // A small anchored menu (track ⋯, album actions). One at a time; Esc or the scrim closes it.
-  const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; document.body.appendChild(menuEl);
+  const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; menuEl.setAttribute('role', 'menu'); document.body.appendChild(menuEl);
+  // (the control that opened it says so while it is open)
+  // (a More button says in its own markup that it opens a menu, and here whether it is open. Any
+  // other button a menu is hung on, a Play that offers a choice only sometimes, the zone button's
+  // sleep timer, says so only while that menu is open; the page or the search box never does)
+  const menuSaid = (open) => {
+    const a = menuAnchor; if (!a || !a.matches || !a.matches('button, [role="button"]')) return;
+    if (open) { if (!a.hasAttribute('aria-haspopup')) { a._menuPassing = true; a.setAttribute('aria-haspopup', 'menu'); } a.setAttribute('aria-expanded', 'true'); }
+    else if (a._menuPassing) { a._menuPassing = false; a.removeAttribute('aria-haspopup'); a.removeAttribute('aria-expanded'); }
+    else if (a.hasAttribute('aria-haspopup')) a.setAttribute('aria-expanded', 'false');
+  };
   // Long-press on a phone, in a list that has Select: selection, with that row ticked (owner,
   // 2026-11-08); elsewhere (and right-click) the row's ⋯ menu
   const longPressSelect = (row) => {
@@ -6451,7 +6541,7 @@
     if (to == null || e.altKey || e.ctrlKey || e.metaKey) return;
     e.preventDefault(); e.stopPropagation(); items[to].focus({ preventScroll: true });
   });
-  const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuBack(); menuEl.hidden = true; if (fromBack !== true) popTransient(); };
+  const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuBack(); menuEl.hidden = true; menuSaid(false); if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
   // Phones: a sheet closes with a swipe down while its list is at the top (it follows the finger;
   // a short pull springs back). A swipe that starts sideways or scrolls the list is left alone.
@@ -6501,12 +6591,29 @@
     // in the menu before (a sub-menu): not a mouse's click that left a menu item focused)
     const fa = document.activeElement;
     const keyed = keyedLast && (!fa || fa === document.body || fa === anchor || menuEl.contains(fa) || (fa.contains && fa.contains(anchor)));
+    if (menuAnchor !== anchor) menuSaid(false); // (a menu opened from another one's place: that one is closed)
     menuAnchor = anchor;
-    menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.face ? face(it.face) : it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
+    // (its name: its first heading, else what its opener is called)
+    { const t = items.find((it) => it.title); menuEl.setAttribute('aria-label', (t && t.title) || anchor.getAttribute('aria-label') || anchor.title || 'Menu'); }
+    // (each titled part is a group named by its title, so a screen reader says which part an item is in:
+    // "Move to" before the zones; a title with nothing after it, "and 3 more on Pubky", describes the menu)
+    const item = (it, i) => `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : 'role="menuitem"'}>${it.face ? face(it.face) : it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`;
+    let html = ''; let open = false; let note = null;
+    items.forEach((it, i) => {
+      if (!it.title) { html += item(it, i); return; }
+      if (open) html += '</div>';
+      open = items.slice(i + 1).some((x) => !x.title) && !(items[i + 1] && items[i + 1].title);
+      const id = `mtitle${i}`;
+      if (open) html += `<div role="group" aria-labelledby="${id}"><div class="pop-title" id="${id}" aria-hidden="true">${esc(it.title)}</div>`;
+      else { html += `<div class="pop-title" id="${id}" aria-hidden="true">${esc(it.title)}</div>`; if (i > 0 && !items.slice(i + 1).some((x) => !x.title)) note = id; }
+    });
+    if (open) html += '</div>';
+    menuEl.innerHTML = html;
+    if (note) menuEl.setAttribute('aria-describedby', note); else menuEl.removeAttribute('aria-describedby');
     // The item runs first: a page it opens replaces the transient entry; otherwise it is popped. The menu
     // closes at once, so the control that opened it (its ⋯) shows the progress until the item is done.
-    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuBack(); menuEl.hidden = true; Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
-    menuEl.hidden = false; pushTransient();
+    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuBack(); menuEl.hidden = true; menuSaid(false); Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
+    menuEl.hidden = false; menuSaid(true); pushTransient();
     const r = anchor.getBoundingClientRect(); const mw = 280;
     menuEl.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
     menuEl.style.top = Math.min(window.innerHeight - menuEl.offsetHeight - 8, r.bottom + 6) + 'px';
@@ -6641,7 +6748,7 @@
   // ("album", "song", never the describer's "other"), and an album's Play says it is the album. On a
   // phone it stays in the line under the title: next to a plays chip a row-end word left the
   // title no room.
-  const discoverRows = (items) => `<div class="list">${items.map((it, i) => { const kind = it.kind && it.kind !== 'other' ? homeKind(it) : ''; return `<div class="list-row clickable" data-ditem="${i}"${it.uri ? ` data-uri="${esc(it.uri)}"` : ''}>${it.image ? `<img class="thumb" src="${esc(it.image)}" alt="" loading="lazy">` : `<div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div>`}<div class="grow"><div class="name">${esc(itemName(it))} ${it.site ? `<span class="src-badge">${esc(it.site.toUpperCase())}</span>` : ''}${it.in_library ? '<span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([it.artist, it.group_size ? `on ${it.group_size} services` : null, it.taggers ? `${it.taggers} tagger${it.taggers === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))}${kind ? `<span class="subkind">${it.artist || it.group_size || it.taggers ? ' · ' : ''}${esc(kind)}</span>` : ''}</div></div>${kind ? `<span class="muted small rowkind">${esc(kind)}</span>` : ''}${playsChip(it)}<span class="row-actions"><button class="icon-btn" data-dplay="${i}" title="Play" aria-label="Play ${it.kind === 'album' ? 'the album ' : ''}${esc(itemName(it))}">${icon('play')}</button><button class="icon-btn" data-dmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></span></div>`; }).join('')}</div>`;
+  const discoverRows = (items) => `<div class="list">${items.map((it, i) => { const kind = it.kind && it.kind !== 'other' ? homeKind(it) : ''; return `<div class="list-row clickable" data-ditem="${i}"${it.uri ? ` data-uri="${esc(it.uri)}"` : ''}>${it.image ? `<img class="thumb" src="${esc(it.image)}" alt="" loading="lazy">` : `<div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div>`}<div class="grow"><div class="name">${esc(itemName(it))} ${it.site ? `<span class="src-badge">${esc(it.site.toUpperCase())}</span>` : ''}${it.in_library ? '<span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([it.artist, it.group_size ? `on ${it.group_size} services` : null, it.taggers ? `${it.taggers} tagger${it.taggers === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))}${kind ? `<span class="subkind">${it.artist || it.group_size || it.taggers ? ' · ' : ''}${esc(kind)}</span>` : ''}</div></div>${kind ? `<span class="muted small rowkind">${esc(kind)}</span>` : ''}${playsChip(it)}<span class="row-actions"><button class="icon-btn" data-dplay="${i}" title="Play" aria-label="Play ${it.kind === 'album' ? 'the album ' : ''}${esc(itemName(it))}">${icon('play')}</button><button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-dmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></span></div>`; }).join('')}</div>`;
   // Charts and search as artwork tiles (Roon-style), with the same play/menu actions as the rows.
   // Service marks for badges: simple monochrome glyphs in the spirit of each
   // service's logo (no trademarked artwork copied), a note for the rest.
@@ -6919,8 +7026,8 @@
   // words, and never asked of Pinakes (they are a private playlist's)
   const MB_SEARCH = 'https://musicbrainz.org/search?type=recording&query=';
   const mbSearchWords = (uri) => { if (!String(uri || '').startsWith(MB_SEARCH)) return null; try { return new URL(uri).searchParams.get('query') || null; } catch { return null; } };
-  const searchRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-search><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('search')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Not matched to a song yet</div></div><a class="btn ghost sm" href="${esc(t.page)}" target="_blank" rel="noopener" aria-label="Find “${esc(t.title)}” on MusicBrainz">${icon('external')} Find on MusicBrainz</a>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
-  const cardRow = (t, k, opts) => t.search ? searchRow(t, k, opts) : `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener" aria-label="Open ${esc(t.title)} (new tab)">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
+  const searchRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-search><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('search')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Not matched to a song yet</div></div><a class="btn ghost sm" href="${esc(t.page)}" target="_blank" rel="noopener" aria-label="Find “${esc(t.title)}” on MusicBrainz">${icon('external')} Find on MusicBrainz</a>${opts.extra ? opts.extra(t, k) : ''}<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
+  const cardRow = (t, k, opts) => t.search ? searchRow(t, k, opts) : `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener" aria-label="Open ${esc(t.title)} (new tab)">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
   // At most two at a time: the node's other calls (play, the zone) must not wait behind them
   const fillCards = (box) => {
     const rows = $$('[data-card]', box); let next = 0;
@@ -6998,7 +7105,7 @@
   // A hero's picture (item and person pages) lies over its monogram, so a picture that fails to load (removed) leaves the monogram, as on the tiles
   const heroImg = (src, round) => `<img src="${esc(imgSrc(src))}" alt="" style="width:100%;border-radius:${round ? '50%' : '12px'}" data-err="remove">`;
   const rowMono = (title, badged) => { const h = hue(title); return `<span class="thumb mono${badged ? ' badged' : ''}" aria-hidden="true" style="background:linear-gradient(135deg, hsl(${h} 38% 30%), hsl(${(h + 40) % 360} 42% 18%))">${esc(initials(title))}</span>`; };
-  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap">${rowMono(t.title, !t.sources && coverBadge(coverSvc(t)))}<img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="remove">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${songSub(t, k, opts)}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
+  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap">${rowMono(t.title, !t.sources && coverBadge(coverSvc(t)))}<img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="remove">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${songSub(t, k, opts)}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
   // The list being selected from (while the bar is up): its page, its part of the page, each song's
   // key and the ticks. The same list drawn again where it stands (a playlist's sources answering, a
   // pin, the next search source, See all songs) takes Select over with the same songs ticked;
@@ -7806,6 +7913,9 @@
   let plGen = 0;
   // The latest favourites load, so a page that lists favourites can wait for it on a cold start
   let favLoad = null; let favRedraw = null; let favRetryFocus = false;
+  // Songs: each draw's number and the newest one shown (an older draw's answer is not put in over
+  // a newer one's), and the read under way while the page is drawn again where it stands
+  let songsDraw = 0; let songsShown = 0; let songsReading = null;
   // Only the latest load's answer counts: on a cold start a slow first answer that lands after a
   // heart was pressed would otherwise put back the list without that bookmark. An older load
   // waits for the latest and answers with it.
@@ -7930,7 +8040,9 @@
       try { done = !(await more()); } catch (e) { done = true; toast(e.message, 'error'); }
       busy = false;
       if (done) { io.disconnect(); sentinel.remove(); } else { io.unobserve(sentinel); io.observe(sentinel); }
-    }, { rootMargin: '1200px 0px' });
+      // (measured from the page's own scrolling box: a margin around the window is cut off by that
+      // box, so the next part was only asked for once the list's end was on screen)
+    }, { root: /auto|scroll/.test(getComputedStyle(main).overflowY) ? main : null, rootMargin: '1200px 0px' });
     io.observe(sentinel);
     return () => { done = true; io.disconnect(); sentinel.remove(); };
   };
@@ -8015,8 +8127,11 @@
   // An album's heart: kept on the node (album:<id>), or on its release or its release group (the
   // album page and Discover heart the group)
   const albumFav = (a) => !!(state.favUris && (state.favUris.has(`album:${a.id}`) || (a.release_mbid && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`)) || (a.release_group_mbid && state.favUris.has(`https://musicbrainz.org/release-group/${a.release_group_mbid}`))));
+  const NAME_ORDER = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
   const sortList = (kind, list, how) => {
-    const by = (f) => [...list].sort((a, b) => String(f(a) || '').localeCompare(String(f(b) || ''), undefined, { sensitivity: 'base', numeric: true }));
+    // (one collator for every comparison: localeCompare with options makes one per call, which was
+    // most of the time Albums and Artists took to open on a big library; each name's key once)
+    const by = (f) => list.map((x) => [String(f(x) || ''), x]).sort((a, b) => NAME_ORDER.compare(a[0], b[0])).map((p) => p[1]);
     if (kind === 'albums') {
       if (how === 'artist') return by((a) => `${a.album_artist || ''}\u0000${a.title}`);
       if (how === 'year') return [...list].sort((a, b) => (b.year || 0) - (a.year || 0));
@@ -8169,7 +8284,31 @@
   const NAV_SKELETON = `<div class="navskel" aria-busy="true"><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div>${skelRows(6)}${SLOW}</div>`;
   // Drawn: something of the page's own that isn't a placeholder (a page's own loading() is one)
   const pageDrawn = (before) => { const f = main.firstElementChild; return f !== before && !main.querySelector(':scope > .navskel, :scope > .skeleton, :scope > .sk-grid'); };
-  const navigate = (fresh) => {
+  // Another page opened (not the first one, not a new query): where the focus goes. When it was on
+  // what the new page replaced (a tile, a row's link, the page's Back), it had fallen to the page's
+  // body, so the next Tab started at the sidebar and a screen reader said nothing of the new page: it
+  // goes to the page's heading (else the page). Anywhere else (a sidebar place, the search box, the
+  // player) it stays, and the page's name is said instead. A page that puts the focus somewhere itself
+  // keeps that.
+  let personActed = false;
+  for (const type of ['keydown', 'pointerdown']) document.addEventListener(type, () => { personActed = true; }, { capture: true, once: true });
+  const lostFocus = () => { const a = document.activeElement; return !a || a === document.body; };
+  // (one that is drawn: a phone's Settings has the other panels' titles in the page, hidden)
+  const shown = (el) => el.getClientRects().length > 0;
+  const pageHeading = () => [...main.querySelectorAll(':scope h1, :scope .page-head h2')].find(shown) || [...main.querySelectorAll(':scope h2')].find(shown) || null;
+  // (its words without the count beside them: "Artists", not "Artists2")
+  const headingName = (h) => (h ? [...h.childNodes].filter((n) => n.nodeType === 3 || (n.nodeType === 1 && !n.matches('.count, [aria-hidden="true"]'))).map((n) => n.textContent).join('').trim() : '');
+  const focusPage = () => {
+    const h = pageHeading();
+    if (!h) { main.focus({ preventScroll: true }); return document.activeElement === main ? main : null; }
+    // (only for this: a click on the heading later doesn't take the focus; no ring on a heading that
+    // can't be pressed)
+    if (!h.hasAttribute('tabindex')) { h.setAttribute('tabindex', '-1'); h.dataset.navfocus = ''; h.addEventListener('blur', () => { if (h.dataset.navfocus != null) { h.removeAttribute('tabindex'); delete h.dataset.navfocus; } }, { once: true }); }
+    h.focus({ preventScroll: true });
+    if (document.activeElement === h) return h;
+    main.focus({ preventScroll: true }); return document.activeElement === main ? main : null;
+  };
+  const navigate = (fresh, moveFocus = false) => {
     const gen = ++navGen; navCtl.abort(); navCtl = new AbortController();
     navStop(); const superseded = new Promise((res) => { navStop = res; });
     let bar = document.getElementById('navprog');
@@ -8187,10 +8326,24 @@
     // A fresh page comes in with a short rise (and its first tiles and rows after one another); the
     // class goes after that, so what arrives later on the page doesn't move
     const pageIn = () => { if (!fresh) return; clearTimeout(main.viewInT); main.classList.remove('view-in'); void main.offsetWidth; main.classList.add('view-in'); main.viewInT = setTimeout(() => main.classList.remove('view-in'), 900); };
-    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(() => { capped = true; res(); }, 15000); });
-    const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
+    // (moved: the page's heading had the focus; it is put there again when the page's code is done if
+    // a later draw of the page took it away)
+    let moved = false;
+    const place = () => { if (!moveFocus || gen !== navGen) return; if (lostFocus()) moved = !!focusPage(); };
+    const had = document.activeElement;
+    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); place(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(() => { capped = true; res(); }, 15000); });
+    const end = () => {
+      clearTimeout(skel); clearTimeout(cap); mo.disconnect();
+      if (gen !== navGen) return;
+      bar.hidden = true; said.textContent = '';
+      // (the focus stayed where it was: the page's name is said)
+      // (a moment later, and only if the focus is still where it was: a page that put it in a field
+      // of its own says enough)
+      if (moveFocus && !moved && !capped) setTimeout(() => { if (gen !== navGen || document.activeElement !== had) return; const name = headingName(pageHeading()); if (name) said.textContent = name; }, 60);
+    };
     const t0 = performance.now(); const shown = state.view;
     fromNav = true; let rendering; try { rendering = render(); } finally { fromNav = false; } navRendering = rendering; drawing = lastDrawing;
+    if (moveFocus) drawing.done.then(() => { if (moved && gen === navGen && lostFocus()) focusPage(); });
     // Usage insights: how this page went (drawn, or its code failed or it never drew in 15 s); a
     // newer page first says nothing
     if (window.PM_USAGE) Promise.race([rendering.then(() => 'ok', () => 'failed'), superseded.then(() => null), drawn.then(() => (capped ? 'failed' : 'ok'))]).then((o) => { if (o) PM_USAGE.loaded(shown, o, performance.now() - t0); });
@@ -8764,11 +8917,57 @@
           break;
         }
         case 'tracks': {
-          loading();
+          // Drawn again where it stands (the library changed: a scan ended, a playlist was edited
+          // on another device): the songs that were listed are read again and put in at once, a
+          // filter's matches too, so the page is neither emptied nor back at its top
+          const again = redrawing('tracks');
+          // One read at a time while it is drawn again: a change that comes during a read is drawn
+          // once that read is in (thrown away for each newer one, a read slower than the changes
+          // come would never show)
+          // (a read of an earlier visit, cut off when another page was opened, never ends: it doesn't count)
+          if (again && songsReading && songsReading.nav === navGen) { songsReading.again = true; return; }
+          if (!again) { loading(); songsReading = null; }
+          const drawn = ++songsDraw; const reading = again ? (songsReading = { again: false, nav: navGen }) : null;
+          drawStale = () => drawn < songsShown || state.view !== 'tracks';
           // Pages from the node as the list scrolls; the filter is a library search on the node.
           const PAGE = 300;
-          const [first, stats] = await Promise.all([api('GET', `/library/tracks?limit=${PAGE}`), api('GET', '/library/stats').catch(() => null)]);
-          if (state.view !== 'tracks') return;
+          const findSongs = (q) => api('GET', `/library/search?${new URLSearchParams({ q, sources: 0, limit: 500 })}`);
+          // (what the page on screen lists and has in its filter, when it is Songs drawn already)
+          const listed = () => (redrawing('tracks') ? $$('#tracklist .track', main).length : 0);
+          const typed = () => (redrawing('tracks') ? ($('#filter', main)?.value || '').trim() : '');
+          const q0 = typed();
+          // (the first `n` songs, a page at least, a thousand per answer, and whether more follow;
+          // `from`: going on from what was read)
+          const readSongs = async (n, from = { tracks: [], more: true }) => {
+            const tracks = from.tracks; let more = from.more;
+            while (more && tracks.length < n && !drawStale()) {
+              const limit = Math.min(1000, Math.max(PAGE, n - tracks.length));
+              const r = await api('GET', `/library/tracks?limit=${limit}${tracks.length ? `&after=${tracks[tracks.length - 1].id}` : ''}`);
+              tracks.push(...r.tracks); more = r.tracks.length === limit;
+            }
+            return { tracks, more };
+          };
+          let first; let stats; let found;
+          try {
+            [first, stats, found] = await Promise.all([readSongs(q0 ? PAGE : Math.max(PAGE, listed())), api('GET', '/library/stats').catch(() => null), q0 ? findSongs(q0).catch(() => null) : null]);
+            // (the list grew on the page while it was read: up to there too, so the new page is not shorter)
+            for (let i = 0; i < 3 && !drawStale() && !typed() && first.more && listed() > first.tracks.length; i++) first = await readSongs(listed(), first);
+          } catch (e) {
+            // Drawn again in place and the read failed: the page stays as it is and says why (the
+            // error page would take the list and its place); a change that waited is read a second later
+            if (!reading || drawStale()) throw e;
+            toast(e.message, 'error');
+            if (reading.again) setTimeout(() => { if (state.view === 'tracks') render(); }, 1000);
+            return;
+          } finally { if (reading && songsReading === reading) songsReading = null; }
+          // (a newer draw is on the page, or another page: this answer is not put in; a change
+          // that waited for this read is drawn by a read of its own)
+          if (drawStale()) { if (reading && reading.again && state.view === 'tracks') setTimeout(() => { if (state.view === 'tracks') render(); }); return; }
+          songsShown = drawn;
+          // (in place whenever Songs is on the page by now, also when an older read drew it meanwhile)
+          const inPlace = redrawing('tracks');
+          const oldFilter = inPlace ? $('#filter', main) : null; const place = inPlace ? keepPlace() : null;
+          const nowTyped = oldFilter ? oldFilter.value.trim() : '';
           const total = Math.max(stats ? stats.tracks : 0, first.tracks.length);
           main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + headAddMusic(total)) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', ...noMusicYet('Songs')));
           const box = $('#tracklist');
@@ -8779,7 +8978,7 @@
             const append = (rows) => { box.insertAdjacentHTML('beforeend', trackRows(rows, { key: 'all', start: shown.length, bare: true })); shown.push(...rows); };
             const browse = () => {
               reset(); append(first.tracks); $('#tracknote').hidden = true;
-              if (first.tracks.length === PAGE) {
+              if (first.more) {
                 const mine = run;
                 stop = growList(box, async () => {
                   const r = await api('GET', `/library/tracks?limit=${PAGE}&after=${shown[shown.length - 1].id}`);
@@ -8788,10 +8987,23 @@
                 });
               }
             };
-            browse();
             const f = $('#filter'); let timer = null;
+            const matched = (r) => {
+              reset(); append(r.tracks);
+              const note = $('#tracknote'); note.hidden = r.tracks.length < 500; note.textContent = 'The first 500 matches: type more to narrow them down.';
+              const c = $('.page-head .count'); if (c) c.dataset.filtered = `${r.tracks.length}${r.tracks.length === 500 ? '+' : ''} shown`;
+            };
+            // (drawn again with a filter typed: its text, and its matches as read with the page)
+            // (the box emptied while they were read: the whole list, not the old matches)
+            const refound = !!(f && found && nowTyped);
+            if (f && oldFilter && oldFilter.value) f.value = oldFilter.value;
+            if (refound) matched(found); else browse();
             if (f) {
               const none = filterNone(box, 'song');
+              if (refound && nowTyped === q0) none(q0, found.tracks.length);
+              // (the matches could not be read again, or the box says something else by now: the
+              // filter asks for what it says, and says so if that fails)
+              if (nowTyped !== (refound ? q0 : '')) setTimeout(() => { if (f.isConnected) f.oninput(); });
               // Each keystroke empties the no-match line and outdates the search in flight, so only the
               // answer for the text in the box can say "No song matches".
               f.oninput = () => {
@@ -8799,31 +9011,42 @@
                 timer = setTimeout(async () => {
                   const q = f.value.trim(); const c = $('.page-head .count');
                   if (!q) { browse(); none('', 0); if (c) c.dataset.filtered = ''; return; }
-                  const r = await api('GET', `/library/search?${new URLSearchParams({ q, sources: 0, limit: 500 })}`).catch((e) => { toast(e.message, 'error'); return null; });
+                  const r = await findSongs(q).catch((e) => { toast(e.message, 'error'); return null; });
                   if (!r && mine === run) none('', 1);
-                  if (!r || mine !== run || state.view !== 'tracks') return;
-                  reset(); append(r.tracks); none(q, r.tracks.length);
-                  const note = $('#tracknote'); note.hidden = r.tracks.length < 500; note.textContent = 'The first 500 matches: type more to narrow them down.';
-                  if (c) c.dataset.filtered = `${r.tracks.length}${r.tracks.length === 500 ? '+' : ''} shown`;
+                  // (the page drawn again meanwhile: this filter box is the old page's)
+                  if (!r || mine !== run || state.view !== 'tracks' || !f.isConnected) return;
+                  matched(r); none(q, r.tracks.length);
                 }, 200);
               };
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
             // Play all: what is shown when filtered, else every track (fetched on the press).
+            // (one load at a time, also across the page drawn again in place while it runs: the new
+            // button is drawn pressed then)
             const sh = $('#shuffle');
+            if (sh && state.playAllLoading) sh.disabled = true;
             if (sh) sh.onclick = async () => {
+              if (state.playAllLoading) return;
               if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true, 'end', { shuffle: false });
               // (the message stays while a big library loads, and goes when the songs play; a quick load
               // shows none, as Which song is this?'s lookup)
               // It counts up as each thousand comes (unless another message replaced it), and gives up
               // after 30 s without an answer: Play all can be pressed again
-              let loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true;
+              let loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true; state.playAllLoading = true;
               const slow = setTimeout(() => toast(loading, 'wait'), 400);
               const onPage = (n) => { const t = $('#toast'); const was = loading; loading = `Loading ${countOf(total, 'songs')}… ${fmtCount(n)} so far`; if (t.classList.contains('show') && t.textContent === was) toast(loading, 'wait'); };
               try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks, { onPage, wait: 30000 }), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
-              clearTimeout(slow); toastDone(loading); sh.disabled = false;
+              clearTimeout(slow); toastDone(loading); state.playAllLoading = false; sh.disabled = false;
+              { const now = $('#shuffle'); if (now && now !== sh && state.drawnPage === 'tracks') now.disabled = false; }
             };
           }
+          state.drawnPage = 'tracks';
+          if (place) {
+            place(); if (state.placeHold) state.placeHold();
+            const f = $('#filter', main);
+            if (oldFilter && f && f.value && document.activeElement === f) { try { f.setSelectionRange(oldFilter.selectionStart, oldFilter.selectionEnd, oldFilter.selectionDirection || 'none'); } catch { /* no caret */ } }
+          }
+          if (reading && reading.again) setTimeout(() => { if (state.view === 'tracks') render(); });
           break;
         }
         case 'search': {
@@ -9202,7 +9425,7 @@
           // (the eyebrow is the kind alone: who sees the playlist and where it is kept is the sharing
           // note's sentence under the buttons, said once, at every width)
           main.innerHTML = backBtn('playlists', 'Collections') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Collection</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}${libNote}</p>
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button aria-haspopup="menu" aria-expanded="false" class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && !t.pending && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" data-wd="up" title="Move up" aria-label="${esc(rowWords.up(t.title))}" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" data-wd="down" title="Move down" aria-label="${esc(rowWords.down(t.title))}" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" data-wd="unlist" title="Remove" aria-label="${esc(rowWords.unlist(t.title))}">${icon('close')}</button></span>` }) : emptyState('playlist', 'This collection is empty', mine ? 'Add songs from any ⋯ menu.' : 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the collection on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this collection" aria-label="Remove ${esc(t.title)} from this collection">${icon('close')}</button>` })}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this collection, shown with it when you share it.</p>'}</section>`;
@@ -9258,7 +9481,7 @@
           $('#pldesc').onclick = () => editField('description', 'Description', d.playlist.description);
           $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, dl: { kind: 'playlist', id: d.summary.id, online: songs.filter((t) => t.track_id == null && !t.card).length }, extra: [{ label: 'Rename…', icon: 'notes', own: true, run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', own: true, run: () => editField('description', 'Description', d.playlist.description) },
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
-            ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete collection…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this collection?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Collection deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
+            ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete collection…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this collection?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true, danger: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Collection deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Collection deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
           // (Remove chosen from the keyboard in the row's ⋯ menu, as phones offer it: the menu gave the
           // focus back to that ⋯, so it goes on to the next song's ⋯, a card's if that one is a card)
@@ -9658,7 +9881,7 @@
               top.innerHTML = done
                 ? `<span class="warn-text">Couldn’t ${kept ? 'update' : 'load'} your TIDAL collection: ${esc(err)}</span>${kept ? ' Showing the last copy.' : ''} <button class="btn sm" type="button" data-tretry>Try again</button>`
                 : `<span class="spin" aria-hidden="true"></span> ${kept ? 'Updating your TIDAL collection' : 'Loading your TIDAL collection'}${view.slow ? '… the first time after a restart can take a while' : '…'} <a href="#tidalmine" data-jump>${kept ? 'Show the last copy' : 'Show'}</a>`;
-              const j = $('[data-jump]', top); if (j) j.onclick = (e) => { e.preventDefault(); box.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+              const j = $('[data-jump]', top); if (j) j.onclick = (e) => { e.preventDefault(); box.scrollIntoView({ behavior: glide(), block: 'start' }); };
               const t = $('[data-tretry]', top); if (t) t.onclick = () => render();
             };
             // Each part redraws on its own, so focus in the other one stays
@@ -9716,7 +9939,7 @@
           const playFrom = (i, replace = true) => playSourceItems(qitems.slice(i), replace, 'end', replace ? { shuffle: false } : {}); // (Play: in order, shuffle off)
           const canHeart = !!(await (async () => { try { await api('GET', '/favourites?uri=' + encodeURIComponent(it.url)); return true; } catch { return false; } })());
           main.innerHTML = backBtn('sources', srcName) + `<div class="artist-hero"><div class="portrait" style="border-radius:12px;background:hsl(${hue(it.title)} 35% 28%)">${it.image ? `<img src="${esc(it.image)}" alt="" data-err="remove">` : esc(initials(it.title))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, countOf(it.tracks.length, 'songs')].filter(Boolean).join(' · '))} · <a href="${esc(webUrl(it.url))}" target="_blank" rel="noopener">open</a>${it.licence ? (/^https?:/.test(it.licence) ? ` · <a href="${esc(webUrl(it.licence))}" target="_blank" rel="noopener">licence</a>` : ` · ${esc(it.licence)}`) : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to collection">${icon('playlist')} Collection</button>${it.library_album_id ? `<button class="btn ghost" id="ainlib" title="You already have this album">${icon('disc')} In your library</button>` : ''}${canHeart ? `<button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart" aria-pressed="${state.favUris.has(it.url)}">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Bookmarked' : 'Bookmark'}</button>` : ''}</div></div>${it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : ''}</div></div>`
-            + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div class="fmt-col"><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>${t.url ? `<button class="icon-btn" data-act="more" data-amore1="${i}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>` : ''}</div></div>`; }).join('')}</div>`;
+            + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div class="fmt-col"><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>${t.url ? `<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-act="more" data-amore1="${i}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>` : ''}</div></div>`; }).join('')}</div>`;
           $('#aplay').onclick = () => playFrom(0, true); $('#aadd').onclick = () => playFrom(0, false);
           $('#amore').onclick = (e) => { e.stopPropagation(); uriMenu($('#amore'), it.tracks.map((t) => t.url), it.title); };
           const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { if (await setFavourite({ uri: it.url }, !on)) render(); } catch (er) { toast(er.message, 'error'); } };
@@ -9975,7 +10198,7 @@
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
             + `<div class="hero item-hero"><div class="art ${pg.image ? (kind === 'artist' ? 'round ' : '') : 'placeholder '}monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${pg.image ? heroImg(pg.image, kind === 'artist') : ''}${heroBadge}</div><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" aria-pressed="${!!fav}" title="${fav ? 'Remove from Bookmarks' : 'Add to Bookmarks'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" aria-pressed="${!!fav}" title="${fav ? 'Remove from Bookmarks' : 'Add to Bookmarks'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button aria-haspopup="menu" aria-expanded="false" class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               ${myReview !== undefined ? reviewRow(myReview) : ''}
               <div class="hmatch-slot" id="hmatch"></div>
               </div></div>`
@@ -10200,8 +10423,8 @@
             return true;
           };
           const forDrawn = (f) => (...a) => (zoneMoved() ? undefined : f(...a));
-          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private collection from this queue">${icon('playlist')} Save as collection</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || !isListener() || !isBrowser()) ? `<button class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
-            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="${esc(rowWords.drag(itemName(it)))}" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here" aria-label="${esc(rowWords.play(itemName(it)))}">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" aria-label="${esc(rowWords.up(itemName(it)))}" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" aria-label="${esc(rowWords.down(itemName(it)))}" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove" aria-label="${esc(rowWords.unqueue(itemName(it)))}">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : !isBrowser() && state.queueError && state.queueZone !== state.zone ? failedHtml({ message: `Couldn’t read the queue: ${state.queueError.message}` }) /* (not known to be empty) */ : emptyState('queue', 'The queue is empty', 'Play an album, or add a song from its ⋯ menu.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null, true));
+          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private collection from this queue">${icon('playlist')} Save as collection</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || !isListener() || !isBrowser()) ? `<button aria-haspopup="menu" aria-expanded="false" class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
+            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="${esc(rowWords.drag(itemName(it)))}" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here" aria-label="${esc(rowWords.play(itemName(it)))}">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" aria-label="${esc(rowWords.up(itemName(it)))}" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" aria-label="${esc(rowWords.down(itemName(it)))}" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove" aria-label="${esc(rowWords.unqueue(itemName(it)))}">${icon('close')}</button></span><button aria-haspopup="menu" aria-expanded="false" class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : !isBrowser() && state.queueError && state.queueZone !== state.zone ? failedHtml({ message: `Couldn’t read the queue: ${state.queueError.message}` }) /* (not known to be empty) */ : emptyState('queue', 'The queue is empty', 'Play an album, or add a song from its ⋯ menu.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null, true));
           $$('[data-qi]', main).forEach((b) => b.onclick = forDrawn(() => transport({ action: 'play', index: Number(b.dataset.qi) })));
           // An empty queue offers the library shuffled here too, on the zone the page is for (before,
           // only words: the bar's Play said the queue was empty, and its note had the button). Only
@@ -10436,7 +10659,7 @@
             const pick = z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}" aria-label="Play to ${esc(z.name)}">Play to</button>`;
             const wayChips = ways ? `<div class="chips zc-ways" role="group" aria-label="Ways to play to ${esc(familyName(z))}">${ways.map((m) => `<button class="chip ${m.id === state.zone ? 'on' : ''}" data-zsel="${esc(m.id)}" aria-pressed="${m.id === state.zone}" title="Play to ${esc(m.name)}">${esc(PROTO_WORDS[protoOf(m)] || protoOf(m))}</button>`).join('')}</div>` : '';
             const vol = zv ? `<div class="zc-vol"><button class="icon-btn zc-mute" data-volmute="${esc(z.id)}" aria-pressed="${!!zv.muted}" title="${zv.muted ? 'Unmute' : 'Mute'}" aria-label="Mute ${esc(z.name)}">${icon('volume')}</button><input type="range" data-zvol="${esc(z.id)}" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : `<span class="${phone ? 'sr-only' : 'muted small'}">Volume: set on the device</span>`;
-            const ungroup = String(z.id).startsWith('group:') && can('zone_manage') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''; // (only who may change zones: for anyone else the node refuses it)
+            const ungroup = (String(z.id).startsWith('group:') || /^([a-z]+-)?group:/.test(String(z.output || ''))) && can('zone_group') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''; // (only who may change zones: for anyone else the node refuses it)
             // (a wider card's volume and its Play to go together: beside the transport when the slider
             // gets 80 px there, else under it as one, the slider then the line's width. Before, the
             // volume could stay beside the transport with a 56 px slider and Play to went under it
@@ -10920,7 +11143,7 @@
           };
           loadLb();
           // ---- backup and restore (steward next-4, item 1)
-          const tb = $('#tobackup'); if (tb) tb.onclick = () => $('#backupcard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+          const tb = $('#tobackup'); if (tb) tb.onclick = () => $('#backupcard').scrollIntoView({ behavior: glide(), block: 'start' });
           const authH = () => (state.token ? { authorization: 'Bearer ' + state.token } : {});
           const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); };
           $('#bkpass').oninput = () => { $('#bkpass2').hidden = !$('#bkpass').value; };
@@ -11076,6 +11299,8 @@
 
             // 1. Who can use this node: you, then each person with what they can do in one sentence
             const who = (p) => p.name || 'this person';
+            // People whose removal did not finish, as the node remembers them (GET /v1/people `unfinished`)
+            const unfinished = r && Array.isArray(r.unfinished) ? r.unfinished : [];
             const whoLabel = (p) => p.name || `the person with the key ${shortKey(p.key)}`;
             const plays = (p) => !!p.music_enabled && p.access !== 'homeserver';
             const signInsOf = (p) => (Array.isArray(p.sign_ins) ? p.sign_ins : []);
@@ -11103,14 +11328,18 @@
                 + (p.access !== 'music' && onHs ? `<button class="btn sm" data-phs="${k}" data-to="${hsOn ? 'off' : 'on'}" data-fk="hs:${k}" aria-label="Switch the homeserver account ${hsOn ? 'off' : 'on'} for ${a}">Switch homeserver account ${hsOn ? 'off' : 'on'}</button><button class="btn sm" data-pquota="${k}" data-fk="quota:${k}" aria-label="Storage limit for ${a}">Storage limit…</button>` : '')
                 // (someone who only has a homeserver account and no sign-in left has nothing here to remove:
                 // the account itself stays on the homeserver either way; unless their last Remove failed)
-                + (p.access === 'homeserver' && !signInsOf(p).length && !removeFailed.has(p.key) ? '' : `<button class="btn sm danger" data-premove="${k}" data-fk="remove:${k}" aria-label="Remove ${a}">Remove…</button>`);
+                + (p.access === 'homeserver' && !signInsOf(p).length && !removeFailed.has(p.key) && !unfinished.includes(p.key) ? '' : `<button class="btn sm danger" data-premove="${k}" data-fk="remove:${k}" aria-label="Remove ${a}">Remove…</button>`);
             };
-            const failedNote = (key) => (removeFailed.has(key) ? `<p class="set-help pa-err" role="alert" data-premove-err>Removing them did not finish: ${esc(removeFailed.get(key).error)} Remove again to finish it.</p>` : '');
+            // (what the node said on this visit; after a reload the node only says that it did not finish)
+            const failedNote = (key) => (removeFailed.has(key) ? `<p class="set-help pa-err" role="alert" data-premove-err>Removing them did not finish: ${esc(removeFailed.get(key).error)} Remove again to finish it.</p>` : unfinished.includes(key) ? '<p class="set-help pa-err" data-premove-err>Removing them did not finish. Remove again to finish it.</p>' : '');
             const person = (p) => `<div class="set-row set-block pa-person" data-person="${esc(p.key)}"><div class="set-label"><div class="set-name">${p.name ? esc(p.name) : 'No name yet'}</div><p class="set-help" data-psays>${esc(says(p))}</p>${failedNote(p.key)}${store(p)}${signIns(p)}${fold(`key:${p.key}`, 'Show key', `<div class="pa-keyrow"><code class="pa-code">${esc(p.key)}</code><button class="btn sm ghost" data-copykey="${esc(p.key)}" aria-label="Copy the key of ${esc(whoLabel(p))}">Copy key</button></div>`)}</div><div class="actions pa-acts" role="group" aria-label="Change ${esc(whoLabel(p))}">${acts(p)}</div></div>`;
             const youRow = row('You', 'Owner: you can change everything on this node.', '');
             // (someone the node already took off its list while their removal failed: still here, to finish it)
-            const halfGone = [...removeFailed].filter(([key]) => !r || !r.people.some((p) => p.key === key)).map(([key, f]) => ({ key, name: f.name, access: f.access, sign_ins: [] }));
-            const gonePerson = (p) => `<div class="set-row set-block pa-person" data-person="${esc(p.key)}" data-pgone><div class="set-label"><div class="set-name">${p.name ? esc(p.name) : 'No name yet'}</div>${failedNote(p.key)}</div><div class="actions pa-acts" role="group" aria-label="Change ${esc(whoLabel(p))}"><button class="btn sm danger" data-premove="${esc(p.key)}" data-fk="remove:${esc(p.key)}" aria-label="Remove ${esc(whoLabel(p))}">Remove…</button></div></div>`;
+            const listed = (key) => !!r && r.people.some((p) => p.key === key);
+            const halfGone = [...removeFailed].filter(([key]) => !listed(key)).map(([key, f]) => ({ key, name: f.name, access: f.access, sign_ins: [] }))
+              // (and the ones the node remembers from before this visit: it keeps no name for them)
+              .concat(unfinished.filter((key) => !listed(key) && !removeFailed.has(key)).map((key) => ({ key, name: null, access: 'music', sign_ins: [], gone: true })));
+            const gonePerson = (p) => `<div class="set-row set-block pa-person" data-person="${esc(p.key)}" data-pgone><div class="set-label"><div class="set-name">${p.name ? esc(p.name) : p.gone ? `Someone you removed (key ${esc(shortKey(p.key))})` : 'No name yet'}</div>${failedNote(p.key)}</div><div class="actions pa-acts" role="group" aria-label="Change ${esc(whoLabel(p))}"><button class="btn sm danger" data-premove="${esc(p.key)}" data-fk="remove:${esc(p.key)}" aria-label="Remove ${esc(whoLabel(p))}">Remove…</button></div></div>`;
             const whoBody = youRow + (rErr ? errRow(`Couldn’t read who else can use this node: ${rErr}`, 'retry-people')
               : r.people.length || halfGone.length ? r.people.map(person).join('') : row('Nobody else yet', 'The people you add show here.', ''))
               + halfGone.map(gonePerson).join('');
@@ -11140,9 +11369,10 @@
             // 6. The browsers and apps signed in as the owner; this one first, with Log out
             const mineBody = '<div id="pmine" class="pa-rows"></div>';
 
-            // 7. The password for apps (the node's API token)
+            // 7. Apps with a password of their own, then the password for apps (the node's API token)
+            const appsBody = block('', 'Each app you connect (Home Assistant, a Subsonic app, a script) can have a password of its own. With it the app plays, controls and groups zones and browses the library and your collections; it can’t change settings, people or the library. Removing one stops that app alone.', '<div id="papps" class="pa-rows"></div>');
             const exposed = ns.api_token_exposed_at ? `<div class="notice warn" role="alert">This password was in a saved queue’s links, where everyone who could use that zone could read it (noticed ${esc(new Date(ns.api_token_exposed_at * 1000).toLocaleString())}). ${ns.token_replaceable ? 'Make a new one.' : 'Change <code>PM_TOKEN</code> (or <code>[api] token</code>) and restart the node.'}</div>` : '';
-            const APPS_USE = 'Apps and scripts that connect to this node log in with it: Subsonic apps, Home Assistant, your own scripts.';
+            const APPS_USE = 'It can do everything you can. Apps can log in with it, but one with a password of its own (above) can do only what an app needs.';
             const passBody = ns.unread ? settingsErr('reload-password') : ns.token_replaceable
               ? block('', `${APPS_USE} A new one stops the old one at once: every app then needs the new one, and your other browsers are logged out (log in again with Pubky Ring). The people you added stay signed in.`, `${exposed}<div class="actions"><button class="btn" id="tokennew">Make a new password</button></div><div id="tokenout" aria-live="polite"></div>`)
               : block('', `${APPS_USE} Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): it is changed there.`, `${exposed}<div class="actions"><a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a></div>`);
@@ -11163,6 +11393,7 @@
               + sec('zones', 'Zones they can play on', zonesBody, !!zl.error)
               + sec('services', 'Whose music services they play with', srcBody, false)
               + sec('mine', 'Browsers and apps signed in as you', mineBody, false)
+              + sec('apps', 'Apps with their own password', appsBody, false)
               + sec('password', 'Password for apps (API token)', passBody, !!ns.api_token_exposed_at)
               + sec('party', 'Party', partyBody, false)
               + group('Also in Settings', moreBody);
@@ -11173,6 +11404,7 @@
             $$('[data-pa-retry]', box).forEach((b) => b.onclick = () => loadPeople());
             // (the node's settings are read with the rest of Settings: the page is drawn again)
             $$('[data-pa-reload]', box).forEach((b) => b.onclick = () => render());
+            mountAppPasswords($('#papps', box));
             mountSignIns($('#pmine', box), {
               control: state.token ? `<button class="btn" id="logout">${icon('logout')} Log out</button>` : '',
               kept: keptSignIns(),
@@ -11193,7 +11425,7 @@
               const on = b.dataset.to === 'on';
               // Off: the node refuses their sign-ins from now on (their pages go back to Log in) and forgets
               // their registered devices and what those keep for offline. Nothing here promises more.
-              if (!on && !(await choiceDialog({ title: `Switch music off for ${who(p)}?`, text: `They can’t ${p.access === 'music' ? 'use this node' : 'play music here'} until you switch it back on. Their browsers and apps go back to Log in, and the node forgets their devices and what those keep for offline.${p.access === 'music' ? '' : ' Their homeserver account is not touched.'}`, choices: [{ label: 'Switch music off', value: true, primary: true }] }))) return;
+              if (!on && !(await choiceDialog({ title: `Switch music off for ${who(p)}?`, text: `They can’t ${p.access === 'music' ? 'use this node' : 'play music here'} until you switch it back on. Their browsers and apps go back to Log in, and the node forgets their devices and what those keep for offline.${p.access === 'music' ? '' : ' Their homeserver account is not touched.'}`, choices: [{ label: 'Switch music off', value: true, primary: true, danger: true }] }))) return;
               await change(p, { music: on }, on ? `Music is on for ${who(p)}` : `Music is off for ${who(p)}`);
             });
             $$('[data-phs]', box).forEach((b) => b.onclick = async () => {
@@ -11222,7 +11454,7 @@
             $$('[data-premove]', box).forEach((b) => b.onclick = async () => {
               const p = personOf(b.dataset.premove); if (!p) return;
               const stays = p.access !== 'music';
-              const go = await choiceDialog({ title: `Remove ${who(p)}?`, text: `They are signed out everywhere, and what this node keeps for them goes: their music service sign-ins here, preferences, devices and problem reports. Their Pubky account and what is on their own homeserver are not touched.${stays ? ' Their account on this node’s homeserver stays, so they stay in this list without music.' : ''}`, choices: [{ label: stays ? 'Remove their music access' : 'Remove', value: true, primary: true }] });
+              const go = await choiceDialog({ title: `Remove ${who(p)}?`, text: `They are signed out everywhere, and what this node keeps for them goes: their music service sign-ins here, preferences, devices and problem reports. Their Pubky account and what is on their own homeserver are not touched.${stays ? ' Their account on this node’s homeserver stays, so they stay in this list without music.' : ''}`, choices: [{ label: stays ? 'Remove their music access' : 'Remove', value: true, primary: true, danger: true }] });
               if (!go) return;
               const keys = r ? r.people.map((x) => x.key) : []; const at = keys.indexOf(p.key);
               try {
@@ -11231,9 +11463,15 @@
                 pinvOut = ''; // (what Add someone said to send them no longer holds)
                 toast(stays ? `${p.name || 'This person'} no longer plays music here. Their homeserver account stays.` : `Removed ${who(p)}`);
               } catch (e) {
-                // Kept with the node's words: Remove stays on their row, and removing again finishes it
-                removeFailed.set(p.key, { name: p.name || null, access: p.access, error: e.message });
-                toast(`Removing ${who(p)} did not finish: ${e.message}`, 'error');
+                if (e.status === 404) {
+                  // Nobody by that key and nothing of theirs left (finished elsewhere meanwhile): done
+                  removeFailed.delete(p.key);
+                  toast(`Nothing of ${who(p)} is left on this node`);
+                } else {
+                  // Kept with the node's words: Remove stays on their row, and removing again finishes it
+                  removeFailed.set(p.key, { name: p.name || null, access: p.access, error: e.message });
+                  toast(`Removing ${who(p)} did not finish: ${e.message}`, 'error');
+                }
               }
               await loadPeople({ focus: [`rename:${p.key}`, ...[keys[at + 1], keys[at - 1]].filter(Boolean).map((k) => `rename:${k}`), 'pinvname'] });
             });
@@ -11245,7 +11483,7 @@
             });
             $$('[data-psi-all]', box).forEach((b) => b.onclick = async () => {
               const p = personOf(b.dataset.psiAll); if (!p) return;
-              const go = await choiceDialog({ title: `Sign ${who(p)} out everywhere?`, text: 'Each of their browsers and apps has to log in again with Pubky Ring. What they can do here stays as it is.', choices: [{ label: 'Sign out everywhere', value: true, primary: true }] });
+              const go = await choiceDialog({ title: `Sign ${who(p)} out everywhere?`, text: 'Each of their browsers and apps has to log in again with Pubky Ring. What they can do here stays as it is.', choices: [{ label: 'Sign out everywhere', value: true, primary: true, danger: true }] });
               if (!go) return;
               try { const d = await api('DELETE', `/people/${encodeURIComponent(p.key)}/sign-ins`); toast(`Signed ${who(p)} out${d && d.ended === 1 ? ' of one browser or app' : d && d.ended != null ? ` of ${d.ended} browsers or apps` : ' everywhere'}`); } catch (e) { toast(e.message, 'error'); }
               await loadPeople({ focus: [`rename:${p.key}`] });
@@ -11359,7 +11597,7 @@
               if (tn) tn.disabled = true;
             };
             if (tn) tn.onclick = async () => {
-              const go = await choiceDialog({ title: 'Make a new password for apps?', text: 'The old one stops working at once. Every app then needs the new one, and your other browsers are logged out; this one goes on with the new one.', choices: [{ label: 'Make a new password', value: true, primary: true }] });
+              const go = await choiceDialog({ title: 'Make a new password for apps?', text: 'The old one stops working at once. Every app then needs the new one, and your other browsers are logged out; this one goes on with the new one.', choices: [{ label: 'Make a new password', value: true, primary: true, danger: true }] });
               if (!go) return;
               try {
                 const made = await api('POST', '/node/token');
@@ -11430,7 +11668,7 @@
             try {
               const r = await api('POST', path);
               $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve${what}. This page updates by itself.</p><p class="muted small">Pubky Ring is the free app (iPhone and Android, from your app store) that holds your Pubky identity; this node never sees your keys.</p><a class="btn sm" href="${esc(ringUrl(r.url))}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
-              $('#pkurl').scrollIntoView({ behavior: 'smooth', block: 'center' }); // the QR, not below the fold
+              $('#pkurl').scrollIntoView({ behavior: glide(), block: 'center' }); // the QR, not below the fold
               const pc = $('#pkcopy'); if (pc) pc.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(r.url).then(() => toast('Link copied')).catch(() => toast(r.url)); };
               const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); forgetPubkyUser(); toast('Signed in as ' + shortKey(st.user)); render(); } } catch (e) { clearInterval(t); toast(e.message, 'error'); } }, 2000);
             } catch (e) { toast(e.message, 'error'); }
@@ -11546,14 +11784,38 @@
   // (favWayOn: Open Songs or Add music, canShuffleMine: Shuffle my music); a new song count from
   // GET /info that turns "no songs" into "songs" or back draws the one on screen again
   const songsChanged = () => { const e = $('#main .empty[data-songs]'); if (e && ['favourites', 'queue'].includes(state.view) && e.dataset.songs !== String(hasSongs())) render(); };
-  const onLibraryChanged = () => {
+  // The library changed. What was kept from it goes at once (libraryForget); the page on screen is
+  // drawn again (libraryRedraw)
+  const libraryForget = () => {
     forgetAlbums(); forgetLibrarySearches();
     // (a playlist change cut after 30 s: the node changed something, so the next read ends its hold, plHolds)
     plHolds.forEach((h) => { if (h.cut) { h.cut = false; h.after = Math.min(h.after, plDraws + 1); } });
+  };
+  const libraryRedraw = () => {
     // (the redraw below comes before the new song count, songsChanged)
     api('GET', '/info').then((i) => { state.info = i; watchScan(i); if (link.up) setConn('ok', nodeLabel()); songsChanged(); }).catch(() => {});
     if (['albums', 'tracks', 'artists', 'home', 'favourites', 'album', 'artist', 'playlists', 'playlist'].includes(state.view)) render();
   };
+  const libraryChangedNow = () => { libraryForget(); libraryRedraw(); };
+  // The node says so after every write to the library (an import: once per file). A hidden tab
+  // draws nothing: once, when it is looked at again. On the library's long lists the first change
+  // is drawn at once and those that follow within a second with one redraw at its end; a
+  // playlist's or an album's own page answers each one (a playlist's rows wait for the read after it)
+  const LIBRARY_LISTS = ['albums', 'tracks', 'artists', 'home', 'favourites'];
+  // (by the page's own clock, which never goes back: a wall clock set back would hold every redraw)
+  let libActed = -1000; let libLater = null; let libMissed = false; let libLastNav = 0;
+  const onLibraryChanged = () => {
+    libraryForget();
+    if (document.visibilityState === 'hidden') { libMissed = true; return; }
+    if (!LIBRARY_LISTS.includes(state.view)) { libraryRedraw(); return; }
+    const wait = libActed + 1000 - performance.now();
+    if (wait <= 0) { libActed = performance.now(); libraryRedraw(); return; }
+    // (another page opened after the last change that waits: that page was drawn after it, nothing
+    // is owed; a change that came once that page was open is still drawn)
+    libLastNav = navGen;
+    if (!libLater) libLater = setTimeout(() => { libLater = null; if (libLastNav !== navGen) return; if (document.visibilityState === 'hidden') { libMissed = true; return; } libActed = performance.now(); libraryRedraw(); }, wait);
+  };
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible' || !libMissed) return; libMissed = false; clearTimeout(libLater); libLater = null; libActed = performance.now(); libraryRedraw(); });
   const applySnapshot = (ev) => {
     const first = link.boot == null;
     const restarted = !first && ev.boot != null && ev.boot !== link.boot;
@@ -11570,7 +11832,7 @@
       refreshQueue(false);
       if (!overlay.hidden) renderNowPlaying();
       if (state.view === 'zones') render();
-      if (libChanged) onLibraryChanged();
+      if (libChanged) libraryChangedNow();
       if (downFor > 5000) toast(restarted ? 'Reconnected: the node restarted' : 'Reconnected');
     }
   };
@@ -11764,7 +12026,7 @@
       document.body.classList.toggle('listener', isListener());
       drawMe().catch(() => {});
       // Usage insights (usage.js): off unless the owner turned them on; asks the node once
-      if (window.PM_USAGE) PM_USAGE.mount({ token: () => state.token, view: () => state.view, shell: shellMode, offline: isOffline, open: () => setView('settings', isListener() ? undefined : 'privacy'), ask: (title, text, label) => choiceDialog({ title, text, choices: [{ label, value: true, primary: true }] }).then((v) => v === true) });
+      if (window.PM_USAGE) PM_USAGE.mount({ token: () => state.token, view: () => state.view, shell: shellMode, offline: isOffline, open: () => setView('settings', isListener() ? undefined : 'privacy'), ask: (title, text, label, danger) => choiceDialog({ title, text, choices: [{ label, value: true, primary: true, danger: !!danger }] }).then((v) => v === true) });
       if (isOwner()) {
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});

@@ -28,6 +28,25 @@ const AUTH_SETUP_KEY: [u8; 32] = [
 pub const LATENCY_FRAMES: u32 = 88_200;
 /// Packets kept for resend requests (about four seconds).
 const RESEND_KEEP: usize = 500;
+/// The longest body of an RTSP answer that is read (and dropped).
+const MAX_REPLY_BODY: usize = 1 << 20;
+/// The longest line of an RTSP answer (its status line, a header) that is read.
+const MAX_REPLY_LINE: u64 = 8 * 1024;
+/// The most header lines an RTSP answer may have.
+const MAX_REPLY_HEADERS: usize = 100;
+
+/// Read one line of an answer into `line`, at most [`MAX_REPLY_LINE`] bytes of it: how long a
+/// line is is the receiver's word, like the body's length. `Ok(0)`: the stream ended.
+fn read_reply_line(r: &mut impl BufRead, line: &mut String) -> std::io::Result<usize> {
+    let n = r.take(MAX_REPLY_LINE).read_line(line)?;
+    if n as u64 == MAX_REPLY_LINE && !line.ends_with('\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "a line of the answer is too long",
+        ));
+    }
+    Ok(n)
+}
 
 /// Seconds between 1900 (NTP) and 1970 (Unix).
 const NTP_EPOCH: u64 = 2_208_988_800;
@@ -131,7 +150,7 @@ impl Rtsp {
             });
         }
         let mut status_line = String::new();
-        let read = self.reader.read_line(&mut status_line);
+        let read = read_reply_line(&mut self.reader, &mut status_line);
         // No answer at all: the receiver hung up (a reset reads as an error, a close as nothing)
         match read {
             Ok(0) => return Err(AirPlayError::Closed(format!("no answer to {method}"))),
@@ -155,6 +174,10 @@ impl Rtsp {
                     "the receiver did not answer {method}"
                 )))
             }
+            // (a line too long, or one that is no text)
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(AirPlayError::Protocol(format!("{method}: {e}")))
+            }
             Err(e) => return Err(e.into()),
             Ok(_) => {}
         }
@@ -164,24 +187,43 @@ impl Rtsp {
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| AirPlayError::Protocol(format!("{method}: bad answer {status_line:?}")))?;
         let mut headers = Vec::new();
+        let mut lines = 0;
         loop {
             let mut line = String::new();
-            if self.reader.read_line(&mut line)? == 0 {
+            let read = read_reply_line(&mut self.reader, &mut line).map_err(|e| match e.kind() {
+                std::io::ErrorKind::InvalidData => AirPlayError::Protocol(format!("{method}: {e}")),
+                _ => e.into(),
+            })?;
+            if read == 0 {
                 break;
             }
             let line = line.trim_end();
             if line.is_empty() {
                 break;
             }
+            lines += 1;
+            if lines > MAX_REPLY_HEADERS {
+                return Err(AirPlayError::Protocol(format!(
+                    "{method}: an answer of more than {MAX_REPLY_HEADERS} header lines"
+                )));
+            }
             if let Some((k, v)) = line.split_once(':') {
                 headers.push((k.trim().to_string(), v.trim().to_string()));
             }
         }
         let reply = Reply { status, headers };
-        if let Some(len) = reply
-            .header("Content-Length")
-            .and_then(|l| l.parse::<usize>().ok())
-        {
+        if let Some(len) = reply.header("Content-Length") {
+            // (a length that is no number would leave the body in the stream, to be read as the
+            // next answer)
+            let len: usize = len
+                .parse()
+                .map_err(|_| AirPlayError::Protocol(format!("{method}: an answer of length {len:?}")))?;
+            // (a receiver's answers carry a few hundred bytes; the length is the device's word)
+            if len > MAX_REPLY_BODY {
+                return Err(AirPlayError::Protocol(format!(
+                    "{method}: an answer of {len} bytes"
+                )));
+            }
             let mut skip = vec![0u8; len];
             self.reader.read_exact(&mut skip)?;
         }
@@ -643,5 +685,93 @@ mod tests {
             album: None,
         });
         assert_eq!(d, b"mlit\0\0\0\x0aminm\0\0\0\x02Ab".to_vec());
+    }
+
+    /// A receiver that reads one request and sends `answer`, whatever was asked.
+    fn receiver_that_answers(answer: Vec<u8>) -> SocketAddr {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let Ok((conn, _)) = l.accept() else { return };
+            let mut r = BufReader::new(conn.try_clone().unwrap());
+            let mut w = conn;
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 || h.trim_end().is_empty() {
+                    break;
+                }
+            }
+            let _ = w.write_all(&answer);
+            // (open until the other side has read the answer and hung up)
+            let mut rest = Vec::new();
+            let _ = r.read_to_end(&mut rest);
+        });
+        addr
+    }
+
+    /// How long its answer is is the receiver's word: a length no answer has is a protocol
+    /// error, not memory set aside for it. So is a length that is no number (its body would be
+    /// read as the next answer).
+    #[test]
+    fn an_answer_that_claims_an_impossible_length_is_a_protocol_error() {
+        let addr = receiver_that_answers(
+            format!(
+                "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: {}\r\n\r\n",
+                usize::MAX
+            )
+            .into_bytes(),
+        );
+        let e = Session::start(addr, false).err().expect("no session");
+        assert!(matches!(e, AirPlayError::Protocol(_)), "{e}");
+        assert!(e.to_string().contains("bytes"), "{e}");
+
+        let addr = receiver_that_answers(
+            b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: twelve\r\n\r\nHello world!".to_vec(),
+        );
+        let e = Session::start(addr, false).err().expect("no session");
+        assert!(matches!(e, AirPlayError::Protocol(_)), "{e}");
+        assert!(e.to_string().contains("twelve"), "{e}");
+    }
+
+    /// The lines of an answer are the receiver's word as well: a line that does not end, and
+    /// header lines without end, are protocol errors after a bounded read.
+    #[test]
+    fn an_answer_whose_lines_do_not_end_is_a_protocol_error() {
+        // A status line with no end
+        let addr = receiver_that_answers(vec![b'A'; 4 * MAX_REPLY_LINE as usize]);
+        let e = Session::start(addr, false).err().expect("no session");
+        assert!(matches!(e, AirPlayError::Protocol(_)), "{e}");
+        assert!(e.to_string().contains("too long"), "{e}");
+
+        // A header line with no end
+        let mut answer = b"RTSP/1.0 200 OK\r\nX-Long: ".to_vec();
+        answer.extend(vec![b'A'; 4 * MAX_REPLY_LINE as usize]);
+        let e = Session::start(receiver_that_answers(answer), false)
+            .err()
+            .expect("no session");
+        assert!(matches!(e, AirPlayError::Protocol(_)), "{e}");
+        assert!(e.to_string().contains("too long"), "{e}");
+
+        // Header lines without end
+        let mut answer = b"RTSP/1.0 200 OK\r\n".to_vec();
+        for i in 0..10 * MAX_REPLY_HEADERS {
+            answer.extend(format!("X-{i}: 1\r\n").into_bytes());
+        }
+        let e = Session::start(receiver_that_answers(answer), false)
+            .err()
+            .expect("no session");
+        assert!(matches!(e, AirPlayError::Protocol(_)), "{e}");
+        assert!(e.to_string().contains("header lines"), "{e}");
+
+        // A line just under the limit is read
+        let mut line = String::new();
+        let mut long = vec![b'a'; MAX_REPLY_LINE as usize - 1];
+        long.push(b'\n');
+        long.extend(b"next\n");
+        let mut r = BufReader::new(&long[..]);
+        assert_eq!(read_reply_line(&mut r, &mut line).unwrap() as u64, MAX_REPLY_LINE);
+        line.clear();
+        assert_eq!(read_reply_line(&mut r, &mut line).unwrap(), 5);
+        assert_eq!(line, "next\n");
     }
 }
