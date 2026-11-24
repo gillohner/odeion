@@ -177,8 +177,10 @@ def run(h):
     try:
         # The first screen, read once: the mini player's place, the Home and Zones tabs
         nodes = ui_nodes()
-        minis = [n for n in nodes if 'content-desc="Now playing"' in n or 'text="Now playing"' in n]
-        assert minis, "no mini player on the first screen"
+        # (its name: "Now playing" with nothing on, "Now playing: <song>" with a song)
+        minis = [n for n in nodes if any(k in n for k in ('content-desc="Now playing"', 'text="Now playing"', 'content-desc="Now playing: ', 'text="Now playing: '))]
+        named = [m.group(1) or m.group(2) for m in (re.search('content-desc="([^"]+)"|text="([^"]+)"', n) for n in nodes) if m][-20:]
+        assert minis, f"no mini player on the first screen (named there: {named})"
         _, y1, _, y2 = bounds(max(minis, key=lambda n: bounds(n)[1]))
         cy = (y1 + y2) // 2
         def tab(word):
