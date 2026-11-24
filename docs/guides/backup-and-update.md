@@ -18,6 +18,11 @@ database, its key and your Pubky account's files. `backup.sh` below does all of 
   Pubky and so on). After a restore the node lists which services to sign in to again.
 - With a passphrase the sign-ins are included, encrypted. Nothing opens them without the
   passphrase, so keep it somewhere safe.
+- A restore keeps the library it replaces in the data folder as `library.db.bak` until the next
+  restore, so restoring the wrong file can be undone (stop the node, then
+  `odeiond restore <data folder>/library.db.bak`). That is the library only: the sign-ins a
+  passphrase-locked backup puts back (Pubky, remote access, the API token) stay as restored. When there is no room for that copy, the
+  library is not replaced and the restore says so.
 
 The file holds the node's library only, never a homeserver. It never holds who is logged in to
 the node: after a restore from Settings on a running node everyone stays logged in or out as they
@@ -190,7 +195,27 @@ Set the image tag back (`ODEION_TAG` in the bundle's `.env`, or `PM_TAG` when th
 When the newer version changed the library's database (its CHANGELOG entry says so), put back the
 library from the backup you made before updating; versions after 0.2.0 refuse to start on a
 library a newer version changed ("this library was opened by a newer version of Odeion").
-With the bundle:
+A node that upgrades the library's database keeps the file as it was first, beside it, as
+`library.db.before-upgrade` (from the latest upgrade only; a start again after that upgrade
+failed partway keeps it as it is). It holds everything the library held
+then, sign-ins included, so it can go back in place of the backup's `library.db`, and the
+`.pmbackup` step below is not needed. Anything changed since the upgrade is lost, and sign-ins
+ended since (a browser, a listener, an API token replaced) work again: end them again in
+**Settings › People & access**. A node that could not make the copy at an upgrade removes an older
+one, so the file is always from the latest upgrade. When `odeiond restore` of the newer version
+was the first thing to open the library after the update, the copy is the library from before
+that restore. With the bundle:
+
+```sh
+cd ~/pubky-music-node/deploy/bundle
+sudo systemctl stop odeion-bundle 2>/dev/null   # no start at boot try while the library is put back
+docker compose stop music
+docker run --rm -v pubky-music_music-node:/v alpine:3.22 sh -c \
+  'cp -p /v/library.db /v/library.db.newer && cp /v/library.db.before-upgrade /v/library.db && rm -f /v/library.db-wal /v/library.db-shm && chown "$(stat -c %u:%g /v)" /v/library.db'
+docker compose start music
+```
+
+From a backup instead, with the bundle:
 
 ```sh
 cd ~/pubky-music-node/deploy/bundle

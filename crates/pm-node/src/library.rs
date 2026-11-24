@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 fn open(cfg: &NodeConfig) -> anyhow::Result<Library> {
     std::fs::create_dir_all(&cfg.data_dir)?;
     let path = cfg.db_path();
-    Library::open(&path).with_context(|| format!("opening library {}", path.display()))
+    Library::open_node_library(&path).with_context(|| format!("opening library {}", path.display()))
 }
 
 /// A running node's hold on its data folder: a lock on `node.lock` there, kept as long as this
@@ -377,7 +377,8 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
         // node to keep them from, none of the backup's own settings goes in either (an older backup
         // still holds them, its ended sessions among them)
         let here = if db.exists() {
-            match Library::open(&db) {
+            // (a newer binary's restore upgrades it: with the copy a start would keep)
+            match Library::open_node_library(&db) {
                 Ok(here) => Some(here),
                 Err(e) => {
                     println!(

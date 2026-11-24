@@ -227,7 +227,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             path.display()
         );
     }
-    let lib = pm_library::Library::open(&db_path)?;
+    let lib = pm_library::Library::open_node_library(&db_path)?;
     let registry = outputs::discover_all(&cfg.outputs);
     pm_api::tidal_unofficial::set_config_client(
         &cfg.tidal.unofficial_client_id,

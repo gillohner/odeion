@@ -253,3 +253,78 @@ async fn legacy_membership_is_distinct_from_missing_disabled_or_unreadable_acces
     };
     assert_eq!(membership_of(&s, TOKEN, &owner), Some(None));
 }
+
+/// A restore through the route keeps the library it replaces beside it, under the name the
+/// stopped-node restore uses (`library.db.bak`), private, and says where; the next restore keeps
+/// the library as it is then.
+#[tokio::test]
+async fn a_restore_keeps_the_library_it_replaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let app = crate::router(s.clone());
+    let mark = |v: &str| s.library.lock().unwrap().set_setting("test.mark", v).unwrap();
+    let marked = |lib: &Library| lib.get_setting("test.mark").unwrap();
+    mark("in the backup");
+    let (taken, _) = crate::backup::make(&s, None).unwrap();
+    mark("made after the backup");
+    let report = crate::backup::restore(&s, taken.clone(), None, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        marked(&s.library.lock().unwrap()).as_deref(),
+        Some("in the backup")
+    );
+    let kept = dir.path().join("library.db.bak");
+    assert!(!dir.path().join("library.db.bak.next").exists(), "put in place");
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains(&kept.display().to_string())),
+        "{:?}",
+        report.notes
+    );
+    assert_eq!(
+        marked(&Library::open(&kept).unwrap()).as_deref(),
+        Some("made after the backup")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the copy holds sign-ins");
+    }
+    mark("before the second restore");
+    restore(&app, taken).await;
+    assert_eq!(
+        marked(&Library::open(&kept).unwrap()).as_deref(),
+        Some("before the second restore")
+    );
+}
+
+/// A restore whose copy of the library as it is cannot be made does not replace the library, and
+/// the copy kept by the previous restore stays as it was.
+#[tokio::test]
+async fn a_restore_without_room_for_the_copy_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let mark = |v: &str| s.library.lock().unwrap().set_setting("test.mark", v).unwrap();
+    let marked = |lib: &Library| lib.get_setting("test.mark").unwrap();
+    mark("in the backup");
+    let (taken, _) = crate::backup::make(&s, None).unwrap();
+    mark("before the first restore");
+    crate::backup::restore(&s, taken.clone(), None, false)
+        .await
+        .unwrap();
+    mark("now");
+    // The copy's name is taken by a folder: it cannot be put there
+    std::fs::create_dir(dir.path().join("library.db.bak.next")).unwrap();
+    let refused = crate::backup::restore(&s, taken, None, false).await;
+    assert!(refused.is_err(), "refused");
+    assert_eq!(marked(&s.library.lock().unwrap()).as_deref(), Some("now"));
+    assert_eq!(
+        marked(&Library::open(&dir.path().join("library.db.bak")).unwrap()).as_deref(),
+        Some("before the first restore"),
+        "the previous restore's copy stays"
+    );
+}
