@@ -5920,6 +5920,11 @@
       if (e.code === 'Space' && onControl) e.preventDefault();
       return;
     }
+    // A dialog on top has the keyboard: Space, the arrows, N, / and ? are the player's and the
+    // page's, and behind "Add music" or "Delete this…?" they went to another song, opened Now
+    // playing under the dialog, or put a second dialog over the first. (Its own keys are the
+    // browser's: Tab, Space and Enter on its buttons, Escape)
+    if (document.querySelector('dialog[open]')) return;
     { const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' ? 'next' : e.key === 'ArrowLeft' ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
     // An open ⋯ menu, zone picker, Sound panel, volume or copy's popup closes before Search, Now playing
     // or Help: it stayed open (with its grey scrim) over or behind them.
