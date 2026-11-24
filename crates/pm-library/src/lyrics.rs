@@ -76,18 +76,31 @@ fn parse_timestamp(tag: &str) -> Option<u64> {
         Some((s, f)) => (s, f),
         None => (last, ""),
     };
-    let secs: u64 = secs.parse().ok()?;
+    // Digits only, everywhere (`"+5".parse()` is a number, and a file's text is anything)
+    let digits = |s: &str| -> Option<u64> {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse().ok()
+    };
+    let secs = digits(secs)?;
+    // So the fraction's first three are three bytes: `[ti:9.99€ x]` reads as minutes "ti",
+    // seconds 9 and a fraction that is no number
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let frac_ms = match frac.len() {
         0 => 0,
         1 => frac.parse::<u64>().ok()? * 100,
         2 => frac.parse::<u64>().ok()? * 10,
         _ => frac[..3].parse::<u64>().ok()?,
     };
-    let mut ms = secs * 1000 + frac_ms;
-    let mins: u64 = parts.pop()?.parse().ok()?;
-    ms += mins * 60_000;
+    // (numbers too long for a time are no time, not an overflow)
+    let mut ms = secs.checked_mul(1000)?.checked_add(frac_ms)?;
+    let mins = digits(parts.pop()?)?;
+    ms = ms.checked_add(mins.checked_mul(60_000)?)?;
     if let Some(h) = parts.pop() {
-        ms += h.parse::<u64>().ok()? * 3_600_000;
+        ms = ms.checked_add(digits(h)?.checked_mul(3_600_000)?)?;
     }
     Some(ms)
 }
@@ -103,12 +116,58 @@ pub fn sidecar_mtime(audio: &Path) -> Option<i64> {
         .map(|d| d.as_secs() as i64)
 }
 
+/// The longest sidecar that is read (a long song's synchronised lyrics are a few tens of KB).
+pub const SIDECAR_MAX_BYTES: u64 = 1024 * 1024;
+
 /// The `.lrc` file next to `audio` (same stem), if there is one.
+///
+/// Only a lyrics file is read: a regular file of at most [`SIDECAR_MAX_BYTES`]. A link is
+/// followed only to another `.lrc` file (a library made of links to another disk).
 pub fn sidecar(audio: &Path) -> Option<String> {
-    let lrc = audio.with_extension("lrc");
-    let text = std::fs::read(&lrc).ok()?;
+    use std::io::Read;
+    let mut lrc = audio.with_extension("lrc");
+    if std::fs::symlink_metadata(&lrc).ok()?.file_type().is_symlink() {
+        lrc = std::fs::canonicalize(&lrc).ok()?;
+        let named_lrc = lrc.extension().is_some_and(|e| e.eq_ignore_ascii_case("lrc"));
+        if !named_lrc {
+            return None;
+        }
+    }
+    // Before it is opened: nothing but a file is opened at all
+    if !std::fs::metadata(&lrc).ok()?.is_file() {
+        return None;
+    }
+    let file = open_sidecar(&lrc).ok()?;
+    // (and of the file that was opened, should the name have changed hands in between)
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > SIDECAR_MAX_BYTES {
+        return None;
+    }
+    let mut text = Vec::new();
+    // (the limit again: the length was the file's a moment ago)
+    file.take(SIDECAR_MAX_BYTES).read_to_end(&mut text).ok()?;
     let text = String::from_utf8_lossy(&text).into_owned();
     (!text.trim().is_empty()).then_some(text)
+}
+
+/// Open the sidecar at `path` (links already resolved) for reading. The name can change hands
+/// between the checks above and this call, so on unix the call itself never waits (opening a
+/// pipe would, for someone at its other end) and never follows a link at the name (it could
+/// lead to a file that is no `.lrc`). What was opened is checked again by the caller.
+///
+/// On Windows the open is a plain one: a link put at the name in that moment is followed
+/// (making one there takes an administrator or developer mode; a folder has no pipes). Its
+/// way to open the link itself (`FILE_FLAG_OPEN_REPARSE_POINT`) also changes how files that a
+/// sync program keeps online are read, so it waits for a build that is tested on Windows.
+fn open_sidecar(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    open.open(path)
 }
 
 #[cfg(test)]
@@ -148,6 +207,38 @@ mod tests {
         assert_eq!(parse_timestamp("ab:cd"), None);
     }
 
+    /// A file's text is anything: a tag that only looks like a time is no time, and never a
+    /// panic (the fraction was cut at its third byte, inside a character; long numbers overflowed).
+    #[test]
+    fn text_that_only_looks_like_a_time_is_not_one() {
+        for tag in [
+            "ti:9.99€ Song",
+            "00:12.34é",
+            "00:01.€",
+            "00:01.1é",
+            "00:01.+12",
+            "00:+05",
+            "+1:00",
+            "+1:00:00",
+            ":05",
+            "00:99999999999999999999",
+            "18446744073709551615:00",
+            "18446744073709551:00:00",
+            "307445734561825861:00",
+            "00:18446744073709552",
+        ] {
+            assert_eq!(parse_timestamp(tag), None, "{tag}");
+        }
+        let (lines, synced) =
+            parse("[ti:9.99€ Song]\n[00:12.34é]La\n[00:01.500]Da\n[00:99999999999999999999]x");
+        assert!(synced);
+        assert_eq!(
+            lines.iter().map(|l| (l.ms, l.text.as_str())).collect::<Vec<_>>(),
+            [(Some(1500), "Da")],
+            "the other lines carry no time, so a synchronised text leaves them out"
+        );
+    }
+
     #[test]
     fn sidecar_next_to_the_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -155,5 +246,109 @@ mod tests {
         assert!(sidecar(&audio).is_none());
         std::fs::write(dir.path().join("a.lrc"), "[00:00.00]x").unwrap();
         assert_eq!(sidecar(&audio).as_deref(), Some("[00:00.00]x"));
+    }
+
+    /// What `ask` answers, on a thread: `None` when it has not answered after five seconds (it
+    /// waits on the pipe at `pipe`, which is then opened from here so that the thread ends). A
+    /// wait shows as a failure this way, not as a test that never ends.
+    #[cfg(unix)]
+    fn within_5s<T: Send + 'static>(pipe: &Path, ask: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(ask()));
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5)).ok();
+        if got.is_none() {
+            // (for reading too: an open for writing alone would itself wait for a reader)
+            let _ = std::fs::OpenOptions::new().read(true).write(true).open(pipe);
+        }
+        got
+    }
+
+    /// Only a lyrics file is read as a sidecar: a regular file no longer than lyrics are, also
+    /// behind a link, which is followed only to another `.lrc` file.
+    #[cfg(unix)]
+    #[test]
+    fn a_sidecar_is_a_lyrics_file_and_nothing_else() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir(&music).unwrap();
+        let other = dir.path().join("notes.txt");
+        std::fs::write(&other, "not lyrics").unwrap();
+
+        // A link to a file that is no .lrc
+        symlink(&other, music.join("a.lrc")).unwrap();
+        assert_eq!(sidecar(&music.join("a.flac")), None);
+        // A link to something that is no file, whatever it is named
+        symlink("/dev/zero", music.join("b.lrc")).unwrap();
+        assert_eq!(sidecar(&music.join("b.flac")), None);
+        std::fs::create_dir(dir.path().join("folder.lrc")).unwrap();
+        symlink(dir.path().join("folder.lrc"), music.join("h.lrc")).unwrap();
+        assert_eq!(sidecar(&music.join("h.flac")), None);
+        // A pipe is not opened: that would wait for a writer that never comes
+        let pipe = music.join("p.lrc");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if made.is_ok_and(|s| s.success()) {
+            assert_eq!(
+                within_5s(&pipe, {
+                    let song = music.join("p.flac");
+                    move || sidecar(&song)
+                }),
+                Some(None),
+                "a pipe named .lrc"
+            );
+            // The open itself does not wait either (the name can become a pipe after the check)
+            assert_eq!(
+                within_5s(&pipe, {
+                    let pipe = pipe.clone();
+                    move || open_sidecar(&pipe).is_ok_and(|f| f.metadata().is_ok_and(|m| m.is_file()))
+                }),
+                Some(false),
+                "a pipe, opened"
+            );
+            let linked = dir.path().join("pipe-target.lrc");
+            std::fs::rename(&pipe, &linked).unwrap();
+            symlink(&linked, music.join("q.lrc")).unwrap();
+            assert_eq!(
+                within_5s(&linked, {
+                    let song = music.join("q.flac");
+                    move || sidecar(&song)
+                }),
+                Some(None),
+                "a link to a pipe named .lrc"
+            );
+        }
+        // The open does not follow a link at the name: links are resolved, and their target's
+        // name checked, before it
+        std::fs::write(dir.path().join("real.lrc"), "real").unwrap();
+        symlink(dir.path().join("real.lrc"), music.join("r.lrc")).unwrap();
+        assert!(open_sidecar(&music.join("r.lrc")).is_err());
+        assert!(open_sidecar(&dir.path().join("real.lrc")).is_ok());
+        assert_eq!(sidecar(&music.join("r.flac")).as_deref(), Some("real"));
+        // A link that leads nowhere, a folder, a file longer than lyrics are
+        symlink(dir.path().join("gone.lrc"), music.join("c.lrc")).unwrap();
+        assert_eq!(sidecar(&music.join("c.flac")), None);
+        std::fs::create_dir(music.join("d.lrc")).unwrap();
+        assert_eq!(sidecar(&music.join("d.flac")), None);
+        std::fs::write(music.join("e.lrc"), vec![b'x'; SIDECAR_MAX_BYTES as usize + 1]).unwrap();
+        assert_eq!(sidecar(&music.join("e.flac")), None);
+        std::fs::write(music.join("f.lrc"), vec![b'x'; SIDECAR_MAX_BYTES as usize]).unwrap();
+        assert_eq!(
+            sidecar(&music.join("f.flac")).map(|t| t.len()),
+            Some(SIDECAR_MAX_BYTES as usize)
+        );
+
+        // A library of links to another disk: a link to a lyrics file is read, also through a
+        // linked folder
+        let disk = dir.path().join("disk");
+        std::fs::create_dir(&disk).unwrap();
+        std::fs::write(disk.join("song.LRC"), "[00:01.00]linked").unwrap();
+        symlink(disk.join("song.LRC"), music.join("g.lrc")).unwrap();
+        assert_eq!(
+            sidecar(&music.join("g.flac")).as_deref(),
+            Some("[00:01.00]linked")
+        );
+        symlink(&disk, music.join("album")).unwrap();
+        std::fs::write(disk.join("two.lrc"), "two").unwrap();
+        assert_eq!(sidecar(&music.join("album/two.flac")).as_deref(), Some("two"));
     }
 }

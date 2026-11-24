@@ -27,6 +27,10 @@ url = { workspace = true, optional = true }
 calamine = { version = "0.37", default-features = false }
 metaflac = "0.2"
 
+[target.'cfg(unix)'.dependencies]
+# Lyrics sidecar: open flags (never wait on a pipe, never follow a link at the name)
+libc = "0.2"
+
 [dev-dependencies]
 hound = { workspace = true }
 tempfile = "3"

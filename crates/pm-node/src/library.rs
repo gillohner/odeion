@@ -12,6 +12,181 @@ fn open(cfg: &NodeConfig) -> anyhow::Result<Library> {
     Library::open(&path).with_context(|| format!("opening library {}", path.display()))
 }
 
+/// A running node's hold on its data folder: a lock on `node.lock` there, kept as long as this
+/// lives. The system lets go of it when the process ends, however it ends, so no stale hold
+/// stays behind.
+#[derive(Debug)]
+pub struct DataDirLock {
+    _file: std::fs::File,
+}
+
+/// What [`lock_data_dir`] found.
+#[derive(Debug)]
+pub enum Hold {
+    /// This process has the data folder now.
+    Taken(DataDirLock),
+    /// Another process (a running node, a restore) has it.
+    Held,
+    /// The folder's file system takes no locks (some network shares): nobody can tell.
+    NoLocks(std::io::Error),
+}
+
+/// Open `node.lock` without following a link at its name (a link there could point a restore
+/// run with sudo at another file, which it would then make readable to everyone), and only if it
+/// is a plain file with one name. `write`: also create it, open for writing.
+fn open_lock_file(path: &Path, write: bool) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    if write {
+        opts.create(true).truncate(false).write(true);
+    } else {
+        opts.read(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // (non-blocking: a FIFO there would otherwise hold the open until someone reads it;
+        // on a plain file it changes nothing, and the lock is taken without waiting anyway)
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = opts.open(path).map_err(|e| {
+        // O_NOFOLLOW on a link: ELOOP
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            return std::io::Error::other(format!(
+                "{} is a link, not the node's lock file: remove it",
+                path.display()
+            ));
+        }
+        e
+    })?;
+    let meta = file.metadata()?;
+    #[cfg(unix)]
+    let one_name = {
+        use std::os::unix::fs::MetadataExt;
+        meta.nlink() == 1
+    };
+    #[cfg(not(unix))]
+    let one_name = true;
+    if !meta.is_file() || !one_name {
+        return Err(std::io::Error::other(format!(
+            "{} is not a plain file of its own (a folder, a device or a second name of another file): remove it",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+/// Whether a failed lock means the file system takes no locks at all (some network shares), as
+/// opposed to a lock that failed on one that does: only then may the caller go on unchecked.
+fn takes_no_locks(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(libc::ENOLCK) {
+        return true;
+    }
+    e.kind() == std::io::ErrorKind::Unsupported
+}
+
+/// Take the hold on the data folder. `Err`: `node.lock` cannot be made or opened, is not a plain
+/// file (a link there is refused), it is another user's file that cannot be locked (a restore run
+/// with sudo made it), or the lock failed for another reason than a file system without locks:
+/// whoever asked stops rather than go on blind.
+pub fn lock_data_dir(data_dir: &Path) -> std::io::Result<Hold> {
+    std::fs::create_dir_all(data_dir)?;
+    let path = data_dir.join("node.lock");
+    let (file, own) = match open_lock_file(&path, true) {
+        Ok(f) => {
+            // Readable by everyone (it is empty): a restore run as another user can still lock
+            // it, whatever the umask made of it. On the opened file, never by name
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = f.set_permissions(std::fs::Permissions::from_mode(0o644));
+            }
+            (f, true)
+        }
+        // Another user's file: reading it is enough to lock it, where the file system allows.
+        // (A folder this user cannot write and no file yet: the error as it is)
+        Err(e)
+            if e.kind() == std::io::ErrorKind::PermissionDenied
+                && std::fs::symlink_metadata(&path).is_ok() =>
+        {
+            (
+                open_lock_file(&path, false).map_err(|e| {
+                    std::io::Error::new(
+                        e.kind(),
+                        format!(
+                        "{} cannot be opened ({e}): it belongs to another user; give it to this one (chown)",
+                        path.display()
+                    ),
+                    )
+                })?,
+                false,
+            )
+        }
+        Err(e) => return Err(e),
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(Hold::Taken(DataDirLock { _file: file })),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(Hold::Held),
+        Err(std::fs::TryLockError::Error(e)) if takes_no_locks(&e) => Ok(Hold::NoLocks(e)),
+        Err(std::fs::TryLockError::Error(e)) if own => Err(std::io::Error::new(
+            e.kind(),
+            format!("{} cannot be locked ({e})", path.display()),
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(std::io::Error::new(
+            e.kind(),
+            format!(
+                "{} cannot be locked ({e}): it belongs to another user; give it to this one (chown)",
+                path.display()
+            ),
+        )),
+    }
+}
+
+/// How long a starting node waits for the data folder when someone else holds it: the node it
+/// replaces, still on its way out, or a restore about to end. Then it does not start (a service
+/// manager or Docker starts it again).
+pub const HOLD_PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Take the hold on the data folder for a starting node ([`lock_data_dir`]), waiting up to
+/// `patience` for whoever has it. `Ok(None)`: the file system takes no locks (said in the log),
+/// the node starts as before. `Err`: someone still holds it after `patience`, or `node.lock`
+/// cannot be used: the node does not start, so it never opens a database a restore is replacing
+/// or another node writes.
+pub async fn wait_for_data_dir(
+    data_dir: &Path,
+    patience: std::time::Duration,
+) -> anyhow::Result<Option<DataDirLock>> {
+    let started = std::time::Instant::now();
+    let mut said = false;
+    loop {
+        match lock_data_dir(data_dir)
+            .with_context(|| format!("the lock on the data folder {}", data_dir.display()))?
+        {
+            Hold::Taken(hold) => return Ok(Some(hold)),
+            Hold::NoLocks(e) => {
+                tracing::warn!(
+                    data_dir = %data_dir.display(),
+                    "the data folder takes no locks ({e}): `odeiond restore` cannot tell that this node runs"
+                );
+                return Ok(None);
+            }
+            Hold::Held if started.elapsed() >= patience => anyhow::bail!(
+                "another node or `odeiond restore` is using the data folder {}: stop that node, or let the \
+                 restore finish, then start this one",
+                data_dir.display()
+            ),
+            Hold::Held => {
+                if !said {
+                    tracing::info!(data_dir = %data_dir.display(), "the data folder is in use: waiting for it");
+                    said = true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+    }
+}
+
 /// The work folders `backup` makes in the data folder: `backup-work-<pid>`.
 const WORK_PREFIX: &str = "backup-work-";
 
@@ -148,9 +323,27 @@ fn write_staged(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Replace the library database with a backup. Stop the node first: the
 /// previous database is kept as `library.db.bak`, and stale WAL files are
-/// removed so SQLite cannot replay them into the restored copy.
+/// removed so SQLite cannot replay them into the restored copy. While a node runs on the data
+/// folder this is refused: that node would go on writing into the database it has open (now
+/// `library.db.bak`, without its WAL files), and nothing it stores would be in the restored one.
 pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
+    // Held to the end of the restore, also when it fails
+    let _hold = match lock_data_dir(&cfg.data_dir)
+        .with_context(|| format!("the lock on the data folder {}", cfg.data_dir.display()))?
+    {
+        Hold::Taken(hold) => Some(hold),
+        Hold::Held => anyhow::bail!(
+            "a node (or another restore) is running on {}: stop it first, or restore from Settings › Backup \
+             in the web app, which works while it runs",
+            cfg.data_dir.display()
+        ),
+        // A folder without locks: as before, on the word that the node is stopped
+        Hold::NoLocks(e) => {
+            println!("note: this folder takes no locks ({e}), so whether a node runs on it cannot be checked; going on");
+            None
+        }
+    };
     let db = cfg.db_path();
     // Validate (and migrate) a scratch copy first so a broken file never
     // replaces a working library.
@@ -792,5 +985,171 @@ mod tests {
         let lib = open(&cfg).unwrap();
         assert_eq!(lib.get_setting("accounts.owner_sessions").unwrap(), None);
         assert_eq!(lib.get_setting("home.layout").unwrap().as_deref(), Some("kept"));
+    }
+
+    /// `restore` does not replace the database while a node holds the data folder, and does
+    /// once that node is gone.
+    #[test]
+    fn the_restore_command_is_refused_while_a_node_runs_on_the_data_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.path().join("data"),
+            ..Default::default()
+        };
+        open(&cfg).unwrap().set_setting("home.layout", "old").unwrap();
+        let file = dir.path().join("copy.sqlite");
+        backup(&cfg, &file, false).unwrap();
+        open(&cfg).unwrap().set_setting("home.layout", "new").unwrap();
+        let bak = cfg.db_path().with_extension("db.bak");
+
+        let Hold::Taken(running) = lock_data_dir(&cfg.data_dir).unwrap() else {
+            panic!("no node holds it yet")
+        };
+        assert!(
+            matches!(lock_data_dir(&cfg.data_dir).unwrap(), Hold::Held),
+            "held once"
+        );
+        let e = restore(&cfg, &file).unwrap_err().to_string();
+        assert!(e.contains("is running on"), "{e}");
+        assert!(!bak.exists(), "the database was not moved");
+        assert_eq!(
+            open(&cfg).unwrap().get_setting("home.layout").unwrap().as_deref(),
+            Some("new")
+        );
+
+        drop(running);
+        restore(&cfg, &file).unwrap();
+        assert!(bak.exists());
+        assert_eq!(
+            open(&cfg).unwrap().get_setting("home.layout").unwrap().as_deref(),
+            Some("old")
+        );
+        // The restore let go of it again
+        assert!(matches!(lock_data_dir(&cfg.data_dir).unwrap(), Hold::Taken(_)));
+    }
+
+    /// A starting node waits for the data folder, gets it once whoever held it lets go, and does
+    /// not start (an error) when it is still held after the wait. A restore holds it to its end,
+    /// also when it fails, and a second restore meanwhile is refused.
+    #[tokio::test]
+    async fn a_starting_node_waits_for_the_data_folder_then_does_not_start() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let short = Duration::from_millis(300);
+        let taken = |h: Hold| match h {
+            Hold::Taken(l) => l,
+            Hold::Held => panic!("held"),
+            Hold::NoLocks(e) => panic!("no locks here: {e}"),
+        };
+        // Nobody holds it: at once
+        drop(wait_for_data_dir(&data, short).await.unwrap().expect("free"));
+        // Another holds it the whole time: the wait, then no start
+        let other = taken(lock_data_dir(&data).unwrap());
+        let asked = Instant::now();
+        let e = wait_for_data_dir(&data, short).await.unwrap_err().to_string();
+        assert!(e.contains("is using the data folder"), "{e}");
+        assert!(asked.elapsed() >= short && asked.elapsed() < Duration::from_secs(10));
+        // It lets go during the wait: the hold
+        let gone = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            drop(other);
+        });
+        let hold = wait_for_data_dir(&data, Duration::from_secs(5)).await.unwrap();
+        assert!(hold.is_some(), "the hold, once the other let go");
+        gone.await.unwrap();
+        // While this node holds it a restore is refused and changes nothing; a failed restore
+        // lets go of it
+        let cfg = NodeConfig {
+            data_dir: data.clone(),
+            ..Default::default()
+        };
+        let refused = restore(&cfg, &dir.path().join("no-such-backup")).unwrap_err();
+        assert!(refused.to_string().contains("is running on"), "{refused}");
+        drop(hold);
+        assert!(restore(&cfg, &dir.path().join("no-such-backup")).is_err());
+        assert!(
+            matches!(lock_data_dir(&data).unwrap(), Hold::Taken(_)),
+            "let go after a failure"
+        );
+        // The lock file can be locked by another user too: made readable to all, also when it
+        // was not (whatever the umask)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let lock = data.join("node.lock");
+            std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+            drop(taken(lock_data_dir(&data).unwrap()));
+            let mode = std::fs::metadata(&lock).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o644);
+        }
+    }
+
+    /// A link at `node.lock` is refused and its target left as it was (a restore run with sudo
+    /// would otherwise make another user's file readable to everyone), and so is a second name
+    /// of another file.
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_file_is_never_a_link_or_a_second_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let secret = dir.path().join("secret");
+        std::fs::write(&secret, "x").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        std::os::unix::fs::symlink(&secret, data.join("node.lock")).unwrap();
+        let e = lock_data_dir(&data).unwrap_err().to_string();
+        assert!(e.contains("is a link"), "{e}");
+        assert_eq!(mode(&secret), 0o600, "the link's target was not touched");
+
+        std::fs::remove_file(data.join("node.lock")).unwrap();
+        std::fs::hard_link(&secret, data.join("node.lock")).unwrap();
+        let e = lock_data_dir(&data).unwrap_err().to_string();
+        assert!(e.contains("not a plain file of its own"), "{e}");
+        assert_eq!(mode(&secret), 0o600, "the other name's file was not touched");
+
+        std::fs::remove_file(data.join("node.lock")).unwrap();
+        assert!(matches!(lock_data_dir(&data).unwrap(), Hold::Taken(_)));
+    }
+
+    /// Only a file system without locks lets a caller go on unchecked; any other failed lock
+    /// stops it.
+    #[test]
+    fn only_a_file_system_without_locks_goes_on_unchecked() {
+        use std::io::{Error, ErrorKind};
+        assert!(takes_no_locks(&Error::from(ErrorKind::Unsupported)));
+        #[cfg(unix)]
+        {
+            assert!(takes_no_locks(&Error::from_raw_os_error(libc::ENOLCK)));
+            assert!(takes_no_locks(&Error::from_raw_os_error(libc::EOPNOTSUPP)));
+            assert!(!takes_no_locks(&Error::from_raw_os_error(libc::EIO)));
+            assert!(!takes_no_locks(&Error::from_raw_os_error(libc::EBADF)));
+        }
+        assert!(!takes_no_locks(&Error::from(ErrorKind::PermissionDenied)));
+    }
+
+    /// A FIFO at `node.lock` (anyone who can write the data folder can make one) is refused at
+    /// once: the open does not wait for a reader, so neither a start nor a restore hangs.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_lock_file_is_refused_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let fifo = std::ffi::CString::new(data.join("node.lock").to_str().unwrap()).unwrap();
+        // SAFETY: a NUL-terminated path that lives through the call
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(lock_data_dir(&data).map(|_| ()).map_err(|e| e.to_string()));
+        });
+        let r = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the open waited for a reader");
+        // (no reader: opening a FIFO without blocking for writing fails at once, ENXIO)
+        assert!(r.is_err(), "{r:?}");
     }
 }

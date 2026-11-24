@@ -839,8 +839,9 @@ async fn a_plain_backup_keeps_no_way_in() {
     );
 }
 
-/// The owner's browser sessions and device sign-ins never go into a backup, and a restore keeps
-/// the node's own: a backup from before Make a new token can't bring back a sign-in that ended.
+/// The owner's browser sessions, device sign-ins and app passwords never go into a backup, and a
+/// restore keeps the node's own: a backup from before Make a new token can't bring back a sign-in
+/// that ended, nor one from before an app password was removed that password.
 #[tokio::test]
 async fn a_restore_never_brings_back_ended_sign_ins() {
     let dir = tempfile::tempdir().unwrap();
@@ -854,6 +855,7 @@ async fn a_restore_never_brings_back_ended_sign_ins() {
         lib.set_setting("accounts.device_sessions", &list("device"))
             .unwrap();
     }
+    let app = pm_api::app_passwords::make(&a, "Home Assistant").unwrap();
     let pass = ["fixture", "passphrase"].join("-");
     let (plain, _) = pm_api::backup::make(&a, None).unwrap();
     let (locked, _) = pm_api::backup::make(&a, Some(&pass)).unwrap();
@@ -862,6 +864,11 @@ async fn a_restore_never_brings_back_ended_sign_ins() {
         for n in ["browser", "device"] {
             assert!(!raw.contains(&hash(n)), "{n} sign-in in the {name} backup");
         }
+        assert!(!raw.contains(&app.password), "app password in the {name} backup");
+        assert!(
+            !raw.contains("Home Assistant"),
+            "app password in the {name} backup"
+        );
     }
     // Make a new token ended them; the older backup is restored: they stay ended
     {
@@ -869,8 +876,16 @@ async fn a_restore_never_brings_back_ended_sign_ins() {
         lib.delete_setting("accounts.owner_sessions").unwrap();
         lib.delete_setting("accounts.device_sessions").unwrap();
     }
+    // A new app password after the backup: the restore keeps it, the node's own
+    let later = pm_api::app_passwords::make(&a, "Symfonium").unwrap();
+    assert!(pm_api::app_passwords::remove(&a, &app.listed.id).unwrap());
     let (st, r) = restore(&router(a.clone()), &locked, Some(&pass)).await;
     assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(
+        pm_api::app_passwords::list(&a).unwrap(),
+        vec![later.listed.clone()],
+        "the node's own app passwords, as they were"
+    );
     let lib = a.library.lock().unwrap();
     assert_eq!(lib.get_setting("accounts.owner_sessions").unwrap(), None);
     assert_eq!(lib.get_setting("accounts.device_sessions").unwrap(), None);

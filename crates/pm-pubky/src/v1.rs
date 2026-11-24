@@ -47,15 +47,6 @@ pub fn bookmarks_dir() -> String {
     namespace_path(Root::Priv, SOCIAL_NAMESPACE, "bookmarks/")
 }
 
-/// The root a node visibility maps to.
-pub fn root_of(public: bool) -> Root {
-    if public {
-        Root::Pub
-    } else {
-        Root::Priv
-    }
-}
-
 /// Microseconds of a timestamp id, `None` when it is not one.
 pub fn micros_of(id: &str) -> Option<i64> {
     validate_timestamp_id_format(id).ok()

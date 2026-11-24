@@ -3,7 +3,8 @@
 A Home Assistant custom integration for an [Odeion](https://github.com/gillohner/pubky-music-node) node:
 every zone becomes a `media_player`, and the node's library is in Home Assistant's media browser.
 
-It talks to the node's own HTTP API and its live events socket (`/v1/events`) with the node's API token.
+It talks to the node's own HTTP API and its live events socket (`/v1/events`) with a password the node
+gives it: an app password (Settings › People & access › Apps with their own password), or the API token.
 Nothing leaves your network.
 
 ## What you get
@@ -49,9 +50,13 @@ entries, devices and entity ids keep working, and nothing needs adding again.
 ## Set up
 
 Home Assistant finds nodes on your network by themselves (zeroconf, `_pubky-music._tcp`). Look under
-Settings › Devices & services › Discovered and enter the node's API token. You can also add it by hand:
-*Add integration › Odeion*, then enter the node's address, its port (7788 unless you changed it) and
-its API token. The token is in the node's Settings › Node, or `[api] token` in `node.toml`.
+Settings › Devices & services › Discovered and enter an app password for it. You can also add it by
+hand: *Add integration › Odeion*, then enter the node's address, its port (7788 unless you changed it)
+and the password. Make one in the node's Settings › People & access › Apps with their own password:
+with it Home Assistant plays, controls and groups zones and browses the library, and nothing else, and
+you can remove it alone. The node's API token (`[api] token` in `node.toml`) works too, but can do
+everything you can. With an app password the media browser's Home folder says it is not open to it:
+the node keeps Home for you and the API token.
 
 Each node is one device, and each zone is a device under it.
 

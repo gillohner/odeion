@@ -134,9 +134,10 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
+        // (bytes, not a slice of the text: the two after a `%` may be half of a character)
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            if let (Some(hi), Some(lo)) = ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16)) {
+                out.push((hi * 16 + lo) as u8);
                 i += 3;
                 continue;
             }
@@ -448,17 +449,31 @@ pub(crate) fn open_blocking(
     let (id, rel) = split_key(key).ok_or_else(|| fail("not a WebDAV file".into()))?;
     let share = find(shared, &id).ok_or_else(|| fail("that WebDAV share was removed".into()))?;
     let mut url = share.file_url(&rel).map_err(fail)?;
-    if !share.user.is_empty() {
-        // The HTTP reader takes a URL only: the credentials ride in it, inside the node
-        let _ = url.set_username(&share.user);
-        let _ = url.set_password(Some(&share.password));
+    // The credentials go as a header, never in the URL: errors name the URL (a decoder's too),
+    // and zone state and events carry them to listeners. A request with headers never follows
+    // a playlist to another host. Credentials typed into the share's address move to the
+    // header as well.
+    let (mut user, mut password) = (share.user.clone(), share.password.clone());
+    if !url.username().is_empty() || url.password().is_some() {
+        let decode = crate::about::percent_decode;
+        if user.is_empty() {
+            user = decode(url.username());
+            password = decode(url.password().unwrap_or(""));
+        }
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
     }
-    crate::sources::open_http_stream(url.as_str()).map_err(|e| match e {
-        pm_zones::SourceError::Open { reason, .. } => fail(if share.password.is_empty() {
-            reason
-        } else {
-            reason.replace(&share.password, "<password>")
-        }),
+    let mut headers = Vec::new();
+    // A password alone (`http://:token@host/`) is sent too, with an empty user name
+    if !user.is_empty() || !password.is_empty() {
+        let basic = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("{user}:{password}"),
+        );
+        headers.push(("authorization".to_string(), format!("Basic {basic}")));
+    }
+    crate::sources::open_http_stream_with(url.as_str(), &headers, None).map_err(|e| match e {
+        pm_zones::SourceError::Open { reason, .. } => fail(reason),
         other => other,
     })
 }
@@ -714,5 +729,109 @@ mod tests {
             Some(("ab12cd".into(), "Queen & Co/01 Song.flac".into()))
         );
         assert!(!format!("{sh:?}").contains("not-shown"));
+    }
+
+    /// `%` followed by anything that is not two hex digits is kept as it is, also when the
+    /// bytes after it are part of a longer character (the text was cut inside it).
+    #[test]
+    fn percent_decoding_takes_any_text() {
+        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
+        assert_eq!(percent_decode("%C3%A9t%c3%a9"), "été");
+        for kept in ["%aé", "%é1", "100%", "%2", "%zz", "%+f", "50%é", "%"] {
+            assert_eq!(percent_decode(kept), kept);
+        }
+    }
+
+    /// A share's password never shows in what a failed playback says (the zone's state and its
+    /// events carry that to listeners): not as typed, not percent-encoded. It reaches the share
+    /// as a header.
+    #[test]
+    fn a_failed_playback_never_shows_the_share_password() {
+        use std::io::Write;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/dav/Music/", l.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                let mut c = c;
+                let mut req = [0u8; 4096];
+                let n = c.read(&mut req).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&req[..n]).into_owned());
+                // Audio by its type, nothing a decoder reads
+                let body = [0u8; 2048];
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/flac\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = c.write_all(head.as_bytes());
+                let _ = c.write_all(&body);
+            }
+        });
+        let password = "p@ss word:/x";
+        let encoded: String = url::form_urlencoded::byte_serialize(password.as_bytes()).collect();
+        let basic = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("me:{password}"),
+        );
+        // In their own fields, and typed into the share's address
+        let in_address = base.replacen("http://", "http://me:p%40ss%20word%3A%2Fx@", 1);
+        for (url, user, pass) in [(base.clone(), "me", password), (in_address, "", "")] {
+            let share = Share {
+                id: "ab12cd".into(),
+                name: "NAS".into(),
+                url,
+                user: user.into(),
+                password: pass.into(),
+            };
+            let key = share.root().join("Queen/01 Song.flac");
+            let shared: Shared = Arc::new(RwLock::new(vec![share]));
+            let err = match open_blocking(&shared, &key) {
+                Ok(_) => panic!("zeros decoded"),
+                Err(e) => e,
+            };
+            let said = format!("{err} {err:?}");
+            for secret in [
+                password,
+                "p%40ss%20word%3A%2Fx",
+                "p%40ss",
+                encoded.as_str(),
+                "p@ss",
+            ] {
+                assert!(!said.contains(secret), "{secret:?} in {said}");
+            }
+            assert!(!said.contains("me:"), "{said}");
+            let req = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(
+                req.to_ascii_lowercase()
+                    .contains(&format!("authorization: basic {}", basic.to_ascii_lowercase())),
+                "{req}"
+            );
+        }
+        // A password alone in the address (a token) still goes, with an empty user name
+        while rx.try_recv().is_ok() {}
+        let token_only = base.replacen("http://", "http://:t%40ken@", 1);
+        let share = Share {
+            id: "ab12cd".into(),
+            name: "NAS".into(),
+            url: token_only,
+            user: String::new(),
+            password: String::new(),
+        };
+        let key = share.root().join("Queen/01 Song.flac");
+        let shared: Shared = Arc::new(RwLock::new(vec![share]));
+        let err = match open_blocking(&shared, &key) {
+            Ok(_) => panic!("zeros decoded"),
+            Err(e) => e,
+        };
+        let said = format!("{err} {err:?}");
+        assert!(!said.contains("t%40ken") && !said.contains("t@ken"), "{said}");
+        let basic = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ":t@ken");
+        let mut reqs = vec![rx.recv_timeout(Duration::from_secs(5)).unwrap()];
+        reqs.extend(rx.try_iter());
+        let want = format!("authorization: basic {}", basic.to_ascii_lowercase());
+        assert!(
+            reqs.iter().all(|r| r.to_ascii_lowercase().contains(&want)),
+            "{reqs:?}"
+        );
     }
 }

@@ -318,17 +318,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CastLink<S> {
         .await?;
         Ok(())
     }
-
-    /// Keep answering heartbeats; returns when the peer closes.
-    pub async fn serve_heartbeat(&mut self) -> Result<(), CastError> {
-        loop {
-            let msg = self.recv().await?;
-            if msg.namespace == NS_HEARTBEAT {
-                let src = msg.source_id.clone();
-                self.send(&src, NS_HEARTBEAT, json!({"type": "PONG"})).await?;
-            }
-        }
-    }
 }
 
 /// TLS client config that accepts the device's self-signed certificate.
