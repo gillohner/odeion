@@ -491,10 +491,172 @@ fn wait_for_writer(tries: i32) -> bool {
     true
 }
 
+/// An existing library at `path` whose schema this version would upgrade: its version, and a
+/// plain connection to it (nothing run on it yet). `None` for a new or empty file, one already
+/// at this version or newer, and one that does not open (the open after it reports that).
+fn schema_to_upgrade(path: &Path) -> Option<(i64, Connection)> {
+    if !std::fs::metadata(path).is_ok_and(|m| m.len() > 0) {
+        return None;
+    }
+    let conn = Connection::open(path).ok()?;
+    conn.busy_handler(Some(wait_for_writer)).ok()?;
+    let found = schema_version_of(&conn)?;
+    let known = MIGRATIONS.last().map_or(0, |(v, _)| *v);
+    (found < known).then_some((found, conn))
+}
+
+/// The schema version of the library on `conn`: 0 for tables from before the schema had a
+/// version, `None` for an empty file or one that cannot be read.
+fn schema_version_of(conn: &Connection) -> Option<i64> {
+    let tables = |name: &str| -> Option<i64> {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND (?1 = '' OR name = ?1)",
+            [name],
+            |r| r.get(0),
+        )
+        .ok()
+    };
+    if tables("schema_version")? > 0 {
+        conn.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| {
+            r.get(0)
+        })
+        .ok()
+    } else if tables("")? > 0 {
+        // Tables from before the schema had a version
+        Some(0)
+    } else {
+        None
+    }
+}
+
+/// Beside a copy [`Library::open_node_library`] keeps while its upgrade is under way: the schema
+/// version the copy was made at, `<copy>.to`. Removed once the library opens upgraded.
+fn copy_note_path(copy: &Path) -> PathBuf {
+    let mut name = copy.as_os_str().to_owned();
+    name.push(".to");
+    PathBuf::from(name)
+}
+
+/// What the note beside `copy` says ([`copy_note_path`]).
+fn noted_version(copy: &Path) -> Option<i64> {
+    std::fs::read_to_string(copy_note_path(copy))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Write `bytes` to `path` (made or emptied) and to disk, through the handle that wrote them
+/// (Windows flushes a file only for a handle that may write it).
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+/// The schema version of the library file at `path`, read without changing it.
+fn file_schema_version(path: &Path) -> Option<i64> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    schema_version_of(&conn)
+}
+
+/// Write the folder holding `path` to disk (a rename in it is then kept through a power cut).
+/// Best effort; nothing to do where folders cannot be opened (Windows).
+pub fn sync_folder_of(path: &Path) {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// [`Library::keep_copy`] on a connection: `VACUUM INTO` a private part file beside `copy`,
+/// written to disk, then renamed over `copy`.
+fn keep_copy_of(conn: &Connection, copy: &Path) -> Result<()> {
+    let mut name = copy.as_os_str().to_owned();
+    name.push(".part");
+    let part = PathBuf::from(name);
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| LibraryError::Io { path, source }
+    };
+    // Empty and the node's user's alone before SQLite writes to it (it holds sign-ins)
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    // One copy at a time to this name (two processes starting at once): a lock on a file of its
+    // own, held to the end, so a part file left by a stop is told apart from one being written.
+    // Where the file system has no locks, as before
+    let mut lock_name = copy.as_os_str().to_owned();
+    lock_name.push(".lock");
+    let lock_path = PathBuf::from(lock_name);
+    let _lock = {
+        let mut lo = std::fs::OpenOptions::new();
+        lo.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            lo.mode(0o600);
+        }
+        let f = lo.open(&lock_path).map_err(io(&lock_path))?;
+        match f.try_lock() {
+            Ok(()) => Some(f),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(io(copy)(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "another copy is being made",
+                )))
+            }
+            Err(std::fs::TryLockError::Error(_)) => None,
+        }
+    };
+    // A part left by a stop in the middle of an earlier copy
+    match std::fs::remove_file(&part) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(io(&part)(e)),
+        _ => {}
+    }
+    drop(o.open(&part).map_err(io(&part))?);
+    let made = (|| -> Result<()> {
+        conn.execute("VACUUM INTO ?1", params![part.to_string_lossy()])?;
+        // Through a write handle: Windows flushes a file only for a handle that may write it
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&part)
+            .and_then(|f| f.sync_all())
+            .map_err(io(&part))?;
+        std::fs::rename(&part, copy).map_err(io(copy))?;
+        // The rename on disk too (a power cut could otherwise leave the older copy, or none)
+        sync_folder_of(copy);
+        Ok(())
+    })();
+    if made.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    made
+}
+
 impl Library {
     /// Opens (or makes) the library at `path`. A new one is readable by the node's user alone
     /// (it holds sign-ins); SQLite gives its journal files the same permissions.
     pub fn open(path: &Path) -> Result<Self> {
+        #[cfg(test)]
+        if keep_copy_tests::FAILING_OPENS.with(|n| n.replace(n.get().saturating_sub(1)) > 0) {
+            return Err(LibraryError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::other("an open made to fail by a test"),
+            });
+        }
         // A new one is made empty and 0600 first, so it is never readable by others, not even
         // for the moment between SQLite creating it and the first write
         #[cfg(unix)]
@@ -1825,6 +1987,103 @@ impl Library {
         let conn = self.lock();
         conn.execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
         Ok(())
+    }
+
+    /// Keep a copy of the whole library at `copy`, in place of the one there: readable by the
+    /// node's user alone, and put at that name only once it is whole (an older copy stays
+    /// until then). Made before the library is replaced, so the step can be undone.
+    pub fn keep_copy(&self, copy: &Path) -> Result<()> {
+        keep_copy_of(&self.lock(), copy)
+    }
+
+    /// Where [`Library::open_node_library`] keeps the library as it was before this version
+    /// upgraded its schema: `<file>.before-upgrade`, beside it.
+    pub fn before_upgrade_path(db: &Path) -> PathBuf {
+        let mut name = db.as_os_str().to_owned();
+        name.push(".before-upgrade");
+        PathBuf::from(name)
+    }
+
+    /// [`Library::open`] for the node's own library: when this version is about to upgrade the
+    /// schema of an existing library, the file as it was is kept first at
+    /// [`Library::before_upgrade_path`] (one copy, from before the latest upgrade). An older
+    /// version can open that copy again after a rollback, and an upgrade that went wrong can be
+    /// undone. A copy that cannot be made (a full disk) is logged and the upgrade goes on, as
+    /// it did before there was one: a node that does not start is no safer.
+    pub fn open_node_library(path: &Path) -> Result<Self> {
+        if let Some((found, conn)) = schema_to_upgrade(path) {
+            let copy = Self::before_upgrade_path(path);
+            let known = MIGRATIONS.last().map_or(0, |(v, _)| *v);
+            // The copy of an upgrade that is still under way, from an earlier start where it did
+            // not go through: its note says the version it was made at (and the copy is at it),
+            // and the library has moved past that, so migrations went in since and the copy is
+            // the only way back. It stays as it is, whatever this version's upgrade goes to (a
+            // fix release): a restart must not replace it with the half-upgraded library, nor
+            // remove it. A copy whose note does not hold, or a library still at the copy's
+            // version (nothing went in, or it was rolled back to the copy and used since), gets
+            // a new copy
+            let ours = noted_version(&copy)
+                .is_some_and(|from| from < found && file_schema_version(&copy) == Some(from));
+            let note = copy_note_path(&copy);
+            let kept = if ours {
+                Ok(())
+            } else {
+                // The note first, on disk, then the copy in place: an older copy left under the
+                // name (the copy failed, a stop between) is at another version than its note
+                write_synced(&note, found.to_string().as_bytes())
+                    .map_err(|source| LibraryError::Io {
+                        path: note.clone(),
+                        source,
+                    })
+                    .and_then(|()| keep_copy_of(&conn, &copy))
+            };
+            match kept {
+                Ok(()) if ours => tracing::info!(
+                    at = found,
+                    to = known,
+                    copy = %copy.display(),
+                    "upgrading the library's schema again: the copy from the first try stays"
+                ),
+                Ok(()) => tracing::info!(
+                    from = found,
+                    to = known,
+                    copy = %copy.display(),
+                    "kept a copy of the library before upgrading its schema"
+                ),
+                Err(e) => {
+                    // An older copy is from before an earlier upgrade: taken for this one's, it
+                    // would bring back a library months old. Not when another process is making
+                    // this upgrade's copy right now (it puts its own in place)
+                    let another = matches!(&e, LibraryError::Io { source, .. }
+                        if source.kind() == std::io::ErrorKind::AlreadyExists);
+                    let older = !another && copy.exists() && std::fs::remove_file(&copy).is_ok();
+                    if !another {
+                        let _ = std::fs::remove_file(&note);
+                    }
+                    tracing::warn!(
+                        from = found,
+                        to = known,
+                        older_copy_removed = older,
+                        "no copy of the library could be kept before upgrading its schema: {e}"
+                    );
+                }
+            }
+        }
+        // A failed open leaves the copy: each migration goes in on its own, so another try (or
+        // the next start) may get one in and fail at a later one, and only the copy holds the
+        // library as it was. A copy from an upgrade that got nothing in is replaced at the next
+        // start (its note names the version the library is still at), or removed there when no
+        // new copy fits
+        let opened = Self::open(path);
+        // Open, so at this version: the upgrade is over, and the next one's copy is a new one
+        // (after a rollback to the copy, the library has changed since it was made)
+        if opened.is_ok() {
+            let note = copy_note_path(&Self::before_upgrade_path(path));
+            if std::fs::remove_file(&note).is_ok() {
+                sync_folder_of(&note);
+            }
+        }
+        opened
     }
 
     /// Rewrite the database file in place and fold the write-ahead log into it: afterwards the
@@ -8132,5 +8391,279 @@ mod identify_tests {
         assert_eq!(files, 2);
         assert_eq!(lib.folder_totals(Path::new("drive://abcd")).unwrap().0, 1);
         assert_eq!(lib.mark_missing_under(Path::new("drive://abcd"), 99).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod keep_copy_tests {
+    use super::*;
+
+    thread_local! {
+        /// How many of this thread's next [`Library::open`] calls fail before they touch the file.
+        pub(super) static FAILING_OPENS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A library as the version before this one left it: every migration but the last.
+    fn old_library(path: &Path) -> i64 {
+        let conn = Connection::open(path).unwrap();
+        let (older, _) = MIGRATIONS.split_at(MIGRATIONS.len() - 1);
+        for (version, sql) in older {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_version(version, applied_at) VALUES (?1, 0)",
+                params![version],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES ('kept', 'from before the upgrade')",
+            [],
+        )
+        .unwrap();
+        older.last().unwrap().0
+    }
+
+    /// The node's own library is copied once, before this version upgrades its schema: the copy
+    /// is the old version's file, whole and private; an open that upgrades nothing makes none.
+    #[test]
+    fn the_library_is_copied_before_its_schema_is_upgraded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let copy = Library::before_upgrade_path(&path);
+        assert_eq!(copy, dir.path().join("library.db.before-upgrade"));
+
+        // A new library: nothing to keep
+        drop(Library::open_node_library(&path).unwrap());
+        assert!(!copy.exists());
+        std::fs::remove_file(&path).unwrap();
+
+        let old = old_library(&path);
+        // A part a stop in the middle of an earlier copy left
+        let mut part = copy.as_os_str().to_owned();
+        part.push(".part");
+        let part = PathBuf::from(part);
+        std::fs::write(&part, b"half").unwrap();
+        // While another process holds the copy's lock it makes this upgrade's copy: none is made
+        // here, and an older copy stays for it to replace
+        let lock = std::fs::File::create(dir.path().join("library.db.before-upgrade.lock")).unwrap();
+        lock.lock().unwrap();
+        std::fs::write(&copy, b"from an earlier upgrade").unwrap();
+        let other = Library::open_node_library(&path);
+        lock.unlock().unwrap();
+        drop(other.unwrap());
+        assert_eq!(std::fs::read(&copy).unwrap(), b"from an earlier upgrade");
+        assert!(part.exists());
+        // A copy that fails for another reason: the older copy goes (it would pass for this
+        // upgrade's). Here the part's name is a folder, which a stop never leaves
+        for name in ["library.db", "library.db-wal", "library.db-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(name));
+        }
+        old_library(&path);
+        std::fs::remove_file(&part).unwrap();
+        std::fs::create_dir(&part).unwrap();
+        drop(Library::open_node_library(&path).unwrap());
+        assert!(!copy.exists());
+        std::fs::remove_dir(&part).unwrap();
+        // Left by a stop in the middle of a copy (no lock held): replaced
+        std::fs::write(&part, b"half").unwrap();
+        for name in ["library.db", "library.db-wal", "library.db-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(name));
+        }
+        old_library(&path);
+        let lib = Library::open_node_library(&path).unwrap();
+        let known = MIGRATIONS.last().unwrap().0;
+        assert_eq!(lib.schema_version().unwrap(), known);
+        assert!(!part.exists());
+        let kept = Connection::open(&copy).unwrap();
+        let version: i64 = kept
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, old, "the copy is the library before the upgrade");
+        let value: String = kept
+            .query_row("SELECT value FROM settings WHERE key = 'kept'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(value, "from before the upgrade");
+        drop(kept);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&copy).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the copy holds sign-ins");
+        }
+        drop(lib);
+
+        // Opened again at this version: the copy stays as it is, no new one is made
+        std::fs::remove_file(&copy).unwrap();
+        drop(Library::open_node_library(&path).unwrap());
+        assert!(!copy.exists());
+    }
+
+    /// A library at `version`, made by the migrations up to it, whose next-but-one or next
+    /// migration fails (`identify_state.rules` exists already: migration 19 adds it).
+    fn library_whose_upgrade_fails(path: &Path, version: i64) {
+        let conn = Connection::open(path).unwrap();
+        for (v, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= version) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_version(version, applied_at) VALUES (?1, 0)",
+                params![v],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("ALTER TABLE identify_state ADD COLUMN rules INTEGER")
+            .unwrap();
+    }
+
+    /// An upgrade that fails keeps the copy from before it: once a migration went in it is the
+    /// only way back; when none did, the next start replaces it with a new one.
+    #[test]
+    fn a_failed_upgrade_keeps_the_copy_once_the_library_changed() {
+        assert_eq!(MIGRATIONS.last().unwrap().0, 19, "the test breaks migration 19");
+        let dir = tempfile::tempdir().unwrap();
+        // 17 -> 18 goes in, 19 fails
+        let path = dir.path().join("two.db");
+        library_whose_upgrade_fails(&path, 17);
+        assert!(Library::open_node_library(&path).is_err());
+        let copy = Library::before_upgrade_path(&path);
+        let kept: i64 = Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 17, "the copy from before 18 stays");
+        // Started again (a service manager does): 19 fails again, on a library at 18 now. The
+        // copy from before 18 is this upgrade's and stays, neither replaced nor removed
+        assert!(Library::open_node_library(&path).is_err());
+        let kept: i64 = Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 17, "the copy from before 18 stays after a restart");
+        // A copy whose note does not hold (not at the version it names) is replaced as before
+        std::fs::write(copy_note_path(&copy), "16").unwrap();
+        assert!(Library::open_node_library(&path).is_err());
+        let kept: i64 = Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 18, "replaced by one at 18, and kept");
+        // Rolled back to the copy (as the guide says) and used: the next try copies it anew
+        let path = dir.path().join("rolled.db");
+        library_whose_upgrade_fails(&path, 17);
+        assert!(Library::open_node_library(&path).is_err());
+        let copy = Library::before_upgrade_path(&path);
+        std::fs::copy(&copy, &path).unwrap();
+        for side in ["rolled.db-wal", "rolled.db-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(side));
+        }
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO settings(key, value) VALUES ('since', 'the rollback')",
+                [],
+            )
+            .unwrap();
+        assert!(Library::open_node_library(&path).is_err());
+        let since: Option<String> = Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT value FROM settings WHERE key = 'since'", [], |r| r.get(0))
+            .ok();
+        assert_eq!(
+            since.as_deref(),
+            Some("the rollback"),
+            "a new copy, from after the rollback"
+        );
+        // 18 -> 19 fails: nothing went in, the copy stays until an open goes through
+        let path = dir.path().join("one.db");
+        library_whose_upgrade_fails(&path, 18);
+        assert!(Library::open_node_library(&path).is_err());
+        assert!(Library::before_upgrade_path(&path).exists());
+        assert_eq!(schema_to_upgrade(&path).map(|(v, _)| v), Some(18));
+    }
+
+    /// An open that fails before any migration goes in keeps the copy: the next try may get a
+    /// migration in and fail at a later one, and then the copy is the only way back.
+    #[test]
+    fn a_failed_open_keeps_the_copy_for_the_next_try() {
+        assert_eq!(MIGRATIONS.last().unwrap().0, 19, "the test breaks migration 19");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let copy = Library::before_upgrade_path(&path);
+        // 17 -> 18 would go in, 19 fails; this open fails before either
+        library_whose_upgrade_fails(&path, 17);
+        let version_of = |file: &Path| -> i64 {
+            Connection::open(file)
+                .unwrap()
+                .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+                .unwrap()
+        };
+        FAILING_OPENS.with(|n| n.set(1));
+        assert!(Library::open_node_library(&path).is_err());
+        FAILING_OPENS.with(|n| n.set(0));
+        assert_eq!(version_of(&copy), 17, "the copy stays after the failed open");
+        assert_eq!(version_of(&path), 17, "nothing went in");
+        // The next start: 18 goes in, 19 fails, and the library at 17 is still in the copy
+        assert!(Library::open_node_library(&path).is_err());
+        assert_eq!(version_of(&path), 18);
+        assert_eq!(version_of(&copy), 17, "the copy from before 18 stays");
+    }
+
+    /// Once an upgrade is over its copy's note goes: after a rollback to the copy (as the guide
+    /// says) and changes, the next upgrade keeps a new copy with those changes, not the old one.
+    #[test]
+    fn a_rolled_back_library_gets_a_new_copy_at_the_next_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for (v, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 17) {
+                conn.execute_batch(sql).unwrap();
+                conn.execute(
+                    "INSERT INTO schema_version(version, applied_at) VALUES (?1, 0)",
+                    params![v],
+                )
+                .unwrap();
+            }
+        }
+        drop(Library::open_node_library(&path).unwrap());
+        let copy = Library::before_upgrade_path(&path);
+        assert!(copy.exists());
+        assert!(!copy_note_path(&copy).exists(), "the upgrade is over");
+        // Rolled back: the copy in place of the library, then changed by the older version
+        std::fs::copy(&copy, &path).unwrap();
+        for side in ["library.db-wal", "library.db-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(side));
+        }
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO settings(key, value) VALUES ('since', 'the rollback')",
+                [],
+            )
+            .unwrap();
+        drop(Library::open_node_library(&path).unwrap());
+        let kept: Option<String> = Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT value FROM settings WHERE key = 'since'", [], |r| r.get(0))
+            .ok();
+        assert_eq!(kept.as_deref(), Some("the rollback"), "a new copy");
+    }
+
+    /// `keep_copy` puts a whole copy in place of an older one and leaves no part file.
+    #[test]
+    fn a_kept_copy_replaces_the_older_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(&dir.path().join("library.db")).unwrap();
+        let copy = dir.path().join("library.db.bak");
+        std::fs::write(&copy, b"an older copy").unwrap();
+        lib.set_setting("now", "1").unwrap();
+        lib.keep_copy(&copy).unwrap();
+        lib.set_setting("now", "2").unwrap();
+        let kept = Library::open(&copy).unwrap();
+        assert_eq!(kept.get_setting("now").unwrap().as_deref(), Some("1"));
+        assert!(!dir.path().join("library.db.bak.part").exists());
+        // A copy that cannot be made is an error (the web restore then changes nothing)
+        drop(kept);
+        let blocked = dir.path().join("no such folder").join("library.db.bak");
+        assert!(lib.keep_copy(&blocked).is_err());
     }
 }

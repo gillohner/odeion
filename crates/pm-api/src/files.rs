@@ -209,10 +209,13 @@ pub(crate) async fn copy_one(
 }
 
 /// One file's bytes to `remote`: Ok(false) when a good copy is there already. Sent only where
-/// nothing good is (a path in `present` is checked first), guarded (the reserve with what is
+/// nothing good is (what is there now is checked first, unless `present` lists the path with
+/// this size: a path the start's listing did not have may have been written since, by another
+/// node or an upload, and an upload that failed over it would be removed as half written; one
+/// whose check fails is not sent), guarded (the reserve with what is
 /// really sent, recorded while in flight, checked after, nothing half written left there), and
 /// added to `present` once there.
-async fn send_one(
+pub(crate) async fn send_one(
     s: &NodeState,
     target: &dyn crate::copy_guard::Target,
     room: &dyn crate::copy_guard::Room,
@@ -222,8 +225,21 @@ async fn send_one(
 ) -> Result<bool, crate::copy_guard::Refused> {
     let len = bytes.len() as u64;
     match present.get(remote) {
-        None => {}
         Some(sz) if *sz == Some(len) => return Ok(false),
+        // Not listed: a good copy there now is kept; sent when there is none. Not when that
+        // cannot be checked: a failed upload's clean-up could remove a good copy written since
+        None => match crate::copy_guard::whole_copy_there(target, remote, len).await {
+            Ok(true) => {
+                present.insert(remote.to_string(), Some(len));
+                return Ok(false);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                return Err(crate::copy_guard::Refused::Other(format!(
+                    "couldn't check the copy there ({e})"
+                )))
+            }
+        },
         // Listed with its size unknown or another: what is there now decides
         Some(_) => match crate::copy_guard::needs_sending(target, remote, len).await {
             Ok(true) => {}
