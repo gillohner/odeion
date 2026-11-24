@@ -242,13 +242,16 @@ async function nowPlaying(browser, width) {
       await page.goBack(); await page.waitForTimeout(500);
       check(!await npShown(page) && await onQueue(), `${label} ${m}: then Back closes Now playing, on the Queue, no entry left (${await at()})`);
       await reset();
-      // (N pressed with the list of shortcuts open over Now playing closes Now playing under it: Esc
-      // then leaves no entry in the history)
+      // (N pressed with the list of shortcuts open is the dialog's key, not the player's: Now playing
+      // under it stays as it is. Esc closes the list, then Back closes Now playing, no entry left)
       s = await npMenu(sleep);
       await page.keyboard.press('?'); await page.waitForTimeout(400);
       await page.keyboard.press('n'); await page.waitForTimeout(400);
+      check(s && await helpOpen(page) && await npShown(page), `${label} ${m}: ?, then N: the list of shortcuts stays open and Now playing stays under it (${await at()})`);
       await page.keyboard.press('Escape'); await page.waitForTimeout(500);
-      check(s && !await helpOpen(page) && !await npShown(page) && await onQueue(), `${label} ${m}: ?, N, then Esc: all closed, on the Queue, no entry left (${await at()})`);
+      check(!await helpOpen(page) && await npShown(page) && await transient(page), `${label} ${m}: then Esc closes only the list, Now playing stays (${await at()})`);
+      await page.goBack(); await page.waitForTimeout(500);
+      check(!await npShown(page) && await onQueue(), `${label} ${m}: then Back closes Now playing, on the Queue, no entry left (${await at()})`);
       await reset();
       s = await npMenu(sleep);
       await page.keyboard.press('n'); await page.waitForTimeout(500);

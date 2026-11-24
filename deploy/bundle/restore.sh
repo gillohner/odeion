@@ -18,6 +18,17 @@ die() { echo "restore: $*" >&2; exit 1; }
 B=$(cd "$1" 2>/dev/null && pwd) || die "no folder $1"
 [ -f "$B/SHA256SUMS" ] || die "$B is not a complete backup (no SHA256SUMS)"
 (cd "$B" && sha256sum --quiet -c SHA256SUMS) || die "files in $B do not match their checksums"
+# The start at boot (start-at-boot.sh) would start the bundle half-way through: its retries go on
+# after a plain disable
+if command -v systemctl >/dev/null 2>&1; then
+  case $(systemctl show -p ActiveState --value odeion-bundle.service 2>/dev/null) in
+    '' | inactive | failed) systemctl is-enabled -q odeion-bundle.service 2>/dev/null && on=1 || on= ;;
+    *) on=1 ;;
+  esac
+  # a retry that waits for its 30 s (some systemd versions call that failed, not activating)
+  case $(systemctl show -p SubState --value odeion-bundle.service 2>/dev/null) in auto-restart*) on=1 ;; esac
+  [ -z "$on" ] || die "odeion-bundle.service (the start at boot) is on: sudo systemctl disable --now odeion-bundle first, then sudo ./start-at-boot.sh after the restore"
+fi
 # curl for the node's API (pinned), and the small image the compose file already uses
 CURL=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
 ALPINE=$(sed -n 's/^ *image: *\(alpine:[^ ]*\).*/\1/p' docker-compose.yml | head -n 1)

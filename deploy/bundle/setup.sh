@@ -43,3 +43,6 @@ put CLOUDFLARE_TUNNEL_TOKEN ""
 echo "Wrote $ENV (passwords generated, not shown). LAN address: ${IP:-unknown, set PUBLIC_IP}."
 echo "Music folder: $(sed -n 's/^MUSIC_DIR=//p' "$ENV"). Edit $ENV to change it, then: docker compose up -d"
 echo "The node's API token and the homeserver admin password are in $ENV."
+if [ -d /run/systemd/system ] && [ ! -f /etc/systemd/system/odeion-bundle.service ]; then
+  echo "So the node also comes back after a reboot when a network share answers late: sudo ./start-at-boot.sh"
+fi
