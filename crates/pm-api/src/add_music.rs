@@ -288,9 +288,6 @@ pub(crate) async fn store(
     {
         return Ok(Stored::Already(remote));
     }
-    // To the node's own homeserver there is no uplink to spare; to another one, pace the copy.
-    let rate = if bundled { 0 } else { crate::files::copy_rate(s) };
-    let keep_local = (!bundled).then(|| bytes.clone());
     // Listed at another size: what is there now decides (it may be under another name)
     if have.contains_key(&hash[..16]) {
         match crate::copy_guard::needs_sending(target, &remote, len).await {
@@ -298,7 +295,21 @@ pub(crate) async fn store(
             Ok(false) => return Ok(Stored::Already(remote)),
             Err(e) => return Err(format!("{name}: couldn't check the copy there ({e})")),
         }
+    } else {
+        // Not listed: a whole copy written there since is kept, and nothing is sent when that
+        // can't be checked (a failed upload's clean-up could remove a good copy), as a copy does
+        match crate::copy_guard::whole_copy_there(target, &remote, len).await {
+            Ok(true) => {
+                have.insert(hash[..16].to_string(), Some(len));
+                return Ok(Stored::Already(remote));
+            }
+            Ok(false) => {}
+            Err(e) => return Err(format!("{name}: couldn't check the copy there ({e})")),
+        }
     }
+    // To the node's own homeserver there is no uplink to spare; to another one, pace the copy.
+    let rate = if bundled { 0 } else { crate::files::copy_rate(s) };
+    let keep_local = (!bundled).then(|| bytes.clone());
     // Guarded: the reserve of the disk it lands on (the bundled homeserver's, else this node's
     // mirror), and nothing half written left there
     let rate = (rate > 0).then_some(rate);
