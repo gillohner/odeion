@@ -37,6 +37,10 @@ Newest first. Dates are when the change landed on `main`.
 
 - **A tap right as Songs fills in reaches the song's buttons.** Since song rows off screen are drawn only when they come near, a tap in the one frame after the rows were put in (opening Songs, typing a filter) landed on the row itself instead of its ⋯ or Play. The first 24 rows, a screenful, are drawn as soon as they are put in.
 
+### 2026-11-23
+
+- **A message at the foot of the page is no longer lost to the next one.** There is one place for these messages, and a new one replaced whatever was there: an error could be gone a moment after it appeared ("Reconnected" came, or the page said something else), and an Undo could be replaced before you reached it. An error, and a message with a button (Undo, Shuffle my music), now stays at least 2.5 seconds; a plain message that comes in that time waits and shows after. An error is announced to a screen reader as one. A message raised while a dialog is open shows over the dialog (it was drawn under the dialog's dark backdrop). A message that waits for an answer ("Bringing the songs back…") has a spinner.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.
