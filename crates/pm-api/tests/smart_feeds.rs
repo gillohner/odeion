@@ -126,7 +126,8 @@ async fn feeds_left_behind_are_deleted_on_the_homeserver() {
         .await
         .unwrap();
     let z32 = session.public_key().to_string();
-    let homeserver = pm_pubky::homeserver::NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver =
+        pm_pubky::homeserver::NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let dir = tempfile::tempdir().unwrap();
     let s = node(dir.path());
     s.set_sync(Some(Arc::new(pm_api::sync::PubkySync::from_session(

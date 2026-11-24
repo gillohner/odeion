@@ -50,7 +50,7 @@ async function openAlbum(page) {
       try {
         await openAlbum(page);
         const before = await look(page);
-        check(before.text === LONGER && before.cut, `${width} album from a long-named playlist: Back reads the whole name, cut with … on screen`);
+        check(before.text === LONGER && before.cut, `${width} album from a long-named collection: Back reads the whole name, cut with … on screen`);
         check(before.title === null, `${width}: no tooltip before the mouse comes`);
         await hover(page);
         const on = await look(page);

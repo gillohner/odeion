@@ -230,12 +230,17 @@ async fn rest(
     body: String,
 ) -> Response {
     // Last value wins in the map (what clients expect for `v`, `c`, `f`); every
-    // `id` is also kept in order for calls that take several (jukebox add).
+    // `id` is also kept in order for calls that take several (jukebox add), and so is every
+    // value of the parameters a playlist call repeats ([`REPEATED`]).
     let mut params = Params::new();
     let mut ids = Vec::new();
     for (k, v) in url::form_urlencoded::parse(raw_query.as_deref().unwrap_or("").as_bytes()) {
         if k == "id" {
             ids.push(v.to_string());
+        }
+        if REPEATED.contains(&k.as_ref()) {
+            add_repeated(&mut params, &k, &v);
+            continue;
         }
         params.insert(k.into_owned(), v.into_owned());
     }
@@ -248,36 +253,71 @@ async fn rest(
             if k == "id" {
                 ids.push(v.to_string());
             }
+            if REPEATED.contains(&k.as_ref()) {
+                add_repeated(&mut params, &k, &v);
+                continue;
+            }
             params.entry(k.into_owned()).or_insert(v.into_owned());
         }
     }
     let method = method.trim_end_matches(".view").to_string();
     let fmt = fmt_of(&params);
-    if let Err(e) = authenticate(&s, &params) {
-        return error_response(fmt, e);
+    let app = match authenticate(&s, &params) {
+        Ok(app) => app,
+        Err(e) => return error_response(fmt, e),
+    };
+    if app && !app_may(&method) {
+        return error_response(
+            fmt,
+            SubErr::new(50, "An app password can't do that: use the node's API token"),
+        );
     }
     match dispatch(&s, &method, &params, &ids, &headers).await {
+        // An app password reads file names, not where the owner keeps files (as on /v1)
+        // (and no node sign-in in a link, a saved radio station's say: as a person's answers)
+        Ok(Reply::Json(m)) if app => {
+            let mut v = Value::Object(m);
+            drop_paths(&mut v);
+            let known = crate::accounts::KnownTokens::lazy(&s);
+            crate::accounts::hide_for_listener(
+                &mut v,
+                &crate::accounts::library_roots(&s),
+                &s.node_origins(),
+                &|t| known.has(t),
+            );
+            let Value::Object(m) = v else {
+                unreachable!("an object stays an object")
+            };
+            envelope(fmt, "ok", m)
+        }
         Ok(Reply::Json(m)) => envelope(fmt, "ok", m),
         Ok(Reply::Raw(r)) => r,
         Err(e) => error_response(fmt, e),
     }
 }
 
-fn authenticate(s: &NodeState, p: &Params) -> Result<(), SubErr> {
+/// Who is asking: the API token (or a node without one) is `Ok(false)`; one of the owner's app
+/// passwords `Ok(true)` ([`app_may`]).
+fn authenticate(s: &NodeState, p: &Params) -> Result<bool, SubErr> {
     let Some(token) = s.token() else {
-        return Ok(());
+        return Ok(false);
     };
     let user = p.get("u").map(String::as_str).unwrap_or("");
     if user != s.subsonic_user {
         return Err(SubErr::new(40, "Wrong username or password"));
     }
+    let same = crate::app_passwords::same;
     if let (Some(t), Some(salt)) = (p.get("t"), p.get("s")) {
         let mut h = Md5::new();
         h.update(token.as_bytes());
         h.update(salt.as_bytes());
         let want = hex::encode(h.finalize());
-        if want.eq_ignore_ascii_case(t) {
-            return Ok(());
+        if same(want.as_bytes(), t.to_ascii_lowercase().as_bytes()) {
+            return Ok(false);
+        }
+        if let Some(id) = crate::app_passwords::of_subsonic_token(s, salt, t) {
+            crate::app_passwords::note_used_now(s, &id);
+            return Ok(true);
         }
         return Err(SubErr::new(40, "Wrong username or password"));
     }
@@ -289,11 +329,40 @@ fn authenticate(s: &NodeState, p: &Params) -> Result<(), SubErr> {
                 .unwrap_or_default(),
             None => pw.clone(),
         };
-        if plain == *token {
-            return Ok(());
+        if same(plain.as_bytes(), token.as_bytes()) {
+            return Ok(false);
+        }
+        if let Some(id) = crate::app_passwords::of(s, &plain) {
+            crate::app_passwords::note_used_now(s, &id);
+            return Ok(true);
         }
     }
     Err(SubErr::new(40, "Wrong username or password"))
+}
+
+/// Takes every `path` (a song's file on the node's disk) out of an answer.
+fn drop_paths(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            o.remove("path");
+            o.values_mut().for_each(drop_paths);
+        }
+        Value::Array(a) => a.iter_mut().for_each(drop_paths),
+        _ => {}
+    }
+}
+
+/// What an app password may ask of Subsonic: everything a player does (browse, search, stream,
+/// stars and ratings, playlists, bookmarks, the play queue, scrobbles, the jukebox), not what
+/// changes the node: scanning the library, the radio station list.
+fn app_may(method: &str) -> bool {
+    !matches!(
+        method,
+        "startScan"
+            | "createInternetRadioStation"
+            | "updateInternetRadioStation"
+            | "deleteInternetRadioStation"
+    )
 }
 
 fn want(p: &Params, k: &str) -> Result<String, SubErr> {
@@ -485,7 +554,8 @@ fn playlist_json(lib: &Library, row: &MusicPostRow, p: &Playlist, with_entries: 
         "comment": p.description,
         "songCount": tracks.len(),
         "duration": duration,
-        "public": false,
+        // (shared on Pubky or not; a client that sends this back with an edit changes nothing)
+        "public": row.visibility == "public",
         "owner": "pubky",
         "created": iso(p.created_at / 1_000_000),
         "changed": iso(p.updated_at / 1_000_000),
@@ -528,9 +598,33 @@ fn save_playlist(lib: &Library, id: &str, mut p: Playlist, visibility: Visibilit
     Ok(())
 }
 
+/// The parameters a client sends once per value (`songId=1&songId=2`, as the Subsonic API
+/// describes them): every value counts, in the order sent.
+const REPEATED: [&str; 3] = ["songId", "songIdToAdd", "songIndexToRemove"];
+
+/// Keep one more value of a [`REPEATED`] parameter: the values are numbers, so they are kept as
+/// the comma list [`multi`] reads.
+fn add_repeated(params: &mut Params, key: &str, value: &str) {
+    let all = params.entry(key.to_string()).or_default();
+    if !all.is_empty() {
+        all.push(',');
+    }
+    all.push_str(value);
+}
+
+/// What a stored playlist is: shared on Pubky or not. An edit keeps it, unless it says
+/// `public=false` (`updatePlaylist`).
+fn visibility_of(row: &MusicPostRow) -> Visibility {
+    if row.visibility == "public" {
+        Visibility::Public
+    } else {
+        Visibility::Private
+    }
+}
+
 fn multi(p: &Params, key: &str) -> Vec<String> {
-    // axum's Query keeps the last duplicate; clients that send several
-    // `songId=` also work with a comma list, which we accept too.
+    // Every value of a repeated parameter ([`add_repeated`]); a comma list in one value is
+    // taken too.
     p.get(key)
         .map(|v| {
             v.split(',')
@@ -1313,13 +1407,30 @@ async fn dispatch(
             let (items, local) = items_for_song_ids(&lib, &songs)?;
             if let Some(pid) = p.get("playlistId") {
                 // Subsonic semantics: createPlaylist with playlistId replaces the item list.
+                // That is the list the client was given: what it was never shown (an item that
+                // is no song of this library, such as one from a streaming service) stays, after
+                // the new songs.
                 let (row, mut pl) = load_playlist(&lib, pid)?;
+                let shown = playlist_entries(&lib, &row.id, &pl);
+                let old_local = playlists::local_ids(&lib, &row.id);
+                let mut items = items;
+                let mut local = local;
+                for (k, item) in pl.items.iter().enumerate() {
+                    if !shown.iter().any(|(e, _)| matches!(e, Entry::Item(i) if *i == k)) {
+                        items.push(item.clone());
+                    }
+                }
+                for (k, id) in old_local.iter().enumerate() {
+                    if !shown.iter().any(|(e, _)| matches!(e, Entry::Local(i) if *i == k)) {
+                        local.push(*id);
+                    }
+                }
                 pl.items = items;
                 playlists::set_local_ids(&lib, &row.id, &local).map_err(|e| SubErr::new(0, e.message))?;
                 if let Some(n) = p.get("name") {
                     pl.name = n.clone();
                 }
-                save_playlist(&lib, &row.id, pl, Visibility::Private)?;
+                save_playlist(&lib, &row.id, pl, visibility_of(&row))?;
                 let (row, pl) = load_playlist(&lib, pid)?;
                 m.insert("playlist".into(), playlist_json(&lib, &row, &pl, true));
             } else {
@@ -1378,7 +1489,14 @@ async fn dispatch(
             pl.items.extend(add);
             local.extend(add_local);
             playlists::set_local_ids(&lib, &row.id, &local).map_err(|e| SubErr::new(0, e.message))?;
-            save_playlist(&lib, &row.id, pl, Visibility::Private)?;
+            // `public=false` takes a shared playlist back. `public=true` does not share one: to
+            // a Subsonic client the word means "the other accounts of this server may see it",
+            // and sharing here publishes the playlist on Pubky, which is asked for in the app.
+            let visibility = match p.get("public") {
+                Some(v) if v.trim().eq_ignore_ascii_case("false") => Visibility::Private,
+                _ => visibility_of(&row),
+            };
+            save_playlist(&lib, &row.id, pl, visibility)?;
             drop(lib);
             s.notify_library();
         }

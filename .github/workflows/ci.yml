@@ -51,7 +51,9 @@ jobs:
           files=$(git diff --name-only "$BASE" "$GITHUB_SHA")
           code=$(printf '%s\n' "$files" | grep -Ev '^(docs/|NOTICE$|LICENSE$)|\.md$' | grep -c . || true)
           echo "$(printf '%s\n' "$files" | grep -c . || true) files changed, $code outside the docs"
-          if [ "$code" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
+          # docs/access.md is read by a Rust test (pm-api access::tests): a change to it alone runs the code jobs
+          held=$(printf '%s\n' "$files" | grep -cx 'docs/access\.md' || true)
+          if [ "$code" -gt 0 ] || [ "$held" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
           image=$(printf '%s\n' "$files" | grep -Ec '^(Dockerfile|\.dockerignore|Cargo\.(toml|lock)|crates/[^/]+/Cargo\.toml|rust-toolchain(\.toml)?|deploy/docker/|tools/release/|\.github/workflows/)' || true)
           if [ "$EVENT" = push ] || [ "$image" -gt 0 ]; then echo "docker=true" >> "$GITHUB_OUTPUT"; else echo "docker=false" >> "$GITHUB_OUTPUT"; fi
           echo "$image files the image is built from"
@@ -69,10 +71,29 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # One cache of the dependencies for every job that builds the workspace, saved by this
+          # job on main only (it builds them all); pull requests read it and save nothing
+          shared-key: ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # cargo-nextest runs the test binaries side by side (cargo test runs them one after another,
+      # so the slowest binaries set the job's length). A pinned release, checked by its SHA-256.
+      - name: install cargo-nextest
+        env:
+          NEXTEST: "0.9.152"
+          NEXTEST_SHA256: d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a
+        run: |
+          f="cargo-nextest-$NEXTEST-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST/$f"
+          echo "$NEXTEST_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$HOME/.cargo/bin"
+          cargo nextest --version
+      - run: cargo nextest run --workspace --profile ci
+      # nextest does not run doctests.
+      - run: cargo test --workspace --doc
       # The ALSA output only compiles with libasound; its unit tests need no hardware.
       - run: cargo clippy -p pm-node -p pm-out-local -p pm-endpoint --all-targets --features alsa -- -D warnings
       # The cross-platform output compiles on Linux too (cpal uses ALSA there).
@@ -83,21 +104,22 @@ jobs:
           RUSTDOCFLAGS: -D warnings
   # pm-node/odeiond and the big-library generator, built once for the jobs below that run them
   # (slimproto, plex, audiobookshelf, bundle, webdav, connection, web-ui, speed, ui-controls,
-  # ui-screens). Default features and line tables, as in .cargo/config.toml. Jobs with additional
+  # ui-screens). Default features, and line tables from .cargo/config.toml. Jobs with additional
   # Rust integration tests keep their own test builds; ALSA keeps its feature-specific node build.
   node:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
-    env:
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci
+          save-if: false
       - run: cargo build -p pm-node && cargo build -p pm-library --example big_library
       - run: tar -czf node-debug.tgz -C target/debug pm-node odeiond examples/big_library && ls -la node-debug.tgz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -165,6 +187,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: crates/pm-desktop
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libasound2-dev
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -186,8 +209,6 @@ jobs:
           context: .
           push: false
           tags: pubky-music-node:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
   sidecar:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -225,7 +246,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: alsa
+          shared-key: ci
+          save-if: false
       - name: a generic kernel with snd-aloop, and virtme-ng
         run: |
           bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
@@ -330,6 +352,9 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci
+          save-if: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
@@ -362,6 +387,9 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci
+          save-if: false
       # Same-run default-feature daemon; homeserver/vault test builds remain independent below.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -371,7 +399,9 @@ jobs:
       - name: the node's CI image
         run: |
           cp target/debug/odeiond deploy/docker/entrypoint.sh deploy/bundle/ci/
-          docker build -q --build-arg APT_MIRROR="${APT_FALLBACK_MIRROR:-}" -t pubky-music-node:ci deploy/bundle/ci
+          # Plain progress, so a stall shows its step. Without a fallback mirror the container's apt
+          # uses the Azure Ubuntu mirror, not the plain-HTTP archive hosts.
+          docker build --progress=plain --build-arg APT_MIRROR="${APT_FALLBACK_MIRROR:-http://azure.archive.ubuntu.com/ubuntu}" -t pubky-music-node:ci deploy/bundle/ci
           # The image carries ffmpeg with the encoders downloads use
           docker run --rm --entrypoint ffmpeg pubky-music-node:ci -hide_banner -encoders | grep -E ' aac | libmp3lame | libopus ' | wc -l | grep -qx 3
       - name: docker compose up
@@ -580,12 +610,17 @@ jobs:
         run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true; tail -n 30 /tmp/pwa/out/node.log || true
 
   # The UI pages checked against fixtures in a real Chromium (tools/ui-fixture.js: the app's own
-  # files, no node, no build), split over seven runners; every page is in exactly one of them.
-  # The pages that take a minute or more have a fixed runner (`pin` below), so new pages added to
-  # the list cannot shift them all onto one runner; the others go round robin. Each runner has
-  # about 15 minutes of pages, plus the Playwright install (usually under a minute).
+  # files, no node, no build), split over three runners that each run three pages at a time; every
+  # page is in exactly one of them. The pages mostly wait (for timers, frames, the fixture's
+  # delays), so three side by side take a third of the time on the same runner: measured on #791
+  # with all 167 pages, twice, no page failed, 40 runner-minutes against 115 for seven runners
+  # with one page at a time. The pages that take a minute or more have a fixed runner (a number
+  # after the page in tools/ui-fixtures.list), spread by their measured times, and start first;
+  # the others go round robin. Each runner takes about 12 minutes, plus the Playwright install.
+  # The list is a file of its own, so a new page changes no workflow (a workflow change also runs
+  # the `docker` job).
   ui-fixtures:
-    name: ui-fixtures (${{ matrix.shard }}/7)
+    name: ui-fixtures (${{ matrix.shard }}/3)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
@@ -593,7 +628,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -607,209 +642,14 @@ jobs:
           npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
           bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh"
           npx playwright install --with-deps chromium >/dev/null
+      # The pages and their runners are tools/ui-fixtures.list (a page with a runner number runs
+      # there, the others go round robin in list order); the runner script checks the list and
+      # prints each page's output in one piece with its time
       - name: the pages, against fixtures
         env:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ strategy.job-total }}
-        run: |
-          cd /tmp/pw
-          # The pages that took a minute or more on CI, as page=runner, spread so each runner has about
-          # the same total (runner 2 also runs the identify check, ~2 min); each must be in the list below
-          pin='
-            ui-library-count-redraw.js=1 ui-item-redraw.js=1 ui-menu-keys.js=1
-            ui-usb-dac.js=2 ui-phone-action-rows.js=2 ui-browser-midsong.js=2 ui-srow-click.js=2
-            ui-row-click.js=3 ui-phone-libnav-focus.js=3 ui-select-bar-focus.js=3 ui-empty-queue.js=3
-            ui-sticky-focus.js=4 ui-browser-keys.js=4 ui-similar-tiles.js=4 ui-phone-simplify.js=4 ui-queue-row-menu.js=4
-            ui-browser-place.js=5 ui-review-fixes.js=5 ui-search-shared-link.js=5
-            ui-motion.js=6 ui-shuffle-repeat.js=6 ui-move-toast.js=6 ui-native-player.js=6
-            ui-phone-rating-redraw.js=7
-          '
-          pin=" $(echo $pin) "
-          n=0
-          seen=' '
-          while read -r script shots; do
-            case "$seen" in *" $script "*) echo "::error::$script is in the list twice"; exit 1 ;; esac
-            seen="$seen$script "
-            case "$pin" in
-              *" $script="*) s=${pin#*" $script="}; s=${s%% *} ;;
-              *) n=$((n + 1)); s=$(( (n - 1) % SHARDS + 1 )) ;;
-            esac
-            [ "$s" = "$SHARD" ] || continue
-            echo "::group::$script"
-            node "$GITHUB_WORKSPACE/tools/$script" "$GITHUB_WORKSPACE" "/tmp/pm/$shots" < /dev/null
-            echo "::endgroup::"
-          done <<'LIST'
-          ui-browser-library.js library-playback-shots
-          ui-search-routing.js search-routing-shots
-          ui-artist-links.js artist-link-shots
-          ui-review-fixes.js review-fixes-shots
-          ui-personal-play-share.js personal-play-share-shots
-          ui-tablet.js tablet-shots
-          ui-topbar.js topbar-shots
-          ui-phone-mini-reach.js phone-mini-reach-shots
-          ui-phone-along-chip.js phone-along-chip-shots
-          ui-busy.js busy-shots
-          ui-tag-page.js tag-page-shots
-          ui-controls-search-check.js controls-search-shots
-          ui-search-recovery.js search-recovery-shots
-          ui-search-contact.js search-contact-shots
-          ui-source-policy.js source-policy-shots
-          ui-choice-chips.js choice-chips-shots
-          ui-queue-covers.js queue-covers-shots
-          ui-versions.js versions-shots
-          ui-similar-tiles.js similar-shots
-          ui-connect-ring.js connect-ring-shots
-          ui-tap-highlight.js tap-highlight-shots
-          ui-here-name.js here-name-shots
-          ui-android-first.js android-first-shots
-          ui-old-webview.js old-webview-shots
-          ui-phone-dialog-actions.js phone-dialog-shots
-          ui-phone-switch-targets.js phone-switch-targets-shots
-          ui-phone-source-chip.js phone-source-chip-shots
-          ui-phone-select-bar.js phone-select-bar-shots
-          ui-nowplaying-phone.js nowplaying-phone-shots
-          ui-phone-simplify.js phone-simplify-shots
-          ui-motion.js motion-shots
-          ui-shuffle-repeat.js shuffle-repeat-shots
-          ui-redesign.js redesign-shots
-          ui-item-about.js item-about-shots
-          ui-rating-hero.js rating-hero-shots
-          ui-usb-dac.js usb-dac-shots
-          ui-native-player.js native-player-shots
-          ui-app-downloads.js app-downloads-shots
-          ui-offline-play.js offline-play-shots
-          ui-downloads-rows.js downloads-rows-shots
-          ui-android-media.js android-media-shots
-          ui-phone-library-targets.js phone-library-targets-shots
-          ui-drive-return.js drive-return-shots
-          ui-drive-folders.js drive-folders-shots
-          ui-phone-back-targets.js phone-back-targets-shots
-          ui-back-tooltip.js back-tooltip-shots
-          ui-signin-return.js signin-return-shots
-          ui-phone-page-buttons.js phone-page-buttons-shots
-          ui-phone-input-targets.js phone-input-targets-shots
-          ui-phone-zone-cards.js phone-zone-cards-shots
-          ui-zones-quiet.js zones-quiet-shots
-          ui-zone-paused-error.js zone-paused-error-shots
-          ui-zone-state-words.js zone-state-words-shots
-          ui-zone-card-mute.js zone-card-mute-shots
-          ui-zone-card-volume-room.js zone-card-volume-room-shots
-          ui-playto-follows.js playto-follows-shots
-          ui-wrong-match.js wrong-match-shots
-          ui-libstatus-wrap.js libstatus-wrap-shots
-          ui-favourites-count.js favourites-count-shots
-          ui-favourites-empty.js favourites-empty-shots
-          ui-library-count-redraw.js library-count-redraw-shots
-          ui-empty-head-count.js empty-head-count-shots
-          ui-head-count-separators.js head-count-separators-shots
-          ui-musicbrainz-contact.js musicbrainz-contact-shots
-          ui-add-music-ask.js add-music-ask-shots
-          ui-phone-library-nav.js phone-library-nav-shots
-          ui-phone-action-rows.js phone-action-rows-shots
-          ui-phone-queue-rows.js phone-queue-rows-shots
-          ui-phone-item-hero-row.js phone-item-hero-row-shots
-          ui-phone-rating-taps.js phone-rating-taps-shots
-          ui-phone-rating-redraw.js phone-rating-redraw-shots
-          ui-phone-home-trending.js phone-home-trending-shots
-          ui-search-scopes.js search-scopes-shots
-          ui-phone-search-head.js phone-search-head-shots
-          ui-search-music.js search-music-shots
-          ui-search-leave.js search-leave-shots
-          ui-search-shared-link.js search-shared-link-shots
-          ui-roon-announce.js roon-announce-shots
-          ui-library-sort.js library-sort-shots
-          ui-artist-row-chevron.js artist-row-chevron-shots
-          ui-list-redraw.js list-redraw-shots
-          ui-song-links.js song-links-shots
-          ui-phone-song-rows.js phone-song-rows-shots
-          ui-playlist-remove-window.js playlist-remove-window-shots
-          ui-playlist-menu-remove-focus.js playlist-menu-remove-focus-shots
-          ui-playlist-filter-remove-focus.js playlist-filter-remove-focus-shots
-          ui-item-links.js item-links-shots
-          ui-item-source-line.js item-source-line-shots
-          ui-phone-hero-reach.js phone-hero-reach-shots
-          ui-usage.js usage-shots
-          ui-roon-import.js roon-import-shots
-          ui-playlist-file-import.js playlist-file-import-shots
-          ui-playlists-redraw.js playlists-redraw-shots
-          ui-playlist-count.js playlist-count-shots
-          ui-playlist-stale-draw.js playlist-stale-draw-shots
-          ui-rows-search-sort.js rows-search-sort-shots
-          ui-filter-none.js filter-none-shots
-          ui-albums-empty.js albums-empty-shots
-          ui-genres-publish.js genres-publish-shots
-          ui-genre-card-contrast.js genre-card-contrast-shots
-          ui-phone-head-level.js phone-head-level-shots
-          ui-album-tile-line.js album-tile-line-shots
-          ui-home-album-line.js home-album-line-shots
-          ui-empty-ways-in.js empty-ways-in-shots
-          ui-item-redraw.js item-redraw-shots
-          ui-songs-name.js songs-name-shots
-          ui-song-row-album.js song-row-album-shots
-          ui-song-row-focus-ring.js song-row-focus-ring-shots
-          ui-row-click.js row-click-shots
-          ui-menu-close-click.js menu-close-click-shots
-          ui-list-focus-ring.js list-focus-ring-shots
-          ui-list-filter-ends.js list-filter-ends-shots
-          ui-srow-click.js srow-click-shots
-          ui-browser-start-title.js browser-start-title-shots
-          ui-latest-press.js latest-press-shots
-          ui-browser-source-toast.js browser-source-toast-shots
-          ui-sticky-focus.js sticky-focus-shots
-          ui-select-bar-focus.js select-bar-focus-shots
-          ui-row-line-focus.js row-line-focus-shots
-          ui-phone-library-head.js phone-library-head-shots
-          ui-song-menus.js song-menus-shots
-          ui-search-remove-song.js search-remove-song-shots
-          ui-row-names.js row-names-shots
-          ui-play-names.js play-names-shots
-          ui-playlist-toast.js playlist-toast-shots
-          ui-playlist-said-once.js playlist-said-once-shots
-          ui-song-heart.js song-heart-shots
-          ui-source-item-mark.js source-item-mark-shots
-          ui-source-item-row.js source-item-row-shots
-          ui-source-kinds.js source-kinds-shots
-          ui-empty-queue.js empty-queue-shots
-          ui-browser-place.js browser-place-shots
-          ui-browser-keys.js browser-keys-shots
-          ui-hero-cover-fallback.js hero-cover-fallback-shots
-          ui-shortcut-modifiers.js shortcut-modifiers-shots
-          ui-queue-keep-focus.js queue-keep-focus-shots
-          ui-queue-row-menu.js queue-row-menu-shots
-          ui-browser-midsong.js browser-midsong-shots
-          ui-back-place.js back-place-shots
-          ui-row-space-modifiers.js row-space-modifiers-shots
-          ui-play-all-progress.js play-all-progress-shots
-          ui-zone-here-line.js zone-here-line-shots
-          ui-action-gaps.js action-gaps-shots
-          ui-queue-mark.js queue-mark-shots
-          ui-count-separators.js count-separators-shots
-          ui-queue-empty-shuffle.js queue-empty-shuffle-shots
-          ui-home-contact.js home-contact-shots
-          ui-home-stale.js home-stale-shots
-          ui-home-retry.js home-retry-shots
-          ui-home-trend-fail-chips.js home-trend-fail-chips-shots
-          ui-progress-toast.js progress-toast-shots
-          ui-move-toast.js move-toast-shots
-          ui-phone-libnav-focus.js phone-libnav-focus-shots
-          ui-queue-head-phone.js queue-head-phone-shots
-          ui-phone-select-redraw.js phone-select-redraw-shots
-          ui-page-title.js page-title-shots
-          ui-row-focus-redraw.js row-focus-redraw-shots
-          ui-phone-row-numbers.js phone-row-numbers-shots
-          ui-pubky-hang.js pubky-hang-shots
-          ui-item-radio-zone.js item-radio-zone-shots
-          ui-artist-top-songs.js artist-top-songs-shots
-          ui-pop-keys.js pop-keys-shots
-          ui-row-cover-mono.js row-cover-mono-shots
-          ui-menu-keys.js menu-keys-shots
-          ui-fixture-item-pages.js fixture-item-pages-shots
-          ui-search-library-change.js search-library-change-shots
-          LIST
-          for p in $pin; do
-            case "$seen" in *" ${p%=*} "*) ;; *) echo "::error::pinned page ${p%=*} is not in the list"; exit 1 ;; esac
-            [ "${p#*=}" -ge 1 ] && [ "${p#*=}" -le "$SHARDS" ] || { echo "::error::$p: there is no runner ${p#*=}"; exit 1; }
-          done
+        run: cd /tmp/pw && node "$GITHUB_WORKSPACE/tools/ui-fixtures-run.js" --shard "$SHARD/$SHARDS" --jobs 3 < /dev/null
       # feedback.js on a test page, the node mocked: text stays text, a draft is its sign-in's,
       # only ticked details are sent. It takes <token> <mock> <shots>, not the list's <repo> <shots>
       - name: problem reports (Help "?", the report dialog and My reports; mocked node)

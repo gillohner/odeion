@@ -432,7 +432,7 @@ async function auditFocusedReflow(browser) {
       check(await item.evaluate((b) => !b.closest('.popover').classList.contains('sheet') && b.getBoundingClientRect().height < 44), '1280 px desktop keeps its compact menu items');
       await desk.page.locator('.popover.menu .pop-item').filter({ hasText: /^Add to (playlist|collection)/ }).click();
       check(await desk.page.locator('dialog[open] #pplist .list-row').first().evaluate((r) => r.getBoundingClientRect().height < 44), '1280 px desktop keeps its compact picker rows');
-      check(await desk.page.evaluate(() => document.activeElement.id === 'ppq'), '1280 px desktop: the picker opens with the focus in Find a playlist');
+      check(await desk.page.evaluate(() => document.activeElement.id === 'ppq'), '1280 px desktop: the picker opens with the focus in Find a collection');
     } finally { await desk.context.close(); }
     // Desktop and tablet keep the first field focused in Edit tags and Add a WebDAV share
     for (const width of [1280, 768]) {

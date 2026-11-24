@@ -364,7 +364,8 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
     {
       const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
       await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
-      await ctx.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });
+      // (the node's own answer is the owner's, `can` included: a person's list goes with the role)
+      await ctx.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null, can: ['artwork', 'session', 'library', 'zone_list', 'zone_use', 'collections', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in'] } }); });
       let ls = null; await ctx.routeWebSocket(/\/v1\/events/, (ws) => { ws.connectToServer(); ls = ws; });
       const p = await ctx.newPage(); const errors = []; p.on('pageerror', (e) => errors.push(e.message));
       await p.goto(BASE + '/library'); await until(async () => !!ls, 10000); await sleep(1500);

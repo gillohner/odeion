@@ -56,6 +56,9 @@ struct Current {
     /// Where the track was before a seek that hasn't given a block yet: a stream that took the
     /// seek and then fails to read goes on from there instead of ending.
     seek_from: Option<u64>,
+    /// The track has given audio (a block): one that ends without is not started again at once
+    /// (`Engine::silent`).
+    gave_audio: bool,
 }
 
 /// What a source is streaming, with the service taken from the item's uri when the source
@@ -175,6 +178,11 @@ struct Engine {
     /// track's end opens the next item only while fewer than [`OPENS_IN_FLIGHT`] run: a zone has
     /// at most that many opens in flight, however often the queue changes.
     parked: Vec<Arc<AtomicBool>>,
+    /// Items that ended without giving any audio (an empty file, a first block that does not
+    /// decode) since audio last played. None of them is started again by the end of a track
+    /// until something gives audio: with Repeat on, such an item, or a queue of them, would
+    /// start over at once, round after round, each one counted as a play.
+    silent: std::collections::HashSet<u64>,
     /// Crossfade length in ms (0 = off), set from the zone.
     crossfade: Arc<AtomicU64>,
     incoming: Option<Incoming>,
@@ -224,6 +232,7 @@ pub(crate) fn spawn(
         current: None,
         prefetch: None,
         parked: Vec::new(),
+        silent: std::collections::HashSet::new(),
         deferred: std::collections::VecDeque::new(),
         crossfade,
         incoming: None,
@@ -307,7 +316,7 @@ impl Engine {
         self.emit(ZoneEvent::Error { message });
         if self.transport != Transport::Stopped {
             self.transport = Transport::Stopped;
-            self.emit(ZoneEvent::Stopped);
+            self.emit(ZoneEvent::Stopped { queue_ended: false });
         }
         self.dirty = true;
         self.publish();
@@ -447,7 +456,8 @@ impl Engine {
                 let next = self.queue.lock().expect("queue poisoned").after_skip();
                 match next {
                     Some(i) => self.start_index(i),
-                    None => self.stop(),
+                    // A skip past the last item is the end of the queue, as its playing out is
+                    None => self.stop_as(true),
                 }
             }
             Command::Previous => {
@@ -492,6 +502,8 @@ impl Engine {
     /// item is being skipped ends the pass.
     fn start_index(&mut self, index: usize) {
         self.abort_current();
+        // (a command chose what plays: what gave no audio before it is forgotten)
+        self.silent.clear();
         let len = self.queue.lock().expect("queue poisoned").len();
         let mut index = index;
         let mut last_reason: Option<String> = None;
@@ -763,6 +775,8 @@ impl Engine {
             return;
         }
         c.base_ms = ms;
+        // (a track sought to its end before its first block is no track without audio)
+        c.gave_audio = true;
         c.start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
         if c.paused_at_ms.is_some() {
             c.paused_at_ms = Some(ms);
@@ -818,6 +832,11 @@ impl Engine {
 
     /// Stop now: discard buffered audio and close the sink.
     fn stop(&mut self) {
+        self.stop_as(false);
+    }
+
+    /// [`Self::stop`], saying whether the queue ran out ([`ZoneEvent::Stopped`]).
+    fn stop_as(&mut self, queue_ended: bool) {
         self.abort_current();
         self.sink_paused = false;
         if let Some(mut s) = self.sink.take() {
@@ -826,9 +845,20 @@ impl Engine {
         if self.transport != Transport::Stopped {
             self.transport = Transport::Stopped;
             self.output.now_playing(None);
-            self.emit(ZoneEvent::Stopped);
+            self.emit(ZoneEvent::Stopped { queue_ended });
         }
         self.dirty = true;
+    }
+
+    /// A Stop (also the one before a queue is replaced, cleared or moved to another zone) or a
+    /// Play of another item is waiting to be handled.
+    fn stop_or_play_waits(&mut self) -> bool {
+        while let Ok(c) = self.cmds.try_recv() {
+            self.deferred.push_back(c);
+        }
+        self.deferred
+            .iter()
+            .any(|(_, c)| matches!(c, Command::Stop | Command::Play(Some(_)) | Command::Shutdown))
     }
 
     /// Record `msg`, stop, and tell listeners.
@@ -1059,6 +1089,7 @@ impl Engine {
             fading: false,
             format,
             seek_from: None,
+            gave_audio: false,
         });
         self.drop_prefetch();
         self.error = None;
@@ -1079,6 +1110,10 @@ impl Engine {
         let read = cur.source.next_block();
         if read.is_ok() {
             cur.seek_from = None;
+        }
+        if matches!(read, Ok(Some(_))) {
+            cur.gave_audio = true;
+            self.silent.clear();
         }
         match read {
             Err(e) if self.recover_from_seek(&e) => {}
@@ -1160,6 +1195,9 @@ impl Engine {
         let Some(mut cur) = self.current.take() else {
             return;
         };
+        if !cur.gave_audio {
+            self.silent.insert(cur.item.id);
+        }
         // Stages with delay (resampler) hand back their tail now.
         match cur.proc.finish() {
             Ok(Some(tail)) if !tail.is_empty() => {
@@ -1199,6 +1237,12 @@ impl Engine {
             let Some(item) = self.queue.lock().expect("queue poisoned").get(index).cloned() else {
                 break;
             };
+            // Repeat came round to an item that gave no audio, and nothing has since: the
+            // zone stops and says so, instead of starting it again at once
+            if self.silent.contains(&item.id) {
+                self.error = Some("stopped at an item that gives no audio".into());
+                break;
+            }
             // The next item opened ahead may still be opening (a stream that doesn't answer); with
             // none (or another), it opens on a thread of its own, never here: either way the wait
             // takes Stop, Next or a Play of another item meanwhile
@@ -1258,7 +1302,10 @@ impl Engine {
         self.transport = Transport::Stopped;
         self.dirty = true;
         self.output.now_playing(None);
-        self.emit(ZoneEvent::Stopped);
+        // A Stop that came while the tail played out (it is handled next and finds the zone
+        // stopped) still counts: this is then no end the queue reached by itself
+        let queue_ended = !self.stop_or_play_waits();
+        self.emit(ZoneEvent::Stopped { queue_ended });
     }
 
     // ---- crossfade ----
@@ -1442,6 +1489,8 @@ impl Engine {
             fading: false,
             format,
             seek_from: None,
+            // (it gave the audio of the fade)
+            gave_audio: true,
         });
         self.drop_prefetch();
         self.error = None;

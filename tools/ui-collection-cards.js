@@ -57,7 +57,7 @@ const api = async (method, path, body) => {
       const menu = page.locator('.popover.menu:not([hidden])'); await menu.waitFor();
       const labels = await menu.locator('.pop-item').allTextContents();
       assert.ok(labels.some((l) => /Copy link/.test(l)), `Copy link: ${labels}`);
-      if (width < 600) assert.ok(labels.some((l) => /Remove from playlist/.test(l)), `a phone reaches the row's moves: ${labels}`);
+      if (width < 600) assert.ok(labels.some((l) => /Remove from collection/.test(l)), `a phone reaches the row's moves: ${labels}`);
       await page.keyboard.press('Escape'); await page.waitForTimeout(200);
       // Clicking a card's row, or an unmatched line's words, plays nothing and breaks nothing
       // (review of #156: the search row's click replaced the queue from song 1)

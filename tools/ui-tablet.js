@@ -238,15 +238,15 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
       await page.click('#plmore'); await page.waitForTimeout(250);
       const items = await page.evaluate(() => [...document.querySelectorAll('.popover.menu:not([hidden]) .pop-item')].map((b) => b.textContent.trim()));
       await page.keyboard.press('Escape'); await page.waitForTimeout(200);
-      return items.some((t) => /^Delete playlist/.test(t));
+      return items.some((t) => /^Delete collection/.test(t));
     };
     for (const w of widths) {
       await page.setViewportSize({ width: w, height: 800 }); await page.waitForTimeout(300);
       const beside = await visible(page, '#pldel'); const inMenu = await menuHasDelete();
       const wide = w > 1024;
-      check(beside === wide && inMenu === !wide, `playlist opened at ${widths[0]}, at ${w}: Delete ${wide ? 'beside Play, not in ⋯' : 'in ⋯, not beside Play'} (beside ${beside}, in ⋯ ${inMenu})`);
+      check(beside === wide && inMenu === !wide, `collection opened at ${widths[0]}, at ${w}: Delete ${wide ? 'beside Play, not in ⋯' : 'in ⋯, not beside Play'} (beside ${beside}, in ⋯ ${inMenu})`);
     }
-    check(!state.errors.length, `playlist resize: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
+    check(!state.errors.length, `collection resize: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();
   }
   // Settings › Appearance › Layout: Automatic / Phone / Desktop; the old choices map across

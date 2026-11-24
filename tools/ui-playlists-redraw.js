@@ -93,9 +93,9 @@ const IMPORTED = { ...fx.summary, id: 'imp1', name: 'Road trip', items: 1 };
         const shown = await until(() => page.evaluate(() => !!document.querySelector('#main [data-pl="imp1"]')), 4000);
         l = await look();
         const open = await page.evaluate(() => [...document.querySelectorAll('#toast .toast-act')].map((b) => b.textContent));
-        check(shown, `${width}: the imported playlist shows in the list while the person stays on Playlists`);
+        check(shown, `${width}: the imported collection shows in the list while the person stays on Collections`);
         check(new URL(page.url()).pathname === '/playlists' && l.name === 'Road' && l.focus === 'plname', `${width}: they stay, typing (${new URL(page.url()).pathname}, "${l.name}", focus ${l.focus})`);
-        check(open.includes('Open playlist'), `${width}: the toast still offers ${JSON.stringify(open)}`);
+        check(open.includes('Open collection'), `${width}: the toast still offers ${JSON.stringify(open)}`);
         await page.screenshot({ path: path.join(SHOTS, `import-shown-${width}.png`) });
 
         // 3b. The keyboard on a playlist's row: a library change keeps it on that row (before, the new
@@ -103,7 +103,7 @@ const IMPORTED = { ...fx.summary, id: 'imp1', name: 'Road trip', items: 1 };
         await page.focus('#main [data-pl="p5"]'); await mark(); changed();
         const kept = await redrawn(); await sleep(150);
         const on = await page.evaluate(() => { const a = document.activeElement; return a && (a.dataset.pl || a.id || a.tagName); });
-        check(kept && on === 'p5', `${width}: the keyboard on a playlist's row stays on it when the list is drawn again (redrawn ${kept}, ${on})`);
+        check(kept && on === 'p5', `${width}: the keyboard on a collection's row stays on it when the list is drawn again (redrawn ${kept}, ${on})`);
         await page.screenshot({ path: path.join(SHOTS, `keyboard-kept-${width}.png`) });
 
         // 4. Create: the new row is there, the box is emptied and keeps the keyboard.
@@ -142,7 +142,7 @@ const IMPORTED = { ...fx.summary, id: 'imp1', name: 'Road trip', items: 1 };
         };
         await open2([{ ms: 300 }, { ms: 2500 }]);
         const early = await until(() => page.evaluate(() => location.pathname === '/playlists' && !!document.querySelector('#main [data-pl]')), 1500);
-        check(early, `${width}: Playlists is drawn from its first answer while a newer one is still coming`);
+        check(early, `${width}: Collections is drawn from its first answer while a newer one is still coming`);
         await until(() => page.evaluate(() => !!document.querySelector('#main [data-pl="p41"]')), 4000);
         check(await page.evaluate(() => !!document.querySelector('#main [data-pl="p41"]')), `${width}: then the newer answer's row is drawn too`);
         for (const old of [{ ms: 1500 }, { ms: 1500, status: 500 }]) {
@@ -182,7 +182,7 @@ const IMPORTED = { ...fx.summary, id: 'imp1', name: 'Road trip', items: 1 };
         await until(async () => (await look()).focus !== 'BODY', 1500);
         let l = await look();
         check(drawn && l.name === '' && l.focus !== 'plname', `${width} touch: a tap on Create draws the row and empties the box without pulling the keyboard up (made ${drawn}, "${l.name}", ${l.focus})`);
-        check(l.focus === 'tap1' && l.row, `${width} touch: the focus goes to the new playlist's row, not to the page (${l.focus})`);
+        check(l.focus === 'tap1' && l.row, `${width} touch: the focus goes to the new collection's row, not to the page (${l.focus})`);
         // (#main scrolls smoothly: the row is in view once that ends)
         const seen = await until(() => page.evaluate(() => { const r = document.querySelector('#main [data-pl="tap1"]').getBoundingClientRect(); const m = document.querySelector('#main').getBoundingClientRect(); return r.top >= m.top && r.bottom <= m.bottom; }), 3000);
         check(seen, `${width} touch: the new row, here at the foot of a long list, is scrolled into view (top ${(await look()).top})`);

@@ -74,10 +74,10 @@ async function run(browser, width) {
       // Favourites: counted, played and headed as songs
       await fx.go(page, '/favourites');
       await page.locator('#favplay').waitFor();
-      assert.equal(await page.locator('main .page-head h2 .count').first().textContent(), '1 song', `${T}: Favourites counts songs (and only what there is: no "0 albums")`);
-      assert.equal((await page.locator('#favplay').textContent()).trim(), 'Play songs', `${T}: Favourites' Play button`);
-      assert.deepEqual(await page.locator('main .section-head h3').allTextContents(), ['Songs'], `${T}: Favourites' song section`);
-      await noTrack(page, `${T} Favourites`);
+      assert.equal(await page.locator('main .page-head h2 .count').first().textContent(), '1 song', `${T}: Bookmarks counts songs (and only what there is: no "0 albums")`);
+      assert.equal((await page.locator('#favplay').textContent()).trim(), 'Play songs', `${T}: Bookmarks' Play button`);
+      assert.deepEqual(await page.locator('main .section-head h3').allTextContents(), ['Songs'], `${T}: Bookmarks' song section`);
+      await noTrack(page, `${T} Bookmarks`);
       await page.screenshot({ path: path.join(shots, `favourites-${width}.png`) });
       // A genre: counted and headed as songs
       await fx.go(page, '/genre/4');
@@ -127,7 +127,7 @@ async function run(browser, width) {
       assert.deepEqual(state.errors, [], 'no page errors');
     } finally { await context.close(); }
   }
-  console.log(`PASS ${T}: the song list, Favourites, Genres, a song page and the empty Queue and Playlists say "songs", never "tracks"`);
+  console.log(`PASS ${T}: the song list, Bookmarks, Genres, a song page and the empty Queue and Collections say "songs", never "tracks"`);
 }
 
 (async () => {

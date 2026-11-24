@@ -228,8 +228,8 @@ pub(crate) fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<Api
         ApiEvent::LibraryChanged => Some(ev.clone()),
         // The owner's copies: file names and folders on their machine
         ApiEvent::Jobs { .. } => (c.role == crate::accounts::Role::Owner).then(|| ev.clone()),
-        // Outputs are the owner's, as `GET /v1/outputs` is
-        ApiEvent::OutputsChanged { .. } => (c.role == crate::accounts::Role::Owner).then(|| ev.clone()),
+        // Outputs are for whoever may see `GET /v1/outputs` (an app password too)
+        ApiEvent::OutputsChanged { .. } => c.can(crate::access::Capability::ZoneGroup).then(|| ev.clone()),
     }
 }
 
@@ -504,7 +504,8 @@ mod tests {
             ZoneEvent::Paused { position_ms: 1 },
             ZoneEvent::Resumed,
             ZoneEvent::Seeked { position_ms: 2 },
-            ZoneEvent::Stopped,
+            ZoneEvent::Stopped { queue_ended: false },
+            ZoneEvent::Stopped { queue_ended: true },
             ZoneEvent::QueueChanged,
             ZoneEvent::StreamTitle { title: "t".into() },
             ZoneEvent::Error {
@@ -519,7 +520,7 @@ mod tests {
                 | ZoneEvent::Paused { .. }
                 | ZoneEvent::Resumed
                 | ZoneEvent::Seeked { .. }
-                | ZoneEvent::Stopped
+                | ZoneEvent::Stopped { .. }
                 | ZoneEvent::QueueChanged
                 | ZoneEvent::StreamTitle { .. }
                 | ZoneEvent::Error { .. } => {}

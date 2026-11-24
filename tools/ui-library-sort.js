@@ -202,7 +202,7 @@ async function albumChips(browser, width) {
     assert.equal(await page.locator('#albumgrid .tile').count(), albums.length, 'clearing restores every album');
     await fx.cleanCopy(page);
     assert.deepEqual(state.errors, [], 'no page errors');
-    console.log(`PASS album chips ${width}: Lossless and Favourites keep the typed filter and keyboard place`);
+    console.log(`PASS album chips ${width}: Lossless and Bookmarks keep the typed filter and keyboard place`);
   } finally { await context.close(); }
 }
 
@@ -237,12 +237,12 @@ async function emptyAlbums(browser, width) {
       assert.deepEqual(state.errors, [], 'no page errors');
     } finally { await context.close(); }
   };
-  const none = ['No favourite albums', 'Open an album and press its heart to see it here.'];
+  const none = ['No bookmarked albums', 'Open an album and press its heart to see it here.'];
   await run([], ['[data-lfav]'], ...none);
-  await run([3], ['[data-focus="lossless"]', '[data-lfav]'], 'No favourite albums of this quality', 'None of your favourite albums has a file of this quality.');
+  await run([3], ['[data-focus="lossless"]', '[data-lfav]'], 'No bookmarked albums of this quality', 'None of your bookmarked albums has a file of this quality.');
   // No favourite at all: Favourites is what empties it, whatever the quality
   await run([], ['[data-focus="lossless"]', '[data-lfav]'], ...none);
-  console.log(`PASS empty albums ${width}: Favourites and Favourites + quality say why, the filter keeps its text`);
+  console.log(`PASS empty albums ${width}: Bookmarks and Bookmarks + quality say why, the filter keeps its text`);
 }
 
 // An album hearted before MusicBrainz knew it is kept on the node as album:<id>; Favourites shows it
@@ -253,10 +253,10 @@ async function nodeFavAlbum(browser) {
     await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length > 3);
     await page.locator('[data-lfav]').click();
     await page.waitForFunction(() => document.querySelector('[data-lfav]')?.getAttribute('aria-pressed') === 'true' && document.querySelectorAll('#albumgrid .tile').length === 1);
-    assert.equal(await page.locator('#albumgrid .tile').getAttribute('data-album'), '2', 'the node-kept favourite is listed');
+    assert.equal(await page.locator('#albumgrid .tile').getAttribute('data-album'), '2', 'the node-kept bookmark is listed');
     assert.equal(await page.locator('.page-head .count').innerText(), '1 of 45');
     assert.deepEqual(state.errors, [], 'no page errors');
-    console.log('PASS Favourites lists an album hearted before MusicBrainz knew it');
+    console.log('PASS Bookmarks lists an album bookmarked before MusicBrainz knew it');
   } finally { await context.close(); }
 }
 
@@ -276,14 +276,14 @@ async function coldFavourites(browser, width) {
   try {
     await fx.go(page, '/albums');
     await page.waitForFunction(() => document.querySelector('#albumgrid .tile, .empty h3'));
-    assert.equal(await page.locator('.empty').count(), 0, `${width}: no "No favourite albums" while the favourites are on their way`);
-    assert.equal(await page.locator('[data-lfav]').getAttribute('aria-pressed'), 'true', 'Favourites is still chosen');
+    assert.equal(await page.locator('.empty').count(), 0, `${width}: no "No bookmarked albums" while the bookmarks are on their way`);
+    assert.equal(await page.locator('[data-lfav]').getAttribute('aria-pressed'), 'true', 'Bookmarks is still chosen');
     assert.deepEqual(await page.locator('#albumgrid .tile').evaluateAll((els) => els.map((e) => Number(e.getAttribute('data-album')))), [2, 5], `${width}: the release's and the release group's hearts are both listed`);
     assert.equal(await page.locator('.page-head .count').innerText(), '2 of 45');
     assert.equal(await page.locator('#filter').isDisabled(), false, 'the filter works');
     if (width === 1280) { await fx.cleanCopy(page); await page.screenshot({ path: path.join(shots, `after-albums-fav-cold-${width}.png`) }); }
     assert.deepEqual(state.errors, [], 'no page errors');
-    console.log(`PASS cold Favourites ${width}: waits for the favourites, lists release-group hearts`);
+    console.log(`PASS cold Bookmarks ${width}: waits for the bookmarks, lists release-group hearts`);
   } finally { await context.close(); }
 }
 
@@ -304,29 +304,29 @@ async function slowFavourites(browser, width) {
     await fx.go(page, '/albums');
     await page.waitForFunction(() => document.querySelector('.empty h3'), null, { timeout: 4500 })
       .catch(() => assert.fail(`${width}: the page is drawn after about 3 s, not left loading`));
-    assert.ok(Date.now() - t < 5000, `${width}: drawn before the favourites are in`);
-    assert.equal(await page.locator('.empty h3').innerText(), 'Getting your favourites…', `${width}: says they are on their way, not "No favourite albums"`);
+    assert.ok(Date.now() - t < 5000, `${width}: drawn before the bookmarks are in`);
+    assert.equal(await page.locator('.empty h3').innerText(), 'Getting your bookmarks…', `${width}: says they are on their way, not "No bookmarked albums"`);
     // No count beside the note until they are in ("0 of 45" said none were hearted)
-    assert.equal(await page.locator('.page-head .count').count(), 0, `${width}: no count while the favourites are on their way, not "0 of 45"`);
+    assert.equal(await page.locator('.page-head .count').count(), 0, `${width}: no count while the bookmarks are on their way, not "0 of 45"`);
     if (width === 1280) { await fx.cleanCopy(page); await page.screenshot({ path: path.join(shots, `after-albums-fav-slow-${width}.png`) }); }
     // Another order chosen meanwhile is drawn at once (it doesn't wait another 3 s)
     const t2 = Date.now();
     await page.selectOption('[data-lsort]', 'year');
     await page.waitForFunction(() => document.querySelector('[data-lsort]')?.value === 'year' && document.querySelector('#albumswait'), null, { timeout: 1500 })
-      .catch(() => assert.fail(`${width}: a new order is drawn at once while the favourites are on their way`));
+      .catch(() => assert.fail(`${width}: a new order is drawn at once while the bookmarks are on their way`));
     assert.ok(Date.now() - t2 < 1500, `${width}: no second wait`);
     assert.equal(await page.locator('.page-head .count').count(), 0, `${width}: still no count after another order is chosen`);
     await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length === 1, null, { timeout: 6000 })
-      .catch(() => assert.fail(`${width}: listed once the favourites are in`));
+      .catch(() => assert.fail(`${width}: listed once the bookmarks are in`));
     assert.deepEqual(await page.locator('#albumgrid .tile').evaluateAll((els) => els.map((e) => Number(e.getAttribute('data-album')))), [3]);
     assert.equal(await page.locator('.empty').count(), 0);
-    assert.equal(await page.locator('.page-head .count').innerText(), '1 of 45', `${width}: the count says how many are hearted once they are in`);
+    assert.equal(await page.locator('.page-head .count').innerText(), '1 of 45', `${width}: the count says how many are bookmarked once they are in`);
     // Drawn again once, not in a loop: the list stays as it is
     await page.evaluate(() => { window.__grid = document.querySelector('#albumgrid'); });
     await page.waitForTimeout(3500);
     assert.equal(await page.evaluate(() => window.__grid.isConnected), true, `${width}: drawn again once, not in a loop`);
     assert.deepEqual(state.errors, [], 'no page errors');
-    console.log(`PASS slow Favourites ${width}: drawn after 3 s with a note, listed when they come`);
+    console.log(`PASS slow Bookmarks ${width}: drawn after 3 s with a note, listed when they come`);
   } finally { await context.close(); }
 }
 
@@ -347,19 +347,19 @@ async function failedFavourites(browser, width, late = false) {
   try {
     await fx.go(page, '/albums');
     if (late) {
-      await page.waitForFunction(() => document.querySelector('.empty h3')?.textContent === 'Getting your favourites…', null, { timeout: 4400 })
-        .catch(() => assert.fail(`${at}: says the favourites are on their way while they are`));
-      await page.waitForFunction(() => document.querySelector('.empty h3')?.textContent !== 'Getting your favourites…', null, { timeout: 6000 });
+      await page.waitForFunction(() => document.querySelector('.empty h3')?.textContent === 'Getting your bookmarks…', null, { timeout: 4400 })
+        .catch(() => assert.fail(`${at}: says the bookmarks are on their way while they are`));
+      await page.waitForFunction(() => document.querySelector('.empty h3')?.textContent !== 'Getting your bookmarks…', null, { timeout: 6000 });
     }
     await page.waitForFunction(() => document.querySelector('.empty h3'), null, { timeout: 6000 })
-      .catch(() => assert.fail(`${width}: Albums is drawn when the favourites can't be read`));
-    assert.equal(await page.locator('.empty h3').innerText(), 'Couldn’t get your favourites', `${width}: says the favourites couldn't be read, not "No favourite albums"`);
-    assert.equal(await page.locator('.page-head .count').count(), 0, `${width}: no count when the favourites can't be read, not "0 of 45"`);
-    assert.equal(await page.locator('[data-lfav]').getAttribute('aria-pressed'), 'true', 'Favourites is still chosen');
+      .catch(() => assert.fail(`${width}: Albums is drawn when the bookmarks can't be read`));
+    assert.equal(await page.locator('.empty h3').innerText(), 'Couldn’t get your bookmarks', `${width}: says the bookmarks couldn't be read, not "No bookmarked albums"`);
+    assert.equal(await page.locator('.page-head .count').count(), 0, `${width}: no count when the bookmarks can't be read, not "0 of 45"`);
+    assert.equal(await page.locator('[data-lfav]').getAttribute('aria-pressed'), 'true', 'Bookmarks is still chosen');
     const again = page.getByRole('button', { name: 'Try again' });
     assert.equal(await again.count(), 1, `${width}: one Try again`);
     if (width === 1280 && !late) { await fx.cleanCopy(page); await page.screenshot({ path: path.join(shots, `after-albums-fav-failed-${width}.png`) }); }
-    if (late) { assert.deepEqual(state.errors, [], 'no page errors'); console.log(`PASS failed Favourites ${at}: on their way, then says they couldn't be read`); return; }
+    if (late) { assert.deepEqual(state.errors, [], 'no page errors'); console.log(`PASS failed Bookmarks ${at}: on their way, then says they couldn't be read`); return; }
     // Still failing: Try again asks again and comes back to the same note (not "No favourite
     // albums"), with the keyboard still on Try again
     const asked = () => state.hits.filter((h) => h.v === '/favourites' && h.m === 'GET').length;
@@ -367,19 +367,19 @@ async function failedFavourites(browser, width, late = false) {
     await again.focus(); await page.keyboard.press('Enter');
     await page.waitForFunction(() => { const b = document.querySelector('#albumsfavretry'); return b && !b.disabled && document.activeElement === b; }, null, { timeout: 6000 })
       .catch(() => assert.fail(`${width}: after a failed Try again, Try again is back and keeps the keyboard`));
-    assert.ok(asked() > before, `${width}: Try again asks for the favourites again`);
-    assert.equal(await page.locator('.empty h3').innerText(), 'Couldn’t get your favourites', `${width}: still failing, still says so`);
+    assert.ok(asked() > before, `${width}: Try again asks for the bookmarks again`);
+    assert.equal(await page.locator('.empty h3').innerText(), 'Couldn’t get your bookmarks', `${width}: still failing, still says so`);
     assert.equal(await page.locator('.page-head .count').count(), 0, `${width}: still no count`);
     // Readable again: Try again lists them, with the count
     delete state.fixtures['/favourites'];
     await page.getByRole('button', { name: 'Try again' }).click();
     await page.waitForFunction(() => document.querySelectorAll('#albumgrid .tile').length === 1, null, { timeout: 6000 })
-      .catch(() => assert.fail(`${width}: Try again lists the favourites once they can be read`));
+      .catch(() => assert.fail(`${width}: Try again lists the bookmarks once they can be read`));
     assert.deepEqual(await page.locator('#albumgrid .tile').evaluateAll((els) => els.map((e) => Number(e.getAttribute('data-album')))), [3]);
     assert.equal(await page.locator('.empty').count(), 0);
     assert.equal(await page.locator('.page-head .count').innerText(), '1 of 45', `${width}: the count is back once they are in`);
     assert.deepEqual(state.errors, [], 'no page errors');
-    console.log(`PASS failed Favourites ${width}: says so with Try again, no count; lists them once they can be read`);
+    console.log(`PASS failed Bookmarks ${width}: says so with Try again, no count; lists them once they can be read`);
   } finally { await context.close(); }
 }
 

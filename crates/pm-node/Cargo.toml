@@ -40,10 +40,14 @@ qrcode = { version = "0.14", default-features = false }
 rand = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# The data folder's lock file: opened without following a link (O_NOFOLLOW)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

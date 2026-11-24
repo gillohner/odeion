@@ -8,6 +8,9 @@
 //      long-hand duration and delay properties too;
 //   5. every font-size and border-radius takes a step of the type or radius scale (--fs-*, --r-*);
 //      a radius of 3 px or less (bars, marks), 50%, relative units and a fluid clamp() are fine.
+//   6. Odeion's own words in the page's copy: Bookmarks, never Favourites; Collections, never
+//      Playlists (tools/refactor/wording.js has the table, what another product's own word is, and
+//      --write to put it right).
 //   node tools/design-lint.js [static dir]
 const fs = require('fs');
 const path = require('path');
@@ -16,6 +19,15 @@ const files = fs.readdirSync(DIR).filter((f) => /\.(js|html)$/.test(f)).map((f) 
 const css = fs.readdirSync(DIR).filter((f) => f.endsWith('.css')).map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\n');
 const problems = [];
 const where = (file, src, idx) => `${file}:${src.slice(0, idx).split('\n').length}`;
+
+// Spacing, layers and font weights stand on their tokens: padding, margin and gap take a step of
+// the spacing scale (--sp-*), z-index a named layer (--z-*), font-weight a weight of the scale
+// (--fw-*), wherever the value has a token (tools/refactor/tokens.js: its table says what is on the
+// scale, its --write moves plain values onto it).
+{
+  const appCss = path.join(DIR, 'app.css');
+  if (fs.existsSync(appCss)) problems.push(...require('./refactor/tokens.js').check(fs.readFileSync(appCss, 'utf8')).problems);
+}
 
 // The component set a button may belong to.
 const BUTTON_CLASSES = ['btn', 'set-tab', 'np-artbtn', 'chip', 'icon-btn', 'chiplink', 'chipx', 'half', 'back', 'tile', 'link', 'nav-item', 'pop-item', 'tab', 'seg', 'row-btn', 'list-row', 'toast-x', 'close', 'crumb', 'zone-btn', 'out-btn', 'play-btn', 'sbtn', 'mini', 'qbtn', 'rowplay', 'idmark', 'card', 'quality', 'connbar-retry', 'lnk', 'upstreams', 'jobchip', 'faces', 'bnav', 'az', 'ptag', 'np-dockbtn', 'np-stab', 'np-grab'];
@@ -91,6 +103,22 @@ for (const [c, at] of [...used.entries()].sort()) {
   }
 }
 
+// A form's submit handler hands its work to the page's busy mark: a block-bodied handler that
+// starts a save and returns nothing leaves the button without progress and lets a second Enter
+// send again (every onsubmit goes through busy(), which can only wait for a promise it is given).
+// `return` the save's promise, or make the handler async. (What it cannot see: an async handler
+// that starts a save without awaiting it, or a body that returns early and then starts one.)
+for (const [file, src] of files) {
+  if (!file.endsWith('.js')) continue;
+  for (const m of src.matchAll(/\.onsubmit\s*=\s*(async\s*)?\(([\w\s]*)\)\s*=>\s*\{/g)) {
+    if (m[1]) continue;
+    let i = m.index + m[0].length; let depth = 1;
+    while (i < src.length && depth) { const ch = src[i]; if (ch === '{') depth++; else if (ch === '}') depth--; i++; }
+    const body = src.slice(m.index + m[0].length, i - 1);
+    if (!/\breturn\b|\bawait\b/.test(body)) problems.push(`${where(file, src, m.index)}  a form's submit handler returns nothing: return the save's promise (or make it async), so its button shows progress and a second Enter does not send again: ${body.trim().slice(0, 70)}`);
+  }
+}
+
 // 4. durations on the motion scale
 {
   const cssFiles = fs.readdirSync(DIR).filter((f) => f.endsWith('.css'));
@@ -108,6 +136,14 @@ for (const [c, at] of [...used.entries()].sort()) {
         if (first && !/var\(--dur-/.test(decl.slice(0, first.index + 1))) problems.push(`${f}:${src.slice(0, m.index).split('\n').length}  ${m[1]} with a raw duration: use var(--dur-fast|base|slow): ${decl.slice(0, 60)}`);
       }
     }
+  }
+}
+
+// 6. Odeion's own words
+{
+  const wording = require('./refactor/wording');
+  for (const f of wording.PAGE_FILES.map((x) => path.join(DIR, path.basename(x))).filter((x) => fs.existsSync(x))) {
+    for (const h of wording.run(f, 'check').found) problems.push(`${path.basename(f)}:${h.line}  says “${h.word}” (…${h.around}…): Odeion says Bookmarks and Collections; node tools/refactor/wording.js --write`);
   }
 }
 

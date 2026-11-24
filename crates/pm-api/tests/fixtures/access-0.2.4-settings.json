@@ -1,0 +1,10 @@
+{
+  "_about": "Settings rows as a 0.2.4 node wrote them: the people list, the three sign-in lists, the zones open to listeners (the test node's one zone), the source policy and one person's own setting. The token behind the listener's hash is in the test that reads this file (access_data_from_0_2_4_still_works); the owner's two are listed, not used.",
+  "people": "{\"people\":[{\"key\":\"o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy\",\"access\":\"music\",\"name\":\"Ann\",\"music_enabled\":true,\"added_at\":1761480000,\"homeserver_enabled\":true},{\"key\":\"8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo\",\"access\":\"homeserver_music\",\"name\":null,\"music_enabled\":false,\"added_at\":1761480100,\"homeserver_enabled\":true,\"reports\":\"0123456789abcdef0123456789abcdef\"},{\"key\":\"gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo\",\"access\":\"homeserver\",\"name\":null,\"music_enabled\":false,\"added_at\":1761480200,\"homeserver_enabled\":true}],\"invites\":[{\"id\":\"inv1\",\"access\":\"homeserver_music\",\"name\":\"Cy\",\"token\":\"AAAA-BBBB-CCCC\",\"storage_quota_mb\":500,\"created_at\":1761480300}]}",
+  "accounts.tokens": "[{\"hash\":\"eb19b9ba87c3d8c2ed5ad6bd0d4107267bea171ccf9cd9b6873ac44c9f7a1d11\",\"key\":\"o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy\",\"created_at\":1761481000}]",
+  "accounts.owner_sessions": "[{\"hash\":\"cb85c79f636f88de7e8aac697f4ee70f6b91b53089a101cb3cd8af746897bd99\",\"key\":\"tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy\",\"created_at\":1761482000}]",
+  "accounts.device_sessions": "[{\"hash\":\"377e03a70d31090d2cd9ca81ebd331067fc33b0c4f956b7b3149b943cf85d5b4\",\"key\":\"tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy\",\"created_at\":1761483000}]",
+  "accounts.listener_zones": "[\"null\"]",
+  "sources.policy": "choice",
+  "person.o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy.sources.use": "own"
+}

@@ -66,10 +66,10 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
 
       // ---- not connected: Playlists asks to connect ----
       await go('/playlists');
-      assert.match(await main(), /Playlists/, 'a listener has Playlists (not sent to Albums)');
+      assert.match(await main(), /Collections/, 'a listener has Collections (not sent to Albums)');
       assert.match(await page.locator('#hsnote').innerText(), /collections are kept on your own homeserver/);
-      assert.doesNotMatch(await main(), /Import M3U|Smart playlists/, 'imports and smart playlists stay the owner’s');
-      assert.ok(!asked.some((a) => a.includes('/smart')), 'smart playlists aren’t even asked for');
+      assert.doesNotMatch(await main(), /Import M3U|Smart collections/, 'imports and smart collections stay the owner’s');
+      assert.ok(!asked.some((a) => a.includes('/smart')), 'smart collections aren’t even asked for');
       await shot('collections-connect');
       // Creating one before connecting opens the Ring dialog; approved, it goes again
       await page.locator('#plname').fill('Road trip');
@@ -111,7 +111,7 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       await shot('collection-shared');
       // Her ⋯ menu offers Add to playlist… (no longer hidden for listeners)
       await page.locator('#plmore').click();
-      await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Add to playlist…' }).first().waitFor();
+      await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Add to collection…' }).first().waitFor();
       await page.keyboard.press('Escape'); await sleep(200);
       // Revoked in Ring: a change opens "Approve this node again"
       hs = { ...hs, lost: true };
@@ -141,7 +141,7 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       listener = false;
       await go('/playlists');
       txt = await main();
-      assert.match(txt, /Import M3U/); assert.match(txt, /Smart playlists/);
+      assert.match(txt, /Import M3U/); assert.match(txt, /Smart collections/);
       assert.equal(await page.locator('#hsnote').count(), 0);
       await shot('owner-playlists');
 

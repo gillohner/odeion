@@ -21,6 +21,7 @@
 <script src="/pwa.js"></script>
 </head>
 <body>
+<button class="btn skip" id="skip" type="button">Skip to the page</button>
 <div class="shell">
   <aside class="sidebar" id="sidebar">
     <div class="brand">
@@ -32,12 +33,12 @@
         <div class="nav-label">Library</div>
         <button class="nav-item" data-view="home"><svg class="ic"><use href="#i-home"/></svg><span>Home</span></button>
         <button class="nav-item" data-view="library"><svg class="ic"><use href="#i-library"/></svg><span>Your library</span></button>
-        <button class="nav-item" data-view="favourites"><svg class="ic"><use href="#i-heart"/></svg><span>Favourites</span></button>
+        <button class="nav-item" data-view="favourites"><svg class="ic"><use href="#i-heart"/></svg><span>Bookmarks</span></button>
         <button class="nav-item" data-view="albums"><svg class="ic"><use href="#i-disc"/></svg><span>Albums</span></button>
         <button class="nav-item" data-view="artists"><svg class="ic"><use href="#i-artist"/></svg><span>Artists</span></button>
         <button class="nav-item" data-view="genres"><svg class="ic"><use href="#i-genre"/></svg><span>Genres</span></button>
         <button class="nav-item" data-view="tracks"><svg class="ic"><use href="#i-notes"/></svg><span>Songs</span></button>
-        <button class="nav-item" data-view="playlists"><svg class="ic"><use href="#i-playlist"/></svg><span>Playlists</span></button>
+        <button class="nav-item" data-view="playlists"><svg class="ic"><use href="#i-playlist"/></svg><span>Collections</span></button>
         <button class="nav-item" data-view="radio"><svg class="ic"><use href="#i-radio"/></svg><span>Radio</span></button>
         <button class="nav-item" data-view="sources"><svg class="ic"><use href="#i-archive"/></svg><span>Sources</span></button>
       </div>
@@ -70,7 +71,8 @@
       <button class="icon-btn me-btn" id="me" aria-label="You, settings and Log out" title="You, settings and Log out" aria-haspopup="menu"><svg class="ic"><use href="#i-artist"/></svg></button>
     </header>
     <div id="usagenotice" hidden></div>
-    <main id="main" class="main" tabindex="-1"></main>
+    <!-- The first page's loader is here, in the page itself: it shows before app.js is read and while the node answers its first questions (app.js draws over it; NAV_SKELETON there has the same shapes) -->
+    <main id="main" class="main" tabindex="-1"><div class="navskel" id="bootskel" aria-busy="true"><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div><div class="skeleton sk-row" style="height:216px" aria-hidden="true"></div><p class="muted small slow-note" role="status" hidden>Still loading…</p></div></main>
     <script>/* The Android app draws this page in Android System WebView. One older than Chrome 111 lacks CSS the page is built on (below 88: inset, :is(), aspect-ratio), and below 80 it cannot read app.js at all, so this is here, in plain old JavaScript: one line above the content that says how to put it right. Only in the Android app (window.pmDesktop, set by the app; looked for again once the page has loaded, should it arrive late), never in a browser or the desktop app. */
 (function () { var MIN_WEBVIEW = 111; function check() { var d = window.pmDesktop; if (!d || d.platform !== 'android' || document.getElementById('webviewnote')) return; var m = /\bChrome\/(\d+)\./.exec(String(navigator.userAgent || '')); if (!m || Number(m[1]) >= MIN_WEBVIEW) return; var main = document.getElementById('main'); if (!main) return; var n = document.createElement('div'); n.id = 'webviewnote'; n.className = 'notice warn webview-note'; n.setAttribute('role', 'status'); n.setAttribute('data-webview', m[1]); var s = document.createElement('span'); s.appendChild(document.createTextNode('Update Android System WebView for Odeion to show correctly')); var a = document.createElement('a'); a.className = 'btn sm'; a.href = 'https://play.google.com/store/apps/details?id=com.google.android.webview'; a.target = '_blank'; a.rel = 'noopener'; a.appendChild(document.createTextNode('Open Google Play')); n.appendChild(s); n.appendChild(a); main.parentNode.insertBefore(n, main); } try { check(); document.addEventListener('DOMContentLoaded', check); window.addEventListener('load', check); } catch (e) { /* no note */ } })();</script>
   </div>

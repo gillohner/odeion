@@ -136,18 +136,23 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await box('slim:00:04:20:00:00:01').isDisabled(), 'squeezelite players are not offered with them');
     await c.close();
 
-    // ---- About: tokens ----
+    // ---- People & access: Log out and the password for apps (the API token); About points there ----
     c = await ctx(); p = await c.newPage();
-    await p.goto(BASE + '/settings/about');
-    await p.waitForSelector('#logout');
+    await p.goto(BASE + '/settings/people');
+    await p.waitForSelector('#peoplebox #logout');
     check((await p.textContent('#logout')).trim() === 'Log out', 'this browser has Log out');
-    check(!(await p.$('#tokennew')) && /Set in the node’s config/.test(await p.textContent('#main')) && await p.locator('#main a[href*="troubleshooting.md"]').count() === 1, 'a config token: changed in the config, with the guide');
+    check(await p.locator('#set-about #logout, #set-about #tokennew').count() === 0 && await p.locator('#set-about [data-settab="people"]').count() === 1, 'About has one row that opens People & access');
+    check(!(await p.$('#tokennew')) && /Set in the node’s config/.test(await p.textContent('#peoplebox')) && await p.locator('#main a[href*="troubleshooting.md"]').count() === 1, 'a config token: changed in the config, with the guide');
+    // (the node here keeps its own token: what the page asks with the made-up new one goes on with the
+    // real one, as it would on a node that had made it; the page reads its lists again after the change)
+    await p.route(/\/v1\//, (r) => { const h = r.request().headers(); return h.authorization === `Bearer ${'f'.repeat(64)}` ? r.continue({ headers: { ...h, authorization: `Bearer ${TOKEN}` } }) : r.fallback(); });
     await p.route(/\/v1\/node\/settings$/, async (r) => { if (r.request().method() !== 'GET') return r.continue(); const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, token_replaceable: true } }); });
     let rotated = 0; await p.route(/\/v1\/node\/token$/, (r) => { rotated++; return r.fulfill({ json: { token: 'f'.repeat(64) } }); });
-    await p.goto(BASE + '/settings/about');
-    await p.click('#tokennew');
+    await p.goto(BASE + '/settings/people');
+    await p.click('#peoplebox #tokennew');
     await p.click('dialog .choice');
     check(await visible(p, '#tokenout code'), 'the new token is shown');
+    check(await visible(p, '#tokendone') && await visible(p, '#peoplebox #logout'), 'the screen stays, with its lists read again');
     check(rotated === 1 && (await p.textContent('#tokenout code')) === 'f'.repeat(64), 'once, as the node made it');
     check(await p.evaluate(() => localStorage.getItem('pm.token')) === 'f'.repeat(64), 'this browser uses it');
     await Promise.all([p.waitForNavigation({ timeout: 10000 }).catch(() => null), p.click('#tokendone')]);
@@ -594,14 +599,14 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.click('#libadd');
     await p.waitForSelector('dialog[open] .choice');
     const ways = await p.$$eval('dialog[open] .choice .choice-label', (els) => els.map((e) => e.textContent.trim()));
-    check(JSON.stringify(ways) === '["Upload files","Add a folder or network share","Import playlists"]', `Add music: ${ways.join(', ')}`);
+    check(JSON.stringify(ways) === '["Upload files","Add a folder or network share","Import collections"]', `Add music: ${ways.join(', ')}`);
     await choose('Upload files');
     check(await visible(p, '#libupload #updrop'), 'Upload files opens the drop zone');
     await p.click('#libadd'); await choose('Add a folder or network share'); await choose('A folder on the node');
     await p.waitForSelector('dialog[open] [data-field]'); await p.fill('dialog[open] [data-field]', '/no/such/folder/ui-setup'); await choose('Add folder');
     check(await visible(p, '.toast.error'), 'a folder that isn’t there is refused before it is saved');
-    await p.click('#libadd'); await choose('Import playlists');
-    check(await p.locator('#libplimport').waitFor({ state: 'attached', timeout: 8000 }).then(() => true).catch(() => false) && new URL(p.url()).pathname === '/library/import' && /Move from Roon/.test(await p.textContent('#main')), 'Import playlists opens Your library › Import (playlist files, Move from Roon)');
+    await p.click('#libadd'); await choose('Import collections');
+    check(await p.locator('#libplimport').waitFor({ state: 'attached', timeout: 8000 }).then(() => true).catch(() => false) && new URL(p.url()).pathname === '/library/import' && /Move from Roon/.test(await p.textContent('#main')), 'Import collections opens Your library › Import (playlist files, Move from Roon)');
     await p.unroute(/\/v1\/pubky$/); await p.unroute(/\/v1\/storage$/); await p.unroute(/\/v1\/me\/music(\?.*)?$/); await p.unroute(/\/v1\/pubky\/files$/);
     // Node library: a song taken out from its ⋯ menu, then brought back
     const before = (await api('GET', '/library/tracks?limit=50')).tracks.length;
@@ -808,7 +813,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         await pp.click('#pfretry'); await pp.waitForTimeout(800);
         check(asked >= 2, `Try again asks again (${asked} asks)`);
         await fetch(`${BASE}/v1/playlists/${encodeURIComponent(plid)}`, { method: 'DELETE', headers: H }).catch(() => {});
-      } else check(false, 'made a playlist for the play-from check');
+      } else check(false, 'made a collection for the play-from check');
       // A service's search notice names it, and offers Retry only where trying again can help
       await pp.route(/\/v1\/search\?/, (r) => r.fulfill({ status: 200, headers: { 'content-type': 'application/x-ndjson', 'x-pm-sources': 'library,spotify,tidal,deezer' }, body: [
         { source: 'library', status: 'ok', ms: 2, hits: [] },
@@ -822,12 +827,13 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       const note = (name) => notes.find((n) => n.text.includes(name)) || null;
       check(note('Spotify') && !note('Spotify').retry, `a 403 names Spotify, without Retry (${JSON.stringify(note('Spotify'))})`);
       check(note('TIDAL') && note('TIDAL').retry && note('Deezer') && note('Deezer').retry, `a network failure and a timeout keep Retry (${JSON.stringify(notes)})`);
-      check(errs.length === 0, `dashboard, playlist and search notes: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
+      check(errs.length === 0, `dashboard, collection and search notes: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
       await cc.close();
     }
     // A listener: My music only, no edit controls
+    // (the node's own answer is the owner's, `can` included: a person's list goes with the role)
     c = await ctx(); p = await c.newPage();
-    await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });
+    await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null, can: ['artwork', 'session', 'library', 'zone_list', 'zone_use', 'collections', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in'] } }); });
     await p.goto(BASE + '/library'); await p.waitForSelector('#main [data-libtab]');
     check(JSON.stringify(await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()))) === '["My music"]' && !(await p.$('#libadd')), 'a listener gets My music only, without Add music');
     await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');
@@ -849,7 +855,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           { kind: 'song', title: 'Old Song', subtitle: 'Band', id: 'lib-5', track_id: 5, year: 1999, format: 'FLAC 16/44.1', quality: 'lossless', keys: [] },
           { kind: 'song', title: 'New Song', subtitle: 'Band', id: 'lib-6', track_id: 6, year: 2015, format: 'MP3', quality: 'lossy', keys: [] },
           { kind: 'album', title: 'Old Album', subtitle: 'Band', id: 'lib-1', year: 1999, keys: [] },
-          { kind: 'playlist', title: 'Saturday chill', subtitle: '3 songs · your playlist', id: 'pl1', keys: [] }] },
+          { kind: 'playlist', title: 'Saturday chill', subtitle: '3 songs · your collection', id: 'pl1', keys: [] }] },
         { source: 'pubky', status: 'ok', ms: 40, hits: [{ kind: 'song', title: 'Shared Song', subtitle: 'Someone', id: 'tidal-9', uri: 'tidal:track:9', page: 'https://tidal.com/track/9', site: 'tidal.com', year: 2015, keys: [] }] },
         { source: 'people', status: 'ok', ms: 50, hits: [{ kind: 'person', title: 'Sat', subtitle: 'plays bass', id: KEY, page: `https://pubky.app/profile/${KEY}`, keys: [] }] },
         { source: 'posts', status: 'ok', ms: 60, hits: [{ kind: 'post', title: 'Great music tonight', subtitle: 'Author One', id: 'post-a:1', page: 'https://pubky.app/post/a/1', keys: [] }] },
@@ -861,8 +867,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.fill('#search', 'sat'); await p.press('#search', 'Enter');
     await p.waitForSelector('#sresults [data-skind="post"]');
     const heads = await p.$$eval('#sresults .section h3', (els) => els.map((e) => e.textContent.trim()));
-    check(['Albums', 'Songs', 'Playlists', 'People', 'Posts'].every((h) => heads.includes(h)), `results come grouped (${heads.join(', ')})`);
-    check((await p.locator('#sresults [data-skind="person"] .list-row').count()) === 1 && (await p.locator('#sresults [data-skind="playlist"] .list-row').count()) === 1, 'a person and your playlist are rows of their own');
+    check(['Albums', 'Songs', 'Collections', 'People', 'Posts'].every((h) => heads.includes(h)), `results come grouped (${heads.join(', ')})`);
+    check((await p.locator('#sresults [data-skind="person"] .list-row').count()) === 1 && (await p.locator('#sresults [data-skind="playlist"] .list-row').count()) === 1, 'a person and your collection are rows of their own');
     const facetText = await p.textContent('#sresults .facets');
     check(/Quality/.test(facetText) && /Lossless/.test(facetText) && /Years/.test(facetText) && /1990s/.test(facetText) && /2010s/.test(facetText), `facets are counted from the results (${facetText.replace(/\s+/g, ' ').trim().slice(0, 120)})`);
     check((await p.locator('#sresults .facets [data-facet^="service:pubky"]').count()) === 1 && (await p.locator('#sresults .facets [data-facet="service:people"], #sresults .facets [data-facet="service:posts"]').count()) === 0, 'people and posts count as Pubky: one Source chip for the three');

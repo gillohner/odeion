@@ -195,9 +195,18 @@ enum DiscoverCmd {
 }
 
 async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    // From the first moment: a stop asked for while the node is still starting must not be lost
+    let stop = watch_for_stop();
     std::fs::create_dir_all(&cfg.data_dir)?;
     // First, so a port in use stops the start at once and says why (another node running)
     let listener = pm_api::bind(&cfg.api.listen).await?;
+    // The data folder is this node's while it runs: `odeiond restore` looks for this hold, and
+    // holds it itself while it replaces the database. Someone else has it (the node this one
+    // replaces, on its way out; a restore about to end): waited for, before the database is
+    // opened, and when it is still held after that this node does not start, so it never opens
+    // a database a restore is moving away or another node writes. A service manager or Docker
+    // starts it again.
+    let _data_dir_hold = library::wait_for_data_dir(&cfg.data_dir, library::HOLD_PATIENCE).await?;
     let db_path = cfg.db_path();
     // Sign-ins, keys and the token live in these: the node's alone, before the database is opened
     // (and migrated) and before anything reads them
@@ -341,6 +350,9 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             }
             if c.listener_tokens_ended > 0 {
                 what.push(format!("{} listener sign-in(s) ended", c.listener_tokens_ended));
+            }
+            if c.app_passwords_ended > 0 {
+                what.push(format!("{} app password(s) removed", c.app_passwords_ended));
             }
             if what.is_empty() {
                 what.push("none of them was a sign-in of this node's".to_string());
@@ -507,6 +519,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     ) {
         tracing::info!(admin = %ep.url, "bundled homeserver");
         state.set_bundled_homeserver(ep);
+        pm_api::bundled::spawn_learn_key(&state);
     }
     let tunnel_dir = env_or("PM_TUNNEL_DIR", &cfg.homeserver.tunnel_dir);
     if !tunnel_dir.trim().is_empty() {
@@ -562,7 +575,78 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::identify::spawn_recheck(&state);
     let _announced = announce(cfg, &state);
     let _renderers = renderers(cfg, &state);
-    pm_api::serve_listener(state, listener).await
+    pm_api::serve_listener_until(state.clone(), listener, stop.when_serving()).await?;
+    tracing::info!("stopping");
+    state.stop_for_exit(std::time::Duration::from_secs(3)).await;
+    Ok(())
+}
+
+/// The node's ear for "stop" ([`stop_signal`]), from the start of [`serve`].
+struct Stop {
+    serving: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    asked: tokio::sync::watch::Receiver<bool>,
+}
+
+/// Start listening for a stop. Until the node serves ([`Stop::when_serving`]) a stop ends the
+/// process there and then: whatever the start had begun by then (a scan, a copy, the first
+/// sync) is cut as a kill would cut it, which is what happened before; a node that is the first
+/// process of a container would otherwise not react to SIGTERM at all until its start is over.
+/// Once the node serves, a second signal ends a stop that takes too long.
+fn watch_for_stop() -> Stop {
+    let serving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tell, asked) = tokio::sync::watch::channel(false);
+    let started = serving.clone();
+    tokio::spawn(async move {
+        stop_signal().await;
+        if !started.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!("asked to stop while starting");
+            std::process::exit(0);
+        }
+        let _ = tell.send(true);
+        stop_signal().await;
+        tracing::warn!("asked to stop again: exiting now");
+        std::process::exit(130);
+    });
+    Stop { serving, asked }
+}
+
+impl Stop {
+    /// From now on a stop is wound down by the caller: resolves when one is asked for.
+    fn when_serving(mut self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.serving.store(true, std::sync::atomic::Ordering::SeqCst);
+        async move {
+            // (an error: the watching task is gone, so no stop can come)
+            if self.asked.wait_for(|asked| *asked).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
+/// Resolves when the node is asked to stop: SIGTERM (`docker stop`, systemd) or Ctrl-C. As
+/// the first process of a container the node gets no default action for SIGTERM, so without
+/// this a stop waited out Docker's grace period and ended in a kill.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = term.recv() => tracing::info!("SIGTERM"),
+                    _ = tokio::signal::ctrl_c() => tracing::info!("interrupted"),
+                }
+            }
+            Err(e) => {
+                tracing::warn!("cannot listen for SIGTERM: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Remote access settings from `[remote]` for the tunnel's listener at `target`, or `None` when
@@ -708,16 +792,41 @@ async fn upload(cfg: &NodeConfig, files: &[PathBuf]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A panic anywhere (a request, a background task, a zone's thread) is written to the node's log
+/// with where it happened, before the default report on stderr: a task that died of one is
+/// otherwise only missed, never seen.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let what = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic".into());
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        let thread = std::thread::current();
+        tracing::error!(thread = thread.name().unwrap_or("unnamed"), %at, "panic: {what}");
+        default(info);
+    }));
+}
+
 fn main() -> anyhow::Result<()> {
     // First, while this is the only thread: ODEION_ settings onto the PM_ names the code reads
     let env_compat = pm_model::brand::apply_env_compat();
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(env_compat))
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let done = runtime.block_on(run(env_compat));
+    // Work still on a blocking thread (a scan, a copy) gets a second and is then cut, as a kill
+    // would cut it: a node asked to stop must exit. A scan and a copy carry on at the next start
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    done
 }
 
 async fn run(env_compat: pm_model::brand::EnvPlan) -> anyhow::Result<()> {
+    log_panics();
     pm_out_local::quiet_alsa_lib();
     let mut filter = tracing_subscriber::EnvFilter::from_default_env();
     // Symphonia warns about harmless things in many files (junk bytes before a frame, ID3

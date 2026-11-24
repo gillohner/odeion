@@ -78,16 +78,16 @@ the node for other controllers; while the app plays, the node starting that zone
 
 ### Downloads (Android)
 
-In the app, the ⋯ menu of a song, an album or a playlist of your library has **Download**: the
+In the app, the ⋯ menu of a song, an album or a collection of your library has **Download**: the
 app copies the original files to the phone (its own storage, nothing else on the phone sees them)
-and plays them without your node. A playlist keeps its songs from your library; songs it has from a
+and plays them without your node. A collection keeps its songs from your library; songs it has from a
 streaming service (TIDAL and the like) stay online and are not downloaded. Streaming services'
 songs have no Download.
 
 **Your library › Downloads** (or Downloads in the sidebar) is the storage screen: what is on the
-phone (albums, playlists, songs, each with its size), the total against the limit, what is
+phone (albums, collections, songs, each with its size), the total against the limit, what is
 downloading now, **Remove** for each, and **Remove all downloads**. Removing takes away the
-phone's copy only; your library and playlists stay as they are. The limit is 10 GB until you change
+phone's copy only; your library and collections stay as they are. The limit is 10 GB until you change
 it there, and downloads always leave 1 GB free on the phone; when they reach either, they stop and
 the screen says so. Unfinished song copies count against the limit too, and the app checks the
 bytes as they arrive even if the node's file size is out of date. Songs on the phone carry a small

@@ -145,6 +145,17 @@ pub async fn card_now(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
     }
 }
 
+/// A read's place in `inflight`, given up when the read ends.
+struct Place(std::sync::Arc<NodeState>, String);
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        if let Ok(mut inflight) = self.0.pinakes_reader.inflight.lock() {
+            inflight.remove(&self.1);
+        }
+    }
+}
+
 /// Ask Pinakes to read `uri`, once at a time per link. Never an import's search link: its
 /// words are a private playlist's.
 pub async fn resolve(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
@@ -158,7 +169,12 @@ pub async fn resolve(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
         } else {
             let st = s.clone();
             let u = uri.to_string();
-            let f: Inflight = async move {
+            // On a task of its own: a caller that goes away (a page's request dropped midway)
+            // stops asking, and a read nobody asks for would stand still where it is, with its
+            // turn in `pace` taken and its place in `inflight`, and every later read behind it
+            let read = tokio::spawn(async move {
+                // (its place is given up when the read ends, however it ends)
+                let _place = Place(st.clone(), u.clone());
                 let card = match st.discovery() {
                     None => Card::Unknown,
                     Some(d) => {
@@ -175,15 +191,11 @@ pub async fn resolve(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
                     }
                 };
                 st.pinakes_reader.remember(&u, &card);
-                st.pinakes_reader
-                    .inflight
-                    .lock()
-                    .expect("reader inflight")
-                    .remove(&u);
                 card
-            }
-            .boxed()
-            .shared();
+            });
+            let f: Inflight = async move { read.await.unwrap_or(Card::Unknown) }
+                .boxed()
+                .shared();
             inflight.insert(uri.to_string(), f.clone());
             f
         }
