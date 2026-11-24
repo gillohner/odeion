@@ -14660,6 +14660,7 @@ exec sleep 300
                 session_id: None,
                 from: None,
                 client: Default::default(),
+                unconfirmed: false,
                 named_client: None,
             });
             lib.set_setting(tidal_unofficial::STATE_KEY, &serde_json::to_string(&m).unwrap())
@@ -27975,6 +27976,717 @@ exec sleep 300
         // Put back: a fresh library answer that finds it
         assert_eq!(found(app.clone()).await, (false, one));
         drop(slot);
+    }
+
+    /// One account at a service is one person's on a node: someone the owner added can't keep a
+    /// sign-in with an account that is the owner's or another person's here, whichever way the
+    /// sign-in came. Their own account again, a refresh, and the owner's sign-ins are as before.
+    #[tokio::test]
+    async fn one_account_at_a_service_is_one_persons() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:1").await;
+        let lib = s.library.lock().unwrap();
+        let owner = accounts::Who::Owner;
+        let (a, b) = (
+            accounts::Who::Listener(anna.to_string()),
+            accounts::Who::Listener(ben.to_string()),
+        );
+        let sess = |id: &str| serde_json::json!({"access_token": "t", "user_id": id}).to_string();
+        // Spotify: the owner's account is not Anna's to sign in with; her own is
+        owner.put(&lib, "spotify.user", Some(&sess("o1"))).unwrap();
+        let e = a.put(&lib, "spotify.user", Some(&sess("o1"))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(
+            e.message.contains("This Spotify account is already signed in"),
+            "{}",
+            e.message
+        );
+        assert!(a.get(&lib, "spotify.user").is_none(), "nothing kept");
+        a.put(&lib, "spotify.user", Some(&sess("a1"))).unwrap();
+        a.put(&lib, "spotify.user", Some(&sess("a1")))
+            .expect("the same account again (a renewal)");
+        // Nor another person's; his own is fine
+        let e = b.put(&lib, "spotify.user", Some(&sess("a1"))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        b.put(&lib, "spotify.user", Some(&sess("b1"))).unwrap();
+        // The owner's own sign-ins are not checked
+        owner.put(&lib, "spotify.user", Some(&sess("a1"))).unwrap();
+        // TIDAL: both of its sign-ins are one service (the id may be a number there)
+        owner
+            .put(
+                &lib,
+                "tidal.unofficial",
+                Some(&serde_json::json!({"enabled": true, "session": {"user_id": 77}}).to_string()),
+            )
+            .unwrap();
+        let e = b.put(&lib, "tidal.user", Some(&sess("77"))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(e.message.contains("This TIDAL account"), "{}", e.message);
+        let e = b
+            .put(
+                &lib,
+                "tidal.unofficial",
+                Some(&serde_json::json!({"session": {"user_id": "77"}}).to_string()),
+            )
+            .unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        // The same account written another way is the same account
+        for written in ["077", " 77 ", "0077"] {
+            let e = b.put(&lib, "tidal.user", Some(&sess(written))).unwrap_err();
+            assert_eq!(e.status, StatusCode::CONFLICT, "{written:?}");
+        }
+        assert_eq!(accounts::account_id(" 0042 ").as_deref(), Some("42"));
+        assert_eq!(accounts::account_id("000").as_deref(), Some("0"));
+        assert_eq!(accounts::account_id("a1b").as_deref(), Some("a1b"));
+        assert_eq!(accounts::account_id("  "), None);
+        // A TIDAL sign-in kept without its account id is still somebody's: its token names it
+        use base64::Engine;
+        let b64 = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        let token = format!(
+            "{}.{}.s",
+            b64(r#"{"alg":"RS256"}"#),
+            b64(r#"{"uid":88,"cc":"DE"}"#)
+        );
+        owner
+            .put(
+                &lib,
+                "tidal.unofficial",
+                Some(&serde_json::json!({"enabled": true, "session": {"access_token": token}}).to_string()),
+            )
+            .unwrap();
+        let e = b.put(&lib, "tidal.user", Some(&sess("88"))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        // Spotify's ids are text: "007" and "7" are two accounts
+        owner.put(&lib, "spotify.user", Some(&sess("7"))).unwrap();
+        b.put(&lib, "spotify.user", Some(&sess("007")))
+            .expect("another account");
+        let e = b.put(&lib, "spotify.user", Some(&sess(" 7 "))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        // An account two people were signed in with before this keeps working for both (Anna's
+        // and the owner's are the same one in this node's stored sign-ins: Ben can't take it)
+        let e = b.put(&lib, "tidal.user", Some(&sess("1"))).unwrap_err();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        a.put(&lib, "tidal.user", Some(&sess("1")))
+            .expect("her sign-in is renewed");
+        // What names no account, and every other setting: as before
+        b.put(&lib, "spotify.user", Some(r#"{"access_token":"t"}"#))
+            .unwrap();
+        b.put(&lib, "tidal.signin_way", Some("browser")).unwrap();
+        b.put(&lib, "tidal.unofficial", Some(r#"{"enabled":true}"#))
+            .unwrap();
+    }
+
+    /// The same through the browser sign-in: an account that is the owner's on this node is not
+    /// kept for someone else, though it comes back to the browser that started it, or is pasted
+    /// by them.
+    #[tokio::test]
+    async fn a_persons_browser_sign_in_with_someone_elses_account_is_not_kept() {
+        // TIDAL answers every sign-in with account 77
+        let (base, _) = tidal_auth_and_search_mock("fresh-token").await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), &base).await;
+        let app = router(s.clone());
+        let ben_tok = accounts::mint(&s, ben).unwrap();
+        let row = |key: &str| s.library.lock().unwrap().get_setting(key).unwrap();
+        let session = |token: &str, account: &str| {
+            serde_json::json!({"access_token": token, "refresh_token": "r", "expires_at": pm_library::db::now_unix() + 3600, "user_id": account, "scope": "playback"}).to_string()
+        };
+        let start = || {
+            let (app, ben_tok) = (app.clone(), ben_tok.clone());
+            async move {
+                let (st, v, h) =
+                    send_as(&app, "GET", "/v1/sources/tidal/login", Some(&ben_tok), &[], None).await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                let url = url::Url::parse(v["url"].as_str().unwrap()).unwrap();
+                let state = url
+                    .query_pairs()
+                    .find(|(k, _)| k == "state")
+                    .unwrap()
+                    .1
+                    .to_string();
+                let cookie = h.get("set-cookie").unwrap().to_str().unwrap();
+                (state, cookie.split(';').next().unwrap().to_string())
+            }
+        };
+        // 77 is the owner's account here
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("tidal.user", &session("owner-token", "77"))
+            .unwrap();
+        // Back in Ben's own browser: not kept, and the page is told why
+        let (state, cookie) = start().await;
+        let (_, _, h) = send_as(
+            &app,
+            "GET",
+            &format!("/tidal/callback?code=c&state={state}"),
+            None,
+            &[("cookie", cookie.as_str())],
+            None,
+        )
+        .await;
+        let to = h.get("location").unwrap().to_str().unwrap();
+        assert!(
+            to.starts_with("/?tidal=error") && to.contains("already+signed+in"),
+            "{to}"
+        );
+        assert!(row(&format!("person.{ben}.tidal.user")).is_none());
+        // Pasted by Ben: the same
+        let (state, _) = start().await;
+        let pasted = serde_json::json!({"url": format!("http://node/tidal/callback?code=c&state={state}")});
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/sources/tidal/callback",
+            Some(&ben_tok),
+            &[],
+            Some(pasted),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{v}");
+        assert!(row(&format!("person.{ben}.tidal.user")).is_none());
+        assert!(
+            row("tidal.user").unwrap().contains("owner-token"),
+            "the owner's untouched"
+        );
+        // 77 is Anna's instead: not Ben's either
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting("tidal.user", &session("owner-token", "1"))
+                .unwrap();
+            lib.set_setting(&format!("person.{anna}.tidal.user"), &session("anna-token", "77"))
+                .unwrap();
+        }
+        let (state, cookie) = start().await;
+        let (_, _, h) = send_as(
+            &app,
+            "GET",
+            &format!("/tidal/callback?code=c&state={state}"),
+            None,
+            &[("cookie", cookie.as_str())],
+            None,
+        )
+        .await;
+        assert!(h
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("/?tidal=error"));
+        assert!(row(&format!("person.{ben}.tidal.user")).is_none());
+        // Nobody's here: kept for Ben
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(&format!("person.{anna}.tidal.user"), &session("anna-token", "5"))
+            .unwrap();
+        let (state, cookie) = start().await;
+        let (_, _, h) = send_as(
+            &app,
+            "GET",
+            &format!("/tidal/callback?code=c&state={state}"),
+            None,
+            &[("cookie", cookie.as_str())],
+            None,
+        )
+        .await;
+        assert_eq!(h.get("location").unwrap(), "/?tidal=signed_in");
+        assert!(row(&format!("person.{ben}.tidal.user"))
+            .unwrap()
+            .contains("fresh-token"));
+    }
+
+    /// The other TIDAL ways hold a person to the same rule: Sign in with TIDAL (the pasted
+    /// address) and a pasted sign-in. What a pasted sign-in says about its own account is not
+    /// taken while TIDAL answers; when TIDAL does not (a sign-in that has run out), it is what
+    /// counts until the renewal, which is held to TIDAL's answer too.
+    #[tokio::test]
+    async fn a_persons_tidal_sign_in_ways_are_held_to_one_account_each() {
+        let _home_guard = imports::HOME_TEST_LOCK.lock().await;
+        use base64::Engine;
+        let home = tempfile::tempdir().unwrap();
+        *imports::HOME_OVERRIDE.write().unwrap() = Some(home.path().to_path_buf());
+        // A token that names its account (`uid`), as TIDAL's do, or does not
+        let jwt = |claims: &str| {
+            let b = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+            format!("{}.{}.{}", b(r#"{"alg":"RS256"}"#), b(claims), b("s"))
+        };
+        let names_5 = jwt(r#"{"uid":5,"cc":"DE","exp":4000000000}"#);
+        let names_nobody = jwt(r#"{"cc":"DE","exp":4000000000}"#);
+        // (a token file that says account 9 next to a token that names account 5)
+        let says_9_names_5 = base64::engine::general_purpose::STANDARD.encode(format!(
+            r#"{{"userid": 9, "countryCode": "DE", "accessToken": "{names_5}", "refreshToken": "r", "expiresAfter": 4000000000}}"#
+        ));
+        // TIDAL answers every sign-in and every "who is this" with account 77
+        let (base, _) = full_tracks_mock(Vec::new()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        point_tidal_at(&s, &base, true);
+        let app = router(s.clone());
+        let ben_tok = accounts::mint(&s, ben).unwrap();
+        let ben_who = accounts::Who::Listener(ben.to_string());
+        let owner_is = |account: &str| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(
+                    "tidal.user",
+                    &serde_json::json!({"access_token": "owner-token", "refresh_token": "r", "expires_at": pm_library::db::now_unix() + 3600, "user_id": account, "scope": "playback"}).to_string(),
+                )
+                .unwrap()
+        };
+        let bens = || tidal_unofficial::load(&s.library.lock().unwrap(), &ben_who).session;
+        let start = "/v1/sources/tidal/unofficial/browser";
+        let finish = "/v1/sources/tidal/unofficial/browser/finish";
+        let import = "/v1/sources/tidal/signin/import";
+        let landed = serde_json::json!({"text": "https://tidal.com/android/login/auth?code=good-code"});
+
+        // 77 is the owner's account here: not kept for Ben, whichever way
+        owner_is("77");
+        let (st, r, _) = send_as(&app, "POST", start, Some(&ben_tok), &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let (st, r, _) = send_as(&app, "POST", finish, Some(&ben_tok), &[], Some(landed.clone())).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("already signed in"), "{r}");
+        assert!(bens().is_none());
+        // (the pasted sign-in says it is account 5: TIDAL says 77)
+        let pasted = serde_json::json!({"text": names_5});
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(pasted.clone())).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        assert!(bens().is_none());
+
+        // 77 is nobody's here: kept for Ben, under the account TIDAL names
+        owner_is("1");
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(pasted.clone())).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(
+            bens().unwrap().user_id.as_deref(),
+            Some("77"),
+            "TIDAL's answer, not the paste's"
+        );
+        tidal_unofficial::update(&s, &ben_who, |st| st.session = None);
+        let (st, r, _) = send_as(&app, "POST", start, Some(&ben_tok), &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let (st, r, _) = send_as(&app, "POST", finish, Some(&ben_tok), &[], Some(landed)).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(bens().unwrap().user_id.as_deref(), Some("77"));
+        tidal_unofficial::update(&s, &ben_who, |st| st.session = None);
+
+        // TIDAL does not say who it is (out of reach here; a sign-in that has run out is the
+        // same): the account the sign-in names counts, and one that names none is not kept
+        s.tidal.write().unwrap().v1_base = "http://127.0.0.1:9/v1".into();
+        owner_is("5");
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(pasted.clone())).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        // (and what the file says next to its token does not count over what the token names)
+        let two_names = serde_json::json!({"text": says_9_names_5});
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(two_names)).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        assert!(bens().is_none());
+        owner_is("1");
+        let nobody = serde_json::json!({"text": names_nobody});
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(nobody)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("doesn't say whose TIDAL account"),
+            "{r}"
+        );
+        assert!(bens().is_none());
+        let (st, r, _) = send_as(&app, "POST", import, Some(&ben_tok), &[], Some(pasted)).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let kept = bens().unwrap();
+        assert_eq!(kept.user_id.as_deref(), Some("5"));
+        // Only the paste says it is 5: that holds no account for anyone else yet, and its renewal
+        // is checked even when it names 5 again
+        assert!(kept.unconfirmed, "TIDAL didn't answer for it");
+        // It is not played before a renewal has checked it: without a way to renew it, not at all;
+        // with one, its first play renews it first, and a renewal that names no account (this
+        // mock's) still leaves it unplayed
+        tidal_unofficial::update(&s, &ben_who, |st| st.enabled = true);
+        let play = || {
+            let (s2, ben_who2) = (s.clone(), ben_who.clone());
+            tokio::task::spawn_blocking(move || {
+                let ep = s2.tidal.read().unwrap().clone();
+                tidal_unofficial::open_blocking(&s2.library, &ep, "1", &ben_who2).map(|_| ())
+            })
+        };
+        assert!(play().await.unwrap().is_err(), "not played unchecked");
+        assert!(bens().unwrap().unconfirmed);
+        // (a browser sign-in's renewal: this node has the browser client, not a device one)
+        let renewable = tidal_unofficial::Session {
+            refresh_token: Some("r".into()),
+            client: tidal_unofficial::ClientKind::Pkce,
+            ..kept.clone()
+        };
+        tidal_unofficial::update(&s, &ben_who, |st| st.session = Some(renewable));
+        assert!(
+            play().await.unwrap().is_err(),
+            "renewed, still unchecked: not played"
+        );
+        let renewed = bens().unwrap();
+        assert!(
+            renewed.unconfirmed && renewed.access_token == "pk-at-renewed",
+            "the renewal is kept, unconfirmed: {renewed:?}"
+        );
+        tidal_unofficial::update(&s, &ben_who, |st| st.session = Some(kept.clone()));
+        {
+            let lib = s.library.lock().unwrap();
+            let anna_who = accounts::Who::Listener(anna.to_string());
+            assert!(anna_who.account_free(&lib, "tidal.unofficial", "5").is_ok());
+        }
+        owner_is("5");
+        {
+            let lib = s.library.lock().unwrap();
+            let (status, _) =
+                tidal_unofficial::renewed_for(&lib, &ben_who, &serde_json::json!({"user_id": 5}), &kept)
+                    .unwrap_err();
+            assert_eq!(status, StatusCode::CONFLICT, "the same account, checked now");
+        }
+        owner_is("1");
+        // Someone signs in with account 5 and TIDAL vouches for it: the paste that only claimed it
+        // ends, and says why
+        let anna_who = accounts::Who::Listener(anna.to_string());
+        tidal_unofficial::update(&s, &anna_who, |st| {
+            st.session = Some(tidal_unofficial::Session {
+                access_token: names_5.clone(),
+                user_id: Some("5".into()),
+                expires_at: 4_000_000_000,
+                ..Default::default()
+            })
+        });
+        assert_eq!(
+            tidal_unofficial::load(&s.library.lock().unwrap(), &anna_who)
+                .session
+                .and_then(|x| x.user_id)
+                .as_deref(),
+            Some("5")
+        );
+        assert!(bens().is_none(), "Ben's claim ended");
+        let health = tidal_unofficial::load(&s.library.lock().unwrap(), &ben_who)
+            .health
+            .unwrap();
+        assert!(health.detail.contains("someone else"), "{}", health.detail);
+        tidal_unofficial::update(&s, &anna_who, |st| st.session = None);
+        // (the steps below are a sign-in a renewal has named: confirmed)
+        let kept = tidal_unofficial::Session {
+            unconfirmed: false,
+            ..kept
+        };
+
+        // Its renewal names the account: the same one, another that is nobody's, or the owner's
+        {
+            let lib = s.library.lock().unwrap();
+            let renewed =
+                |answer: serde_json::Value| tidal_unofficial::renewed_for(&lib, &ben_who, &answer, &kept);
+            assert_eq!(renewed(serde_json::json!({"access_token": "t"})), Ok(None));
+            assert_eq!(renewed(serde_json::json!({"user_id": 5})), Ok(None));
+            assert_eq!(
+                renewed(serde_json::json!({"user": {"userId": 9}})),
+                Ok(Some("9".to_string()))
+            );
+            let (status, why) = renewed(serde_json::json!({"user_id": 1})).unwrap_err();
+            assert!(why.contains("already signed in"), "{why}");
+            assert_eq!(status, StatusCode::CONFLICT, "only this ends the sign-in");
+            // (an answer that names nobody next to its token: the token names the account)
+            assert!(renewed(serde_json::json!({"access_token": jwt(r#"{"uid":1}"#)})).is_err());
+            assert_eq!(
+                renewed(serde_json::json!({"access_token": jwt(r#"{"uid":5}"#)})),
+                Ok(None)
+            );
+            // (the id as text, or written another way, is read the same)
+            assert_eq!(renewed(serde_json::json!({"user_id": "005"})), Ok(None));
+            assert!(renewed(serde_json::json!({"user_id": "1"})).is_err());
+            assert!(renewed(serde_json::json!({"user": {"userId": "01"}})).is_err());
+            // (the owner's own renewals are not held to it)
+            assert_eq!(
+                tidal_unofficial::renewed_for(
+                    &lib,
+                    &accounts::Who::Owner,
+                    &serde_json::json!({"user_id": 77}),
+                    &kept
+                ),
+                Ok(Some("77".to_string()))
+            );
+        }
+        // A people list that can't be read stops the check, it doesn't pass it: not a conflict
+        // (that would end the sign-in), an error (the renewal is tried again)
+        {
+            let lib = s.library.lock().unwrap();
+            let people = lib.get_setting("people").unwrap().unwrap();
+            lib.set_setting("people", "{not a list").unwrap();
+            let (status, why) =
+                tidal_unofficial::renewed_for(&lib, &ben_who, &serde_json::json!({"user_id": 42}), &kept)
+                    .unwrap_err();
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{why}");
+            assert!(ben_who.account_free(&lib, "tidal.unofficial", "42").is_err());
+            lib.set_setting("people", &people).unwrap();
+            assert_eq!(
+                tidal_unofficial::renewed_for(&lib, &ben_who, &serde_json::json!({"user_id": 42}), &kept),
+                Ok(Some("42".to_string()))
+            );
+        }
+        // Sign in with TIDAL and the code sign-in read the account as renewals do: a number or
+        // text, and the token's own when the answer names none
+        assert_eq!(
+            tidal_unofficial::answer_account(&serde_json::json!({"user_id": "0043"})),
+            Some("43".to_string())
+        );
+        assert_eq!(
+            tidal_unofficial::answer_account(&serde_json::json!({"user": {"userId": 44}})),
+            Some("44".to_string())
+        );
+        let named_by_its_token = tidal_unofficial::Session {
+            access_token: jwt(r#"{"uid":45}"#),
+            ..Default::default()
+        };
+        let held = tidal_unofficial::held_to_its_person(&s, &ben_who, named_by_its_token, true)
+            .await
+            .unwrap();
+        assert_eq!(held.user_id.as_deref(), Some("45"));
+        // A people list that can't be read stops a TIDAL sign-in before anything is kept (the
+        // claims it would end can't be found), the owner's too
+        let people = s.library.lock().unwrap().get_setting("people").unwrap().unwrap();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("people", "{not a list")
+            .unwrap();
+        let before = tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner).session;
+        let r = tidal_unofficial::update_signed_in(&s, &accounts::Who::Owner, "tidal", |st| {
+            st.session = Some(tidal_unofficial::Session {
+                access_token: jwt(r#"{"uid":46}"#),
+                user_id: Some("46".into()),
+                expires_at: 4_000_000_000,
+                ..Default::default()
+            })
+        });
+        assert!(r.is_err(), "refused");
+        assert_eq!(
+            tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner).session,
+            before,
+            "nothing kept"
+        );
+        s.library.lock().unwrap().set_setting("people", &people).unwrap();
+        *imports::HOME_OVERRIDE.write().unwrap() = None;
+    }
+
+    /// A Spotify sign-in kept without its account (Spotify did not answer when it was made) is
+    /// asked about before someone else's sign-in is kept: the account turns out to be the
+    /// owner's, and the other person's sign-in with it is not kept. One that can't be asked
+    /// about stops the sign-in with what to do.
+    #[tokio::test]
+    async fn a_persons_spotify_sign_in_is_held_to_sign_ins_kept_without_their_account() {
+        // Spotify: every code is good, and every token is account "sp-1"
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let knows = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // How the token endpoint answers a renewal: 0 as usual, 1 refused while another renewal
+        // replaces the kept refresh token (Spotify rotates it), 2 refused (revoked)
+        let renewal = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let node: Arc<std::sync::OnceLock<Arc<NodeState>>> = Arc::new(std::sync::OnceLock::new());
+        let mock = Router::new()
+            .route(
+                "/api/token",
+                post({
+                    let (renewal, node) = (renewal.clone(), node.clone());
+                    move |body: String| {
+                        let (renewal, node) = (renewal.clone(), node.clone());
+                        async move {
+                            let mode = renewal.load(std::sync::atomic::Ordering::SeqCst);
+                            if body.contains("grant_type=refresh_token") && mode > 0 {
+                                if mode == 1 {
+                                    let s = node.get().unwrap();
+                                    s.library.lock().unwrap().set_setting(
+                                        "spotify.user",
+                                        &serde_json::json!({"access_token": "owner-at-2", "refresh_token": "r-new", "expires_at": pm_library::db::now_unix() + 3600, "scope": "x"}).to_string(),
+                                    ).unwrap();
+                                }
+                                return (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(serde_json::json!({"error": "invalid_grant", "error_description": "Invalid refresh token"})),
+                                );
+                            }
+                            // (a sign-in gets the scopes the node asks for, no more)
+                            (
+                                StatusCode::OK,
+                                Json(serde_json::json!({"access_token": "new-at", "refresh_token": "r", "expires_in": 3600, "scope": spotify::DEFAULT_SCOPES})),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/me",
+                get({
+                    let knows = knows.clone();
+                    move |headers: HeaderMap| {
+                        let knows = knows.clone();
+                        async move {
+                            // (while it "doesn't know", it does not answer for the owner's token)
+                            let owners = headers.get("authorization").and_then(|v| v.to_str().ok())
+                                == Some("Bearer owner-at");
+                            if owners && !knows.load(std::sync::atomic::Ordering::SeqCst) {
+                                (StatusCode::BAD_GATEWAY, Json(serde_json::json!({})))
+                            } else {
+                                // What /me answers a token without user-read-private and
+                                // user-read-email: no country, product, explicit_content or email
+                                (StatusCode::OK, Json(serde_json::json!({
+                                    "id": "sp-1", "display_name": "One", "type": "user", "uri": "spotify:user:sp-1",
+                                    "href": "https://api.spotify.com/v1/users/sp-1", "images": [],
+                                    "external_urls": {"spotify": "https://open.spotify.com/user/sp-1"},
+                                    "followers": {"href": null, "total": 0}
+                                })))
+                            }
+                        }
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let _ = node.set(s.clone());
+        {
+            let mut ep = s.spotify.write().unwrap();
+            (ep.api_base, ep.accounts_base) = (base.clone(), base.clone());
+            ep.creds = spotify::SpotifyCredentials {
+                client_id: "cid".into(),
+                client_secret: "sec".into(),
+            };
+        }
+        let app = router(s.clone());
+        let ben_tok = accounts::mint(&s, ben).unwrap();
+        let row = |key: &str| s.library.lock().unwrap().get_setting(key).unwrap();
+        // The owner's sign-in, kept without its account
+        let owners = serde_json::json!({"access_token": "owner-at", "refresh_token": "r", "expires_at": pm_library::db::now_unix() + 3600, "scope": "x"}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("spotify.user", &owners)
+            .unwrap();
+        let sign_in = || {
+            let (app, ben_tok) = (app.clone(), ben_tok.clone());
+            async move {
+                let (st, v, h) = send_as(
+                    &app,
+                    "GET",
+                    "/v1/sources/spotify/login",
+                    Some(&ben_tok),
+                    &[],
+                    None,
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                let url = url::Url::parse(v["url"].as_str().unwrap()).unwrap();
+                let param = |name: &str| url.query_pairs().find(|(k, _)| k == name).unwrap().1.to_string();
+                assert_eq!(param("scope"), spotify::DEFAULT_SCOPES);
+                let state = param("state");
+                let cookie = h.get("set-cookie").unwrap().to_str().unwrap();
+                let cookie = cookie.split(';').next().unwrap().to_string();
+                let (_, _, h) = send_as(
+                    &app,
+                    "GET",
+                    &format!("/spotify/callback?code=c&state={state}"),
+                    None,
+                    &[("cookie", cookie.as_str())],
+                    None,
+                )
+                .await;
+                h.get("location").unwrap().to_str().unwrap().to_string()
+            }
+        };
+        // Spotify does not say whose the owner's sign-in is: Ben's is not kept, with what to do
+        knows.store(false, std::sync::atomic::Ordering::SeqCst);
+        let to = sign_in().await;
+        assert!(
+            to.contains("error") && to.contains("could+not+be+checked") && to.contains("the+owner%27s"),
+            "says whose: {to}"
+        );
+        assert!(row(&format!("person.{ben}.spotify.user")).is_none());
+        let kept: serde_json::Value = serde_json::from_str(&row("spotify.user").unwrap()).unwrap();
+        assert!(
+            kept["user_id"].is_null(),
+            "nothing is guessed about the owner's: {kept}"
+        );
+        // Spotify answers: the owner's sign-in is account sp-1, and so would Ben's be: not kept
+        knows.store(true, std::sync::atomic::Ordering::SeqCst);
+        let to = sign_in().await;
+        assert!(to.contains("error") && to.contains("already+signed+in"), "{to}");
+        assert!(row(&format!("person.{ben}.spotify.user")).is_none());
+        let owners: serde_json::Value = serde_json::from_str(&row("spotify.user").unwrap()).unwrap();
+        assert_eq!(
+            owners["user_id"], "sp-1",
+            "the owner's sign-in names its account now"
+        );
+        assert_eq!(owners["access_token"], "owner-at", "and is otherwise as it was");
+        // The owner signed in with another account: Ben's is kept
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "spotify.user",
+                &serde_json::json!({"access_token": "owner-at", "refresh_token": "r", "expires_at": pm_library::db::now_unix() + 3600, "user_id": "sp-2", "scope": "x"}).to_string(),
+            )
+            .unwrap();
+        let to = sign_in().await;
+        assert!(!to.contains("error"), "{to}");
+        // (kept with the account /me named, though it said nothing of country or plan)
+        let bens: serde_json::Value =
+            serde_json::from_str(&row(&format!("person.{ben}.spotify.user")).unwrap()).unwrap();
+        assert_eq!(
+            (bens["user_id"].clone(), bens["display_name"].clone()),
+            (serde_json::json!("sp-1"), serde_json::json!("One"))
+        );
+        assert!(bens["country"].is_null() && bens["product"].is_null(), "{bens}");
+        // A kept sign-in that can't be renewed any more (run out, nothing to renew it with) plays
+        // nothing and holds no account: it doesn't stop anyone, even while Spotify can't be asked
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "spotify.user",
+                &serde_json::json!({"access_token": "old-at", "expires_at": 1, "scope": "x"}).to_string(),
+            )
+            .unwrap();
+        s.library
+            .lock()
+            .unwrap()
+            .delete_setting(&format!("person.{ben}.spotify.user"))
+            .unwrap();
+        knows.store(false, std::sync::atomic::Ordering::SeqCst);
+        let to = sign_in().await;
+        assert!(!to.contains("error"), "{to}");
+        assert!(row(&format!("person.{ben}.spotify.user")).is_some());
+        // A renewal refused because another renewal replaced the refresh token meanwhile is not a
+        // revoked sign-in: Ben's is not kept (asked again later); one Spotify refuses for good is
+        let stale = serde_json::json!({"access_token": "owner-old", "refresh_token": "r-old", "expires_at": 1, "scope": "x"}).to_string();
+        let again = |mode: u8| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting("spotify.user", &stale)
+                .unwrap();
+            s.library
+                .lock()
+                .unwrap()
+                .delete_setting(&format!("person.{ben}.spotify.user"))
+                .unwrap();
+            renewal.store(mode, std::sync::atomic::Ordering::SeqCst);
+        };
+        again(1);
+        let to = sign_in().await;
+        assert!(
+            to.contains("error") && to.contains("could+not+be+checked"),
+            "{to}"
+        );
+        assert!(row(&format!("person.{ben}.spotify.user")).is_none());
+        again(2);
+        let to = sign_in().await;
+        assert!(!to.contains("error"), "revoked: {to}");
+        assert!(row(&format!("person.{ben}.spotify.user")).is_some());
+        renewal.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Radio goes on when the queue runs out, not after a Stop (its own file).

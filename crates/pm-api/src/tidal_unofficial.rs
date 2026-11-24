@@ -115,6 +115,11 @@ pub struct Session {
     /// a device session.
     #[serde(default, skip_serializing_if = "ClientKind::is_device")]
     pub client: ClientKind,
+    /// A pasted sign-in TIDAL did not answer for: its account is only what the paste claims. It
+    /// holds no account in other people's checks (`accounts::account_of`) until a renewal names
+    /// one, which is then checked whatever it is (`renewed_for`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfirmed: bool,
     /// The client an imported file says made it, when it names one (only for the import's
     /// "renews here" check; never stored).
     #[serde(skip)]
@@ -237,11 +242,17 @@ pub fn load(lib: &pm_library::Library, who: &Who) -> ModeState {
 }
 
 fn save(lib: &pm_library::Library, who: &Who, st: &ModeState) {
-    let _ = who.put(
+    let _ = try_save(lib, who, st);
+}
+
+/// [`save`], saying when the state was not kept (someone no longer listed, or a sign-in with an
+/// account that is someone else's here: accounts.rs).
+fn try_save(lib: &pm_library::Library, who: &Who, st: &ModeState) -> Result<(), ApiError> {
+    who.put(
         lib,
         STATE_KEY,
         Some(&serde_json::to_string(st).expect("state serializes")),
-    );
+    )
 }
 
 pub(crate) fn update(s: &NodeState, who: &Who, f: impl FnOnce(&mut ModeState)) -> ModeState {
@@ -255,30 +266,35 @@ pub(crate) fn update(s: &NodeState, who: &Who, f: impl FnOnce(&mut ModeState)) -
 /// [`update`] for an interactive sign-in: the state and the vault's "new sign-in" mark (the
 /// owner's only: the vault is theirs) are written under one library guard, so no vault pass sees
 /// one without the other.
-pub(crate) fn update_signed_in(s: &NodeState, who: &Who, service: &str, f: impl FnOnce(&mut ModeState)) {
-    update_signed_in_if(s, who, service, |_| true, f);
+pub(crate) fn update_signed_in(
+    s: &NodeState,
+    who: &Who,
+    service: &str,
+    f: impl FnOnce(&mut ModeState),
+) -> Result<(), ApiError> {
+    update_signed_in_if(s, who, service, |_| true, f).map(|_| ())
 }
 
 /// [`update_signed_in`] only while `still` holds for the state, checked under the same guard;
-/// whether it was written.
+/// whether it was written, or why the sign-in was not kept.
 pub(crate) fn update_signed_in_if(
     s: &NodeState,
     who: &Who,
     service: &str,
     still: impl FnOnce(&ModeState) -> bool,
     f: impl FnOnce(&mut ModeState),
-) -> bool {
+) -> Result<bool, ApiError> {
     let lib = s.library.lock().expect("library poisoned");
     let mut st = load(&lib, who);
     if !still(&st) {
-        return false;
+        return Ok(false);
     }
     f(&mut st);
-    save(&lib, who, &st);
+    try_save(&lib, who, &st)?;
     if who.is_owner() {
         crate::vault_cache::new_sign_in(&lib, service);
     }
-    true
+    Ok(true)
 }
 
 fn config_client() -> &'static std::sync::OnceLock<Client> {
@@ -374,8 +390,143 @@ fn session_from(v: &Value, previous: Option<&Session>) -> Option<Session> {
         session_id: previous.and_then(|p| p.session_id.clone()),
         from: previous.and_then(|p| p.from.clone()),
         client: previous.map(|p| p.client).unwrap_or_default(),
+        unconfirmed: previous.is_some_and(|p| p.unconfirmed),
         named_client: None,
     })
+}
+
+/// A sign-in of someone other than the owner, before it is stored: whose account it is must be
+/// known, and it must be nobody else's on this node ([`Who::account_free`]). `asked` says the
+/// account in `sess` is TIDAL's own answer. A pasted sign-in's is not: TIDAL is asked, and only
+/// when it does not answer (a sign-in that has run out and is renewed at its first play) the
+/// account is the one the sign-in names itself; the renewal then holds it to TIDAL's answer
+/// ([`renewed_for`]). The owner's sign-ins pass as they are.
+pub(crate) async fn held_to_its_person(
+    s: &NodeState,
+    who: &Who,
+    mut sess: Session,
+    asked: bool,
+) -> Result<Session, ApiError> {
+    if who.is_owner() {
+        return Ok(sess);
+    }
+    if !asked {
+        // TIDAL's answer first; else the account the pasted token names itself; what the paste
+        // says next to it only when neither does
+        let stated = sess.user_id.take();
+        sess = fill_session(s, sess).await;
+        sess.unconfirmed = sess.user_id.is_none();
+        sess.user_id = sess
+            .user_id
+            .or_else(|| token_account(&sess.access_token))
+            .or(stated);
+    }
+    // (an answer that names nobody next to its token: the token names the account)
+    sess.user_id = sess
+        .user_id
+        .as_deref()
+        .and_then(crate::accounts::account_id)
+        .or_else(|| token_account(&sess.access_token));
+    let Some(account) = sess.user_id.as_deref() else {
+        return Err(if asked {
+            crate::accounts::account_unknown("TIDAL")
+        } else {
+            ApiError::bad_request(
+                "This sign-in doesn't say whose TIDAL account it is, and TIDAL didn't either (it may have run out). Use Sign in with TIDAL instead.",
+            )
+        });
+    };
+    who.account_free(&s.library.lock().expect("library poisoned"), STATE_KEY, account)?;
+    Ok(sess)
+}
+
+/// Ends every unconfirmed pasted sign-in (`Session::unconfirmed`) of someone other than `me` that
+/// claims `account`: a sign-in TIDAL vouched for holds it now. Its health line says why. Written
+/// directly, not through `Who::put` (nothing is added that needs checking).
+pub(crate) fn end_claims_on(lib: &pm_library::Library, me: &Who, account: &str) -> Result<(), ApiError> {
+    let listed = crate::people::listed_keys(lib)?;
+    let holders = std::iter::once(Who::Owner).chain(listed.into_iter().map(Who::Listener));
+    for who in holders.filter(|w| w.own() != me.own()) {
+        let mut st = load(lib, &who);
+        let claims = st.session.as_ref().is_some_and(|c| {
+            c.unconfirmed
+                && c.user_id
+                    .as_deref()
+                    .and_then(crate::accounts::account_id)
+                    .as_deref()
+                    == Some(account)
+        });
+        if !claims {
+            continue;
+        }
+        st.session = None;
+        st.health = Some(Health {
+            ok: false,
+            detail: "This TIDAL account was signed in on this node by someone else, with TIDAL's own \
+                     confirmation. Sign in with your own account."
+                .into(),
+            at: now(),
+            lossy: false,
+        });
+        let Some(key) = who.setting(STATE_KEY) else {
+            continue;
+        };
+        lib.set_setting(&key, &serde_json::to_string(&st).expect("state serializes"))?;
+    }
+    Ok(())
+}
+
+/// The account a TIDAL token answer names (`user_id`, or `user.userId`), a number or text, read
+/// one way (`accounts::account_id`). Renewals read theirs the same way ([`renewed_for`]).
+pub(crate) fn answer_account(v: &Value) -> Option<String> {
+    let id = |v: &Value| match v {
+        Value::Number(n) => crate::accounts::account_id(&n.to_string()),
+        Value::String(s) => crate::accounts::account_id(s),
+        _ => None,
+    };
+    id(&v["user_id"]).or_else(|| id(&v["user"]["userId"]))
+}
+
+/// The account a TIDAL token names itself (its `uid` claim).
+fn token_account(access_token: &str) -> Option<String> {
+    match &crate::tidal::jwt_claims(access_token)["uid"] {
+        Value::Number(n) => crate::accounts::account_id(&n.to_string()),
+        Value::String(s) => crate::accounts::account_id(s),
+        _ => None,
+    }
+}
+
+/// The account a renewal's answer names, when it is another one than the session was kept
+/// under (a pasted sign-in whose renewal belongs to a different account): for someone other
+/// than the owner it must be nobody else's on this node, as at sign-in. `Err` is why not.
+pub(crate) fn renewed_for(
+    lib: &pm_library::Library,
+    who: &Who,
+    answer: &Value,
+    kept: &Session,
+) -> Result<Option<String>, (StatusCode, String)> {
+    // (TIDAL writes the id as a number; text is read too, and both the same way)
+    let id = |v: &Value| match v {
+        Value::Number(n) => crate::accounts::account_id(&n.to_string()),
+        Value::String(s) => crate::accounts::account_id(s),
+        _ => None,
+    };
+    // (and when the answer names none next to its token, the token does)
+    let named = id(&answer["user_id"])
+        .or_else(|| id(&answer["user"]["userId"]))
+        .or_else(|| answer["access_token"].as_str().and_then(token_account));
+    let was = kept.user_id.as_deref().and_then(crate::accounts::account_id);
+    match named {
+        // (one only the paste vouched for is checked now, the same account or not)
+        Some(account) if kept.unconfirmed || was.as_deref() != Some(account.as_str()) => {
+            if !who.is_owner() {
+                who.account_free(lib, STATE_KEY, &account)
+                    .map_err(|e| (e.status, e.message))?;
+            }
+            Ok(Some(account))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Who the session is: TIDAL's `/sessions` (user, country, session id).
@@ -388,7 +539,8 @@ async fn fill_session(s: &NodeState, mut sess: Session) -> Session {
         .await
     {
         if let Ok(v) = r.json::<Value>().await {
-            sess.user_id = v["userId"].as_i64().map(|u| u.to_string()).or(sess.user_id);
+            // (a number or text, read one way: `answer_account`)
+            sess.user_id = answer_account(&serde_json::json!({"user_id": v["userId"]})).or(sess.user_id);
             if let Some(c) = v["countryCode"].as_str() {
                 sess.country = c.to_string();
             }
@@ -753,8 +905,29 @@ async fn wait_for_approval(s: &Arc<NodeState>, who: &Who, c: Client, p: Pending)
         let ok = resp.status().is_success();
         let v: Value = resp.json().await.unwrap_or(Value::Null);
         if ok {
-            if let Some(sess) = session_from(&v, None) {
+            if let Some(mut sess) = session_from(&v, None) {
+                // The token answer names the user; /sessions adds the session id and country
+                sess.user_id = answer_account(&v);
                 let sess = fill_session(s, sess).await;
+                // Someone else's account on this node, or one TIDAL did not name, is not kept
+                // for a person (accounts.rs): the code is given up, and the page says why
+                let sess = match held_to_its_person(s, who, sess, true).await {
+                    Ok(sess) => sess,
+                    Err(e) => {
+                        update(s, who, |st| {
+                            if st.login.as_ref().map(|x| &x.device_code) == Some(&p.device_code) {
+                                st.login = None;
+                                st.health = Some(Health {
+                                    ok: false,
+                                    detail: e.message.clone(),
+                                    at: now(),
+                                    lossy: false,
+                                });
+                            }
+                        });
+                        return;
+                    }
+                };
                 // Only while this code is still the sign-in on the way: signed out, replaced or
                 // removed (People) while TIDAL was asked, it isn't kept
                 let still =
@@ -770,8 +943,24 @@ async fn wait_for_approval(s: &Arc<NodeState>, who: &Who, c: Client, p: Pending)
                         lossy: false,
                     });
                 });
-                if kept {
-                    tracing::info!("TIDAL full tracks (unofficial): signed in");
+                match kept {
+                    Ok(true) => tracing::info!("TIDAL full tracks (unofficial): signed in"),
+                    Ok(false) => {}
+                    // Not kept after all (the account became someone else's meanwhile, or
+                    // this person is no longer listed): the code is given up, with why
+                    Err(e) => {
+                        update(s, who, |st| {
+                            if st.login.as_ref().map(|x| &x.device_code) == Some(&p.device_code) {
+                                st.login = None;
+                                st.health = Some(Health {
+                                    ok: false,
+                                    detail: e.message.clone(),
+                                    at: now(),
+                                    lossy: false,
+                                });
+                            }
+                        });
+                    }
                 }
             }
             return;
@@ -1025,14 +1214,13 @@ pub(crate) async fn finish_browser(
     };
     sess.client = ClientKind::Pkce;
     // The token answer names the user; /sessions adds the session id and country
-    sess.user_id = v["user_id"]
-        .as_i64()
-        .or(v["user"]["userId"].as_i64())
-        .map(|u| u.to_string());
+    sess.user_id = answer_account(&v);
     if let Some(cc) = v["user"]["countryCode"].as_str() {
         sess.country = cc.to_string();
     }
     let sess = fill_session(&s, sess).await;
+    // Someone else's account on this node, or one TIDAL did not name, is not kept for a person
+    let sess = held_to_its_person(&s, &who, sess, true).await?;
     // Only while this attempt is still the one on its way (signed out, restarted or removed
     // (People) while TIDAL was asked: not kept)
     let still = |st: &ModeState| st.browser.as_ref() == Some(&p);
@@ -1047,7 +1235,7 @@ pub(crate) async fn finish_browser(
             at: now(),
             lossy: false,
         });
-    });
+    })?;
     if !kept {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -1143,7 +1331,8 @@ fn token_blocking(
         "HI_RES_LOSSLESS"
     }
     .to_string();
-    if sess.expires_at - now() > 60 {
+    // (a paste TIDAL never vouched for is renewed, and so checked, before its first play)
+    if sess.expires_at - now() > 60 && !sess.unconfirmed {
         return Ok(Some((sess, quality)));
     }
     let Some(refresh) = sess.refresh_token.clone() else {
@@ -1203,10 +1392,39 @@ fn token_blocking(
                 .unwrap_or("")
         )));
     }
-    let fresh =
+    let mut fresh =
         session_from(&v, Some(&sess)).ok_or_else(|| FullError::Mode("renewal without a token".into()))?;
     if let Ok(lib) = library.lock() {
         let mut st = load(&lib, who);
+        // The renewal names another account than the sign-in was kept under: held to the same
+        // rule as a sign-in (accounts.rs). Someone else's is not kept: the sign-in ends here
+        match renewed_for(&lib, who, &v, &sess) {
+            Ok(Some(account)) => {
+                fresh.user_id = Some(account);
+                fresh.unconfirmed = false;
+            }
+            Ok(None) => {}
+            // (a store that can't be read now ends nothing: the renewal fails and is tried again)
+            // (as a failed renewal: full tracks stay on, the next play tries again)
+            Err((status, why)) if status != StatusCode::CONFLICT => return Err(FullError::Track(why)),
+            Err((_, why)) => {
+                if st
+                    .session
+                    .as_ref()
+                    .is_some_and(|c| c.access_token == sess.access_token)
+                {
+                    st.session = None;
+                    st.health = Some(Health {
+                        ok: false,
+                        detail: why.clone(),
+                        at: now(),
+                        lossy: false,
+                    });
+                    save(&lib, who, &st);
+                }
+                return Err(FullError::Mode(why));
+            }
+        }
         // Only over the session this renewal started from (the vault may have changed it
         // meanwhile); otherwise the session there now is the one to use
         if st
@@ -1218,8 +1436,16 @@ fn token_blocking(
             save(&lib, who, &st);
         } else {
             tracing::info!("a renewed TIDAL full-tracks session was dropped: the sign-in changed meanwhile");
-            return Ok(st.session.map(|c| (c, quality)));
+            // (one TIDAL never vouched for plays only once a renewal has checked it)
+            return Ok(st.session.filter(|c| !c.unconfirmed).map(|c| (c, quality)));
         }
+    }
+    // Still only what the paste claimed (TIDAL's renewal named no account): it doesn't play
+    if fresh.unconfirmed {
+        return Err(FullError::Mode(
+            "TIDAL didn't say whose account this pasted sign-in is, so it doesn't play here: use Sign in with TIDAL"
+                .into(),
+        ));
     }
     Ok(Some((fresh, quality)))
 }

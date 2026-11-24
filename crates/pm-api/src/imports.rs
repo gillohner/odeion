@@ -387,6 +387,7 @@ fn python_tidal(v: &Value) -> Option<Session> {
         },
         // python-tidal's own file names no client; one that does (`client_id`, as `{"data": …}`
         // or a plain string) is compared with this build's at the import
+        unconfirmed: false,
         named_client: field("client_id")
             .or_else(|| v.get("client_id"))
             .and_then(Value::as_str)
@@ -413,6 +414,7 @@ fn tidal_dl(v: &Value) -> Option<Session> {
         session_id: None,
         from: None,
         client: Default::default(),
+        unconfirmed: false,
         named_client: None,
     })
 }
@@ -452,6 +454,7 @@ fn streamrip(text: &str) -> Option<Session> {
         session_id: None,
         from: None,
         client: Default::default(),
+        unconfirmed: false,
         named_client: None,
     })
 }
@@ -472,6 +475,7 @@ fn bare_token(text: &str) -> Option<Session> {
         session_id: None,
         from: None,
         client: Default::default(),
+        unconfirmed: false,
         named_client: None,
     })
 }

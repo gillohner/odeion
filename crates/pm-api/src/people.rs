@@ -163,6 +163,21 @@ pub(crate) fn listed_for_music(lib: &pm_library::Library, key: &str) -> bool {
         })
 }
 
+/// The key of everyone in People (the library alone). A list that can't be read is an error,
+/// not nobody: a check that goes through everyone's sign-ins must not pass for want of them.
+pub(crate) fn listed_keys(lib: &pm_library::Library) -> Result<Vec<String>, ApiError> {
+    let Some(json) = lib.get_setting(SETTING)? else {
+        return Ok(Vec::new());
+    };
+    let r: Roster = serde_json::from_str(&json).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot read the people list: {e}"),
+        )
+    })?;
+    Ok(r.people.into_iter().map(|p| p.key).collect())
+}
+
 pub fn load(s: &NodeState) -> Roster {
     s.library
         .lock()

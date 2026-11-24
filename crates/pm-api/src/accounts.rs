@@ -370,11 +370,168 @@ impl Who {
                 ));
             }
         }
+        // A sign-in at a service: only an account that is nobody else's here
+        let mut tidal_account = None;
+        if let Some((service, _)) = ACCOUNT_KEYS.iter().find(|(_, keys)| keys.contains(&base)) {
+            if let Some(account) = value.and_then(|v| account_of(v, *service == TIDAL)) {
+                self.account_free(lib, base, &account)?;
+                tidal_account = (*service == TIDAL).then_some(account);
+            }
+        }
+        // (what ends below reads the people list: one that can't be read stops the write here, not
+        // after it)
+        if tidal_account.is_some() {
+            crate::people::listed_keys(lib)?;
+        }
         match value {
             Some(v) => lib.set_setting(&key, v)?,
             None => {
                 lib.delete_setting(&key)?;
             }
+        }
+        // The account is someone's here now: a pasted sign-in that only claimed it ends. The sign-in
+        // is kept either way: a claim that could not be ended is ended by its own next renewal
+        if let Some(account) = tidal_account {
+            if let Err(e) = crate::tidal_unofficial::end_claims_on(lib, self, &account) {
+                tracing::warn!(
+                    "a pasted TIDAL sign-in claiming a kept account was not ended: {}",
+                    e.message
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The settings that hold a person's signed-in account at a service, by the service's name: one
+/// account is one person's on a node ([`Who::account_free`]).
+const ACCOUNT_KEYS: &[(&str, &[&str])] = &[
+    (TIDAL, &["tidal.user", "tidal.unofficial"]),
+    ("Spotify", &["spotify.user"]),
+];
+
+const TIDAL: &str = "TIDAL";
+
+/// What someone other than the owner is told when a service did not say whose account a sign-in
+/// is for: it is not kept, because it can't be held to [`Who::account_free`].
+pub(crate) fn account_unknown(service: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_GATEWAY,
+        format!("{service} didn't say whose account this is, so the sign-in was not kept. Try again."),
+    )
+}
+
+/// The account a stored sign-in is for, as its service names it: for TIDAL (`tidal`) the account
+/// its token names (`uid`), which a sign-in kept without an id has too; else `user_id` of the
+/// sign-in or of its `session`.
+fn account_of(stored: &str, tidal: bool) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(stored).ok()?;
+    // A pasted TIDAL sign-in TIDAL never vouched for holds nothing yet (tidal_unofficial.rs)
+    if v["session"]["unconfirmed"].as_bool() == Some(true) {
+        return None;
+    }
+    let named = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => account_id_of(s, tidal),
+        serde_json::Value::Number(n) => account_id_of(&n.to_string(), tidal),
+        _ => None,
+    };
+    // TIDAL's token names its account itself: that counts before what was written next to it
+    let from_token = || {
+        let token = v["access_token"]
+            .as_str()
+            .or(v["session"]["access_token"].as_str())
+            .filter(|_| tidal)?;
+        named(&crate::tidal::jwt_claims(token)["uid"])
+    };
+    from_token()
+        .or_else(|| named(&v["user_id"]))
+        .or_else(|| named(&v["session"]["user_id"]))
+}
+
+/// A TIDAL account id written one way, so that the same account compares equal however TIDAL or
+/// a pasted sign-in wrote it: without spaces around it, and the number without leading zeros.
+pub(crate) fn account_id(raw: &str) -> Option<String> {
+    account_id_of(raw, true)
+}
+
+/// An account id without spaces around it; a TIDAL one (`tidal`, a number) also without leading
+/// zeros. Other services' ids are text and compare as they are.
+fn account_id_of(raw: &str, tidal: bool) -> Option<String> {
+    let id = raw.trim();
+    if id.is_empty() {
+        return None;
+    }
+    if tidal && id.bytes().all(|b| b.is_ascii_digit()) {
+        let n = id.trim_start_matches('0');
+        return Some(if n.is_empty() { "0" } else { n }.to_string());
+    }
+    Some(id.to_string())
+}
+
+impl Who {
+    /// Whether someone the owner added may keep a sign-in with `account` under `base` (one of
+    /// [`ACCOUNT_KEYS`]): yes when it is the account they are signed in with already, or one
+    /// that is not the owner's and no other person's on this node. Each person plays with their
+    /// own account; an account is shared through the node's sign-ins (the owner's choice in
+    /// Settings), not by a second person signing in with it. The owner's own sign-ins are not
+    /// checked. Under the caller's library guard, as [`Who::put`]. A sign-in whose account the
+    /// service did not name can't be checked: the sign-in handlers refuse those for anyone but
+    /// the owner ([`account_unknown`]).
+    pub(crate) fn account_free(
+        &self,
+        lib: &pm_library::Library,
+        base: &str,
+        account: &str,
+    ) -> Result<(), ApiError> {
+        let Who::Listener(me) = self else {
+            return Ok(());
+        };
+        let Some((service, keys)) = ACCOUNT_KEYS.iter().find(|(_, keys)| keys.contains(&base)) else {
+            return Ok(());
+        };
+        let tidal = *service == TIDAL;
+        let Some(account) = account_id_of(account, tidal) else {
+            return Ok(());
+        };
+        // (a sign-in that can't be read is an error, not "nobody's": nothing is kept then)
+        let held = |setting: String| -> Result<bool, ApiError> {
+            Ok(lib
+                .get_setting(&setting)?
+                .as_deref()
+                .and_then(|j| account_of(j, tidal))
+                .is_some_and(|theirs| theirs == account))
+        };
+        let holds = |key: Option<&str>| -> Result<bool, ApiError> {
+            for b in keys.iter() {
+                let setting = match key {
+                    Some(key) => format!("{PERSON_PREFIX}{key}.{b}"),
+                    None => b.to_string(),
+                };
+                if held(setting)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        if holds(Some(me))? {
+            return Ok(());
+        }
+        let mut taken = holds(None)?;
+        for other in crate::people::listed_keys(lib)? {
+            if taken {
+                break;
+            }
+            taken = other != *me && holds(Some(&other))?;
+        }
+        if taken {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                format!(
+                    "This {service} account is already signed in on this node for someone else. \
+                     Sign in with your own account. To share the owner's, the owner can let \
+                     everyone play through the node's sign-ins (Settings)."
+                ),
+            ));
         }
         Ok(())
     }

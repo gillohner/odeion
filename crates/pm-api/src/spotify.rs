@@ -30,6 +30,9 @@ const USER_KEY: &str = "spotify.user";
 /// The client id of the owner's own Spotify app, entered in Sources › Spotify (guided setup). No
 /// secret: its sign-in is PKCE through the return page (STEWARD-SHARED-APPS.md).
 pub const APP_KEY: &str = "spotify.app";
+/// What a sign-in asks Spotify for. Whose account it is (`/me`'s `id` and `display_name`) comes
+/// without a scope of its own; only `/me`'s `country` and `product` (`user-read-private`) and
+/// `email` (`user-read-email`) need one, and the node asks for neither.
 pub const DEFAULT_SCOPES: &str =
     "user-library-read playlist-read-private playlist-read-collaborative user-read-playback-state user-modify-playback-state";
 
@@ -279,15 +282,26 @@ async fn token_request(s: &NodeState, form: &[(&str, &str)]) -> Result<Value, Ap
     let status = resp.status();
     let v: Value = resp.json().await.map_err(upstream)?;
     if !status.is_success() {
-        return Err(upstream(format!(
-            "token endpoint {status}: {}",
-            v["error_description"]
-                .as_str()
-                .or(v["error"].as_str())
-                .unwrap_or("")
-        )));
+        return Err(upstream(token_refusal(status, &v)));
     }
     Ok(v)
+}
+
+/// What Spotify's token endpoint said when it refused: its status, its error code
+/// (`invalid_grant`, `invalid_client`, …) and its words.
+fn token_refusal(status: reqwest::StatusCode, v: &Value) -> String {
+    let said: Vec<&str> = [v["error"].as_str(), v["error_description"].as_str()]
+        .into_iter()
+        .flatten()
+        .filter(|x| !x.is_empty())
+        .collect();
+    format!("token endpoint {status}: {}", said.join(": "))
+}
+
+/// Spotify refused a renewal for good: the sign-in itself was revoked (`invalid_grant`). A wrong
+/// app (`invalid_client`), a rate limit or anything else may pass.
+fn refused_for_good(e: &ApiError) -> bool {
+    e.message.contains("token endpoint ") && e.message.contains("invalid_grant")
 }
 
 /// Client-credentials token for catalogue search without a user.
@@ -330,6 +344,128 @@ fn store_user(s: &NodeState, who: &Who, u: Option<&UserSession>) -> Result<(), A
     )
 }
 
+/// Whether a kept sign-in names its account.
+fn names_account(u: &UserSession) -> bool {
+    u.user_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+}
+
+/// Whose account a token is for, as Spotify says (`/me`); `None` when it does not answer.
+async fn account_of_token(s: &NodeState, access_token: &str) -> Option<String> {
+    let r = s
+        .http_client()
+        .get(format!("{}/me", api_base(s)))
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .ok()?;
+    if !r.status().is_success() {
+        return None;
+    }
+    r.json::<Value>().await.ok()?["id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// What is known of the account of a kept sign-in ([`account_known`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kept {
+    /// Its account is known, or nothing is kept.
+    Known,
+    /// It can't be renewed any more (no renewal kept, or Spotify refused it): it plays nothing,
+    /// so it holds no account.
+    Dead,
+    /// It could not be asked about now.
+    NotNow,
+}
+
+/// The account of `holder`'s kept sign-in: one kept without it (Spotify did not answer when it
+/// was made) asks Spotify now and keeps the answer.
+async fn account_known(s: &NodeState, holder: &Who) -> Kept {
+    let Some(kept) = load_user(s, holder) else {
+        return Kept::Known;
+    };
+    if names_account(&kept) {
+        return Kept::Known;
+    }
+    // (a renewal on the way asks too)
+    let token = match user_token(s, holder).await {
+        Ok(Some(token)) => token,
+        Ok(None) => return Kept::Dead,
+        // Spotify revoked the sign-in; anything else, a wrong app or a rate limit, is asked again.
+        // (A renewal refused because another one renewed it meanwhile, its refresh token changed
+        // since: that sign-in lives on, and is asked about again)
+        Err(e) if refused_for_good(&e) => {
+            let renewed_meanwhile =
+                load_user(s, holder).is_none_or(|now| now.refresh_token != kept.refresh_token);
+            return if renewed_meanwhile {
+                Kept::NotNow
+            } else {
+                Kept::Dead
+            };
+        }
+        Err(_) => return Kept::NotNow,
+    };
+    let Some(mut u) = load_user(s, holder) else {
+        return Kept::Known;
+    };
+    if names_account(&u) {
+        return Kept::Known;
+    }
+    let Some(account) = account_of_token(s, &token).await else {
+        return Kept::NotNow;
+    };
+    u.user_id = Some(account);
+    let Some(key) = holder.setting(USER_KEY) else {
+        return Kept::NotNow;
+    };
+    // Only over the sign-in that was asked about
+    let lib = s.library.lock().expect("library poisoned");
+    let still = |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == token);
+    // (not stored: changed meanwhile, or the write failed; it is asked again next time)
+    if crate::vault_cache::store_refreshed(&lib, &key, still, &serde_json::to_string(&u).expect("serializes"))
+    {
+        Kept::Known
+    } else {
+        Kept::NotNow
+    }
+}
+
+/// Before someone other than the owner keeps a sign-in: every Spotify sign-in already kept on
+/// this node has to name its account, or the new one can't be held to "one account is one
+/// person's" (accounts.rs). One that can't be renewed any more plays nothing and holds no
+/// account; one that can't be asked about now stops the sign-in, saying whose it is and what to do.
+async fn others_accounts_known(s: &NodeState, who: &Who) -> Result<(), ApiError> {
+    let listed = crate::people::listed_keys(&s.library.lock().expect("library poisoned"))?;
+    let holders = std::iter::once(Who::Owner).chain(listed.into_iter().map(Who::Listener));
+    for holder in holders.filter(|h| h != who) {
+        if account_known(s, &holder).await != Kept::NotNow {
+            continue;
+        }
+        let (whose, fix) = match &holder {
+            // (the one asking is someone the owner added: no other person is named to them)
+            Who::Listener(_) => (
+                "another person's".to_string(),
+                "that person signs out of Spotify and in again in their Settings, or the node's owner \
+                 removes their music access"
+                    .to_string(),
+            ),
+            _ => (
+                "the owner's".to_string(),
+                "the node's owner signs out of Spotify and in again".to_string(),
+            ),
+        };
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "A Spotify sign-in kept on this node ({whose}) could not be checked (Spotify did not say \
+                 whose account it is), so yours was not kept. Try again later; if it stays, {fix}."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// This person's access token, refreshed when within a minute of expiry.
 pub(crate) async fn user_token(s: &NodeState, who: &Who) -> Result<Option<String>, ApiError> {
     let Some(mut u) = load_user(s, who) else {
@@ -351,6 +487,11 @@ pub(crate) async fn user_token(s: &NodeState, who: &Who) -> Result<Option<String
     u.expires_at = now_unix() + v["expires_in"].as_i64().unwrap_or(3600);
     if let Some(r) = v["refresh_token"].as_str() {
         u.refresh_token = Some(r.to_string());
+    }
+    // A sign-in kept without Spotify having said whose account it is: asked now, so that the
+    // account is known to be somebody's here (accounts.rs). Best effort, as at sign-in
+    if !names_account(&u) {
+        u.user_id = account_of_token(s, &u.access_token).await;
     }
     // Only over the session this refresh started from (the vault may have changed it meanwhile)
     let lib = s.library.lock().expect("library poisoned");
@@ -883,6 +1024,7 @@ pub(crate) async fn login(
     {
         let now = std::time::Instant::now();
         let mut pending = pending().lock().expect("pending");
+        crate::tidal::make_room_of(&mut pending, |p| p.started, |p| p.who == who);
         crate::tidal::make_room(&mut pending, |p| p.started, now);
         pending.insert(
             nonce,
@@ -1026,19 +1168,6 @@ async fn finish_login(
         product: None,
         scope: v["scope"].as_str().unwrap_or("").to_string(),
     };
-    {
-        // Stored and marked new under one guard: no vault pass sees one without the other (the
-        // account details below are a later change of the same sign-in; the vault is the owner's)
-        let lib = s.library.lock().expect("library poisoned");
-        who.put(
-            &lib,
-            USER_KEY,
-            Some(&serde_json::to_string(&session).expect("serializes")),
-        )?;
-        if who.is_owner() {
-            crate::vault_cache::new_sign_in(&lib, "spotify");
-        }
-    }
     // Who this account is, asked with its own new token (nobody else's)
     let me = s
         .http_client()
@@ -1051,11 +1180,35 @@ async fn finish_login(
         _ => None,
     };
     if let Some(me) = me {
-        session.user_id = me["id"].as_str().map(str::to_string);
+        session.user_id = me["id"]
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string);
         session.display_name = me["display_name"].as_str().map(str::to_string);
         session.country = me["country"].as_str().map(str::to_string);
         session.product = me["product"].as_str().map(str::to_string);
-        store_user(s, &who, Some(&session))?;
+    }
+    // The owner's sign-in is kept even when Spotify did not say whose it is. Someone else's is
+    // kept only for an account that is nobody else's on this node (accounts.rs), so it has to
+    // be known first
+    if !who.is_owner() {
+        if session.user_id.is_none() {
+            return Err(crate::accounts::account_unknown("Spotify"));
+        }
+        others_accounts_known(s, &who).await?;
+    }
+    {
+        // Stored and marked new under one guard: no vault pass sees one without the other (the
+        // vault is the owner's)
+        let lib = s.library.lock().expect("library poisoned");
+        who.put(
+            &lib,
+            USER_KEY,
+            Some(&serde_json::to_string(&session).expect("serializes")),
+        )?;
+        if who.is_owner() {
+            crate::vault_cache::new_sign_in(&lib, "spotify");
+        }
     }
     tracing::info!(user = ?session.user_id, "Spotify sign-in stored");
     Ok(())
@@ -1720,5 +1873,40 @@ impl crate::signin::SignInSource for SpotifySignIn {
         }
         crate::librespot::set_enabled_bg(s, true);
         Ok(WAY_LIBRESPOT_FILE)
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    /// Only a revoked sign-in counts as refused for good: a wrong app or a rate limit doesn't.
+    #[test]
+    fn only_a_revoked_renewal_is_refused_for_good() {
+        let said = |status: u16, v: serde_json::Value| {
+            upstream(token_refusal(reqwest::StatusCode::from_u16(status).unwrap(), &v))
+        };
+        let revoked = said(
+            400,
+            serde_json::json!({"error": "invalid_grant", "error_description": "Refresh token revoked"}),
+        );
+        assert!(
+            revoked.message.contains("Refresh token revoked"),
+            "{}",
+            revoked.message
+        );
+        assert!(refused_for_good(&revoked));
+        for (status, v) in [
+            (
+                400,
+                serde_json::json!({"error": "invalid_client", "error_description": "Invalid client"}),
+            ),
+            (401, serde_json::json!({"error": "invalid_client"})),
+            (429, serde_json::json!({})),
+            (503, serde_json::json!({"error": "server_error"})),
+        ] {
+            assert!(!refused_for_good(&said(status, v.clone())), "{status} {v}");
+        }
+        assert!(!refused_for_good(&upstream("connection refused")));
     }
 }
