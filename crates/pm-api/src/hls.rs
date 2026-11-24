@@ -149,9 +149,9 @@ pub fn open_segments(
         let resp = client
             .get(&url)
             .send()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.without_url().to_string())?
             .error_for_status()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.without_url().to_string())?;
         let text = crate::capped::text_blocking(resp, PLAYLIST_MAX)?;
         match parse(&url, &text)? {
             Playlist::Master(mut variants) => {

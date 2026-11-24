@@ -739,13 +739,13 @@ pub(crate) async fn connect(
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(ApiError::bad_request("the server address must be an http(s) URL"));
     }
-    let status: Value = s
+    let status = s
         .http_client()
         .get(format!("{url}/status"))
         .send()
         .await
-        .map_err(|e| upstream(e.without_url()))?
-        .json()
+        .map_err(|e| upstream(e.without_url()))?;
+    let status: Value = crate::capped::json(status, crate::capped::MEDIA_SERVER_MAX)
         .await
         .ok()
         .filter(|v: &Value| v["app"].as_str() == Some("audiobookshelf"))
@@ -810,7 +810,9 @@ async fn key_from_password(
     if !resp.status().is_success() {
         return Err(upstream(format!("sign-in answered {}", resp.status())));
     }
-    let v: Value = resp.json().await.map_err(|e| upstream(e.without_url()))?;
+    let v: Value = crate::capped::json(resp, crate::capped::MEDIA_SERVER_MAX)
+        .await
+        .map_err(upstream)?;
     let u = &v["user"];
     let token = str_of(u, "accessToken")
         .or_else(|| str_of(u, "token"))

@@ -70,8 +70,8 @@ pub(crate) async fn text(resp: reqwest::Response, max: usize) -> Result<String, 
         .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
-/// [`text`] for the blocking client.
-pub(crate) fn text_blocking(resp: reqwest::blocking::Response, max: usize) -> Result<String, Error> {
+/// [`bytes`] for the blocking client.
+fn bytes_blocking(resp: reqwest::blocking::Response, max: usize) -> Result<Vec<u8>, Error> {
     use std::io::Read;
     if resp.content_length().is_some_and(|n| n > max as u64) {
         return Err(Error::TooLong(max));
@@ -83,7 +83,21 @@ pub(crate) fn text_blocking(resp: reqwest::blocking::Response, max: usize) -> Re
     if out.len() > max {
         return Err(Error::TooLong(max));
     }
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    Ok(out)
+}
+
+/// [`text`] for the blocking client.
+pub(crate) fn text_blocking(resp: reqwest::blocking::Response, max: usize) -> Result<String, Error> {
+    bytes_blocking(resp, max).map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// [`json`] for the blocking client.
+pub(crate) fn json_blocking<T: serde::de::DeserializeOwned>(
+    resp: reqwest::blocking::Response,
+    max: usize,
+) -> Result<T, Error> {
+    let body = bytes_blocking(resp, max)?;
+    serde_json::from_slice(&body).map_err(|e| Error::Read(format!("not JSON: {e}")))
 }
 
 #[cfg(test)]
@@ -109,14 +123,53 @@ mod tests {
         url
     }
 
+    /// A server on a free port whose answer has no length and never ends: it writes until the
+    /// reader goes away. A reader that keeps the whole body before checking its size never
+    /// returns here, so the tests below wait for it with a timeout.
+    fn serve_endless() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { return };
+                std::thread::spawn(move || {
+                    let mut req = [0u8; 4096];
+                    let _ = c.read(&mut req);
+                    if c.write_all(OPEN_ENDED.as_bytes()).is_err() {
+                        return;
+                    }
+                    // 16 KiB a millisecond at most: a reader that keeps it all holds no more
+                    // than ~160 MiB by STOPS_WITHIN
+                    let chunk = [b'a'; 16 << 10];
+                    while c.write_all(&chunk).is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    /// Long enough for a capped read of a few hundred KiB, far too short to fill memory.
+    const STOPS_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
+
     /// No length given: the body ends when the server closes.
     const OPEN_ENDED: &str = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
 
     #[tokio::test]
     async fn an_answer_without_a_length_is_cut_off_past_the_limit() {
-        let url = serve(OPEN_ENDED, vec![b'a'; 300 << 10]);
+        let url = serve_endless();
         let r = reqwest::get(&url).await.unwrap();
-        let e = super::bytes(r, 100 << 10).await.unwrap_err();
+        let e = tokio::time::timeout(STOPS_WITHIN, super::bytes(r, 100 << 10))
+            .await
+            .expect("the read stops at the limit, not at the end of the body")
+            .unwrap_err();
+        assert_eq!(e, super::Error::TooLong(100 << 10));
+        let r = reqwest::get(&url).await.unwrap();
+        let e = tokio::time::timeout(STOPS_WITHIN, super::json::<serde_json::Value>(r, 100 << 10))
+            .await
+            .expect("the JSON read stops at the limit too")
+            .unwrap_err();
         assert_eq!(e, super::Error::TooLong(100 << 10));
         assert_eq!(e.to_string(), "the answer is longer than 100 KiB");
         // Exactly the limit is still whole
@@ -143,10 +196,21 @@ mod tests {
 
     #[test]
     fn the_blocking_reader_stops_at_the_limit_too() {
-        let url = serve(OPEN_ENDED, vec![b'#'; 300 << 10]);
-        let r = reqwest::blocking::get(&url).unwrap();
+        // A whole-body read of the endless answer would end in this client's timeout, a Read
+        // error, not TooLong
+        let client = reqwest::blocking::Client::builder()
+            .timeout(STOPS_WITHIN)
+            .build()
+            .unwrap();
+        let url = serve_endless();
+        let r = client.get(&url).send().unwrap();
         assert_eq!(
             super::text_blocking(r, 100 << 10),
+            Err(super::Error::TooLong(100 << 10))
+        );
+        let r = client.get(&url).send().unwrap();
+        assert_eq!(
+            super::json_blocking::<serde_json::Value>(r, 100 << 10),
             Err(super::Error::TooLong(100 << 10))
         );
         let url = serve(OPEN_ENDED, b"#EXTM3U\n".to_vec());

@@ -494,13 +494,13 @@ pub(crate) async fn sign_in(
         .as_ref()
         .map(|v| v.device_id.clone())
         .unwrap_or_else(|| crate::tidal::random_urlsafe(16));
-    let info: Value = s
+    let info = s
         .http_client()
         .get(format!("{url}/System/Info/Public"))
         .send()
         .await
-        .map_err(|e| upstream(e.without_url()))?
-        .json()
+        .map_err(|e| upstream(e.without_url()))?;
+    let info: Value = crate::capped::json(info, crate::capped::MEDIA_SERVER_MAX)
         .await
         .map_err(|_| upstream("this address does not answer like a Jellyfin or Emby server"))?;
     let resp = s
@@ -520,7 +520,9 @@ pub(crate) async fn sign_in(
     if !resp.status().is_success() {
         return Err(upstream(format!("sign-in answered {}", resp.status())));
     }
-    let v: Value = resp.json().await.map_err(|e| upstream(e.without_url()))?;
+    let v: Value = crate::capped::json(resp, crate::capped::MEDIA_SERVER_MAX)
+        .await
+        .map_err(upstream)?;
     let srv = Server {
         url,
         user_id: str_of(&v["User"], "Id").ok_or_else(|| upstream("no user id in the answer"))?,

@@ -395,7 +395,7 @@ pub(crate) fn open_track_blocking(
     };
     let base = srv.url.trim_end_matches('/');
     let redact = |e: String| e.replace(&srv.token, "<token>");
-    let meta: Value = crate::sources::http_client()
+    let resp = crate::sources::http_client()
         .get(format!("{base}/library/metadata/{id}"))
         .header(reqwest::header::ACCEPT, "application/json")
         .header("X-Plex-Product", PRODUCT)
@@ -403,8 +403,9 @@ pub(crate) fn open_track_blocking(
         .header("X-Plex-Token", &srv.token)
         .send()
         .and_then(|r| r.error_for_status())
-        .and_then(|r| r.json())
         .map_err(|e| fail(redact(e.without_url().to_string())))?;
+    let meta: Value = crate::capped::json_blocking(resp, crate::capped::MEDIA_SERVER_MAX)
+        .map_err(|e| fail(redact(e.to_string())))?;
     let key = metadata(&meta)
         .first()
         .and_then(part_key)
@@ -552,12 +553,12 @@ fn http_url(url: &str) -> Result<String, ApiError> {
 /// root (`/`) proves the token and names the server.
 async fn probe(s: &NodeState, url: &str, token: &str, timeout: Duration) -> Result<Server, ApiError> {
     let cid = client_id(s);
-    with_headers(s.http_client().get(format!("{url}/identity")), &cid, None)
+    let identity = with_headers(s.http_client().get(format!("{url}/identity")), &cid, None)
         .timeout(timeout)
         .send()
         .await
-        .map_err(|e| upstream(e.without_url()))?
-        .json::<Value>()
+        .map_err(|e| upstream(e.without_url()))?;
+    crate::capped::json::<Value>(identity, crate::capped::MEDIA_SERVER_MAX)
         .await
         .ok()
         .filter(|v| v["MediaContainer"]["machineIdentifier"].is_string())
@@ -573,7 +574,9 @@ async fn probe(s: &NodeState, url: &str, token: &str, timeout: Duration) -> Resu
     if !resp.status().is_success() {
         return Err(upstream(format!("the server answered {}", resp.status())));
     }
-    let root: Value = resp.json().await.map_err(|e| upstream(e.without_url()))?;
+    let root: Value = crate::capped::json(resp, crate::capped::MEDIA_SERVER_MAX)
+        .await
+        .map_err(upstream)?;
     let mc = &root["MediaContainer"];
     Ok(Server {
         url: url.to_string(),
@@ -638,7 +641,9 @@ pub(crate) async fn start_pin(State(s): State<Arc<NodeState>>) -> ApiResult<Plex
     if !resp.status().is_success() {
         return Err(upstream(format!("plex.tv answered {}", resp.status())));
     }
-    let v: Value = resp.json().await.map_err(|e| upstream(e.without_url()))?;
+    let v: Value = crate::capped::json(resp, crate::capped::MEDIA_SERVER_MAX)
+        .await
+        .map_err(upstream)?;
     let id = v["id"].as_u64().ok_or_else(|| upstream("no PIN id"))?;
     let code = str_of(&v, "code").ok_or_else(|| upstream("no PIN code"))?;
     let mut auth = url::Url::parse(AUTH_APP).expect("valid");
@@ -705,7 +710,9 @@ pub(crate) async fn poll_pin(
     if !resp.status().is_success() {
         return Err(upstream(format!("plex.tv answered {}", resp.status())));
     }
-    let pin: Value = resp.json().await.map_err(|e| upstream(e.without_url()))?;
+    let pin: Value = crate::capped::json(resp, crate::capped::MEDIA_SERVER_MAX)
+        .await
+        .map_err(upstream)?;
     let Some(account_token) = str_of(&pin, "authToken") else {
         return Ok(Json(PlexPinStatus {
             status: "waiting".into(),
@@ -722,10 +729,13 @@ pub(crate) async fn poll_pin(
     .ok()
     .and_then(|r| r.error_for_status().ok());
     let user = match user {
-        Some(r) => r.json::<Value>().await.ok().and_then(|u| str_of(&u, "username")),
+        Some(r) => crate::capped::json::<Value>(r, crate::capped::MEDIA_SERVER_MAX)
+            .await
+            .ok()
+            .and_then(|u| str_of(&u, "username")),
         None => None,
     };
-    let res: Value = with_headers(
+    let res = with_headers(
         s.http_client().get(format!("{tv}/api/v2/resources")),
         &cid,
         Some(&account_token),
@@ -733,10 +743,10 @@ pub(crate) async fn poll_pin(
     .query(&[("includeHttps", "1"), ("includeRelay", "1")])
     .send()
     .await
-    .map_err(|e| upstream(e.without_url()))?
-    .json()
-    .await
     .map_err(|e| upstream(e.without_url()))?;
+    let res: Value = crate::capped::json(res, crate::capped::MEDIA_SERVER_MAX)
+        .await
+        .map_err(upstream)?;
     let mut servers: Vec<&Value> = res
         .as_array()
         .map(|a| {
