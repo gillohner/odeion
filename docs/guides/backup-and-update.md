@@ -185,7 +185,8 @@ When the newer version changed the library's database (its CHANGELOG entry says 
 library from the backup you made before updating; versions after 0.2.0 refuse to start on a
 library a newer version changed ("this library was opened by a newer version of Odeion").
 A node that upgrades the library's database keeps the file as it was first, beside it, as
-`library.db.before-upgrade` (from the latest upgrade only). It holds everything the library held
+`library.db.before-upgrade` (from the latest upgrade only; a start again after that upgrade
+failed partway keeps it as it is). It holds everything the library held
 then, sign-ins included, so it can go back in place of the backup's `library.db`, and the
 `.pmbackup` step below is not needed. Anything changed since the upgrade is lost, and sign-ins
 ended since (a browser, a listener, an API token replaced) work again: end them again in

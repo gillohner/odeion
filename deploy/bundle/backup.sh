@@ -166,7 +166,7 @@ docker run --rm -v "$NODE_DATA:/data:ro" "$ALPINE" tar czf - -C /data \
   --exclude ./usage.sqlite --exclude ./usage.sqlite-journal --exclude ./usage.sqlite-wal --exclude ./usage.sqlite-shm \
   --exclude ./feedback.sqlite --exclude ./feedback.sqlite-journal --exclude ./feedback.sqlite-wal --exclude ./feedback.sqlite-shm \
   --exclude ./library.db.bak --exclude ./library.db.restoring \
-  --exclude ./library.db.before-upgrade --exclude ./library.db.newer --exclude ./library.db.bak.next --exclude './library.db.*.part' --exclude './library.db.*.lock' . > "$DEST/node/data.tar.gz"
+  --exclude ./library.db.before-upgrade --exclude ./library.db.before-upgrade.to --exclude ./library.db.newer --exclude ./library.db.bak.next --exclude './library.db.*.part' --exclude './library.db.*.lock' . > "$DEST/node/data.tar.gz"
 [ -z "$TUNNEL" ] || docker run --rm -v "$TUNNEL:/t:ro" "$ALPINE" tar czf - -C /t . > "$DEST/node/tunnel.tar.gz"
 
 # --- the homeserver ---------------------------------------------------------------------------

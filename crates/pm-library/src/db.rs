@@ -523,6 +523,23 @@ fn schema_to_upgrade(path: &Path) -> Option<(i64, Connection)> {
     (found < known).then_some((found, conn))
 }
 
+/// Beside a copy [`Library::open_node_library`] keeps, the schema version of the upgrade it was
+/// made for: `<copy>.to`.
+fn copy_target_path(copy: &Path) -> PathBuf {
+    let mut name = copy.as_os_str().to_owned();
+    name.push(".to");
+    PathBuf::from(name)
+}
+
+/// The upgrade the copy at `copy` was made for ([`copy_target_path`]), when it says.
+fn copy_target(copy: &Path) -> Option<i64> {
+    std::fs::read_to_string(copy_target_path(copy))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// [`Library::keep_copy`] on a connection: `VACUUM INTO` a private part file beside `copy`,
 /// written to disk, then renamed over `copy`.
 fn keep_copy_of(conn: &Connection, copy: &Path) -> Result<()> {
@@ -1936,8 +1953,23 @@ impl Library {
         if let Some((found, conn)) = schema_to_upgrade(path) {
             let copy = Self::before_upgrade_path(path);
             let known = MIGRATIONS.last().map_or(0, |(v, _)| *v);
-            match keep_copy_of(&conn, &copy) {
+            // This upgrade's own copy, from an earlier start where the upgrade did not go
+            // through: some of its migrations may be in the library now, so the copy from before
+            // them is the only way back and stays as it is (a restart must not replace it with
+            // the half-upgraded library, nor remove it)
+            let ours = copy.exists() && copy_target(&copy) == Some(known);
+            match if ours { Ok(()) } else { keep_copy_of(&conn, &copy) } {
+                Ok(()) if ours => tracing::info!(
+                    at = found,
+                    to = known,
+                    copy = %copy.display(),
+                    "upgrading the library's schema again: the copy from the first try stays"
+                ),
                 Ok(()) => {
+                    // (once the copy is in place: a copy without it counts as an earlier upgrade's)
+                    if let Err(e) = std::fs::write(copy_target_path(&copy), known.to_string()) {
+                        tracing::warn!("the copy's upgrade could not be noted beside it: {e}");
+                    }
                     tracing::info!(
                         from = found,
                         to = known,
@@ -1953,6 +1985,9 @@ impl Library {
                     let another = matches!(&e, LibraryError::Io { source, .. }
                         if source.kind() == std::io::ErrorKind::AlreadyExists);
                     let older = !another && copy.exists() && std::fs::remove_file(&copy).is_ok();
+                    if older {
+                        let _ = std::fs::remove_file(copy_target_path(&copy));
+                    }
                     tracing::warn!(
                         from = found,
                         to = known,
@@ -1972,6 +2007,7 @@ impl Library {
                     "the library did not open after its copy was made ({e}): trying again without the copy"
                 );
                 let _ = std::fs::remove_file(&copy);
+                let _ = std::fs::remove_file(copy_target_path(&copy));
                 Self::open(path)
             }
             (opened, _) => opened,
@@ -8329,6 +8365,21 @@ mod keep_copy_tests {
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(kept, 17, "the copy from before 18 stays");
+        // Started again (a service manager does): 19 fails again, on a library at 18 now. The
+        // copy from before 18 is this upgrade's and stays, neither replaced nor removed
+        assert!(Library::open_node_library(&path).is_err());
+        let kept: i64 = Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 17, "the copy from before 18 stays after a restart");
+        // A copy an earlier upgrade made (another target beside it) is replaced as before
+        std::fs::write(copy_target_path(&copy), "18").unwrap();
+        assert!(Library::open_node_library(&path).is_err());
+        assert!(
+            !copy.exists(),
+            "replaced by one at 18, then removed: nothing went in since"
+        );
         // 18 -> 19 fails: nothing went in
         let path = dir.path().join("one.db");
         library_whose_upgrade_fails(&path, 18);
