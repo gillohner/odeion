@@ -4,7 +4,7 @@
 # Docker restarts the containers itself at boot (restart: unless-stopped), but only once: when a
 # container can't start then, for example because a network share it mounts as a volume does not
 # answer yet, Docker never tries again, and the node stays down until someone starts it. This
-# installs a systemd unit (odeion-bundle.service) that runs `docker compose up -d` in this folder
+# installs a systemd unit (odeion-bundle.service) that runs `docker compose up -d --no-recreate` in this folder
 # after the network is up and tries again every 30 seconds until the node runs.
 #
 #   sudo ./start-at-boot.sh            # install and enable it (it runs from the next boot on)
@@ -55,8 +55,9 @@ case ${1:-} in
   ;;
 --run)
   # `up -d` fails when a container can't start (a share volume that doesn't mount yet); the check
-  # after it also catches a node that stopped again at once.
-  docker compose up -d
+  # after it also catches a node that stopped again at once. --no-recreate: a boot only starts what
+  # is there, as Docker's own restart does; an update stays for `docker compose up -d` by hand.
+  docker compose up -d --no-recreate
   if [ -z "$(docker compose ps -q --status running music)" ]; then
     echo "The music container isn't running yet; trying again." >&2
     exit 1
@@ -75,6 +76,9 @@ case ${1:-} in
   case $DIR in *%* | *'
 '*) echo "The folder's path ($DIR) has a % or a line break; move the bundle to a plain path." >&2; exit 1 ;; esac
   [ -f docker-compose.yml ] || { echo "No docker-compose.yml in $DIR." >&2; exit 1; }
+  # The unit runs with systemd's PATH, not the one of this shell (a snap or a per-user Compose plugin)
+  env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin docker compose version >/dev/null 2>&1 ||
+    { echo "docker compose isn't on systemd's PATH (/usr/local/bin, /usr/bin); install Docker's Compose plugin system-wide." >&2; exit 1; }
   # Type=oneshot with Restart= needs systemd 244 (Debian 11, Ubuntu 20.04)
   v=$(systemctl --version | sed -n '1s/^systemd \([0-9]*\).*/\1/p')
   [ "${v:-0}" -ge 244 ] || { echo "This needs systemd 244 or newer (this machine has ${v:-an unknown version})." >&2; exit 1; }
