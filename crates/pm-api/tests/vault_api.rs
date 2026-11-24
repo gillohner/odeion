@@ -1833,6 +1833,68 @@ async fn a_new_node_takes_in_the_settings_copy_before_replacing_it() {
     assert!(copy["settings"].get("smart.0035WKVKQDHSN").is_none(), "{copy}");
 }
 
+/// A node signed in as A, then as B, then as A again takes A's settings copy in once: with no
+/// folders and the derived contact it is not fresh for A again, so what was removed since does
+/// not come back from A's older copy. (Signed in by hand, as `set_sync` does, without the
+/// background work a sign-in starts.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settings_copy_is_taken_in_once_per_identity() {
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let b = ids.pop().unwrap().pop().unwrap();
+    let a = ids.pop().unwrap().pop().unwrap();
+    let homeserver = signing_in();
+    let smart = "smart.0035WKVKQDHSP";
+    homeserver
+        .write_node_settings(
+            &a,
+            &json!({"version": 1, "saved_at": 1, "node": "the old node",
+                "contact": "https://example.org/old-node", "folders": [],
+                "settings": {smart: "{\"name\":\"old\"}"}}),
+        )
+        .await
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let setting = |k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
+    let derived = |sync: &PubkySync| format!("https://pubky.app/profile/{}", sync.z32());
+
+    // 1. A: its copy is taken in
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a.clone()));
+    n.set_contact(&derived(&sync_a)).unwrap();
+    assert!(
+        sync_a.restore_settings(&n, true).await.unwrap().is_some(),
+        "taken in"
+    );
+    assert_eq!(n.contact(), "https://example.org/old-node");
+    assert!(setting(smart).is_some());
+
+    // 2. B (no copy of its own): its backup notes B; the owner removes the contact and the
+    // collection meanwhile
+    sync_a.retire();
+    let sync_b = Arc::new(PubkySync::from_session(homeserver.clone(), b.clone()));
+    n.set_contact(&derived(&sync_b)).unwrap();
+    sync_b.backup_settings(&n).await.expect("backed up");
+    n.library.lock().unwrap().delete_setting(smart).unwrap();
+
+    // 3. A again: not fresh, nothing comes back, and A's copy follows the node
+    sync_b.retire();
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a.clone()));
+    n.set_contact(&derived(&sync_a)).unwrap();
+    assert!(
+        sync_a.restore_settings(&n, true).await.unwrap().is_none(),
+        "A's copy taken in again"
+    );
+    sync_a.backup_settings(&n).await.expect("backed up");
+    assert!(setting(smart).is_none(), "removed, then brought back");
+    assert_eq!(n.contact(), derived(&sync_a));
+    let copy = settings_copy(&homeserver, &a).await;
+    assert!(copy["settings"].get(smart).is_none(), "{copy}");
+    assert_eq!(copy["contact"], derived(&sync_a), "{copy}");
+}
+
 async fn settings_copy(homeserver: &NodeHomeserver, session: &pubky::PubkySession) -> Value {
     homeserver
         .read_node_settings(session)

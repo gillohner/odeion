@@ -1476,13 +1476,7 @@ impl PubkySync {
         let read = self.homeserver.read_node_settings(&self.session).await;
         // Tests stop here (the read done, nothing adopted) to replace the session meanwhile
         crate::test_hooks::pause(|| format!("sync.backup_after_read:{}", self.z32)).await;
-        let taken_in = self
-            .lib(&s.library)?
-            .get_setting(COPY_TAKEN_IN)
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some(self.z32());
+        let taken_in = copy_taken_in(&self.lib(&s.library)?, self.z32());
         let copy = match read {
             // A newer version's copy (its format is past this one's): left to the node that wrote
             // it, as prefs.json is (`read_prefs`)
@@ -1545,8 +1539,7 @@ impl PubkySync {
             }
             // Read again under this lock: a backup that ran meanwhile may have taken the copy in,
             // and what was deleted since must not come back from it
-            let taken_in =
-                taken_in || lib.get_setting(COPY_TAKEN_IN).ok().flatten().as_deref() == Some(self.z32());
+            let taken_in = taken_in || copy_taken_in(&lib, self.z32());
             if !taken_in {
                 // The settings it does not have (a fresh node got the whole copy just above; any
                 // other keeps its own folders and contact)
@@ -1556,7 +1549,7 @@ impl PubkySync {
                         tracing::info!(settings = n, from = %copy.node, "settings taken in from the copy on the homeserver before replacing it");
                     }
                 }
-                if let Err(e) = lib.set_setting(COPY_TAKEN_IN, self.z32()) {
+                if let Err(e) = note_copy_taken_in(&lib, self.z32()) {
                     tracing::warn!("settings copy: {e}");
                     return Err(e.into());
                 }
@@ -1634,7 +1627,7 @@ impl PubkySync {
             let lib = self.lib(&s.library)?;
             (
                 lib.list_folders().map(|f| f.is_empty()).unwrap_or(true) && contact_unset(),
-                lib.get_setting(COPY_TAKEN_IN).ok().flatten().as_deref() == Some(self.z32()),
+                copy_taken_in(&lib, self.z32()),
             )
         };
         // Once taken in, a node without folders is not fresh again at every start or sign-in:
@@ -1679,7 +1672,7 @@ impl PubkySync {
             }
             out.settings = take_in_settings(&lib, &backup.settings);
             // This node has what the copy holds: its backups may replace it from now on
-            if let Err(e) = lib.set_setting(COPY_TAKEN_IN, self.z32()) {
+            if let Err(e) = note_copy_taken_in(&lib, self.z32()) {
                 tracing::warn!("settings copy: {e}");
             }
         }
@@ -1697,13 +1690,50 @@ impl PubkySync {
     }
 }
 
-/// The identity (z32) whose settings copy on the homeserver this node has taken in: set by a
-/// settings restore or by the first backup that took in the copy's settings, so the backups
-/// after it may replace the copy. One of the node's own settings in a backup file
+/// The identities (z32) whose settings copy on the homeserver this node has taken in, a JSON
+/// list: one is added by a settings restore or by the first backup that took in the copy's
+/// settings, so the backups after it may replace the copy. Every identity stays in it, so
+/// signing in as A, then B, then A again does not take A's older copy in a second time (what was
+/// removed since would come back). One of the node's own settings in a backup file
 /// ([`crate::backup`]): a restore keeps the node's value, so the restored settings replace the
-/// copy of the identity it was taken in for (a restore is meant to bring them back), and a node
-/// whose identity the restore changed takes the new identity's copy in first.
+/// copy of an identity they were taken in for (a restore is meant to bring them back), and a
+/// node whose identity the restore changed takes the new identity's copy in first.
 pub const COPY_TAKEN_IN: &str = "pubky.settings_copy_taken_in";
+
+/// The most identities [`COPY_TAKEN_IN`] keeps (the oldest goes first).
+const COPY_TAKEN_IN_MAX: usize = 64;
+
+/// The identities in [`COPY_TAKEN_IN`]; a plain z32 there (its first form) is a list of one.
+fn copies_taken_in(lib: &Library) -> Vec<String> {
+    let Some(v) = lib.get_setting(COPY_TAKEN_IN).ok().flatten() else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<Vec<String>>(&v) {
+        Ok(list) => list,
+        Err(_) if !v.trim().is_empty() && !v.trim_start().starts_with('[') => vec![v.trim().to_string()],
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Whether this node has taken in `z32`'s settings copy ([`COPY_TAKEN_IN`]).
+fn copy_taken_in(lib: &Library, z32: &str) -> bool {
+    copies_taken_in(lib).iter().any(|z| z == z32)
+}
+
+/// Add `z32` to [`COPY_TAKEN_IN`] (callers hold the library lock, so two do not race).
+fn note_copy_taken_in(lib: &Library, z32: &str) -> pm_library::Result<()> {
+    let mut list = copies_taken_in(lib);
+    if list.iter().any(|z| z == z32) {
+        return Ok(());
+    }
+    list.push(z32.to_string());
+    let over = list.len().saturating_sub(COPY_TAKEN_IN_MAX);
+    list.drain(..over);
+    lib.set_setting(
+        COPY_TAKEN_IN,
+        &serde_json::to_string(&list).expect("a list of strings serializes"),
+    )
+}
 
 /// The settings of a copy this node does not have (missing or empty here), of those it backs
 /// up now (a sign-in an older node put in the copy stays out); a history delete counts when it
@@ -1914,5 +1944,31 @@ mod tests {
         // Deleted here and not pushed yet: the homeserver's copy does not bring it back
         assert!(!pull_takes(30, Some((50, Some(30), true))));
         assert!(!pull_takes(90, Some((50, None, true))));
+    }
+
+    /// Every identity whose settings copy was taken in stays noted (A, then B, then A again is
+    /// not fresh for A), a plain z32 (the setting's first form) reads as one, and the list keeps
+    /// at most its limit, the oldest going first.
+    #[test]
+    fn the_copies_taken_in_are_kept_per_identity() {
+        let lib = Library::open_in_memory().unwrap();
+        assert!(!copy_taken_in(&lib, "a"));
+        note_copy_taken_in(&lib, "a").unwrap();
+        note_copy_taken_in(&lib, "b").unwrap();
+        note_copy_taken_in(&lib, "a").unwrap();
+        assert!(copy_taken_in(&lib, "a") && copy_taken_in(&lib, "b"));
+        assert_eq!(copies_taken_in(&lib), ["a", "b"]);
+        lib.set_setting(COPY_TAKEN_IN, "plainz32").unwrap();
+        assert!(copy_taken_in(&lib, "plainz32"));
+        note_copy_taken_in(&lib, "b").unwrap();
+        assert_eq!(copies_taken_in(&lib), ["plainz32", "b"]);
+        for i in 0..COPY_TAKEN_IN_MAX {
+            note_copy_taken_in(&lib, &format!("z{i}")).unwrap();
+        }
+        let list = copies_taken_in(&lib);
+        assert_eq!(list.len(), COPY_TAKEN_IN_MAX);
+        assert!(!copy_taken_in(&lib, "plainz32") && !copy_taken_in(&lib, "b"));
+        let newest = format!("z{}", COPY_TAKEN_IN_MAX - 1);
+        assert_eq!(list.last(), Some(&newest));
     }
 }

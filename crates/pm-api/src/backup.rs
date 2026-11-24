@@ -83,7 +83,7 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 const NODE_OWN: &[&str] = &[
     "stream.secret",
     "node.id",
-    // For which identity this node took in the settings copy on the homeserver (sync.rs)
+    // For which identities this node took in the settings copy on the homeserver (sync.rs)
     crate::sync::COPY_TAKEN_IN,
     // Restoring an older backup must not revive a delayed pre-disconnect sender.
     "listenbrainz.send_generation",
