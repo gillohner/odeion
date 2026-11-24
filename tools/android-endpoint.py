@@ -527,18 +527,33 @@ def open_picker():
     return opened
 
 
-MINI_PLAYER = ('"Now playing"', "Open Now playing", '"Nothing playing"', '"Stopped"')
+# (the bar's own name is "Now playing" with nothing on and "Now playing: <song>" with a song)
+MINI_PLAYER = ('"Now playing"', '"Now playing: ', "Open Now playing", '"Nothing playing"', '"Stopped"')
+mini_player_at = []
 
 
 def tap_mini_player():
-    """Open Now playing from the mini player: its cover ("Open Now playing") while a song is on,
-    else the bar itself ("Now playing") or its "Nothing playing" line. The lowest match on the
-    screen is the bar (Home can say "Nothing playing" too)."""
+    """Open Now playing from the mini player: its cover ("Open Now playing") or the bar itself
+    ("Now playing: <song>") while a song is on, else the bar ("Now playing") or its "Nothing
+    playing" line. The lowest match on the screen is the bar (Home can say "Nothing playing" too).
+    When the screen's dump names none of them (an emulator's WebView can hand out an old tree) the
+    bar is tapped where it was found before, and the log says what the dump named; the step after
+    it (Now playing's zone) still fails if Now playing did not open."""
+    seen = []
+
     def lowest():
-        hits = [n for n in ui_nodes() if any(k in n for k in MINI_PLAYER) and "Close Now playing" not in n and center(n) != (0, 0)]
+        seen[:] = ui_nodes()
+        hits = [n for n in seen if any(k in n for k in MINI_PLAYER) and "Close Now playing" not in n and center(n) != (0, 0)]
         return max(hits, key=lambda n: center(n)[1]) if hits else None
-    node = until("the mini player", lowest, timeout=90, every=1)
-    x, y = center(node)
+    try:
+        x, y = center(until("the mini player", lowest, timeout=45 if mini_player_at else 90, every=1))
+        mini_player_at[:] = [x, y]
+    except RuntimeError as e:
+        named = [m.group(1) or m.group(2) for m in (re.search(r'content-desc="([^"]+)"|text="([^"]+)"', n) for n in seen) if m][-20:]
+        if not mini_player_at:
+            raise RuntimeError(f"{e}; the screen's dump named: {named}") from None
+        x, y = mini_player_at
+        log(f"the mini player was not named in the screen's dump (it named: {named}); tapping where it was")
     adb("shell", "input", "tap", str(x), str(y))
     log(f"tapped the mini player at {x},{y}")
     time.sleep(1)

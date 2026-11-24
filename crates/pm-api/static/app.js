@@ -5,6 +5,16 @@
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
   const BROWSER = 'browser';
+  // A dialog is named by its heading, so a screen reader says what it asks ("Delete this collection?")
+  // and not only "dialog"; `described`: its first paragraph is read with it (a confirmation's words)
+  let dialogNames = 0;
+  const nameDialog = (d, described) => {
+    const h = d.querySelector('h1, h2, h3');
+    if (h && !d.hasAttribute('aria-label') && !d.hasAttribute('aria-labelledby')) { if (!h.id) h.id = `dialogname${++dialogNames}`; d.setAttribute('aria-labelledby', h.id); }
+    const p = described && d.querySelector('p');
+    if (p && !d.hasAttribute('aria-describedby')) { if (!p.id) p.id = `dialogwords${++dialogNames}`; d.setAttribute('aria-describedby', p.id); }
+    return d;
+  };
   // Where the page's own player is, in words. The apps (window.pmDesktop, set by pm-desktop before
   // this script) never say "browser": on Android the in-app player is "This phone", on a desktop app
   // "This computer"; the plain web UI keeps "This browser". Every string that names it goes through
@@ -784,7 +794,7 @@
       h.tabIndex = -1;
       h.onkeydown = (e) => { e.stopPropagation(); if ((e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v')) field.focus(); };
     }
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     (h || field).focus();
   };
   // Edit a song's tags on the node (the file is not touched)
@@ -893,7 +903,7 @@
     transients.push(tr); pushTransient();
     $('[data-scanclose]', d).onclick = () => done(null);
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     (async () => {
       try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); } catch (e) { msg.textContent = `The camera isn’t available (${e.message || e.name}). Paste their key instead.`; return; }
       if (over) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -918,7 +928,7 @@
     transients.push(tr); pushTransient(!!layer);
     $$('[data-ci]', d).forEach((b) => b.onclick = () => { const i = Number(b.dataset.ci); if (i < 0) return done(null); const v = choices[i].value; done(field ? { value: v, text: $('[data-field]', d).value.trim() } : v); });
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
-    if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
+    nameDialog(d, true); if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
   });
   // Comments (TASK-pinakes-social-ux.md B1): social v1 notes whose parent is the item's link, read
   // from Nexus by parent; reply to one, delete your own. One handler per section, by delegation.
@@ -1287,7 +1297,7 @@
       toast(r.json.state === 'queued' ? 'Queued: it starts when the copy before it is done' : 'Copying in the background: the chip in the player bar shows how far it is');
       watchJob(r.json.id);
     };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     drawPanel();
     const first = $('[data-cpick].on', d); if (first) first.focus();
   });
@@ -1327,7 +1337,7 @@
     const list = $('#mmlist', box);
     const match = (f) => { const q = st.q.toLowerCase(); return [f.name, f.song && f.song.title, f.song && f.song.artist, f.song && f.song.album].some((x) => x && String(x).toLowerCase().includes(q)); };
     const cover = (f) => (f.song.album_id ? `<img class="thumb" src="${esc(imgSrc(`/v1/library/albums/${f.song.album_id}/cover`))}" alt="" loading="lazy" data-err="hide">` : '<span class="thumb"></span>');
-    const songRow = (f, k) => `<div class="list-row mrow" data-mrow="${k}">${cover(f)}<button class="icon-btn" data-mplay="${f.song.id}" aria-label="Play ${esc(f.song.title)}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(f.song.title)}${f.song.edited ? ' <span class="pill" title="Tags edited on this node">edited</span>' : ''}</div><div class="sub">${esc([f.song.artist, f.song.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${f.song.duration_ms ? fmt(f.song.duration_ms) : ''}</span><span class="muted small msize">${fileSize(f.size)}</span><button class="icon-btn" data-mmore="${k}" aria-label="More for ${esc(f.song.title)}" title="More">${icon('more')}</button></div>`;
+    const songRow = (f, k) => `<div class="list-row mrow" data-mrow="${k}">${cover(f)}<button class="icon-btn" data-mplay="${f.song.id}" aria-label="Play ${esc(f.song.title)}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(f.song.title)}${f.song.edited ? ' <span class="pill" title="Tags edited on this node">edited</span>' : ''}</div><div class="sub">${esc([f.song.artist, f.song.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${f.song.duration_ms ? fmt(f.song.duration_ms) : ''}</span><span class="muted small msize">${fileSize(f.size)}</span><button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-mmore="${k}" aria-label="More for ${esc(f.song.title)}" title="More">${icon('more')}</button></div>`;
     const looseRow = (f, k) => `<div class="list-row mrow"><div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.removed ? 'Taken out of the library: Node library brings it back.' : 'Not in the library yet: it is read with the next scan.'}</div></div><span class="muted small msize">${fileSize(f.size)}</span><button class="btn sm ghost" data-mdel="${k}" aria-label="Delete ${esc(f.name)} from your homeserver">Delete</button></div>`;
     const delFile = async (f) => {
       const ok = await choiceDialog({ title: 'Delete from your homeserver?', text: `“${f.song ? f.song.title : f.name}” is deleted from your homeserver${ctx.bundled ? ' and leaves the library' : ''}. This can’t be undone.`, choices: [{ label: 'Delete', value: true, primary: true }] });
@@ -3557,7 +3567,8 @@
   $('#next').onclick = () => transport({ action: 'next' });
   $('#prev').onclick = () => transport({ action: 'previous' });
   const seek = $('#seek');
-  seek.addEventListener('input', () => { seek.dataset.dragging = '1'; setFill(seek); });
+  // (read out as the time it is moved to; renderBar writes the playing time again once it is let go)
+  seek.addEventListener('input', () => { seek.dataset.dragging = '1'; setFill(seek); const z = currentZone(); const d = z && z.now_playing ? z.now_playing.duration_ms : 0; if (d) { seek._barWords = `${fmt((seek.value / 1000) * d)} of ${fmt(d)}`; seek.setAttribute('aria-valuetext', seek._barWords); } });
   // (a drag let go on its start value sends no change: the bar's seek let go too)
   for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) seek.addEventListener(ev, () => { setTimeout(() => { delete seek.dataset.dragging; }, 0); }, { passive: true });
   seek.addEventListener('change', () => {
@@ -4436,7 +4447,8 @@
       // A zone that stopped on an error says so here, until the next track starts (the node clears it)
       const err = z && z.transport === 'stopped' && z.error;
       putHtml(npEl, waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`);
-      putText($('#pos'), '0:00'); putText($('#dur'), '0:00'); seek.value = 0; setFill(seek); miniProgress(0);
+      put(npEl, '_barName', 'Now playing', (v) => { npEl.setAttribute('aria-label', v); });
+      putText($('#pos'), '0:00'); putText($('#dur'), '0:00'); seek.value = 0; setFill(seek); miniProgress(0); put(seek, '_barWords', '', () => { seek.removeAttribute('aria-valuetext'); });
       pill('quality idle', '', '—', false, `<span class="qdev">${esc(z ? z.name : '')}</span>`, `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`, 'Sound: where it plays from, how it gets to you, and DSP');
       syncQPanel();
       return;
@@ -4452,6 +4464,8 @@
     const npHtml = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
     const pausedBy = !waitHtml && !errHtml && z.transport === 'paused' && z.error ? z.error : '';
     const linked = !waitHtml && !errHtml && !barPlain();
+    // (its name is the song, not only "Now playing": the label replaces what is inside it for a screen reader)
+    put(npEl, '_barName', waitHtml || errHtml ? 'Now playing' : ((w) => (w ? `Now playing: ${w}` : 'Now playing'))([live || it.title, it.artist].filter(Boolean).join(', ')), (v) => { npEl.setAttribute('aria-label', v); });
     if (put(npEl, '_barHtml', `${npHtml}\n${pausedBy}\n${linked}`, () => { npEl.innerHTML = npHtml; })) {
       // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
       // its title there); with a mouse the bar's title and artist are links of their own
@@ -4460,6 +4474,8 @@
       if (pausedBy) { const sub = $('.np-sub', npEl); if (sub) sub.innerHTML = `<span class="warn-text" role="alert">${esc(pausedBy)}</span>`; }
     } else if (linked && !pausedBy) hydrateArtistCredits(npEl);
     putText($('#pos'), fmt(np.position_ms)); putText($('#dur'), fmt(np.duration_ms));
+    // (the seek bar read out as a time, not as a number of a thousand)
+    if (!seek.dataset.dragging) put(seek, '_barWords', `${fmt(np.position_ms)} of ${fmt(np.duration_ms)}`, (v) => { seek.setAttribute('aria-valuetext', v); });
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     miniProgress(np.duration_ms ? np.position_ms / np.duration_ms : 0);
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
@@ -4555,8 +4571,12 @@
   // The browser's own player: it starts (or fails) by itself
   audio.addEventListener('playing', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); if (state.startError && state.startError.zone === BROWSER) { state.startError = null; renderBar(); } });
   audio.addEventListener('pause', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); });
+  // The first Tab stop: past the menu and the top bar, to the page
+  { const sk = $('#skip'); if (sk) sk.onclick = () => { main.focus({ preventScroll: true }); }; }
   $('#np').onclick = () => toggleNowPlaying();
-  $('#np').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
+  // (Enter or Space on the bar itself; on its title, artist or cover the key is that control's own.
+  // A link has no Space of its own: there it opens Now playing, as it did)
+  $('#np').onkeydown = (e) => { const inner = e.target !== e.currentTarget; if (inner && !(e.key === ' ' && e.target.closest('a'))) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
   // The quality sheet needs to know what is streaming (now_playing.format); without it (This browser,
   // an older node) the label opens Now playing, where the signal path is
   // ---- the sound panel (owner, 2026-10-29): the pill in full ----
@@ -4733,6 +4753,8 @@
   // `right` runs as it slides out, else it snaps back; up and down run `up` / `down` past 40 / 60 px.
   // A drag that starts on a slider or a field is the slider's. The tap a swipe leaves is dropped.
   const calmMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // (how a scripted scroll moves: at once for people who asked for less motion)
+  const glide = () => (calmMotion() ? 'auto' : 'smooth');
   const swipeable = (el, o) => {
     let s = null;
     const reset = () => { if (s && s.move) { s.move.classList.remove('dragging'); s.move.style.transform = ''; s.move.style.opacity = ''; } s = null; };
@@ -4897,7 +4919,7 @@
     const under = one && sheet ? ' inert' : ''; // (what the phone's sheet covers)
     overlay.innerHTML = `
       <div class="np-page np2${sheet && !one ? ' has-sheet' : ''}${one ? ' compact' : ''}">
-        <div class="np-top"${under}><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
+        <div class="np-top"${under}><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button aria-haspopup="menu" aria-expanded="false" class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
         <div class="np-body"${under}>
           <section class="np-player" aria-label="Now playing">
             <div class="np-big">${itemArt(it, '', npSvc(np))}</div>
@@ -4952,7 +4974,7 @@
     const npAct = { shuffle: toggleShuffle, repeat: cycleRepeat, prev: () => transport({ action: 'previous' }), toggle: () => transport({ action: 'toggle' }), next: () => transport({ action: 'next' }) };
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => npAct[b.dataset.npt]());
     renderModes();
-    sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
+    sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); sk.setAttribute('aria-valuetext', `${fmt((sk.value / 1000) * (np.duration_ms || 0))} of ${fmt(np.duration_ms)}`); });
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
     // (a drag that ends without a change, or is cancelled, lets go too)
     for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) sk.addEventListener(ev, () => { setTimeout(() => { delete sk.dataset.dragging; }, 0); }, { passive: true });
@@ -5205,6 +5227,7 @@
   setInterval(() => {
     if (overlay.hidden) return;
     const z = currentZone(); const np = z && z.now_playing; const s = $('#npseek');
+    if (np && s && !s.dataset.dragging) { const words = `${fmt(np.position_ms)} of ${fmt(np.duration_ms)}`; if (s.getAttribute('aria-valuetext') !== words) s.setAttribute('aria-valuetext', words); }
     if (!np || !s || s.dataset.dragging) return;
     if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle || JSON.stringify(outputFacts(z)) !== renderNowPlaying.lastOutput) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
     if ((z.transport || '') !== (overlay.dataset.transport || '')) {
@@ -6028,7 +6051,7 @@
           <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" aria-pressed="${fav}" title="${fav ? 'Remove from Bookmarks' : 'Add to Bookmarks'}" aria-label="${esc(heartWords(fav, t.title))}">${icon(fav ? 'heart-fill' : 'heart')}</button>
           <button class="icon-btn" data-act="next" title="Play next" aria-label="${esc(rowWords.next(t.title))}">${icon('playnext')}</button>
           <button class="icon-btn" data-act="add" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>
-          <button class="icon-btn" data-act="more" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>
+          <button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-act="more" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>
         </div>
       </div>`;
     }).join('');
@@ -6166,7 +6189,7 @@
         $('[data-hsagain]', d).onclick = start;
       }
     };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     start();
   });
   const tagRgba = (hex, a) => { const [r, g, b] = hex.match(/\w\w/g).map((x) => parseInt(x, 16)); return `rgba(${r}, ${g}, ${b}, ${a})`; };
@@ -6237,7 +6260,7 @@
       const here = trail[trail.length - 1];
       try { done(false, await api('POST', '/library/drives', { provider, folder_id: here.id, name: here.name })); } catch (e) { $('#dfmsg', d).textContent = e.message; }
     };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     show();
   });
   // Your library › Node library › Add a WebDAV share: the folder's address, user and password; the node
@@ -6437,7 +6460,17 @@
     $('#notessave').onclick = () => save(r ? r.rating : null, $('#notestext').value.trim());
   };
   // A small anchored menu (track ⋯, album actions). One at a time; Esc or the scrim closes it.
-  const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; document.body.appendChild(menuEl);
+  const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; menuEl.setAttribute('role', 'menu'); document.body.appendChild(menuEl);
+  // (the control that opened it says so while it is open)
+  // (a More button says in its own markup that it opens a menu, and here whether it is open. Any
+  // other button a menu is hung on, a Play that offers a choice only sometimes, the zone button's
+  // sleep timer, says so only while that menu is open; the page or the search box never does)
+  const menuSaid = (open) => {
+    const a = menuAnchor; if (!a || !a.matches || !a.matches('button, [role="button"]')) return;
+    if (open) { if (!a.hasAttribute('aria-haspopup')) { a._menuPassing = true; a.setAttribute('aria-haspopup', 'menu'); } a.setAttribute('aria-expanded', 'true'); }
+    else if (a._menuPassing) { a._menuPassing = false; a.removeAttribute('aria-haspopup'); a.removeAttribute('aria-expanded'); }
+    else if (a.hasAttribute('aria-haspopup')) a.setAttribute('aria-expanded', 'false');
+  };
   // Long-press on a phone, in a list that has Select: selection, with that row ticked (owner,
   // 2026-11-08); elsewhere (and right-click) the row's ⋯ menu
   const longPressSelect = (row) => {
@@ -6508,7 +6541,7 @@
     if (to == null || e.altKey || e.ctrlKey || e.metaKey) return;
     e.preventDefault(); e.stopPropagation(); items[to].focus({ preventScroll: true });
   });
-  const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuBack(); menuEl.hidden = true; if (fromBack !== true) popTransient(); };
+  const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuBack(); menuEl.hidden = true; menuSaid(false); if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
   // Phones: a sheet closes with a swipe down while its list is at the top (it follows the finger;
   // a short pull springs back). A swipe that starts sideways or scrolls the list is left alone.
@@ -6558,12 +6591,29 @@
     // in the menu before (a sub-menu): not a mouse's click that left a menu item focused)
     const fa = document.activeElement;
     const keyed = keyedLast && (!fa || fa === document.body || fa === anchor || menuEl.contains(fa) || (fa.contains && fa.contains(anchor)));
+    if (menuAnchor !== anchor) menuSaid(false); // (a menu opened from another one's place: that one is closed)
     menuAnchor = anchor;
-    menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.face ? face(it.face) : it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
+    // (its name: its first heading, else what its opener is called)
+    { const t = items.find((it) => it.title); menuEl.setAttribute('aria-label', (t && t.title) || anchor.getAttribute('aria-label') || anchor.title || 'Menu'); }
+    // (each titled part is a group named by its title, so a screen reader says which part an item is in:
+    // "Move to" before the zones; a title with nothing after it, "and 3 more on Pubky", describes the menu)
+    const item = (it, i) => `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : 'role="menuitem"'}>${it.face ? face(it.face) : it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`;
+    let html = ''; let open = false; let note = null;
+    items.forEach((it, i) => {
+      if (!it.title) { html += item(it, i); return; }
+      if (open) html += '</div>';
+      open = items.slice(i + 1).some((x) => !x.title) && !(items[i + 1] && items[i + 1].title);
+      const id = `mtitle${i}`;
+      if (open) html += `<div role="group" aria-labelledby="${id}"><div class="pop-title" id="${id}" aria-hidden="true">${esc(it.title)}</div>`;
+      else { html += `<div class="pop-title" id="${id}" aria-hidden="true">${esc(it.title)}</div>`; if (i > 0 && !items.slice(i + 1).some((x) => !x.title)) note = id; }
+    });
+    if (open) html += '</div>';
+    menuEl.innerHTML = html;
+    if (note) menuEl.setAttribute('aria-describedby', note); else menuEl.removeAttribute('aria-describedby');
     // The item runs first: a page it opens replaces the transient entry; otherwise it is popped. The menu
     // closes at once, so the control that opened it (its ⋯) shows the progress until the item is done.
-    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuBack(); menuEl.hidden = true; Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
-    menuEl.hidden = false; pushTransient();
+    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuBack(); menuEl.hidden = true; menuSaid(false); Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
+    menuEl.hidden = false; menuSaid(true); pushTransient();
     const r = anchor.getBoundingClientRect(); const mw = 280;
     menuEl.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
     menuEl.style.top = Math.min(window.innerHeight - menuEl.offsetHeight - 8, r.bottom + 6) + 'px';
@@ -6698,7 +6748,7 @@
   // ("album", "song", never the describer's "other"), and an album's Play says it is the album. On a
   // phone it stays in the line under the title: next to a plays chip a row-end word left the
   // title no room.
-  const discoverRows = (items) => `<div class="list">${items.map((it, i) => { const kind = it.kind && it.kind !== 'other' ? homeKind(it) : ''; return `<div class="list-row clickable" data-ditem="${i}"${it.uri ? ` data-uri="${esc(it.uri)}"` : ''}>${it.image ? `<img class="thumb" src="${esc(it.image)}" alt="" loading="lazy">` : `<div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div>`}<div class="grow"><div class="name">${esc(itemName(it))} ${it.site ? `<span class="src-badge">${esc(it.site.toUpperCase())}</span>` : ''}${it.in_library ? '<span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([it.artist, it.group_size ? `on ${it.group_size} services` : null, it.taggers ? `${it.taggers} tagger${it.taggers === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))}${kind ? `<span class="subkind">${it.artist || it.group_size || it.taggers ? ' · ' : ''}${esc(kind)}</span>` : ''}</div></div>${kind ? `<span class="muted small rowkind">${esc(kind)}</span>` : ''}${playsChip(it)}<span class="row-actions"><button class="icon-btn" data-dplay="${i}" title="Play" aria-label="Play ${it.kind === 'album' ? 'the album ' : ''}${esc(itemName(it))}">${icon('play')}</button><button class="icon-btn" data-dmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></span></div>`; }).join('')}</div>`;
+  const discoverRows = (items) => `<div class="list">${items.map((it, i) => { const kind = it.kind && it.kind !== 'other' ? homeKind(it) : ''; return `<div class="list-row clickable" data-ditem="${i}"${it.uri ? ` data-uri="${esc(it.uri)}"` : ''}>${it.image ? `<img class="thumb" src="${esc(it.image)}" alt="" loading="lazy">` : `<div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div>`}<div class="grow"><div class="name">${esc(itemName(it))} ${it.site ? `<span class="src-badge">${esc(it.site.toUpperCase())}</span>` : ''}${it.in_library ? '<span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([it.artist, it.group_size ? `on ${it.group_size} services` : null, it.taggers ? `${it.taggers} tagger${it.taggers === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))}${kind ? `<span class="subkind">${it.artist || it.group_size || it.taggers ? ' · ' : ''}${esc(kind)}</span>` : ''}</div></div>${kind ? `<span class="muted small rowkind">${esc(kind)}</span>` : ''}${playsChip(it)}<span class="row-actions"><button class="icon-btn" data-dplay="${i}" title="Play" aria-label="Play ${it.kind === 'album' ? 'the album ' : ''}${esc(itemName(it))}">${icon('play')}</button><button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-dmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></span></div>`; }).join('')}</div>`;
   // Charts and search as artwork tiles (Roon-style), with the same play/menu actions as the rows.
   // Service marks for badges: simple monochrome glyphs in the spirit of each
   // service's logo (no trademarked artwork copied), a note for the rest.
@@ -6976,8 +7026,8 @@
   // words, and never asked of Pinakes (they are a private playlist's)
   const MB_SEARCH = 'https://musicbrainz.org/search?type=recording&query=';
   const mbSearchWords = (uri) => { if (!String(uri || '').startsWith(MB_SEARCH)) return null; try { return new URL(uri).searchParams.get('query') || null; } catch { return null; } };
-  const searchRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-search><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('search')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Not matched to a song yet</div></div><a class="btn ghost sm" href="${esc(t.page)}" target="_blank" rel="noopener" aria-label="Find “${esc(t.title)}” on MusicBrainz">${icon('external')} Find on MusicBrainz</a>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
-  const cardRow = (t, k, opts) => t.search ? searchRow(t, k, opts) : `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener" aria-label="Open ${esc(t.title)} (new tab)">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
+  const searchRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-search><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('search')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Not matched to a song yet</div></div><a class="btn ghost sm" href="${esc(t.page)}" target="_blank" rel="noopener" aria-label="Find “${esc(t.title)}” on MusicBrainz">${icon('external')} Find on MusicBrainz</a>${opts.extra ? opts.extra(t, k) : ''}<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
+  const cardRow = (t, k, opts) => t.search ? searchRow(t, k, opts) : `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener" aria-label="Open ${esc(t.title)} (new tab)">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
   // At most two at a time: the node's other calls (play, the zone) must not wait behind them
   const fillCards = (box) => {
     const rows = $$('[data-card]', box); let next = 0;
@@ -7055,7 +7105,7 @@
   // A hero's picture (item and person pages) lies over its monogram, so a picture that fails to load (removed) leaves the monogram, as on the tiles
   const heroImg = (src, round) => `<img src="${esc(imgSrc(src))}" alt="" style="width:100%;border-radius:${round ? '50%' : '12px'}" data-err="remove">`;
   const rowMono = (title, badged) => { const h = hue(title); return `<span class="thumb mono${badged ? ' badged' : ''}" aria-hidden="true" style="background:linear-gradient(135deg, hsl(${h} 38% 30%), hsl(${(h + 40) % 360} 42% 18%))">${esc(initials(title))}</span>`; };
-  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap">${rowMono(t.title, !t.sources && coverBadge(coverSvc(t)))}<img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="remove">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${songSub(t, k, opts)}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
+  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap">${rowMono(t.title, !t.sources && coverBadge(coverSvc(t)))}<img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="remove">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${songSub(t, k, opts)}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
   // The list being selected from (while the bar is up): its page, its part of the page, each song's
   // key and the ticks. The same list drawn again where it stands (a playlist's sources answering, a
   // pin, the next search source, See all songs) takes Select over with the same songs ticked;
@@ -9375,7 +9425,7 @@
           // (the eyebrow is the kind alone: who sees the playlist and where it is kept is the sharing
           // note's sentence under the buttons, said once, at every width)
           main.innerHTML = backBtn('playlists', 'Collections') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Collection</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}${libNote}</p>
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button aria-haspopup="menu" aria-expanded="false" class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && !t.pending && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" data-wd="up" title="Move up" aria-label="${esc(rowWords.up(t.title))}" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" data-wd="down" title="Move down" aria-label="${esc(rowWords.down(t.title))}" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" data-wd="unlist" title="Remove" aria-label="${esc(rowWords.unlist(t.title))}">${icon('close')}</button></span>` }) : emptyState('playlist', 'This collection is empty', mine ? 'Add songs from any ⋯ menu.' : 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the collection on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this collection" aria-label="Remove ${esc(t.title)} from this collection">${icon('close')}</button>` })}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this collection, shown with it when you share it.</p>'}</section>`;
@@ -9831,7 +9881,7 @@
               top.innerHTML = done
                 ? `<span class="warn-text">Couldn’t ${kept ? 'update' : 'load'} your TIDAL collection: ${esc(err)}</span>${kept ? ' Showing the last copy.' : ''} <button class="btn sm" type="button" data-tretry>Try again</button>`
                 : `<span class="spin" aria-hidden="true"></span> ${kept ? 'Updating your TIDAL collection' : 'Loading your TIDAL collection'}${view.slow ? '… the first time after a restart can take a while' : '…'} <a href="#tidalmine" data-jump>${kept ? 'Show the last copy' : 'Show'}</a>`;
-              const j = $('[data-jump]', top); if (j) j.onclick = (e) => { e.preventDefault(); box.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+              const j = $('[data-jump]', top); if (j) j.onclick = (e) => { e.preventDefault(); box.scrollIntoView({ behavior: glide(), block: 'start' }); };
               const t = $('[data-tretry]', top); if (t) t.onclick = () => render();
             };
             // Each part redraws on its own, so focus in the other one stays
@@ -9889,7 +9939,7 @@
           const playFrom = (i, replace = true) => playSourceItems(qitems.slice(i), replace, 'end', replace ? { shuffle: false } : {}); // (Play: in order, shuffle off)
           const canHeart = !!(await (async () => { try { await api('GET', '/favourites?uri=' + encodeURIComponent(it.url)); return true; } catch { return false; } })());
           main.innerHTML = backBtn('sources', srcName) + `<div class="artist-hero"><div class="portrait" style="border-radius:12px;background:hsl(${hue(it.title)} 35% 28%)">${it.image ? `<img src="${esc(it.image)}" alt="" data-err="remove">` : esc(initials(it.title))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, countOf(it.tracks.length, 'songs')].filter(Boolean).join(' · '))} · <a href="${esc(webUrl(it.url))}" target="_blank" rel="noopener">open</a>${it.licence ? (/^https?:/.test(it.licence) ? ` · <a href="${esc(webUrl(it.licence))}" target="_blank" rel="noopener">licence</a>` : ` · ${esc(it.licence)}`) : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to collection">${icon('playlist')} Collection</button>${it.library_album_id ? `<button class="btn ghost" id="ainlib" title="You already have this album">${icon('disc')} In your library</button>` : ''}${canHeart ? `<button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart" aria-pressed="${state.favUris.has(it.url)}">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Bookmarked' : 'Bookmark'}</button>` : ''}</div></div>${it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : ''}</div></div>`
-            + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div class="fmt-col"><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>${t.url ? `<button class="icon-btn" data-act="more" data-amore1="${i}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>` : ''}</div></div>`; }).join('')}</div>`;
+            + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div class="fmt-col"><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>${t.url ? `<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-act="more" data-amore1="${i}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>` : ''}</div></div>`; }).join('')}</div>`;
           $('#aplay').onclick = () => playFrom(0, true); $('#aadd').onclick = () => playFrom(0, false);
           $('#amore').onclick = (e) => { e.stopPropagation(); uriMenu($('#amore'), it.tracks.map((t) => t.url), it.title); };
           const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { if (await setFavourite({ uri: it.url }, !on)) render(); } catch (er) { toast(er.message, 'error'); } };
@@ -10148,7 +10198,7 @@
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
             + `<div class="hero item-hero"><div class="art ${pg.image ? (kind === 'artist' ? 'round ' : '') : 'placeholder '}monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${pg.image ? heroImg(pg.image, kind === 'artist') : ''}${heroBadge}</div><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" aria-pressed="${!!fav}" title="${fav ? 'Remove from Bookmarks' : 'Add to Bookmarks'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" aria-pressed="${!!fav}" title="${fav ? 'Remove from Bookmarks' : 'Add to Bookmarks'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button aria-haspopup="menu" aria-expanded="false" class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               ${myReview !== undefined ? reviewRow(myReview) : ''}
               <div class="hmatch-slot" id="hmatch"></div>
               </div></div>`
@@ -10373,8 +10423,8 @@
             return true;
           };
           const forDrawn = (f) => (...a) => (zoneMoved() ? undefined : f(...a));
-          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private collection from this queue">${icon('playlist')} Save as collection</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || !isListener() || !isBrowser()) ? `<button class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
-            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="${esc(rowWords.drag(itemName(it)))}" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here" aria-label="${esc(rowWords.play(itemName(it)))}">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" aria-label="${esc(rowWords.up(itemName(it)))}" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" aria-label="${esc(rowWords.down(itemName(it)))}" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove" aria-label="${esc(rowWords.unqueue(itemName(it)))}">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : !isBrowser() && state.queueError && state.queueZone !== state.zone ? failedHtml({ message: `Couldn’t read the queue: ${state.queueError.message}` }) /* (not known to be empty) */ : emptyState('queue', 'The queue is empty', 'Play an album, or add a song from its ⋯ menu.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null, true));
+          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private collection from this queue">${icon('playlist')} Save as collection</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || !isListener() || !isBrowser()) ? `<button aria-haspopup="menu" aria-expanded="false" class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
+            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="${esc(rowWords.drag(itemName(it)))}" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here" aria-label="${esc(rowWords.play(itemName(it)))}">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" aria-label="${esc(rowWords.up(itemName(it)))}" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" aria-label="${esc(rowWords.down(itemName(it)))}" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove" aria-label="${esc(rowWords.unqueue(itemName(it)))}">${icon('close')}</button></span><button aria-haspopup="menu" aria-expanded="false" class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : !isBrowser() && state.queueError && state.queueZone !== state.zone ? failedHtml({ message: `Couldn’t read the queue: ${state.queueError.message}` }) /* (not known to be empty) */ : emptyState('queue', 'The queue is empty', 'Play an album, or add a song from its ⋯ menu.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null, true));
           $$('[data-qi]', main).forEach((b) => b.onclick = forDrawn(() => transport({ action: 'play', index: Number(b.dataset.qi) })));
           // An empty queue offers the library shuffled here too, on the zone the page is for (before,
           // only words: the bar's Play said the queue was empty, and its note had the button). Only
@@ -11093,7 +11143,7 @@
           };
           loadLb();
           // ---- backup and restore (steward next-4, item 1)
-          const tb = $('#tobackup'); if (tb) tb.onclick = () => $('#backupcard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+          const tb = $('#tobackup'); if (tb) tb.onclick = () => $('#backupcard').scrollIntoView({ behavior: glide(), block: 'start' });
           const authH = () => (state.token ? { authorization: 'Bearer ' + state.token } : {});
           const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); };
           $('#bkpass').oninput = () => { $('#bkpass2').hidden = !$('#bkpass').value; };
@@ -11618,7 +11668,7 @@
             try {
               const r = await api('POST', path);
               $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve${what}. This page updates by itself.</p><p class="muted small">Pubky Ring is the free app (iPhone and Android, from your app store) that holds your Pubky identity; this node never sees your keys.</p><a class="btn sm" href="${esc(ringUrl(r.url))}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
-              $('#pkurl').scrollIntoView({ behavior: 'smooth', block: 'center' }); // the QR, not below the fold
+              $('#pkurl').scrollIntoView({ behavior: glide(), block: 'center' }); // the QR, not below the fold
               const pc = $('#pkcopy'); if (pc) pc.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(r.url).then(() => toast('Link copied')).catch(() => toast(r.url)); };
               const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); forgetPubkyUser(); toast('Signed in as ' + shortKey(st.user)); render(); } } catch (e) { clearInterval(t); toast(e.message, 'error'); } }, 2000);
             } catch (e) { toast(e.message, 'error'); }
