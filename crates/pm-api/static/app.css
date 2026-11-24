@@ -842,6 +842,8 @@ html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
 /* ---- DSP editor ---- */
 .dsp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--sp-3) var(--sp-4); align-items: end; }
 .dsp-grid label span, .eq-row span { display: block; font-size: var(--fs-xs); color: var(--muted); margin-bottom: var(--sp-1); }
+/* (a warning under a field: its own colour, and its gap above instead of below) */
+.dsp-grid label span.warn-text { color: var(--warn); margin: var(--sp-1) 0 0; }
 .dsp-grid label.check, label.check { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--fg-2); }
 .dsp-grid .cf-fields { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(120px, 200px)); gap: var(--sp-3); }
 .eq { display: flex; flex-direction: column; gap: var(--sp-1h); }

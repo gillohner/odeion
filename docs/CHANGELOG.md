@@ -45,6 +45,10 @@ Newest first. Dates are when the change landed on `main`.
 
 - **While a dialog is open, the keyboard shortcuts leave the music alone.** With a dialog on screen (Add music, a "Delete this…?" question, Rename), the arrow keys still went to the previous or next song, N opened Now playing underneath it, Space on the dialog's text played or paused, and ? put the list of shortcuts over the first dialog. Those keys now do nothing until the dialog is closed; Tab, Space and Enter on its buttons and Escape work as before.
 
+### 2026-11-23
+
+- **The DSP editor's DSD choice lists only what works.** It offered "to_pcm", which the node cannot do yet: a zone saved with it played no DSD file ("DSD to PCM conversion is not implemented yet"). The choices are now Automatic, Native DSD and DoP, in words instead of the setting's own names. A zone that was saved with the old choice shows it, says that its DSD files won't play, and is put right by choosing another and pressing Save.
+
 ### 2026-11-22
 
 - **Pages open faster, most of all away from home.** At every page load the browser asked the node for the web UI's files again and got them whole and uncompressed: about 1.5 MB, 1.2 MB of it the page's script. The node now sends them gzipped (the script is about 360 KB then), and when the browser already has the current file it sends no file at all, only "not changed". An updated node's page is still used at once.
