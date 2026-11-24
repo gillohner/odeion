@@ -1647,7 +1647,7 @@ pub fn start(s: &Arc<NodeState>, sync: Arc<crate::sync::PubkySync>) {
     tokio::spawn(async move {
         // The settings mirror on the homeserver (`settings.json`) once held TIDAL's sign-in in
         // plain text; writing it again now leaves it out
-        sync.backup_settings(&s).await;
+        let _ = sync.backup_settings(&s).await;
         loop {
             if sync.is_retired() {
                 break;

@@ -297,3 +297,39 @@ async fn health_uses_one_bounded_authenticated_list_regardless_of_inventory() {
         assert!(!params.contains_key("cursor"));
     }
 }
+
+/// The same fake homeserver answers 503 for the settings copy: a node that has not taken the copy
+/// in holds its backup back, and `POST /v1/node/settings/backup` says so instead of `{"ok": true}`.
+#[tokio::test]
+async fn a_backup_held_back_is_an_error_not_ok() {
+    let fixture = Fixture::new(0).await;
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/node/settings/backup")
+                .header("authorization", "Bearer node-health-test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&bytes);
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.contains("not replaced yet"), "{body}");
+    let requests = fixture.hs.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|(m, _, _)| m == Method::GET || m == Method::HEAD),
+        "nothing written: {requests:?}"
+    );
+    assert!(
+        requests.iter().any(|(_, uri, _)| uri.ends_with("settings.json")),
+        "the copy was read: {requests:?}"
+    );
+}

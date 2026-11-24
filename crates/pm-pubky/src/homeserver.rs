@@ -1428,6 +1428,9 @@ pub const NODE_RECORD_PATH: &str = pm_appdata::paths::NODE_RECORD_PATH;
 /// reinstalled or replaced node restores them after one Ring sign-in. Never a sign-in or a token:
 /// the file is plain JSON the homeserver's operator can read.
 pub const NODE_SETTINGS_PATH: &str = pm_appdata::paths::NODE_SETTINGS_PATH;
+/// The largest settings copy read back ([`NodeHomeserver::read_node_settings`]); a node writes a
+/// few kilobytes.
+pub const NODE_SETTINGS_MAX: usize = 32 * 1024 * 1024;
 /// The person's own preferences ("You" in Settings), read and written by every node they use.
 pub const PREFS_PATH: &str = pm_appdata::paths::PREFS_PATH;
 
@@ -1489,6 +1492,10 @@ impl NodeHomeserver {
         }
     }
 
+    /// The owner's node settings backup ([`NODE_SETTINGS_PATH`]), `None` when there is none. A
+    /// file that is there but is not JSON (cut short, written by something else) reads as
+    /// `Some(Value::Null)`: there is a copy, and nothing in it can be restored. Errors are the
+    /// homeserver's or the transport's only.
     pub async fn read_node_settings(
         &self,
         session: &PubkySession,
@@ -1497,8 +1504,15 @@ impl NodeHomeserver {
         if !storage.exists(NODE_SETTINGS_PATH).await? {
             return Ok(None);
         }
-        let v: serde_json::Value = storage.get_json(NODE_SETTINGS_PATH).await?;
-        Ok(Some(v))
+        // The whole read within one limit (a body sent a byte now and then too)
+        let bytes = within(OBJECT_TIMEOUT, async {
+            let resp = storage.get(NODE_SETTINGS_PATH).await?;
+            read_capped(resp, NODE_SETTINGS_MAX, OBJECT_TIMEOUT).await
+        })
+        .await?;
+        Ok(Some(
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        ))
     }
 
     /// The owner's node record, if a node published one.

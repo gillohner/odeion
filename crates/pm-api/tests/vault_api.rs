@@ -1246,7 +1246,10 @@ async fn a_replaced_settings_backup_adopts_no_history_delete() {
         b.pop().unwrap(),
     ))));
     let _ = release.send(());
-    backup.await.unwrap();
+    assert!(
+        matches!(backup.await.unwrap(), Err(pm_api::sync::SyncError::Replaced)),
+        "the backup of a replaced session answers so"
+    );
     assert_eq!(
         n.library
             .lock()
@@ -1260,7 +1263,8 @@ async fn a_replaced_settings_backup_adopts_no_history_delete() {
 
 /// The settings backup checks the session after it has the library: a replacement made while it
 /// waited for the lock (another task held it) is seen, and the old identity's history delete is
-/// not adopted, so the node's listens stay.
+/// not adopted, so the node's listens stay. The lock it waits for here is its first one (the
+/// "copy taken in" lookup); the later one, where the delete is adopted, checks the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replacement_while_the_backup_waits_for_the_library_adopts_nothing() {
     let Some(mut ids) = identities_with_sessions(1, &["node.pubky.music"]).await else {
@@ -1318,7 +1322,10 @@ async fn a_replacement_while_the_backup_waits_for_the_library_adopts_nothing() {
     // The session is replaced while the backup waits (only the flag: the library is held here)
     sync_a.retire();
     drop(held);
-    backup.await.unwrap();
+    assert!(
+        matches!(backup.await.unwrap(), Err(pm_api::sync::SyncError::Replaced)),
+        "the backup of a replaced session answers so"
+    );
     let lib = n.library.lock().unwrap();
     assert_eq!(
         lib.get_setting("listens.cleared_before").unwrap(),
@@ -1707,4 +1714,224 @@ async fn stale_storage_completions_preserve_replacement_status_and_quota() {
     let st = n.storage_save.lock().unwrap();
     assert!(st.error.is_none());
     assert!(st.last_saved_at.is_some());
+}
+
+/// A node signed in for the first time takes in the owner's settings copy before it writes its
+/// own over it. The first sync restores the copy: the contact the node derives from the identity
+/// at sign-in does not count as the owner's, so the node is still fresh and gets the copy's
+/// contact. A backup made before any restore adds the copy's settings to the node's instead of
+/// dropping them. After that the copy follows the node, deletions included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_node_takes_in_the_settings_copy_before_replacing_it() {
+    // Two people, so that the first node's background work never touches the second copy
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let second = ids.pop().unwrap().pop().unwrap();
+    let first = ids.pop().unwrap().pop().unwrap();
+    let homeserver = signing_in();
+    let old_copy = |smart: &str| {
+        json!({"version": 1, "saved_at": 1, "node": "the old node",
+            "contact": "https://example.org/old-node", "folders": [],
+            "settings": {smart: "{\"name\":\"kept\"}", "home.layout": "theirs"}})
+    };
+
+    // 1. A new node, signed in: its first sync brings the settings back
+    homeserver
+        .write_node_settings(&first, &old_copy("smart.0035WKVKQDHSM"))
+        .await
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), first.clone()));
+    n.set_sync(Some(sync.clone()));
+    assert!(n.contact().contains("pubky.app/profile/"), "derived at sign-in");
+    pm_api::sync::first_sync_in_background(&n, sync.clone());
+    let mut copy = Value::Null;
+    for _ in 0..600 {
+        copy = settings_copy(&homeserver, &first).await;
+        if copy["node"] == "Living room node" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        copy["node"], "Living room node",
+        "the node's backup after its first sync: {copy}"
+    );
+    let setting = |n: &NodeState, k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
+    assert_eq!(
+        setting(&n, "smart.0035WKVKQDHSM").as_deref(),
+        Some("{\"name\":\"kept\"}")
+    );
+    assert_eq!(n.contact(), "https://example.org/old-node");
+    assert!(copy["settings"]["smart.0035WKVKQDHSM"].is_string(), "{copy}");
+    // The copy above may be the one written before the sync (vault_cache::start): once the first
+    // sync is done, a backup still keeps what was taken in
+    for _ in 0..600 {
+        if n.sync_activity.lock().unwrap().finished_at.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        n.sync_activity.lock().unwrap().finished_at.is_some(),
+        "the first sync ended"
+    );
+    sync.backup_settings(&n).await.expect("backed up");
+    let copy = settings_copy(&homeserver, &first).await;
+    assert!(
+        copy["settings"]["smart.0035WKVKQDHSM"].is_string(),
+        "after the sync: {copy}"
+    );
+    // Taken in: with no folders and the derived contact again, the node is not "fresh" at its
+    // next start or sign-in (what it removed since would come back)
+    n.set_contact(&format!("https://pubky.app/profile/{}", sync.z32()))
+        .unwrap();
+    assert!(
+        sync.restore_settings(&n, true).await.unwrap().is_none(),
+        "restored again"
+    );
+
+    // 2. A node whose settings are backed up before any restore ran (a change made at once)
+    homeserver
+        .write_node_settings(&second, &old_copy("smart.0035WKVKQDHSN"))
+        .await
+        .unwrap();
+    let d2 = tempfile::tempdir().unwrap();
+    let n2 = node(d2.path());
+    n2.library
+        .lock()
+        .unwrap()
+        .set_setting("home.layout", "mine")
+        .unwrap();
+    let sync2 = Arc::new(PubkySync::from_session(homeserver.clone(), second.clone()));
+    n2.set_sync(Some(sync2.clone()));
+    sync2.backup_settings(&n2).await.expect("backed up");
+    let copy = settings_copy(&homeserver, &second).await;
+    assert!(
+        copy["settings"]["smart.0035WKVKQDHSN"].is_string(),
+        "dropped: {copy}"
+    );
+    assert_eq!(
+        copy["settings"]["home.layout"], "mine",
+        "the node's own wins: {copy}"
+    );
+    // Still fresh then (no folders, the derived contact): the copy's contact is taken in, not
+    // written over
+    assert_eq!(copy["contact"], "https://example.org/old-node", "{copy}");
+    assert!(setting(&n2, "smart.0035WKVKQDHSN").is_some());
+    // Taken in once: a setting deleted here afterwards goes from the copy too
+    n2.library
+        .lock()
+        .unwrap()
+        .delete_setting("smart.0035WKVKQDHSN")
+        .unwrap();
+    sync2.backup_settings(&n2).await.expect("backed up");
+    let copy = settings_copy(&homeserver, &second).await;
+    assert!(copy["settings"].get("smart.0035WKVKQDHSN").is_none(), "{copy}");
+}
+
+/// A node signed in as A, then as B, then as A again takes A's settings copy in once: with no
+/// folders and the derived contact it is not fresh for A again, so what was removed since does
+/// not come back from A's older copy. (Signed in by hand, as `set_sync` does, without the
+/// background work a sign-in starts.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settings_copy_is_taken_in_once_per_identity() {
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let b = ids.pop().unwrap().pop().unwrap();
+    let a = ids.pop().unwrap().pop().unwrap();
+    let homeserver = signing_in();
+    let smart = "smart.0035WKVKQDHSP";
+    homeserver
+        .write_node_settings(
+            &a,
+            &json!({"version": 1, "saved_at": 1, "node": "the old node",
+                "contact": "https://example.org/old-node", "folders": [],
+                "settings": {smart: "{\"name\":\"old\"}"}}),
+        )
+        .await
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let setting = |k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
+    let derived = |sync: &PubkySync| format!("https://pubky.app/profile/{}", sync.z32());
+
+    // 1. A: its copy is taken in
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a.clone()));
+    n.set_contact(&derived(&sync_a)).unwrap();
+    assert!(
+        sync_a.restore_settings(&n, true).await.unwrap().is_some(),
+        "taken in"
+    );
+    assert_eq!(n.contact(), "https://example.org/old-node");
+    assert!(setting(smart).is_some());
+
+    // 2. B (no copy of its own): its backup notes B. The contact taken from A's copy goes (B's
+    // derived one is in its place) and the owner removes the collection meanwhile
+    sync_a.retire();
+    let sync_b = Arc::new(PubkySync::from_session(homeserver.clone(), b.clone()));
+    n.set_contact(&derived(&sync_b)).unwrap();
+    sync_b.backup_settings(&n).await.expect("backed up");
+    n.library.lock().unwrap().delete_setting(smart).unwrap();
+
+    // 3. A again: not fresh, nothing comes back, and A's copy follows the node
+    sync_b.retire();
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a.clone()));
+    n.set_contact(&derived(&sync_a)).unwrap();
+    assert!(
+        sync_a.restore_settings(&n, true).await.unwrap().is_none(),
+        "A's copy taken in again"
+    );
+    sync_a.backup_settings(&n).await.expect("backed up");
+    assert!(setting(smart).is_none(), "removed, then brought back");
+    assert_eq!(n.contact(), derived(&sync_a));
+    let copy = settings_copy(&homeserver, &a).await;
+    assert!(copy["settings"].get(smart).is_none(), "{copy}");
+    assert_eq!(copy["contact"], derived(&sync_a), "{copy}");
+}
+
+/// A node that has folders of its own but no contact chosen (the one derived at sign-in) takes
+/// the settings copy's contact at its first backup instead of writing the derived one over it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_with_folders_keeps_the_copys_contact() {
+    let Some(mut ids) = identities_with_sessions(1, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let a = ids.pop().unwrap().pop().unwrap();
+    let homeserver = signing_in();
+    homeserver
+        .write_node_settings(
+            &a,
+            &json!({"version": 1, "saved_at": 1, "node": "the old node",
+                "contact": "mailto:owner@example.org", "folders": [], "settings": {}}),
+        )
+        .await
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let music = d.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    n.library.lock().unwrap().add_folder(&music).unwrap();
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), a.clone()));
+    n.set_contact(&format!("https://pubky.app/profile/{}", sync.z32()))
+        .unwrap();
+    sync.backup_settings(&n).await.expect("backed up");
+    assert_eq!(n.contact(), "mailto:owner@example.org");
+    let copy = settings_copy(&homeserver, &a).await;
+    assert_eq!(copy["contact"], "mailto:owner@example.org", "{copy}");
+    assert_eq!(copy["folders"][0], music.to_string_lossy().as_ref(), "{copy}");
+}
+
+async fn settings_copy(homeserver: &NodeHomeserver, session: &pubky::PubkySession) -> Value {
+    homeserver
+        .read_node_settings(session)
+        .await
+        .unwrap()
+        .expect("a settings copy")
 }
