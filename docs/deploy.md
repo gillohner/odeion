@@ -73,7 +73,7 @@ sudo ./start-at-boot.sh                     # once, on a machine with systemd: s
   every 30 seconds until the node runs (it starts the containers there are; an update you haven't
   applied yet stays for your own `docker compose up -d`), so it starts by itself as soon as the share answers. It doesn't
   stop anything at shutdown. It also starts a node you stopped on purpose, at the next boot:
-  `sudo systemctl disable odeion-bundle` keeps it off, `sudo ./start-at-boot.sh --remove` takes it out.
+  `sudo systemctl disable --now odeion-bundle` keeps it off (also before a restore), `sudo ./start-at-boot.sh --remove` takes it out.
   While such a share is away the node can't start at all, because Docker needs every volume. The
   unit runs the bundle's files as root, so keep the folder writable by you only. It needs systemd
   244 or newer (Debian 11, Ubuntu 20.04 and later).

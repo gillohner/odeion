@@ -93,8 +93,8 @@ mount targets and every match, collection and play stays with its song; for a ne
 
 ### Restore on a new disk or machine
 
-On a machine that already has the bundle's start at boot, run `sudo systemctl disable
-odeion-bundle` first, so a reboot in between doesn't start an empty bundle.
+On a machine that already has the bundle's start at boot, run `sudo systemctl disable --now
+odeion-bundle` first, so neither a retry nor a reboot starts the bundle while it is restored.
 
 1. Install Docker, then get the bundle: `git clone https://github.com/gillohner/pubky-music-node`
    and `cd pubky-music-node/deploy/bundle`. Don't run `setup.sh`: the passwords come from the

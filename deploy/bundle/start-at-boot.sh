@@ -56,7 +56,8 @@ case ${1:-} in
 --run)
   # `up -d` fails when a container can't start (a share volume that doesn't mount yet); the check
   # after it also catches a node that stopped again at once. --no-recreate: a boot only starts what
-  # is there, as Docker's own restart does; an update stays for `docker compose up -d` by hand.
+  # is there, as Docker's own restart does; an update stays for `docker compose up -d` by hand. No
+  # --pull never: an image that is missing (never pulled) is fetched rather than failing every try.
   docker compose up -d --no-recreate
   if [ -z "$(docker compose ps -q --status running music)" ]; then
     echo "The music container isn't running yet; trying again." >&2
@@ -79,6 +80,9 @@ case ${1:-} in
   # The unit runs with systemd's PATH, not the one of this shell (a snap or a per-user Compose plugin)
   env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin docker compose version >/dev/null 2>&1 ||
     { echo "docker compose isn't on systemd's PATH (/usr/local/bin, /usr/bin); install Docker's Compose plugin system-wide." >&2; exit 1; }
+  # The unit runs as root: root's Docker must be the one that runs this bundle (not rootless Docker)
+  [ -n "$(env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin docker compose ps -aq 2>/dev/null)" ] ||
+    { echo "Root's Docker has no containers of this bundle: run docker compose up -d first (rootless Docker isn't covered)." >&2; exit 1; }
   # Type=oneshot with Restart= needs systemd 244 (Debian 11, Ubuntu 20.04)
   v=$(systemctl --version | sed -n '1s/^systemd \([0-9]*\).*/\1/p')
   [ "${v:-0}" -ge 244 ] || { echo "This needs systemd 244 or newer (this machine has ${v:-an unknown version})." >&2; exit 1; }

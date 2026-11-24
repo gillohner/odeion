@@ -105,6 +105,11 @@ check(boot.get("Type") == ["oneshot"] and boot.get("Restart") == ["on-failure"] 
       "the bundle unit tries again without a limit")
 check(not boot.get("ExecStop") and not boot.get("ExecStopPost"), "stopping the bundle unit leaves the containers alone")
 check(boot.get("WantedBy") == ["multi-user.target"], "the bundle unit is enabled for every boot")
+script = (BUNDLE / "start-at-boot.sh").read_text()
+run_branch = script[script.find("--run)"):script.find(";;", script.find("--run)"))]
+check("docker compose up -d --no-recreate" in run_branch, "a boot only starts the bundle's containers (up -d --no-recreate), it applies no pending update")
+check(script.count("env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin docker compose") >= 2,
+      "the install checks docker compose, and this bundle's containers, under systemd's PATH")
 setup = (BUNDLE / "setup.sh").read_text()
 check("sudo ./start-at-boot.sh" in setup, "setup.sh says how to install the start at boot")
 check("start-at-boot.sh" in (REPO / "docs/deploy.md").read_text(), "docs/deploy.md describes the start at boot")
