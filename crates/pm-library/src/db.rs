@@ -3333,15 +3333,6 @@ impl Library {
         Ok(())
     }
 
-    /// Remember what a song looked like when it was checked.
-    pub fn set_identify_input(&self, track: i64, input_key: &str) -> Result<()> {
-        self.lock().execute(
-            "UPDATE identify_state SET input_key = ?2 WHERE track_id = ?1",
-            params![track, input_key],
-        )?;
-        Ok(())
-    }
-
     /// Songs a plain run compares with what they look like now (no identity): "not found" songs
     /// (unknown or error) with what they looked like when checked (those checked before this was
     /// kept have none and are not compared), and songs waiting for review, with or without it
@@ -3590,19 +3581,6 @@ impl Library {
             }
             Ok(check)
         })
-    }
-
-    /// Whether a song has a canonical identity (tags, a run, the owner).
-    pub fn has_identity(&self, track: i64) -> Result<bool> {
-        Ok(self
-            .lock()
-            .query_row(
-                "SELECT canonical_uri IS NOT NULL FROM tracks WHERE id = ?1",
-                params![track],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(false))
     }
 
     /// Whether the owner said "Not this" to `recording` for this song.

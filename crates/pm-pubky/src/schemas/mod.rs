@@ -138,8 +138,6 @@ pub(crate) fn validate_image_url(url: &str, max: usize) -> Result<(), SchemaErro
     }
 }
 
-/// The app namespace the node wrote public tags under until 2026-10-26.
-pub const TAG_NAMESPACE: &str = pm_appdata::paths::APP_NAMESPACE;
 /// `/pub/pubky.music/tags/`: where the node wrote tags (`PubkyAppTag`s) from 2026-10-21 to
 /// 2026-10-26, while the Nexus behind Pinakes indexed tags on external links only in an app's own
 /// namespace. The sync moves them to `/pub/social/v1/tags/` once ([`crate::v1::music_tag`]) and

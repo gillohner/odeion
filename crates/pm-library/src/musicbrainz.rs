@@ -266,52 +266,6 @@ impl MusicBrainzClient {
         self.get(path, query).await
     }
 
-    /// Search recordings by artist and title; `duration_ms` narrows to ± 2 s.
-    /// Returns (MBID, score 0–100) as MusicBrainz ranks them.
-    pub async fn search_recording(
-        &self,
-        artist: &str,
-        title: &str,
-        duration_ms: Option<u64>,
-    ) -> Result<Vec<(Mbid, u32)>> {
-        let mut query = format!(
-            "recording:\"{}\" AND artist:\"{}\"",
-            lucene_escape(title),
-            lucene_escape(artist)
-        );
-        if let Some(d) = duration_ms {
-            query.push_str(&format!(" AND dur:[{} TO {}]", d.saturating_sub(2000), d + 2000));
-        }
-        let v = self
-            .get("recording", &[("query", &query), ("limit", "10")])
-            .await?;
-        Ok(v.map(|v| parse_search(&v)).unwrap_or_default())
-    }
-
-    /// Like [`Self::search_recording`] but with what MusicBrainz says about each hit (title,
-    /// artist, a release, length), for the owner to choose from. When nothing has a length within
-    /// 2 s of `duration_ms` (a clipped, live or differently mastered file) it searches again
-    /// without the length, so there is still something to choose from.
-    pub async fn search_recording_hits(
-        &self,
-        artist: &str,
-        title: &str,
-        duration_ms: Option<u64>,
-    ) -> Result<Vec<RecordingHit>> {
-        let (narrow, base) = recording_hit_queries(artist, title, duration_ms);
-        if let Some(q) = narrow {
-            let v = self.get("recording", &[("query", &q), ("limit", "10")]).await?;
-            let hits = v.map(|v| parse_search_hits(&v)).unwrap_or_default();
-            if !hits.is_empty() {
-                return Ok(hits);
-            }
-        }
-        let v = self
-            .get("recording", &[("query", &base), ("limit", "10")])
-            .await?;
-        Ok(v.map(|v| parse_search_hits(&v)).unwrap_or_default())
-    }
-
     /// Resolve a service link or ISRC URI to a canonical recording URI.
     pub async fn canonicalize(&self, uri: &MusicUri) -> Result<Option<MusicUri>> {
         match uri {
@@ -430,22 +384,6 @@ pub fn parse_url_relations(v: &Value) -> Vec<(MusicEntity, Mbid)> {
     out
 }
 
-pub fn parse_search(v: &Value) -> Vec<(Mbid, u32)> {
-    v.get("recordings")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|r| {
-                    Some((
-                        mbid_at(r, "id")?,
-                        r.get("score").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// A recording search hit with what MusicBrainz says about it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecordingHit {
@@ -489,7 +427,7 @@ impl HitRelease {
     }
 }
 
-/// The recording searches of [`MusicBrainzClient::search_recording_hits`]: with the length (± 2 s)
+/// The two recording searches for a song (identify's candidate list): with the length (± 2 s)
 /// when there is one, and without.
 pub fn recording_hit_queries(
     artist: &str,
@@ -631,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn isrc_url_and_search_mapping() {
+    fn isrc_and_url_mapping() {
         let v = json!({"isrc": "USQX91300108", "recordings": [{"id": MB}, {"id": "junk"}]});
         assert_eq!(parse_isrc_recordings(&v), vec![Mbid::parse(MB).unwrap()]);
 
@@ -644,12 +582,6 @@ mod tests {
         assert_eq!(rels[0], (MusicEntity::Recording, Mbid::parse(MB).unwrap()));
         assert_eq!(rels[1], (MusicEntity::ReleaseGroup, Mbid::parse(MB2).unwrap()));
         assert_eq!(rels[2], (MusicEntity::Artist, Mbid::parse(MB2).unwrap()));
-
-        let v = json!({"recordings": [{"id": MB, "score": 100}, {"id": MB2, "score": 87}]});
-        assert_eq!(
-            parse_search(&v),
-            vec![(Mbid::parse(MB).unwrap(), 100), (Mbid::parse(MB2).unwrap(), 87)]
-        );
     }
 
     /// Two clients (as the node's call sites are) still ask one at a time, a second apart, and a
