@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/pm-model",
+    "crates/pm-dsd",
     "crates/pm-zones",
     "crates/pm-audio",
     "crates/pm-library",
@@ -41,6 +42,7 @@ repository = "https://github.com/gillohner/pubky-music-node"
 
 [workspace.dependencies]
 pm-model = { path = "crates/pm-model" }
+pm-dsd = { path = "crates/pm-dsd" }
 pm-zones = { path = "crates/pm-zones" }
 pm-audio = { path = "crates/pm-audio" }
 pm-library = { path = "crates/pm-library" }

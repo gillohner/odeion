@@ -11,6 +11,7 @@ default = ["musicbrainz"]
 musicbrainz = ["dep:reqwest", "dep:tokio", "dep:url"]
 
 [dependencies]
+pm-dsd = { workspace = true }
 pm-model = { workspace = true }
 blake3 = { workspace = true }
 id3 = { workspace = true }

@@ -1,278 +1,28 @@
-//! DSF and DFF (DSDIFF) container headers: format, length and the embedded
-//! ID3v2 tag. This module reads headers only; sample data is pm-audio's job.
-//! A small writer in [`synth`] produces valid minimal files for tests.
+//! DSF and DFF (DSDIFF) files in the library: their header (format, length and the embedded
+//! ID3v2 tag), read by pm-dsd as the player reads it. A small writer in [`synth`] produces
+//! valid minimal files for tests.
 
 use crate::error::{LibraryError, Result};
-use pm_model::AudioFormat;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DsdContainer {
-    Dsf,
-    Dff,
-}
+/// The header types are pm-dsd's: the player reads the same header the same way.
+pub use pm_dsd::{Container as DsdContainer, Header as DsdHeader};
 
-impl DsdContainer {
-    pub fn name(&self) -> &'static str {
-        match self {
-            DsdContainer::Dsf => "dsf",
-            DsdContainer::Dff => "dff",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DsdHeader {
-    pub container: DsdContainer,
-    pub format: AudioFormat,
-    /// One-bit samples per channel.
-    pub sample_count: u64,
-    /// Byte offset of the first sample byte.
-    pub data_offset: u64,
-    /// Length in bytes of the sample data.
-    pub data_len: u64,
-    /// DSF: bytes per channel block (usually 4096). DFF: 1 (byte-interleaved).
-    pub block_size: u32,
-    /// Raw ID3v2 tag bytes, if present.
-    pub id3: Option<Vec<u8>>,
-}
-
-impl DsdHeader {
-    pub fn duration_ms(&self) -> Option<u64> {
-        if self.format.rate_hz == 0 {
-            None
-        } else {
-            Some(self.sample_count.checked_mul(1000)? / self.format.rate_hz as u64)
-        }
-    }
-}
-
-fn io_err(path: &Path, e: std::io::Error) -> LibraryError {
-    LibraryError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    }
-}
-
-fn bad(path: &Path, reason: impl Into<String>) -> LibraryError {
-    LibraryError::Probe {
-        path: path.to_path_buf(),
-        reason: reason.into(),
-    }
-}
-
-/// Read the header of a `.dsf` or `.dff` file, sniffing the magic bytes.
+/// Read the header of a `.dsf` or `.dff` file, sniffing the magic bytes, with its ID3v2 tag.
 pub fn read_header(path: &Path) -> Result<DsdHeader> {
-    let mut f = File::open(path).map_err(|e| io_err(path, e))?;
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic).map_err(|e| io_err(path, e))?;
-    f.seek(SeekFrom::Start(0)).map_err(|e| io_err(path, e))?;
-    match &magic {
-        b"DSD " => read_dsf(path, &mut f),
-        b"FRM8" => read_dff(path, &mut f),
-        _ => Err(bad(path, "not a DSF or DFF file")),
-    }
-}
-
-fn read_exact_at<R: Read + Seek>(path: &Path, r: &mut R, off: u64, buf: &mut [u8]) -> Result<()> {
-    r.seek(SeekFrom::Start(off)).map_err(|e| io_err(path, e))?;
-    r.read_exact(buf).map_err(|e| io_err(path, e))
-}
-
-fn read_dsf<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
-    let mut hdr = [0u8; 28];
-    read_exact_at(path, r, 0, &mut hdr)?;
-    let chunk_size = u64::from_le_bytes(hdr[4..12].try_into().unwrap());
-    if chunk_size != 28 {
-        return Err(bad(path, "dsf: DSD chunk size is not 28"));
-    }
-    let metadata_ptr = u64::from_le_bytes(hdr[20..28].try_into().unwrap());
-
-    let mut fmt = [0u8; 52];
-    read_exact_at(path, r, 28, &mut fmt)?;
-    if &fmt[0..4] != b"fmt " {
-        return Err(bad(path, "dsf: missing fmt chunk"));
-    }
-    let fmt_size = u64::from_le_bytes(fmt[4..12].try_into().unwrap());
-    let format_id = u32::from_le_bytes(fmt[16..20].try_into().unwrap());
-    let channels = u32::from_le_bytes(fmt[24..28].try_into().unwrap());
-    let rate = u32::from_le_bytes(fmt[28..32].try_into().unwrap());
-    let bits = u32::from_le_bytes(fmt[32..36].try_into().unwrap());
-    let sample_count = u64::from_le_bytes(fmt[36..44].try_into().unwrap());
-    let block_size = u32::from_le_bytes(fmt[44..48].try_into().unwrap());
-    if format_id != 0 {
-        return Err(bad(path, format!("dsf: unsupported format id {format_id}")));
-    }
-    if !(1..=8).contains(&channels) {
-        return Err(bad(path, format!("dsf: bad channel count {channels}")));
-    }
-    if bits != 1 && bits != 8 {
-        return Err(bad(path, format!("dsf: bits per sample {bits} not 1 or 8")));
-    }
-
-    let data_hdr_off = 28 + fmt_size;
-    let mut data = [0u8; 12];
-    read_exact_at(path, r, data_hdr_off, &mut data)?;
-    if &data[0..4] != b"data" {
-        return Err(bad(path, "dsf: missing data chunk"));
-    }
-    let data_chunk_size = u64::from_le_bytes(data[4..12].try_into().unwrap());
-    let data_len = data_chunk_size.saturating_sub(12);
-
-    let id3 = if metadata_ptr != 0 {
-        read_id3_at(path, r, metadata_ptr)?
-    } else {
-        None
+    let io_err = |source| LibraryError::Io {
+        path: path.to_path_buf(),
+        source,
     };
-
-    let format = AudioFormat::dsd(rate, channels as u8);
-    format.validate().map_err(|e| bad(path, format!("dsf: {e}")))?;
-    Ok(DsdHeader {
-        container: DsdContainer::Dsf,
-        format,
-        sample_count,
-        data_offset: data_hdr_off + 12,
-        data_len,
-        block_size,
-        id3,
-    })
-}
-
-/// The longest ID3v2 tag that is read from a DSF file (as the reader that plays it allows).
-const MAX_ID3: u64 = 16 * 1024 * 1024;
-
-/// Read an ID3v2 tag starting at `off`: header + the synchsafe size.
-fn read_id3_at<R: Read + Seek>(path: &Path, r: &mut R, off: u64) -> Result<Option<Vec<u8>>> {
-    let mut h = [0u8; 10];
-    if read_exact_at(path, r, off, &mut h).is_err() {
-        return Ok(None);
-    }
-    if &h[0..3] != b"ID3" {
-        return Ok(None);
-    }
-    let size = h[6..10]
-        .iter()
-        .fold(0u64, |acc, b| (acc << 7) | (*b as u64 & 0x7f));
-    let footer = if h[5] & 0x10 != 0 { 10 } else { 0 };
-    let total = 10 + size + footer;
-    // The length is the file's word (up to 256 MiB fits its four bytes): no memory is set aside
-    // for a tag longer than tags are; the file is read without it
-    if total > MAX_ID3 {
-        return Ok(None);
-    }
-    let mut buf = vec![0u8; total as usize];
-    read_exact_at(path, r, off, &mut buf)?;
-    Ok(Some(buf))
-}
-
-/// Where the chunk after the one at `at` starts (a 12-byte header, `size` bytes, padded to an
-/// even length), or `None` when the size is no size a file can have (the sum does not fit).
-fn next_chunk(at: u64, size: u64) -> Option<u64> {
-    at.checked_add(12)?.checked_add(size)?.checked_add(size & 1)
-}
-
-fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
-    let mut hdr = [0u8; 16];
-    read_exact_at(path, r, 0, &mut hdr)?;
-    if &hdr[0..4] != b"FRM8" || &hdr[12..16] != b"DSD " {
-        return Err(bad(path, "dff: not a DSDIFF form"));
-    }
-    let form_size = u64::from_be_bytes(hdr[4..12].try_into().unwrap());
-    // Sizes are the file's word: sums are checked, and one that cannot be ends the walk
-    let end = form_size.saturating_add(12);
-
-    let mut rate = None;
-    let mut channels = None;
-    let mut data: Option<(u64, u64)> = None;
-    let mut id3 = None;
-
-    let mut pos = 16u64;
-    while pos.saturating_add(12) <= end {
-        let mut ch = [0u8; 12];
-        if read_exact_at(path, r, pos, &mut ch).is_err() {
-            break;
-        }
-        let id = [ch[0], ch[1], ch[2], ch[3]];
-        let size = u64::from_be_bytes(ch[4..12].try_into().unwrap());
-        let body = pos + 12;
-        match &id {
-            b"PROP" => {
-                // "SND " then sub-chunks.
-                let mut kind = [0u8; 4];
-                read_exact_at(path, r, body, &mut kind)?;
-                if &kind == b"SND " {
-                    let mut p = body + 4;
-                    let pend = body.saturating_add(size);
-                    while p.saturating_add(12) <= pend {
-                        let mut sc = [0u8; 12];
-                        read_exact_at(path, r, p, &mut sc)?;
-                        let sid = [sc[0], sc[1], sc[2], sc[3]];
-                        let ssize = u64::from_be_bytes(sc[4..12].try_into().unwrap());
-                        match &sid {
-                            b"FS  " => {
-                                let mut v = [0u8; 4];
-                                read_exact_at(path, r, p + 12, &mut v)?;
-                                rate = Some(u32::from_be_bytes(v));
-                            }
-                            b"CHNL" => {
-                                let mut v = [0u8; 2];
-                                read_exact_at(path, r, p + 12, &mut v)?;
-                                channels = Some(u16::from_be_bytes(v) as u32);
-                            }
-                            _ => {}
-                        }
-                        let Some(next) = next_chunk(p, ssize) else { break };
-                        p = next;
-                    }
-                }
-            }
-            b"DSD " => data = Some((body, size)),
-            b"ID3 " => id3 = read_id3_at(path, r, body)?,
-            b"DIIN" => {
-                let mut p = body;
-                let pend = body.saturating_add(size);
-                while p.saturating_add(12) <= pend {
-                    let mut sc = [0u8; 12];
-                    read_exact_at(path, r, p, &mut sc)?;
-                    let sid = [sc[0], sc[1], sc[2], sc[3]];
-                    let ssize = u64::from_be_bytes(sc[4..12].try_into().unwrap());
-                    if &sid == b"ID3 " {
-                        id3 = read_id3_at(path, r, p + 12)?;
-                    }
-                    let Some(next) = next_chunk(p, ssize) else { break };
-                    p = next;
-                }
-            }
-            _ => {}
-        }
-        let Some(next) = next_chunk(pos, size) else { break };
-        pos = next;
-    }
-
-    let rate = rate.ok_or_else(|| bad(path, "dff: missing FS chunk"))?;
-    let channels = channels.ok_or_else(|| bad(path, "dff: missing CHNL chunk"))?;
-    let (data_offset, data_len) = data.ok_or_else(|| bad(path, "dff: missing DSD data chunk"))?;
-    // No more audio than the file holds, whatever the chunk says its size is
-    let in_file = r
-        .seek(SeekFrom::End(0))
-        .map_err(|e| io_err(path, e))?
-        .saturating_sub(data_offset);
-    let data_len = data_len.min(in_file);
-    if !(1..=8).contains(&channels) {
-        return Err(bad(path, format!("dff: bad channel count {channels}")));
-    }
-    let format = AudioFormat::dsd(rate, channels as u8);
-    format.validate().map_err(|e| bad(path, format!("dff: {e}")))?;
-    Ok(DsdHeader {
-        container: DsdContainer::Dff,
-        format,
-        sample_count: data_len.saturating_mul(8) / channels as u64,
-        data_offset,
-        data_len,
-        block_size: 1,
-        id3,
+    // (a plain file: the header is read in small pieces at chunk offsets, each after a seek)
+    let mut f = File::open(path).map_err(io_err)?;
+    pm_dsd::read(&mut f, true).map_err(|e| match e {
+        pm_dsd::Error::Io(e) => io_err(e),
+        other => LibraryError::Probe {
+            path: path.to_path_buf(),
+            reason: other.to_string(),
+        },
     })
 }
 
@@ -374,6 +124,7 @@ pub mod synth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pm_model::AudioFormat;
 
     fn id3_bytes() -> Vec<u8> {
         use id3::TagLike;

@@ -1,0 +1,11 @@
+[package]
+name = "pm-dsd"
+description = "DSF and DSDIFF (DFF) headers for Odeion: format, where the samples are, the embedded ID3v2 tag; read by the library scan and the player alike"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pm-model = { workspace = true }
+thiserror = { workspace = true }

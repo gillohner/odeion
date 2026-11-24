@@ -4965,6 +4965,7 @@ version = "0.2.4"
 dependencies = [
  "base64 0.22.1",
  "ebur128",
+ "pm-dsd",
  "pm-model",
  "pm-zones",
  "realfft",
@@ -5023,6 +5024,14 @@ dependencies = [
  "serde",
  "socket2",
  "tracing",
+]
+
+[[package]]
+name = "pm-dsd"
+version = "0.2.4"
+dependencies = [
+ "pm-model",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
