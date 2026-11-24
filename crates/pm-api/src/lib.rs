@@ -29443,6 +29443,119 @@ exec sleep 300
         assert!(unfinished.is_null(), "{unfinished}");
     }
 
+    /// A removal is noted as unfinished in the same write that takes the person off the list: a
+    /// node that stops during the cleanup still offers Remove after its restart. While it runs the page doesn't
+    /// name them (it isn't over); when it ends well the note goes. The note is this node's own:
+    /// a restore keeps it, and someone a restore lists with music again isn't named.
+    #[tokio::test]
+    async fn a_removal_is_noted_until_it_ends_and_a_restore_keeps_the_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let app = router(s.clone());
+        let owner = Some("s3cret");
+        let note = || {
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting("people.unfinished")
+                .unwrap()
+        };
+        let named = || {
+            let app = app.clone();
+            async move {
+                let (st, v, _) = send_as(&app, "GET", "/v1/people", owner, &[], None).await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                v["unfinished"].clone()
+            }
+        };
+        let listed = |key: &str| {
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting("people")
+                .unwrap()
+                .is_some_and(|r| r.contains(key))
+        };
+        // The list and the note are one write: when the note can't be written, the list stays as
+        // it was (no one off the list and not noted) and the removal answers the error
+        let db = rusqlite::Connection::open(&s.db_path).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER no_note_i BEFORE INSERT ON settings WHEN NEW.key = 'people.unfinished'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;
+             CREATE TRIGGER no_note_u BEFORE UPDATE ON settings WHEN NEW.key = 'people.unfinished'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+        )
+        .unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+        assert!(listed(ben), "still listed");
+        assert_eq!(note(), None);
+        db.execute_batch("DROP TRIGGER no_note_i; DROP TRIGGER no_note_u;")
+            .unwrap();
+        // Ben's removal is held up in its cleanup (another homeserver step of his runs)
+        let lock = crate::personal::person_lock(&s, ben);
+        let held = lock.lock().await;
+        let removal = tokio::spawn({
+            let (app, ben) = (app.clone(), ben.to_string());
+            async move { send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await }
+        });
+        for _ in 0..200 {
+            if !listed(ben) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!listed(ben), "off the list");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // A stop now would leave the note; the page doesn't name him while it runs
+        assert_eq!(note(), Some(serde_json::json!([ben]).to_string()));
+        assert!(named().await.is_null());
+        drop(held);
+        let (st, v, _) = removal.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(note(), None, "it ended well");
+        // A backup noting Anna, restored on a node noting Ben: Ben's note stays, Anna's doesn't
+        // come; and Anna, listed with music, isn't named even if noted
+        let set = |v: serde_json::Value| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting("people.unfinished", &v.to_string())
+                .unwrap()
+        };
+        set(serde_json::json!([anna]));
+        let (taken, _) = backup::make(&s, None).unwrap();
+        set(serde_json::json!([ben]));
+        backup::restore(&s, taken, None, false).await.unwrap();
+        assert_eq!(note(), Some(serde_json::json!([ben]).to_string()));
+        assert_eq!(named().await, serde_json::json!([ben]));
+        set(serde_json::json!([anna, ben]));
+        assert!(listed(anna));
+        assert_eq!(named().await, serde_json::json!([ben]));
+        // A removal stopped before the list changed (it can't be read) notes nothing: nothing of
+        // Anna's was removed yet (she has preferences here, so the removal goes as far as the list)
+        s.library
+            .lock()
+            .unwrap()
+            .delete_setting("people.unfinished")
+            .unwrap();
+        let people = s.library.lock().unwrap().get_setting("people").unwrap().unwrap();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(&crate::prefs::storage_key_of(anna), "{}")
+            .unwrap();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("people", "{not a list")
+            .unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{anna}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+        assert_eq!(note(), None);
+        s.library.lock().unwrap().set_setting("people", &people).unwrap();
+    }
+
     /// An app password (Settings › People & access › Apps) plays, controls zones and browses as
     /// the owner, and nothing else: no settings, people, tokens, sign-ins or library changes, never
     /// a file path in a queue, and never the API token in what it reads. Subsonic takes it as a

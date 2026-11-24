@@ -80,7 +80,8 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 /// people list still decides who may use the ones the node has.
 /// Also the files jobs this node is running or keeps for its next start (copies to the
 /// homeserver, bringing files here, uploads it left half written): a restored backup never starts
-/// one nobody asked for, and the node's own carry on (#237 review, M2).
+/// one nobody asked for, and the node's own carry on (#237 review, M2). And the people whose
+/// removal did not finish here: what it left is on this node, not in the backup.
 const NODE_OWN: &[&str] = &[
     "stream.secret",
     "node.id",
@@ -100,6 +101,7 @@ const NODE_OWN: &[&str] = &[
     crate::copy_jobs::JOBS_KEY,
     crate::files::BRING_RESUME_KEY,
     crate::copy_guard::IN_FLIGHT_KEY,
+    crate::people::UNFINISHED,
 ];
 const SCHEDULE_KEY: &str = "backup.schedule";
 /// The passphrase arrives in this header, never in a URL (URLs end up in logs).

@@ -267,6 +267,32 @@ async fn update<T>(
     Ok((out, r))
 }
 
+/// [`update`] for removing `key`: what `f` leaves is stored in one write with `key` noted as
+/// unfinished ([`note_unfinished`]), so no stop or crash between the two leaves them off the list
+/// and not noted. Neither is written when either can't be.
+async fn update_removing<T>(
+    s: &NodeState,
+    key: &str,
+    f: impl FnOnce(&mut Roster) -> Result<T, ApiError>,
+) -> Result<(T, Roster), ApiError> {
+    let _one = s.roster.lock().await;
+    let mut r = load_for_change(s)?;
+    let before = r.clone();
+    let out = f(&mut r)?;
+    let roster = (r != before).then(|| serde_json::to_string(&r).expect("serializes"));
+    let lib = s.library.lock().expect("library poisoned");
+    let note = unfinished_change(&lib, key, true);
+    let mut changes = Vec::new();
+    if let Some(roster) = &roster {
+        changes.push((SETTING, Some(roster.as_str())));
+    }
+    if let Some(note) = &note {
+        changes.push((UNFINISHED, note.as_deref()));
+    }
+    lib.update_settings_atomic(&changes)?;
+    Ok((out, r))
+}
+
 /// Restore may replace the whole roster, but not midway through a removal. Release the roster
 /// before waiting: another person's revocation must still be able to take effect immediately.
 pub(crate) async fn roster_for_restore(s: &NodeState) -> tokio::sync::MutexGuard<'_, ()> {
@@ -548,7 +574,9 @@ pub struct PeopleView {
 /// removal can fail after the person is off the list, and then only this says that something of
 /// theirs is still on the node. Kept so the page can offer Remove again after a reload or a
 /// restart; the newest [`UNFINISHED_MAX`].
-const UNFINISHED: &str = "people.unfinished";
+/// This node's own (`backup::NODE_OWN`): what a removal left (approvals, vault connections,
+/// sessions) is on this node, whatever a restored backup says.
+pub(crate) const UNFINISHED: &str = "people.unfinished";
 const UNFINISHED_MAX: usize = 50;
 
 /// The keys of people whose removal did not finish.
@@ -560,28 +588,39 @@ pub(crate) fn unfinished(lib: &pm_library::Library) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Notes that `key`'s removal did not finish (`open`), or that nothing of theirs is left to
-/// remove. Best effort: the removal's own answer already says what happened.
-fn note_unfinished(s: &NodeState, key: &str, open: bool) {
-    let lib = s.library.lock().expect("library poisoned");
-    let mut keys = unfinished(&lib);
+/// The list of unfinished removals with `key` on it (`open`) or off it: `None` when it already
+/// says so, else the setting's new value (`None`: nobody is left on it, the setting goes).
+fn unfinished_change(lib: &pm_library::Library, key: &str, open: bool) -> Option<Option<String>> {
+    let mut keys = unfinished(lib);
     let had = keys.iter().any(|k| k == key);
     if had == open {
-        return;
+        return None;
     }
     keys.retain(|k| k != key);
     if open {
         keys.push(key.to_string());
         if keys.len() > UNFINISHED_MAX {
-            keys.remove(0);
+            let dropped = keys.remove(0);
+            tracing::warn!(
+                "people: more than {UNFINISHED_MAX} removals did not finish; {dropped} is no longer named (removing them again still finishes it)"
+            );
         }
     }
-    let written = if keys.is_empty() {
-        lib.delete_setting(UNFINISHED).map(|_| ())
-    } else {
-        lib.set_setting(UNFINISHED, &serde_json::to_string(&keys).expect("serializes"))
+    Some((!keys.is_empty()).then(|| serde_json::to_string(&keys).expect("serializes")))
+}
+
+/// Notes that `key`'s removal did not finish (`open`), or that nothing of theirs is left to
+/// remove. Best effort: the removal's own answer already says what happened.
+fn note_unfinished(s: &NodeState, key: &str, open: bool) {
+    // (also after a removal task broke off, which may have poisoned the lock)
+    let lib = s
+        .library
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(value) = unfinished_change(&lib, key, open) else {
+        return;
     };
-    if let Err(e) = written {
+    if let Err(e) = lib.update_settings_atomic(&[(UNFINISHED, value.as_deref())]) {
         tracing::warn!("people: the list of removals that did not finish was not written: {e}");
     }
 }
@@ -653,6 +692,18 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<PeopleVie
             used_bytes,
         });
     }
+    // Not someone listed with music again (by a restore, say): nothing is left to finish. Nor
+    // someone whose removal (or re-adding) is under way: it holds their membership lock, and says
+    // how it ended when it does
+    let unfinished = unfinished(&s.library.lock().expect("library poisoned"))
+        .into_iter()
+        .filter(|k| {
+            !people
+                .iter()
+                .any(|v| &v.person.key == k && v.person.access.music())
+        })
+        .filter(|k| crate::personal::membership_lock(&s, k).try_lock().is_ok())
+        .collect();
     Ok(Json(PeopleView {
         owner: s.sync_handle().map(|h| h.z32().to_string()),
         people,
@@ -662,7 +713,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<PeopleVie
             .map(|i| invite_view(i, hs.as_deref()))
             .collect(),
         homeserver,
-        unfinished: unfinished(&s.library.lock().expect("library poisoned")),
+        unfinished,
     }))
 }
 
@@ -915,17 +966,16 @@ pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<Stri
     // cleanup or release the membership barrier early.
     // A removal that did not finish is remembered ([`note_unfinished`]), so Remove again is
     // still offered after a reload or a restart (the person may be off the list already). The
-    // removal notes its own outcome while it holds the person's membership lock; only a task
-    // that broke off is noted here
+    // removal notes itself as unfinished in the same write as the list change, and its outcome
+    // at the end, both while it holds the person's membership lock. A task that broke off is
+    // noted already when it got as far as the list change, and had removed nothing before it
+    // (noting it here, after the lock, could bring back a note a re-add had just cleared)
     match tokio::spawn(remove_person(s.clone(), key.clone())).await {
         Ok(done) => done,
-        Err(_) => {
-            note_unfinished(&s, &key, true);
-            Err(ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "the removal task did not finish: try again",
-            ))
-        }
+        Err(_) => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the removal task did not finish: try again",
+        )),
     }
 }
 
@@ -942,7 +992,7 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
     }
     let membership = crate::personal::membership_lock(&s, &key);
     let _membership = membership.lock().await;
-    let (_removing, r) = update(&s, |r| {
+    let (_removing, r) = update_removing(&s, &key, |r| {
         if let Some(i) = r.people.iter().position(|p| p.key == key) {
             if r.people[i].access.on_homeserver() {
                 let p = &mut r.people[i];
@@ -972,8 +1022,16 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
         Ok(Removing::new(&s, &key))
     })
     .await
-    // (nobody by that key and nothing of theirs left: nothing to finish, nothing remembered)
-    .inspect_err(|e| note_unfinished(&s, &key, e.status != StatusCode::NOT_FOUND))?;
+    // Nobody by that key and nothing of theirs left: nothing to finish, nothing remembered. Any
+    // other error came before the list changed: whatever was noted stays as it was
+    .inspect_err(|e| {
+        if e.status == StatusCode::NOT_FOUND {
+            note_unfinished(&s, &key, false);
+        }
+    })?;
+    // Noted as unfinished with the list change (`update_removing`) until the end says otherwise:
+    // if the node stops or crashes during the cleanup below, Remove is still offered after the
+    // restart
     // Their problem reports go while no one can give them music again: a re-add waits for the
     // membership lock held here, a restore for the removal marker. The roster is held around the
     // inbox delete as housekeeping holds it (roster, then inbox), and the library lock isn't held
@@ -1012,6 +1070,30 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_unfinished_list_keeps_the_newest_fifty() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = pm_library::Library::open(&dir.path().join("lib.sqlite")).unwrap();
+        let note = |key: &str, open: bool| {
+            if let Some(v) = unfinished_change(&lib, key, open) {
+                lib.update_settings_atomic(&[(UNFINISHED, v.as_deref())]).unwrap();
+            }
+        };
+        assert_eq!(unfinished_change(&lib, "k0", false), None, "already off it");
+        for i in 0..=UNFINISHED_MAX {
+            note(&format!("k{i}"), true);
+        }
+        let keys = unfinished(&lib);
+        assert_eq!(keys.len(), UNFINISHED_MAX);
+        assert_eq!(keys.first().map(String::as_str), Some("k1"), "the oldest went");
+        assert_eq!(keys.last().map(String::as_str), Some("k50"));
+        assert_eq!(unfinished_change(&lib, "k50", true), None, "already on it");
+        for k in keys {
+            note(&k, false);
+        }
+        assert_eq!(lib.get_setting(UNFINISHED).unwrap(), None, "the setting goes");
+    }
 
     #[test]
     fn access_kinds_and_keys() {
