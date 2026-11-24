@@ -1967,7 +1967,10 @@ impl Library {
                 ),
                 Ok(()) => {
                     // (once the copy is in place: a copy without it counts as an earlier upgrade's)
-                    if let Err(e) = std::fs::write(copy_target_path(&copy), known.to_string()) {
+                    let note = copy_target_path(&copy);
+                    if let Err(e) = std::fs::write(&note, known.to_string())
+                        .and_then(|()| std::fs::File::open(&note)?.sync_all())
+                    {
                         tracing::warn!("the copy's upgrade could not be noted beside it: {e}");
                     }
                     tracing::info!(
@@ -1997,7 +2000,7 @@ impl Library {
                 }
             }
         }
-        match (Self::open(path), made) {
+        let opened = match (Self::open(path), made) {
             // The copy may have taken the room the upgrade needed. While the library is still at
             // the version it was copied at (no migration went in), the copy holds nothing the
             // library does not: without it, as before there was one. Once a migration went in,
@@ -2011,7 +2014,13 @@ impl Library {
                 Self::open(path)
             }
             (opened, _) => opened,
+        };
+        // Open, so at this version: the upgrade is over, and the next one's copy is a new one
+        // (after a rollback to the copy, the library has changed since it was made)
+        if opened.is_ok() {
+            let _ = std::fs::remove_file(copy_target_path(&Self::before_upgrade_path(path)));
         }
+        opened
     }
 
     /// Rewrite the database file in place and fold the write-ahead log into it: afterwards the
@@ -8386,6 +8395,44 @@ mod keep_copy_tests {
         assert!(Library::open_node_library(&path).is_err());
         assert!(!Library::before_upgrade_path(&path).exists());
         assert_eq!(schema_to_upgrade(&path).map(|(v, _)| v), Some(18));
+    }
+
+    /// Once an upgrade is over its copy's note goes: after a rollback to the copy (as the guide
+    /// says) and changes, the next upgrade keeps a new copy with those changes, not the old one.
+    #[test]
+    fn a_rolled_back_library_gets_a_new_copy_at_the_next_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for (v, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 17) {
+                conn.execute_batch(sql).unwrap();
+                conn.execute(
+                    "INSERT INTO schema_version(version, applied_at) VALUES (?1, 0)",
+                    params![v],
+                )
+                .unwrap();
+            }
+        }
+        drop(Library::open_node_library(&path).unwrap());
+        let copy = Library::before_upgrade_path(&path);
+        assert!(copy.exists());
+        assert!(!copy_target_path(&copy).exists(), "the upgrade is over");
+        // Rolled back: the copy in place of the library, then changed by the older version
+        std::fs::copy(&copy, &path).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO settings(key, value) VALUES ('since', 'the rollback')",
+                [],
+            )
+            .unwrap();
+        drop(Library::open_node_library(&path).unwrap());
+        let kept: Option<String> = Connection::open(&copy)
+            .unwrap()
+            .query_row("SELECT value FROM settings WHERE key = 'since'", [], |r| r.get(0))
+            .ok();
+        assert_eq!(kept.as_deref(), Some("the rollback"), "a new copy");
     }
 
     /// `keep_copy` puts a whole copy in place of an older one and leaves no part file.
