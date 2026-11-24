@@ -566,6 +566,13 @@ html[data-shell="phone"] .notice[data-failed] .btn.sm { min-height: 44px; }
 /* An album with no artist or year keeps its line's height: a tile is a button, which centres its content, so a
    shorter tile's cover sat lower than its neighbours' */
 .tile .a:empty::before { content: '\a0'; }
+/* A library album's line: artist · year, then its quality badge. The text is what gives way ("…"),
+   the badge stays whole (it was cut off, leaving a bare "…" after the year). The badge fits the
+   text's line (its 1 px border had made the line 2 px taller than a tile's without one); a line
+   with the badge alone keeps the text's height. */
+.tile .a:has(> .at, > .fmt) { display: flex; align-items: center; min-height: calc(1.45 * var(--fs-xs)); }
+.tile .a > .at { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tile .a > .fmt { flex: none; line-height: 1.25; }
 .tile-play {
   position: absolute; right: 10px; bottom: 10px; width: 40px; height: 40px; border-radius: 50%; border: 0;
   background: var(--accent); color: var(--on-accent); display: flex; align-items: center; justify-content: center;
@@ -1903,6 +1910,8 @@ html[data-shell="phone"] .bottomnav { border-top: 0; }
 html[data-shell="phone"] .page-head { align-items: center; }
 /* Library: the filter row and the quality chips under it had no space between them */
 html[data-shell="phone"] .main > .page-head + .chips { margin-top: var(--sp-3); }
+/* Albums and Artists: the Sort row under the filter row had no space between them either */
+html[data-shell="phone"] .main > .page-head + .listbar { margin-top: var(--sp-3); }
 /* Songs and Albums: the filter takes the row's free width, so Play all and Add music (its icon on a
    phone) sit beside it instead of Add music wrapping onto a row of its own. A filter on its own
    (Artists) keeps its place beside the heading. */
