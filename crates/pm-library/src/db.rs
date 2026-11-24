@@ -8438,6 +8438,9 @@ mod keep_copy_tests {
         assert!(Library::open_node_library(&path).is_err());
         let copy = Library::before_upgrade_path(&path);
         std::fs::copy(&copy, &path).unwrap();
+        for side in ["rolled.db-wal", "rolled.db-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(side));
+        }
         Connection::open(&path)
             .unwrap()
             .execute(
@@ -8486,6 +8489,9 @@ mod keep_copy_tests {
         assert!(!copy_note_path(&copy).exists(), "the upgrade is over");
         // Rolled back: the copy in place of the library, then changed by the older version
         std::fs::copy(&copy, &path).unwrap();
+        for side in ["library.db-wal", "library.db-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(side));
+        }
         Connection::open(&path)
             .unwrap()
             .execute(
