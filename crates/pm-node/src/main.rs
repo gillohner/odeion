@@ -209,9 +209,11 @@ async fn serve(
     // replaces, on its way out; a restore about to end): waited for, before the database is
     // opened, and when it is still held after that this node does not start, so it never opens
     // a database a restore is moving away or another node writes. A service manager or Docker
-    // starts it again. Kept in `hold` until the process is done with the folder ([`shut_down`])
+    // starts it again. Kept in `hold`, never let go of by this process ([`HoldSlot`])
     *hold.lock().expect("data folder hold") =
-        library::wait_for_data_dir(&cfg.data_dir, library::HOLD_PATIENCE).await?;
+        library::wait_for_data_dir(&cfg.data_dir, library::HOLD_PATIENCE)
+            .await?
+            .map(std::mem::ManuallyDrop::new);
     let db_path = cfg.db_path();
     // Sign-ins, keys and the token live in these: the node's alone, before the database is opened
     // (and migrated) and before anything reads them
@@ -819,35 +821,28 @@ fn log_panics() {
     }));
 }
 
-/// Where `serve` keeps its hold on the data folder, so that it outlives `serve` ([`shut_down`]).
-type HoldSlot = std::sync::Arc<std::sync::Mutex<Option<library::DataDirLock>>>;
+/// Where `serve` keeps its hold on the data folder. The hold is never dropped, however `serve`
+/// ends (a panic that unwinds out of it included): the process's end lets go of it, so
+/// `odeiond restore` or a new node takes the folder only once nothing of this one can write
+/// there any more (blocking work given its second at the stop, the threads that watch Soloist
+/// and librespot, which the runtime does not wait for).
+type HoldSlot = std::sync::Arc<std::sync::Mutex<Option<std::mem::ManuallyDrop<library::DataDirLock>>>>;
 
 fn main() -> anyhow::Result<()> {
     // First, while this is the only thread: ODEION_ settings onto the PM_ names the code reads
     let env_compat = pm_model::brand::apply_env_compat();
-    // (before the runtime: a panic that unwinds out of it drops the runtime, which waits for its
-    // threads, before the hold)
     let hold = HoldSlot::default();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let done = runtime.block_on(run(env_compat, hold.clone()));
-    shut_down(runtime, &hold);
+    shut_down(runtime);
     done
 }
 
 /// Work still on a blocking thread (a scan, a copy) gets a second and is then left behind, as a
 /// kill would cut it: a node asked to stop must exit. A scan and a copy carry on at the next
-/// start. The node never lets go of its data folder itself: the hold ends with the process, so
-/// `odeiond restore` or a new node takes the folder only once nothing of this one can write
-/// there any more, however `serve` ended.
-fn shut_down(runtime: tokio::runtime::Runtime, hold: &HoldSlot) {
+/// start. The data folder stays held ([`HoldSlot`]) until the process ends.
+fn shut_down(runtime: tokio::runtime::Runtime) {
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
-    if let Some(lock) = hold
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-    {
-        std::mem::forget(lock);
-    }
 }
 
 async fn run(env_compat: pm_model::brand::EnvPlan, hold: HoldSlot) -> anyhow::Result<()> {
@@ -1001,7 +996,7 @@ mod tests {
             let library::Hold::Taken(l) = library::lock_data_dir(dir.path()).unwrap() else {
                 panic!("the data folder is free");
             };
-            *hold.lock().unwrap() = Some(l);
+            *hold.lock().unwrap() = Some(std::mem::ManuallyDrop::new(l));
             let d = dir.path().to_path_buf();
             // A writer still at work when the command is over
             tokio::task::spawn_blocking(move || {
@@ -1009,8 +1004,38 @@ mod tests {
                 let _ = seen.send(matches!(library::lock_data_dir(&d), Ok(library::Hold::Held)));
             });
         });
-        shut_down(runtime, &hold);
+        shut_down(runtime);
+        drop(hold);
         assert!(saw.recv().unwrap(), "held while the writer ran");
+        assert!(
+            matches!(library::lock_data_dir(dir.path()), Ok(library::Hold::Held)),
+            "held until the process ends"
+        );
+    }
+
+    /// A panic that unwinds out of `serve` drops the runtime and the slot: the data folder stays
+    /// held all the same (threads the runtime does not wait for may still write there).
+    #[test]
+    fn the_data_folder_stays_held_after_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let hold = HoldSlot::default();
+        let slot = hold.clone();
+        let d = dir.path().to_path_buf();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let library::Hold::Taken(l) = library::lock_data_dir(&d).unwrap() else {
+                    panic!("the data folder is free");
+                };
+                *slot.lock().unwrap() = Some(std::mem::ManuallyDrop::new(l));
+                panic!("serve panicked");
+            })
+        }));
+        assert!(unwound.is_err());
+        drop(hold);
         assert!(
             matches!(library::lock_data_dir(dir.path()), Ok(library::Hold::Held)),
             "held until the process ends"
