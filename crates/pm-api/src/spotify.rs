@@ -30,6 +30,9 @@ const USER_KEY: &str = "spotify.user";
 /// The client id of the owner's own Spotify app, entered in Sources › Spotify (guided setup). No
 /// secret: its sign-in is PKCE through the return page (STEWARD-SHARED-APPS.md).
 pub const APP_KEY: &str = "spotify.app";
+/// What a sign-in asks Spotify for. Whose account it is (`/me`'s `id` and `display_name`) comes
+/// without a scope of its own; only `/me`'s `country` and `product` (`user-read-private`) and
+/// `email` (`user-read-email`) need one, and the node asks for neither.
 pub const DEFAULT_SCOPES: &str =
     "user-library-read playlist-read-private playlist-read-collaborative user-read-playback-state user-modify-playback-state";
 

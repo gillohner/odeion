@@ -28279,9 +28279,10 @@ exec sleep 300
                                     Json(serde_json::json!({"error": "invalid_grant", "error_description": "Invalid refresh token"})),
                                 );
                             }
+                            // (a sign-in gets the scopes the node asks for, no more)
                             (
                                 StatusCode::OK,
-                                Json(serde_json::json!({"access_token": "new-at", "refresh_token": "r", "expires_in": 3600, "scope": "x"})),
+                                Json(serde_json::json!({"access_token": "new-at", "refresh_token": "r", "expires_in": 3600, "scope": spotify::DEFAULT_SCOPES})),
                             )
                         }
                     }
@@ -28300,7 +28301,14 @@ exec sleep 300
                             if owners && !knows.load(std::sync::atomic::Ordering::SeqCst) {
                                 (StatusCode::BAD_GATEWAY, Json(serde_json::json!({})))
                             } else {
-                                (StatusCode::OK, Json(serde_json::json!({"id": "sp-1", "display_name": "One"})))
+                                // What /me answers a token without user-read-private and
+                                // user-read-email: no country, product, explicit_content or email
+                                (StatusCode::OK, Json(serde_json::json!({
+                                    "id": "sp-1", "display_name": "One", "type": "user", "uri": "spotify:user:sp-1",
+                                    "href": "https://api.spotify.com/v1/users/sp-1", "images": [],
+                                    "external_urls": {"spotify": "https://open.spotify.com/user/sp-1"},
+                                    "followers": {"href": null, "total": 0}
+                                })))
                             }
                         }
                     }
@@ -28342,12 +28350,9 @@ exec sleep 300
                 .await;
                 assert_eq!(st, StatusCode::OK, "{v}");
                 let url = url::Url::parse(v["url"].as_str().unwrap()).unwrap();
-                let state = url
-                    .query_pairs()
-                    .find(|(k, _)| k == "state")
-                    .unwrap()
-                    .1
-                    .to_string();
+                let param = |name: &str| url.query_pairs().find(|(k, _)| k == name).unwrap().1.to_string();
+                assert_eq!(param("scope"), spotify::DEFAULT_SCOPES);
+                let state = param("state");
                 let cookie = h.get("set-cookie").unwrap().to_str().unwrap();
                 let cookie = cookie.split(';').next().unwrap().to_string();
                 let (_, _, h) = send_as(
@@ -28397,9 +28402,14 @@ exec sleep 300
             .unwrap();
         let to = sign_in().await;
         assert!(!to.contains("error"), "{to}");
-        assert!(row(&format!("person.{ben}.spotify.user"))
-            .unwrap()
-            .contains("sp-1"));
+        // (kept with the account /me named, though it said nothing of country or plan)
+        let bens: serde_json::Value =
+            serde_json::from_str(&row(&format!("person.{ben}.spotify.user")).unwrap()).unwrap();
+        assert_eq!(
+            (bens["user_id"].clone(), bens["display_name"].clone()),
+            (serde_json::json!("sp-1"), serde_json::json!("One"))
+        );
+        assert!(bens["country"].is_null() && bens["product"].is_null(), "{bens}");
         // A kept sign-in that can't be renewed any more (run out, nothing to renew it with) plays
         // nothing and holds no account: it doesn't stop anyone, even while Spotify can't be asked
         s.library
