@@ -969,10 +969,13 @@ async fn restore_locked(
             return Err(e.into());
         }
         match std::fs::rename(&next, &before) {
-            Ok(()) => report.notes.push(format!(
-                "The library from before this restore is kept as {} until the next restore.",
-                before.display()
-            )),
+            Ok(()) => {
+                pm_library::db::sync_folder_of(&before);
+                report.notes.push(format!(
+                    "The library from before this restore is kept as {} until the next restore.",
+                    before.display()
+                ))
+            }
             Err(e) => report.notes.push(format!(
                 "The library from before this restore is kept as {} ({e} as {}).",
                 next.display(),

@@ -301,3 +301,30 @@ async fn a_restore_keeps_the_library_it_replaces() {
         Some("before the second restore")
     );
 }
+
+/// A restore whose copy of the library as it is cannot be made does not replace the library, and
+/// the copy kept by the previous restore stays as it was.
+#[tokio::test]
+async fn a_restore_without_room_for_the_copy_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let mark = |v: &str| s.library.lock().unwrap().set_setting("test.mark", v).unwrap();
+    let marked = |lib: &Library| lib.get_setting("test.mark").unwrap();
+    mark("in the backup");
+    let (taken, _) = crate::backup::make(&s, None).unwrap();
+    mark("before the first restore");
+    crate::backup::restore(&s, taken.clone(), None, false)
+        .await
+        .unwrap();
+    mark("now");
+    // The copy's name is taken by a folder: it cannot be put there
+    std::fs::create_dir(dir.path().join("library.db.bak.next")).unwrap();
+    let refused = crate::backup::restore(&s, taken, None, false).await;
+    assert!(refused.is_err(), "refused");
+    assert_eq!(marked(&s.library.lock().unwrap()).as_deref(), Some("now"));
+    assert_eq!(
+        marked(&Library::open(&dir.path().join("library.db.bak")).unwrap()).as_deref(),
+        Some("before the first restore"),
+        "the previous restore's copy stays"
+    );
+}
