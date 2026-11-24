@@ -18781,6 +18781,8 @@ exec sleep 300
         fail_after: Option<usize>,
         /// Checking a file's size fails (the homeserver went away after an upload).
         stat_fails: std::sync::atomic::AtomicBool,
+        /// `stat_fails` is set by the first upload (checks before it go through).
+        stat_fails_after_upload: bool,
         /// Files whose size the homeserver doesn't say (no Content-Length).
         no_size: std::sync::Mutex<std::collections::HashSet<String>>,
         /// How long each upload takes.
@@ -18808,6 +18810,9 @@ exec sleep 300
                 tokio::time::sleep(d).await;
             }
             self.ops.lock().unwrap().push(format!("up:{remote}"));
+            if self.stat_fails_after_upload {
+                self.stat_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             let n = {
                 let mut u = self.uploads.lock().unwrap();
                 u.push(remote.to_string());
@@ -19496,8 +19501,10 @@ exec sleep 300
     /// and its in-flight record stays for the next start to settle (#224 review).
     #[tokio::test]
     async fn an_upload_whose_size_cant_be_checked_is_failed_and_kept_in_flight() {
-        let hs = Arc::new(FakeHomeserver::default());
-        hs.stat_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let hs = Arc::new(FakeHomeserver {
+            stat_fails_after_upload: true,
+            ..Default::default()
+        });
         let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
             free: 500 * GB,
             total: 1000 * GB,
@@ -20849,6 +20856,7 @@ exec sleep 300
 
         // Paused before the restart: still paused, nothing sent, until Resume
         hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
         *s.copy_jobs.queue.lock().unwrap() = Default::default();
         s.library
             .lock()
@@ -20867,6 +20875,7 @@ exec sleep 300
 
         // Cancelled just before the stop: it ends at the start, and the copy queued after it runs
         hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
         *s.copy_jobs.queue.lock().unwrap() = Default::default();
         let mut kept_cancelled: serde_json::Value = serde_json::from_str(&kept("cancelled")).unwrap();
         let mut next = kept_cancelled["current"].clone();
@@ -21326,6 +21335,7 @@ exec sleep 300
 
         // Paused, then someone else signs in and it is resumed
         hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
         let start = || {
             call(
                 &app,
@@ -21352,6 +21362,7 @@ exec sleep 300
         // Someone else signs in while it runs: it stops before the next file
         sign_in_as(None);
         hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
         let (_, job) = start().await;
         let id = job["id"].as_str().unwrap().to_string();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -21363,6 +21374,7 @@ exec sleep 300
         // Kept by a node that didn't note the account: it doesn't run
         sign_in_as(None);
         hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
         *s.copy_jobs.queue.lock().unwrap() = Default::default();
         s.library
             .lock()
@@ -29266,6 +29278,127 @@ exec sleep 300
         )
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
+    }
+
+    /// A file that was not on the homeserver when a copy listed it, but is there whole by the
+    /// time the copy reaches it (another node of the owner, an upload), is not sent again: an
+    /// upload that failed over it would be removed as half written, and the good copy with it.
+    #[tokio::test]
+    async fn a_copy_checks_a_file_written_since_its_listing_before_sending() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, _app, _src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let disk = roomy();
+        let remote = "/pub/pubky.app/files/music/abcd-song.flac";
+        hs.sizes.lock().unwrap().insert(remote.into(), 5);
+        let mut present = std::collections::HashMap::new();
+        let sent = files::send_one(&s, &*hs, &*disk, &mut present, remote, b"12345".to_vec()).await;
+        assert!(matches!(sent, Ok(false)), "the good copy there counts");
+        assert!(hs.uploads.lock().unwrap().is_empty(), "nothing sent over it");
+        assert_eq!(present.get(remote), Some(&Some(5)), "noted as there");
+        // Not there: sent
+        let other = "/pub/pubky.app/files/music/ef01-other.flac";
+        let sent = files::send_one(&s, &*hs, &*disk, &mut present, other, b"123".to_vec()).await;
+        assert!(matches!(sent, Ok(true)));
+        assert_eq!(*hs.uploads.lock().unwrap(), [other.to_string()]);
+    }
+
+    /// A file the copy's listing did not have, whose check fails when the copy reaches it, is
+    /// not sent: a good copy may have been written there since, and a failed upload's clean-up
+    /// would remove it.
+    #[tokio::test]
+    async fn a_copy_does_not_send_a_file_it_cannot_check() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, _app, _src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let disk = roomy();
+        let remote = "/pub/pubky.app/files/music/abcd-song.flac";
+        hs.sizes.lock().unwrap().insert(remote.into(), 5);
+        hs.stat_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut present = std::collections::HashMap::new();
+        let sent = files::send_one(&s, &*hs, &*disk, &mut present, remote, b"12345".to_vec()).await;
+        assert!(
+            matches!(&sent, Err(copy_guard::Refused::Other(e)) if e.starts_with("couldn't check the copy there")),
+            "{sent:?}"
+        );
+        assert!(hs.uploads.lock().unwrap().is_empty(), "nothing sent");
+        assert!(hs.deletes.lock().unwrap().is_empty(), "nothing removed");
+        assert_eq!(
+            hs.sizes.lock().unwrap().get(remote),
+            Some(&5),
+            "the copy there stays whole"
+        );
+        assert!(present.is_empty());
+    }
+
+    /// An import (a folder, or files from a browser) checks a file its listing did not have
+    /// right before it sends it, as a copy does: a whole copy written there since is kept as it
+    /// is, and when the check fails nothing is sent (a failed upload's clean-up would remove a
+    /// good copy written since).
+    #[tokio::test]
+    async fn an_import_checks_a_file_its_listing_did_not_have() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, _app, _src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let disk = roomy();
+        let bytes = b"12345".to_vec();
+        let h16 = blake3::hash(&bytes).to_hex()[..16].to_string();
+        let remote = format!("{}{h16}-song.flac", pm_pubky::homeserver::PRIVATE_FILES_DIR);
+        let said = |r: &Result<add_music::Stored, String>| match r {
+            Ok(add_music::Stored::Sent(p)) => format!("sent {p}"),
+            Ok(add_music::Stored::Already(p)) => format!("already {p}"),
+            Err(e) => format!("refused: {e}"),
+        };
+        // Written there since the listing: kept, nothing sent over it
+        hs.sizes.lock().unwrap().insert(remote.clone(), 5);
+        let mut have = std::collections::HashMap::new();
+        let stored = add_music::store(
+            &s,
+            &*hs,
+            &*disk,
+            &mut have,
+            "song.flac",
+            None,
+            bytes.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(said(&stored), format!("already {remote}"));
+        assert!(hs.uploads.lock().unwrap().is_empty(), "nothing sent over it");
+        assert_eq!(have.get(&h16), Some(&Some(5)), "noted as there");
+        // The check fails: refused, nothing sent, the copy there stays
+        hs.stat_fails.store(true, SeqCst);
+        hs.fails.store(true, SeqCst);
+        let mut have = std::collections::HashMap::new();
+        let stored = add_music::store(
+            &s,
+            &*hs,
+            &*disk,
+            &mut have,
+            "song.flac",
+            None,
+            bytes.clone(),
+            None,
+        )
+        .await;
+        assert!(
+            said(&stored).starts_with("refused: song.flac: couldn't check the copy there"),
+            "{}",
+            said(&stored)
+        );
+        assert!(hs.uploads.lock().unwrap().is_empty(), "nothing sent");
+        assert!(hs.deletes.lock().unwrap().is_empty(), "nothing removed");
+        assert_eq!(
+            hs.sizes.lock().unwrap().get(&remote),
+            Some(&5),
+            "the copy there stays whole"
+        );
+        // Not there: sent
+        hs.stat_fails.store(false, SeqCst);
+        hs.fails.store(false, SeqCst);
+        hs.sizes.lock().unwrap().clear();
+        let stored = add_music::store(&s, &*hs, &*disk, &mut have, "song.flac", None, bytes, None).await;
+        assert_eq!(said(&stored), format!("sent {remote}"));
+        assert_eq!(*hs.uploads.lock().unwrap(), [remote]);
     }
 
     /// A bring that was cancelled is not started again after a restart; the part folder its
