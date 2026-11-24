@@ -1883,7 +1883,10 @@ impl KnownSet {
     }
 
     fn has(&self, t: &str) -> bool {
-        self.api.as_deref() == Some(t) || self.hashes.contains(&hash(t))
+        self.api
+            .as_deref()
+            .is_some_and(|a| crate::state::same_secret(a, t))
+            || self.hashes.contains(&hash(t))
     }
 }
 
@@ -2030,7 +2033,7 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
     let mut listeners = Vec::new();
     for t in &found {
         let h = hash(t);
-        if api.as_deref() == Some(t.as_str()) {
+        if api.as_deref().is_some_and(|a| crate::state::same_secret(a, t)) {
             out.api_token_found = true;
         } else if owners.contains(&h) {
             out.owner_sessions_ended = true;
