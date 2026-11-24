@@ -507,6 +507,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     ) {
         tracing::info!(admin = %ep.url, "bundled homeserver");
         state.set_bundled_homeserver(ep);
+        pm_api::bundled::spawn_learn_key(&state);
     }
     let tunnel_dir = env_or("PM_TUNNEL_DIR", &cfg.homeserver.tunnel_dir);
     if !tunnel_dir.trim().is_empty() {
