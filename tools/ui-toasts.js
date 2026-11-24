@@ -38,7 +38,7 @@ const ADDED = /^Added to (favourites|Bookmarks)/;
   // again…": the page says that by itself after a start failed, and a retry that works says nothing
   // more, so a 'wait' toast, which stays until the next one, would stay on.)
   {
-    const src = fs.readFileSync(path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-web/static/app.js'), 'utf8');
+    const src = require('./ui-src').appJs(path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-web/static')).toString('utf8');
     const plain = [...src.matchAll(/\btoast\((['"`])((?:(?!\1)[^\\]|\\.)*…)\1\s*\)/g)].map((m) => m[2]).filter((w) => !/ Trying again…$/.test(w));
     const said = [...src.matchAll(/said = `Moving to [^`]*…`; toast\(said(, '[a-z]+')?\)/g)].map((m) => m[1] || '');
     check(!plain.length, `a toast that says it is under way ("…") is shown as one that waits (${plain.length ? plain.join(' | ') : 'all are'})`);

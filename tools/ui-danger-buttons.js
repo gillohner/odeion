@@ -47,7 +47,7 @@ const colours = (page, sel) => page.evaluate((s) => { const el = document.queryS
 (async () => {
   // Every confirmation that asks about deleting, removing, forgetting, ending, signing someone out
   // ("Sign <name> out everywhere?" too), switching someone's music off or replacing
-  const app = fs.readFileSync(path.join(ROOT, 'crates/pm-web/static/app.js'), 'utf8');
+  const app = require('./ui-src').appJs(path.join(ROOT, 'crates/pm-web/static')).toString('utf8');
   const asks = [...app.matchAll(/choiceDialog\(\{ title: (['`])((?:Delete|Remove|Forget|Clear|End|Disconnect|Sign\b[^'`]*?\bout|Switch music off|Log out|Make a new (?:token|password))[^'`]*)\1/g)];
   const plain = asks.filter((m) => !app.slice(m.index, app.indexOf('})', m.index)).includes('danger: true')).map((m) => m[2]);
   // (the usage panel asks through the page's dialog: its fourth argument is the destructive mark)

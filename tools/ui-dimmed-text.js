@@ -16,7 +16,7 @@ const fx = require('./ui-fixture');
 const ROOT = path.resolve(process.argv[2] || path.join(__dirname, '..'));
 const SHOTS = path.resolve(process.argv[3] || path.join(process.env.TMPDIR || '.', 'dimmed-text-shots'));
 fs.mkdirSync(SHOTS, { recursive: true });
-const APP = fs.readFileSync(path.join(ROOT, 'crates/pm-web/static/app.js'), 'utf8');
+const APP = require('./ui-src').appJs(path.join(ROOT, 'crates/pm-web/static')).toString('utf8');
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 

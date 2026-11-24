@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const STATIC = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-web', 'static');
+const ui = require('./ui-src'); // app.js is joined from its parts, as the node's build does
 const SHOTS = path.resolve(process.argv[3] || path.join(process.env.TMPDIR || '.', 'unskip-limit-shots'));
 fs.mkdirSync(SHOTS, { recursive: true });
 let failed = 0;
@@ -48,10 +49,10 @@ const server = http.createServer(async (req, res) => {
     return send(200, {});
   }
   const name = u.pathname.slice(1);
-  const file = /^[\w.-]+$/.test(name) && name !== 'index.html' && fs.existsSync(path.join(STATIC, name)) ? name : 'index.html';
+  const file = /^[\w.-]+$/.test(name) && name !== 'index.html' && ui.has(STATIC, name) ? name : 'index.html';
   const type = { '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.html': 'text/html; charset=utf-8' }[path.extname(file)] || 'application/octet-stream';
   res.writeHead(200, { 'content-type': type, 'cache-control': 'no-cache' });
-  res.end(fs.readFileSync(path.join(STATIC, file)));
+  res.end(ui.read(STATIC, file));
 });
 
 (async () => {

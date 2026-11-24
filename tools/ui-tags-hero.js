@@ -30,7 +30,7 @@ const ALINK = 'https://tidal.com/album/654321';
 // Pubky ids are 52 characters of z-base-32
 const P = Array.from({ length: 8 }, (_, i) => `${'p'.repeat(4)}${String.fromCharCode(97 + i)}`.padEnd(52, 'y'));
 const NAMES = ['Ann', 'Bo', 'Cy', 'Di', 'Ed', 'Flo', 'Gus', 'Hal'];
-const appSrc = fs.readFileSync(path.join(__dirname, '..', 'crates', 'pm-web', 'static', 'app.js'), 'utf8');
+const appSrc = require('./ui-src').appJs().toString('utf8');
 const block = /\n  const TAG_COLOURS = [\s\S]*?\n  const tagRgba = [^\n]*\n/.exec(appSrc);
 // Without them (before this change) the page checks still run, and fail on the page itself
 const { tagColour, tagRgba } = block ? new Function(`${block[0]}\nreturn { tagColour, tagRgba };`)() : { tagColour: () => null, tagRgba: () => 'no tagColour in app.js' };
@@ -55,6 +55,7 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
         await page.route((u) => u.origin === new URL(BASE).origin && !u.pathname.startsWith('/v1/'), async (r) => {
           const req = r.request(); const p = new URL(req.url()).pathname.slice(1);
           const file = path.join(STATIC, p);
+          if (p === 'app.js') return r.fulfill({ body: require('./ui-src').appJs(STATIC), contentType: MIME['.js'] });
           if (p && !p.includes('..') && fs.existsSync(file) && fs.statSync(file).isFile()) return r.fulfill({ body: fs.readFileSync(file), contentType: MIME[path.extname(file)] || 'application/octet-stream' });
           if (req.resourceType() === 'document') return r.fulfill({ body: fs.readFileSync(path.join(STATIC, 'index.html')), contentType: 'text/html' });
           return r.fallback();

@@ -15,7 +15,14 @@ const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..', '..');
 const STATIC = path.join(ROOT, 'crates', 'pm-web', 'static');
-const PAGE_FILES = ['index.html', 'party.html', 'app.js', 'feedback.js', 'usage.js', 'pwa.js'].map((f) => path.join(STATIC, f));
+// The page's script is kept as parts (crates/pm-web/ui/app/NN-name.js, joined into the one /app.js):
+// each part is read and written as a file of its own. A tree without the parts has static/app.js.
+const PARTS = path.join(ROOT, 'crates', 'pm-web', 'ui', 'app');
+const scriptFiles = () => (fs.existsSync(PARTS)
+  ? fs.readdirSync(PARTS).filter((n) => /^\d\d-[a-z0-9-]+\.js$/.test(n)).sort().map((n) => path.join(PARTS, n))
+  : [path.join(STATIC, 'app.js')]);
+const PAGE_FILES = [...['index.html', 'party.html'].map((f) => path.join(STATIC, f)), ...scriptFiles(),
+  ...['feedback.js', 'usage.js', 'pwa.js'].map((f) => path.join(STATIC, f))];
 const OLD = /\b(?:un)?favou?rit(?:es?|ed|ing)\b|\bplaylists?\b|\bheart(?:ed|ing)\b/gi;
 
 // ---- scanning ------------------------------------------------------------------------------

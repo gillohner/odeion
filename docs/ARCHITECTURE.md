@@ -32,6 +32,10 @@ below it. Tests may (dev-dependencies): `pm-api`'s use `pm-web` and `pm-endpoint
 - The same page runs in the browser, the installed web app and the apps (`window.pmDesktop`).
 - Its files are in `crates/pm-web/static/` and are compiled into `pm-web`. A change to the UI
   rebuilds `pm-web` and links the node again; it does not rebuild `pm-api`.
+- The page's script is served as one `/app.js`, and kept as ordered parts in
+  `crates/pm-web/ui/app/` (`NN-name.js`). The build joins them end to end
+  (`crates/pm-web/build.rs`), the tools do the same (`tools/ui-src.js`). They are pieces of one
+  script, not modules: see `crates/pm-web/ui/README.md`.
 - `pm-api` does not depend on `pm-web`. `pm_api::router(state)` is the API alone, and
   `router_with_pages(state, pages)` puts a pages router next to it. `pm-node` hands
   `pm_web::router()` to both of its listeners: `pm_api::serve_listener_with_pages_until` for its
@@ -47,11 +51,11 @@ below it. Tests may (dev-dependencies): `pm-api`'s use `pm-web` and `pm-endpoint
   `crates/pm-api/tests/pages.rs` when it compares the page with a list of the API (the views a
   problem report may name, the usage schema). `pm-api`'s unit tests do not read those files.
 - That is what lets CI skip the jobs that only build and test Rust for a pull request that
-  changes nothing but `crates/pm-web/static`, `tools/ui-*.js`, `tools/ui-fixtures.list` and docs (`changes` in
-  `.github/workflows/ci.yml`); the `pages` job runs the tests above instead. Three kinds of
-  Markdown are not docs there, because a Rust test reads them: `docs/APP-DATA.md` (`pm-appdata`
-  checks every app path against it) and `docs/access.md` (`pm-api` checks it against the access
-  table), and Markdown below the top level outside `docs/`
+  changes nothing but the UI's files and script parts, `tools/ui-*.js`, `tools/ui-fixtures.list`
+  and docs (`changes` in `.github/workflows/ci.yml`); the `pages` job runs the tests above
+  instead. Three kinds of Markdown are not docs there, because a Rust test reads them:
+  `docs/APP-DATA.md` (`pm-appdata` checks every app path against it), `docs/access.md` (`pm-api`
+  checks it against the access table), and Markdown below the top level outside `docs/`
   (`pubky-music-specs` reads every file of its crate, its README too). Main runs everything.
 - A page checked against fixtures is a script `tools/ui-<name>.js`, listed in
   `tools/ui-fixtures.list` (CI runs only listed pages and refuses an unlisted one);
