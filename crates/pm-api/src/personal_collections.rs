@@ -1669,6 +1669,8 @@ pub(crate) async fn play(
             "none of the collection's items is in this node's library",
         ));
     }
+    // Whole or not at all, before the zone is touched
+    crate::queue_room(&zone, items.len(), body.replace.unwrap_or(true))?;
     // Who queued them, as the queue routes record it: never the owner's plays (listens.rs)
     for it in &mut items {
         it.by = Some(key.clone());

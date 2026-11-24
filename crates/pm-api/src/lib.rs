@@ -2100,6 +2100,21 @@ fn drop_sign_ins(s: &NodeState, headers: &HeaderMap, items: &mut [QueueItem]) {
     }
 }
 
+/// Whether `asked` items fit `zone`'s queue (it holds [`pm_zones::MAX_QUEUE_ITEMS`] and no
+/// more): in place of it (`replace`) or after it. Every route that puts a list into a queue asks
+/// this first, before it stops, clears or looks up anything: a queue that took only part would
+/// leave the rest lost (a move from This browser empties the browser's own queue after it).
+pub(crate) fn queue_room(zone: &Zone, asked: usize, replace: bool) -> Result<(), ApiError> {
+    let has = if replace { 0 } else { zone.queue_len() };
+    if has.saturating_add(asked) > pm_zones::MAX_QUEUE_ITEMS {
+        return Err(ApiError::bad_request(format!(
+            "a queue holds at most {} items (this one has {has}, {asked} more were sent)",
+            pm_zones::MAX_QUEUE_ITEMS
+        )));
+    }
+    Ok(())
+}
+
 async fn enqueue(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
@@ -2108,7 +2123,10 @@ async fn enqueue(
     Json(body): Json<Enqueue>,
 ) -> ApiResult<Enqueued> {
     let zone = zone_of(&s, &id)?;
-    let mut items = Vec::with_capacity(body.track_ids.len() + body.items.len());
+    // Before any song is looked up: a queue holds so many items and no more
+    let asked = body.track_ids.len() + body.items.len();
+    queue_room(&zone, asked, body.replace)?;
+    let mut items = Vec::with_capacity(asked);
     {
         let lib = s.library.lock().expect("library poisoned");
         for tid in &body.track_ids {
@@ -2458,8 +2476,8 @@ pub(crate) async fn load_zone(
     // Off until the items are in: a queue loaded in order with shuffle off is in order
     to.set_shuffle(false);
     let mut events = to.subscribe();
-    let len = queue.len();
-    to.enqueue(queue, Insert::End);
+    // (what the queue took: it holds so many items and no more)
+    let len = to.enqueue(queue, Insert::End).len();
     let mut index = index.filter(|i| *i < len);
     match shuffle {
         LoadShuffle::Off => {}
@@ -2511,6 +2529,10 @@ async fn load(
     if body.items.is_empty() {
         return Err(ApiError::bad_request("nothing to move: the queue is empty"));
     }
+    let to = zone_of(&s, &id)?;
+    // In place of the zone's queue, whole or not at all: nothing is stopped or cleared for a
+    // list the queue can't hold (the browser empties its own queue after a move)
+    queue_room(&to, body.items.len(), true)?;
     drop_sign_ins(&s, &headers, &mut body.items);
     for it in &mut body.items {
         it.uri = it.uri.trim().to_string();
@@ -2525,7 +2547,6 @@ async fn load(
             it.limit = None;
         }
     }
-    let to = zone_of(&s, &id)?;
     Ok(Json(
         load_zone(
             &to,
@@ -13738,6 +13759,207 @@ exec sleep 300
         .await;
         assert!(v.get("ends_at_ms").is_none());
         assert!(s.sleep_ends_at(zone.id()).is_none());
+    }
+
+    /// A queue takes at most `MAX_QUEUE_ITEMS`: a request for more is a 400 before any song is
+    /// looked up (the ids here are no songs: without the limit the answer is a 404), and a
+    /// sleep timer of any length is set without its end time running over.
+    #[tokio::test]
+    async fn a_queue_and_a_sleep_timer_have_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let many: Vec<u64> = (0..=pm_zones::MAX_QUEUE_ITEMS as u64)
+            .map(|i| 9_000_000 + i)
+            .collect();
+        let (st, e) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"track_ids": many, "replace": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        assert!(
+            e["error"].as_str().unwrap().contains("at most 100000 items"),
+            "{e}"
+        );
+        let (st, e) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"track_ids": [9_000_000]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{e}");
+        // What is in the queue counts unless it is replaced
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        zone.enqueue(
+            (0..5)
+                .map(|i| pm_zones::QueueItem::new(format!("https://radio.example/{i}")))
+                .collect(),
+            pm_zones::Insert::End,
+        );
+        let fill: Vec<u64> = (0..pm_zones::MAX_QUEUE_ITEMS as u64 - 4)
+            .map(|i| 9_000_000 + i)
+            .collect();
+        let (st, e) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"track_ids": fill})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        assert!(e["error"].as_str().unwrap().contains("this one has 5"), "{e}");
+
+        let (st, v) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/sleep"),
+            Some(serde_json::json!({"seconds": u64::MAX})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["ends_at_ms"], u64::MAX);
+        let (st, v) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/sleep"),
+            Some(serde_json::json!({"seconds": null})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(v.get("ends_at_ms").is_none(), "{v}");
+    }
+
+    /// A list that would pass what a queue holds is refused, 400, before the zone is touched, on
+    /// every route that puts it in place of the queue: a move from This browser (`load`, whose
+    /// browser empties its own queue after a move) and a collection played into the zone. Without
+    /// the check the zone stopped, emptied, kept 100,000 of them and answered success.
+    #[tokio::test]
+    async fn a_list_past_the_queue_limit_leaves_the_zone_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        let had = zone.enqueue(
+            (0..5)
+                .map(|i| pm_zones::QueueItem::new(format!("https://radio.example/{i}")))
+                .collect(),
+            pm_zones::Insert::End,
+        );
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), zone.wait_acked()).await;
+        let ids = |z: &Zone| z.queue().iter().map(|it| it.id).collect::<Vec<_>>();
+        assert_eq!(ids(&zone), had);
+        let over = pm_zones::MAX_QUEUE_ITEMS + 1;
+
+        // A move of 100,001 items (short ones: the request stays under the body limit, 2 MiB)
+        let items: Vec<serde_json::Value> = (0..over)
+            .map(|i| serde_json::json!({"uri": format!("x{i}")}))
+            .collect();
+        assert!(serde_json::to_vec(&items).unwrap().len() < 2 << 20);
+        let (st, e) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": items, "index": 0, "transport": "playing"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        assert!(
+            e["error"].as_str().unwrap().contains("at most 100000 items"),
+            "{e}"
+        );
+        assert_eq!(ids(&zone), had, "the zone's queue is as it was");
+
+        // A collection of 100,001 library songs (one album), played in place of the queue
+        let release = "c1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        {
+            let lib = s.library.lock().unwrap();
+            lib.begin_batch().unwrap();
+            for i in 0..over {
+                let t = pm_model::Track {
+                    id: None,
+                    title: format!("Part {i}"),
+                    artists: vec![pm_model::Artist {
+                        id: None,
+                        name: "Reader".into(),
+                        mbid: None,
+                    }],
+                    album: Some(pm_model::Album {
+                        id: None,
+                        title: "Long".into(),
+                        album_artist: Some("Reader".into()),
+                        release_mbid: Some(pm_model::Mbid::parse(release).unwrap()),
+                        release_group_mbid: None,
+                        year: None,
+                        upc: None,
+                        total_discs: None,
+                    }),
+                    track_no: Some(i as u32 + 1),
+                    disc_no: None,
+                    duration_ms: Some(1_000),
+                    file: pm_model::AudioFile {
+                        path: dir.path().join(format!("long/{i}.flac")),
+                        size_bytes: 1,
+                        mtime_unix: 0,
+                        container: "flac".into(),
+                        format: pm_model::AudioFormat::pcm(44_100, 16, 2),
+                        duration_ms: Some(1_000),
+                    },
+                    recording_mbid: None,
+                    isrc: None,
+                    acoustid: None,
+                    canonical: None,
+                    replaygain_track_gain_db: None,
+                    replaygain_album_gain_db: None,
+                    genres: vec![],
+                };
+                lib.upsert_track(&t).unwrap();
+            }
+            lib.commit_batch().unwrap();
+        }
+        let (st, pl) = call(
+            &app,
+            "POST",
+            "/v1/playlists",
+            Some(serde_json::json!({"name": "Long",
+                "uris": [format!("https://musicbrainz.org/release/{release}")]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{pl}");
+        let id = pl["summary"]["id"].as_str().unwrap().to_string();
+        for replace in [serde_json::json!(true), serde_json::Value::Null] {
+            let (st, e) = call(
+                &app,
+                "POST",
+                &format!("/v1/playlists/{id}/play"),
+                Some(serde_json::json!({"zone": zid, "replace": replace})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+            assert!(
+                e["error"].as_str().unwrap().contains("at most 100000 items"),
+                "{e}"
+            );
+            assert_eq!(ids(&zone), had, "the zone's queue is as it was");
+        }
+        // After the queue too: the five there count
+        let (st, e) = call(
+            &app,
+            "POST",
+            &format!("/v1/playlists/{id}/play"),
+            Some(serde_json::json!({"zone": zid, "replace": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        assert!(e["error"].as_str().unwrap().contains("this one has 5"), "{e}");
+        assert_eq!(ids(&zone), had);
     }
 
     #[tokio::test]

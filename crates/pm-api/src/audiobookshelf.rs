@@ -524,6 +524,9 @@ pub(crate) async fn play(State(s): State<Arc<NodeState>>, Json(b): Json<PlayBook
             "this item has no audio",
         ));
     }
+    // The whole book or nothing, before the zone's queue is touched: a queue holds so many parts
+    // and no more, and the place to start from could be past them
+    crate::queue_room(&zone, book.parts.len(), true)?;
     let resume = if b.restart {
         0
     } else {

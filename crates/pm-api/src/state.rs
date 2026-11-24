@@ -910,6 +910,16 @@ impl NodeState {
             return;
         }
         let n = saved.items.len();
+        if n > pm_zones::MAX_QUEUE_ITEMS {
+            // Saved by a version without the limit: the rest is left out, and the next save
+            // replaces this one
+            tracing::warn!(
+                zone = %zone.id(),
+                saved = n,
+                kept = pm_zones::MAX_QUEUE_ITEMS,
+                "the saved queue is longer than a queue holds: only the first items are restored"
+            );
+        }
         zone.enqueue(saved.items, pm_zones::Insert::End);
         zone.set_repeat(saved.repeat);
         zone.set_radio(saved.radio);
@@ -2327,7 +2337,7 @@ impl NodeState {
         let mut timers = self.sleep.lock().expect("sleep lock");
         timers.remove(zone.id());
         let secs = seconds?;
-        let ends_at_ms = unix_ms() + secs * 1000;
+        let ends_at_ms = unix_ms().saturating_add(secs.saturating_mul(1000));
         let state = Arc::clone(self);
         let id = zone.id().clone();
         let key = id.clone();
@@ -2730,7 +2740,10 @@ fn continue_radio(library: &pm_library::LibraryLock, zone: &Arc<Zone>) {
     }
     let start = state.queue.len();
     tracing::info!(zone = %zone.id(), added = items.len(), "radio: continuing with similar tracks");
-    zone.enqueue(items, pm_zones::Insert::End);
+    // (a full queue takes nothing more: nothing to go on with)
+    if zone.enqueue(items, pm_zones::Insert::End).is_empty() {
+        return;
+    }
     zone.play_index(start);
 }
 

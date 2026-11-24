@@ -772,8 +772,6 @@ pub(crate) async fn play(
         .get(&ZoneId::new(&body.zone))
         .ok_or_else(|| ApiError::not_found(format!("no zone {}", body.zone)))?;
     let p = load_playlist(&s, &id)?;
-    // The owner (playlists are the owner's) takes the zone back from a listener
-    crate::listens::zone_changed_by(&s, &body.zone, true);
     // Songs play from where they play (pins, orders); the library's albums play whole, in place
     let mut songs = p.clone();
     songs.items.retain(|i| i.kind() == Some(ItemKind::Track));
@@ -812,6 +810,10 @@ pub(crate) async fn play(
             "none of the playlist's items plays on this node's connected services",
         ));
     }
+    // Whole or not at all, before the zone is touched
+    crate::queue_room(&zone, items.len(), body.replace.unwrap_or(true))?;
+    // The owner (playlists are the owner's) takes the zone back from a listener
+    crate::listens::zone_changed_by(&s, &body.zone, true);
     let queued = items.len();
     queue_into(&zone, items, body.replace).await;
     Ok(Json(PlayedPlaylist { queued, missing }))
@@ -841,6 +843,7 @@ pub(crate) fn library_queue(lib: &Library, p: &Playlist) -> (Vec<pm_zones::Queue
 
 /// Queue `items` into `zone`: in place of its queue, started (`replace`, the default), or after it.
 /// Returns once the engine has applied it (bounded), so a read right after sees the new queue.
+/// The caller has asked [`crate::queue_room`] first: the queue takes only what fits.
 pub(crate) async fn queue_into(
     zone: &pm_zones::Zone,
     items: Vec<pm_zones::QueueItem>,

@@ -26,7 +26,7 @@ pub mod zone;
 
 pub use queue::{
     node_link_path, node_link_tokens, node_link_without_token, FetchLimit, Insert, Queue, QueueItem,
-    QueueSnapshot, Repeat, TokenCheck,
+    QueueSnapshot, Repeat, TokenCheck, MAX_QUEUE_ITEMS,
 };
 pub use registry::OutputRegistry;
 pub use sink::{
