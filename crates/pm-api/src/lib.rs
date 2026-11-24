@@ -28334,4 +28334,132 @@ exec sleep 300
         let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
         assert!(jobs["current"].is_null(), "not started again: {jobs}");
     }
+
+    /// A removal that does not finish is remembered: `GET /v1/people` names the person under
+    /// `unfinished` (they may be off the list already), so Remove again is still offered after a
+    /// reload or a restart. It is forgotten when the removal finishes, or nothing of theirs is left.
+    #[tokio::test]
+    async fn a_removal_that_did_not_finish_is_remembered_until_it_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let app = router(s.clone());
+        let owner = Some("s3cret");
+        let people = || {
+            let app = app.clone();
+            async move {
+                let (st, v, _) = send_as(&app, "GET", "/v1/people", owner, &[], None).await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                let listed: Vec<String> = v["people"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p["key"].as_str().unwrap().to_string())
+                    .collect();
+                (listed, v["unfinished"].clone())
+            }
+        };
+        // (Cy has an account on this node's homeserver too: removed, they stay listed without music)
+        let cy = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "people",
+                &serde_json::json!({"people": [
+                    {"key": anna, "access": "music", "music_enabled": true, "added_at": 1},
+                    {"key": ben, "access": "music", "music_enabled": true, "added_at": 1},
+                    {"key": cy, "access": "homeserver_music", "music_enabled": true, "added_at": 1}]})
+                .to_string(),
+            )
+            .unwrap();
+        let (listed, unfinished) = people().await;
+        assert!(
+            listed.contains(&ben.to_string()) && unfinished.is_null(),
+            "{listed:?} {unfinished}"
+        );
+        // Ben's homeserver approval can't be taken off the node (a folder stands where its file is)
+        let grants = s.db_path.parent().unwrap().join("grants");
+        let in_the_way = |key: &str| grants.join(format!("{key}.session"));
+        std::fs::create_dir_all(in_the_way(ben).join("x")).unwrap();
+        for _ in 0..2 {
+            let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+            assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+            assert!(v["error"].as_str().unwrap().contains("remove them again"), "{v}");
+            // Off the list, and named as not finished (once)
+            let (listed, unfinished) = people().await;
+            assert!(!listed.contains(&ben.to_string()), "{listed:?}");
+            assert_eq!(unfinished, serde_json::json!([ben]));
+        }
+        // Adding Ben again has to finish the removal first: not while it can't
+        let add_ben = serde_json::json!({"access": "music", "key": ben});
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            "/v1/people/invites",
+            owner,
+            &[],
+            Some(add_ben.clone()),
+        )
+        .await;
+        assert!(!st.is_success(), "{st} {v}");
+        assert_eq!(people().await.1, serde_json::json!([ben]));
+        // What was in the way is gone: adding Ben again finishes it, and Ben is no longer named
+        // as someone whose removal did not finish
+        std::fs::remove_dir_all(in_the_way(ben)).unwrap();
+        let (st, v, _) = send_as(&app, "POST", "/v1/people/invites", owner, &[], Some(add_ben)).await;
+        assert!(st.is_success(), "{st} {v}");
+        let (listed, unfinished) = people().await;
+        assert!(
+            listed.contains(&ben.to_string()) && unfinished.is_null(),
+            "{listed:?} {unfinished}"
+        );
+        // Cy's removal fails the same way: still listed (the homeserver account), and named
+        std::fs::create_dir_all(in_the_way(cy).join("x")).unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{cy}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+        let (listed, unfinished) = people().await;
+        assert!(listed.contains(&cy.to_string()), "{listed:?}");
+        assert_eq!(unfinished, serde_json::json!([cy]));
+        // Removing again, when it can finish, answers 200 and it is forgotten
+        std::fs::remove_dir_all(in_the_way(cy)).unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{cy}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (listed, unfinished) = people().await;
+        assert!(
+            listed.contains(&cy.to_string()) && unfinished.is_null(),
+            "{listed:?} {unfinished}"
+        );
+        // Ben again, off the list with something left: the next Remove finishes it (the grant
+        // file is there this time, and goes)
+        std::fs::create_dir_all(in_the_way(ben).join("x")).unwrap();
+        let (st, _, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
+        std::fs::remove_dir_all(in_the_way(ben)).unwrap();
+        std::fs::write(in_the_way(ben), b"left over").unwrap();
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(!in_the_way(ben).exists());
+        assert!(people().await.1.is_null());
+        // A removal that works leaves nothing to remember
+        let (st, v, _) = send_as(&app, "DELETE", &format!("/v1/people/{anna}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (listed, unfinished) = people().await;
+        assert!(
+            !listed.contains(&anna.to_string()) && unfinished.is_null(),
+            "{listed:?} {unfinished}"
+        );
+        // A name that was remembered for someone of whom nothing is left (a restored list, say)
+        // goes at the next Remove, which answers that there is nobody
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("people.unfinished", &serde_json::json!([ben]).to_string())
+            .unwrap();
+        let (_, unfinished) = people().await;
+        assert_eq!(unfinished, serde_json::json!([ben]));
+        let (st, _, _) = send_as(&app, "DELETE", &format!("/v1/people/{ben}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (_, unfinished) = people().await;
+        assert!(unfinished.is_null(), "{unfinished}");
+    }
 }
