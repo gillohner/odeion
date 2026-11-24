@@ -28351,6 +28351,7 @@ exec sleep 300
         let sent = files::send_one(&s, &*hs, &*disk, &mut present, remote, b"12345".to_vec()).await;
         assert!(matches!(sent, Ok(false)), "the good copy there counts");
         assert!(hs.uploads.lock().unwrap().is_empty(), "nothing sent over it");
+        assert_eq!(present.get(remote), Some(&Some(5)), "noted as there");
         // Not there: sent
         let other = "/pub/pubky.app/files/music/ef01-other.flac";
         let sent = files::send_one(&s, &*hs, &*disk, &mut present, other, b"123".to_vec()).await;
