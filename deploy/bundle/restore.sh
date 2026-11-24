@@ -25,6 +25,8 @@ if command -v systemctl >/dev/null 2>&1; then
     '' | inactive | failed) systemctl is-enabled -q odeion-bundle.service 2>/dev/null && on=1 || on= ;;
     *) on=1 ;;
   esac
+  # a retry that waits for its 30 s (some systemd versions call that failed, not activating)
+  case $(systemctl show -p SubState --value odeion-bundle.service 2>/dev/null) in auto-restart*) on=1 ;; esac
   [ -z "$on" ] || die "odeion-bundle.service (the start at boot) is on: sudo systemctl disable --now odeion-bundle first, then sudo ./start-at-boot.sh after the restore"
 fi
 # curl for the node's API (pinned), and the small image the compose file already uses

@@ -461,6 +461,12 @@ jobs:
           # A restore refuses while the unit is on (its retries would start the bundle half-way)
           if ./restore.sh "$(ls -d $RUNNER_TEMP/backups/2*/)" 2> $RUNNER_TEMP/unit-refused.log; then echo "restore.sh ran with the unit on"; exit 1; fi
           grep -q 'odeion-bundle.service (the start at boot) is on' $RUNNER_TEMP/unit-refused.log
+          # A plain disable (no --now) leaves the retries going: a restore still refuses
+          sudo systemctl disable odeion-bundle
+          echo "disabled, retrying: $(systemctl show -p ActiveState --value odeion-bundle)/$(systemctl show -p SubState --value odeion-bundle)"
+          if ./restore.sh "$(ls -d $RUNNER_TEMP/backups/2*/)" 2> $RUNNER_TEMP/unit-refused2.log; then echo "restore.sh ran while a disabled unit still retried"; exit 1; fi
+          grep -q 'odeion-bundle.service (the start at boot) is on' $RUNNER_TEMP/unit-refused2.log
+          sudo systemctl enable odeion-bundle
           # The share answers: the next try starts the node
           mkdir -p "$SHARE"
           for i in $(seq 60); do done_ && break; sleep 2; done
