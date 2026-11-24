@@ -135,6 +135,9 @@ pub fn parse(base: &str, text: &str) -> Result<Playlist, String> {
     }
 }
 
+/// The most a playlist may be: a day of 6 s segments is under 2 MiB.
+const PLAYLIST_MAX: usize = 4 << 20;
+
 /// Fetch `url` (master or media playlist) down to its media playlist; the highest-bandwidth
 /// variant is used.
 pub fn open_segments(
@@ -143,14 +146,13 @@ pub fn open_segments(
 ) -> Result<crate::segmented::Segments, String> {
     let mut url = url.to_string();
     for _ in 0..2 {
-        let text = client
+        let resp = client
             .get(&url)
             .send()
             .map_err(|e| e.to_string())?
             .error_for_status()
-            .map_err(|e| e.to_string())?
-            .text()
             .map_err(|e| e.to_string())?;
+        let text = crate::capped::text_blocking(resp, PLAYLIST_MAX)?;
         match parse(&url, &text)? {
             Playlist::Master(mut variants) => {
                 variants.sort_by_key(|(bw, _)| *bw);

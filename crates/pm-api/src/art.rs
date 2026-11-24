@@ -221,7 +221,7 @@ async fn download(
         if !mime.starts_with("image/") {
             return None;
         }
-        let bytes = match resp.bytes().await {
+        let bytes = match crate::capped::bytes(resp, RELAYED_PICTURE_MAX).await {
             Ok(b) if !b.is_empty() => b,
             _ => return None,
         };
@@ -265,8 +265,8 @@ pub(crate) fn picture(bytes: Vec<u8>, cache: &str) -> Result<axum::response::Res
         .into_response())
 }
 
-/// The most a relayed picture may be.
-const RELAYED_PICTURE_MAX: usize = 16 << 20;
+/// The most a picture from another server may be, relayed or kept.
+pub(crate) const RELAYED_PICTURE_MAX: usize = 16 << 20;
 
 /// A picture another server sent, answered as [`picture`] does: by its bytes, whatever type the
 /// server gave it, and none at all when it is no picture (or larger than any cover).
@@ -274,24 +274,12 @@ pub(crate) async fn relayed_picture(
     resp: reqwest::Response,
     cache: &str,
 ) -> Result<axum::response::Response, crate::ApiError> {
-    use futures_util::StreamExt;
-    let too_big = || crate::ApiError::not_found("that picture is too large");
-    if resp
-        .content_length()
-        .is_some_and(|n| n as usize > RELAYED_PICTURE_MAX)
-    {
-        return Err(too_big());
-    }
-    let mut bytes = Vec::new();
-    let mut body = resp.bytes_stream();
-    while let Some(chunk) = body.next().await {
-        let chunk =
-            chunk.map_err(|e| crate::ApiError::new(axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
-        if bytes.len() + chunk.len() > RELAYED_PICTURE_MAX {
-            return Err(too_big());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+    let bytes = crate::capped::bytes(resp, RELAYED_PICTURE_MAX)
+        .await
+        .map_err(|e| match e {
+            crate::capped::Error::TooLong(_) => crate::ApiError::not_found("that picture is too large"),
+            crate::capped::Error::Read(e) => crate::ApiError::new(axum::http::StatusCode::BAD_GATEWAY, e),
+        })?;
     picture(bytes, cache)
 }
 

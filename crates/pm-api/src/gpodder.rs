@@ -246,6 +246,11 @@ fn sync_lock() -> &'static tokio::sync::Mutex<()> {
     L.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+/// The most one answer of the gPodder server may be (subscriptions or episode actions): the first
+/// sync asks for every episode action since 0, years of plays and pauses, so it is the media
+/// servers' size.
+const ANSWER_MAX: usize = crate::capped::MEDIA_SERVER_MAX;
+
 async fn send<T: for<'de> Deserialize<'de> + Default>(
     a: &Account,
     req: reqwest::RequestBuilder,
@@ -263,7 +268,9 @@ async fn send<T: for<'de> Deserialize<'de> + Default>(
     if !status.is_success() {
         return Err(format!("the gPodder server answered {status}"));
     }
-    let text = resp.text().await.map_err(|e| format!("gPodder server: {e}"))?;
+    let text = crate::capped::text(resp, ANSWER_MAX)
+        .await
+        .map_err(|e| format!("gPodder server: {e}"))?;
     if text.trim().is_empty() {
         return Ok(T::default());
     }

@@ -188,7 +188,9 @@ async fn get_text(s: &NodeState, url: &str, params: &[(&str, String)]) -> Result
     if !resp.status().is_success() {
         return Err(bad_gateway(format!("{url} answered {}", resp.status())));
     }
-    resp.text().await.map_err(|e| bad_gateway(format!("{url}: {e}")))
+    crate::capped::text(resp, crate::radio::DIRECTORY_MAX)
+        .await
+        .map_err(|e| bad_gateway(format!("{url}: {e}")))
 }
 
 /// The curated stations: SomaFM, then Radio Paradise.

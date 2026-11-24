@@ -133,7 +133,9 @@ async fn call(s: &NodeState, srv: &Server, method: &str, params: &[(&str, &str)]
     if !resp.status().is_success() {
         return Err(upstream(format!("{method} answered {}", resp.status())));
     }
-    let v: Value = resp.json().await.map_err(|e| upstream(e.without_url()))?;
+    let v: Value = crate::capped::json(resp, crate::capped::MEDIA_SERVER_MAX)
+        .await
+        .map_err(upstream)?;
     let r = v["subsonic-response"].clone();
     if r["status"].as_str() != Some("ok") {
         return Err(upstream(

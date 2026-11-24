@@ -41,6 +41,7 @@ pub mod backup;
 pub mod bandcamp;
 pub mod bookmarks;
 pub mod bundled;
+mod capped;
 mod client_mask;
 pub mod comments;
 pub mod dash;
@@ -2961,7 +2962,7 @@ async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> R
                 .flatten();
             let got = match matched {
                 Some(url) => match s.http_client().get(&url).send().await {
-                    Ok(r) if r.status().is_success() => r.bytes().await.ok(),
+                    Ok(r) if r.status().is_success() => capped::bytes(r, art::RELAYED_PICTURE_MAX).await.ok(),
                     _ => None,
                 },
                 None => None,

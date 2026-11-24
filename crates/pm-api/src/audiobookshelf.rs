@@ -144,7 +144,9 @@ async fn send(rb: reqwest::RequestBuilder, what: &str) -> Result<Value, ApiError
     let resp = rb.send().await.map_err(|e| upstream(e.without_url()))?;
     match resp.status() {
         st if st.is_success() => {
-            let body = resp.bytes().await.map_err(|e| upstream(e.without_url()))?;
+            let body = crate::capped::bytes(resp, crate::capped::MEDIA_SERVER_MAX)
+                .await
+                .map_err(upstream)?;
             Ok(serde_json::from_slice(&body).unwrap_or(Value::Null))
         }
         StatusCode::UNAUTHORIZED => Err(ApiError::new(
