@@ -351,6 +351,9 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             if c.listener_tokens_ended > 0 {
                 what.push(format!("{} listener sign-in(s) ended", c.listener_tokens_ended));
             }
+            if c.app_passwords_ended > 0 {
+                what.push(format!("{} app password(s) removed", c.app_passwords_ended));
+            }
             if what.is_empty() {
                 what.push("none of them was a sign-in of this node's".to_string());
             }
