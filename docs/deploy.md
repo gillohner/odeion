@@ -73,8 +73,9 @@ sudo ./start-at-boot.sh                     # once, on a machine with systemd: s
   30 seconds until the node runs, so it starts by itself as soon as the share answers. It doesn't
   stop anything at shutdown. It also starts a node you stopped on purpose, at the next boot:
   `sudo systemctl disable odeion-bundle` keeps it off, `sudo ./start-at-boot.sh --remove` takes it out.
-  While such a share is away the node can't start at all, because Docker needs every volume; a
-  share the machine mounts itself (`/etc/fstab` with `_netdev,nofail`) doesn't hold up the boot.
+  While such a share is away the node can't start at all, because Docker needs every volume. The
+  unit runs the bundle's files as root, so keep the folder writable by you only. It needs systemd
+  244 or newer (Debian 11, Ubuntu 20.04 and later).
 
 - **What listens where:** the node on 7788, and the homeserver's Pubky TLS port 6287 (Pubky apps,
   Pubky Ring) on the network. The homeserver's admin API (6288) and plain HTTP port (6286) are
@@ -391,7 +392,7 @@ The node scans folders; anything the operating system can mount is a folder.
 | Source | How |
 | :-- | :-- |
 | Local disks, USB drives | add the folder in Settings or `[library] folders` |
-| NAS / network shares (SMB, NFS) | mount them (`/etc/fstab`, `mount -t cifs …`) and add the mount point; use `_netdev` so the mount exists before the node starts, and `nofail` so a share that is off doesn't hold up the boot. With the bundle, `start-at-boot.sh` starts the node once the share answers (above) |
+| NAS / network shares (SMB, NFS) | mount them (`/etc/fstab`, `mount -t cifs …`) and add the mount point; use `_netdev` so the mount exists before the node starts |
 | Dropbox, Google Drive, OneDrive, S3, WebDAV, … | `rclone mount remote:Music /mnt/music --vfs-cache-mode full --read-only` (a systemd unit keeps it up), then add `/mnt/music`. The VFS cache makes the first play of a file a download and every later one local; bit-perfect playback is unaffected because the node reads the original bytes |
 | Downloads from another app (a download client, a seedbox) | point that app at a folder the node watches; the watcher rescans after the last change |
 | Your Pubky homeserver | `odeiond upload` or `POST /v1/pubky/files` stores originals under `/priv/pubky.music/files/`; "Bring files here" (`POST /v1/pubky/files/mirror`) pulls what the node lacks into a library folder as a background job and scans it |

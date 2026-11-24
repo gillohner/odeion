@@ -75,6 +75,9 @@ case ${1:-} in
   case $DIR in *%* | *'
 '*) echo "The folder's path ($DIR) has a % or a line break; move the bundle to a plain path." >&2; exit 1 ;; esac
   [ -f docker-compose.yml ] || { echo "No docker-compose.yml in $DIR." >&2; exit 1; }
+  # Type=oneshot with Restart= needs systemd 244 (Debian 11, Ubuntu 20.04)
+  v=$(systemctl --version | sed -n '1s/^systemd \([0-9]*\).*/\1/p')
+  [ "${v:-0}" -ge 244 ] || { echo "This needs systemd 244 or newer (this machine has ${v:-an unknown version})." >&2; exit 1; }
   tmp=$(mktemp "$UNIT_FILE.XXXXXX")
   unit > "$tmp"
   chmod 644 "$tmp"
