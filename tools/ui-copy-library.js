@@ -138,14 +138,15 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       // Each Show more draws the whole tree again, so a page takes longer the more rows are open,
       // and the last one (2 000 rows) follows the runner's speed: 0.5 s on a quiet machine, 1.0 to
       // 1.3 s on a busy CI runner for the same code. The 1 s budget is for the first level and the
-      // median page. A page that grows faster than its rows still fails on any runner: the time per
-      // row of the pages of 1 200 rows or more may be at most 1.5 times the median page's (a redraw
-      // that grows with the square of the rows gives 1.7 at the last page).
+      // median page (1 200 rows). A page that grows faster than its rows still fails on any runner:
+      // the time per row of the big pages (1 600 to 2 000 rows) may be at most 1.5 times that of the
+      // small ones (400 to 800 rows, their median). Linear code reads under 1 (each page has a fixed
+      // part); a redraw that grows with the square of the rows reads about 3.
       const pages = more.map((m) => m.page); const mid = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
-      const median = mid(pages); const perRow = more.map((m) => m.page / m.rows); const perRowMid = mid(perRow);
-      const growth = Math.max(...perRow.filter((_, i) => more[i].rows >= 1200)) / Math.max(perRowMid, 0.01);
+      const median = mid(pages); const perRow = (m) => m.page / m.rows;
+      const growth = Math.max(...more.filter((m) => m.rows >= 1600).map(perRow)) / Math.max(mid(more.filter((m) => m.rows <= 800).map(perRow)), 0.01);
       const slowest = more.reduce((a, b) => (b.page > a.page ? b : a));
-      check(firstLevel.page < 1000 && median < 1000 && growth <= 1.5, `${W} each page of the level is quick (first ${firstLevel.page} ms, median ${median} ms, both within 1 s; slowest ${slowest.page} ms; time per row on the pages of 1 200 rows or more at most ${growth.toFixed(2)} times the median page's, within 1.5; every page ${pages.join(' ')}; in all, with the mocked answer's trip, ${firstLevel.total} and ${slowest.total} ms)`);
+      check(firstLevel.page < 1000 && median < 1000 && growth <= 1.5, `${W} each page of the level is quick (first ${firstLevel.page} ms, median ${median} ms, both within 1 s; slowest ${slowest.page} ms; time per row of the big pages ${growth.toFixed(2)} times the small ones' (at most 1.5); every page ${pages.join(' ')}; in all, with the mocked answer's trip, ${firstLevel.total} and ${slowest.total} ms)`);
       // A tick with 2 000 rows: under 200 ms of work
       const tickMs = await p.evaluate(async (a) => { const r = document.querySelector(`.ctrow[data-cpath="/music/${a}"]`); const t1 = performance.now(); r.click(); await new Promise((ok) => requestAnimationFrame(() => ok())); return performance.now() - t1; }, artist(1));
       check(tickMs < 200, `${W} a tick among 2 000 rows takes ${Math.round(tickMs)} ms`);
