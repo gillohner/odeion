@@ -19,15 +19,36 @@ database, its key and your Pubky account's files. `backup.sh` below does all of 
 - With a passphrase the sign-ins are included, encrypted. Nothing opens them without the
   passphrase, so keep it somewhere safe.
 - A restore keeps the library it replaces in the data folder as `library.db.bak` until the next
-  restore, so restoring the wrong file can be undone (stop the node, then
-  `odeiond restore <data folder>/library.db.bak`). That is the library only: the sign-ins a
-  passphrase-locked backup puts back (Pubky, remote access, the API token) stay as restored. When there is no room for that copy, the
-  library is not replaced and the restore says so.
+  restore, so restoring the wrong file can be undone: stop the node, then run `odeiond restore` on
+  that file with the node's own config and as the node's user (commands below). That is the library
+  only: the sign-ins a passphrase-locked backup puts back (Pubky, remote access, the API token) stay
+  as restored. When there is no room for that copy, the library is not replaced and the restore says so.
+
+To undo a restore from Settings:
+
+```sh
+# Docker, in the folder with docker-compose.yml (service pubky-music)
+docker compose stop pubky-music
+docker compose run --rm pubky-music restore /data/library.db.bak
+docker compose start pubky-music
+
+# Docker with its own homeserver (deploy/bundle)
+cd ~/pubky-music-node/deploy/bundle
+sudo systemctl stop odeion-bundle 2>/dev/null   # no start at boot try while the library is put back
+docker compose stop music
+docker compose run --rm music restore /data/library.db.bak
+docker compose start music
+
+# Linux without Docker (service pubky-music-node on an install from before Odeion)
+sudo systemctl stop odeiond
+sudo -u pubky-music odeiond -c /etc/pubky-music/node.toml restore /var/lib/pubky-music/library.db.bak
+sudo systemctl start odeiond
+```
 
 The file holds the node's library only, never a homeserver. It never holds who is logged in to
 the node: after a restore from Settings on a running node everyone stays logged in or out as they
-were. Where the library file itself is put back (a new machine, the bundle's `restore.sh`, going
-back to the previous version below), everyone logs in again: you with Pubky Ring or the API
+were. Where the library file of a backup is put back (a new machine, the bundle's `restore.sh`,
+the backup's `library.db` when going back to the previous version below), everyone logs in again: you with Pubky Ring or the API
 token, the people you added with Pubky Ring.
 
 **Every day or week, to a folder:** in the same place, pick a folder on the node, how often and
@@ -139,7 +160,9 @@ the backup file above doesn't. Leave out `usage.sqlite*` (usage insights, if the
 crash a journal still holds what was written. No backup holds them, and a Clear, or the removal of
 a person and their reports, never reaches a copy. Leave out `grants/` too: listeners' approvals to
 reach their own homeservers, theirs to give. No backup holds them, and a copy would bring back
-the approval of someone who has disconnected since.
+the approval of someone who has disconnected since. Leave out `library.db.bak`,
+`library.db.before-upgrade` and `library.db.newer` as well: each is a whole library from before a
+restore, an upgrade or a rollback, with every sign-in it held then, also those ended since.
 
 | Install | Data folder |
 | :-- | :-- |
