@@ -886,6 +886,9 @@ html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
 .star .half.l { left: 0; border-radius: var(--r-sm) 0 0 var(--r-sm); }
 .star .half.r { right: 0; border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .star .half:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* A star being saved: the spinner sits on the middle of its star, not in the pressed half's corner */
+.star .half.is-spinning::after { position: absolute; top: 50%; left: 100%; margin: -8px 0 0 -8px; pointer-events: none; }
+.star .half.r.is-spinning::after { left: 0; }
 /* Phones: each star is a 44 px tap (a half star 22 × 44 px, was 12 × 26 px, so a thumb set the
    wrong rating or none). The stars sit side by side (no gap: a tap between two lands on one), the
    glyphs keep their size and place (the row's top margin gives back what the taller stars add

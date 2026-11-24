@@ -539,7 +539,8 @@
       b.onmouseenter = () => paint(Number(b.dataset.rate));
       b.onfocus = () => paint(Number(b.dataset.rate));
       // The same value again clears the rating
-      b.onclick = () => { const v = Number(b.dataset.rate); save(cur === v ? null : v, r ? r.text : ''); };
+      // (busy until it is saved: a quick second press on the same star sends nothing)
+      b.onclick = () => { const v = Number(b.dataset.rate); return save(cur === v ? null : v, r ? r.text : ''); };
     });
     stars.onmouseleave = () => paint(cur);
     stars.addEventListener('focusout', () => paint(cur));
