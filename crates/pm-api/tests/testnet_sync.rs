@@ -125,7 +125,7 @@ async fn playlists_round_trip_through_the_private_folder() {
         .await
         .unwrap();
     let z32 = session.public_key().to_string();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
 
     let dir = tempfile::tempdir().unwrap();
     // Node A creates a playlist and pushes it.
@@ -336,7 +336,7 @@ async fn tags_move_to_social_v1() {
         .await
         .unwrap();
     let z32 = session.public_key().to_string();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     // What older nodes wrote: a tag on a TIDAL link in each old folder, one on a pubky:// post
     let oldest = pubky_app_specs::PubkyAppTag::new("https://tidal.com/album/199574241".into(), "lol".into());
     let older = pubky_app_specs::PubkyAppTag::new(
@@ -465,7 +465,7 @@ async fn old_private_objects_move_to_v1_once() {
         .await
         .unwrap();
     let z32 = session.public_key().to_string();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let song = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
 
     // What a node wrote before step 3
@@ -578,7 +578,7 @@ async fn an_old_session_asks_to_sign_in_again() {
     let signer = pubky.signer(Keypair::random());
     let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
     signer.signup(&hs, None).await.unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let approve = |caps: &'static str| {
         let homeserver = homeserver.clone();
         let signer = signer.clone();
@@ -663,7 +663,7 @@ async fn a_shared_playlist_is_published_and_unpublished() {
         .await
         .unwrap();
     let z32 = session.public_key().to_string();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let dir = tempfile::tempdir().unwrap();
     let n = node(dir.path(), "share");
     let app = router(n.clone());
@@ -763,7 +763,7 @@ async fn another_node_opens_and_copies_a_shared_playlist() {
         .unwrap();
     let z32 = session.public_key().to_string();
     let key = z32.strip_prefix("pubky").unwrap_or(&z32).to_string();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let dir = tempfile::tempdir().unwrap();
 
     // The author shares a playlist with one pinned song and its own order
@@ -879,7 +879,7 @@ async fn a_long_playlist_is_a_collection_too() {
         .unwrap();
     let z32 = session.public_key().to_string();
     let key = z32.strip_prefix("pubky").unwrap_or(&z32).to_string();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let dir = tempfile::tempdir().unwrap();
     let a = node(dir.path(), "long-a");
     let app_a = router(a.clone());
@@ -969,7 +969,7 @@ async fn an_album_is_copied_to_the_homeserver_once() {
         .signin_blocking(ClientId::new("pm-api-test").unwrap())
         .await
         .unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let dir = tempfile::tempdir().unwrap();
     let music = dir.path().join("music");
     std::fs::create_dir(&music).unwrap();
@@ -1078,7 +1078,7 @@ async fn many_favourites_sync_in_batches() {
         .signin_blocking(ClientId::new("pm-api-test").unwrap())
         .await
         .unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let dir = tempfile::tempdir().unwrap();
     let n = node(dir.path(), "n");
     {
@@ -1169,7 +1169,7 @@ async fn one_client_and_a_batched_first_sync() {
         assert!(st.is_success());
     }
     let sa = Arc::new(PubkySync::from_session(
-        NodeHomeserver::from_pubky(pubky.clone()),
+        NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet),
         session,
     ));
     loop {
@@ -1270,7 +1270,7 @@ async fn a_copy_job_does_not_hold_up_the_node() {
         }
     }
     n.set_sync(Some(Arc::new(PubkySync::from_session(
-        NodeHomeserver::from_pubky(pubky.clone()),
+        NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet),
         session,
     ))));
     // Paced (the default is 2.5 MB/s): here 40 MB/s so the test stays short
@@ -1354,7 +1354,10 @@ async fn a_paced_upload_lands_whole() {
         .signin_blocking(ClientId::new("pm-api-test").unwrap())
         .await
         .unwrap();
-    let sync = PubkySync::from_session(NodeHomeserver::from_pubky(pubky.clone()), session);
+    let sync = PubkySync::from_session(
+        NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet),
+        session,
+    );
     let bytes: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
     let path = "/priv/pubky.music/files/0123456789abcdef-paced.flac";
     sync.upload_private_paced(path, bytes.clone(), Some(1_000_000))
@@ -1395,7 +1398,7 @@ async fn bringing_files_here_skips_what_the_node_has() {
         .signin_blocking(ClientId::new("pm-api-test").unwrap())
         .await
         .unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let dir = tempfile::tempdir().unwrap();
     let music = dir.path().join("music-a");
     std::fs::create_dir(&music).unwrap();
@@ -1661,7 +1664,7 @@ async fn the_settings_copy_never_carries_a_sign_in() {
         .signin_blocking(ClientId::new("pm-api-settings").unwrap())
         .await
         .unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     // A fake session, put together at run time so secret scanners don't read the test as a leak
     let token = format!(
         "{{\"{}\":\"old-a\",\"{}\":\"old-r\"}}",
@@ -1740,7 +1743,7 @@ async fn a_collection_is_shared_found_duplicated_and_bookmarked() {
         return;
     }
     let pubky = Pubky::testnet().unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let (session, z32, raw) = identity(&pubky, "pm-api-collections").await;
     let dir = tempfile::tempdir().unwrap();
     let a = node(dir.path(), "a");
@@ -1908,7 +1911,7 @@ async fn the_listen_history_lands_where_the_setting_says() {
         return;
     }
     let pubky = Pubky::testnet().unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let (session, z32, _) = identity(&pubky, "pm-api-listens").await;
     let dir = tempfile::tempdir().unwrap();
     let a = node(dir.path(), "a");
@@ -2112,7 +2115,7 @@ async fn profiles_and_follows_are_social_v1() {
         return;
     }
     let pubky = Pubky::testnet().unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let (me, my_z32, _) = identity(&pubky, "pm-api-follows").await;
     let (them, _, their_key) = identity(&pubky, "pm-api-follows-them").await;
     // Both profiles; v1 wins
@@ -2221,7 +2224,7 @@ async fn the_spec_migrator_and_the_node_converge() {
     }
     use pubky_app_specs::traits::HashId;
     let pubky = Pubky::testnet().unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let (session, z32, raw) = identity(&pubky, "pm-api-migrator").await;
     let song = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
     let followee = "pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy";
@@ -2337,7 +2340,7 @@ async fn a_comment_is_a_note_with_the_song_as_parent() {
         return;
     }
     let pubky = Pubky::testnet().unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let (session, z32, raw) = identity(&pubky, "pm-api-comments").await;
     let dir = tempfile::tempdir().unwrap();
     let n = node(dir.path(), "n");
@@ -2523,7 +2526,7 @@ async fn the_node_record_holds_no_token_and_an_old_one_is_retired() {
     let pubky = Pubky::testnet().unwrap();
     for made in [true, false] {
         let (session, _, _) = identity(&pubky, "pm-api-node-record").await;
-        let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+        let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
         // A fake token, put together at run time so secret scanners don't read the test as a leak
         let old = ["older", "node", "credential", if made { "a" } else { "b" }].join("-");
         // What an older version wrote
@@ -2590,7 +2593,7 @@ async fn a_shared_view_lists_the_newest_posts_within_a_bound() {
     }
     use pm_pubky::homeserver::ListBounds;
     let pubky = Pubky::testnet().unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let (session, z32, key) = identity(&pubky, "pm-api-bounded").await;
     let dir = tempfile::tempdir().unwrap();
     // One public playlist the node wrote, then 249 older copies of its public post at ids of
@@ -2762,7 +2765,7 @@ async fn a_large_private_folder_lists_within_the_pages_deadline() {
     }
     use pm_pubky::homeserver::ListBounds;
     let pubky = Pubky::testnet().unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let (session, _z32, _) = identity(&pubky, "pm-api-files").await;
     let dir = pm_pubky::homeserver::PRIVATE_FILES_DIR;
     // 2,000 small files (20 pages), 8 at a time
@@ -2817,7 +2820,7 @@ async fn a_capped_listing_lists_what_the_sdk_lists() {
     }
     use pm_pubky::homeserver::ListBounds;
     let pubky = Pubky::testnet().unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let (session, _z32, raw) = identity(&pubky, "pm-api-capped-list").await;
     assert!(
         session.as_grant().is_some(),
@@ -2874,7 +2877,7 @@ async fn a_sign_in_switch_ends_the_old_sessions_sync() {
         return;
     }
     let pubky = Pubky::testnet().unwrap();
-    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let homeserver = NodeHomeserver::from_pubky_on(pubky.clone(), pm_pubky::Network::Testnet);
     let hs = PublicKey::try_from(TESTNET_HOMESERVER).unwrap();
     // Identity A, with a session for this node and one for another device of A's
     let signer_a = pubky.signer(Keypair::random());

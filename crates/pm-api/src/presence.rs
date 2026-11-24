@@ -120,10 +120,11 @@ impl Presence {
 }
 
 /// Who this caller is for presence: their Pubky key, [`OWNER`] for an owner without one; a
-/// party guest is nobody.
+/// party guest and an app password are nobody.
 pub fn who(c: &Caller) -> Option<String> {
     match c.role {
-        Role::Guest => None,
+        // An app password plays for the owner, but no one listens through it
+        Role::Guest | Role::App => None,
         Role::Owner => Some(c.key.clone().unwrap_or_else(|| OWNER.into())),
         Role::Listener => c.key.clone(),
     }
@@ -512,6 +513,16 @@ async fn end_group(s: &Arc<NodeState>, a: &Along) -> Result<ZoneState, ApiError>
         host_plays(s, &a.host_zone, &a.host, since);
     }
     Ok(st)
+}
+
+/// Whether the zone `group` is a listen-along group.
+pub fn is_along(s: &NodeState, group: &str) -> bool {
+    s.presence
+        .along
+        .lock()
+        .expect("presence lock")
+        .iter()
+        .any(|a| a.group == group)
 }
 
 fn take_along(s: &NodeState, group: &str) -> Option<Along> {

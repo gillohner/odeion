@@ -62,9 +62,15 @@ pub(crate) async fn notify(
     State(s): State<Arc<NodeState>>,
     Path(token): Path<String>,
     method: Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     body: String,
 ) -> StatusCode {
+    // Only by a name the node handed out or a control point uses: a page on another site whose
+    // name resolves to the node (DNS rebinding) is the same origin to the browser
+    if !crate::peer::gena_host(&headers, &uri, &s.public_url) {
+        return StatusCode::FORBIDDEN;
+    }
     if method.as_str() != "NOTIFY" {
         return StatusCode::METHOD_NOT_ALLOWED;
     }

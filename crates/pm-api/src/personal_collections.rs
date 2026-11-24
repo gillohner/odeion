@@ -1457,9 +1457,14 @@ pub(crate) async fn get(
 pub(crate) async fn create(
     State(s): State<Arc<NodeState>>,
     Extension(c): Extension<Caller>,
-    Json(body): Json<CreatePlaylist>,
+    Json(mut body): Json<CreatePlaylist>,
 ) -> Result<Response, ApiError> {
     let Some(key) = listener(&c) else {
+        // An app password keeps collections, private ones: a public one is posted under the
+        // owner's name, which is the owner's to choose
+        if c.role == crate::accounts::Role::App {
+            body.public = None;
+        }
         return Ok(playlists::create(State(s), Json(body)).await?.into_response());
     };
     change(&s, &key, None, |lib, _| {
@@ -1774,10 +1779,11 @@ mod tests {
         }
     }
 
-    /// Whether the route this path matches is one of a person's own (`access::ROUTES`).
+    /// Whether the route this path matches is one of a person's own collection routes
+    /// (`access::ROUTES`).
     fn is_own_route(m: &Method, p: &str) -> bool {
         use crate::access::{required, route_of, Capability};
-        route_of(p).and_then(|(route, _)| required(m, route)) == Some(Capability::Own)
+        route_of(p).and_then(|(route, _)| required(m, route)) == Some(Capability::Collections)
     }
 
     #[test]
@@ -1791,10 +1797,22 @@ mod tests {
             (Method::DELETE, "/playlists/0034A0Z1Y2X3W"),
             (Method::POST, "/collections/0034A0Z1Y2X3W/items"),
             (Method::DELETE, "/collections/0034A0Z1Y2X3W/items/3"),
-            (Method::PUT, "/collections/0034A0Z1Y2X3W/visibility"),
             (Method::POST, "/collections/0034A0Z1Y2X3W/play"),
         ] {
             assert!(is_own_route(&m, p), "{m} {p}");
+        }
+        // Making one public is a person's own too, under `own` (an app password has the collection
+        // routes but not this)
+        for p in [
+            "/collections/0034A0Z1Y2X3W/visibility",
+            "/playlists/0034A0Z1Y2X3W/visibility",
+        ] {
+            let route = crate::access::route_of(p).map(|(r, _)| r);
+            assert_eq!(
+                route.and_then(|r| crate::access::required(&Method::PUT, r)),
+                Some(crate::access::Capability::Own),
+                "{p}"
+            );
         }
         for (m, p) in [
             (Method::POST, "/playlists/from-queue"),

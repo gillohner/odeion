@@ -6,7 +6,8 @@
 //   limit and Remove, each asked first where it takes something away and sent once; Add someone and
 //   what to send them; the can / can't lists; zones "Every zone / Only these" (none ticked is refused);
 //   the three choices of whose music services; the browsers and apps signed in as you, with Log out,
-//   Sign out and Sign out all others; the password for apps; a party list that failed says so; a
+//   Sign out and Sign out all others; apps with their own password (listed, removed after asking, a
+//   new one made by name and shown once); the password for apps; a party list that failed says so; a
 //   people list that failed says so and leaves the rest of the screen working; a removal that did not
 //   finish keeps Remove on the person; opened at an address of the node's own machine, the page says
 //   to send the node's address on the network instead of offering its own to copy;
@@ -41,8 +42,10 @@ const NEW_TOKEN = 'f'.repeat(64);
 // What GET /v1/me lists for each caller (crates/pm-api/src/access.rs: the owner has every capability
 // but a party guest's; someone the owner added has these, `own_sign_in` unless the node plays
 // everyone through its own sign-ins)
-const PERSON_CAN = ['artwork', 'session', 'library', 'zone_list', 'zone_use', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in'];
-const OWNER_CAN = [...PERSON_CAN, 'owner_music', 'zone_manage', 'library_manage', 'settings', 'service_logins', 'people', 'tokens', 'vault', 'backup', 'identity', 'remote_access', 'party', 'diagnostics'];
+const PERSON_CAN = ['artwork', 'session', 'library', 'zone_list', 'zone_use', 'collections', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in'];
+// What POST /v1/node/app-passwords hands out, built at run time so it never reads as a real one
+const MADE_FOR_APP = ['pma', 'k'.repeat(43)].join('_');
+const OWNER_CAN = [...PERSON_CAN, 'owner_music', 'zone_manage', 'zone_group', 'library_manage', 'settings', 'service_logins', 'people', 'tokens', 'vault', 'backup', 'identity', 'remote_access', 'party', 'diagnostics'];
 // The words a person reads: none of the old or inside names, wherever they show (the screen, a
 // dialog, a toast). "token" only as the heading's "(API token)".
 const plainWords = (text, where) => {
@@ -85,6 +88,7 @@ const node = (over = {}) => ({
     ] },
   ],
   invites: [{ id: 'inv1', access: 'homeserver_music', name: 'Eve', token: 'AAAA-BBBB-CCCC', storage_quota_mb: 200, created_at: T0, url: `pubkyauth://direct_signup?hs=${HS}&st=AAAA-BBBB-CCCC`, qr_svg: QR }],
+  apps: [{ id: 'ha', name: 'Home Assistant', created_at: T0 - 2 * DAY, last_used: T0 - (T0 % DAY) }, { id: 'sy', name: 'Symfonium', created_at: T0 - 5 * DAY }],
   mine: [
     { id: 'm1', kind: 'browser', label: 'Chromium on Linux', remote: false, created_at: T0, last_used: T0 - (T0 % DAY), current: true },
     { id: 'm2', kind: 'app', label: 'Odeion app 0.2.4', remote: true, created_at: T0 - DAY, current: false },
@@ -96,7 +100,7 @@ const node = (over = {}) => ({
 // answers 500 with this message; `n.gate['PUT /people/zones']`: it waits for this promise first.
 const serve = async (context, n) => {
   await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: ZONES })); });
-  await context.route(/\/v1\/(people|party|me\/sign-ins|node\/settings|node\/token)(\/|\?|$)/, async (r) => {
+  await context.route(/\/v1\/(people|party|me\/sign-ins|node\/settings|node\/token|node\/app-passwords)(\/|\?|$)/, async (r) => {
     const req = r.request(); const v = new URL(req.url()).pathname.slice(3); const m = req.method();
     const body = req.postData() ? JSON.parse(req.postData()) : undefined;
     const call = `${m} ${v}`;
@@ -109,12 +113,16 @@ const serve = async (context, n) => {
     if (call === 'PUT /node/settings') { if (body.sources_policy) n.policy = body.sources_policy; return json({}); }
     if (call === 'POST /node/token') return json({ token: NEW_TOKEN });
     if (call === 'GET /me/sign-ins') return json(n.mine);
+    if (call === 'GET /node/app-passwords') return json(n.apps);
+    if (call === 'POST /node/app-passwords') { const a = { id: `new${n.apps.length}`, name: body.name, created_at: T0 }; n.apps.unshift(a); return json({ ...a, password: MADE_FOR_APP }); }
+    if (m === 'DELETE' && seg[1] === 'app-passwords' && seg.length === 3) { const had = n.apps.some((a) => a.id === seg[2]); n.apps = n.apps.filter((a) => a.id !== seg[2]); return had ? json({ removed: true }) : json({ error: 'no such app password' }, 404); }
     if (call === 'DELETE /me/sign-ins') { const before = n.mine.length; n.mine = n.mine.filter((s) => s.current); return json({ ended: before - n.mine.length }); }
     if (m === 'DELETE' && seg[0] === 'me' && seg.length === 3) { const had = n.mine.some((s) => s.id === seg[2]); n.mine = n.mine.filter((s) => s.id !== seg[2]); return had ? json({ ended: 1 }) : json({ error: 'no such sign-in' }, 404); }
     if (call === 'GET /party') return json(n.parties);
     if (call === 'POST /party') { const pt = { id: `p${n.parties.length + 1}`, name: body.name || 'Party', zone: body.zone, zone_name: (ZONES.find((z) => z.id === body.zone) || {}).name, created_at: T0, expires_at: T0 + body.hours * 3600, adds_per_hour: body.adds_per_hour, waiting_per_guest: body.waiting_per_guest, guests: [], added: 0, url: `${ORIGIN}/party/abcdefghijklmnopqrstuvwxyz0123456789`, qr_svg: QR }; n.parties.push(pt); return json(pt); }
     if (m === 'DELETE' && seg[0] === 'party') { n.parties = n.parties.filter((p) => p.id !== seg[1]); return json({}); }
-    if (call === 'GET /people') return json({ owner: null, people: n.people, invites: n.invites, homeserver: n.homeserver });
+    // (`unfinished`: the people whose removal did not finish, as the node remembers them; left out when none)
+    if (call === 'GET /people') return json({ owner: null, people: n.people, invites: n.invites, homeserver: n.homeserver, ...(n.leftover.size ? { unfinished: [...n.leftover] } : {}) });
     // The zones as a node of this version keeps them (`none`: no zone at all; an empty id is refused
     // without it). `n.olderZones`: as a node before it does (no `none` in its answers, the list kept
     // as sent: the list of one zone without a name opens no zone there). `n.dropsNone`: answers
@@ -135,7 +143,8 @@ const serve = async (context, n) => {
     }
     if (m === 'DELETE' && seg[1] === 'invites') { n.invites = n.invites.filter((i) => i.id !== seg[2]); return json({ forgotten: seg[2] }); }
     // (someone taken off the list by a removal that then failed: removing again finishes it)
-    if (m === 'DELETE' && seg.length === 2 && n.leftover.has(seg[1])) { n.leftover.delete(seg[1]); return json({ people: n.people, invites: n.invites }); }
+    // (`n.nothingLeft`: finished elsewhere meanwhile: the node answers that there is nobody by that key)
+    if (m === 'DELETE' && seg.length === 2 && n.leftover.has(seg[1])) { n.leftover.delete(seg[1]); return n.nothingLeft ? json({ error: 'no such person' }, 404) : json({ people: n.people, invites: n.invites }); }
     const p = n.people.find((x) => x.key === seg[1]);
     if (!p) return json({ error: 'no such person' }, 404);
     if (m === 'PATCH') {
@@ -217,9 +226,9 @@ const atLoopback = async (context) => {
         if (!phone) assert.equal((await page.locator('#settab-people').innerText()).trim(), 'People & access');
         assert.equal(await page.locator('#set-people .set-title').innerText(), 'People & access');
         const heads = await box.locator('h3.set-h').allInnerTexts();
-        assert.deepEqual(heads.map((h) => h.toLowerCase()), ['who can use this node', 'add someone', 'what people you add can do', 'zones they can play on', 'whose music services they play with', 'browsers and apps signed in as you', 'password for apps (api token)', 'party', 'also in settings'], 'the sections, in order');
+        assert.deepEqual(heads.map((h) => h.toLowerCase()), ['who can use this node', 'add someone', 'what people you add can do', 'zones they can play on', 'whose music services they play with', 'browsers and apps signed in as you', 'apps with their own password', 'password for apps (api token)', 'party', 'also in settings'], 'the sections, in order');
         if (phone) {
-          assert.equal(await box.locator('details[data-fold]').count(), 8, 'on a phone each section is a fold');
+          assert.equal(await box.locator('details[data-fold]').count(), 9, 'on a phone each section is a fold');
           assert.equal(await box.locator('details[data-fold="who"]').getAttribute('open'), '', 'the people are open');
           assert.equal(await box.locator('details[data-fold="party"][open]').count(), 0, 'Party is shut');
         } else assert.equal(await box.locator('[data-fold]').count(), 0, 'no folds off phones');
@@ -551,6 +560,35 @@ const atLoopback = async (context) => {
         assert.equal(calls(n, 'DELETE /me/sign-ins').length, 1);
         assert.equal(await mine.locator('[data-si-all]').count(), 0, 'nothing to sign out when there are no others');
 
+        // 7a. Apps with their own password: listed, one removed after asking, a new one shown once
+        await openSec('apps');
+        const apps = box.locator('#papps');
+        await apps.locator('[data-ap="ha"]').waitFor();
+        assert.match(await apps.locator('[data-ap="ha"]').innerText(), /Home Assistant[\s\S]*made 11\/18\/2026 · last used 11\/20\/2026/);
+        assert.match(await apps.locator('[data-ap="sy"]').innerText(), /Symfonium[\s\S]*not used yet/);
+        await apps.locator('[data-ap-del="sy"]').click();
+        assert.match(await dialog.innerText(), /Remove the password of Symfonium\?[\s\S]*Symfonium stops working with this node at once/);
+        await dialog.locator('[data-ci="-1"]').click();
+        await settled();
+        assert.equal(calls(n, 'DELETE /node/app-passwords/sy').length, 0, 'Cancel sent nothing');
+        await apps.locator('[data-ap-del="sy"]').click();
+        await dialog.locator('.choice', { hasText: 'Remove' }).click();
+        await apps.locator('[data-ap="sy"]').waitFor({ state: 'detached' });
+        await settled();
+        assert.equal(calls(n, 'DELETE /node/app-passwords/sy').length, 1);
+        await apps.locator('#apgo').click();
+        assert.equal(await apps.locator('#apnameerr').isVisible(), true, 'a name is asked for first');
+        assert.equal(calls(n, 'POST /node/app-passwords').length, 0);
+        await apps.locator('#apname').fill('Kitchen tablet');
+        await apps.locator('#apgo').click();
+        await apps.locator('[data-ap-made]').waitFor();
+        await settled();
+        assert.deepEqual(calls(n, 'POST /node/app-passwords').map((c) => c.body), [{ name: 'Kitchen tablet' }], 'made once');
+        assert.equal(await apps.locator('[data-ap-made]').innerText(), MADE_FOR_APP);
+        assert.match(await apps.locator('[data-ap="new1"]').innerText(), /Kitchen tablet[\s\S]*not used yet/);
+        assert.equal(await apps.locator('#apname').inputValue(), '', 'the name field is empty again');
+        assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.textContent.trim()), 'Copy', 'the focus on Copy');
+
         // 8. Party: a list that can't be read says so, with Retry (not "no parties")
         await openSec('party');
         await box.locator('#ptgo').click();
@@ -574,7 +612,7 @@ const atLoopback = async (context) => {
         assert.equal(await box.locator('[data-settab="remote"]').count(), 0, 'no row for a tab this node doesn’t have');
 
         // The words: no jargon in what a person reads, Bookmarks and Collections
-        for (const id of ['who', 'invite', 'cando', 'zones', 'services', 'mine', 'password', 'party']) await openSec(id);
+        for (const id of ['who', 'invite', 'cando', 'zones', 'services', 'mine', 'apps', 'password', 'party']) await openSec(id);
         plainWords(await box.innerText(), 'the owner’s screen');
         await cleanCopy(page);
         await shot(page, width, `owner-${width}-all-sections.png`);
@@ -678,6 +716,47 @@ const atLoopback = async (context) => {
         await errs.first().locator('[data-pa-reload]').click();
         await until(async () => (await page.locator('#peoplebox [data-pa-error]').count()) === 0 && (await page.locator('#peoplebox [data-srcpolicy]').count()) === 3, 'the settings read again');
         assert.equal(await page.locator('#peoplebox [data-srcpolicy="own"]').getAttribute('aria-checked'), 'true');
+        assert.deepEqual(state.errors, [], 'no page errors');
+        await context.close();
+      }
+      // A removal that did not finish on an earlier visit: the node remembers it, so the person is
+      // still on the screen (off the node's list, without a name) with Remove, which finishes it; and
+      // when nothing of theirs is left after all, that is said and the row goes
+      if (!phone) {
+        for (const nothingLeft of [false, true]) {
+          const n = node({ leftover: new Set([DI]), nothingLeft });
+          n.people = n.people.filter((p) => p.key !== DI);
+          const { context, page, state } = await owner(browser, width, n);
+          const box = page.locator('#peoplebox');
+          const gone = box.locator(`[data-person="${DI}"][data-pgone]`);
+          await gone.waitFor();
+          assert.match(await gone.innerText(), /^Someone you removed \(key ybndrf…[a-z0-9]{10}\)\s+Removing them did not finish\. Remove again to finish it\.\s+Remove…$/);
+          assert.equal(await gone.locator('[data-premove-err]').getAttribute('role'), null, 'not announced again on every draw');
+          await gone.locator('[data-premove]').click();
+          await page.locator('dialog.dialog .choice').click();
+          await page.locator('#toast', { hasText: nothingLeft ? /^Nothing of this person is left on this node$/ : /^Removed this person$/ }).waitFor();
+          await gone.waitFor({ state: 'detached' });
+          await sleep(150);
+          assert.equal(calls(n, `DELETE /people/${DI}`).length, 1, 'sent once');
+          assert.equal(await box.locator('[data-premove-err]').count(), 0, 'nothing is left to finish');
+          await cleanCopy(page);
+          assert.deepEqual(state.errors, [], 'no page errors');
+          await context.close();
+        }
+      }
+      // The same for someone who is still listed (a homeserver account, no sign-in left): Remove is
+      // offered on their own row, which otherwise has none
+      if (!phone) {
+        const n = node({ leftover: new Set([CY]) });
+        const { context, page, state } = await owner(browser, width, n);
+        const box = page.locator('#peoplebox');
+        const cy = box.locator(`[data-person="${CY}"]`);
+        await cy.locator('[data-premove-err]').waitFor();
+        assert.equal(await cy.locator('[data-premove-err]').innerText(), 'Removing them did not finish. Remove again to finish it.');
+        assert.equal(await cy.locator('[data-premove]').count(), 1, 'Remove is offered though they have no sign-in left');
+        assert.equal(await box.locator('[data-pgone]').count(), 0, 'no second row: they are listed');
+        assert.equal(await box.locator(`[data-person="${BO}"] [data-premove-err]`).count(), 0, 'nobody else is marked');
+        await cleanCopy(page);
         assert.deepEqual(state.errors, [], 'no page errors');
         await context.close();
       }
@@ -808,7 +887,7 @@ const atLoopback = async (context) => {
           assert.deepEqual(state.errors, [], 'no page errors');
           await context.close();
         }
-        // What the node says the caller can do decides the controls: Ungroup needs `zone_manage`, the
+        // What the node says the caller can do decides the controls: Ungroup needs `zone_group`, the
         // owner's chores in the status chip need `settings`
         for (const [who, me, ungroup, chip] of [
           ['the owner', { role: 'owner', key: null, zones: null, can: OWNER_CAN }, 1, /^Change the API token · 1 more$/],

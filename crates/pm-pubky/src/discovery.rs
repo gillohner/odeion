@@ -203,19 +203,6 @@ impl Discovery {
             Err(e) => Err(e.into()),
         }
     }
-
-    /// Fill `taggers` on each item from Nexus; items Nexus does not know keep
-    /// `None`. One request per item: keep pages small.
-    pub async fn hydrate_taggers(&self, items: &mut [DiscoveredItem]) -> Result<(), DiscoveryError> {
-        for item in items.iter_mut() {
-            match self.nexus.resource_by_uri(&item.card.uri).await {
-                Ok(view) => item.taggers = Some(view.distinct_taggers() as u32),
-                Err(NexusError::NotFound) => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]

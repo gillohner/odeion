@@ -79,7 +79,21 @@ jobs:
       - run: bash "$GITHUB_WORKSPACE/tools/ci/apt-fallback.sh" && sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # cargo-nextest runs the test binaries side by side (cargo test runs them one after another,
+      # so the slowest binaries set the job's length). A pinned release, checked by its SHA-256.
+      - name: install cargo-nextest
+        env:
+          NEXTEST: "0.9.152"
+          NEXTEST_SHA256: d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a
+        run: |
+          f="cargo-nextest-$NEXTEST-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$f" "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST/$f"
+          echo "$NEXTEST_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$HOME/.cargo/bin"
+          cargo nextest --version
+      - run: cargo nextest run --workspace --profile ci
+      # nextest does not run doctests.
+      - run: cargo test --workspace --doc
       # The ALSA output only compiles with libasound; its unit tests need no hardware.
       - run: cargo clippy -p pm-node -p pm-out-local -p pm-endpoint --all-targets --features alsa -- -D warnings
       # The cross-platform output compiles on Linux too (cpal uses ALSA there).
@@ -385,7 +399,9 @@ jobs:
       - name: the node's CI image
         run: |
           cp target/debug/odeiond deploy/docker/entrypoint.sh deploy/bundle/ci/
-          docker build -q --build-arg APT_MIRROR="${APT_FALLBACK_MIRROR:-}" -t pubky-music-node:ci deploy/bundle/ci
+          # Plain progress, so a stall shows its step. Without a fallback mirror the container's apt
+          # uses the Azure Ubuntu mirror, not the plain-HTTP archive hosts.
+          docker build --progress=plain --build-arg APT_MIRROR="${APT_FALLBACK_MIRROR:-http://azure.archive.ubuntu.com/ubuntu}" -t pubky-music-node:ci deploy/bundle/ci
           # The image carries ffmpeg with the encoders downloads use
           docker run --rm --entrypoint ffmpeg pubky-music-node:ci -hide_banner -encoders | grep -E ' aac | libmp3lame | libopus ' | wc -l | grep -qx 3
       - name: docker compose up

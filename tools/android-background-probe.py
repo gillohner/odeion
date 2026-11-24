@@ -160,7 +160,7 @@ def connect_app():
     except RuntimeError:
         # What the screen showed instead (kept with the run's artifacts)
         subprocess.run(["adb", "exec-out", "screencap", "-p"], stdout=open(out / "connect-timeout.png", "wb"), check=False)
-        (out / "connect-timeout-ui.txt").write_text("\n".join(ui_nodes()))
+        (out / "connect-timeout-ui.txt").write_text("\n".join(ui_nodes(evidence=True)))
         raise
     until("the player service", lambda: "player service started" in ep.logcat(), timeout=90)
 
@@ -557,7 +557,7 @@ def main():
             # inner handler covered only the later node-page wait, hiding startup failures.
             shot("connect-failed")
             try:
-                (out / "connect-failed-ui.txt").write_text("\n".join(ui_nodes()))
+                (out / "connect-failed-ui.txt").write_text("\n".join(ui_nodes(evidence=True)))
                 dump("connect-failed-activity", "activity", "activities")
                 dump("connect-failed-window", "window", "windows")
             except Exception as evidence_error:

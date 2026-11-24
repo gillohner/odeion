@@ -49,10 +49,6 @@ impl AudioFormat {
     pub const DSD256_RATE: u32 = 11_289_600;
     pub const DSD512_RATE: u32 = 22_579_200;
 
-    pub fn is_pcm(&self) -> bool {
-        self.kind == SampleKind::Pcm
-    }
-
     pub fn is_dsd(&self) -> bool {
         self.kind == SampleKind::Dsd
     }

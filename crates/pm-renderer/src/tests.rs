@@ -46,15 +46,30 @@ fn soap(service: &str, action: &str, args: &str) -> String {
     )
 }
 
+/// A SOAP call as a control point sends it: an XML body and the `SOAPACTION` header.
 async fn post(app: &Router, path: &str, body: String) -> (StatusCode, String) {
+    let action = xml::parse_call(&body).map(|c| c.action).unwrap_or_default();
+    let soapaction = format!("\"urn:schemas-upnp-org:service:AVTransport:1#{action}\"");
+    post_with(
+        app,
+        path,
+        &[
+            ("content-type", "text/xml; charset=\"utf-8\""),
+            ("soapaction", &soapaction),
+        ],
+        body,
+    )
+    .await
+}
+
+async fn post_with(app: &Router, path: &str, headers: &[(&str, &str)], body: String) -> (StatusCode, String) {
+    let mut req = Request::post(path);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
     let resp = app
         .clone()
-        .oneshot(
-            Request::post(path)
-                .header("content-type", "text/xml")
-                .body(Body::from(body))
-                .unwrap(),
-        )
+        .oneshot(req.body(Body::from(body)).unwrap())
         .await
         .unwrap();
     let st = resp.status();
@@ -416,4 +431,49 @@ async fn subscriptions_are_capped_per_controller() {
         .body(Body::empty())
         .unwrap();
     assert_eq!(app.clone().oneshot(renew).await.unwrap().status(), StatusCode::OK);
+}
+
+/// A page on another site can post to a zone's control URL through a visitor's browser, but only
+/// as a "simple" request: no `SOAPACTION`, and a text/plain, form or no body type. Such a call
+/// is refused; a control point's call (`SOAPACTION`, as BubbleUPnP, Kodi and gupnp send it)
+/// still works.
+#[tokio::test]
+async fn control_takes_only_soap_calls_a_browser_cannot_send_unasked() {
+    let (r, host) = renderer();
+    let app = r.router();
+    let play = || soap(xml::AVT, "Play", "<Speed>1</Speed>");
+    let action = "\"urn:schemas-upnp-org:service:AVTransport:1#Play\"";
+    for headers in [
+        // What a form or a no-cors fetch on another site sends
+        vec![("content-type", "text/plain")],
+        vec![("content-type", "application/x-www-form-urlencoded")],
+        vec![("content-type", "multipart/form-data; boundary=x")],
+        vec![],
+        // An XML body without the action header, and the header with a simple body
+        vec![("content-type", "text/xml")],
+        vec![("content-type", "text/plain"), ("soapaction", action)],
+        vec![("content-type", "multipart/form-data"), ("soapaction", action)],
+        // An empty action
+        vec![("content-type", "text/xml"), ("soapaction", "")],
+    ] {
+        let (st, body) = post_with(&app, "/upnp/zone/kitchen/ctl/avt", &headers, play()).await;
+        assert!(st.is_client_error(), "{headers:?}: {st} {body}");
+    }
+    assert!(host.acts.lock().unwrap().is_empty(), "the zone was never asked");
+    let types = [
+        Some("text/xml"),
+        Some("text/xml; charset=\"utf-8\""),
+        Some("text/xml;charset=utf-8"),
+        Some("application/soap+xml"),
+        Some("application/xml"),
+        Some("TEXT/XML"),
+        None,
+    ];
+    for ct in types {
+        let mut headers = vec![("soapaction", action)];
+        headers.extend(ct.map(|ct| ("content-type", ct)));
+        let (st, body) = post_with(&app, "/upnp/zone/kitchen/ctl/avt", &headers, play()).await;
+        assert_eq!(st, StatusCode::OK, "{ct:?}: {body}");
+    }
+    assert_eq!(host.acts.lock().unwrap().len(), types.len());
 }
