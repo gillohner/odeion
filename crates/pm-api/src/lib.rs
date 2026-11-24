@@ -30095,6 +30095,11 @@ exec sleep 300
             }
         };
         assert_eq!(bearer("s3cret".into()).await, StatusCode::OK);
+        // The right `?token=` gets past the check (no output of that name here: 404, not 401)
+        assert_eq!(
+            get("/v1/outputs/pull/den/stream.wav?token=s3cret".into()).await,
+            StatusCode::NOT_FOUND
+        );
         for wrong in ["s3crex", "s3cre", "s3cret0", ""] {
             assert_eq!(bearer(wrong.into()).await, StatusCode::UNAUTHORIZED, "{wrong}");
             assert_eq!(
