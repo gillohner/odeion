@@ -50,6 +50,7 @@ ui-downloads-rows.js downloads-rows-shots
 ui-android-media.js android-media-shots
 ui-phone-library-targets.js phone-library-targets-shots
 ui-drive-return.js drive-return-shots
+ui-unknown-address.js unknown-address-shots
 ui-drive-folders.js drive-folders-shots
 ui-phone-back-targets.js phone-back-targets-shots
 ui-back-tooltip.js back-tooltip-shots

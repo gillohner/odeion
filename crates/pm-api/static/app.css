@@ -394,6 +394,7 @@ html:not([data-shell="phone"]) .lyric-lines { overscroll-behavior: contain; }
   background: var(--surface-3); color: var(--fg); border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
   padding: var(--sp-2h) var(--sp-3h); border-radius: var(--r-md); box-shadow: var(--shadow); opacity: 0; pointer-events: none; z-index: var(--z-toast);
   transition: opacity var(--dur-base) var(--ease), transform var(--dur-base) var(--ease); max-width: min(90vw, 520px);
+  overflow-wrap: anywhere; /* a long address or name wraps inside it, not past the screen */
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { border-left-color: var(--bad); }

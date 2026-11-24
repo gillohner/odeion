@@ -5416,6 +5416,16 @@
     const v = p.slice(1);
     return NAV_VIEWS.includes(v) ? { v } : null;
   };
+  // An address that is no page (/settings/you, a mistyped /library/<tab>, an id the app can't read)
+  // opens the nearest page, Settings or Your library, else Home, and says so (not Home without a word).
+  const missedRoute = () => {
+    const p = location.pathname.replace(/\/+$/, '') || '/';
+    if (p === '/' || p === '/app') return null;
+    let said = p; try { said = decodeURI(p); } catch { /* kept as typed */ }
+    const top = p.split('/')[1].toLowerCase(); const ch = Array.from(said);
+    // (the offline Android app routes before this: it opens Downloads, as before)
+    return { v: top === 'settings' || top === 'library' ? top : 'home', said: ch.length > 60 ? ch.slice(0, 59).join('') + '…' : said };
+  };
   // The same thing gets the same page (docs/ux/08-item-page.md): old detail views open the item page.
   const SERVICE_PAGE = { tidal: (k, id) => `https://tidal.com/${k}/${id}`, deezer: (k, id) => `https://www.deezer.com/${k}/${id}`, spotify: (k, id) => `https://open.spotify.com/${k}/${id}` };
   const toItem = (v, arg) => {
@@ -12103,7 +12113,8 @@
           history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search);
           // A saved search's source applies to its first request, before the view is drawn.
           runSearch('pop', r.arg.in || 'everywhere');
-        } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace');
+        } else if (r) setView(r.v, r.arg, 'replace');
+        else { const m = missedRoute(); setView(m ? m.v : state.view, undefined, 'replace'); if (m) toast(`No page at ${m.said}`); }
       }
       if (signinBack) { const b = signinBack; signinBack = null; state.signinFailed = b.why ? { svc: b.svc, why: b.why } : null; toast(b.text, b.kind); if (isListener()) setView('settings'); else setView('sources', { source: b.svc }); }
       link.loaded = true;
