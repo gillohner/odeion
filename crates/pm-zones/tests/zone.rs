@@ -216,7 +216,8 @@ impl SourceFactory for Factory {
             } else {
                 SeekKind::Works
             },
-            broken: false,
+            // (`baddecode`: opens, and its first block does not decode)
+            broken: item.uri.contains("baddecode"),
         }))
     }
 
@@ -1229,6 +1230,65 @@ async fn repeat_one_and_queue_edits_while_playing() {
     assert_eq!(starts[1], "start:a:true");
     assert_eq!(*starts.last().unwrap(), "start:b:true");
     assert_eq!(*r.rec.opens.lock().unwrap(), 1);
+}
+
+/// With Repeat on, an item that gives no audio (an empty file, a first block that does not
+/// decode) is not started over and over: once Repeat comes round to it with nothing played in
+/// between, the zone stops and says why. A queue that has a song that plays goes on repeating.
+#[tokio::test]
+async fn repeat_does_not_spin_on_items_that_give_no_audio() {
+    let starts = |evs: &[ZoneEvent]| kinds(evs).into_iter().filter(|k| k.starts_with("start:")).count();
+    // One empty item on Repeat One; one that fails at its first block on Repeat All
+    for (uri, repeat) in [("empty", Repeat::One), ("baddecode", Repeat::All)] {
+        let mut r = rig(&[(uri, RATE, if uri == "empty" { 0 } else { 100 })]);
+        r.zone.set_repeat(repeat);
+        r.zone.enqueue(vec![QueueItem::new(uri)], Insert::End);
+        r.zone.play();
+        let st = tokio::time::timeout(Duration::from_secs(5), r.zone.wait_stopped())
+            .await
+            .unwrap_or_else(|_| panic!("{uri}: the zone goes on starting it"));
+        assert_eq!(
+            st.error.as_deref(),
+            Some("stopped at an item that gives no audio"),
+            "{uri}"
+        );
+        assert_eq!(starts(&drain_events(&mut r.events)), 1, "{uri}: started once");
+        assert!(r.rec.samples.lock().unwrap().is_empty());
+    }
+    // A queue of nothing but such items, Repeat All: one round, then the same
+    let mut r = rig(&[("empty", RATE, 0), ("empty2", RATE, 0)]);
+    r.zone.set_repeat(Repeat::All);
+    r.zone.enqueue(
+        vec![QueueItem::new("empty"), QueueItem::new("empty2")],
+        Insert::End,
+    );
+    r.zone.play();
+    let st = tokio::time::timeout(Duration::from_secs(5), r.zone.wait_stopped())
+        .await
+        .expect("the zone goes on starting them");
+    assert_eq!(
+        st.error.as_deref(),
+        Some("stopped at an item that gives no audio")
+    );
+    assert_eq!(starts(&drain_events(&mut r.events)), 2);
+    // Beside a song that plays, the empty item is passed each round and Repeat goes on
+    let mut r = rig(&[("a", RATE, 100), ("empty", RATE, 0)]);
+    r.zone.set_repeat(Repeat::All);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("empty")], Insert::End);
+    r.zone.play();
+    r.gate.allow(3);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+    assert_eq!(r.zone.state().error, None);
+    r.zone.set_repeat(Repeat::Off);
+    r.gate.allow(1000);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    let k = kinds(&drain_events(&mut r.events));
+    assert!(
+        k.iter().filter(|k| k.starts_with("start:empty")).count() >= 3,
+        "{k:?}"
+    );
 }
 
 #[tokio::test]
