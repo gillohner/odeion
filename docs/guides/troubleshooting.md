@@ -71,6 +71,15 @@ its first start and keeps it in the `api-token` file in its data folder. Where i
 DHT": the homeserver needs the internet when it starts, to publish its address. It starts by
 itself once the machine is online again (after a power cut, the router may come up later).
 
+## The node is down after a reboot, the rest runs (own homeserver)
+
+`docker compose ps -a` shows the music container as `Exited (255)`, and
+`docker inspect -f '{{.State.Error}}' pubky-music-music-1` names a share that did not mount (for
+example "no route to host"): the network share the node mounts was not there yet when the machine
+started, and Docker doesn't try again. `docker compose up -d` in the bundle's folder starts it.
+So it doesn't happen again, install the bundle's start at boot once: `sudo ./start-at-boot.sh`
+([deploy.md](../deploy.md#with-its-own-pubky-homeserver-bundled)).
+
 ## The node doesn't start: "Permission denied" on /data
 
 The data folder must be writable by user id 1000. With a folder instead of a Docker volume:
