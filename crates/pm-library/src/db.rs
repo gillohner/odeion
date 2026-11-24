@@ -498,7 +498,7 @@ fn schema_to_upgrade(path: &Path) -> Option<(i64, Connection)> {
     if !std::fs::metadata(path).is_ok_and(|m| m.len() > 0) {
         return None;
     }
-    let conn = Connection::open(path).ok()?;
+    let mut conn = Connection::open(path).ok()?;
     conn.busy_handler(Some(wait_for_writer)).ok()?;
     let found = schema_version_of(&conn)?;
     let known = MIGRATIONS.last().map_or(0, |(v, _)| *v);
