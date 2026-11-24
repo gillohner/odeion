@@ -423,8 +423,11 @@ everything needed to rebuild the node, never the audio:
   lists which services to sign in to again. Nothing opens them without the passphrase.
 
 **Every day or week, to a folder:** the same card writes backups to a folder on the node (another
-disk or a NAS) and keeps the newest N. A passphrase saved there stays on this node and is never
-put in a backup. `GET /v1/backup` serves a backup without sign-ins for a cron job.
+disk or a NAS) and keeps the newest N. Each file's name ends with the first 8 characters of the
+node's id (`pubky-music-<date>-<time>-<id>.pmbackup`), and only this node's scheduled files are
+ever removed: another node's in the same folder, and backups downloaded from Settings and saved
+there, stay. A new file is synced to disk and read back before any older one is removed. A passphrase saved there
+stays on this node and is never put in a backup. `GET /v1/backup` serves a backup without sign-ins for a cron job.
 
 **Restore** on a new node: Home's Get started card links to it, or Settings → Backup and restore →
 Choose a backup file. The node checks the file and shows what it holds first, then swaps the
