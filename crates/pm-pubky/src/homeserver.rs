@@ -1420,7 +1420,8 @@ impl NodeHomeserver {
         Ok(())
     }
 
-    /// Download a private file into `dest` as it arrives (no whole file in memory), no faster
+    /// Download a private file into a new file `dest` (an error when it is there) as it arrives
+    /// (no whole file in memory), no faster
     /// than `bytes_per_sec` when set; `progress` hears each chunk's size and returns `false` to
     /// stop (the partial file is removed). Returns the bytes written.
     pub async fn download_private_to(
@@ -1434,7 +1435,7 @@ impl NodeHomeserver {
         use tokio::io::AsyncWriteExt;
         let io = |e: std::io::Error| HomeserverError::Transport(format!("{}: {e}", dest.display()));
         let mut resp = within(STALL_TIMEOUT, async { Ok(session.storage().get(path).await?) }).await?;
-        let mut file = tokio::fs::File::create(dest).await.map_err(io)?;
+        let mut file = new_download_file(dest).await.map_err(io)?;
         let start = tokio::time::Instant::now();
         let mut written: u64 = 0;
         // No limit on the whole download (a big file at a paced rate takes long), only on a stall
@@ -2378,6 +2379,46 @@ mod object_tests {
             "read {} bytes of the one that didn't",
             sent[2]
         );
+    }
+}
+
+/// The file a download is written into: a new one only, never one that is there or what a link
+/// there leads to (`AlreadyExists` then, and that file is not touched).
+async fn new_download_file(dest: &std::path::Path) -> std::io::Result<tokio::fs::File> {
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .await
+}
+
+#[cfg(test)]
+mod download_file_tests {
+    use super::new_download_file;
+
+    /// A download never opens a file that is there, nor through a link there: neither is cut
+    /// short, and the error says it is there.
+    #[tokio::test]
+    async fn a_download_never_writes_into_a_file_that_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let there = dir.path().join("1.part");
+        std::fs::write(&there, b"kept").unwrap();
+        let e = new_download_file(&there).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&there).unwrap(), b"kept");
+        #[cfg(unix)]
+        {
+            let elsewhere = dir.path().join("elsewhere.flac");
+            std::fs::write(&elsewhere, b"a song").unwrap();
+            let link = dir.path().join("2.part");
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+            let e = new_download_file(&link).await.unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(&elsewhere).unwrap(), b"a song");
+        }
+        let fresh = dir.path().join("3.part");
+        drop(new_download_file(&fresh).await.unwrap());
+        assert!(fresh.is_file());
     }
 }
 

@@ -28206,4 +28206,52 @@ exec sleep 300
         .await;
         assert_eq!((st, v["ended"].as_u64()), (StatusCode::OK, Some(0)), "{v}");
     }
+
+    /// A bring that was cancelled is not started again after a restart; the part folder its
+    /// record names is cleared and the record goes. A part folder of another name stays.
+    #[tokio::test]
+    async fn a_cancelled_bring_is_not_started_again_and_its_parts_go() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let dest = src.join("brought");
+        for name in [".odeion-bring-old", ".odeion-bring-other"] {
+            std::fs::create_dir_all(dest.join(name)).unwrap();
+            std::fs::write(dest.join(name).join("1.part"), b"x").unwrap();
+        }
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                files::BRING_RESUME_KEY,
+                &serde_json::json!({"dest": dest, "parts": ".odeion-bring-old", "cancelled": true})
+                    .to_string(),
+            )
+            .unwrap();
+        files::resume_jobs(&s);
+        let mut gone = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if s.library
+                .lock()
+                .unwrap()
+                .get_setting(files::BRING_RESUME_KEY)
+                .unwrap()
+                .is_none()
+            {
+                gone = true;
+                break;
+            }
+        }
+        assert!(gone, "the record of the cancelled bring went");
+        assert!(
+            !dest.join(".odeion-bring-old").exists(),
+            "its part folder was cleared"
+        );
+        assert!(
+            dest.join(".odeion-bring-other/1.part").exists(),
+            "another folder stays"
+        );
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert!(jobs["current"].is_null(), "not started again: {jobs}");
+    }
 }
