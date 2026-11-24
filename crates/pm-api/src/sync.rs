@@ -1476,7 +1476,7 @@ impl PubkySync {
         let read = self.homeserver.read_node_settings(&self.session).await;
         // Tests stop here (the read done, nothing adopted) to replace the session meanwhile
         crate::test_hooks::pause(|| format!("sync.backup_after_read:{}", self.z32)).await;
-        let taken_in = copy_taken_in(&self.lib(&s.library)?, self.z32());
+        let taken_in = copy_taken_in(&*self.lib(&s.library)?, self.z32());
         let copy = match read {
             // A newer version's copy (its format is past this one's): left to the node that wrote
             // it, as prefs.json is (`read_prefs`)
