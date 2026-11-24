@@ -29,6 +29,10 @@ Newest first. Dates are when the change landed on `main`.
 
 - **Screen readers, keyboards and system settings get what they need in more places.** A ⋯ menu is announced as a menu, with a name, and its button says whether it is open. Every dialog is announced by its heading, and a confirmation's question is read with it (before: "dialog, Delete, button"). The mini player's name is the song that plays, not just "Now playing", and Enter on its title or artist opens that page (it opened Now playing). The seek bars read as a time ("1:01 of 4:00", not "254"). The first Tab stop is "Skip to the page". With "reduce motion" set, the page no longer glides when it scrolls. In Windows High Contrast, fields keep their focus mark, the chosen menu item has an outline, and sliders and switches are visible. On a phone, two fingers can zoom Now playing and the mini player. Placeholder text in fields is easier to read in the dark theme (the browser's own grey was about 3.9:1 there).
 
+### 2026-11-23
+
+- **A button that deletes looks like one.** When Odeion asks before it deletes a collection, a comment or a file on your homeserver, removes a song from the library or every download, clears usage events, or makes a new token, the button that goes ahead is now filled with the warning red instead of the accent colour that Save and Play have. A collection's own Delete button and Remove in the selection bar are red at rest, not only under the pointer. Nothing about what the buttons do has changed.
+
 ### 2026-11-22
 
 - **The node stops when asked.** On SIGTERM (`docker stop`, a restart, an update, systemd) or Ctrl-C the node now takes no new request, finishes the ones it is answering, also those that came in through remote access (up to 2 seconds; one that takes longer is ended), stops its zones for good (nothing starts one again while the node winds down, and a zone that appears in that time is closed too), folds the library's write-ahead log into its file and exits. In a container it used to ignore SIGTERM (it is the container's first process), so every stop waited out Docker's 10 seconds and ended in a kill.

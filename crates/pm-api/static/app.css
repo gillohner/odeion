@@ -22,6 +22,8 @@
   --ok: #4fcf7f;
   --warn: #e8b24a;
   --bad: #ef6b6b;
+  /* (the warning colour as a button's words: nearer the text colour, so it reads on every surface in both themes) */
+  --bad-ink: color-mix(in srgb, var(--bad) 80%, var(--fg));
   --info: #5aa9ff;
   --q-bit: #a496ff;
   --q-enh: #5aa9ff;
@@ -426,7 +428,12 @@ html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44p
 .btn.primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
 .btn.ghost { background: none; border-color: transparent; color: var(--fg-2); }
 .btn.ghost:hover { background: var(--surface-2); color: var(--fg); }
-.btn.danger:hover { border-color: var(--bad); color: var(--bad); }
+/* A button that deletes, removes or ends something: in the warning colour at rest, not only under
+   the pointer; filled when it is a dialog's main choice (which was the accent colour, like Save) */
+.btn.danger { border-color: color-mix(in srgb, var(--bad) 55%, var(--line-strong)); background: none; color: var(--bad-ink); }
+.btn.danger:hover { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+.btn.primary.danger { background: var(--bad); border-color: var(--bad); color: var(--on-accent); }
+.btn.primary.danger:hover { background: color-mix(in srgb, var(--bad) 86%, var(--fg)); border-color: color-mix(in srgb, var(--bad) 86%, var(--fg)); }
 .btn.sm { padding: 5px var(--sp-2h); font-size: var(--fs-sm); }
 .btn.heart.on { color: #ff6b8a; border-color: rgba(255, 107, 138, 0.4); }
 .actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
