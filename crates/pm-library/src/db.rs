@@ -5523,7 +5523,9 @@ mod tests {
 
     /// Two folders whose names differ only in case are two folders: removing, scanning or
     /// counting one leaves the other's songs alone (`LIKE` ignored the case). A folder name with
-    /// `_` or `%` in it matches only itself.
+    /// `_` or `%` in it matches only itself. (Unix: its paths are written with `/`, and folder
+    /// names differ only in case only where the file system tells case apart.)
+    #[cfg(unix)]
     #[test]
     fn folders_that_differ_only_in_case_are_kept_apart() {
         let lib = Library::open_in_memory().unwrap();
