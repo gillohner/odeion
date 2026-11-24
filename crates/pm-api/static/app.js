@@ -11076,6 +11076,8 @@
 
             // 1. Who can use this node: you, then each person with what they can do in one sentence
             const who = (p) => p.name || 'this person';
+            // People whose removal did not finish, as the node remembers them (GET /v1/people `unfinished`)
+            const unfinished = r && Array.isArray(r.unfinished) ? r.unfinished : [];
             const whoLabel = (p) => p.name || `the person with the key ${shortKey(p.key)}`;
             const plays = (p) => !!p.music_enabled && p.access !== 'homeserver';
             const signInsOf = (p) => (Array.isArray(p.sign_ins) ? p.sign_ins : []);
@@ -11103,14 +11105,18 @@
                 + (p.access !== 'music' && onHs ? `<button class="btn sm" data-phs="${k}" data-to="${hsOn ? 'off' : 'on'}" data-fk="hs:${k}" aria-label="Switch the homeserver account ${hsOn ? 'off' : 'on'} for ${a}">Switch homeserver account ${hsOn ? 'off' : 'on'}</button><button class="btn sm" data-pquota="${k}" data-fk="quota:${k}" aria-label="Storage limit for ${a}">Storage limit…</button>` : '')
                 // (someone who only has a homeserver account and no sign-in left has nothing here to remove:
                 // the account itself stays on the homeserver either way; unless their last Remove failed)
-                + (p.access === 'homeserver' && !signInsOf(p).length && !removeFailed.has(p.key) ? '' : `<button class="btn sm danger" data-premove="${k}" data-fk="remove:${k}" aria-label="Remove ${a}">Remove…</button>`);
+                + (p.access === 'homeserver' && !signInsOf(p).length && !removeFailed.has(p.key) && !unfinished.includes(p.key) ? '' : `<button class="btn sm danger" data-premove="${k}" data-fk="remove:${k}" aria-label="Remove ${a}">Remove…</button>`);
             };
-            const failedNote = (key) => (removeFailed.has(key) ? `<p class="set-help pa-err" role="alert" data-premove-err>Removing them did not finish: ${esc(removeFailed.get(key).error)} Remove again to finish it.</p>` : '');
+            // (what the node said on this visit; after a reload the node only says that it did not finish)
+            const failedNote = (key) => (removeFailed.has(key) ? `<p class="set-help pa-err" role="alert" data-premove-err>Removing them did not finish: ${esc(removeFailed.get(key).error)} Remove again to finish it.</p>` : unfinished.includes(key) ? '<p class="set-help pa-err" data-premove-err>Removing them did not finish. Remove again to finish it.</p>' : '');
             const person = (p) => `<div class="set-row set-block pa-person" data-person="${esc(p.key)}"><div class="set-label"><div class="set-name">${p.name ? esc(p.name) : 'No name yet'}</div><p class="set-help" data-psays>${esc(says(p))}</p>${failedNote(p.key)}${store(p)}${signIns(p)}${fold(`key:${p.key}`, 'Show key', `<div class="pa-keyrow"><code class="pa-code">${esc(p.key)}</code><button class="btn sm ghost" data-copykey="${esc(p.key)}" aria-label="Copy the key of ${esc(whoLabel(p))}">Copy key</button></div>`)}</div><div class="actions pa-acts" role="group" aria-label="Change ${esc(whoLabel(p))}">${acts(p)}</div></div>`;
             const youRow = row('You', 'Owner: you can change everything on this node.', '');
             // (someone the node already took off its list while their removal failed: still here, to finish it)
-            const halfGone = [...removeFailed].filter(([key]) => !r || !r.people.some((p) => p.key === key)).map(([key, f]) => ({ key, name: f.name, access: f.access, sign_ins: [] }));
-            const gonePerson = (p) => `<div class="set-row set-block pa-person" data-person="${esc(p.key)}" data-pgone><div class="set-label"><div class="set-name">${p.name ? esc(p.name) : 'No name yet'}</div>${failedNote(p.key)}</div><div class="actions pa-acts" role="group" aria-label="Change ${esc(whoLabel(p))}"><button class="btn sm danger" data-premove="${esc(p.key)}" data-fk="remove:${esc(p.key)}" aria-label="Remove ${esc(whoLabel(p))}">Remove…</button></div></div>`;
+            const listed = (key) => !!r && r.people.some((p) => p.key === key);
+            const halfGone = [...removeFailed].filter(([key]) => !listed(key)).map(([key, f]) => ({ key, name: f.name, access: f.access, sign_ins: [] }))
+              // (and the ones the node remembers from before this visit: it keeps no name for them)
+              .concat(unfinished.filter((key) => !listed(key) && !removeFailed.has(key)).map((key) => ({ key, name: null, access: 'music', sign_ins: [], gone: true })));
+            const gonePerson = (p) => `<div class="set-row set-block pa-person" data-person="${esc(p.key)}" data-pgone><div class="set-label"><div class="set-name">${p.name ? esc(p.name) : p.gone ? `Someone you removed (key ${esc(shortKey(p.key))})` : 'No name yet'}</div>${failedNote(p.key)}</div><div class="actions pa-acts" role="group" aria-label="Change ${esc(whoLabel(p))}"><button class="btn sm danger" data-premove="${esc(p.key)}" data-fk="remove:${esc(p.key)}" aria-label="Remove ${esc(whoLabel(p))}">Remove…</button></div></div>`;
             const whoBody = youRow + (rErr ? errRow(`Couldn’t read who else can use this node: ${rErr}`, 'retry-people')
               : r.people.length || halfGone.length ? r.people.map(person).join('') : row('Nobody else yet', 'The people you add show here.', ''))
               + halfGone.map(gonePerson).join('');
@@ -11231,9 +11237,15 @@
                 pinvOut = ''; // (what Add someone said to send them no longer holds)
                 toast(stays ? `${p.name || 'This person'} no longer plays music here. Their homeserver account stays.` : `Removed ${who(p)}`);
               } catch (e) {
-                // Kept with the node's words: Remove stays on their row, and removing again finishes it
-                removeFailed.set(p.key, { name: p.name || null, access: p.access, error: e.message });
-                toast(`Removing ${who(p)} did not finish: ${e.message}`, 'error');
+                if (e.status === 404) {
+                  // Nobody by that key and nothing of theirs left (finished elsewhere meanwhile): done
+                  removeFailed.delete(p.key);
+                  toast(`Nothing of ${who(p)} is left on this node`);
+                } else {
+                  // Kept with the node's words: Remove stays on their row, and removing again finishes it
+                  removeFailed.set(p.key, { name: p.name || null, access: p.access, error: e.message });
+                  toast(`Removing ${who(p)} did not finish: ${e.message}`, 'error');
+                }
               }
               await loadPeople({ focus: [`rename:${p.key}`, ...[keys[at + 1], keys[at - 1]].filter(Boolean).map((k) => `rename:${k}`), 'pinvname'] });
             });
