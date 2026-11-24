@@ -28,7 +28,7 @@ const MAX_ENTRIES: usize = 200_000;
 /// What a range request fetches at least.
 const CHUNK: u64 = 256 * 1024;
 
-/// A share. `Debug` never shows the password.
+/// A share. `Debug` never shows the password, nor credentials in the address.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Share {
     pub id: String,
@@ -45,7 +45,7 @@ impl std::fmt::Debug for Share {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Share")
             .field("id", &self.id)
-            .field("url", &self.url)
+            .field("url", &shown_url(&self.url))
             .field("user", &self.user)
             .field("password", &"<set>")
             .finish()
@@ -53,6 +53,28 @@ impl std::fmt::Debug for Share {
 }
 
 impl Share {
+    /// Moves a user name and password typed into the address (`http://me:secret@nas/dav/`) to
+    /// `user` and `password` and takes them out of the address. With the user field empty, the
+    /// address gives the user and its password (a password field stays only when the address has
+    /// none), as playback sent them before; with the same user in it, an empty password field
+    /// gets the address's. When the fields name another user, they win and the address loses its
+    /// credentials all the same. True when the address had any.
+    fn take_url_credentials(&mut self) -> bool {
+        let Some((url, user, password)) = split_credentials(&self.url) else {
+            return false;
+        };
+        self.url = url;
+        if self.user.is_empty() {
+            self.user = user;
+            if !password.is_empty() {
+                self.password = password;
+            }
+        } else if self.user == user && self.password.is_empty() {
+            self.password = password;
+        }
+        true
+    }
+
     fn base(&self) -> Result<url::Url, String> {
         let mut u = url::Url::parse(&self.url).map_err(|e| e.to_string())?;
         if !u.path().ends_with('/') {
@@ -85,23 +107,74 @@ impl Share {
         Ok(u)
     }
 
+    /// A password alone (a token, `http://:token@host/` as typed) goes too, with an empty user.
+    fn has_credentials(&self) -> bool {
+        !self.user.is_empty() || !self.password.is_empty()
+    }
+
     fn auth(&self, rb: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
-        if self.user.is_empty() {
-            rb
-        } else {
+        if self.has_credentials() {
             rb.basic_auth(&self.user, Some(&self.password))
+        } else {
+            rb
         }
+    }
+}
+
+/// `url` without the user name and password typed into it, and those (decoded); `None` when it
+/// has none or is not a URL.
+fn split_credentials(url: &str) -> Option<(String, String, String)> {
+    let mut u = url::Url::parse(url).ok()?;
+    if u.username().is_empty() && u.password().is_none() {
+        return None;
+    }
+    let user = percent_decode(u.username());
+    let password = percent_decode(u.password().unwrap_or(""));
+    u.set_username("").ok()?;
+    u.set_password(None).ok()?;
+    Some((u.to_string(), user, password))
+}
+
+/// A share's address as it may be shown: never with credentials, also when it is not a URL.
+fn shown_url(url: &str) -> String {
+    if let Some((u, ..)) = split_credentials(url) {
+        return u;
+    }
+    if url::Url::parse(url).is_ok() {
+        return url.to_string();
+    }
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..host_end].rfind('@') {
+        Some(at) if scheme.is_empty() => rest[at + 1..].to_string(),
+        Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+        None => url.to_string(),
     }
 }
 
 pub type Shared = Arc<RwLock<Vec<Share>>>;
 
+/// The shares in the settings. One saved with credentials in its address (before they were
+/// taken out on adding) has them moved to its fields, and is saved again that way.
 pub fn load(lib: &pm_library::Library) -> Vec<Share> {
-    lib.get_setting(SETTING)
+    let mut shares: Vec<Share> = lib
+        .get_setting(SETTING)
         .ok()
         .flatten()
         .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let mut moved = false;
+    for sh in &mut shares {
+        moved |= sh.take_url_credentials();
+    }
+    if moved {
+        if let Err(e) = lib.set_setting(SETTING, &serde_json::to_string(&shares).expect("serializes")) {
+            tracing::warn!(
+                "WebDAV shares: could not save them without the credentials in their addresses: {e}"
+            );
+        }
+    }
+    shares
 }
 
 fn store(s: &NodeState, shares: &[Share]) -> Result<(), ApiError> {
@@ -447,28 +520,18 @@ pub(crate) fn open_blocking(
         reason,
     };
     let (id, rel) = split_key(key).ok_or_else(|| fail("not a WebDAV file".into()))?;
-    let share = find(shared, &id).ok_or_else(|| fail("that WebDAV share was removed".into()))?;
-    let mut url = share.file_url(&rel).map_err(fail)?;
+    let mut share = find(shared, &id).ok_or_else(|| fail("that WebDAV share was removed".into()))?;
     // The credentials go as a header, never in the URL: errors name the URL (a decoder's too),
     // and zone state and events carry them to listeners. A request with headers never follows
-    // a playlist to another host. Credentials typed into the share's address move to the
-    // header as well.
-    let (mut user, mut password) = (share.user.clone(), share.password.clone());
-    if !url.username().is_empty() || url.password().is_some() {
-        let decode = crate::about::percent_decode;
-        if user.is_empty() {
-            user = decode(url.username());
-            password = decode(url.password().unwrap_or(""));
-        }
-        let _ = url.set_username("");
-        let _ = url.set_password(None);
-    }
+    // a playlist to another host. Credentials still in the share's address (adding and loading
+    // take them out) move to the header as well.
+    share.take_url_credentials();
+    let url = share.file_url(&rel).map_err(fail)?;
     let mut headers = Vec::new();
-    // A password alone (`http://:token@host/`) is sent too, with an empty user name
-    if !user.is_empty() || !password.is_empty() {
+    if share.has_credentials() {
         let basic = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
-            format!("{user}:{password}"),
+            format!("{}:{}", share.user, share.password),
         );
         headers.push(("authorization".to_string(), format!("Basic {basic}")));
     }
@@ -494,7 +557,7 @@ pub(crate) async fn fetch_library_file(s: &NodeState, path: &Path) -> std::io::R
     let share = find(&s.webdav, &id).ok_or_else(|| std::io::Error::other("that WebDAV share was removed"))?;
     let url = share.file_url(&rel).map_err(std::io::Error::other)?;
     let mut rb = s.http_client().get(url);
-    if !share.user.is_empty() {
+    if share.has_credentials() {
         rb = rb.basic_auth(&share.user, Some(&share.password));
     }
     let resp = crate::downloads::send_for_cache(rb).await?;
@@ -509,7 +572,7 @@ pub(crate) async fn fetch_library_file(s: &NodeState, path: &Path) -> std::io::R
 
 // ---- routes ----
 
-/// A share as Settings shows it (never the password).
+/// A share as Settings shows it (never the password, nor credentials in the address).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareView {
     pub id: String,
@@ -530,7 +593,7 @@ fn view(s: &NodeState, sh: &Share) -> ShareView {
     ShareView {
         id: sh.id.clone(),
         name: sh.name.clone(),
-        url: sh.url.clone(),
+        url: shown_url(&sh.url),
         user: sh.user.clone(),
         tracks,
         bytes,
@@ -586,7 +649,7 @@ pub(crate) async fn add(State(s): State<Arc<NodeState>>, Json(b): Json<NewShare>
             "the share's address must be an http(s) URL",
         ));
     }
-    let share = Share {
+    let mut share = Share {
         id: crate::tidal::random_urlsafe(6)
             .to_lowercase()
             .replace(['-', '_'], "x"),
@@ -599,6 +662,8 @@ pub(crate) async fn add(State(s): State<Arc<NodeState>>, Json(b): Json<NewShare>
         user: b.user.trim().to_string(),
         password: b.password,
     };
+    // Kept in the fields, never in the address: Settings shows the address
+    share.take_url_credentials();
     let probe = share.clone();
     tokio::task::spawn_blocking(move || probe.base().and_then(|base| propfind(&probe, &base)))
         .await
@@ -833,5 +898,238 @@ mod tests {
             reqs.iter().all(|r| r.to_ascii_lowercase().contains(&want)),
             "{reqs:?}"
         );
+    }
+
+    /// Reads one whole request (head and body) from a test share's connection.
+    fn read_request(c: &mut std::net::TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = c.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text[..end]
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if buf.len() >= end + 4 + len {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    fn test_node(dir: &Path) -> Arc<NodeState> {
+        let db = dir.join("library.db");
+        NodeState::new(
+            crate::NodeSettings {
+                name: "webdav-test".into(),
+                version: "0".into(),
+                db_path: db.clone(),
+                scan_folders: vec![],
+                art_dir: dir.join("art"),
+                mirror_dir: dir.join("homeserver"),
+                pipeline: pm_audio::PipelineConfig::default(),
+                token: Some("owner-fixture-token-webdav".into()),
+                subsonic_user: "pubky".into(),
+                pubky: Default::default(),
+                public_url: "http://127.0.0.1:7788".into(),
+                upnp: false,
+                cast: false,
+                slimproto_port: 0,
+                session_secret_path: None,
+                tidal: Default::default(),
+                spotify: Default::default(),
+                acoustid_key: String::new(),
+                jamendo: Default::default(),
+            },
+            pm_library::Library::open(&db).unwrap(),
+            pm_zones::OutputRegistry::new(),
+        )
+    }
+
+    /// A share that answers a listing with its folder and anything else with audio (that no
+    /// decoder reads), and hands over each request it gets.
+    fn test_share() -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::Write;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = l.local_addr().unwrap().to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                let mut c = c;
+                let req = read_request(&mut c);
+                let listing = req.starts_with("PROPFIND");
+                let _ = tx.send(req);
+                let (head, body) = if listing {
+                    let xml = r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#;
+                    (
+                        "207 Multi-Status\r\nContent-Type: application/xml",
+                        xml.as_bytes().to_vec(),
+                    )
+                } else {
+                    ("200 OK\r\nContent-Type: audio/flac", vec![0u8; 2048])
+                };
+                let head = format!(
+                    "HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = c.write_all(head.as_bytes());
+                let _ = c.write_all(&body);
+            }
+        });
+        (host, rx)
+    }
+
+    /// Credentials typed into a share's address are kept in its fields: the saved share, the list
+    /// Settings shows and the share's `Debug` have an address without them, and the share still
+    /// gets them (checking the folder, playing). A password alone is kept with an empty user.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn credentials_in_an_address_are_kept_out_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = test_node(dir.path());
+        let basic = |creds: &str| {
+            format!(
+                "authorization: basic {}",
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, creds)
+                    .to_ascii_lowercase()
+            )
+        };
+        for (typed, user, password, secrets) in [
+            ("http://me:p%40w@{host}/dav/", "me", "p@w", ["p%40w", "p@w"]),
+            ("http://:tok@{host}/dav/", "", "tok", [":tok@", "tok@"]),
+        ] {
+            // A share of its own for each, so a scan of the one before is not counted
+            let (host, rx) = test_share();
+            let typed = typed.replace("{host}", &host);
+            let clean = format!("http://{host}/dav/");
+            let new = NewShare {
+                url: typed.clone(),
+                name: None,
+                user: String::new(),
+                password: String::new(),
+            };
+            let added = match add(State(s.clone()), Json(new)).await {
+                Ok(j) => j.0,
+                Err(_) => panic!("{typed} not added"),
+            };
+            assert_eq!((added.url.as_str(), added.user.as_str()), (clean.as_str(), user));
+            let want = basic(&format!("{user}:{password}"));
+            // The folder was checked with the credentials
+            let probe = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(probe.starts_with("PROPFIND /dav/ "), "{probe}");
+            assert!(probe.to_ascii_lowercase().contains(&want), "{probe}");
+
+            // As saved
+            let saved: Vec<Share> =
+                serde_json::from_str(&s.library.lock().unwrap().get_setting(SETTING).unwrap().unwrap())
+                    .unwrap();
+            let sh = saved.iter().find(|x| x.id == added.id).unwrap().clone();
+            assert_eq!(
+                (sh.url.as_str(), sh.user.as_str(), sh.password.as_str()),
+                (clean.as_str(), user, password)
+            );
+            assert_eq!(
+                s.webdav.read().unwrap().iter().find(|x| x.id == added.id),
+                Some(&sh)
+            );
+            // As listed, and as a log shows it
+            let listed = match list(State(s.clone())).await {
+                Ok(j) => serde_json::to_string(&j.0).unwrap(),
+                Err(_) => panic!("not listed"),
+            };
+            let debug = format!("{sh:?}");
+            for said in [&listed, &debug] {
+                for secret in secrets {
+                    assert!(!said.contains(secret), "{secret:?} in {said}");
+                }
+                assert!(!said.contains('@'), "{said}");
+            }
+
+            // Played: still sent, as a header
+            let (shared, key) = (s.webdav.clone(), sh.root().join("Queen/01 Song.flac"));
+            let _ = tokio::task::spawn_blocking(move || open_blocking(&shared, &key).is_ok())
+                .await
+                .unwrap();
+            let played = std::iter::from_fn(|| rx.recv_timeout(Duration::from_secs(5)).ok())
+                .find(|r| r.starts_with("GET "))
+                .expect("played");
+            assert!(played.starts_with("GET /dav/Queen/01%20Song.flac "), "{played}");
+            assert!(played.to_ascii_lowercase().contains(&want), "{played}");
+        }
+    }
+
+    /// A share saved with credentials in its address (before adding took them out) loses them
+    /// when the node loads it, and is saved again without them. A user in the share's fields
+    /// wins over another one in the address; with the user field empty, the address gives the
+    /// user and its password (a password field stays only when the address has none).
+    #[test]
+    fn a_share_saved_with_credentials_in_its_address_is_cleaned_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = pm_library::Library::open(&dir.path().join("library.db")).unwrap();
+        let plain = Share {
+            id: "cc".into(),
+            name: "Plain".into(),
+            url: "https://nas.local/plain/".into(),
+            user: "ann".into(),
+            password: "pw".into(),
+        };
+        let before = serde_json::json!([
+            {"id": "aa", "name": "NAS", "url": "http://me:p%40w@nas.local/dav/"},
+            {"id": "bb", "name": "Cloud", "url": "https://me:tok@cloud.local/x/", "user": "bob", "password": "hunter2"},
+            plain,
+            {"id": "dd", "name": "Both", "url": "http://me:p%40w@nas.local/both/", "password": "hunter2"},
+            {"id": "ee", "name": "User only", "url": "http://me@nas.local/user/", "password": "hunter2"},
+        ]);
+        lib.set_setting(SETTING, &before.to_string()).unwrap();
+        let shares = load(&lib);
+        let got: Vec<(&str, &str, &str)> = shares
+            .iter()
+            .map(|s| (s.url.as_str(), s.user.as_str(), s.password.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("http://nas.local/dav/", "me", "p@w"),
+                ("https://cloud.local/x/", "bob", "hunter2"),
+                ("https://nas.local/plain/", "ann", "pw"),
+                ("http://nas.local/both/", "me", "p@w"),
+                ("http://nas.local/user/", "me", "hunter2"),
+            ]
+        );
+        let stored = lib.get_setting(SETTING).unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<Vec<Share>>(&stored).unwrap(), shares);
+        for gone in ["p%40w", "me:", "me@", "tok"] {
+            assert!(!stored.contains(gone), "{gone:?} in {stored}");
+        }
+        // Loaded again: nothing to move
+        assert_eq!(load(&lib), shares);
+
+        // Shown, a share's address never has credentials, also when it is not a URL
+        for (url, shown) in [
+            ("http://me:p%40w@nas.local/dav/", "http://nas.local/dav/"),
+            ("http://:tok@nas.local/", "http://nas.local/"),
+            ("http://nas.local/a@b/", "http://nas.local/a@b/"),
+            ("http://me:pw@[bad/x@y", "http://[bad/x@y"),
+        ] {
+            assert_eq!(shown_url(url), shown, "{url}");
+            let sh = Share {
+                url: url.into(),
+                password: "hunter2".into(),
+                ..plain.clone()
+            };
+            let debug = format!("{sh:?}");
+            assert!(debug.contains(shown) && !debug.contains("hunter2"), "{debug}");
+        }
     }
 }
