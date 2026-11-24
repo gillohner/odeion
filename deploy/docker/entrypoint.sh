@@ -10,6 +10,8 @@
 #   PM_CONTACT   email or URL for outbound User-Agent strings (optional here; it can also be
 #                set later in Settings, which turns Discover on without a restart)
 #   PM_NAME      name shown to controllers (default Odeion node)
+#   PM_BEHIND_PROXY  true when a reverse proxy on this machine (this container's network) forwards
+#                to the node ([api] behind_proxy, docs/guides/remote-access.md; default false)
 #   PM_PUBLIC_URL  how devices reach this node (http://<host-ip>:7788); renderers and endpoints
 #                fetch audio from it. Empty: this machine's address on its way to the network, so
 #                set it when the container is not on the host network or that is the wrong one
@@ -49,6 +51,9 @@ if [ ! -f "$CONF" ] || [ "${PM_REWRITE_CONFIG:-0}" = "1" ]; then
     [ -n "$f" ] && folders="$folders\"$f\", "
   done
   IFS="$old_ifs"
+  # (a TOML boolean: anything but true is false)
+  behind_proxy=false
+  [ "${PM_BEHIND_PROXY:-false}" = true ] && behind_proxy=true
   cat > "$CONF" <<TOML
 data_dir = "$DATA_DIR"
 contact = "${PM_CONTACT:-}"
@@ -61,6 +66,7 @@ listen = "${PM_LISTEN:-0.0.0.0:7788}"
 token = "${PM_TOKEN:-}"
 name = "${PM_NAME:-Odeion node}"
 public_url = "${PM_PUBLIC_URL:-}"
+behind_proxy = $behind_proxy
 
 [tidal]
 client_id = "${PM_TIDAL_CLIENT_ID:-}"

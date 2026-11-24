@@ -315,6 +315,12 @@ pub struct ApiConfig {
     /// Announce the node on the LAN (mDNS `_pubky-music._tcp` and SSDP) so apps
     /// find it. Only when `listen` is not a loopback address.
     pub announce: bool,
+    /// A reverse proxy or tunnel on this machine forwards to the node. Requests from this
+    /// machine itself may then come from anywhere, so they no longer count as local: the node
+    /// always has a token (it makes one, also on a loopback `listen`), and the routes that take
+    /// none answer the local network only, not this machine. Needed for a proxy that adds no
+    /// forwarding header (a bare nginx `proxy_pass`); harmless with one that does.
+    pub behind_proxy: bool,
 }
 
 impl NodeConfig {
@@ -449,6 +455,7 @@ impl Default for ApiConfig {
             subsonic_user: "pubky".into(),
             public_url: String::new(),
             announce: true,
+            behind_proxy: false,
         }
     }
 }

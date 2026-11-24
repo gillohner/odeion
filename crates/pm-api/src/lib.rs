@@ -950,6 +950,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
             state.clone(),
             peer::tokenless_direct_only,
         ))
+        // `[api] behind_proxy` for the layers built without the state (peer::lan_only): outside
+        // every one of them
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            peer::mark_behind_proxy,
+        ))
+        // Outermost: a node that is stopping answers 503 before any other layer runs, and the
+        // request counts as in flight through all of them
         .layer(middleware::from_fn_with_state(
             state.clone(),
             peer::not_while_stopping,
@@ -3685,7 +3693,7 @@ async fn controller_login_start(
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let remote = peer::lan_peer(&req).is_none();
+    let remote = peer::lan_peer(&req, s.is_behind_proxy()).is_none();
     let body = axum::body::to_bytes(req.into_body(), 1024)
         .await
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;

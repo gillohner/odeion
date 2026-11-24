@@ -32,21 +32,31 @@ fn proxied(h: &HeaderMap) -> bool {
     FORWARDED.iter().any(|k| h.contains_key(*k))
 }
 
+/// The request's source address (an IPv4 address mapped into IPv6 as IPv4).
+fn source(req: &Request) -> Option<IpAddr> {
+    let ip = req.extensions().get::<ConnectInfo<SocketAddr>>()?.0.ip();
+    Some(match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    })
+}
+
 /// The request reached the node's listener directly: not through iroh, not through a proxy.
-pub fn direct(req: &Request) -> bool {
-    req.extensions().get::<Remote>().is_none() && !proxied(req.headers())
+/// `behind_proxy` (`[api] behind_proxy`, [`NodeState::is_behind_proxy`]): a proxy on this
+/// machine forwards to the node, with or without a forwarding header, so a request from this
+/// machine came through it.
+pub fn direct(req: &Request, behind_proxy: bool) -> bool {
+    req.extensions().get::<Remote>().is_none()
+        && !proxied(req.headers())
+        && !(behind_proxy && source(req).is_some_and(|ip| ip.is_loopback()))
 }
 
 /// The source address of a direct request from the LAN or this machine, if it is one.
-pub fn lan_peer(req: &Request) -> Option<IpAddr> {
-    if !direct(req) {
+pub fn lan_peer(req: &Request, behind_proxy: bool) -> Option<IpAddr> {
+    if !direct(req, behind_proxy) {
         return None;
     }
-    let ip = req.extensions().get::<ConnectInfo<SocketAddr>>()?.0.ip();
-    let ip = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
-        v4 => v4,
-    };
+    let ip = source(req)?;
     let lan = match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
         // Loopback, unique local (fc00::/7) and link-local (fe80::/10)
@@ -57,11 +67,25 @@ pub fn lan_peer(req: &Request) -> Option<IpAddr> {
     lan.then_some(ip)
 }
 
+/// `[api] behind_proxy`, as [`mark_behind_proxy`] puts it on every request: for layers that are
+/// built without the node's state ([`lan_only`] on the open routes).
+#[derive(Debug, Clone, Copy)]
+pub struct BehindProxy(pub bool);
+
+/// Layer of the API, outside every other but [`not_while_stopping`]: puts [`BehindProxy`] on the
+/// request for the layers inside it.
+pub async fn mark_behind_proxy(State(s): State<Arc<NodeState>>, mut req: Request, next: Next) -> Response {
+    req.extensions_mut().insert(BehindProxy(s.is_behind_proxy()));
+    next.run(req).await
+}
+
 /// Layer for the renderer routes: LAN peers only, never a page of another site through a
 /// visitor's browser (in every auth mode: these routes take no token), and the handlers learn
-/// who asked.
+/// who asked. Under [`mark_behind_proxy`] (`router` puts it outside every route); without it
+/// `behind_proxy` counts as off.
 pub async fn lan_only(mut req: Request, next: Next) -> Response {
-    let Some(ip) = lan_peer(&req) else {
+    let behind_proxy = req.extensions().get::<BehindProxy>().is_some_and(|b| b.0);
+    let Some(ip) = lan_peer(&req, behind_proxy) else {
         return (
             StatusCode::FORBIDDEN,
             "the renderer answers on the local network only",
@@ -121,7 +145,7 @@ pub fn renderer_host(h: &HeaderMap, uri: &axum::http::Uri) -> bool {
 /// ([`loopback_addressed`]): another website must not reach it through the visitor's browser.
 pub async fn tokenless_direct_only(State(s): State<Arc<NodeState>>, req: Request, next: Next) -> Response {
     if s.token().is_none() {
-        if !direct(&req) {
+        if !direct(&req, s.is_behind_proxy()) {
             return (
                 StatusCode::UNAUTHORIZED,
                 "this node has no API token, so it answers only directly; set [api] token to reach it remotely",
@@ -378,6 +402,15 @@ mod tests {
     use axum::body::Body;
     use axum::http::Method;
 
+    /// (`[api] behind_proxy` off, as in every test but the ones that say otherwise)
+    fn lan_peer(req: &Request) -> Option<IpAddr> {
+        super::lan_peer(req, false)
+    }
+
+    fn direct(req: &Request) -> bool {
+        super::direct(req, false)
+    }
+
     fn req(from: Option<&str>, headers: &[(&str, &str)], remote: bool) -> Request {
         let mut b = axum::http::Request::builder().uri("/upnp/zone/z/desc.xml");
         for (k, v) in headers {
@@ -432,6 +465,25 @@ mod tests {
         assert!(lan_peer(&req(None, &[], false)).is_none());
         assert!(direct(&req(Some("127.0.0.1:9"), &[], false)));
         assert!(!direct(&req(Some("127.0.0.1:9"), &[], true)));
+    }
+
+    /// With a proxy on this machine (`[api] behind_proxy`) a request from this machine is not a
+    /// local one, with a forwarding header or without; the local network's own devices still
+    /// are.
+    #[test]
+    fn behind_a_proxy_this_machine_is_not_a_local_peer() {
+        let from = |a: &str| req(Some(a), &[], false);
+        for a in ["127.0.0.1:9", "[::1]:9", "[::ffff:127.0.0.1]:9", "127.8.8.8:1"] {
+            assert!(!super::direct(&from(a), true), "{a}");
+            assert!(super::lan_peer(&from(a), true).is_none(), "{a}");
+            // (without the setting, as before)
+            assert!(super::direct(&from(a), false), "{a}");
+        }
+        for a in ["192.168.1.20:5000", "10.0.0.3:1", "[fd00::5]:1"] {
+            assert!(super::direct(&from(a), true), "{a}");
+            assert!(super::lan_peer(&from(a), true).is_some(), "{a}");
+        }
+        assert!(super::lan_peer(&from("8.8.8.8:53"), true).is_none());
     }
 
     fn heads(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -775,6 +827,116 @@ mod tests {
             !cross_site(&HeaderMap::new(), &Method::GET, "/v1/info"),
             "no Sec-Fetch headers"
         );
+    }
+
+    /// Behind a proxy on its machine, a node that has no token (the binary makes one then; this
+    /// is the node asked directly) answers nobody as the owner: a request from this machine
+    /// came through the proxy, whatever host it names and with no forwarding header.
+    #[tokio::test]
+    async fn behind_a_proxy_a_node_without_a_token_answers_nobody() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lib.sqlite");
+        let s = NodeState::new(
+            crate::NodeSettings {
+                name: "t".into(),
+                version: "0".into(),
+                db_path: db.clone(),
+                scan_folders: vec![],
+                art_dir: dir.path().join("art"),
+                mirror_dir: dir.path().join("homeserver"),
+                pipeline: pm_audio::PipelineConfig::default(),
+                token: None,
+                subsonic_user: "pubky".into(),
+                pubky: Default::default(),
+                public_url: "http://127.0.0.1:7788".into(),
+                upnp: false,
+                cast: false,
+                slimproto_port: 0,
+                session_secret_path: None,
+                tidal: Default::default(),
+                spotify: Default::default(),
+                acoustid_key: String::new(),
+                jamendo: Default::default(),
+            },
+            pm_library::Library::open(&db).unwrap(),
+            pm_zones::OutputRegistry::new(),
+        );
+        let app = crate::router(s.clone());
+        let ask = || {
+            let app = app.clone();
+            async move {
+                let mut r = axum::http::Request::builder()
+                    .uri("/v1/info")
+                    .header("host", "127.0.0.1:7788")
+                    .body(Body::empty())
+                    .unwrap();
+                r.extensions_mut()
+                    .insert(ConnectInfo("127.0.0.1:50000".parse::<SocketAddr>().unwrap()));
+                app.oneshot(r).await.unwrap().status()
+            }
+        };
+        assert_eq!(
+            ask().await,
+            StatusCode::OK,
+            "a node without a token answers this machine"
+        );
+        s.set_behind_proxy(true);
+        assert_eq!(ask().await, StatusCode::UNAUTHORIZED);
+        s.set_behind_proxy(false);
+        assert_eq!(ask().await, StatusCode::OK);
+    }
+
+    /// The open routes' LAN-only layer is built without the node's state; it still follows
+    /// `[api] behind_proxy`, which the API's outermost layer puts on each request: a renderer's
+    /// event from this machine is refused behind a proxy, and reaches the handler otherwise.
+    #[tokio::test]
+    async fn the_open_routes_lan_check_follows_behind_proxy() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lib.sqlite");
+        let s = NodeState::new(
+            crate::NodeSettings {
+                name: "t".into(),
+                version: "0".into(),
+                db_path: db.clone(),
+                scan_folders: vec![],
+                art_dir: dir.path().join("art"),
+                mirror_dir: dir.path().join("homeserver"),
+                pipeline: pm_audio::PipelineConfig::default(),
+                token: Some("s3cret".into()),
+                subsonic_user: "pubky".into(),
+                pubky: Default::default(),
+                public_url: "http://127.0.0.1:7788".into(),
+                upnp: false,
+                cast: false,
+                slimproto_port: 0,
+                session_secret_path: None,
+                tidal: Default::default(),
+                spotify: Default::default(),
+                acoustid_key: String::new(),
+                jamendo: Default::default(),
+            },
+            pm_library::Library::open(&db).unwrap(),
+            pm_zones::OutputRegistry::new(),
+        );
+        let app = crate::router(s.clone());
+        let notify = || {
+            let app = app.clone();
+            async move {
+                let mut r = axum::http::Request::builder()
+                    .method("NOTIFY")
+                    .uri("/v1/upnp/events/no-such-token")
+                    .body(Body::empty())
+                    .unwrap();
+                r.extensions_mut()
+                    .insert(ConnectInfo("127.0.0.1:50000".parse::<SocketAddr>().unwrap()));
+                app.oneshot(r).await.unwrap().status()
+            }
+        };
+        assert_ne!(notify().await, StatusCode::FORBIDDEN, "reaches the handler");
+        s.set_behind_proxy(true);
+        assert_eq!(notify().await, StatusCode::FORBIDDEN);
     }
 
     /// The renderer refuses what a browser sends for another site's page, and nothing a control

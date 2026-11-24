@@ -71,3 +71,27 @@ anywhere and sign in with the same token.
 With plain Docker or Linux, you can run `cloudflared` or a reverse proxy with HTTPS (Caddy,
 nginx) yourself in front of port 7788. The token stays required; never put the node on the
 internet without HTTPS.
+
+When the proxy runs on the same machine as the node, add this to the node's config:
+
+```toml
+[api]
+behind_proxy = true
+```
+
+In the Docker image, `PM_BEHIND_PROXY=true` writes it when the image writes the config.
+
+The node tells a forwarded request from a local one by the headers a proxy adds
+(`X-Forwarded-For`, `X-Forwarded-Host`, `X-Real-IP`, `Forwarded`, Cloudflare's). Caddy,
+Traefik, Apache and `cloudflared` add one by themselves. nginx does not: a bare
+`proxy_pass http://127.0.0.1:7788;` sends nothing that tells the node the request came from
+outside, and a node that listens on 127.0.0.1 without a token would answer it as the owner.
+With `behind_proxy = true` a request from the machine itself (127.0.0.1, ::1) no longer counts
+as local: the node always has a token (it makes one in `<data folder>/api-token` when the config
+sets none), and the few routes that take no token answer other devices on your network only, not
+apps on this machine. Point the proxy at `127.0.0.1` or `localhost`, not at the machine's own
+network address: a request from that address still counts as one from your network. The setting
+covers a proxy on this machine only: a proxy in another container or on another machine reaches
+the node from a network address, so it must add `X-Forwarded-For`. Setting the headers
+in nginx as well is still right: `proxy_set_header X-Forwarded-For $remote_addr;` and
+`proxy_set_header X-Forwarded-Host $host;`.

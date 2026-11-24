@@ -41,8 +41,15 @@ pub enum Source {
 /// Tokens the old docs and the TrueNAS file handed out: anyone who read them knows these.
 const PLACEHOLDERS: &[&str] = &["change-me", "changeme", "change-me-to-a-long-random-secret"];
 
-/// The token the API requires, and where it came from.
-pub fn resolve(configured: &str, listen: &str, data_dir: &Path) -> std::io::Result<(Option<String>, Source)> {
+/// The token the API requires, and where it came from. `behind_proxy` (`[api] behind_proxy`):
+/// a proxy on this machine forwards to the node, so a loopback `listen` is no reason to go
+/// without a token.
+pub fn resolve(
+    configured: &str,
+    listen: &str,
+    behind_proxy: bool,
+    data_dir: &Path,
+) -> std::io::Result<(Option<String>, Source)> {
     let configured = configured.trim();
     let placeholder = PLACEHOLDERS.iter().any(|p| configured.eq_ignore_ascii_case(p));
     if !configured.is_empty() && !placeholder {
@@ -51,7 +58,7 @@ pub fn resolve(configured: &str, listen: &str, data_dir: &Path) -> std::io::Resu
         }
         return Ok((Some(configured.to_string()), Source::Configured));
     }
-    if !placeholder && is_loopback(listen) {
+    if !placeholder && !behind_proxy && is_loopback(listen) {
         return Ok((None, Source::None));
     }
     let path = token_path(data_dir);
@@ -170,11 +177,11 @@ mod tests {
     fn a_configured_token_wins_and_loopback_needs_none() {
         let d = tempfile::tempdir().unwrap();
         assert_eq!(
-            resolve(" s3cret ", "0.0.0.0:7788", d.path()).unwrap(),
+            resolve(" s3cret ", "0.0.0.0:7788", false, d.path()).unwrap(),
             (Some("s3cret".into()), Source::Configured)
         );
         assert_eq!(
-            resolve("", "127.0.0.1:7788", d.path()).unwrap(),
+            resolve("", "127.0.0.1:7788", false, d.path()).unwrap(),
             (None, Source::None)
         );
         assert!(!token_path(d.path()).exists());
@@ -183,12 +190,18 @@ mod tests {
     #[test]
     fn a_documented_placeholder_is_never_the_token() {
         let d = tempfile::tempdir().unwrap();
-        let (t, src) = resolve("change-me-to-a-long-random-secret", "0.0.0.0:7788", d.path()).unwrap();
+        let (t, src) = resolve(
+            "change-me-to-a-long-random-secret",
+            "0.0.0.0:7788",
+            false,
+            d.path(),
+        )
+        .unwrap();
         let t = t.unwrap();
         assert_eq!(t.len(), 64);
         assert_eq!(src, Source::ReplacedPlaceholder(token_path(d.path())));
         // Even on loopback, and the same made token every time
-        let (u, _) = resolve(" Change-Me ", "127.0.0.1:7788", d.path()).unwrap();
+        let (u, _) = resolve(" Change-Me ", "127.0.0.1:7788", false, d.path()).unwrap();
         assert_eq!(u.unwrap(), t);
     }
 
@@ -200,7 +213,7 @@ mod tests {
         let p = token_path(d.path());
         std::fs::write(&p, "a-token-written-by-hand\n").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let (t, _) = resolve("", "0.0.0.0:7788", d.path()).unwrap();
+        let (t, _) = resolve("", "0.0.0.0:7788", false, d.path()).unwrap();
         assert_eq!(t.as_deref(), Some("a-token-written-by-hand"));
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
     }
@@ -208,7 +221,7 @@ mod tests {
     #[test]
     fn a_network_listener_without_a_token_gets_one_kept_across_starts() {
         let d = tempfile::tempdir().unwrap();
-        let (a, src) = resolve("", "0.0.0.0:7788", d.path()).unwrap();
+        let (a, src) = resolve("", "0.0.0.0:7788", false, d.path()).unwrap();
         let a = a.unwrap();
         assert_eq!(a.len(), 64);
         assert_eq!(src, Source::File(token_path(d.path())));
@@ -223,10 +236,31 @@ mod tests {
         }
         // Written through a side file, none left behind
         assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1);
-        let (b, _) = resolve("", "[::]:7788", d.path()).unwrap();
+        let (b, _) = resolve("", "[::]:7788", false, d.path()).unwrap();
         assert_eq!(b.unwrap(), a);
         // An emptied file stops the start rather than leaving the API open
         std::fs::write(token_path(d.path()), "  \n").unwrap();
-        assert!(resolve("", "0.0.0.0:7788", d.path()).is_err());
+        assert!(resolve("", "0.0.0.0:7788", false, d.path()).is_err());
+    }
+
+    /// Behind a proxy on this machine a loopback address is no reason to go without a token:
+    /// the node makes one, as it does on any other address.
+    #[test]
+    fn behind_a_proxy_a_loopback_node_has_a_token_too() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve("", "127.0.0.1:7788", false, d.path()).unwrap(),
+            (None, Source::None)
+        );
+        let (t, src) = resolve("", "127.0.0.1:7788", true, d.path()).unwrap();
+        let t = t.expect("a token");
+        assert!(t.len() >= 32, "{}", t.len());
+        assert_eq!(src, Source::File(token_path(d.path())));
+        // The same one at the next start, and a configured one still wins
+        assert_eq!(resolve("", "localhost:7788", true, d.path()).unwrap().0, Some(t));
+        assert_eq!(
+            resolve("a-configured-long-token", "127.0.0.1:7788", true, d.path()).unwrap(),
+            (Some("a-configured-long-token".into()), Source::Configured)
+        );
     }
 }
