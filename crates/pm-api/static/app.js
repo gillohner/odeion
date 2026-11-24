@@ -213,12 +213,42 @@
     vv.addEventListener('resize', kbMove); vv.addEventListener('scroll', kbMove);
   }
   document.addEventListener('focusin', (e) => { const a = e.target; if (a && a.matches && a.matches('input, textarea') && a.closest('.np-bsheet')) setTimeout(() => { if (document.activeElement === a) a.scrollIntoView({ block: 'center' }); }, 300); });
+  // The toast's element: in the page, or in the modal dialog that is open (a modal dialog and its
+  // backdrop are drawn over everything else on the page, so a message raised from one was under the
+  // backdrop). It comes back to the page when the dialog closes, also when the dialog is taken away
+  // in the same step.
+  const toastBox = document.getElementById('toast');
+  const toastEl = () => {
+    // (a browser that does not know :modal keeps the toast in the page, as before)
+    const open = [...document.querySelectorAll('dialog[open]')].filter((d) => { try { return d.matches(':modal'); } catch { return false; } }).pop() || null;
+    const host = open || document.body;
+    // (closed: to the dialog still open under it, else the page)
+    if (toastBox.parentElement !== host) { host.appendChild(toastBox); if (open) open.addEventListener('close', () => { if (toastBox.parentElement === open || !toastBox.isConnected) toastEl(); }, { once: true }); }
+    return toastBox;
+  };
   // `action` ({ label, run }): a button in the toast (Undo); the toast stays longer then. Returns that button
+  // An error stays readable and an Undo within reach: a plain message that comes in the first 2.5 s
+  // of an error or of a toast with a button waits for that time to be up, then shows (the newest
+  // one if several came). Before, it took their place at once: an error was gone milliseconds
+  // after it appeared when the page said something else next. One rule for every message, wherever
+  // it comes from; an error, a toast with a button or a progress message ('wait': the answer to a
+  // press, "Moving to …") is shown at once, as before.
   const toast = (msg, kind = '', action = null) => {
-    const t = $('#toast');
+    const t = toastEl();
+    const until = toast.keep && t.classList.contains('show') ? toast.keep : 0;
+    if (!kind && !action && performance.now() < until) {
+      toast.next = msg; clearTimeout(toast.nextT);
+      toast.nextT = setTimeout(() => { if (toast.next === msg) { toast.next = null; toast.keep = 0; toast(msg); } }, until - performance.now());
+      return null;
+    }
+    toast.next = null; clearTimeout(toast.nextT);
+    toast.keep = kind === 'error' || action ? performance.now() + 2500 : 0;
+    // (an error interrupts a screen reader, as the errors written into the page do; the rest wait their turn)
+    t.setAttribute('role', kind === 'error' ? 'alert' : 'status'); t.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
     t.textContent = msg;
     let b = null;
-    const hide = () => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); };
+    // (gone: a plain message that waited for it shows now)
+    const hide = () => { t.classList.remove('show'); toast.keep = 0; toast.h = setTimeout(() => { t.textContent = ''; }, 400); const n = toast.next; if (n) { toast.next = null; clearTimeout(toast.nextT); toast(n); } };
     // (listeners, not on… properties: focusin and focusout have none; the next toast drops them)
     const unhook = () => { if (toast.ac) toast.ac.abort(); toast.ac = null; };
     if (action) { b = document.createElement('button'); b.className = 'btn sm toast-act'; b.textContent = action.label; b.onclick = () => { clearTimeout(toast.h); unhook(); b.remove(); hide(); Promise.resolve(action.run()).catch((e) => toast(e.message, 'error')); }; t.appendChild(b); }
@@ -243,9 +273,11 @@
   // replaced it meanwhile (before, it stayed its full 3.8 s: behind the next dialog, and on the page
   // the answer opened, over the phone's soft keyboard)
   const toastDone = (msg) => {
-    const t = $('#toast');
+    const t = toastBox;
+    if (toast.next === msg) { toast.next = null; clearTimeout(toast.nextT); return; } // (its answer came while it still waited)
     if (!t.classList.contains('show') || t.textContent !== msg) return;
-    clearTimeout(toast.h); t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400);
+    clearTimeout(toast.h); t.classList.remove('show'); toast.keep = 0; toast.h = setTimeout(() => { t.textContent = ''; }, 400);
+    const n = toast.next; if (n) { toast.next = null; clearTimeout(toast.nextT); toast(n); }
   };
   // A press whose button a redraw removed leaves the focus on the page: it goes to the toast's Undo
   // (keyboard and screen-reader users reach it there; the toast waits while it has the focus)
@@ -3773,7 +3805,7 @@
     // (the message goes when the node answers: the menu opened meanwhile is drawn again instead of a
     // toast, and the message stayed over it, saying it still moved)
     let said = '';
-    if (zonePop.hidden) { const tz0 = target === BROWSER ? { name: hereName() } : state.zones[target]; said = `Moving to ${(tz0 && tz0.name) || 'the zone'}…`; toast(said); }
+    if (zonePop.hidden) { const tz0 = target === BROWSER ? { name: hereName() } : state.zones[target]; said = `Moving to ${(tz0 && tz0.name) || 'the zone'}…`; toast(said, 'wait'); }
     let resume = null; // the browser, paused for the move: back on when the move fails
     const cur = currentZone(); const curTitle = cur && cur.now_playing ? cur.now_playing.item.title || '' : '';
     const wasPlaying = cur && cur.transport === 'playing';
@@ -4729,7 +4761,7 @@
     overlay.hidden = !open;
     document.body.classList.toggle('np-open', open);
     // (a toast on screen moves with the bars: Now playing hides the mini player and the tabs)
-    { const t = $('#toast'); if (t.classList.contains('show')) placeToast(t); }
+    { const t = toastBox; if (t.classList.contains('show')) placeToast(t); }
     // (what it covers is out of reach for Tab and screen readers while it is open: the side bar, the
     // page and the phone's tabs; a desktop's player bar is not under it and stays)
     $$('.shell > .sidebar, .shell > .content, .shell > .bottomnav').forEach((el) => { el.inert = open; });
@@ -5888,6 +5920,11 @@
       if (e.code === 'Space' && onControl) e.preventDefault();
       return;
     }
+    // A dialog on top has the keyboard: Space, the arrows, N, / and ? are the player's and the
+    // page's, and behind "Add music" or "Delete this…?" they went to another song, opened Now
+    // playing under the dialog, or put a second dialog over the first. (Its own keys are the
+    // browser's: Tab, Space and Enter on its buttons, Escape)
+    if (document.querySelector('dialog[open]')) return;
     { const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' ? 'next' : e.key === 'ArrowLeft' ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
     // An open ⋯ menu, zone picker, Sound panel, volume or copy's popup closes before Search, Now playing
     // or Help: it stayed open (with its grey scrim) over or behind them.
@@ -6691,13 +6728,17 @@
     showMenu(at instanceof Element ? at : anchor, [...head, ...items.map((it) => (it.run ? { ...it, run: guard(it.run) } : it))]);
   };
   const BAND_KINDS = ['peaking', 'low_shelf', 'high_shelf', 'low_pass', 'high_pass'];
+  // How a zone gets DSD: only what the node can do. (Its setting has a fourth value, to_pcm, which
+  // the engine refuses: "DSD to PCM conversion is not implemented yet". It is not offered; a zone
+  // saved with it shows that, and that its DSD files won't play, until another is chosen.)
+  const DSD_MODES = [['auto', 'Automatic'], ['native', 'Native DSD'], ['do_p', 'DoP']];
   const dspEditor = (zone, cfg) => `<div class="card dsp" style="margin-top:12px"><div class="section-head"><h3>DSP · ${esc(zone.name)}</h3><span class="muted small">Every stage shows in the signal path; defaults keep the path bit-perfect.</span></div>
     <div class="dsp-grid">
       <label><span>Headroom (dB)</span><input class="input" id="d-headroom" type="number" step="0.5" min="-30" max="0" value="${cfg.headroom_db ?? ''}" placeholder="off"></label>
       <label><span>Software volume (dB)</span><input class="input" id="d-volume" type="number" step="0.5" min="-60" max="0" value="${cfg.volume_db ?? ''}" placeholder="off"></label>
       <label><span>Volume limit (dB)</span><input class="input" id="d-maxvol" type="number" step="0.5" min="-90" max="0" value="${cfg.max_volume_db ?? ''}" placeholder="none" title="Every volume request for this zone, hardware or software, is capped here"></label>
       <label><span>Loudness (ReplayGain)</span><select class="input" id="d-loudness">${['off', 'track', 'album'].map((v) => `<option value="${v}" ${cfg.loudness === v ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
-      <label><span>DSD</span><select class="input" id="d-dsd">${['auto', 'native', 'do_p', 'to_pcm'].map((v) => `<option value="${v}" ${cfg.dsd_mode === v ? 'selected' : ''}>${v === 'do_p' ? 'DoP' : v}</option>`).join('')}</select></label>
+      <label><span id="d-dsdlabel">DSD</span><select class="input" id="d-dsd"${cfg.dsd_mode === 'to_pcm' ? ' aria-labelledby="d-dsdlabel" aria-describedby="d-dsdnote"' : ''}>${[...DSD_MODES, ...(cfg.dsd_mode === 'to_pcm' ? [['to_pcm', 'To PCM (not possible yet)']] : [])].map(([v, l]) => `<option value="${v}" ${cfg.dsd_mode === v ? 'selected' : ''}>${l}</option>`).join('')}</select>${cfg.dsd_mode === 'to_pcm' ? '<span class="warn-text small" id="d-dsdnote">DSD files won’t play on this zone: the node can’t turn DSD into PCM yet. Choose another.</span>' : ''}</label>
       <label class="check"><input type="checkbox" id="d-dither" ${cfg.dither ? 'checked' : ''}> TPDF dither when reducing bit depth</label>
       <label class="check"><input type="checkbox" id="d-resample" ${cfg.resample ? 'checked' : ''}> Resample when the output cannot take the rate (shown as Lossy)</label>
       <label class="check"><input type="checkbox" id="d-cf" ${cfg.crossfeed && cfg.crossfeed.enabled !== false ? 'checked' : ''}> Headphone crossfeed</label>
@@ -6723,6 +6764,7 @@
     $('#d-save').onclick = async () => { try { await api('PUT', `/zones/${encodeURIComponent(zoneId)}/dsp`, collect()); toast('DSP saved; applies from the next song'); } catch (e) { toast(e.message, 'error'); } };
     $('#d-reset').onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(zoneId)}/dsp`); toast('DSP reset'); render(); } catch (e) { toast(e.message, 'error'); } };
     $('#d-close').onclick = () => { state.dspOpen = null; render(); };
+    $('#d-dsd').onchange = () => { const sel = $('#d-dsd'); const n = $('#d-dsdnote'); if (!n) return; const on = sel.value === 'to_pcm'; n.hidden = !on; if (on) sel.setAttribute('aria-describedby', 'd-dsdnote'); else sel.removeAttribute('aria-describedby'); }; // (a hidden note is still read through aria-describedby: it goes with it)
   };
   // "New releases from your artists": release groups MusicBrainz lists for tagged artists.
   const newReleasesSection = (nr) => {
@@ -9034,7 +9076,7 @@
               // after 30 s without an answer: Play all can be pressed again
               let loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true; state.playAllLoading = true;
               const slow = setTimeout(() => toast(loading, 'wait'), 400);
-              const onPage = (n) => { const t = $('#toast'); const was = loading; loading = `Loading ${countOf(total, 'songs')}… ${fmtCount(n)} so far`; if (t.classList.contains('show') && t.textContent === was) toast(loading, 'wait'); };
+              const onPage = (n) => { const t = toastBox; const was = loading; loading = `Loading ${countOf(total, 'songs')}… ${fmtCount(n)} so far`; if (t.classList.contains('show') && t.textContent === was) toast(loading, 'wait'); };
               try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks, { onPage, wait: 30000 }), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
               clearTimeout(slow); toastDone(loading); state.playAllLoading = false; sh.disabled = false;
               { const now = $('#shuffle'); if (now && now !== sh && state.drawnPage === 'tracks') now.disabled = false; }
@@ -10587,7 +10629,7 @@
           // (for the zone the page was drawn for; one save at a time, a second tap while the first is
           // on its way made a second playlist, and one the node hasn't answered yet says so)
           const saveQueue = async (zid) => {
-            if (queueSaving) { toast('Still saving the queue as a collection…'); return; } queueSaving = true;
+            if (queueSaving) { toast('Still saving the queue as a collection…', 'wait'); return; } queueSaving = true;
             const body = zid === BROWSER ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: zid };
             try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); } finally { queueSaving = false; }
           };

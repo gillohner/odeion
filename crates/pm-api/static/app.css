@@ -397,6 +397,8 @@ html:not([data-shell="phone"]) .lyric-lines { overscroll-behavior: contain; }
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { border-left-color: var(--bad); }
+/* ---- a message that waits for an answer ("Bringing them back…") shows that it does ---- */
+.toast.wait::before { content: ''; display: inline-block; box-sizing: border-box; width: 14px; height: 14px; margin-right: var(--sp-2); vertical-align: -2px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
 /* (the toast itself lets taps through; its Undo takes them) */
 .toast .toast-act { margin-left: var(--sp-2h); vertical-align: middle; pointer-events: auto; }
 .toast:not(.show) .toast-act { pointer-events: none; visibility: hidden; }
@@ -592,6 +594,9 @@ html[data-shell="phone"] .notice[data-failed] .btn.sm { min-height: 44px; }
 /* (a row that follows a finger shows its label in the gap it leaves, outside its own box: it is on
    screen then, and paints as it did) */
 .track.swiping { content-visibility: visible; }
+/* (the first screenful is drawn as it is put in: a tap in the frame after Songs or a filter put the
+   rows in landed on the row, not on its ⋯ or Play) */
+.track:nth-child(-n+24) { content-visibility: visible; }
 .track:hover, .track:focus-within { background: var(--surface-2); }
 /* A click on a library song row (or a service album's) plays from there, as on a playlist's (.list-row.clickable) */
 :is([data-list], .src-tracks) > .track { cursor: pointer; }
@@ -837,6 +842,8 @@ html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
 /* ---- DSP editor ---- */
 .dsp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--sp-3) var(--sp-4); align-items: end; }
 .dsp-grid label span, .eq-row span { display: block; font-size: var(--fs-xs); color: var(--muted); margin-bottom: var(--sp-1); }
+/* (a warning under a field: its own colour, and its gap above instead of below) */
+.dsp-grid label span.warn-text { color: var(--warn); margin: var(--sp-1) 0 0; }
 .dsp-grid label.check, label.check { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); color: var(--fg-2); }
 .dsp-grid .cf-fields { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(120px, 200px)); gap: var(--sp-3); }
 .eq { display: flex; flex-direction: column; gap: var(--sp-1h); }

@@ -81,11 +81,20 @@ find the music again is in the backup:
 - shares the machine mounts itself (`/etc/fstab`, a NAS app): `config/host-shares.txt` and the
   matching `/etc/fstab` lines in `config/fstab-lines.txt`. Mount them again before the restore.
 
+A share mounted by Docker must answer before the node can start. After a reboot Docker tries
+only once, so install the bundle's start at boot once (`sudo ./start-at-boot.sh`): it starts the
+node as soon as the share answers. To check it, stop the share (or unplug the NAS), restart the
+machine, and see `systemctl status odeion-bundle` say it is trying again; once the share is back,
+the node runs within about a minute.
+
 The library remembers each song by its path in the container (`/music/Roon/...`). Keep the same
 mount targets and every match, collection and play stays with its song; for a new place, see
 [Restore a backup file](#restore-a-backup-file).
 
 ### Restore on a new disk or machine
+
+On a machine that already has the bundle's start at boot, run `sudo systemctl disable --now
+odeion-bundle` first, so neither a retry nor a reboot starts the bundle while it is restored.
 
 1. Install Docker, then get the bundle: `git clone https://github.com/gillohner/pubky-music-node`
    and `cd pubky-music-node/deploy/bundle`. Don't run `setup.sh`: the passwords come from the
@@ -99,6 +108,8 @@ node's data, starts everything, and after the node's first scan puts the sign-in
 node's own restore. It ends with the node's report: the sign-ins it put back and any library folder
 it cannot find. It only restores into an empty install: it stops when the bundle already has
 containers or data, so it never overwrites a running node.
+
+Then, once, `sudo ./start-at-boot.sh`, so the node comes back after a reboot (above).
 
 On a machine with another network address, change `PUBLIC_IP` and `PM_PUBLIC_URL` in `.env` after
 the restore, then `docker compose up -d`. The dashboard and the Cloudflare tunnel start again with
@@ -183,6 +194,7 @@ With the bundle:
 
 ```sh
 cd ~/pubky-music-node/deploy/bundle
+sudo systemctl stop odeion-bundle 2>/dev/null   # no start at boot try while the library is put back
 docker compose stop music
 docker run --rm -i -v pubky-music_music-node:/v alpine:3.22 sh -c \
   'cp /v/library.db /v/library.db.newer && cat > /v/library.db && rm -f /v/library.db-wal /v/library.db-shm && chown "$(stat -c %u:%g /v)" /v/library.db' \
@@ -194,6 +206,8 @@ Then restore that backup's `node/library.pmbackup` in **Settings › Backup › 
 with the passphrase from `node/passphrase`: it puts the sign-ins back. Everyone logs in to the
 node again afterwards (the library file holds no log-ins). Anything you changed after
 that backup is gone (the newer library stays next to it as `library.db.newer`). A homeserver that won't start after `git pull`: go back to the bundle you had
-with `git checkout <the commit in the backup's config/git-commit>` and `docker compose up -d`. If
+with `git checkout <the commit in the backup's config/git-commit>` and `docker compose up -d`
+(with the start at boot installed, run `sudo ./start-at-boot.sh --remove` before the checkout: an
+older bundle has no `start-at-boot.sh`, and its unit would fail every 30 seconds). If
 it still fails, [ask for help](troubleshooting.md#still-stuck) before removing anything; the
 backup folder stays as it is.
