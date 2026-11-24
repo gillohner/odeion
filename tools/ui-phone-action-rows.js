@@ -248,7 +248,8 @@ async function bookmarked(browser, width, android) {
   // ⋯ → Remove from favourites: the mark goes
   await page.locator('#tracklist .track').nth(2).locator('[data-act="more"]').tap();
   await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from Bookmarks' }).tap();
-  await page.waitForFunction(() => !document.querySelectorAll('#tracklist .track')[2].querySelector('.heart.on'), null, { timeout: 5000 }).catch(() => {});
+  // the list redraws after the change: wait for its third row to be back (a throwing wait counts as a page error)
+  await page.waitForFunction(() => { const r = document.querySelectorAll('#tracklist .track')[2]; return !!r && !r.querySelector('.heart.on'); }, null, { timeout: 5000 }).catch(() => {});
   await page.waitForTimeout(200);
   m = await marks(page, '#tracklist .track', '.title');
   check(!m[2].shown, `${at}: ⋯ → Remove from Bookmarks takes its heart away (${m.map((x) => `${x.name}:${x.shown}`).join(' ')})`);

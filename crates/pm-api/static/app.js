@@ -8184,7 +8184,10 @@
     if (how === 'added') return [...list].sort((a, b) => (b.id || 0) - (a.id || 0));
     return by((a) => a.name);
   };
-  const firstLetter = (x) => { const c = String(x || '').trim().charAt(0).toUpperCase().normalize('NFKD').charAt(0); return /[A-Z]/.test(c) ? c : '#'; };
+  // (letters that don't split into a base letter go under the one they sort with, so "Œuvre" is
+  // under O and "#" stays first or last in the A–Z row)
+  const AZ_BASE = { Æ: 'A', Ɓ: 'B', Đ: 'D', Ð: 'D', Ɗ: 'D', Ə: 'E', Ħ: 'H', Ɨ: 'I', Ł: 'L', Ŋ: 'N', Œ: 'O', Ø: 'O', Ŧ: 'T', Ƶ: 'Z' };
+  const firstLetter = (x) => { let c = String(x || '').trim().charAt(0).toUpperCase().normalize('NFKD').charAt(0); c = AZ_BASE[c] || c; return /[A-Z]/.test(c) ? c : '#'; };
   const listControls = (kind, pref, letters) => `<div class="listbar"><label class="small muted">Sort <select class="input sm" data-lsort aria-label="Sort">${LIST_SORTS[kind].map(([k, l]) => `<option value="${k}" ${pref.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${kind === 'albums' ? `<button class="chip ${pref.fav ? 'on' : ''}" data-lfav aria-pressed="${!!pref.fav}">${icon(pref.fav ? 'heart-fill' : 'heart')} Bookmarks</button>` : ''}${letters.length > 1 ? `<span class="azbar" role="group" aria-label="Jump to a letter">${letters.map((l) => `<button class="az" data-az="${l}" aria-pressed="false">${l}</button>`).join('')}</span>` : ''}</div>`;
   // Off while there is nothing to filter: what was typed stays and applies again once there is
   const filterBox = (placeholder, off = false) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}"${off ? ' disabled' : ''}>`;
@@ -9010,7 +9013,8 @@
           const inPlace = redrawing('tracks');
           const oldFilter = inPlace ? $('#filter', main) : null; const place = inPlace ? keepPlace() : null;
           const nowTyped = oldFilter ? oldFilter.value.trim() : '';
-          const total = Math.max(stats ? stats.tracks : 0, first.tracks.length);
+          // (a count with no songs in the answer is nothing to list or play: the empty state)
+          const total = first.tracks.length ? Math.max(stats ? stats.tracks : 0, first.tracks.length) : 0;
           main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + headAddMusic(total)) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', ...noMusicYet('Songs')));
           const box = $('#tracklist');
           if (box) {
