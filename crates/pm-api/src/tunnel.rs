@@ -153,7 +153,12 @@ async fn https_ok(s: &NodeState, url: &str, homeserver: bool) -> bool {
         .and_then(|v| v.to_str().ok())
         .is_some_and(|c| c.contains("json"));
     if homeserver {
-        st.is_success() && resp.text().await.is_ok_and(|t| t.contains("Pubky Homeserver"))
+        // The domain is one the owner typed: its answer is read up to 1 MiB, far more than a
+        // homeserver's front page
+        st.is_success()
+            && crate::capped::text(resp, 1 << 20)
+                .await
+                .is_ok_and(|t| t.contains("Pubky Homeserver"))
     } else {
         // The node answers its API with JSON: 200, or 401 without the token, both mean "reached"
         (st.is_success() || st == StatusCode::UNAUTHORIZED) && json

@@ -70,21 +70,51 @@ pub(crate) async fn text(resp: reqwest::Response, max: usize) -> Result<String, 
         .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
-/// [`bytes`] for the blocking client.
+/// [`bytes`] for the blocking client, within one overall wait.
+///
+/// The blocking client's timeout bounds each body read on its own (see `sources.rs`), so a
+/// server that sends a byte now and then would hold a reader of many small reads for as long as
+/// it likes. reqwest's own `bytes()`/`text()`/`json()` read under one wait; this keeps one too:
+/// [`BLOCKING_WAIT`] for the whole body, checked after every read, so it ends at most one read
+/// wait past it.
 fn bytes_blocking(resp: reqwest::blocking::Response, max: usize) -> Result<Vec<u8>, Error> {
+    bytes_blocking_within(resp, max, BLOCKING_WAIT)
+}
+
+/// [`bytes_blocking`] with its overall wait given.
+fn bytes_blocking_within(
+    resp: reqwest::blocking::Response,
+    max: usize,
+    wait: std::time::Duration,
+) -> Result<Vec<u8>, Error> {
     use std::io::Read;
     if resp.content_length().is_some_and(|n| n > max as u64) {
         return Err(Error::TooLong(max));
     }
+    let deadline = std::time::Instant::now() + wait;
+    let mut body = resp.take(max as u64 + 1);
     let mut out = Vec::new();
-    resp.take(max as u64 + 1)
-        .read_to_end(&mut out)
-        .map_err(|e| Error::Read(e.to_string()))?;
-    if out.len() > max {
-        return Err(Error::TooLong(max));
+    let mut chunk = [0u8; 16 << 10];
+    loop {
+        match body.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(Error::Read(e.to_string())),
+        }
+        if out.len() > max {
+            return Err(Error::TooLong(max));
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(Error::Read("the answer took too long".into()));
+        }
     }
     Ok(out)
 }
+
+/// The whole-body wait of [`text_blocking`] and [`json_blocking`]: the stream clients' wait
+/// (`sources::STREAM_WAIT`), which reqwest's blocking `text()`/`json()` gave the whole body.
+const BLOCKING_WAIT: std::time::Duration = crate::sources::STREAM_WAIT;
 
 /// [`text`] for the blocking client.
 pub(crate) fn text_blocking(resp: reqwest::blocking::Response, max: usize) -> Result<String, Error> {
@@ -138,11 +168,11 @@ mod tests {
                     if c.write_all(OPEN_ENDED.as_bytes()).is_err() {
                         return;
                     }
-                    // 16 KiB a millisecond at most: a reader that keeps it all holds no more
-                    // than ~160 MiB by STOPS_WITHIN
+                    // 16 KiB every 2 ms at most: a reader that keeps it all holds no more than
+                    // ~160 MiB by BLOCKING_WAIT (20 s), ~80 MiB by STOPS_WITHIN
                     let chunk = [b'a'; 16 << 10];
                     while c.write_all(&chunk).is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        std::thread::sleep(std::time::Duration::from_millis(2));
                     }
                 });
             }
@@ -196,8 +226,9 @@ mod tests {
 
     #[test]
     fn the_blocking_reader_stops_at_the_limit_too() {
-        // A whole-body read of the endless answer would end in this client's timeout, a Read
-        // error, not TooLong
+        // A whole-body read of the endless answer ends in this client's timeout (reqwest's
+        // text()/json()) or in BLOCKING_WAIT (a read loop without the limit): a Read error, not
+        // TooLong
         let client = reqwest::blocking::Client::builder()
             .timeout(STOPS_WITHIN)
             .build()
@@ -225,6 +256,49 @@ mod tests {
             super::text_blocking(r, 1 << 20),
             Err(super::Error::TooLong(1 << 20))
         );
+    }
+
+    /// A server that sends a byte now and then (each read well inside the client's timeout)
+    /// cannot hold a blocking read past its overall wait.
+    #[test]
+    fn a_trickling_answer_ends_at_the_blocking_wait() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { return };
+                std::thread::spawn(move || {
+                    let mut req = [0u8; 4096];
+                    let _ = c.read(&mut req);
+                    if c.write_all(OPEN_ENDED.as_bytes()).is_err() {
+                        return;
+                    }
+                    while c.write_all(b"a").is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                });
+            }
+        });
+        let client = reqwest::blocking::Client::builder()
+            .timeout(STOPS_WITHIN)
+            .build()
+            .unwrap();
+        let r = client.get(&url).send().unwrap();
+        // On a thread: without the overall wait this read would never end
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let _ = tx.send(super::bytes_blocking_within(
+                r,
+                1 << 20,
+                std::time::Duration::from_secs(1),
+            ));
+        });
+        let got = rx
+            .recv_timeout(STOPS_WITHIN)
+            .expect("the read ends at its overall wait");
+        assert_eq!(got, Err(super::Error::Read("the answer took too long".into())));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     /// A media server's answer is read as JSON up to its size, and a failed read does not name
