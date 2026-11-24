@@ -62,7 +62,22 @@ cd deploy/bundle
 # set MUSIC_DIR in .env to your music folder
 docker compose up -d
 docker compose --profile dashboard up -d    # optional: Pubky's admin UI on http://127.0.0.1:8812
+sudo ./start-at-boot.sh                     # once, on a machine with systemd: see "After a reboot"
 ```
+
+- **After a reboot:** Docker starts the containers again by itself, but tries each only once. A
+  container that can't start then stays down: most often the node, when a network share it
+  mounts as a Docker volume doesn't answer yet (the NAS or the network comes up after the
+  machine). `sudo ./start-at-boot.sh` installs `odeion-bundle.service`, which runs
+  `docker compose up -d --no-recreate` in the bundle's folder once the network is up and tries again
+  every 30 seconds until the node runs (it starts the containers there are; an update you haven't
+  applied yet stays for your own `docker compose up -d`, unless the containers were removed with
+  `docker compose down`: then it makes them from the tag in `.env`), so it starts by itself as soon as the share answers. It doesn't
+  stop anything at shutdown. It also starts a node you stopped on purpose, at the next boot:
+  `sudo systemctl disable --now odeion-bundle` keeps it off (also before a restore), `sudo ./start-at-boot.sh --remove` takes it out.
+  While such a share is away the node can't start at all, because Docker needs every volume. The
+  unit runs the bundle's files as root, so keep the folder writable by you only. It needs systemd
+  244 or newer (Debian 11, Ubuntu 20.04 and later).
 
 - **What listens where:** the node on 7788, and the homeserver's Pubky TLS port 6287 (Pubky apps,
   Pubky Ring) on the network. The homeserver's admin API (6288) and plain HTTP port (6286) are
@@ -379,7 +394,7 @@ The node scans folders; anything the operating system can mount is a folder.
 | Source | How |
 | :-- | :-- |
 | Local disks, USB drives | add the folder in Settings or `[library] folders` |
-| NAS / network shares (SMB, NFS) | mount them (`/etc/fstab`, `mount -t cifs …`) and add the mount point; use `_netdev` so the mount exists before the node starts |
+| NAS / network shares (SMB, NFS) | mount them (`/etc/fstab`, `mount -t cifs …`) and add the mount point, with `_netdev` in its options. In Docker, a share that mounts after the node started shows up in the container only after `docker compose restart` of the node |
 | Dropbox, Google Drive, OneDrive, S3, WebDAV, … | `rclone mount remote:Music /mnt/music --vfs-cache-mode full --read-only` (a systemd unit keeps it up), then add `/mnt/music`. The VFS cache makes the first play of a file a download and every later one local; bit-perfect playback is unaffected because the node reads the original bytes |
 | Downloads from another app (a download client, a seedbox) | point that app at a folder the node watches; the watcher rescans after the last change |
 | Your Pubky homeserver | `odeiond upload` or `POST /v1/pubky/files` stores originals under `/priv/pubky.music/files/`; "Bring files here" (`POST /v1/pubky/files/mirror`) pulls what the node lacks into a library folder as a background job and scans it |

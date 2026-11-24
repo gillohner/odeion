@@ -22,6 +22,10 @@ Newest first. Dates are when the change landed on `main`.
 - **Link cards keep loading after a page was left midway.** The node asks Pinakes to read a link nobody tagged yet, one link at a time and paced. When the page that asked went away while its link waited for its turn (a tap on another page, a reload), that read stood still with the turn taken, and no other link was read until someone opened the same link again: cards for new links stayed on "reading". Each read now runs to its end on its own, whoever asked for it, and its answer is kept for the next look.
 - **A removal that did not finish is still offered after a reload.** Removing someone can fail part-way, after they are already off the list; the page then kept "Remove again" only until it was reloaded. The node now remembers such removals (`unfinished` in `GET /v1/people`), and People & access keeps the person on the screen with Remove until it has finished. When nothing of theirs is left after all, the page says so instead of reporting a failure.
 
+### 2026-11-24
+
+- **The bundle comes back after a reboot when a network share answers late.** Docker starts the bundle's containers again after a boot, but tries each only once: when a share the node mounts as a Docker volume (a NAS on SMB or NFS) was not reachable yet, the node stayed down until someone started it, while the homeserver ran. `sudo ./start-at-boot.sh` in `deploy/bundle` now installs `odeion-bundle.service`, which starts the bundle's containers there (`docker compose up -d --no-recreate`) once the network is up and tries again every 30 seconds until the node runs. It stops nothing at shutdown and applies no pending update to containers that are there, and `--remove` takes it out; `restore.sh` refuses to run while it is on. `setup.sh` points to it.
+
 ### 2026-11-23
 
 - **Lyrics files are read with limits.** A `.lrc` file next to a song is read only when it is a regular file of at most 1 MiB; a link is followed only to another `.lrc` file. Lyrics whose text only looks like a time stamp (a price in a title line, a very long number) are read as text.
