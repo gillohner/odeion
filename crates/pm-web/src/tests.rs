@@ -309,20 +309,8 @@ async fn the_web_app_is_called_odeion() {
 async fn the_apps_keep_every_file_the_page_loads() {
     let kept: Vec<&str> = pm_offline::sync::UI_FILES.iter().map(|(path, _)| *path).collect();
     // Every `<script src=…>` and every `<link …>` that is a style sheet, however its attributes
-    // are ordered
-    let mut loaded = Vec::new();
-    for (tag, attr) in [("<script ", "src=\""), ("<link ", "href=\"")] {
-        for (i, _) in INDEX_HTML.match_indices(tag) {
-            let rest = &INDEX_HTML[i..];
-            let rest = &rest[..rest.find('>').unwrap()];
-            if tag == "<link " && !rest.contains("rel=\"stylesheet\"") {
-                continue;
-            }
-            if let Some((_, url)) = rest.split_once(attr) {
-                loaded.push(url.split('"').next().unwrap());
-            }
-        }
-    }
+    // are ordered, spaced or quoted
+    let loaded = loaded_files(INDEX_HTML);
     assert!(
         loaded.len() >= 6 && loaded.contains(&"/app.js") && loaded.contains(&"/app.css"),
         "{loaded:?}"
@@ -338,4 +326,94 @@ async fn the_apps_keep_every_file_the_page_loads() {
     for path in kept {
         assert_eq!(get_page(path).await.status(), StatusCode::OK, "{path}");
     }
+}
+
+/// The files a page loads: `src` of each `<script>` and `href` of each style sheet `<link>`.
+fn loaded_files(page: &str) -> Vec<&str> {
+    let lower = page.to_ascii_lowercase();
+    let mut loaded = Vec::new();
+    for (tag, attr) in [("<script", "src"), ("<link", "href")] {
+        for (i, _) in lower.match_indices(tag) {
+            let after = &page[i + tag.len()..];
+            if !after.starts_with(|c: char| c.is_ascii_whitespace()) {
+                continue;
+            }
+            let attrs = attributes(after);
+            let get = |name: &str| {
+                attrs
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| *v)
+            };
+            if tag == "<link" && !get("rel").is_some_and(|r| r.eq_ignore_ascii_case("stylesheet")) {
+                continue;
+            }
+            if let Some(url) = get(attr) {
+                loaded.push(url);
+            }
+        }
+    }
+    loaded
+}
+
+/// A tag's attributes in order, up to its `>` (one inside a quoted value does not end it):
+/// (name, value), the value double-, single- or not quoted, empty for a name alone.
+fn attributes(tag: &str) -> Vec<(&str, &str)> {
+    let b = tag.as_bytes();
+    let skip_space = |mut i: usize| {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    loop {
+        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b'/') {
+            i += 1;
+        }
+        if i >= b.len() || b[i] == b'>' {
+            return out;
+        }
+        let start = i;
+        while i < b.len() && !b[i].is_ascii_whitespace() && !matches!(b[i], b'=' | b'>' | b'/') {
+            i += 1;
+        }
+        let name = &tag[start..i];
+        i = skip_space(i);
+        if i >= b.len() || b[i] != b'=' {
+            out.push((name, ""));
+            continue;
+        }
+        i = skip_space(i + 1);
+        if i < b.len() && (b[i] == b'"' || b[i] == b'\'') {
+            let quote = b[i];
+            let from = i + 1;
+            i = from;
+            while i < b.len() && b[i] != quote {
+                i += 1;
+            }
+            out.push((name, &tag[from..i]));
+            i += 1;
+        } else {
+            let from = i;
+            while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'>' {
+                i += 1;
+            }
+            out.push((name, &tag[from..i]));
+        }
+    }
+}
+
+#[test]
+fn a_loaded_file_is_found_however_its_tag_is_written() {
+    let page = "<link rel=\"stylesheet\" href=\"/a.css\">\n<link\n  href='/b.css' rel=stylesheet>\n\
+                <link rel=\"manifest\" href=\"/m.webmanifest\">\n<script\tsrc=/c.js defer></script>\n\
+                <SCRIPT data-src=\"/no.js\" src = \"/d.js\"></SCRIPT><scripture src=\"/no2.js\">\n\
+                <script data-x=\"a>b src=/no3.js\" src=\"/e.js\"></script>\n\
+                <link rel=stylesheet title=\"x href=/no4.css\" href=\"/f.css\"/>";
+    assert_eq!(
+        loaded_files(page),
+        ["/c.js", "/d.js", "/e.js", "/a.css", "/b.css", "/f.css"]
+    );
 }

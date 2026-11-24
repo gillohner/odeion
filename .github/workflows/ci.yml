@@ -64,7 +64,8 @@ jobs:
           held=$(printf '%s\n' "$files" | grep -cx 'docs/access\.md' || true)
           if [ "$code" -gt 0 ] || [ "$held" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
           # Anything that is not the page's files, a fixture page or docs can reach Rust code
-          # (docs/APP-DATA.md, docs/access.md and a crate's own README are read by Rust tests, so they are not "docs" here)
+          # (docs/APP-DATA.md and docs/access.md are read by Rust tests, and a crate's own Markdown may be:
+          # pubky-music-specs reads every file of its crate; so they are not "docs" here)
           rust=$(printf '%s\n' "$files" | sed -E 's#^docs/(APP-DATA|access)\.md$#rust:&#' | grep -Ev '^(crates/pm-web/static/|crates/pm-web/ui/app/[^/]+\.js$|tools/ui-[^/]+\.js$|tools/ui-fixtures\.list$|docs/|NOTICE$|LICENSE$|[^/]+\.md$)' | grep -c . || true)
           echo "$rust outside the web UI's files, the fixture pages and the docs"
           if [ "$EVENT" = push ] || [ "$rust" -gt 0 ]; then echo "rust=true" >> "$GITHUB_OUTPUT"; else echo "rust=false" >> "$GITHUB_OUTPUT"; fi

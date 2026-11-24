@@ -18,7 +18,7 @@ const DIR = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-web', 's
 // (app.js is kept as parts, crates/pm-web/ui/app: read joined, as the node serves it, and a
 // problem in it is reported at its part and line)
 const ui = require('./ui-src');
-const files = [...fs.readdirSync(DIR).filter((f) => /\.(js|html)$/.test(f) && f !== 'app.js').map((f) => [f, fs.readFileSync(path.join(DIR, f), 'utf8')]), ['app.js', ui.appJs(DIR).toString('utf8')]];
+const files = [...fs.readdirSync(DIR).filter((f) => /\.(js|html)$/.test(f) && f !== 'app.js').map((f) => [f, fs.readFileSync(path.join(DIR, f), 'utf8')]), ...(ui.has(DIR, 'app.js') ? [['app.js', ui.appJs(DIR).toString('utf8')]] : [])];
 const css = fs.readdirSync(DIR).filter((f) => f.endsWith('.css')).map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\n');
 const problems = [];
 const where = (file, src, idx) => (file === 'app.js' && ui.hasParts(DIR) ? `app/${ui.where(idx, DIR)}` : `${file}:${src.slice(0, idx).split('\n').length}`);

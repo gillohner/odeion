@@ -53,10 +53,10 @@ below it. Tests may (dev-dependencies): `pm-api`'s use `pm-web` and `pm-endpoint
 - That is what lets CI skip the jobs that only build and test Rust for a pull request that
   changes nothing but the UI's files and script parts, `tools/ui-*.js`, `tools/ui-fixtures.list`
   and docs (`changes` in `.github/workflows/ci.yml`); the `pages` job runs the tests above
-  instead. Three kinds of Markdown are not docs there, because a Rust test reads them:
-  `docs/APP-DATA.md` (`pm-appdata` checks every app path against it), `docs/access.md` (`pm-api`
-  checks it against the access table), and Markdown below the top level outside `docs/`
-  (`pubky-music-specs` reads every file of its crate, its README too). Main runs everything.
+  instead. Three kinds of Markdown are not docs there: `docs/APP-DATA.md` (`pm-appdata` checks
+  every app path against it) and `docs/access.md` (`pm-api` checks it against the access table),
+  which Rust tests read, and Markdown below the top level outside `docs/`, where CI can't tell
+  which a test reads (`pubky-music-specs` reads every file of its crate). Main runs everything.
 - `pm-api`'s unit tests are one file per area in `crates/pm-api/src/tests/` (zones, sign-in ways,
   each large service, copies, scrobblers, ...), declared inside `mod tests` in `lib.rs`, which
   keeps the helpers they share. A new test goes at the end of its area's file.
