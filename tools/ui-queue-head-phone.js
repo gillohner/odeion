@@ -25,7 +25,7 @@ const head = (page) => page.evaluate(() => {
   const box = (e) => e.getBoundingClientRect();
   return { ids: bs.map((e) => e.id).join(','), rows: new Set(bs.map((e) => Math.round(box(e).top))).size, small: bs.filter((e) => box(e).width < 44 || box(e).height < 44).map((e) => e.id), over: document.documentElement.scrollWidth - innerWidth };
 });
-const menu = (page) => page.evaluate(() => { const m = document.querySelector('.popover.menu'); return m && !m.hidden ? [...m.children].map((c) => c.classList.contains('pop-title') ? '# ' + c.textContent.trim() : ((c.querySelector(':scope > span') || c).firstChild.textContent || '').trim()).join(' | ') : ''; });
+const menu = (page) => page.evaluate(() => { const m = document.querySelector('.popover.menu'); return m && !m.hidden ? [...m.querySelectorAll('.pop-title, .pop-item')].map((c) => c.classList.contains('pop-title') ? '# ' + c.textContent.trim() : ((c.querySelector(':scope > span') || c).firstChild.textContent || '').trim()).join(' | ') : ''; });
 
 async function zoneQueue(browser, width, opts = {}) {
   const Z = (id, name) => ({ id, name, output: 'upnp:' + id, transport: 'paused', now_playing: { item: items[0], position_ms: 1000, duration_ms: 60000 }, queue: id === 'z1' ? items : items2, queue_index: 0, queue_version: 1, repeat: 'off', shuffle: false, radio: false, error: null, acked: 0, volume: { percent: 40 } });

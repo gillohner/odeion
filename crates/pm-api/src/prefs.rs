@@ -171,7 +171,8 @@ pub(crate) fn storage_key_of(key: &str) -> String {
 
 fn storage_key(c: &Caller) -> Result<String, ApiError> {
     match c.role {
-        Role::Owner => Ok(OWNER_KEY.to_string()),
+        // An app password keeps the owner's play order (`PUT /v1/play-order`)
+        Role::Owner | Role::App => Ok(OWNER_KEY.to_string()),
         Role::Listener => c
             .key
             .as_ref()
@@ -389,7 +390,7 @@ pub(crate) async fn get(
     axum::Extension(c): axum::Extension<Caller>,
 ) -> ApiResult<PrefsView> {
     storage_key(&c)?;
-    if c.role == Role::Owner {
+    if matches!(c.role, Role::Owner | Role::App) {
         // A change is being saved: answer from the node's copy rather than wait for it
         let Ok(_one) = owner_lock().try_lock() else {
             let saved_on = if s.sync_handle().is_some() && pending(&s).is_none() {
@@ -475,7 +476,7 @@ pub(crate) async fn put(
         serde_json::from_value(v).map_err(|e| ApiError::bad_request(format!("preferences: {e}")))
     };
     let u = parse(raw.clone())?;
-    if c.role != Role::Owner {
+    if !matches!(c.role, Role::Owner | Role::App) {
         let mut p = load(&s, &c);
         apply(&mut p, u)?;
         p.updated_at = now_ms();

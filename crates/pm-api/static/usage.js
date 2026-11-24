@@ -306,7 +306,7 @@
   // (the same kind of button first: after Clear all that is Clear all, never the switch next to it)
   const refocus = (el, sel) => { const a = document.activeElement; if (el.isConnected && (!a || a === document.body || !a.isConnected)) { const b = (sel && el.querySelector(`${sel}:not([disabled])`)) || el.querySelector('[data-usage]:not([disabled]), [data-usage-node]:not([disabled])'); if (b) b.focus(); } };
   const say = (el, text, bad) => { const m = el.querySelector('.usage-msg'); if (m) { m.textContent = text; m.classList.toggle('warn-text', !!bad); } };
-  const ask = (title, text, label) => (ctx && ctx.ask ? ctx.ask(title, text, label) : Promise.resolve(window.confirm(`${title}\n\n${text}`)));
+  const ask = (title, text, label, danger) => (ctx && ctx.ask ? ctx.ask(title, text, label, danger) : Promise.resolve(window.confirm(`${title}\n\n${text}`)));
   const renderPersonal = async (el) => {
     if (!el) return;
     el.classList.add('usage-slot');
@@ -327,7 +327,7 @@
     go('stop', async () => { await choose(false); await renderPersonal(el); say(el, 'Stopped for you. Nothing more of yours is recorded.'); });
     go('share', async () => { await choose(true); await renderPersonal(el); say(el, 'Sharing again from your next page.'); });
     go('clear', async () => {
-      if (!await ask('Clear your usage events?', 'The raw events still linked to you are deleted. Older ones are no longer linked to anyone and go when they expire.', 'Clear mine')) { btn('clear').disabled = false; return; }
+      if (!await ask('Clear your usage events?', 'The raw events still linked to you are deleted. Older ones are no longer linked to anyone and go when they expire.', 'Clear mine', true)) { btn('clear').disabled = false; return; }
       const n = await clearMine(); await renderPersonal(el); say(el, n ? `Cleared ${n} event${n === 1 ? '' : 's'}.` : 'Nothing linked to you was stored.');
     });
   };
@@ -352,7 +352,7 @@
     });
     go('off', async () => { fresh(); await put({ enabled: false }); await readMe(); await renderNode(el); say(el, 'Off: nothing more is recorded. What is stored stays until it expires or you clear it.'); });
     go('clear', async () => {
-      if (!await ask('Clear all usage events?', 'Every stored event and daily count on this node is deleted. It doesn’t turn usage insights off.', 'Clear all')) { await renderNode(el); return; }
+      if (!await ask('Clear all usage events?', 'Every stored event and daily count on this node is deleted. It doesn’t turn usage insights off.', 'Clear all', true)) { await renderNode(el); return; }
       fresh(); const x = await request('POST', '/node/usage/clear', undefined); if (!x.ok) throw new Error('That didn’t work; try again.');
       await renderNode(el); say(el, 'Cleared.');
     });

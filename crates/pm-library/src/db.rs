@@ -1666,6 +1666,27 @@ impl Library {
         .map_err(Into::into)
     }
 
+    /// Record a successful push of the bookmark `pushed` (as it was read for the push; a
+    /// tombstone was pushed as a delete), only if it is still that. One removed while its write
+    /// was on the way stays a tombstone to push; one added again while its delete was on the
+    /// way stays to be written, as does one removed and added again during its write (it has a
+    /// new time). `true` when recorded (a pushed tombstone is purged).
+    pub fn mark_bookmark_pushed(&self, pushed: &BookmarkRow, at_micros: i64) -> Result<bool> {
+        let conn = self.lock();
+        let n = if pushed.deleted {
+            conn.execute(
+                "DELETE FROM bookmarks WHERE id = ?1 AND deleted = 1",
+                params![pushed.id],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE bookmarks SET synced_at = ?2 WHERE id = ?1 AND deleted = 0 AND created_at = ?3",
+                params![pushed.id, at_micros, pushed.created_at],
+            )?
+        };
+        Ok(n > 0)
+    }
+
     /// Live bookmarks, newest first.
     pub fn list_bookmarks(&self) -> Result<Vec<BookmarkRow>> {
         let conn = self.lock();
@@ -1801,6 +1822,17 @@ impl Library {
         self.lock()
             .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
+    }
+
+    /// Fold the write-ahead log into the database file (before the node stops: the file alone
+    /// then holds everything). `false` when another connection kept part of it from being folded
+    /// in (a scan in the middle of its writes): that part stays in the log, which SQLite reads
+    /// at the next open; nothing is lost either way.
+    pub fn checkpoint(&self) -> Result<bool> {
+        let busy: i64 = self
+            .lock()
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+        Ok(busy == 0)
     }
 
     /// What a backup carries, counted (shown before a restore and compared after it).
@@ -2303,6 +2335,22 @@ impl Library {
             params![id, at_micros],
         )?;
         Ok(())
+    }
+
+    /// Record a successful push of a tag as it was read for the push (`removal`: its tombstone,
+    /// pushed as a delete), only if it is still that ([`Self::mark_bookmark_pushed`]). `true`
+    /// when recorded (a pushed tombstone is purged).
+    pub fn mark_tag_pushed(&self, id: &str, removal: bool, at_micros: i64) -> Result<bool> {
+        let conn = self.lock();
+        let n = if removal {
+            conn.execute("DELETE FROM tags WHERE id = ?1 AND deleted = 1", params![id])?
+        } else {
+            conn.execute(
+                "UPDATE tags SET synced_at = ?2 WHERE id = ?1 AND deleted = 0",
+                params![id, at_micros],
+            )?
+        };
+        Ok(n > 0)
     }
 
     /// Every tag id the node holds, removed ones included (a sync skips downloading these).
@@ -3285,15 +3333,6 @@ impl Library {
         Ok(())
     }
 
-    /// Remember what a song looked like when it was checked.
-    pub fn set_identify_input(&self, track: i64, input_key: &str) -> Result<()> {
-        self.lock().execute(
-            "UPDATE identify_state SET input_key = ?2 WHERE track_id = ?1",
-            params![track, input_key],
-        )?;
-        Ok(())
-    }
-
     /// Songs a plain run compares with what they look like now (no identity): "not found" songs
     /// (unknown or error) with what they looked like when checked (those checked before this was
     /// kept have none and are not compared), and songs waiting for review, with or without it
@@ -3542,19 +3581,6 @@ impl Library {
             }
             Ok(check)
         })
-    }
-
-    /// Whether a song has a canonical identity (tags, a run, the owner).
-    pub fn has_identity(&self, track: i64) -> Result<bool> {
-        Ok(self
-            .lock()
-            .query_row(
-                "SELECT canonical_uri IS NOT NULL FROM tracks WHERE id = ?1",
-                params![track],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(false))
     }
 
     /// Whether the owner said "Not this" to `recording` for this song.
@@ -6035,6 +6061,59 @@ mod tag_tests {
             lib.tag_by_id("t1").unwrap().is_none(),
             "pushed tombstones are purged"
         );
+    }
+
+    /// A change made while a push was on the way is not lost: the push is recorded only for
+    /// the bookmark or tag as it was read for it.
+    #[test]
+    fn a_push_is_recorded_only_for_what_was_pushed() {
+        let lib = Library::open_in_memory().unwrap();
+        let uri = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        // Written, and removed while the write was on the way: the removal stays to be pushed
+        let written = lib.add_bookmark("b1", uri, 1_000).unwrap();
+        assert!(lib.remove_bookmark(uri).unwrap());
+        assert!(!lib.mark_bookmark_pushed(&written, 2_000).unwrap());
+        let pending = lib.unsynced_bookmarks().unwrap();
+        assert!(pending.len() == 1 && pending[0].deleted, "{pending:?}");
+        // Its delete pushed, and added again while that was on the way: the add stays to be pushed
+        let removal = pending[0].clone();
+        let again = lib.add_bookmark("b1", uri, 3_000).unwrap();
+        assert!(!lib.mark_bookmark_pushed(&removal, 4_000).unwrap());
+        let pending = lib.unsynced_bookmarks().unwrap();
+        assert!(pending.len() == 1 && !pending[0].deleted, "{pending:?}");
+        // Removed and added again during its write: it has a new time, which stays to be pushed
+        assert!(lib.remove_bookmark(uri).unwrap());
+        let newer = lib.add_bookmark("b1", uri, 4_500).unwrap();
+        assert!(!lib.mark_bookmark_pushed(&again, 4_600).unwrap());
+        assert_eq!(lib.unsynced_bookmarks().unwrap().len(), 1);
+        // Nothing changed meanwhile: recorded; a tombstone is purged
+        assert!(lib.mark_bookmark_pushed(&newer, 5_000).unwrap());
+        assert!(lib.unsynced_bookmarks().unwrap().is_empty());
+        assert!(lib.remove_bookmark(uri).unwrap());
+        let removal = lib.unsynced_bookmarks().unwrap().remove(0);
+        assert!(lib.mark_bookmark_pushed(&removal, 6_000).unwrap());
+        assert!(lib.bookmark_by_uri(uri).unwrap().is_none());
+
+        lib.add_tag("t1", uri, "disco", 1_000).unwrap();
+        assert!(lib.remove_tag(uri, "disco").unwrap());
+        assert!(!lib.mark_tag_pushed("t1", false, 2_000).unwrap());
+        assert!(lib
+            .unsynced_tags()
+            .unwrap()
+            .iter()
+            .any(|t| t.id == "t1" && t.deleted));
+        lib.add_tag("t1", uri, "disco", 3_000).unwrap();
+        assert!(!lib.mark_tag_pushed("t1", true, 4_000).unwrap());
+        assert!(lib
+            .unsynced_tags()
+            .unwrap()
+            .iter()
+            .any(|t| t.id == "t1" && !t.deleted));
+        assert!(lib.mark_tag_pushed("t1", false, 5_000).unwrap());
+        assert!(lib.unsynced_tags().unwrap().is_empty());
+        assert!(lib.remove_tag(uri, "disco").unwrap());
+        assert!(lib.mark_tag_pushed("t1", true, 6_000).unwrap());
+        assert!(lib.tag_by_id("t1").unwrap().is_none());
     }
 
     /// A call that panics while it holds the shared library does not lock everyone else out:

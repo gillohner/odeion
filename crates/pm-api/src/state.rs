@@ -315,6 +315,12 @@ pub struct NodeState {
     /// (and so the User-Agent) changes: `(contact, client)`.
     http: Mutex<Option<(String, reqwest::Client)>>,
     scanning: Mutex<bool>,
+    /// The node was asked to stop ([`Self::begin_stop`]): no new request is taken.
+    stopping: std::sync::atomic::AtomicBool,
+    /// Requests still being answered are ended ([`Self::end_requests`]).
+    requests_ended: tokio::sync::watch::Sender<bool>,
+    /// How many requests are being answered right now, on all listeners ([`Self::request_began`]).
+    requests_in_flight: tokio::sync::watch::Sender<usize>,
     /// Sources the owner switched off (Sources page): hidden everywhere, sign-ins kept.
     sources_off: std::sync::RwLock<std::collections::HashSet<String>>,
     /// `public_url` was not configured: the binary picked this machine's network address for
@@ -587,6 +593,9 @@ impl NodeState {
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
+            stopping: Default::default(),
+            requests_ended: tokio::sync::watch::channel(false).0,
+            requests_in_flight: tokio::sync::watch::channel(0).0,
             public_url_guessed: Default::default(),
             config_file: Mutex::new(None),
             pubky_client: std::sync::OnceLock::new(),
@@ -631,6 +640,13 @@ impl NodeState {
     /// library settings on every queue change) is restored, stopped.
     pub fn create_zone(self: &Arc<Self>, name: &str, output: Arc<dyn Output>) -> Arc<Zone> {
         let zone = self.zones.create(name, output);
+        // A zone made while the node stops (a player found, a Squeezebox connecting, a group
+        // made by a request still being answered) is closed like the others: it is in the list
+        // by now, and the stop sets its mark before it reads that list ([`Self::stop_for_exit`]),
+        // so one of the two closes it
+        if self.is_stopping() {
+            zone.close();
+        }
         self.restore_queue(&zone);
         // The zone's crossfade (`PUT /v1/zones/{id}/crossfade`), kept across restarts
         if let Ok(Some(ms)) = self
@@ -792,6 +808,90 @@ impl NodeState {
             }
         });
         zone
+    }
+
+    /// The node was asked to stop: from now on every listener (the remote-access one too)
+    /// answers new requests with 503, so nothing starts a zone again or begins a write while
+    /// the node winds down. Requests already being answered go on.
+    pub fn begin_stop(&self) {
+        self.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The time requests got to finish is over ([`crate::STOP_GRACE`]): a request still being
+    /// answered, on any listener, is ended where it waits and answered with 503
+    /// (`peer::not_while_stopping`), so that no handler goes on while the node winds down.
+    /// Streams already being sent (events, audio to a player) are no requests being answered:
+    /// they end with the process, as does work a handler gave to a thread or a task of its own.
+    pub fn end_requests(&self) {
+        self.begin_stop();
+        self.requests_ended.send_replace(true);
+    }
+
+    /// A request is being answered from now until the returned value is dropped
+    /// (`peer::not_while_stopping` holds it while the handler runs, on every listener).
+    pub(crate) fn request_began(&self) -> RequestInFlight<'_> {
+        self.requests_in_flight.send_modify(|n| *n += 1);
+        RequestInFlight(self)
+    }
+
+    /// Resolves once no request is being answered on any listener. A stop waits for this (at
+    /// most [`crate::STOP_GRACE`]): a request on another listener than the one that was told to
+    /// stop (remote access) gets the same time to finish.
+    pub(crate) async fn requests_done(&self) {
+        let mut in_flight = self.requests_in_flight.subscribe();
+        if in_flight.wait_for(|n| *n == 0).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Resolves once [`Self::end_requests`] was called.
+    pub(crate) async fn requests_ended(&self) {
+        let mut ended = self.requests_ended.subscribe();
+        if ended.wait_for(|ended| *ended).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Before the node exits: requests still being answered are ended ([`Self::end_requests`]),
+    /// every zone stops for good (a player is told to stop, a device is closed; the queues are
+    /// saved as they are; no later command starts one again, [`Zone::close`]), waiting at most
+    /// `within` for all of them, and the library's write-ahead log is folded into its file.
+    pub async fn stop_for_exit(&self, within: std::time::Duration) {
+        self.end_requests();
+        let zones: Vec<Arc<Zone>> = self
+            .zones
+            .list()
+            .iter()
+            .filter_map(|z| self.zones.get(&z.id))
+            .collect();
+        for zone in &zones {
+            zone.close();
+        }
+        let stopped = async {
+            for zone in &zones {
+                zone.wait_stopped().await;
+            }
+        };
+        if tokio::time::timeout(within, stopped).await.is_err() {
+            tracing::warn!("a zone did not stop in time; exiting anyway");
+        }
+        // On a thread of its own and with a limit: a holder of the library, or a scan in the
+        // middle of its writes, must not keep the node from exiting (the log is read at the
+        // next start either way)
+        let library = self.library.clone();
+        let checkpoint =
+            tokio::task::spawn_blocking(move || library.lock().expect("library poisoned").checkpoint());
+        match tokio::time::timeout(std::time::Duration::from_secs(2), checkpoint).await {
+            Ok(Ok(Ok(true))) => {}
+            Ok(Ok(Ok(false))) => tracing::info!("part of the library's log stays for the next start"),
+            Ok(Ok(Err(e))) => tracing::warn!("the library's log was not folded into its file: {e}"),
+            Ok(Err(e)) => tracing::warn!("the library's log was not folded into its file: {e}"),
+            Err(_) => tracing::warn!("the library was busy; its log is folded in at the next start"),
+        }
     }
 
     /// Put the saved queue back into a freshly created zone (no playback).
@@ -1212,15 +1312,10 @@ impl NodeState {
         true
     }
 
-    /// Start the Slimproto server (players connect to us) and the UDP discovery responder. Call
-    /// from inside the tokio runtime. Each connecting player becomes an output with a zone; its
-    /// pull stream is registered for the HTTP route.
-    pub fn start_slimproto(self: &Arc<Self>) -> std::io::Result<()> {
-        self.start_slimproto_on(None)
-    }
-
-    /// [`Self::start_slimproto`] on one address (`None`: all of them). On a loopback address the
-    /// discovery responder stays off: only players on this machine can connect.
+    /// Start the Slimproto server (players connect to us) and the UDP discovery responder on one
+    /// address (`None`: all of them). Call from inside the tokio runtime. Each connecting player
+    /// becomes an output with a zone; its pull stream is registered for the HTTP route. On a
+    /// loopback address the discovery responder stays off: only players on this machine can connect.
     pub fn start_slimproto_on(self: &Arc<Self>, bind: Option<std::net::IpAddr>) -> std::io::Result<()> {
         if self.slimproto_port == 0 {
             return Ok(());
@@ -2295,6 +2390,14 @@ impl NodeState {
             if let Some(old) = current.as_ref() {
                 old.retire();
             }
+            // The owner's own public data keeps the SDK's path also where no session is passed
+            // (their homeserver may sit on their own network); the previous owner's does not
+            if let Some(old) = current.as_ref() {
+                old.homeserver().set_owner(None);
+            }
+            if let Some(new) = sync.as_ref() {
+                new.homeserver().set_owner(Some(new.session().public_key()));
+            }
             std::mem::replace(&mut *current, sync)
         });
         // A pass of the old session still running writes nothing more, to the library or to its
@@ -2632,6 +2735,17 @@ fn continue_radio(library: &pm_library::LibraryLock, zone: &Arc<Zone>) {
         return;
     }
     zone.play_index(start);
+}
+
+/// A request being answered ([`NodeState::request_began`]); it is over when this is dropped.
+pub(crate) struct RequestInFlight<'a>(&'a NodeState);
+
+impl Drop for RequestInFlight<'_> {
+    fn drop(&mut self) {
+        self.0
+            .requests_in_flight
+            .send_modify(|n| *n = n.saturating_sub(1));
+    }
 }
 
 /// Library tracks (`track:<id>`) go into the play history; other URIs do not.
