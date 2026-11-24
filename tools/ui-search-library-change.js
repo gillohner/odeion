@@ -395,19 +395,24 @@ async function removedWhileAsked(browser, width) {
 // at once, while the next ask is still on its way (before, it stayed out until that ask was in).
 // Another song removed then and not brought back stays out (Bring back names a file: only that
 // file's song is back), also when the app never learnt its file (other: 'failed', its lookup
-// answered 500; 'pending', its lookup still on its way)
+// answered 500; 'pending', its lookup still on its way). And the song brought back is listed also
+// when its own file lookup (asked as the Remove question opened) answers only after Bring back
+// ('own-pending': before, the removal kept no file, so Bring back missed it and the answer dropped it)
 const FILES = { 1: '/music/Sefa/Journey/01 Journey Through Time.flac', 2: '/music/Sefa/Journey/02 Journey Home.flac' };
 async function broughtBack(browser, width, other = 'known') {
   const { page, context, state, lib, changed } = await setup(browser, width);
   lib.song2 = true;
   const restored = []; const hiddenFiles = new Set();
   let releaseLookup = () => {}; const lookupHeld = new Promise((r) => { releaseLookup = r; });
+  let releaseOwn = () => {}; const ownHeld = new Promise((r) => { releaseOwn = r; }); let ownAsked = false; let ownFree = false; let ownLanded = false;
   // A song's file as the node says it (none once it is out: its file is hidden, so 404), and Node
   // library's list of files taken out
   await context.route(/\/v1\/library\/tracks\/\d+$/, (route) => {
     const id = Number(route.request().url().split('/').pop()); const f = FILES[id];
     if (route.request().method() === 'DELETE') { hiddenFiles.add(f); return route.fulfill({ status: 204, body: '' }); }
     if (id === 2 && other === 'failed') return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'database busy' }) });
+    // (its answer as it was when asked, before the removal: the song and its file)
+    if (id === 1 && other === 'own-pending' && !ownFree) { ownAsked = true; return ownHeld.then(() => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ...fx.track, id, file: { ...fx.track.file, path: f } }) })).then(() => { ownLanded = true; }).catch(() => {}); }
     if (id === 2 && other === 'pending') return lookupHeld.then(() => route.fulfill({ status: 404, contentType: 'application/json', body: '{}' })).catch(() => {});
     if (hiddenFiles.has(f)) return route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: `no track ${id}` }) });
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ...fx.track, id, file: { ...fx.track.file, path: f } }) });
@@ -428,6 +433,7 @@ async function broughtBack(browser, width, other = 'known') {
     await page.locator('.set-row', { hasText: '01 Journey Through Time.flac' }).locator('[data-unhide]').click();
     await until(page, () => /reading it again|next scan/.test(document.body.innerText), 'brought back');
     assert.deepEqual(restored, [FILES[1]], 'the first song\'s file was brought back on the node');
+    if (other === 'own-pending') { assert.ok(ownAsked, 'the first song\'s file was asked for'); ownFree = true; releaseOwn(); for (const end = Date.now() + 5000; !ownLanded; await sleep(50)) if (Date.now() > end) throw new Error('Timed out: the held file lookup answered'); await sleep(200); }
     // The answer read before the removal lands while Your library is open (no new ask: the search
     // isn't on screen); the ask Back starts is held
     held.release();
@@ -446,7 +452,7 @@ async function broughtBack(browser, width, other = 'known') {
     await until(page, () => document.querySelector('#sprog').hidden, 'progress line gone');
     assert.ok(await songListed(page) && !(await songListed(page, SONG2)), `${width} (${other}): and after the next answer`);
     assert.deepEqual(state.errors, []);
-  } finally { releaseLookup(); await context.close(); }
+  } finally { releaseLookup(); releaseOwn(); await context.close(); }
 }
 
 (async () => {
@@ -467,8 +473,9 @@ async function broughtBack(browser, width, other = 'known') {
       await broughtBack(browser, width);
       await broughtBack(browser, width, 'failed');
       await broughtBack(browser, width, 'pending');
+      await broughtBack(browser, width, 'own-pending');
       if (width === 360) await hung(browser, width);
-      console.log(`ok ${width}px: a collection write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing, or when the stream broke after every answer); an offline one starts afresh; a song removed during the ask stays out, unless brought back meanwhile (only the song whose file was brought back, not one whose file lookup failed or is still on its way)`);
+      console.log(`ok ${width}px: a collection write or library change makes the same search ask again; the one on screen stays; a change during the ask asks once more; a hung ask is given up; same answer not redrawn; errored asks the library only (and its error goes when that was the one missing, or when the stream broke after every answer); an offline one starts afresh; a song removed during the ask stays out, unless brought back meanwhile (only the song whose file was brought back, not one whose file lookup failed or is still on its way; also when its own file lookup answers after Bring back)`);
     }
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });

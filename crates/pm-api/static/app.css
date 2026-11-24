@@ -394,6 +394,7 @@ html:not([data-shell="phone"]) .lyric-lines { overscroll-behavior: contain; }
   background: var(--surface-3); color: var(--fg); border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
   padding: var(--sp-2h) var(--sp-3h); border-radius: var(--r-md); box-shadow: var(--shadow); opacity: 0; pointer-events: none; z-index: var(--z-toast);
   transition: opacity var(--dur-base) var(--ease), transform var(--dur-base) var(--ease); max-width: min(90vw, 520px);
+  overflow-wrap: anywhere; /* a long address or name wraps inside it, not past the screen */
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { border-left-color: var(--bad); }
@@ -566,6 +567,13 @@ html[data-shell="phone"] .notice[data-failed] .btn.sm { min-height: 44px; }
 /* An album with no artist or year keeps its line's height: a tile is a button, which centres its content, so a
    shorter tile's cover sat lower than its neighbours' */
 .tile .a:empty::before { content: '\a0'; }
+/* A library album's line: artist · year, then its quality badge. The text is what gives way ("…"),
+   the badge stays whole (it was cut off, leaving a bare "…" after the year). The badge fits the
+   text's line (its 1 px border had made the line 2 px taller than a tile's without one); a line
+   with the badge alone keeps the text's height. */
+.tile .a:has(> .at, > .fmt) { display: flex; align-items: center; min-height: calc(1.45 * var(--fs-xs)); }
+.tile .a > .at { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tile .a > .fmt { flex: none; line-height: 1.25; }
 .tile-play {
   position: absolute; right: 10px; bottom: 10px; width: 40px; height: 40px; border-radius: 50%; border: 0;
   background: var(--accent); color: var(--on-accent); display: flex; align-items: center; justify-content: center;
@@ -855,8 +863,10 @@ html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
 /* ---- artist hero ---- */
 .artist-hero { display: flex; gap: var(--sp-5); align-items: flex-start; margin-bottom: var(--sp-2); }
 .artist-hero .grow { flex: 1; min-width: 0; }
-.portrait { width: 140px; height: 140px; border-radius: 50%; flex: none; overflow: hidden; display: flex; align-items: center; justify-content: center; font-weight: var(--fw-bold); font-size: var(--fs-display); color: rgba(255,255,255,0.85); box-shadow: var(--shadow); }
-.portrait img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.portrait { position: relative; width: 140px; height: 140px; border-radius: 50%; flex: none; overflow: hidden; display: flex; align-items: center; justify-content: center; font-weight: var(--fw-bold); font-size: var(--fs-display); color: rgba(255,255,255,0.85); box-shadow: var(--shadow); }
+/* A service album's or artist's picture lies over its initials, so one that fails to load (removed) leaves the initials */
+.portrait > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.portrait > img.loaded { background: var(--surface-3); }
 .bio { color: var(--fg-2); max-width: 72ch; margin-top: var(--sp-3); line-height: 1.55; }
 .artist-hero a { color: var(--fg-2); }
 .artist-hero a:hover { color: var(--accent-strong); }
@@ -978,8 +988,8 @@ html[data-shell="phone"] #iversions .list-row .icon-btn { width: 44px; height: 4
 .src-badge.ico.cover svg { width: 13px; height: 13px; }
 .art.sm .src-badge.ico.cover, .thumbwrap .src-badge.ico.cover { left: 3px; bottom: 3px; width: 16px; height: 16px; }
 .art.sm .src-badge.ico.cover svg, .thumbwrap .src-badge.ico.cover svg { width: 10px; height: 10px; }
-.hero .art .src-badge.ico.cover { left: 10px; bottom: 10px; width: 28px; height: 28px; }
-.hero .art .src-badge.ico.cover svg { width: 16px; height: 16px; }
+.hero .art .src-badge.ico.cover, .portrait .src-badge.ico.cover { left: 10px; bottom: 10px; width: 28px; height: 28px; }
+.hero .art .src-badge.ico.cover svg, .portrait .src-badge.ico.cover svg { width: 16px; height: 16px; }
 .np-big .src-badge.ico.cover { left: 12px; bottom: 12px; width: 32px; height: 32px; }
 .np-big .src-badge.ico.cover svg { width: 18px; height: 18px; }
 .list-row .thumbwrap { position: relative; display: block; flex: none; margin-right: var(--sp-2h); line-height: 0; }
@@ -1901,6 +1911,8 @@ html[data-shell="phone"] .bottomnav { border-top: 0; }
 html[data-shell="phone"] .page-head { align-items: center; }
 /* Library: the filter row and the quality chips under it had no space between them */
 html[data-shell="phone"] .main > .page-head + .chips { margin-top: var(--sp-3); }
+/* Albums and Artists: the Sort row under the filter row had no space between them either */
+html[data-shell="phone"] .main > .page-head + .listbar { margin-top: var(--sp-3); }
 /* Songs and Albums: the filter takes the row's free width, so Play all and Add music (its icon on a
    phone) sit beside it instead of Add music wrapping onto a row of its own. A filter on its own
    (Artists) keeps its place beside the heading. */

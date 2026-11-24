@@ -2,7 +2,9 @@
 // page's monogram (its initials on its colour), as the tiles and song rows do, not an empty grey box
 // (album, song) or nothing at all (artist, person). Also when the picture comes in late with About
 // (the page asked again): the monogram stays under it, with the source badge. A picture that loads
-// covers the monogram and gets its own backing (.loaded). 1280, 1024 and 768 px.
+// covers the monogram and gets its own backing (.loaded). A streaming service's own album and artist pages
+// (Sources › an album, a service artist) the same: their initials under the picture, the album's source
+// badge on top, a picture that loads covering the initials. 1280, 1024 and 768 px.
 // Isolated API fixtures; no node or external network required.
 //   node tools/ui-hero-cover-fallback.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -35,6 +37,13 @@ const base = () => ({
   '/item/artist/lib-11': { body: { ...fx.itemPage('artist', 'lib-11', tracks), image: BROKEN } },
   ['/profiles/' + PID]: { body: { name: 'Ada Lovelace', avatar: BROKEN } },
   ['/shared/' + PID + '/playlists']: { body: [] },
+  // A service (SoundCloud) with two albums, one whose picture fails and one whose picture loads, and an artist
+  '/sources': { body: [{ id: 'soundcloud', name: 'SoundCloud', enabled: true, status: 'signed in' }] },
+  '/sources/soundcloud/likes': { body: { tracks: [], playlists: [{ id: 'bad', title: 'Night <Drive>', creator: 'Sefa' }, { id: 'good', title: 'Plumage', creator: 'Dr. Peacock' }] } },
+  '/sources/soundcloud/playlists': { body: [] },
+  '/sources/soundcloud/items/bad': { body: { title: 'Night <Drive>', creator: 'Sefa', url: 'https://soundcloud.com/sefa/sets/night', image: BROKEN, tracks: [{ url: 'https://soundcloud.com/sefa/one', title: 'One', duration_ms: 200000 }] } },
+  '/sources/soundcloud/items/good': { body: { title: 'Plumage', creator: 'Dr. Peacock', url: 'https://soundcloud.com/peacock/sets/plumage', image: '/v1/library/albums/8/cover', tracks: [{ url: 'https://soundcloud.com/peacock/one', title: 'One', duration_ms: 200000 }] } },
+  '/sources/soundcloud/artists/sefa': { body: { name: 'Sefa', url: 'https://soundcloud.com/sefa', image: BROKEN, albums: [] } },
 });
 
 // What the hero's picture box shows: its initials (seen), its picture (if any, and whether it covers the box), its badge
@@ -51,6 +60,22 @@ const hero = (page) => page.evaluate(() => {
     gradient: /gradient/.test(getComputedStyle(art).backgroundImage),
     img: !!img, imgCovers: !!ir && Math.abs(ir.width - r.width) < 2 && Math.abs(ir.height - r.height) < 2 && img.naturalWidth > 0, loaded: !!img && img.classList.contains('loaded'),
     badge: !!badge, badgeOnTop: !!badge && top(badge), shadow: getComputedStyle(art).boxShadow !== 'none',
+  };
+});
+// A service album's or artist's picture box (.portrait): the same look
+const portrait = (page) => page.evaluate(() => {
+  const box = document.querySelector('#main .artist-hero .portrait'); if (!box) return null;
+  const r = box.getBoundingClientRect(); const span = box.querySelector(':scope > span:not([class])');
+  const sr = span && span.getBoundingClientRect(); const img = box.querySelector(':scope > img');
+  const ir = img && img.getBoundingClientRect(); const badge = box.querySelector('.src-badge');
+  const at = (el) => { const was = el.style.pointerEvents; el.style.pointerEvents = 'auto'; const b = el.getBoundingClientRect(); const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); el.style.pointerEvents = was; return !!hit && (hit === el || el.contains(hit)); };
+  const mid = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  return {
+    w: Math.round(r.width), h: Math.round(r.height),
+    initials: span ? span.textContent.trim() : '', initialsShown: !!sr && sr.width > 0 && getComputedStyle(span).visibility !== 'hidden',
+    coloured: getComputedStyle(box).backgroundColor !== 'rgba(0, 0, 0, 0)',
+    img: !!img, imgCovers: !!ir && Math.abs(ir.width - r.width) < 2 && Math.abs(ir.height - r.height) < 2 && img.naturalWidth > 0 && mid === img, loaded: !!img && img.classList.contains('loaded'),
+    badge: !!badge, badgeOnTop: !!badge && at(badge),
   };
 });
 const settle = async (page, ms = 900) => { await page.locator('#main .hero .art').first().waitFor({ timeout: 5000 }).catch(() => {}); await page.waitForTimeout(ms); };
@@ -111,6 +136,28 @@ async function run(browser, width) {
       else check(h && !h.img && h.initials === 'J' && h.initialsShown && h.gradient && h.badge, `${what}: the monogram and the badge stay (${JSON.stringify(h)})`);
       delete state.fixtures[key];
     }
+    // A service's album whose picture fails: its initials (the title escaped, not markup), with the service badge
+    await fx.go(page, '/sources/soundcloud');
+    await page.click('[data-sitem="bad"]'); await page.locator('#main .artist-hero .portrait').waitFor({ timeout: 5000 }).catch(() => {}); await page.waitForTimeout(900);
+    let p = await portrait(page);
+    check(p && !p.img && p.initials === 'ND' && p.initialsShown && p.coloured, `${at} service album, picture fails: its initials ND, not an empty box (${JSON.stringify(p)})`);
+    check(p && p.badge && p.badgeOnTop, `${at} service album, picture fails: the source badge is on it`);
+    check(p && p.w >= 110 && p.h === p.w, `${at} service album, picture fails: the box keeps its square size (${p && p.w}×${p && p.h})`);
+    check(!(await page.locator('#main .artist-hero drive').count()) && (await page.locator('#main .artist-hero h1').textContent()) === 'Night <Drive>', `${at} service album: the title's markup is shown as text`);
+    await page.screenshot({ path: path.join(shots, `service-album-broken-${width}.png`) });
+    // A service's album whose picture loads: it covers the initials, with a backing, under the badge
+    await fx.go(page, '/sources/soundcloud');
+    await page.click('[data-sitem="good"]'); await page.locator('#main .artist-hero .portrait').waitFor({ timeout: 5000 }).catch(() => {}); await page.waitForTimeout(900);
+    p = await portrait(page);
+    check(p && p.img && p.imgCovers && p.loaded, `${at} service album, picture loads: it covers the initials (${JSON.stringify(p)})`);
+    check(p && p.badge && p.badgeOnTop, `${at} service album, picture loads: the source badge is over it`);
+    await page.screenshot({ path: path.join(shots, `service-album-cover-${width}.png`) });
+    // A service's artist whose picture fails (the page Back restores): the initials
+    await page.evaluate(() => { history.pushState({ transient: false, v: 'source-artist', arg: { source: 'soundcloud', id: 'sefa' }, depth: 1 }, '', '/sources/soundcloud'); history.pushState({ transient: false, v: 'home', depth: 2 }, '', '/'); history.back(); });
+    await page.locator('#main .artist-hero .portrait').waitFor({ timeout: 5000 }).catch(() => {}); await page.waitForTimeout(900);
+    p = await portrait(page);
+    check(p && !p.img && p.initials === 'S' && p.initialsShown && p.coloured && p.w === p.h, `${at} service artist, picture fails: its initials S, not an empty circle (${JSON.stringify(p)})`);
+    await page.screenshot({ path: path.join(shots, `service-artist-broken-${width}.png`) });
     await fx.cleanCopy(page);
     check(!state.errors.length, `${at} no page errors (${state.errors.join(' | ')})`);
   } finally { await context.close(); }

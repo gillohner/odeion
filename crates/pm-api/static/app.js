@@ -73,7 +73,7 @@
   document.addEventListener('error', (e) => { const t = e.target; const how = t && t.dataset && t.dataset.err; if (how === 'remove') t.remove(); else if (how === 'hide') t.style.visibility = 'hidden'; }, true);
   // A song row's (or a page hero's) cover that has loaded gets a backing of its own (.loaded), so the initials under it
   // don't show through a cover with transparent parts; while it loads it has none, and the initials show
-  document.addEventListener('load', (e) => { const t = e.target; if (t instanceof HTMLImageElement && t.matches('.thumbwrap > img.thumb, .hero .art.monogram > img')) t.classList.add('loaded'); }, true);
+  document.addEventListener('load', (e) => { const t = e.target; if (t instanceof HTMLImageElement && t.matches('.thumbwrap > img.thumb, .hero .art.monogram > img, .portrait > img')) t.classList.add('loaded'); }, true);
   const icon = (name, cls = 'ic') => `<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
   const fmt = (ms) => {
     if (ms === Infinity) return 'Live'; // a radio stream has no length
@@ -869,8 +869,8 @@
       await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library');
       // (the kept searches' answers lose the song now: the search on screen is drawn again from its
       // kept answer, not asked again, so it would list the song until started again; withoutTrack)
-      const mark = { id: Number(id), path: null, back: false }; removedTracks.push(mark);
-      file.then((f) => { mark.path = f; });
+      const mark = { id: Number(id), path: null, back: false, since: restoredPaths.length }; removedTracks.push(mark);
+      file.then((f) => { mark.path = f; if (f && restoredPaths.slice(mark.since).includes(f)) mark.back = true; });
       for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) r.answers[src] = withoutTrack(a, src, id);
       const at = anchor ? $$('#sresults [data-smore]').indexOf(anchor) : -1;
       const focused = at >= 0 && document.activeElement === anchor;
@@ -5416,6 +5416,16 @@
     const v = p.slice(1);
     return NAV_VIEWS.includes(v) ? { v } : null;
   };
+  // An address that is no page (/settings/you, a mistyped /library/<tab>, an id the app can't read)
+  // opens the nearest page, Settings or Your library, else Home, and says so (not Home without a word).
+  const missedRoute = () => {
+    const p = location.pathname.replace(/\/+$/, '') || '/';
+    if (p === '/' || p === '/app') return null;
+    let said = p; try { said = decodeURI(p); } catch { /* kept as typed */ }
+    const top = p.split('/')[1].toLowerCase(); const ch = Array.from(said);
+    // (the offline Android app routes before this: it opens Downloads, as before)
+    return { v: top === 'settings' || top === 'library' ? top : 'home', said: ch.length > 60 ? ch.slice(0, 59).join('') + '…' : said };
+  };
   // The same thing gets the same page (docs/ux/08-item-page.md): old detail views open the item page.
   const SERVICE_PAGE = { tidal: (k, id) => `https://tidal.com/${k}/${id}`, deezer: (k, id) => `https://www.deezer.com/${k}/${id}`, spotify: (k, id) => `https://open.spotify.com/${k}/${id}` };
   const toItem = (v, arg) => {
@@ -5669,11 +5679,14 @@
   // (an answer the same but for the time it took)
   // Songs removed from the library this session, in order (removeFromLibrary): an answer asked before
   // a removal and landing after it drops them (refreshSearch, startSearch), unless Bring back put the
-  // song back since (back: its file brought back, Node library; one whose file is not known, its
-  // lookup failed or still on its way, stays out until a fresh library answer lists it)
+  // song back since (back: its file brought back, Node library; one whose lookup failed stays out
+  // until a fresh library answer lists it. One whose lookup is still on its way when its file is
+  // brought back is marked once the lookup answers: restoredPaths, the files brought back in order,
+  // each removal looking only at those brought back after it, since: never an earlier Bring back)
   const removedTracks = [];
+  const restoredPaths = [];
   const goneSince = (since) => removedTracks.slice(since).filter((m) => !m.back).map((m) => m.id);
-  const broughtBack = (path) => { for (const m of removedTracks) if (m.path && m.path === path) m.back = true; };
+  const broughtBack = (path) => { restoredPaths.push(path); for (const m of removedTracks) if (m.path && m.path === path) m.back = true; };
   // An answer without library song id: the library's copy goes; a service's copy stays, without the
   // library's id (no Remove or Edit tags on it, its page not the removed song's)
   const withoutTrack = (a, src, id) => {
@@ -6169,7 +6182,10 @@
   };
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
-  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true, `<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span>`)}<div class="t">${esc(a.title)}${dlAlbum(a.id) ? dlMark() : ''}</div><div class="a">${esc([a.album_artist, a.year].filter(Boolean).join(' · '))}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
+  // A tile's line under its title in a span of its own, so a long artist name is what is shortened
+  // with "…" and the quality badge after it stays whole (app.css .tile .a > .at)
+  const tileLine = (text) => (text ? `<span class="at">${esc(text)}</span>` : '');
+  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true, `<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span>`)}<div class="t">${esc(a.title)}${dlAlbum(a.id) ? dlMark() : ''}</div><div class="a">${tileLine([a.album_artist, a.year].filter(Boolean).join(' · '))}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
   // People on Pubky (STEWARD-UX-PEOPLE.md): profiles from Nexus via the node, cached here too.
   const profileCache = new Map();
   const loadProfiles = async (ids) => {
@@ -8184,7 +8200,10 @@
     if (how === 'added') return [...list].sort((a, b) => (b.id || 0) - (a.id || 0));
     return by((a) => a.name);
   };
-  const firstLetter = (x) => { const c = String(x || '').trim().charAt(0).toUpperCase().normalize('NFKD').charAt(0); return /[A-Z]/.test(c) ? c : '#'; };
+  // (letters that don't split into a base letter go under the one they sort with, so "Œuvre" is
+  // under O and "#" stays first or last in the A–Z row)
+  const AZ_BASE = { Æ: 'A', Ɓ: 'B', Đ: 'D', Ð: 'D', Ɗ: 'D', Ə: 'E', Ħ: 'H', Ɨ: 'I', Ł: 'L', Ŋ: 'N', Œ: 'O', Ø: 'O', Ŧ: 'T', Ƶ: 'Z' };
+  const firstLetter = (x) => { let c = String(x || '').trim().charAt(0).toUpperCase().normalize('NFKD').charAt(0); c = AZ_BASE[c] || c; return /[A-Z]/.test(c) ? c : '#'; };
   const listControls = (kind, pref, letters) => `<div class="listbar"><label class="small muted">Sort <select class="input sm" data-lsort aria-label="Sort">${LIST_SORTS[kind].map(([k, l]) => `<option value="${k}" ${pref.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${kind === 'albums' ? `<button class="chip ${pref.fav ? 'on' : ''}" data-lfav aria-pressed="${!!pref.fav}">${icon(pref.fav ? 'heart-fill' : 'heart')} Bookmarks</button>` : ''}${letters.length > 1 ? `<span class="azbar" role="group" aria-label="Jump to a letter">${letters.map((l) => `<button class="az" data-az="${l}" aria-pressed="false">${l}</button>`).join('')}</span>` : ''}</div>`;
   // Off while there is nothing to filter: what was typed stays and applies again once there is
   const filterBox = (placeholder, off = false) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}"${off ? ' disabled' : ''}>`;
@@ -9010,7 +9029,8 @@
           const inPlace = redrawing('tracks');
           const oldFilter = inPlace ? $('#filter', main) : null; const place = inPlace ? keepPlace() : null;
           const nowTyped = oldFilter ? oldFilter.value.trim() : '';
-          const total = Math.max(stats ? stats.tracks : 0, first.tracks.length);
+          // (a count with no songs in the answer is nothing to list or play: the empty state)
+          const total = first.tracks.length ? Math.max(stats ? stats.tracks : 0, first.tracks.length) : 0;
           main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + headAddMusic(total)) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', ...noMusicYet('Songs')));
           const box = $('#tracklist');
           if (box) {
@@ -9449,9 +9469,11 @@
           // Summary bar: "12 songs · 8 Library · 3 TIDAL · 1 unavailable", each part a filter.
           const counts = new Map(); songs.forEach((t) => { const key = t.unavailable ? 'none' : t.plays ? t.plays.service : null; if (key) counts.set(key, (counts.get(key) || 0) + 1); });
           // (a chip whose songs are all gone, removed or now playing from elsewhere, goes off: the
-          // whole playlist shows again with "N songs" on, never an empty list with no chip on)
-          if (state.plFilter && state.plFilter.id === plId && !pfPending && !counts.has(state.plFilter.key)) state.plFilter = null;
-          const filt = state.plFilter && state.plFilter.id === plId ? state.plFilter.key : null;
+          // whole playlist shows again with "N songs" on, never an empty list with no chip on. Only an
+          // answer that came says so: a failed one keeps the chip chosen, the rows showing unfiltered
+          // with "Try again" until an answer comes, and the chip is on again then)
+          if (state.plFilter && state.plFilter.id === plId && pf && !counts.has(state.plFilter.key)) state.plFilter = null;
+          const filt = (pf || pfPending) && state.plFilter && state.plFilter.id === plId ? state.plFilter.key : null;
           // While the play-from answer is on its way, its chip row keeps its place, so the songs don't jump (second review #20)
           const summaryBar = pfPending && songs.length ? '<div class="chips plsummary" aria-hidden="true"><span class="chip skeleton chip-sk"></span><span class="chip skeleton chip-sk"></span></div>' : pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songCount} song${songCount === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
           const pfNote = !mine && !pf && !pfPending && songs.length ? '<p class="muted small pfnote" role="status">Couldn’t find where these songs play. <button class="link" id="pfretry">Try again</button></p>' : '';
@@ -9468,7 +9490,9 @@
           // note's sentence under the buttons, said once, at every width)
           main.innerHTML = backBtn('playlists', 'Collections') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Collection</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}${libNote}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button aria-haspopup="menu" aria-expanded="false" class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
-            + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && !t.pending && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" data-wd="up" title="Move up" aria-label="${esc(rowWords.up(t.title))}" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" data-wd="down" title="Move down" aria-label="${esc(rowWords.down(t.title))}" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" data-wd="unlist" title="Remove" aria-label="${esc(rowWords.unlist(t.title))}">${icon('close')}</button></span>` }) : emptyState('playlist', 'This collection is empty', mine ? 'Add songs from any ⋯ menu.' : 'Add songs from any ⋯ menu, or import a file.')}</section>`
+            // (a collection whose songs are all on this node only lists them below: no Songs card
+            // saying "This collection is empty" over them; it stays in the page, hidden, for its bindings)
+            + `<section class="section" id="plsongs"${!songs.length && localSongs.length ? ' hidden' : ''}><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && !t.pending && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" data-wd="up" title="Move up" aria-label="${esc(rowWords.up(t.title))}" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" data-wd="down" title="Move down" aria-label="${esc(rowWords.down(t.title))}" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" data-wd="unlist" title="Remove" aria-label="${esc(rowWords.unlist(t.title))}">${icon('close')}</button></span>` }) : emptyState('playlist', 'This collection is empty', mine ? 'Add songs from any ⋯ menu.' : 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the collection on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this collection" aria-label="Remove ${esc(t.title)} from this collection">${icon('close')}</button>` })}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this collection, shown with it when you share it.</p>'}</section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
@@ -9959,7 +9983,7 @@
           const { source, id } = state.viewArg;
           const a = await api('GET', `/sources/${encodeURIComponent(source)}/artists/${encodeURIComponent(id)}`);
           if (state.view !== 'source-artist') return;
-          main.innerHTML = backBtn('search', 'Back') + `<div class="artist-hero"><div class="portrait" style="background:hsl(${hue(a.name)} 35% 28%)">${a.image ? `<img src="${esc(a.image)}" alt="" data-err="remove">` : esc(initials(a.name))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">Artist · ${esc(source.toUpperCase())}</div><h1>${esc(a.name)}</h1><div class="muted">${countOf(a.albums.length, 'albums')} · <a href="${esc(webUrl(a.url))}" target="_blank" rel="noopener">open</a>${a.library_artist_id ? ` · <button class="link" data-artist="${a.library_artist_id}">in your library</button>` : ''}</div></div></div></div></div>` + (a.albums.length ? `<div class="grid">${a.albums.map((h) => `<button class="tile" data-sitem="${esc(h.id)}" title="${esc(h.title)}"><div class="art">${h.image ? `<img loading="lazy" alt="" src="${esc(h.image)}">` : ''}${coverBadge(source, true)}${h.library_album_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="t">${esc(h.title)}</div><div class="a">${esc([h.year].filter(Boolean).join(' · '))}</div>${coverFrom(source)}</button>`).join('')}</div>` : '<p class="muted">No albums listed.</p>');
+          main.innerHTML = backBtn('search', 'Back') + `<div class="artist-hero"><div class="portrait" style="background:hsl(${hue(a.name)} 35% 28%)"><span aria-hidden="true">${esc(initials(a.name))}</span>${a.image ? `<img src="${esc(a.image)}" alt="" data-err="remove">` : ''}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">Artist · ${esc(source.toUpperCase())}</div><h1>${esc(a.name)}</h1><div class="muted">${countOf(a.albums.length, 'albums')} · <a href="${esc(webUrl(a.url))}" target="_blank" rel="noopener">open</a>${a.library_artist_id ? ` · <button class="link" data-artist="${a.library_artist_id}">in your library</button>` : ''}</div></div></div></div></div>` + (a.albums.length ? `<div class="grid">${a.albums.map((h) => `<button class="tile" data-sitem="${esc(h.id)}" title="${esc(h.title)}"><div class="art">${h.image ? `<img loading="lazy" alt="" src="${esc(h.image)}">` : ''}${coverBadge(source, true)}${h.library_album_id ? '<span class="src-badge lib">in library</span>' : ''}</div><div class="t">${esc(h.title)}</div><div class="a">${esc([h.year].filter(Boolean).join(' · '))}</div>${coverFrom(source)}</button>`).join('')}</div>` : '<p class="muted">No albums listed.</p>');
           $$('[data-sitem]', main).forEach((b) => b.onclick = () => setView('source-item', { source, id: b.dataset.sitem }));
           $$('[data-artist]', main).forEach((b) => b.onclick = () => setView('artist', Number(b.dataset.artist)));
           break;
@@ -9980,7 +10004,7 @@
           const qitems = it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms, image: it.image || null }));
           const playFrom = (i, replace = true) => playSourceItems(qitems.slice(i), replace, 'end', replace ? { shuffle: false } : {}); // (Play: in order, shuffle off)
           const canHeart = !!(await (async () => { try { await api('GET', '/favourites?uri=' + encodeURIComponent(it.url)); return true; } catch { return false; } })());
-          main.innerHTML = backBtn('sources', srcName) + `<div class="artist-hero"><div class="portrait" style="border-radius:12px;background:hsl(${hue(it.title)} 35% 28%)">${it.image ? `<img src="${esc(it.image)}" alt="" data-err="remove">` : esc(initials(it.title))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, countOf(it.tracks.length, 'songs')].filter(Boolean).join(' · '))} · <a href="${esc(webUrl(it.url))}" target="_blank" rel="noopener">open</a>${it.licence ? (/^https?:/.test(it.licence) ? ` · <a href="${esc(webUrl(it.licence))}" target="_blank" rel="noopener">licence</a>` : ` · ${esc(it.licence)}`) : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to collection">${icon('playlist')} Collection</button>${it.library_album_id ? `<button class="btn ghost" id="ainlib" title="You already have this album">${icon('disc')} In your library</button>` : ''}${canHeart ? `<button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart" aria-pressed="${state.favUris.has(it.url)}">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Bookmarked' : 'Bookmark'}</button>` : ''}</div></div>${it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : ''}</div></div>`
+          main.innerHTML = backBtn('sources', srcName) + `<div class="artist-hero"><div class="portrait" style="border-radius:12px;background:hsl(${hue(it.title)} 35% 28%)"><span aria-hidden="true">${esc(initials(it.title))}</span>${it.image ? `<img src="${esc(it.image)}" alt="" data-err="remove">` : ''}${coverBadge(source)}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, countOf(it.tracks.length, 'songs')].filter(Boolean).join(' · '))} · <a href="${esc(webUrl(it.url))}" target="_blank" rel="noopener">open</a>${it.licence ? (/^https?:/.test(it.licence) ? ` · <a href="${esc(webUrl(it.licence))}" target="_blank" rel="noopener">licence</a>` : ` · ${esc(it.licence)}`) : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to collection">${icon('playlist')} Collection</button>${it.library_album_id ? `<button class="btn ghost" id="ainlib" title="You already have this album">${icon('disc')} In your library</button>` : ''}${canHeart ? `<button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart" aria-pressed="${state.favUris.has(it.url)}">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Bookmarked' : 'Bookmark'}</button>` : ''}</div></div>${it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : ''}</div></div>`
             + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div class="fmt-col"><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>${t.url ? `<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-act="more" data-amore1="${i}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>` : ''}</div></div>`; }).join('')}</div>`;
           $('#aplay').onclick = () => playFrom(0, true); $('#aadd').onclick = () => playFrom(0, false);
           $('#amore').onclick = (e) => { e.stopPropagation(); uriMenu($('#amore'), it.tracks.map((t) => t.url), it.title); };
@@ -12089,7 +12113,8 @@
           history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search);
           // A saved search's source applies to its first request, before the view is drawn.
           runSearch('pop', r.arg.in || 'everywhere');
-        } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace');
+        } else if (r) setView(r.v, r.arg, 'replace');
+        else { const m = missedRoute(); setView(m ? m.v : state.view, undefined, 'replace'); if (m) toast(`No page at ${m.said}`); }
       }
       if (signinBack) { const b = signinBack; signinBack = null; state.signinFailed = b.why ? { svc: b.svc, why: b.why } : null; toast(b.text, b.kind); if (isListener()) setView('settings'); else setView('sources', { source: b.svc }); }
       link.loaded = true;

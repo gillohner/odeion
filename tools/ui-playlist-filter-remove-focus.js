@@ -4,7 +4,9 @@
 // focus fell to the page and the next Tab started at the top. Now it goes on to the next song that
 // shows (the shown one before when none shows after it). And removing the chip's last song left an
 // empty list with no chip on: now the whole playlist shows again with "N songs" on, and the focus
-// goes on to the next song. At 360 (browser and the Android app), 412 and 1280 px.
+// goes on to the next song. A play-from answer that fails (after a removal) kept no chip either: now
+// the chip chosen stays, the rows show unfiltered with "Try again", and the chip is on again once an
+// answer comes. At 360 (browser and the Android app), 412 and 1280 px.
 //   node tools/ui-playlist-filter-remove-focus.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -20,7 +22,7 @@ const song = (id, title) => ({ ...fx.track, id, title, canonical_uri: `https://m
 // Alpha and Charlie play from the library, Bravo and Delta from TIDAL
 const SONGS = { A: song(1, 'Alpha'), B: song(2, 'Bravo'), C: song(3, 'Charlie'), D: song(4, 'Delta') };
 const FROM = { A: 'library', B: 'tidal', C: 'library', D: 'tidal' };
-const NAMES = { f1: 'Next shown', f2: 'Last shown', f3: 'Chip emptied' };
+const NAMES = { f1: 'Next shown', f2: 'Last shown', f3: 'Chip emptied', f4: 'Failed answer' };
 const sum = (id, n) => ({ ...fx.summary, id, name: NAMES[id], items: n });
 const detailOf = (id, keys) => ({ summary: sum(id, keys.length), playlist: { ...sum(id, keys.length), items: keys.map((k) => ({ uri: SONGS[k].canonical_uri })) }, tracks: keys.map((k) => (FROM[k] === 'library' ? SONGS[k] : null)), entries: keys.map((k) => ({ kind: 'track', uri: SONGS[k].canonical_uri })), local_tracks: [] });
 const pfOf = (keys) => ({ order: { order: ['library', 'tidal'], services: [{ id: 'library', name: 'Your library', connected: true }, { id: 'tidal', name: 'TIDAL', connected: true }] }, own_order: false, items: keys.map((k, i) => ({ index: i, uri: SONGS[k].canonical_uri, title: SONGS[k].title, artist: 'Sefa', duration_ms: 240000, track_id: FROM[k] === 'library' ? SONGS[k].id : null, stream_uri: FROM[k] === 'tidal' ? `tidal:track:${SONGS[k].id}` : null, plays_from: { service: FROM[k], label: FROM[k] === 'library' ? 'Your library' : 'TIDAL' }, sources: [] })) });
@@ -30,7 +32,7 @@ async function run(browser, width, android) {
   const tag = `${width}${android ? '-android' : ''}`; const phone = width < 600;
   const { page, context } = await fx.create(browser, width, { mobile: phone });
   if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android' }; });
-  const lists = { f1: ['A', 'B', 'C', 'D'], f2: ['A', 'B', 'C', 'D'], f3: ['A', 'B', 'C'] }; const writes = [];
+  const lists = { f1: ['A', 'B', 'C', 'D'], f2: ['A', 'B', 'C', 'D'], f3: ['A', 'B', 'C'], f4: ['A', 'B', 'C', 'D'] }; const writes = []; let pfFails = false;
   await page.route('**/v1/pubky', (r) => json(r, { user: null, sync: { running: false } }));
   await page.route('**/v1/storage', (r) => json(r, { homeserver: { mode: 'none' }, saving: { state: 'saved' } }));
   await page.route(/\/v1\/playlists\/(f\d+)(\/.*)?$/, async (r) => {
@@ -38,7 +40,7 @@ async function run(browser, width, android) {
     const [, , , id, ...rest] = u.pathname.split('/'); const sub = rest.join('/');
     if (m === 'DELETE' && sub.startsWith('items/')) { const k = Number(sub.split('/')[1]); writes.push(`${id} DELETE ${k}`); lists[id].splice(k, 1); return json(r, {}); }
     if (m !== 'GET') return r.fallback();
-    if (sub === 'play-from') return json(r, pfOf(lists[id]));
+    if (sub === 'play-from') return pfFails ? r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'down' }) }) : json(r, pfOf(lists[id]));
     if (!sub) return json(r, detailOf(id, lists[id]));
     return r.fallback();
   });
@@ -100,6 +102,24 @@ async function run(browser, width, android) {
     check(/^2 songs/.test(await chipOn()), `${tag}: "2 songs" is the chip on (${await chipOn()})`);
     check((await focused()) === `Charlie:${kind}`, `${tag}: the focus goes on to the next song, Charlie (${await focused()})`);
     await page.screenshot({ path: path.join(SHOTS, `after-chip-emptied-${tag}.png`) });
+
+    // 4. The TIDAL chip on (Bravo, Delta show), Bravo removed while the play-from answer fails: the rows
+    // show unfiltered with "Try again", and once an answer comes the TIDAL chip is on again (Delta)
+    check(await open('f4', 'Alpha,Bravo,Charlie,Delta', 'tidal'), `${tag}: the fourth playlist's TIDAL chip shows ${await shown()}`);
+    pfFails = true;
+    check(await keyRemove('Bravo'), `${tag}: Bravo's Remove from playlist with the play-from answer failing`);
+    const retry = () => page.locator('#pfretry').isVisible().catch(() => false);
+    // (Delta, a TIDAL song the library doesn't have, has no name while there is no answer)
+    check(await until(async () => (await all()) === 'Alpha,Charlie,Untitled' && (await retry()), 5000), `${tag}: the failed answer shows "Try again" (${await all()})`);
+    check((await shown()) === 'Alpha,Charlie,Untitled', `${tag}: with no answer the rows show unfiltered (${await shown()})`);
+    check((await chipOn()) === 'none', `${tag}: and no chip shows on while there is no answer (${await chipOn()})`);
+    await page.screenshot({ path: path.join(SHOTS, `after-failed-answer-${tag}.png`) });
+    pfFails = false;
+    await page.click('#pfretry');
+    check(await until(async () => (await chipOn()) !== 'none' && (await shown()) === 'Delta', 5000), `${tag}: once an answer comes the TIDAL chip is on again (${await chipOn()}; shows ${await shown()})`);
+    check(/TIDAL/.test(await chipOn()), `${tag}: the chip on is TIDAL, as chosen (${await chipOn()})`);
+    await page.screenshot({ path: path.join(SHOTS, `after-try-again-${tag}.png`) });
+    check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${tag}: no sideways overflow after Try again`);
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${tag}: no sideways overflow`);
   } catch (e) { check(false, `${tag}: ${e.message}`); }
   await context.close();

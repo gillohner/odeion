@@ -50,6 +50,7 @@ ui-downloads-rows.js downloads-rows-shots
 ui-android-media.js android-media-shots
 ui-phone-library-targets.js phone-library-targets-shots
 ui-drive-return.js drive-return-shots
+ui-unknown-address.js unknown-address-shots
 ui-drive-folders.js drive-folders-shots
 ui-phone-back-targets.js phone-back-targets-shots
 ui-back-tooltip.js back-tooltip-shots
@@ -110,6 +111,7 @@ ui-genre-card-contrast.js genre-card-contrast-shots
 ui-phone-head-level.js phone-head-level-shots
 ui-album-tile-line.js album-tile-line-shots
 ui-home-album-line.js home-album-line-shots
+ui-list-head-tiles.js list-head-tiles-shots
 ui-empty-ways-in.js empty-ways-in-shots
 ui-item-redraw.js item-redraw-shots 3
 ui-songs-name.js songs-name-shots
@@ -191,3 +193,5 @@ ui-dimmed-text.js dimmed-text-shots
 ui-toasts.js toasts-shots
 ui-dialog-keys.js dialog-keys-shots
 ui-dsd-modes.js dsd-modes-shots
+ui-playlist-local-only.js playlist-local-only-shots
+ui-songs-empty-az.js songs-empty-az-shots

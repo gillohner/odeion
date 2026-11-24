@@ -11,6 +11,9 @@ const SHOTS = path.resolve(process.argv[3] || path.join(process.env.TMPDIR || '/
 fs.mkdirSync(SHOTS, { recursive: true });
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
+// Rows are content-visibility: auto, so until a frame has drawn them their text reads as ''
+// (innerText of skipped content): wait two frames after they are there, then read
+const drawn = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 
 const names = ['Sefa', 'Dr. Peacock', 'Angerfist'];
 const tracks = Array.from({ length: 12 }, (_, k) => {
@@ -39,6 +42,7 @@ const rowReport = () => [...document.querySelectorAll('#main .tracks[data-list="
       try {
         await fx.go(page, '/tracks');
         await page.waitForFunction(() => document.querySelectorAll('#main .track').length >= 12, null, { timeout: 8000 });
+        await drawn(page);
         const shell = await page.evaluate(() => document.documentElement.dataset.shell);
         const rows = await page.evaluate(rowReport);
         check(rows.length >= 12, `${T}: the Songs rows are drawn (${rows.length}, ${shell} layout)`);
@@ -77,6 +81,7 @@ const rowReport = () => [...document.querySelectorAll('#main .tracks[data-list="
           state.favs = [fx.SONG];
           await fx.go(page, '/favourites');
           await page.waitForSelector('#main .tracks[data-list="fav"] .track', { timeout: 8000 });
+          await drawn(page);
           const fav = await page.evaluate(() => { const r = document.querySelector('#main .tracks[data-list="fav"] .track'); return { by: r.querySelector('.by').innerText.trim(), col: getComputedStyle(r.querySelector('.album-col')).display }; });
           check(/· Journey$/.test(fav.by) && fav.col === 'none', `${T}: Bookmarks' rows too (${fav.by}; column ${fav.col})`);
         }
@@ -92,6 +97,7 @@ const rowReport = () => [...document.querySelectorAll('#main .tracks[data-list="
       try {
         await fx.go(page, '/tracks');
         await page.waitForSelector('#main .track .by-album [data-act="album"]', { state: 'attached', timeout: 8000 });
+        await drawn(page);
         const r = await page.evaluate(() => {
           const by = document.querySelector('#main .track .by'); const a = by.querySelector('[data-act="album"]');
           return { display: getComputedStyle(a).display, cut: by.scrollWidth > by.clientWidth, href: a.getAttribute('href') };
@@ -122,6 +128,7 @@ const rowReport = () => [...document.querySelectorAll('#main .tracks[data-list="
       try {
         await fx.go(page, '/tracks');
         await page.waitForFunction(() => document.querySelectorAll('#main .track').length >= 3, null, { timeout: 8000 });
+        await drawn(page);
         const by = await page.evaluate(() => [...document.querySelectorAll('#main .track .by')].map((e) => e.innerText.trim()));
         if (width > 900) {
           check(by[0] === '' && by[1] === '' && by[2] === 'Sefa, Dr. Peacock', `${T}: the album keeps its column; no artists, no artist line (${JSON.stringify(by)})`);
