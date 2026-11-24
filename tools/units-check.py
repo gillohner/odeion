@@ -10,6 +10,8 @@
 - `systemd-analyze verify` accepts both (with the executables stood in by /bin/true);
 - the move (unit header, Linux guide, compatibility page) looks at `systemctl cat` and carries the
   old unit's ReadWritePaths=, Environment= lines and drop-ins over, so no local change is lost.
+- the bundle's start at boot (deploy/bundle/start-at-boot.sh): its unit runs compose in the bundle's
+  folder after the network is up, retries without a limit and stops nothing.
 
     python3 -I tools/units-check.py [scratch dir]
 """
@@ -86,6 +88,36 @@ if shutil.which("systemd-analyze"):
         shutil.rmtree(d, ignore_errors=True)
 else:
     print("skip systemd-analyze: not installed")
+
+# The bundle's start at boot (deploy/bundle/start-at-boot.sh): the unit it writes retries without
+# limit after the network is up, runs compose in the bundle's folder and stops nothing.
+BUNDLE = REPO / "deploy" / "bundle"
+r = subprocess.run(["sh", str(BUNDLE / "start-at-boot.sh"), "--print"], capture_output=True, text=True,
+                   env={"PATH": "/usr/bin:/bin"})
+check(r.returncode == 0, f"start-at-boot.sh --print ({r.stderr.strip()[:200]})")
+boot_text = r.stdout
+boot = directives(boot_text)
+check(boot.get("WorkingDirectory") == [str(BUNDLE.resolve())], f"the bundle unit runs in the bundle's folder ({boot.get('WorkingDirectory')})")
+check(boot.get("ExecStart") == ["/bin/sh ./start-at-boot.sh --run"], "the bundle unit runs start-at-boot.sh --run")
+check({"network-online.target", "docker.service"} <= set(words(boot, "After")) and "network-online.target" in words(boot, "Wants"),
+      "the bundle unit starts after the network is online and after Docker")
+check(boot.get("Type") == ["oneshot"] and boot.get("Restart") == ["on-failure"] and boot.get("StartLimitIntervalSec") == ["0"],
+      "the bundle unit tries again without a limit")
+check(not boot.get("ExecStop") and not boot.get("ExecStopPost"), "stopping the bundle unit leaves the containers alone")
+check(boot.get("WantedBy") == ["multi-user.target"], "the bundle unit is enabled for every boot")
+setup = (BUNDLE / "setup.sh").read_text()
+check("sudo ./start-at-boot.sh" in setup, "setup.sh says how to install the start at boot")
+check("start-at-boot.sh" in (REPO / "docs/deploy.md").read_text(), "docs/deploy.md describes the start at boot")
+if shutil.which("systemd-analyze"):
+    d = Path(tempfile.mkdtemp(prefix="odeion-units-", dir=sys.argv[1] if len(sys.argv) > 1 else None))
+    try:
+        (d / "odeion-bundle.service").write_text(boot_text.replace(f"WorkingDirectory={BUNDLE.resolve()}", f"WorkingDirectory={d}"))
+        r = subprocess.run(["systemd-analyze", "verify", "--man=no", str(d / "odeion-bundle.service")],
+                           capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "SYSTEMD_LOG_LEVEL": "warning"})
+        msgs = [l for l in (r.stdout + r.stderr).splitlines() if "odeion-bundle" in l]
+        check(r.returncode == 0 and not msgs, f"systemd-analyze verify accepts the bundle unit ({' | '.join(msgs)[:300]})")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 print(f"\n{len(problems)} problem(s)")
 sys.exit(1 if problems else 0)

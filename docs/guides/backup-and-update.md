@@ -81,6 +81,12 @@ find the music again is in the backup:
 - shares the machine mounts itself (`/etc/fstab`, a NAS app): `config/host-shares.txt` and the
   matching `/etc/fstab` lines in `config/fstab-lines.txt`. Mount them again before the restore.
 
+A share mounted by Docker must answer before the node can start. After a reboot Docker tries
+only once, so install the bundle's start at boot once (`sudo ./start-at-boot.sh`): it starts the
+node as soon as the share answers. To check it, stop the share (or unplug the NAS), restart the
+machine, and see `systemctl status odeion-bundle` say it is trying again; once the share is back,
+the node runs within about a minute.
+
 The library remembers each song by its path in the container (`/music/Roon/...`). Keep the same
 mount targets and every match, collection and play stays with its song; for a new place, see
 [Restore a backup file](#restore-a-backup-file).
@@ -99,6 +105,8 @@ node's data, starts everything, and after the node's first scan puts the sign-in
 node's own restore. It ends with the node's report: the sign-ins it put back and any library folder
 it cannot find. It only restores into an empty install: it stops when the bundle already has
 containers or data, so it never overwrites a running node.
+
+Then, once, `sudo ./start-at-boot.sh`, so the node comes back after a reboot (above).
 
 On a machine with another network address, change `PUBLIC_IP` and `PM_PUBLIC_URL` in `.env` after
 the restore, then `docker compose up -d`. The dashboard and the Cloudflare tunnel start again with

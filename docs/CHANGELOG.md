@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-24
+
+- **The bundle comes back after a reboot when a network share answers late.** Docker starts the bundle's containers again after a boot, but tries each only once: when a share the node mounts as a Docker volume (a NAS on SMB or NFS) was not reachable yet, the node stayed down until someone started it, while the homeserver ran. `sudo ./start-at-boot.sh` in `deploy/bundle` now installs `odeion-bundle.service`, which runs `docker compose up -d` there once the network is up and tries again every 30 seconds until the node runs. It stops nothing at shutdown, and `--remove` takes it out. `setup.sh` points to it.
+
 ### 2026-11-23
 
 - **Lyrics files are read with limits.** A `.lrc` file next to a song is read only when it is a regular file of at most 1 MiB; a link is followed only to another `.lrc` file. Lyrics whose text only looks like a time stamp (a price in a title line, a very long number) are read as text.
