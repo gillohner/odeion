@@ -3,8 +3,8 @@
 ## What to back up
 
 Your music files are yours to back up as usual; the node never changes them. The node's own data
-is the library database (matches, playlists, favourites, tags, play history, queues, settings) and
-your sign-ins to services. If you signed in to Pubky, playlists, favourites and tags are also kept
+is the library database (matches, collections, bookmarks, tags, play history, queues, settings) and
+your sign-ins to services. If you signed in to Pubky, collections, bookmarks and tags are also kept
 in your Pubky account and come back on a new node by themselves.
 
 With the node's own homeserver (the `deploy/bundle` install), back up the homeserver too: its
@@ -24,7 +24,11 @@ database, its key and your Pubky account's files. `backup.sh` below does all of 
   passphrase-locked backup puts back (Pubky, remote access, the API token) stay as restored. When there is no room for that copy, the
   library is not replaced and the restore says so.
 
-The file holds the node's library only, never a homeserver.
+The file holds the node's library only, never a homeserver. It never holds who is logged in to
+the node: after a restore from Settings on a running node everyone stays logged in or out as they
+were. Where the library file itself is put back (a new machine, the bundle's `restore.sh`, going
+back to the previous version below), everyone logs in again: you with Pubky Ring or the API
+token, the people you added with Pubky Ring.
 
 **Every day or week, to a folder:** in the same place, pick a folder on the node, how often and
 how many to keep. Best on another disk or a NAS. In Docker the folder must be inside the
@@ -83,7 +87,7 @@ find the music again is in the backup:
   matching `/etc/fstab` lines in `config/fstab-lines.txt`. Mount them again before the restore.
 
 The library remembers each song by its path in the container (`/music/Roon/...`). Keep the same
-mount targets and every match, playlist and play stays with its song; for a new place, see
+mount targets and every match, collection and play stays with its song; for a new place, see
 [Restore a backup file](#restore-a-backup-file).
 
 ### Restore on a new disk or machine
@@ -113,7 +117,7 @@ half-restored install (only this one; the backup folder is never changed), then 
 On a new or reinstalled node: Home's **Get started** card links to it, or **Settings › Backup ›
 Choose a backup file**. The node shows what the file holds first, then puts the library back and
 rescans. If your music now lives at another path, it asks for each folder's new place, and the
-tracks keep their playlists and history.
+tracks keep their collections and history.
 
 ## Copying the whole data folder
 
@@ -210,7 +214,8 @@ docker compose start music
 ```
 
 Then restore that backup's `node/library.pmbackup` in **Settings › Backup › Choose a backup file**
-with the passphrase from `node/passphrase`: it puts the sign-ins back. Anything you changed after
+with the passphrase from `node/passphrase`: it puts the sign-ins back. Everyone logs in to the
+node again afterwards (the library file holds no log-ins). Anything you changed after
 that backup is gone (the newer library stays next to it as `library.db.newer`). A homeserver that won't start after `git pull`: go back to the bundle you had
 with `git checkout <the commit in the backup's config/git-commit>` and `docker compose up -d`. If
 it still fails, [ask for help](troubleshooting.md#still-stuck) before removing anything; the

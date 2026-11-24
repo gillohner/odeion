@@ -147,7 +147,11 @@ async fn delayed_request_across_restores(method: &str) {
     assert_ne!(a, b, "restore grants a fresh report membership");
     let authenticated = crate::accounts::caller(&s, Some(&token)).unwrap();
     assert_eq!(authenticated.role, Role::Listener);
-    assert_eq!(authenticated.key.as_deref(), Some(ANN), "R1 reinstates token T");
+    assert_eq!(
+        authenticated.key.as_deref(),
+        Some(ANN),
+        "R1 lists Ann again: the token the node kept is hers to use"
+    );
     resume.notify_one();
     let (status, response) = pending.await.unwrap();
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{response}");

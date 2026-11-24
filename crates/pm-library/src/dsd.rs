@@ -44,7 +44,7 @@ impl DsdHeader {
         if self.format.rate_hz == 0 {
             None
         } else {
-            Some(self.sample_count * 1000 / self.format.rate_hz as u64)
+            Some(self.sample_count.checked_mul(1000)? / self.format.rate_hz as u64)
         }
     }
 }
@@ -140,6 +140,9 @@ fn read_dsf<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
     })
 }
 
+/// The longest ID3v2 tag that is read from a DSF file (as the reader that plays it allows).
+const MAX_ID3: u64 = 16 * 1024 * 1024;
+
 /// Read an ID3v2 tag starting at `off`: header + the synchsafe size.
 fn read_id3_at<R: Read + Seek>(path: &Path, r: &mut R, off: u64) -> Result<Option<Vec<u8>>> {
     let mut h = [0u8; 10];
@@ -154,9 +157,20 @@ fn read_id3_at<R: Read + Seek>(path: &Path, r: &mut R, off: u64) -> Result<Optio
         .fold(0u64, |acc, b| (acc << 7) | (*b as u64 & 0x7f));
     let footer = if h[5] & 0x10 != 0 { 10 } else { 0 };
     let total = 10 + size + footer;
+    // The length is the file's word (up to 256 MiB fits its four bytes): no memory is set aside
+    // for a tag longer than tags are; the file is read without it
+    if total > MAX_ID3 {
+        return Ok(None);
+    }
     let mut buf = vec![0u8; total as usize];
     read_exact_at(path, r, off, &mut buf)?;
     Ok(Some(buf))
+}
+
+/// Where the chunk after the one at `at` starts (a 12-byte header, `size` bytes, padded to an
+/// even length), or `None` when the size is no size a file can have (the sum does not fit).
+fn next_chunk(at: u64, size: u64) -> Option<u64> {
+    at.checked_add(12)?.checked_add(size)?.checked_add(size & 1)
 }
 
 fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
@@ -166,7 +180,8 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
         return Err(bad(path, "dff: not a DSDIFF form"));
     }
     let form_size = u64::from_be_bytes(hdr[4..12].try_into().unwrap());
-    let end = 12 + form_size;
+    // Sizes are the file's word: sums are checked, and one that cannot be ends the walk
+    let end = form_size.saturating_add(12);
 
     let mut rate = None;
     let mut channels = None;
@@ -174,7 +189,7 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
     let mut id3 = None;
 
     let mut pos = 16u64;
-    while pos + 12 <= end {
+    while pos.saturating_add(12) <= end {
         let mut ch = [0u8; 12];
         if read_exact_at(path, r, pos, &mut ch).is_err() {
             break;
@@ -189,8 +204,8 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
                 read_exact_at(path, r, body, &mut kind)?;
                 if &kind == b"SND " {
                     let mut p = body + 4;
-                    let pend = body + size;
-                    while p + 12 <= pend {
+                    let pend = body.saturating_add(size);
+                    while p.saturating_add(12) <= pend {
                         let mut sc = [0u8; 12];
                         read_exact_at(path, r, p, &mut sc)?;
                         let sid = [sc[0], sc[1], sc[2], sc[3]];
@@ -208,7 +223,8 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
                             }
                             _ => {}
                         }
-                        p += 12 + ssize + (ssize & 1);
+                        let Some(next) = next_chunk(p, ssize) else { break };
+                        p = next;
                     }
                 }
             }
@@ -216,8 +232,8 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
             b"ID3 " => id3 = read_id3_at(path, r, body)?,
             b"DIIN" => {
                 let mut p = body;
-                let pend = body + size;
-                while p + 12 <= pend {
+                let pend = body.saturating_add(size);
+                while p.saturating_add(12) <= pend {
                     let mut sc = [0u8; 12];
                     read_exact_at(path, r, p, &mut sc)?;
                     let sid = [sc[0], sc[1], sc[2], sc[3]];
@@ -225,17 +241,25 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
                     if &sid == b"ID3 " {
                         id3 = read_id3_at(path, r, p + 12)?;
                     }
-                    p += 12 + ssize + (ssize & 1);
+                    let Some(next) = next_chunk(p, ssize) else { break };
+                    p = next;
                 }
             }
             _ => {}
         }
-        pos = body + size + (size & 1);
+        let Some(next) = next_chunk(pos, size) else { break };
+        pos = next;
     }
 
     let rate = rate.ok_or_else(|| bad(path, "dff: missing FS chunk"))?;
     let channels = channels.ok_or_else(|| bad(path, "dff: missing CHNL chunk"))?;
     let (data_offset, data_len) = data.ok_or_else(|| bad(path, "dff: missing DSD data chunk"))?;
+    // No more audio than the file holds, whatever the chunk says its size is
+    let in_file = r
+        .seek(SeekFrom::End(0))
+        .map_err(|e| io_err(path, e))?
+        .saturating_sub(data_offset);
+    let data_len = data_len.min(in_file);
     if !(1..=8).contains(&channels) {
         return Err(bad(path, format!("dff: bad channel count {channels}")));
     }
@@ -244,7 +268,7 @@ fn read_dff<R: Read + Seek>(path: &Path, r: &mut R) -> Result<DsdHeader> {
     Ok(DsdHeader {
         container: DsdContainer::Dff,
         format,
-        sample_count: data_len * 8 / channels as u64,
+        sample_count: data_len.saturating_mul(8) / channels as u64,
         data_offset,
         data_len,
         block_size: 1,
@@ -404,5 +428,83 @@ mod tests {
         let p = dir.path().join("x.dsf");
         std::fs::write(&p, b"RIFF....WAVE").unwrap();
         assert!(matches!(read_header(&p), Err(LibraryError::Probe { .. })));
+    }
+
+    /// Chunk sizes are the file's word. One that cannot be a size (the sum with its place does
+    /// not fit) ends the read with an error; it does not wrap around to an earlier place.
+    #[test]
+    fn dff_chunk_sizes_that_cannot_be_are_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.dff");
+        let form = |form_size: u64, chunks: &[u8]| {
+            let mut b = b"FRM8".to_vec();
+            b.extend(form_size.to_be_bytes());
+            b.extend(b"DSD ");
+            b.extend(chunks);
+            b.extend([0u8; 64]);
+            b
+        };
+        let chunk = |id: &[u8; 4], size: u64, body: &[u8]| {
+            let mut b = id.to_vec();
+            b.extend(size.to_be_bytes());
+            b.extend(body);
+            b
+        };
+        for size in [u64::MAX, u64::MAX - 11, u64::MAX - 27, u64::MAX - 28, 1 << 63] {
+            // At the top level, with a form that claims every size there is
+            let top = form(u64::MAX, &chunk(b"JUNK", size, &[]));
+            // Inside the properties chunk and inside the edited-master chunk
+            let prop_body = [&b"SND "[..], &chunk(b"JUNK", size, &[])].concat();
+            let prop = form(200, &chunk(b"PROP", prop_body.len() as u64, &prop_body));
+            let diin_body = chunk(b"JUNK", size, &[]);
+            let diin = form(200, &chunk(b"DIIN", diin_body.len() as u64, &diin_body));
+            for (what, bytes) in [("top", top), ("PROP", prop), ("DIIN", diin)] {
+                std::fs::write(&p, bytes).unwrap();
+                assert!(
+                    matches!(read_header(&p), Err(LibraryError::Probe { .. })),
+                    "{what} {size}"
+                );
+            }
+        }
+    }
+
+    /// A data chunk that says it is longer than the file is as long as the file: the length
+    /// and the playing time come from what is there.
+    #[test]
+    fn a_dff_data_chunk_is_no_longer_than_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.dff");
+        let data = vec![0x69u8; 1000];
+        let mut bytes = synth::dff(2_822_400, 2, &data, None);
+        // The `DSD ` data chunk is the last one: its size field sits 8 bytes before the data
+        let at = bytes.len() - data.len() - 8;
+        assert_eq!(&bytes[at - 4..at], b"DSD ");
+        for claimed in [u64::MAX, u64::MAX - 12, 1 << 62] {
+            bytes[at..at + 8].copy_from_slice(&claimed.to_be_bytes());
+            std::fs::write(&p, &bytes).unwrap();
+            let h = read_header(&p).unwrap();
+            assert_eq!(h.data_len, 1000, "{claimed}");
+            assert_eq!(h.sample_count, 1000 * 8 / 2, "{claimed}");
+            assert_eq!(h.duration_ms(), Some(4000 * 1000 / 2_822_400), "{claimed}");
+        }
+    }
+
+    /// How long a DSF file's tag is is the file's word: for one that says it is longer than
+    /// tags are, no memory is set aside, and the file is read without its tag.
+    #[test]
+    fn a_dsf_tag_of_an_impossible_length_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.dsf");
+        let data = vec![0x69u8; 4096 * 2];
+        // (a tag header that gives the longest length its four bytes hold, about 256 MiB)
+        let header = [b'I', b'D', b'3', 4, 0, 0, 0x7F, 0x7F, 0x7F, 0x7F];
+        std::fs::write(&p, synth::dsf(2_822_400, 2, 4096, &data, Some(&header))).unwrap();
+        let h = read_header(&p).unwrap();
+        assert!(h.id3.is_none());
+        assert_eq!(h.data_len, data.len() as u64);
+        // (a tag of a usual length is still read)
+        let tag = id3_bytes();
+        std::fs::write(&p, synth::dsf(2_822_400, 2, 4096, &data, Some(&tag))).unwrap();
+        assert_eq!(read_header(&p).unwrap().id3.as_deref(), Some(&tag[..]));
     }
 }

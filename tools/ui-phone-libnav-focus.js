@@ -53,7 +53,7 @@ const where = () => {
   const browser = await chromium.launch(process.env.PLAYWRIGHT_CHROMIUM ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM } : {});
   try {
     for (const width of [360, 412]) {
-      for (const p of [{ name: 'Songs', url: '/tracks', rows: '#main .track', n: tracks.length }, { name: 'Playlists', url: '/playlists', rows: '#main .list-row', n: collections.length }]) {
+      for (const p of [{ name: 'Songs', url: '/tracks', rows: '#main .track', n: tracks.length }, { name: 'Collections', url: '/playlists', rows: '#main .list-row', n: collections.length }]) {
         const at = `${width} ${p.name}`;
         const { context, page, state } = await fx.create(browser, width, { tracks, collections });
         try {

@@ -5,6 +5,16 @@
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
   const BROWSER = 'browser';
+  // A dialog is named by its heading, so a screen reader says what it asks ("Delete this collection?")
+  // and not only "dialog"; `described`: its first paragraph is read with it (a confirmation's words)
+  let dialogNames = 0;
+  const nameDialog = (d, described) => {
+    const h = d.querySelector('h1, h2, h3');
+    if (h && !d.hasAttribute('aria-label') && !d.hasAttribute('aria-labelledby')) { if (!h.id) h.id = `dialogname${++dialogNames}`; d.setAttribute('aria-labelledby', h.id); }
+    const p = described && d.querySelector('p');
+    if (p && !d.hasAttribute('aria-describedby')) { if (!p.id) p.id = `dialogwords${++dialogNames}`; d.setAttribute('aria-describedby', p.id); }
+    return d;
+  };
   // Where the page's own player is, in words. The apps (window.pmDesktop, set by pm-desktop before
   // this script) never say "browser": on Android the in-app player is "This phone", on a desktop app
   // "This computer"; the plain web UI keeps "This browser". Every string that names it goes through
@@ -152,7 +162,7 @@
     genre: { label: 'Genre', ops: [['contains', 'contains'], ['is', 'is']], input: 'text', hint: 'techno' },
     artist: { label: 'Artist', ops: [['contains', 'contains']], input: 'text', hint: 'name' },
     year: { label: 'Year', ops: [['between', 'between']], input: 'range' },
-    favourite: { label: 'Favourite', ops: [['is', 'is']], input: 'yesno' },
+    favourite: { label: 'Bookmark', ops: [['is', 'is']], input: 'yesno' },
     plays: { label: 'Times played', ops: [['at_least', 'at least'], ['at_most', 'at most']], input: 'number' },
     last_played: { label: 'Last played', ops: [['within_days', 'in the last'], ['not_within_days', 'not in the last']], input: 'days' },
     tag: { label: 'Your Pubky tag', ops: [['is', 'is']], input: 'text', hint: 'chill' },
@@ -161,14 +171,14 @@
   const smartRuleRow = (r, i) => {
     const f = SMART_FIELDS[r.field] || SMART_FIELDS.genre;
     const val = r.value == null ? '' : r.value;
-    const input = f.input === 'yesno' ? `<select class="input sm" data-k="value" aria-label="Favourite"><option value="yes" ${val !== false ? 'selected' : ''}>yes</option><option value="no" ${val === false ? 'selected' : ''}>no</option></select>`
+    const input = f.input === 'yesno' ? `<select class="input sm" data-k="value" aria-label="Bookmark"><option value="yes" ${val !== false ? 'selected' : ''}>yes</option><option value="no" ${val === false ? 'selected' : ''}>no</option></select>`
       : f.input === 'range' ? `<input class="input sm" data-k="value" type="number" placeholder="from" value="${esc(val || '')}" aria-label="From year" style="width:90px"> and <input class="input sm" data-k="to" type="number" placeholder="to" value="${esc(r.to || '')}" aria-label="To year" style="width:90px">`
       : f.input === 'number' ? `<input class="input sm" data-k="value" type="number" min="0" value="${esc(val || 0)}" aria-label="Times" style="width:90px"> times`
       : f.input === 'days' ? `<input class="input sm" data-k="value" type="number" min="1" value="${esc(val || 30)}" aria-label="Days" style="width:90px"> days`
       : `<input class="input sm" data-k="value" value="${esc(val)}" placeholder="${esc(f.hint || '')}" aria-label="${esc(f.label)}">`;
     return `<div class="smrule" data-smrule="${i}"><select class="input sm" data-k="field" aria-label="What">${Object.entries(SMART_FIELDS).map(([k, x]) => `<option value="${k}" ${r.field === k ? 'selected' : ''}>${x.label}</option>`).join('')}</select><select class="input sm" data-k="op" aria-label="How">${f.ops.map(([k, l]) => `<option value="${k}" ${r.op === k ? 'selected' : ''}>${l}</option>`).join('')}</select>${input}<button class="icon-btn" data-smrm="${i}" aria-label="Remove this rule" title="Remove this rule">${icon('close')}</button></div>`;
   };
-  const smartSummary = (x) => { const seeds = (x.seeds || []).map((sd) => sd.label || sd.kind); const rs = [...(seeds.length ? [`like ${seeds.join(', ')}`] : []), ...(x.rules || []).map((r) => { const f = SMART_FIELDS[r.field]; if (!f) return r.field; const op = (f.ops.find(([k]) => k === r.op) || f.ops[0])[1]; if (r.field === 'favourite') return r.value === false ? 'not a favourite' : 'a favourite'; if (r.field === 'year') return `year ${r.value || '…'}–${r.to || '…'}`; return `${f.label.toLowerCase()} ${op} ${r.value}${r.field === 'last_played' ? ' days' : ''}`; })]; return rs.join(x.matches === 'any' ? ' or ' : ' and ') + (x.minutes ? ` · ${x.minutes} min` : ''); };
+  const smartSummary = (x) => { const seeds = (x.seeds || []).map((sd) => sd.label || sd.kind); const rs = [...(seeds.length ? [`like ${seeds.join(', ')}`] : []), ...(x.rules || []).map((r) => { const f = SMART_FIELDS[r.field]; if (!f) return r.field; const op = (f.ops.find(([k]) => k === r.op) || f.ops[0])[1]; if (r.field === 'favourite') return r.value === false ? 'not bookmarked' : 'bookmarked'; if (r.field === 'year') return `year ${r.value || '…'}–${r.to || '…'}`; return `${f.label.toLowerCase()} ${op} ${r.value}${r.field === 'last_played' ? ' days' : ''}`; })]; return rs.join(x.matches === 'any' ? ' or ' : ' and ') + (x.minutes ? ` · ${x.minutes} min` : ''); };
   // Art for a queue item: a streaming source's image, else the library album cover; a badge for
   // where it plays from (`svc`; null for none), quiet when the art sits in a button.
   const itemArt = (it, cls = '', svc = null, quiet = false) => {
@@ -549,7 +559,7 @@
         + group('Cloud drives', drv.roots.map((r) => row(esc(r.name), `${r.provider === 'google' ? 'Google Drive' : 'OneDrive'} · ${countOf(r.tracks, 'songs')}`, `<button class="btn sm" data-dr-scan="${esc(r.id)}">Rescan</button><button class="btn sm ghost" data-dr-del="${esc(r.id)}">Remove</button>`)).join('')
           + drv.providers.map((p) => row(esc(p.name), !p.configured ? 'Not set up on this node: add its app in Settings › This node › Service apps' : p.connected ? `Signed in${p.user ? ` as ${esc(p.user)}` : ''}` : 'Sign in, then pick a music folder; it is read again every 6 hours.' + (driveFailed && driveFailed.provider === p.id ? '<br>' + driveFailedHtml(driveFailed.why) : ''), !p.configured ? '' : p.connected ? `<button class="btn" data-dr-add="${esc(p.id)}" data-dr-name="${esc(p.name)}">${icon('plus')} Add a folder</button><button class="btn sm ghost" data-dr-out="${esc(p.id)}">Sign out</button>` : `<button class="btn" data-dr-login="${esc(p.id)}">Sign in</button>`)).join(''))
         + group('Fix my files\u2019 tags', block('', 'Write what the node knows into your files, so other players see it too: each artist on their own (not one artist called \u201cSefa, Dr. Peacock\u201d), and the MusicBrainz match of each song. You see every change first; each file\u2019s tags are saved before it changes, and the music itself is never touched.', '<div class="actions"><button class="btn" id="fixcheck">Check my files</button></div><div id="fixout" aria-live="polite"></div>'))
-        + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that playlists, tags and other apps understand: IDs in the tags first, then the folder as an album (one MusicBrainz lookup for a whole album), then how it sounds (AcoustID) for the rest. Unsure matches, and songs where two ways disagree, wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
+        + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that collections, tags and other apps understand: IDs in the tags first, then the folder as an album (one MusicBrainz lookup for a whole album), then how it sounds (AcoustID) for the rest. Unsure matches, and songs where two ways disagree, wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
     return library;
   };
   const bindNodeLibrary = (idSt) => {
@@ -576,7 +586,7 @@
       $('#wdopen').onclick = async () => { const sh = await webdavDialog(); if (sh) { toast(`${sh.name} added; scanning`); render(); } };
       $$('[data-wd-scan]').forEach((b) => b.onclick = async () => { try { await api('POST', `/library/webdav/${b.dataset.wdScan}/scan`); toast('Reading the share again'); } catch (e) { toast(e.message, 'error'); } });
       $$('[data-wd-del]').forEach((b) => b.onclick = async () => { if (!confirm('Remove this share and its songs from the library? The files on the share stay.')) return; try { const r = await api('DELETE', `/library/webdav/${b.dataset.wdDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
-      $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') addFolder(); };
+      $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') $('#folderbtn').click(); };
       $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${countOf(r.removed_tracks, 'songs')} gone`); render(); } catch (e) { toast(e.message, 'error'); } });
     renderIdentify(idSt);
   };
@@ -617,7 +627,7 @@
         const r = await fetch('/v1/playlists/import/file?file=' + encodeURIComponent(f.name), { method: 'POST', signal: ac.signal, headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
         const b = await r.json().catch(() => ({})); if (!r.ok || !b.id) throw new Error(b.error || `The node answered ${r.status}`);
         libWrote(); return b;
-      })().catch((e) => { throw ac.signal.aborted ? new Error('The node stopped answering, so the playlist may not be in. Playlists shows whether it is.') : e; });
+      })().catch((e) => { throw ac.signal.aborted ? new Error('The node stopped answering, so the collection may not be in. Collections shows whether it is.') : e; });
       const said = `Imported “${j.name}”: ${j.imported} of ${j.parsed} matched${j.kept ? ` · ${countOf(j.kept, 'kept as links')}` : ''}${(j.unresolved || []).length ? ` · not matched: ${j.unresolved.slice(0, 4).map((d) => d.title).join(', ')}` : ''}`;
       api('GET', '/playlists').then((l) => { state.playlists = l; }, () => {});
       { const o = out(); if (o) o.textContent = ''; }
@@ -633,7 +643,7 @@
       };
       let go = here(); if (go && popPending) { await popPending; go = here(); }
       if (go) { setView('playlist', j.id); toast(said); } else {
-        toast(said, '', { label: 'Open playlist', run: () => setView('playlist', j.id) });
+        toast(said, '', { label: 'Open collection', run: () => setView('playlist', j.id) });
         // (on Playlists, the new row is in the list at once; drawn where it stands, what is typed stays)
         if (state.view === 'playlists') render();
       }
@@ -655,7 +665,7 @@
   // Playlists from files and moving from Roon (was Settings › Import)
   const importHtml = () => {
     const block = sBlock; const group = sGroup;
-      const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here: they are checked right away, nothing changes yet.</li><li>Import what matched.</li></ol><label class="btn file-btn roonpick">${icon('upload')} Choose Roon export files<input type="file" id="roonfiles" accept=".xlsx,.csv" multiple></label><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout"></div><p id="roonsay" class="sr-only" role="status"></p>`));
+      const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here: they are checked right away, nothing changes yet.</li><li>Import what matched.</li></ol><label class="btn file-btn roonpick">${icon('upload')} Choose Roon export files<input type="file" id="roonfiles" accept=".xlsx,.csv" multiple></label><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Bookmarks</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become collections</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout"></div><p id="roonsay" class="sr-only" role="status"></p>`));
     return group('Playlists from files', sBlock('', 'An M3U or M3U8 list, a CSV, or a Roon playlist export: each line is matched to a song (MusicBrainz, ISRC, then title and artist); what doesn’t match stays as its line.', `<label class="btn file-btn">${icon('upload')} Choose a playlist file<input type="file" id="libplimport" accept=".m3u,.m3u8,.csv,.xlsx"></label><div id="libplout" class="small" aria-live="polite"></div>`)
       + sRow('Playlists on a service', 'TIDAL, Spotify, Deezer and the others: open the playlist on Sources and choose Import.', '<button class="btn ghost" data-view-go="sources">Open Sources</button>'))
       + importTab;
@@ -698,7 +708,7 @@
               const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
               if (!dry) libWrote();
               const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
-              const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}${r.playlist.kept ? ` and ${countOf(r.playlist.kept, 'links')} to match by hand` : ''}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
+              const did = [r.favourites ? `${r.favourites} bookmark${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `collection made with ${countOf(r.playlist.imported, 'songs')}${r.playlist.kept ? ` and ${countOf(r.playlist.kept, 'links')} to match by hand` : ''}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
               const row = `<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${fmtCount(r.matched)} of ${fmtCount(r.rows)} matched this library${did ? ' · ' + esc(did) : ''}</p>`
                 + (r.tags_found.length ? `<p class="muted small">Roon tags: ${r.tags_found.slice(0, 12).map(([l, c]) => `${esc(l)} (${c})`).join(', ')}${r.tags_found.length > 12 ? '…' : ''}</p>` : '')
                 + (r.misses.length ? `<details class="small"><summary>${r.unmatched + r.not_identified} not moved, and why</summary><ul class="misses">${r.misses.map((m) => `<li><strong>${esc(m.what)}</strong>: ${esc(m.reason)}</li>`).join('')}</ul></details>` : '') + '</div>';
@@ -784,7 +794,7 @@
       h.tabIndex = -1;
       h.onkeydown = (e) => { e.stopPropagation(); if ((e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v')) field.focus(); };
     }
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     (h || field).focus();
   };
   // Edit a song's tags on the node (the file is not touched)
@@ -812,7 +822,7 @@
     const v = await editTagsDialog(cur); if (!v) return;
     try {
       if (v.undo) await api('DELETE', `/library/tracks/${id}/edit`); else await api('PUT', `/library/tracks/${id}/edit`, v);
-      toast(v.undo ? 'Back to the file’s tags' : 'Saved on this node'); onLibraryChanged(); if (state.view === 'library') render();
+      toast(v.undo ? 'Back to the file’s tags' : 'Saved on this node'); libraryChangedNow(); if (state.view === 'library') render();
     } catch (e) { toast(e.message, 'error'); }
   };
   // (anchor: the ⋯ it was chosen from; on a search result, the focus goes on to the next result's ⋯
@@ -821,7 +831,7 @@
     // (its file, asked while the question is open: Bring back names the file, not the song, and the
     // node has no file for it once it is out)
     const file = api('GET', `/library/tracks/${id}`).then((t) => (t && t.file && t.file.path) || null, () => null);
-    const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true }] });
+    const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true, danger: true }] });
     if (!ok) return;
     try {
       await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library');
@@ -832,7 +842,7 @@
       for (const r of searchRuns.values()) for (const [src, a] of Object.entries(r.answers)) r.answers[src] = withoutTrack(a, src, id);
       const at = anchor ? $$('#sresults [data-smore]').indexOf(anchor) : -1;
       const focused = at >= 0 && document.activeElement === anchor;
-      onLibraryChanged();
+      libraryChangedNow();
       // (waited for only then: another page's redraw can take long, or never end when left meanwhile)
       const drawn = render();
       if (focused) { await drawn; if ((!document.activeElement || document.activeElement === document.body) && state.view === 'search') ($$('#sresults [data-smore]')[at] || search).focus(); }
@@ -841,7 +851,7 @@
   const editAlbumTags = async (albumId, title, artist) => {
     const v = await choiceDialog({ title: 'Rename the album', text: 'Kept on this node; the files stay as they are.', field: { label: 'Album title', value: title || '' }, choices: [{ label: 'Save', value: 'save', primary: true }] });
     if (!v || !v.text) return;
-    try { await api('PUT', `/library/albums/${albumId}/edit`, { title: v.text, ...(artist != null ? { album_artist: artist } : {}) }); toast('Album renamed on this node'); onLibraryChanged(); render(); } catch (e) { toast(e.message, 'error'); }
+    try { await api('PUT', `/library/albums/${albumId}/edit`, { title: v.text, ...(artist != null ? { album_artist: artist } : {}) }); toast('Album renamed on this node'); libraryChangedNow(); render(); } catch (e) { toast(e.message, 'error'); }
   };
   // "Add music": one button, three ways in
   const addMusicDialog = async () => {
@@ -849,7 +859,7 @@
     const pick = await choiceDialog({ title: 'Add music', text: 'Wherever the files are, they’re one library: albums, search and playback don’t change.', choices: [
       { label: 'Upload files', note: 'From this device to your homeserver, kept privately; a cut connection carries on where it stopped.', value: 'upload', primary: true },
       ...(owner ? [{ label: 'Add a folder or network share', note: 'Played where it is: a folder on the node’s machine, a NAS (WebDAV) or a cloud drive. Checked before it is saved.', value: 'folder' }] : []),
-      ...(owner ? [{ label: 'Import playlists', note: 'M3U, CSV or a Roon export; service playlists from their page in Sources.', value: 'import' }] : []),
+      ...(owner ? [{ label: 'Import collections', note: 'M3U, CSV or a Roon export; service playlists from their page in Sources.', value: 'import' }] : []),
     ] });
     if (pick === 'upload') { state.libUpload = true; if (state.view === 'library' && (state.viewArg || 'mine') === 'mine') render(); else setView('library', null); }
     if (pick === 'folder') addPlaceDialog();
@@ -893,7 +903,7 @@
     transients.push(tr); pushTransient();
     $('[data-scanclose]', d).onclick = () => done(null);
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     (async () => {
       try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); } catch (e) { msg.textContent = `The camera isn’t available (${e.message || e.name}). Paste their key instead.`; return; }
       if (over) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -911,14 +921,14 @@
   // `layer`: opened over Now playing, it gets a history entry of its own, so Back closes it alone
   const choiceDialog = ({ title, text, choices, field, layer }) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
-    d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}${field ? `<label class="dialog-field"><span class="muted small">${esc(field.label)}</span><input class="input" data-field value="${esc(field.value || '')}" aria-label="${esc(field.label)}"></label>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
+    d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}${field ? `<label class="dialog-field"><span class="muted small">${esc(field.label)}</span><input class="input" data-field value="${esc(field.value || '')}" aria-label="${esc(field.label)}"></label>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}${c.danger ? ' danger' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
     document.body.appendChild(d);
     const tr = { layer: !!layer, open: () => d.open, close: (fromBack) => done(null, fromBack) };
     const done = (v, fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(!!layer && transients.some((t) => t.open())); resolve(v); };
     transients.push(tr); pushTransient(!!layer);
     $$('[data-ci]', d).forEach((b) => b.onclick = () => { const i = Number(b.dataset.ci); if (i < 0) return done(null); const v = choices[i].value; done(field ? { value: v, text: $('[data-field]', d).value.trim() } : v); });
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
-    if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
+    nameDialog(d, true); if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
   });
   // Comments (TASK-pinakes-social-ux.md B1): social v1 notes whose parent is the item's link, read
   // from Nexus by parent; reply to one, delete your own. One handler per section, by delegation.
@@ -982,7 +992,7 @@
       const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
       const d = e.target.closest('[data-cdel]');
       if (d) {
-        const go = await choiceDialog({ title: 'Delete this comment?', text: 'It goes from your homeserver; apps that already showed it drop it once Nexus sees it gone.', choices: [{ label: 'Delete', value: true, primary: true }] });
+        const go = await choiceDialog({ title: 'Delete this comment?', text: 'It goes from your homeserver; apps that already showed it drop it once Nexus sees it gone.', choices: [{ label: 'Delete', value: true, primary: true, danger: true }] });
         if (!go) return;
         d.disabled = true;
         try { await api('DELETE', `/comments?post=${encodeURIComponent(d.dataset.cdel)}`); toast('Comment deleted'); d.closest('li.comment').remove(); } catch (err) { d.disabled = false; toast(err.message, 'error'); }
@@ -1056,6 +1066,13 @@
   // "Still loading…" under a skeleton after 2 s, as long as `still()` says it is the same load
   const slowNote = (el, still) => setTimeout(() => { if (still() && el.isConnected) { const n = el.querySelector('.slow-note'); if (n) n.hidden = false; } }, 2000);
   const SLOW = '<p class="muted small slow-note" role="status" hidden>Still loading…</p>';
+  // (the page's own first loader, index.html #bootskel, says so too while the node's first answers take long)
+  slowNote(document.getElementById('main'), () => !!document.getElementById('bootskel'));
+  // (and "Loading…" for a screen reader: in the status region navigate() uses, put in after the page
+  // has opened, since words a status region already has when the page loads are not read out; not
+  // behind Log in. The first page's draw empties it, as after any navigation)
+  { const said = document.createElement('p'); said.id = 'navstatus'; said.className = 'sr-only'; said.setAttribute('role', 'status'); document.body.appendChild(said);
+    setTimeout(() => { if (document.getElementById('bootskel') && !document.body.classList.contains('signedout')) said.textContent = 'Loading…'; }, 300); }
   const ROOT = '';
   const copyTree = () => ({ nodes: new Map([[ROOT, { path: ROOT, parent: null, kids: null, next: null, open: true }]]), sel: new Map(), focus: null, missing: false });
   // `body`: a preset (an album's or songs' ⋯ Copy); none opens on the folders
@@ -1280,7 +1297,7 @@
       toast(r.json.state === 'queued' ? 'Queued: it starts when the copy before it is done' : 'Copying in the background: the chip in the player bar shows how far it is');
       watchJob(r.json.id);
     };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     drawPanel();
     const first = $('[data-cpick].on', d); if (first) first.focus();
   });
@@ -1320,10 +1337,10 @@
     const list = $('#mmlist', box);
     const match = (f) => { const q = st.q.toLowerCase(); return [f.name, f.song && f.song.title, f.song && f.song.artist, f.song && f.song.album].some((x) => x && String(x).toLowerCase().includes(q)); };
     const cover = (f) => (f.song.album_id ? `<img class="thumb" src="${esc(imgSrc(`/v1/library/albums/${f.song.album_id}/cover`))}" alt="" loading="lazy" data-err="hide">` : '<span class="thumb"></span>');
-    const songRow = (f, k) => `<div class="list-row mrow" data-mrow="${k}">${cover(f)}<button class="icon-btn" data-mplay="${f.song.id}" aria-label="Play ${esc(f.song.title)}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(f.song.title)}${f.song.edited ? ' <span class="pill" title="Tags edited on this node">edited</span>' : ''}</div><div class="sub">${esc([f.song.artist, f.song.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${f.song.duration_ms ? fmt(f.song.duration_ms) : ''}</span><span class="muted small msize">${fileSize(f.size)}</span><button class="icon-btn" data-mmore="${k}" aria-label="More for ${esc(f.song.title)}" title="More">${icon('more')}</button></div>`;
+    const songRow = (f, k) => `<div class="list-row mrow" data-mrow="${k}">${cover(f)}<button class="icon-btn" data-mplay="${f.song.id}" aria-label="Play ${esc(f.song.title)}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(f.song.title)}${f.song.edited ? ' <span class="pill" title="Tags edited on this node">edited</span>' : ''}</div><div class="sub">${esc([f.song.artist, f.song.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${f.song.duration_ms ? fmt(f.song.duration_ms) : ''}</span><span class="muted small msize">${fileSize(f.size)}</span><button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-mmore="${k}" aria-label="More for ${esc(f.song.title)}" title="More">${icon('more')}</button></div>`;
     const looseRow = (f, k) => `<div class="list-row mrow"><div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.removed ? 'Taken out of the library: Node library brings it back.' : 'Not in the library yet: it is read with the next scan.'}</div></div><span class="muted small msize">${fileSize(f.size)}</span><button class="btn sm ghost" data-mdel="${k}" aria-label="Delete ${esc(f.name)} from your homeserver">Delete</button></div>`;
     const delFile = async (f) => {
-      const ok = await choiceDialog({ title: 'Delete from your homeserver?', text: `“${f.song ? f.song.title : f.name}” is deleted from your homeserver${ctx.bundled ? ' and leaves the library' : ''}. This can’t be undone.`, choices: [{ label: 'Delete', value: true, primary: true }] });
+      const ok = await choiceDialog({ title: 'Delete from your homeserver?', text: `“${f.song ? f.song.title : f.name}” is deleted from your homeserver${ctx.bundled ? ' and leaves the library' : ''}. This can’t be undone.`, choices: [{ label: 'Delete', value: true, primary: true, danger: true }] });
       if (!ok) return;
       try { await api('DELETE', '/pubky/files', { paths: [f.path] }); toast('Deleted'); st.local = null; load(); } catch (er) { toast(er.message, 'error'); }
     };
@@ -1523,13 +1540,16 @@
     clearTimeout(healthTimer); healthTimer = setTimeout(checkHealth, 60000);
     let parts; try { parts = await api('GET', '/health'); } catch { return; }
     const el = $('#upstreams'); if (!el) return;
-    const bad = parts.filter((p) => p.state !== 'ok');
+    // The owner's chores (sign in again, change the API token) show to whoever can change the node's
+    // settings: anyone else has nowhere to do them
+    const chores = can('settings'); const chore = (p) => p.state === 'needs_sign_in' || p.state === 'change';
+    const bad = parts.filter((p) => p.state !== 'ok' && (chores || !chore(p)));
     el.hidden = !bad.length; if (!bad.length) return;
     const first = bad[0];
     // Each state in its own words: "not answering" only for one that doesn't answer
     $('.up-text', el).textContent = (first.state === 'needs_sign_in' ? (first.id === 'homeserver' ? `${first.name}: log out and in to approve new folders` : `${first.name}: sign in again`) : first.state === 'change' ? (first.id === 'api-token' ? 'Change the API token' : `${first.name} needs a change`) : `${first.name} not answering`) + (bad.length > 1 ? ` · ${bad.length - 1} more` : '');
     el.title = bad.map((p) => `${p.name}: ${p.detail || p.state}`).join('\n') + '\nYour library keeps playing.';
-    el.onclick = () => showMenu(el, [{ title: 'External resources' }, ...parts.map((p) => ({ label: p.name, note: p.state === 'ok' ? `answering${p.ms != null ? ` · ${p.ms} ms` : ''}` : p.detail || p.state, icon: p.state === 'ok' ? 'check' : 'close', disabled: p.state !== 'needs_sign_in' && p.state !== 'change', run: () => { if (p.state === 'change') { setView('settings', 'about'); return; } state.autoResign = true; setView('settings', 'accounts'); } })), { label: 'Check again', icon: 'shuffle', run: () => checkHealth() }]);
+    el.onclick = () => showMenu(el, [{ title: 'External resources' }, ...parts.map((p) => ({ label: p.name, note: p.state === 'ok' ? `answering${p.ms != null ? ` · ${p.ms} ms` : ''}` : p.detail || p.state, icon: p.state === 'ok' ? 'check' : 'close', disabled: !chores || !chore(p), run: () => { if (p.state === 'change') { setView('settings', 'people'); return; } state.autoResign = true; setView('settings', 'accounts'); } })), { label: 'Check again', icon: 'shuffle', run: () => checkHealth() }]);
   };
   // Clickable rows that are not buttons or links are made reachable for the keyboard, also when
   // they arrive after a page first draws (Home's sections, search results).
@@ -1538,7 +1558,11 @@
   {
     let queued = false;
     const tag = () => { queued = false; document.querySelectorAll(UNTAGGED).forEach(keyable); };
-    new MutationObserver(() => { if (!queued) { queued = true; requestAnimationFrame(tag); } }).observe(document.body, { childList: true, subtree: true });
+    // (what was just added is made reachable in the same step, before a key press or anything else
+    // can come: a frame later, Tab pressed in that frame went past a row that had just been drawn.
+    // The whole page is still looked over once a frame, for a row that became clickable in place)
+    const tagIn = (n) => { if (n.nodeType !== 1) return; if (n.matches(UNTAGGED)) keyable(n); n.querySelectorAll(UNTAGGED).forEach(keyable); };
+    new MutationObserver((recs) => { for (const r of recs) r.addedNodes.forEach(tagIn); if (!queued) { queued = true; requestAnimationFrame(tag); } }).observe(document.body, { childList: true, subtree: true });
   }
   // ---- Log in / Log out (TASK-login-ux) -------------------------------------
   // Signed out, the page is one Log in screen instead of the app: Pubky Ring for the owner and
@@ -1984,7 +2008,7 @@
       dlSet(d); markDownloads();
       if (state.view === 'downloads' && state.dl) storageUpdate(state.dl);
       // A song also kept with its album, a playlist or the favourites stays
-      if (!on && d && d.still_kept) { toast(`“${title}” stays on this phone: its album, a playlist or your favourites keep it there`); return; }
+      if (!on && d && d.still_kept) { toast(`“${title}” stays on this phone: its album, a collection or your bookmarks keep it there`); return; }
       toast(on ? `Downloading “${title}” to this phone${online ? `; ${online === 1 ? '1 song not in your library stays' : `${online} songs not in your library stay`} online` : ''}` : `“${title}” removed from this phone`);
     } catch (e) { toast(String((e && e.message) || e), 'error'); }
   };
@@ -2031,14 +2055,14 @@
     const section = (kind, title) => { const r = rows(kind); return r ? `<section class="section"><div class="section-head"><h3>${title}</h3></div><div class="list">${r}</div></section>` : ''; };
     const limit = `<label class="set-row"><span class="set-label"><span class="set-name">Limit</span><span class="set-help">Downloads stop there, and always leave ${fileSize(d.keep_free)} free on this phone.</span></span><select class="input" id="dllimit" aria-label="Downloads limit">${DL_LIMITS.map((v) => `<option value="${v == null ? '' : v}" ${(d.limit == null ? v == null : v === d.limit) ? 'selected' : ''}>${v == null ? 'No limit' : fileSize(v)}</option>`).join('')}</select></label>`;
     const body = d.items.length
-      ? section('album', 'Albums') + section('playlist', 'Playlists') + section('track', 'Songs')
+      ? section('album', 'Albums') + section('playlist', 'Collections') + section('track', 'Songs')
         + `<div class="actions"><button class="btn ghost" id="dlrmall">${icon('trash')} Remove all downloads</button></div>`
-      : `<div class="empty">${icon('download')}<h3>Nothing on this phone yet</h3><p>Download an album, a playlist or a song from its ⋯ menu: it plays here without your node, and saves mobile data.</p></div>`;
+      : `<div class="empty">${icon('download')}<h3>Nothing on this phone yet</h3><p>Download an album, a collection or a song from its ⋯ menu: it plays here without your node, and saves mobile data.</p></div>`;
     const lists = $('#dllists', main);
     if (listsOnly && lists) { lists.innerHTML = body; const h = $('.page-head', main); if (h) h.outerHTML = `<div class="page-head"><h2>Downloads${d.songs ? `<span class="count">${esc(fmtCount(d.songs))}</span>` : ''}</h2><div class="actions"></div></div>`; }
     else main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p><div id="dllists">${body}</div><div class="set-group">${limit}</div>`;
     $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; return x ? dlKeep(x.kind, x.id, false, x.title) : undefined; });
-    const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your playlists stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
+    const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your collections stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true, danger: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
     if (listsOnly && lists) return;
     $('#dllimit', main).onchange = async (e) => { const v = e.target.value; try { dlSet(await dlCall('downloads_limit', { bytes: v === '' ? null : Number(v) })); if (state.view === 'downloads') storageUpdate(state.dl); } catch (er) { toast(String((er && er.message) || er), 'error'); } };
   };
@@ -2092,10 +2116,163 @@
   // the shared library on the zones the owner opened and has nothing of the owner's
   const isListener = () => !!(state.me && state.me.role === 'listener');
   const isOwner = () => !isListener();
+  // What the page shows and hides goes by what the node says this caller can do (GET /v1/me's
+  // `can`: the capability names of crates/pm-api/src/access.rs, in snake case). Without the list
+  // (the offline app, a backend that has no roles) it is the role as before: the owner everything,
+  // someone with music access what the node gives them.
+  const LISTENER_CAN = new Set(['artwork', 'session', 'library', 'zone_list', 'zone_use', 'collections', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in']);
+  const can = (cap) => { const me = state.me; return me && Array.isArray(me.can) ? me.can.includes(cap) : !isListener() || LISTENER_CAN.has(cap); };
+  // ---- people & access: the words the owner's screen and a person's own Settings share ----
+  // "Kitchen", "Kitchen and Den", "Kitchen, Den and Hall", "Kitchen, Den, Hall and 2 more"
+  const listWords = (names) => { const n = names.length > 4 ? [...names.slice(0, 3), `${names.length - 3} more`] : names; return n.length < 2 ? n.join('') : `${n.slice(0, -1).join(', ')} and ${n[n.length - 1]}`; };
+  // What someone the owner added can and can't do, in plain words: [capability, words]. `o.has(cap)`
+  // says whether they can; `o.their`, `o.owners` and `o.zones` fit the words to who reads them.
+  // `o.noZone`: what "can't" says when no zone is open to them (then `o.has('zone_use')` is false).
+  const CAN_WORDS = [
+    ['library', () => 'Play and search this node’s library'],
+    ['zone_use', (o) => o.zones],
+    ['collections', (o) => `Keep ${o.their} own bookmarks and collections, on ${o.their} own Pubky account`],
+    ['own_sign_in', (o) => `Sign in to ${o.their} own TIDAL, Qobuz or Spotify`],
+    ['own', () => 'Report a problem'],
+  ];
+  const CANT_WORDS = [
+    ['zone_use', (o) => o.noZone || ''],
+    ['settings', () => 'Change settings'],
+    ['library_manage', () => 'Add, change or remove music'],
+    ['owner_music', (o) => `See ${o.owners} bookmarks, collections, tags or history`],
+    ['people', () => 'Add or remove people'],
+    ['backup', () => 'Back up or restore'],
+    ['zone_manage', () => 'Change zones and speakers'],
+  ];
+  const canLists = (o) => {
+    const col = (title, mark, rows) => (rows.length ? `<div class="pa-col"><h4 class="pa-col-h">${esc(title)}</h4><ul class="pa-points ${mark}">${rows.map(([, words]) => `<li>${icon(mark === 'pa-yes' ? 'check' : 'close')}<span>${esc(words(o))}</span></li>`).join('')}</ul></div>` : '');
+    return `<div class="pa-cando">${col(o.canTitle, 'pa-yes', CAN_WORDS.filter(([cap, words]) => o.has(cap) && words(o)))}${col(o.cantTitle, 'pa-no', CANT_WORDS.filter(([cap, words]) => !o.has(cap) && words(o)))}</div>`;
+  };
+  // A sign-in on this node as its list shows it (GET /v1/me/sign-ins, `sign_ins` in GET /v1/people):
+  // what it said it is, since when, the day it was last used, and whether it signed in from
+  // somewhere other than the node's own network (remote access, a tunnel, a public address)
+  const signInName = (s) => s.label || { browser: 'A browser', app: 'An app' }[s.kind] || 'A browser or app';
+  // (`last_used` is the start of a UTC day: read as that day, wherever the reader is)
+  const signInNote = (s) => [
+    s.created_at ? `since ${new Date(s.created_at * 1000).toLocaleDateString()}` : '',
+    s.last_used == null ? '' : s.last_used >= Math.floor(Date.now() / 86400000) * 86400 ? 'last used today' : `last used ${new Date(s.last_used * 1000).toLocaleDateString(undefined, { timeZone: 'UTC' })}`,
+    s.remote ? 'signed in away from home' : '',
+  ].filter(Boolean).join(' · ');
+  // The caller's own sign-ins, drawn into `host` as settings rows: this one first (hereName: "This
+  // browser", "This computer", "This phone"), with `control` (the owner's Log out), then every other
+  // one with Sign out, and "Sign out all others".
+  // Loading, "Only this one", and an error with Retry. `kept`: the caller's `{ list }`, so a page
+  // drawn again shows the last answer at once while it asks again. `wire(host)` runs after every draw.
+  const mountSignIns = (host, { control = '', kept = {}, wire = null } = {}) => {
+    if (!host) return;
+    const row = (name, note, ctl, attr = '') => `<div class="set-row" ${attr}><div class="set-label"><div class="set-name">${name}</div>${note ? `<p class="set-help">${note}</p>` : ''}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+    const here = (list) => {
+      const cur = (list || []).find((s) => s.current);
+      const note = cur ? esc([cur.label, signInNote(cur)].filter(Boolean).join(' · ')) : !list ? '' : state.token ? 'Logged in with the password for apps.' : 'No log in is needed here: this node has no password for apps.';
+      return row(esc(hereName()), note, control, 'data-si-here');
+    };
+    const draw = (list, error) => {
+      const others = (list || []).filter((s) => !s.current);
+      host.innerHTML = here(list) + (error
+        ? `<div class="set-row" data-si-error><div class="set-label"><p class="set-help pa-err" role="alert">Couldn’t read the other sign-ins: ${esc(error)}</p></div><div class="set-ctl"><button class="btn sm" data-si-retry>Retry</button></div></div>`
+        : !list ? '<div class="set-row" data-si-loading aria-busy="true"><div class="skeleton pa-skel"></div></div>'
+          : !others.length ? '<div class="set-row" data-si-none><div class="set-label"><p class="set-help">Only this one.</p></div></div>'
+            : others.map((s) => row(esc(signInName(s)), esc(signInNote(s)), `<button class="btn sm" data-si-end="${esc(s.id)}" aria-label="Sign out ${esc(signInName(s))}, ${esc(signInNote(s))}">Sign out</button>`, `data-si="${esc(s.id)}"`)).join('')
+              + `<div class="set-row" data-si-rest><div class="set-label"><p class="set-help">${others.length === 1 ? 'One other is signed in.' : `${others.length} others are signed in.`}</p></div><div class="set-ctl"><button class="btn sm" data-si-all>Sign out all others</button></div></div>`);
+      $$('[data-si-end]', host).forEach((b) => b.onclick = async () => {
+        const s = others.find((x) => x.id === b.dataset.siEnd); const ids = others.map((x) => x.id); const at = ids.indexOf(b.dataset.siEnd);
+        try { await api('DELETE', `/me/sign-ins/${encodeURIComponent(b.dataset.siEnd)}`); toast(`Signed out: ${s ? signInName(s) : 'that sign-in'}`); } catch (e) { toast(e.message, 'error'); }
+        // (found by its value: an id from the node is never made into a selector)
+        await load([ids[at + 1], ids[at - 1]].filter(Boolean).map((id) => () => $$('[data-si-end]', host).find((x) => x.dataset.siEnd === id)));
+      });
+      const all = $('[data-si-all]', host); if (all) all.onclick = async () => {
+        const go = await choiceDialog({ title: 'Sign out all other browsers and apps?', text: `Each of them has to log in again with Pubky Ring. ${hereName()} stays logged in.`, choices: [{ label: 'Sign out all others', value: true, primary: true, danger: true }] });
+        if (!go) { all.focus(); return; }
+        try { const r = await api('DELETE', '/me/sign-ins'); toast(r && r.ended === 1 ? 'Signed out one other browser or app' : `Signed out ${r && r.ended != null ? r.ended : 'the'} other browsers and apps`); } catch (e) { toast(e.message, 'error'); }
+        await load([]);
+      };
+      const again = $('[data-si-retry]', host); if (again) again.onclick = () => load([() => $('[data-si-end]', host), () => $('[data-si-all]', host)]);
+      if (wire) wire(host);
+    };
+    // `focus`: where the focus goes when the control that had it is gone after the draw: functions
+    // that find it (the next row's Sign out), else this browser's own control, else the list itself
+    const load = async (focus = null) => {
+      const had = !!focus && host.contains(document.activeElement);
+      let list = null; let error = null;
+      try { list = await api('GET', '/me/sign-ins'); if (!Array.isArray(list)) throw new Error('The node’s answer was not a list.'); } catch (e) { list = null; error = e.message; }
+      if (!host.isConnected) return;
+      const same = !error && kept.list && JSON.stringify(kept.list) === JSON.stringify(list) && !$('[data-si-loading], [data-si-error]', host);
+      if (!error) kept.list = list;
+      if (!same) draw(error ? null : list, error);
+      if (had && !host.contains(document.activeElement)) { const to = [...focus, () => $('[data-si-here] .btn', host)].map((find) => find()).find(Boolean) || host; to.focus({ preventScroll: to === host }); }
+    };
+    host.tabIndex = -1;
+    draw(kept.list || null, null);
+    load();
+  };
+  // The last list this log in was shown (another log in in the same tab starts without one)
+  const keptSignIns = () => { if (!state.mySignIns || state.mySignIns.by !== state.token) state.mySignIns = { by: state.token, list: null }; return state.mySignIns; };
+  // The apps the owner gave a password of their own (GET /v1/node/app-passwords), drawn into `host`:
+  // each with when it was made and last used, and Remove (asked first); then a name field and
+  // "Make a password", whose password shows once, with Copy, until the page is drawn again.
+  // Loading, none yet, and an error with Retry.
+  const mountAppPasswords = (host) => {
+    if (!host) return;
+    const row = (name, note, ctl, attr = '') => `<div class="set-row" ${attr}><div class="set-label"><div class="set-name">${name}</div>${note ? `<p class="set-help">${note}</p>` : ''}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+    const note = (a) => [
+      a.created_at ? `made ${new Date(a.created_at * 1000).toLocaleDateString()}` : '',
+      a.last_used == null ? 'not used yet' : a.last_used >= Math.floor(Date.now() / 86400000) * 86400 ? 'last used today' : `last used ${new Date(a.last_used * 1000).toLocaleDateString(undefined, { timeZone: 'UTC' })}`,
+    ].filter(Boolean).join(' · ');
+    const form = '<div class="set-row set-block" data-ap-new><div class="set-label"><label class="set-name" for="apname">Give an app its own password</label><p class="set-help">Name the app, then copy its password into it.</p><div class="toolbar"><input class="input" id="apname" maxlength="60" placeholder="The app’s name, e.g. Home Assistant" autocomplete="off"><button class="btn" id="apgo">Make a password</button></div><p class="field-err small" id="apnameerr" role="alert" hidden></p><div id="apout" aria-live="polite"></div></div></div>';
+    let shown = '';
+    const draw = (list, error) => {
+      const typed = $('#apname', host) ? $('#apname', host).value : '';
+      host.innerHTML = (error
+        ? `<div class="set-row" data-ap-error><div class="set-label"><p class="set-help pa-err" role="alert">Couldn’t read the apps: ${esc(error)}</p></div><div class="set-ctl"><button class="btn sm" data-ap-retry>Retry</button></div></div>`
+        : !list ? '<div class="set-row" data-ap-loading aria-busy="true"><div class="skeleton pa-skel"></div></div>'
+          : !list.length ? '<div class="set-row" data-ap-none><div class="set-label"><p class="set-help">No app has a password of its own yet.</p></div></div>'
+            : list.map((a) => row(esc(a.name), esc(note(a)), `<button class="btn sm danger" data-ap-del="${esc(a.id)}" aria-label="Remove the password of ${esc(a.name)}">Remove…</button>`, `data-ap="${esc(a.id)}"`)).join(''))
+        + form;
+      $('#apname', host).value = typed;
+      $('#apout', host).innerHTML = shown;
+      $$('[data-ap-del]', host).forEach((b) => b.onclick = async () => {
+        const a = (list || []).find((x) => x.id === b.dataset.apDel); const name = a ? a.name : 'this app';
+        const go = await choiceDialog({ title: `Remove the password of ${name}?`, text: `${name} stops working with this node at once. Your other apps go on.`, choices: [{ label: 'Remove', value: true, primary: true, danger: true }] });
+        if (!go) { b.focus(); return; }
+        try { await api('DELETE', `/node/app-passwords/${encodeURIComponent(b.dataset.apDel)}`); toast(`Removed the password of ${name}`); } catch (e) { toast(e.message, 'error'); }
+        await load();
+        const next = $('[data-ap-del]', host) || $('#apname', host); if (next) next.focus();
+      });
+      const err = $('#apnameerr', host);
+      $('#apname', host).oninput = () => { err.hidden = true; };
+      $('#apgo', host).onclick = async () => {
+        const name = $('#apname', host).value.trim();
+        if (!name) { err.textContent = 'Name the app first.'; err.hidden = false; $('#apname', host).focus(); return; }
+        let made;
+        try { made = await api('POST', '/node/app-passwords', { name }); } catch (e) { toast(e.message, 'error'); return; }
+        shown = `<p class="small pa-newpass">The password of ${esc(made.name)}, shown only now. Copy it into the app (a Subsonic app takes it as its password).</p><div class="toolbar"><code class="pa-code" data-ap-made>${esc(made.password)}</code><button class="btn sm primary" data-copylink="${esc(made.password)}">Copy</button></div>`;
+        $('#apname', host).value = '';
+        await load();
+        const copy = $('#apout [data-copylink]', host); if (copy) copy.focus();
+      };
+      const again = $('[data-ap-retry]', host); if (again) again.onclick = () => load();
+    };
+    const load = async () => {
+      let list = null; let error = null;
+      try { list = await api('GET', '/node/app-passwords'); if (!Array.isArray(list)) throw new Error('The node’s answer was not a list.'); } catch (e) { list = null; error = e.message; }
+      if (!host.isConnected) return;
+      draw(list, error);
+    };
+    host.tabIndex = -1;
+    draw(null, null);
+    return load();
+  };
   // Offline (the app's local server, pm-offline): only what this device keeps, played here
   const isOffline = () => !!(state.info && state.info.offline);
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
   const LISTENER_VIEWS_OFF = new Set(['home', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
+  // "No zone" as a node before that choice keeps it: a list of one zone without a name
+  const noZoneList = (l) => Array.isArray(l) && l.length > 0 && l.every((id) => id === '');
   const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
   // The phone's own zone (the node's, on this app's output) while the app plays its music itself:
   // one "This phone" in the phone's picker; listed again while it is the zone in use or plays
@@ -2177,7 +2354,9 @@
   // the bar shows it rather than "Zone" and "Nothing playing" (owner's recording: a second shell
   // that swapped to the real one). index.html draws it before this script runs.
   const barKept = () => { try { return JSON.parse(localStorage.getItem('pm.bar') || 'null') || {}; } catch { return {}; } };
-  const barKeep = (part) => { const was = barKept(); const next = { ...was, ...part }; if (JSON.stringify(next) !== JSON.stringify(was)) { try { localStorage.setItem('pm.bar', JSON.stringify(next)); } catch { /* private window */ } } };
+  // (asked on every draw of the bar: the same words as last time read and write nothing)
+  const barKeptLast = {};
+  const barKeep = (part) => { const key = Object.keys(part).join(); const said = JSON.stringify(part); if (barKeptLast[key] === said) return; barKeptLast[key] = said; const was = barKept(); const next = { ...was, ...part }; if (JSON.stringify(next) !== JSON.stringify(was)) { try { localStorage.setItem('pm.bar', JSON.stringify(next)); } catch { /* private window */ } } };
   const renderZoneName = () => { const z = currentZone(); if (z && state.zonesSeen) barKeep({ zone: z.name }); const name = (!state.zonesSeen && !state.zonePicked && barKept().zone) || (z ? z.name : 'Zone'); $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); };
   // ---- One volume, one source (TASK-volume-one-source) ----
   // Every slider for a zone reads the same thing: the level the node read back from the output
@@ -2228,8 +2407,9 @@
     if (z.id === state.zone) $('.player').classList.toggle('novol', !r);
     if (!r) return;
     for (const el of volSliders(z)) if (el !== except) applyVol(el, r);
-    for (const t of $$(`[data-vollevel="${cssStr(z.id)}"]`)) t.textContent = levelText(r);
-    for (const b of $$(`[data-volmute="${cssStr(z.id)}"]`)) { b.setAttribute('aria-pressed', String(!!r.muted)); b.title = r.muted ? 'Unmute' : 'Mute'; }
+    // (asked on every event of the zone: the same level and mute as shown write nothing)
+    { const words = levelText(r); for (const t of $$(`[data-vollevel="${cssStr(z.id)}"]`)) if (t.textContent !== words) t.textContent = words; }
+    for (const b of $$(`[data-volmute="${cssStr(z.id)}"]`)) { const m = String(!!r.muted); if (b.getAttribute('aria-pressed') !== m) { b.setAttribute('aria-pressed', m); b.title = r.muted ? 'Unmute' : 'Mute'; } }
   };
   const setZoneVol = async (z, value, from) => {
     const r = zoneVolume(z); if (!r) return;
@@ -2338,7 +2518,7 @@
   const wireSpotSetup = () => {
     const f = $('#spotapp'); if (!f) return;
     const save = async (client_id, msg) => { try { await api('PUT', '/sources/spotify/app', { client_id }); toast(msg); render(); } catch (e) { toast(e.message, 'error'); } };
-    f.onsubmit = (e) => { e.preventDefault(); save(String(new FormData(f).get('id') || '').trim(), 'Spotify app saved. Now connect Spotify'); };
+    f.onsubmit = (e) => { e.preventDefault(); return save(String(new FormData(f).get('id') || '').trim(), 'Spotify app saved. Now connect Spotify'); };
     const cp = $('#spotcopy'); if (cp) cp.onclick = () => { const t = f.querySelector('code').textContent; (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('Redirect URI copied')).catch(() => toast(t)); };
     const ch = $('#spotappchange'); if (ch) ch.onclick = () => { f.hidden = false; $('#spotid').focus(); };
     const ca = $('#spotappcancel'); if (ca) ca.onclick = () => { f.hidden = true; };
@@ -2454,8 +2634,8 @@
       act.innerHTML = html;
       const useIt = act.querySelector('[data-sg="use"]'); if (useIt) useIt.onclick = async () => { if (await h.choose(pick)) { toast(`Using ${w.label || 'this way'}`); h.done(); } };
       act.querySelectorAll('[data-import]').forEach((b) => b.onclick = async () => { b.disabled = true; await h.useImport({ id: b.dataset.import }, b.dataset.import); b.disabled = false; });
-      const ff = act.querySelector('[data-sg="file"]'); if (ff) ff.onsubmit = async (e) => { e.preventDefault(); const file = ff.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } h.useImport({ text: await file.text() }, 'the file'); };
-      const pf = act.querySelector('[data-sg="paste"]'); if (pf) pf.onsubmit = (e) => { e.preventDefault(); h.useImport({ text: pf.querySelector('textarea').value }, 'the pasted sign-in'); };
+      const ff = act.querySelector('[data-sg="file"]'); if (ff) ff.onsubmit = async (e) => { e.preventDefault(); const file = ff.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } await h.useImport({ text: await file.text() }, 'the file'); };
+      const pf = act.querySelector('[data-sg="paste"]'); if (pf) pf.onsubmit = (e) => { e.preventDefault(); return h.useImport({ text: pf.querySelector('textarea').value }, 'the pasted sign-in'); };
       if (cfg.wire) cfg.wire(pick, si, h, act);
     }
     // Another way swaps in as the action; the focus goes to it
@@ -3238,9 +3418,9 @@
     if (!isBrowser()) {
       const zid = state.zone; const ask = ++queueAsk;
       // (a failed fetch shows no songs, but says nothing of the zone's queue: Play still goes to the node)
-      let q = null; try { q = await api('GET', `/zones/${zid}/queue`); } catch { /* shown empty */ }
+      let q = null; let failed = null; try { q = await api('GET', `/zones/${zid}/queue`); } catch (e) { failed = e; /* said on the Queue page, not shown as an empty queue */ }
       if (ask !== queueAsk || zid !== state.zone) { queueDropped = true; return ask === queueAsk ? null : false; }
-      state.queue = q || []; state.queueZone = q ? zid : null;
+      state.queue = q || []; state.queueZone = q ? zid : null; state.queueError = q ? null : failed;
       // (the Queue page drew what it had when its own, older answer was dropped: drawn again now,
       // unless this answer is the page's own, as it is drawn: that draw has it, a second would take
       // the focus from a row)
@@ -3324,9 +3504,13 @@
     if (browserShuffle()) shuffleFrom(items, shuffle ? 0 : 1);
     state.browserQueue = items; browserPlay(0, 0, true); renderModes();
   };
-  const renderModes = () => {
+  // (`ifChanged`: asked by the bar's draw, several times a second: nothing to do while both modes are
+  // as they were; whoever draws mode buttons anew (Now playing, the Queue page) asks without it)
+  let modesShown = '';
+  const renderModes = (ifChanged) => {
     const r = !isBrowser() && repeatPending.has(state.zone) ? repeatPending.get(state.zone).value : zoneRepeat();
     const sh = !isBrowser() && shufflePending.has(state.zone) ? shufflePending.get(state.zone).value : zoneShuffle();
+    { const now = `${r} ${sh}`; if (ifChanged && now === modesShown) return; modesShown = now; }
     const rWords = { off: 'Repeat: off', all: 'Repeat: the whole queue', one: 'Repeat: this song' }[r]; const sWords = `Shuffle: ${sh ? 'on' : 'off'}`;
     // (on: the accent and a dot under the icon, not colour alone; the state is in the label too)
     const mark = (b, on, words, ic) => { if (ic && b.dataset.ic !== ic) { b.innerHTML = icon(ic); b.dataset.ic = ic; } b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.setAttribute('aria-label', words); b.title = words; };
@@ -3383,7 +3567,8 @@
   $('#next').onclick = () => transport({ action: 'next' });
   $('#prev').onclick = () => transport({ action: 'previous' });
   const seek = $('#seek');
-  seek.addEventListener('input', () => { seek.dataset.dragging = '1'; setFill(seek); });
+  // (read out as the time it is moved to; renderBar writes the playing time again once it is let go)
+  seek.addEventListener('input', () => { seek.dataset.dragging = '1'; setFill(seek); const z = currentZone(); const d = z && z.now_playing ? z.now_playing.duration_ms : 0; if (d) { seek._barWords = `${fmt((seek.value / 1000) * d)} of ${fmt(d)}`; seek.setAttribute('aria-valuetext', seek._barWords); } });
   // (a drag let go on its start value sends no change: the bar's seek let go too)
   for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) seek.addEventListener(ev, () => { setTimeout(() => { delete seek.dataset.dragging; }, 0); }, { passive: true });
   seek.addEventListener('change', () => {
@@ -4220,14 +4405,30 @@
   };
   // The phone mini player's progress: a 2 px line on its top edge
   const miniProgress = (f) => { const el = $('#miniprog'); if (el) el.style.setProperty('--p', `${Math.max(0, Math.min(1, f || 0)) * 100}%`); };
+  // The bar is drawn on every event of its zone (four a second while it plays) and after most
+  // presses. Each part is written only when what it shows has changed (`put`: the last value written
+  // is kept on the element; only this function writes them), so between two songs the mini player's
+  // cover, title and artists stay the same elements (a keyboard's place on them stays too), and a tick
+  // writes the time and the seek bar and nothing else. The playing song's mark in the page's lists:
+  // here when the song changes, and as rows are drawn (the watch on the page, where `main` is).
+  const put = (el, key, val, write) => { if (!el || el[key] === val) return false; el[key] = val; write(val); return true; };
+  const putText = (el, s) => put(el, '_barText', s, (v) => { el.textContent = v; });
+  const putHtml = (el, s) => put(el, '_barHtml', s, (v) => { el.innerHTML = v; });
+  let markedUri = null;
   const renderBar = () => {
-    markPlaying(); renderModes(); if (state.view === 'dashboard') drawDashboard();
     const z = currentZone(); const np = z && z.now_playing;
+    { const cur = `${state.zone} ${np ? np.item.uri || '' : ''}`; if (cur !== markedUri) { markedUri = cur; markPlaying(); } }
+    renderModes(true); if (state.view === 'dashboard') drawDashboard();
     setSourceColour(np);
     const playing = z && z.transport === 'playing';
-    $('#toggle').innerHTML = icon(playing ? 'pause' : 'play');
-    $('#toggle').setAttribute('aria-label', playing ? 'Pause' : 'Play');
-    const q = $('#quality');
+    { const tg = $('#toggle'); if (put(tg, '_barIcon', playing ? 'pause' : 'play', (v) => { tg.innerHTML = icon(v); })) tg.setAttribute('aria-label', playing ? 'Pause' : 'Play'); }
+    const q = $('#quality'); const npEl = $('#np');
+    // (the pill's parts, each written when it changes)
+    const pill = (cls, src, words, dsp, short, label, title) => {
+      put(q, '_barCls', cls, (v) => { q.className = v; }); putHtml($('.qsrc', q), src); putText($('.qtext', q), words);
+      { const d = $('.qdsp', q); put(d, '_barHidden', !dsp, (v) => { d.hidden = v; }); }
+      putHtml($('.qshort', q), short); put(q, '_barLabel', label, (v) => { q.setAttribute('aria-label', v); }); put(q, '_barTitle', title, (v) => { q.title = v; });
+    };
     // Pressing play answers at once (owner, 2026-10-29): "Starting on <device>…" until the zone
     // plays, or what went wrong, for a few seconds
     const st = state.starting && state.starting.zone === state.zone ? state.starting : null;
@@ -4238,17 +4439,17 @@
     if (!np && !state.zonesSeen && !state.zonePicked && barKept().title && !waitHtml && !errHtml) {
       // The node hasn't said yet: the song the bar showed last stays (index.html drew it)
       const k = barKept();
-      $('#np').innerHTML = `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">${esc(k.title)}</div><div class="np-sub">${esc(k.sub || '')}</div></div>`;
+      putHtml(npEl, `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">${esc(k.title)}</div><div class="np-sub">${esc(k.sub || '')}</div></div>`);
       return;
     }
     if (z && state.zonesSeen) barKeep(np ? { title: np.item.title || '', sub: np.item.artist || '' } : { title: '', sub: '' });
     if (!np) {
       // A zone that stopped on an error says so here, until the next track starts (the node clears it)
       const err = z && z.transport === 'stopped' && z.error;
-      $('#np').innerHTML = waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`;
-      $('#pos').textContent = '0:00'; $('#dur').textContent = '0:00'; seek.value = 0; setFill(seek); miniProgress(0);
-      q.className = 'quality idle'; $('.qtext', q).textContent = '—'; $('.qsrc', q).innerHTML = ''; $('.qdsp', q).hidden = true; $('.qshort', q).innerHTML = `<span class="qdev">${esc(z ? z.name : '')}</span>`; q.title = 'Sound: where it plays from, how it gets to you, and DSP';
-      q.setAttribute('aria-label', `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`);
+      putHtml(npEl, waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`);
+      put(npEl, '_barName', 'Now playing', (v) => { npEl.setAttribute('aria-label', v); });
+      putText($('#pos'), '0:00'); putText($('#dur'), '0:00'); seek.value = 0; setFill(seek); miniProgress(0); put(seek, '_barWords', '', () => { seek.removeAttribute('aria-valuetext'); });
+      pill('quality idle', '', '—', false, `<span class="qdev">${esc(z ? z.name : '')}</span>`, `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`, 'Sound: where it plays from, how it gets to you, and DSP');
       syncQPanel();
       return;
     }
@@ -4256,15 +4457,25 @@
     const live = np.stream_title;
     const links = npLinksHtml(it, live, barPlain());
     // A track change cross-fades the mini player
-    const npEl = $('#np'); const wasUri = npEl.dataset.uri || ''; npEl.dataset.uri = it.uri || '';
+    const wasUri = npEl.dataset.uri || ''; if (wasUri !== (it.uri || '')) npEl.dataset.uri = it.uri || '';
     if (wasUri && wasUri !== (it.uri || '') && !waitHtml && !errHtml) { npEl.classList.remove('swap'); void npEl.offsetWidth; npEl.classList.add('swap'); clearTimeout(npEl.swapT); npEl.swapT = setTimeout(() => npEl.classList.remove('swap'), 500); }
-    $('#np').innerHTML = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
-    // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
-    // its title there); with a mouse the bar's title and artist are links of their own
-    if (!waitHtml && !errHtml && !barPlain()) bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
-    // Paused because its device went away (a USB DAC unplugged): said where the artist is
-    if (!waitHtml && !errHtml && z.transport === 'paused' && z.error) { const sub = $('#np .np-sub'); if (sub) sub.innerHTML = `<span class="warn-text" role="alert">${esc(z.error)}</span>`; }
-    $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
+    // (the same song, shown the same way, with the same word on a pause: the elements stay; a link
+    // whose artist could not be read yet is asked for again, as each draw did)
+    const npHtml = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
+    const pausedBy = !waitHtml && !errHtml && z.transport === 'paused' && z.error ? z.error : '';
+    const linked = !waitHtml && !errHtml && !barPlain();
+    // (its name is the song, not only "Now playing": the label replaces what is inside it for a screen reader)
+    put(npEl, '_barName', waitHtml || errHtml ? 'Now playing' : ((w) => (w ? `Now playing: ${w}` : 'Now playing'))([live || it.title, it.artist].filter(Boolean).join(', ')), (v) => { npEl.setAttribute('aria-label', v); });
+    if (put(npEl, '_barHtml', `${npHtml}\n${pausedBy}\n${linked}`, () => { npEl.innerHTML = npHtml; })) {
+      // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
+      // its title there); with a mouse the bar's title and artist are links of their own
+      if (linked) bindNpLinks(npEl, it, () => { if (!overlay.hidden) toggleNowPlaying(); });
+      // Paused because its device went away (a USB DAC unplugged): said where the artist is
+      if (pausedBy) { const sub = $('.np-sub', npEl); if (sub) sub.innerHTML = `<span class="warn-text" role="alert">${esc(pausedBy)}</span>`; }
+    } else if (linked && !pausedBy) hydrateArtistCredits(npEl);
+    putText($('#pos'), fmt(np.position_ms)); putText($('#dur'), fmt(np.duration_ms));
+    // (the seek bar read out as a time, not as a number of a thousand)
+    if (!seek.dataset.dragging) put(seek, '_barWords', `${fmt(np.position_ms)} of ${fmt(np.duration_ms)}`, (v) => { seek.setAttribute('aria-valuetext', v); });
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     miniProgress(np.duration_ms ? np.position_ms / np.duration_ms : 0);
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
@@ -4272,17 +4483,13 @@
     const zp = zoneNp(z, np);
     const h = zp.signal_path ? headline(zp.signal_path) : null;
     const dsp = dspOn(np);
-    q.className = 'quality ' + (h ? 'q-' + h : '') + (dsp ? ' dsp' : '');
     const svc = npSvc(np); const svcName = svc === 'library' ? 'your library' : svc ? srcName(svc) : null;
-    $('.qsrc', q).innerHTML = svc ? svcIcon(svc) : '';
     const dv = deviceOf(z);
     const words = (np.signal_path || np.format ? pathSummary(zp) : playedBy()) + (dv ? ` → ${dacWordsFor(z)}` : '');
-    $('.qtext', q).textContent = words;
-    $('.qdsp', q).hidden = !dsp;
     const badge = np.output_format ? rateBits(np.output_format) : np.format ? (np.format.lossless ? 'Lossless' : np.format.codec || '') : '';
-    $('.qshort', q).innerHTML = `<span class="qdev">${esc(z.name)}</span>${badge ? `<span class="qbadge">${esc(badge)}</span>` : ''}`;
-    q.setAttribute('aria-label', `Sound: ${svcName ? `from ${svcName}, ` : ''}${words}${dsp ? ', DSP on' : ''}. Playing on ${z.name}. Open the sound panel`);
-    q.title = zp.signal_path ? zp.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : decodeNote();
+    pill('quality ' + (h ? 'q-' + h : '') + (dsp ? ' dsp' : ''), svc ? svcIcon(svc) : '', words, dsp, `<span class="qdev">${esc(z.name)}</span>${badge ? `<span class="qbadge">${esc(badge)}</span>` : ''}`,
+      `Sound: ${svcName ? `from ${svcName}, ` : ''}${words}${dsp ? ', DSP on' : ''}. Playing on ${z.name}. Open the sound panel`,
+      zp.signal_path ? zp.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : decodeNote());
     syncQPanel();
   };
   // ---- immediate feedback on play (owner, 2026-10-29) ----
@@ -4364,8 +4571,12 @@
   // The browser's own player: it starts (or fails) by itself
   audio.addEventListener('playing', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); if (state.startError && state.startError.zone === BROWSER) { state.startError = null; renderBar(); } });
   audio.addEventListener('pause', () => { if (state.starting && state.starting.zone === BROWSER) startDone(); });
+  // The first Tab stop: past the menu and the top bar, to the page
+  { const sk = $('#skip'); if (sk) sk.onclick = () => { main.focus({ preventScroll: true }); }; }
   $('#np').onclick = () => toggleNowPlaying();
-  $('#np').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
+  // (Enter or Space on the bar itself; on its title, artist or cover the key is that control's own.
+  // A link has no Space of its own: there it opens Now playing, as it did)
+  $('#np').onkeydown = (e) => { const inner = e.target !== e.currentTarget; if (inner && !(e.key === ' ' && e.target.closest('a'))) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
   // The quality sheet needs to know what is streaming (now_playing.format); without it (This browser,
   // an older node) the label opens Now playing, where the signal path is
   // ---- the sound panel (owner, 2026-10-29): the pill in full ----
@@ -4474,7 +4685,7 @@
     const drawHeart = () => {
       const h = $('#npheart', overlay); if (!h || !live()) return;
       if (!ref()) { h.innerHTML = ''; return; }
-      const word = fav ? 'In favourites' : 'Add to favourites';
+      const word = fav ? 'In Bookmarks' : 'Add to Bookmarks';
       const had = document.activeElement && document.activeElement.id === 'npfav';
       h.innerHTML = `<button class="icon-btn np-heart ${fav ? 'on' : ''}" id="npfav" aria-pressed="${fav}" aria-label="${word}" title="${word}">${icon(fav ? 'heart-fill' : 'heart')}</button>`;
       $('#npfav', overlay).onclick = async () => { const want = !fav; try { if (await setFavourite(ref(), want)) { fav = want; drawHeart(); } } catch (e) { toast(e.message, 'error'); } };
@@ -4492,7 +4703,7 @@
     const box = $('#nppubky', overlay); if (!box || !live()) return;
     box.innerHTML = pageRow + (target
       ? `<div class="np-tags"><span class="eyebrow">Tags</span>${tags.map((x) => `${tagChip(x.label, { own: true, attrs: `data-np-tag="${esc(x.label)}"`, title: `Your tag · open ${x.label}` })}${x.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>`
-      : t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in playlists.</p>'
+      : t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in collections.</p>'
         : `<p class="muted">Nothing to tag here: ${it.stream || np2Stream(it) ? 'this is a live stream' : 'this song has no page yet'}.</p>`);
     const pb = $('#nppage', box); if (pb) pb.onclick = () => setView('item', { kind: 'song', id: songPage });
     $$('[data-np-tag]', box).forEach((x) => x.onclick = () => setView('tag', x.dataset.npTag));
@@ -4542,6 +4753,8 @@
   // `right` runs as it slides out, else it snaps back; up and down run `up` / `down` past 40 / 60 px.
   // A drag that starts on a slider or a field is the slider's. The tap a swipe leaves is dropped.
   const calmMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // (how a scripted scroll moves: at once for people who asked for less motion)
+  const glide = () => (calmMotion() ? 'auto' : 'smooth');
   const swipeable = (el, o) => {
     let s = null;
     const reset = () => { if (s && s.move) { s.move.classList.remove('dragging'); s.move.style.transform = ''; s.move.style.opacity = ''; } s = null; };
@@ -4706,7 +4919,7 @@
     const under = one && sheet ? ' inert' : ''; // (what the phone's sheet covers)
     overlay.innerHTML = `
       <div class="np-page np2${sheet && !one ? ' has-sheet' : ''}${one ? ' compact' : ''}">
-        <div class="np-top"${under}><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
+        <div class="np-top"${under}><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button aria-haspopup="menu" aria-expanded="false" class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
         <div class="np-body"${under}>
           <section class="np-player" aria-label="Now playing">
             <div class="np-big">${itemArt(it, '', npSvc(np))}</div>
@@ -4761,7 +4974,7 @@
     const npAct = { shuffle: toggleShuffle, repeat: cycleRepeat, prev: () => transport({ action: 'previous' }), toggle: () => transport({ action: 'toggle' }), next: () => transport({ action: 'next' }) };
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => npAct[b.dataset.npt]());
     renderModes();
-    sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
+    sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); sk.setAttribute('aria-valuetext', `${fmt((sk.value / 1000) * (np.duration_ms || 0))} of ${fmt(np.duration_ms)}`); });
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
     // (a drag that ends without a change, or is cancelled, lets go too)
     for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) sk.addEventListener(ev, () => { setTimeout(() => { delete sk.dataset.dragging; }, 0); }, { passive: true });
@@ -5014,6 +5227,7 @@
   setInterval(() => {
     if (overlay.hidden) return;
     const z = currentZone(); const np = z && z.now_playing; const s = $('#npseek');
+    if (np && s && !s.dataset.dragging) { const words = `${fmt(np.position_ms)} of ${fmt(np.duration_ms)}`; if (s.getAttribute('aria-valuetext') !== words) s.setAttribute('aria-valuetext', words); }
     if (!np || !s || s.dataset.dragging) return;
     if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle || JSON.stringify(outputFacts(z)) !== renderNowPlaying.lastOutput) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
     if ((z.transport || '') !== (overlay.dataset.transport || '')) {
@@ -5029,6 +5243,9 @@
 
   // ---- views ---------------------------------------------------------------
   const main = $('#main');
+  // Rows drawn after the song started (a page opened, more of a list read in) get the playing
+  // song's mark as they come, while it plays or is paused: asked once per change of the page
+  new MutationObserver((recs) => { if (recs.some((r) => [...r.addedNodes].some((n) => n.nodeType === 1))) markPlaying(); }).observe(main, { childList: true, subtree: true }); // (elements only: a time rewritten as text, the dashboard's, adds no row)
   // Another page opened: the page on screen stays where it is until the new one (or its skeleton)
   // replaces it, and the new one starts at its top. (Put at the top at once, the old page showed
   // its own top for a moment first.) The reset comes with that first draw, before the page's own
@@ -5090,7 +5307,7 @@
     // The app's own output with a USB DAC on it (`dac`: "This phone"), read-only for now
     ...(dac ? [['dac', dac, 'zone']] : []),
     { group: 'node', title: 'This node · admin', saved: saved.node || SETTINGS_GROUPS.node },
-    ['apps', 'Service apps', 'settings'], ['people', 'People', 'artist'], ['playback', 'Zones and outputs', 'zone'],
+    ['apps', 'Service apps', 'settings'], ['people', 'People & access', 'artist'], ['playback', 'Zones and outputs', 'zone'],
     ['nodehome', 'Home for everyone', 'home'],
     ...(tunnel && !bundled ? [['remote', 'Remote access', 'external']] : []),
     ['discover', 'Discover', 'compass'], ['usage', 'Usage insights', 'eye'], ['backup', 'Backup', 'download'], ['about', 'About and updates', 'info'],
@@ -5099,7 +5316,7 @@
   const SETTINGS_TABS = settingsTabs({ bundled: true, tunnel: true, dac: 'This phone' }).filter(Array.isArray); // every tab, for routes
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
   const NAV_VIEWS = ['library', 'home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music', 'downloads'];
-  const VIEW_LABELS = { library: 'Your library', downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Songs', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
+  const VIEW_LABELS = { library: 'Your library', downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Bookmarks', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Songs', playlists: 'Collections', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Collection', shared: 'Shared collection' };
   const b64u = (x) => btoa(unescape(encodeURIComponent(x))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const unb64u = (x) => decodeURIComponent(escape(atob(x.replace(/-/g, '+').replace(/_/g, '/'))));
   const itemSeg = (kind) => (kind === 'artist' ? 'artist' : kind === 'album' ? 'album' : 'song');
@@ -5180,7 +5397,7 @@
     return null;
   };
   // What the back arrow says on the next page.
-  const hereLabel = () => state.view === 'item' ? (state.itemTitle || 'Back') : state.view === 'releases' ? (state.relTitle || 'Back') : state.view === 'tag' ? `#${String(state.viewArg).split(',').join(' #')}` : state.view === 'home-section' ? (HOME_TITLES[state.viewArg && state.viewArg.section] || 'Home') : state.view === 'playlist' || state.view === 'shared' ? (state.itemTitle || 'Playlist') : state.view === 'search' ? (state.viewArg && state.viewArg.q ? `Results for “${state.viewArg.q}”` : 'Search') : (VIEW_LABELS[state.view] || 'Back');
+  const hereLabel = () => state.view === 'item' ? (state.itemTitle || 'Back') : state.view === 'releases' ? (state.relTitle || 'Back') : state.view === 'tag' ? `#${String(state.viewArg).split(',').join(' #')}` : state.view === 'home-section' ? (HOME_TITLES[state.viewArg && state.viewArg.section] || 'Home') : state.view === 'playlist' || state.view === 'shared' ? (state.itemTitle || 'Collection') : state.view === 'search' ? (state.viewArg && state.viewArg.q ? `Results for “${state.viewArg.q}”` : 'Search') : (VIEW_LABELS[state.view] || 'Back');
   // The browser tab (and its Back list, and a screen reader on each page) names the page, not only
   // the app: "Journey · Odeion"; Home is the app's own name. The name is the one Back gives this
   // page, else its heading (a person, a smart playlist); a Back that names no page leaves the app's.
@@ -5272,7 +5489,9 @@
     state.drawnPage = null; endSelect(); // (opening a page, the same one too, ends Select)
     state.zoneInView = v === 'zones' && how !== 'pop'; // Zones opened (not Back): show the zone in use
     // (a page that drew nothing, its code done or failed: at its top then, unless a newer page waits)
-    return navigate(fresh).finally(() => { if (top && topLater === top) topNow(); });
+    // (not for a change inside the page, 'replace': a tag taken off, a tab, the next page of a list;
+    // nor before the person has pressed or typed anything: a page the app opens by itself)
+    return navigate(fresh, fresh && !firstPage && how !== 'replace' && personActed).finally(() => { if (top && topLater === top) topNow(); });
   };
   // (a post that is no playlist pasted over a search with a query: that search's entry takes its
   // search, as a new query there does, so Back and Escape go where Search was opened from: { q, in, depth
@@ -5725,16 +5944,16 @@
     toastDone(looking);
     const about = `“${t.title}”${who ? ` by ${who}` : ''}`;
     if (c.needs_contact) {
-      const go = await choiceDialog({ title: 'Which song is this?', text: `Playlists and favourites name each song the way other apps understand, by its entry in MusicBrainz (the open music encyclopedia). To look ${about} up there, the node first needs your email or website.`, choices: [{ label: 'Add it', value: 'contact', primary: true }] });
+      const go = await choiceDialog({ title: 'Which song is this?', text: `Collections and bookmarks name each song the way other apps understand, by its entry in MusicBrainz (the open music encyclopedia). To look ${about} up there, the node first needs your email or website.`, choices: [{ label: 'Add it', value: 'contact', primary: true }] });
       if (go) openContact();
       return null;
     }
     if (!c.suggestions.length) {
-      await choiceDialog({ title: 'Which song is this?', text: `MusicBrainz has nothing that matches ${about}${who ? '' : ' (the file has no artist)'}, so it can't go into playlists or favourites yet. You can still play it and queue it. Giving the file its proper title and artist tags usually fixes this.`, choices: [{ label: 'OK', value: 'ok', primary: true }] });
+      await choiceDialog({ title: 'Which song is this?', text: `MusicBrainz has nothing that matches ${about}${who ? '' : ' (the file has no artist)'}, so it can't go into collections or bookmarks yet. You can still play it and queue it. Giving the file its proper title and artist tags usually fixes this.`, choices: [{ label: 'OK', value: 'ok', primary: true }] });
       return null;
     }
     const mins = (ms) => (ms ? fmt(ms) : '');
-    const pick = await choiceDialog({ title: 'Which song is this?', text: `Playlists and favourites name each song by its entry in MusicBrainz (the open music encyclopedia). Pick the one that is ${about}${t.duration_ms ? ` (${mins(t.duration_ms)})` : ''}; it is remembered for this file.`, choices: c.suggestions.map((x, k) => ({ label: `${x.title || t.title}${x.artist ? ` · ${x.artist}` : ''}`, note: [x.release_title, `${Math.round(x.score * 100)}% match`].filter(Boolean).join(' · '), value: x.id, primary: k === 0 })) });
+    const pick = await choiceDialog({ title: 'Which song is this?', text: `Collections and bookmarks name each song by its entry in MusicBrainz (the open music encyclopedia). Pick the one that is ${about}${t.duration_ms ? ` (${mins(t.duration_ms)})` : ''}; it is remembered for this file.`, choices: c.suggestions.map((x, k) => ({ label: `${x.title || t.title}${x.artist ? ` · ${x.artist}` : ''}`, note: [x.release_title, `${Math.round(x.score * 100)}% match`].filter(Boolean).join(' · '), value: x.id, primary: k === 0 })) });
     if (pick == null) return null;
     const picked = c.suggestions.find((x) => x.id === pick);
     try { const done = await api('POST', `/library/suggestions/${pick}/accept?track_id=${encodeURIComponent(t.id)}${picked ? `&recording_mbid=${encodeURIComponent(picked.recording_mbid)}` : ''}`); rememberTracks([done]); return done; } catch (e) { toast(e.message, 'error'); return null; }
@@ -5829,10 +6048,10 @@
         <div class="fmt-col"><span class="fmt ${LOSSY[t.file && t.file.container] ? 'lossy' : ''}">${esc(fileFormat(t.file))}</span></div>
         <div class="dur">${fmt(t.duration_ms)}</div>
         <div class="row-actions">
-          <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" aria-pressed="${fav}" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(fav, t.title))}">${icon(fav ? 'heart-fill' : 'heart')}</button>
+          <button class="icon-btn heart ${fav ? 'on' : ''}" data-act="fav" aria-pressed="${fav}" title="${fav ? 'Remove from Bookmarks' : 'Add to Bookmarks'}" aria-label="${esc(heartWords(fav, t.title))}">${icon(fav ? 'heart-fill' : 'heart')}</button>
           <button class="icon-btn" data-act="next" title="Play next" aria-label="${esc(rowWords.next(t.title))}">${icon('playnext')}</button>
           <button class="icon-btn" data-act="add" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>
-          <button class="icon-btn" data-act="more" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>
+          <button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-act="more" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>
         </div>
       </div>`;
     }).join('');
@@ -5970,7 +6189,7 @@
         $('[data-hsagain]', d).onclick = start;
       }
     };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     start();
   });
   const tagRgba = (hex, a) => { const [r, g, b] = hex.match(/\w\w/g).map((x) => parseInt(x, 16)); return `rgba(${r}, ${g}, ${b}, ${a})`; };
@@ -6041,7 +6260,7 @@
       const here = trail[trail.length - 1];
       try { done(false, await api('POST', '/library/drives', { provider, folder_id: here.id, name: here.name })); } catch (e) { $('#dfmsg', d).textContent = e.message; }
     };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    nameDialog(d); if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     show();
   });
   // Your library › Node library › Add a WebDAV share: the folder's address, user and password; the node
@@ -6241,7 +6460,17 @@
     $('#notessave').onclick = () => save(r ? r.rating : null, $('#notestext').value.trim());
   };
   // A small anchored menu (track ⋯, album actions). One at a time; Esc or the scrim closes it.
-  const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; document.body.appendChild(menuEl);
+  const menuEl = document.createElement('div'); menuEl.className = 'popover menu'; menuEl.hidden = true; menuEl.setAttribute('role', 'menu'); document.body.appendChild(menuEl);
+  // (the control that opened it says so while it is open)
+  // (a More button says in its own markup that it opens a menu, and here whether it is open. Any
+  // other button a menu is hung on, a Play that offers a choice only sometimes, the zone button's
+  // sleep timer, says so only while that menu is open; the page or the search box never does)
+  const menuSaid = (open) => {
+    const a = menuAnchor; if (!a || !a.matches || !a.matches('button, [role="button"]')) return;
+    if (open) { if (!a.hasAttribute('aria-haspopup')) { a._menuPassing = true; a.setAttribute('aria-haspopup', 'menu'); } a.setAttribute('aria-expanded', 'true'); }
+    else if (a._menuPassing) { a._menuPassing = false; a.removeAttribute('aria-haspopup'); a.removeAttribute('aria-expanded'); }
+    else if (a.hasAttribute('aria-haspopup')) a.setAttribute('aria-expanded', 'false');
+  };
   // Long-press on a phone, in a list that has Select: selection, with that row ticked (owner,
   // 2026-11-08); elsewhere (and right-click) the row's ⋯ menu
   const longPressSelect = (row) => {
@@ -6283,7 +6512,7 @@
       if (!sw.on) { sw.on = true; sw.row.classList.add('swiping'); }
       sw.dx = Math.max(-140, Math.min(140, dx));
       sw.row.style.transform = `translateX(${sw.dx}px)`;
-      sw.row.dataset.swipeLabel = sw.dx > 0 ? 'Play next' : 'Add to playlist';
+      sw.row.dataset.swipeLabel = sw.dx > 0 ? 'Play next' : 'Add to collection';
       sw.row.classList.toggle('swipe-ready', Math.abs(sw.dx) >= 80);
     }, { passive: true });
     const end = () => {
@@ -6291,7 +6520,7 @@
       if (s2.long) longEnd = Date.now();
       if (!s2.on) return;
       reset(s2.row);
-      if (Math.abs(s2.dx) >= 80) { const more = moreOf(s2.row); menuPick = { label: s2.dx > 0 ? 'Play next' : 'Add to playlist', at: Date.now(), anchor: more }; more.click(); }
+      if (Math.abs(s2.dx) >= 80) { const more = moreOf(s2.row); menuPick = { label: s2.dx > 0 ? 'Play next' : 'Add to collection', at: Date.now(), anchor: more }; more.click(); }
     };
     document.addEventListener('touchend', end, { passive: true });
     document.addEventListener('touchcancel', () => { if (sw) { clearTimeout(sw.timer); if (sw.on) reset(sw.row); sw = null; } }, { passive: true });
@@ -6312,7 +6541,7 @@
     if (to == null || e.altKey || e.ctrlKey || e.metaKey) return;
     e.preventDefault(); e.stopPropagation(); items[to].focus({ preventScroll: true });
   });
-  const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuBack(); menuEl.hidden = true; if (fromBack !== true) popTransient(); };
+  const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuBack(); menuEl.hidden = true; menuSaid(false); if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
   // Phones: a sheet closes with a swipe down while its list is at the top (it follows the finger;
   // a short pull springs back). A swipe that starts sideways or scrolls the list is left alone.
@@ -6362,12 +6591,29 @@
     // in the menu before (a sub-menu): not a mouse's click that left a menu item focused)
     const fa = document.activeElement;
     const keyed = keyedLast && (!fa || fa === document.body || fa === anchor || menuEl.contains(fa) || (fa.contains && fa.contains(anchor)));
+    if (menuAnchor !== anchor) menuSaid(false); // (a menu opened from another one's place: that one is closed)
     menuAnchor = anchor;
-    menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.face ? face(it.face) : it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
+    // (its name: its first heading, else what its opener is called)
+    { const t = items.find((it) => it.title); menuEl.setAttribute('aria-label', (t && t.title) || anchor.getAttribute('aria-label') || anchor.title || 'Menu'); }
+    // (each titled part is a group named by its title, so a screen reader says which part an item is in:
+    // "Move to" before the zones; a title with nothing after it, "and 3 more on Pubky", describes the menu)
+    const item = (it, i) => `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : 'role="menuitem"'}>${it.face ? face(it.face) : it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`;
+    let html = ''; let open = false; let note = null;
+    items.forEach((it, i) => {
+      if (!it.title) { html += item(it, i); return; }
+      if (open) html += '</div>';
+      open = items.slice(i + 1).some((x) => !x.title) && !(items[i + 1] && items[i + 1].title);
+      const id = `mtitle${i}`;
+      if (open) html += `<div role="group" aria-labelledby="${id}"><div class="pop-title" id="${id}" aria-hidden="true">${esc(it.title)}</div>`;
+      else { html += `<div class="pop-title" id="${id}" aria-hidden="true">${esc(it.title)}</div>`; if (i > 0 && !items.slice(i + 1).some((x) => !x.title)) note = id; }
+    });
+    if (open) html += '</div>';
+    menuEl.innerHTML = html;
+    if (note) menuEl.setAttribute('aria-describedby', note); else menuEl.removeAttribute('aria-describedby');
     // The item runs first: a page it opens replaces the transient entry; otherwise it is popped. The menu
     // closes at once, so the control that opened it (its ⋯) shows the progress until the item is done.
-    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuBack(); menuEl.hidden = true; Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
-    menuEl.hidden = false; pushTransient();
+    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuBack(); menuEl.hidden = true; menuSaid(false); Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
+    menuEl.hidden = false; menuSaid(true); pushTransient();
     const r = anchor.getBoundingClientRect(); const mw = 280;
     menuEl.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
     menuEl.style.top = Math.min(window.innerHeight - menuEl.offsetHeight - 8, r.bottom + 6) + 'px';
@@ -6389,14 +6635,14 @@
   // The toast names the playlist picked (as a new one's "Created “…”" does), so with many of them
   // you can tell which row the tap hit
   const addToPlaylist = async (pl, tracks, uris) => {
-    const to = pl.name ? `“${pl.name}”` : 'playlist';
+    const to = pl.name ? `“${pl.name}”` : 'collection';
     try { await api('POST', `/playlists/${encodeURIComponent(pl.id)}/items`, uris ? { uris } : { track_ids: tracks.map((t) => t.id) }); const n = uris ? uris.length : tracks.length; toast((n === 1 ? `Added to ${to}` : `${countOf(n, 'songs')} added to ${to}`) + (uris ? '' : stayNote(tracks))); }
     catch (e) { toast(e.message, 'error'); }
   };
   // "Add to playlist" for canonical URLs (Internet Archive files): the same menu, by uris.
   const uriMenu = async (anchor, uris, name) => {
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
-    return playlistPicker((pl) => addToPlaylist(pl, [], uris), name || 'New playlist', async (n) => { try { await api('POST', '/playlists', { name: n, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${n}”`); } catch (e) { toast(e.message, 'error'); } });
+    return playlistPicker((pl) => addToPlaylist(pl, [], uris), name || 'New collection', async (n) => { try { await api('POST', '/playlists', { name: n, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${n}”`); } catch (e) { toast(e.message, 'error'); } });
   };
   // (head: items before the song's own, e.g. a queue row's name and its Move up / Move down / Remove;
   // live: whether the menu is still wanted once its reads are in, e.g. that queue row still drawn
@@ -6406,7 +6652,7 @@
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     await pubkyUser();
     const single = tracks.length === 1 ? tracks[0] : null;
-    const favItem = single ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite({ track_id: single.id }, !isFav(single))) render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
+    const favItem = single ? [{ label: isFav(single) ? 'Remove from Bookmarks' : 'Add to Bookmarks', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite({ track_id: single.id }, !isFav(single))) render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     // Start radio: from the single track, or from a random track of a set (album page menu).
     // (the radio goes on for the zone whose queue the seed replaced, also when you switch zone while
     // the seed is sent: before, that queue was replaced and its radio silently left off; the toast
@@ -6427,7 +6673,7 @@
       // The same order and words as a song's ⋯ on its page, an album or search (itemMenu)
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
-      { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”` + stayNote(tracks)); } catch (e) { toast(e.message, 'error'); } }) },
+      { label: 'Add to collection…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New collection')) || 'New collection', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”` + stayNote(tracks)); } catch (e) { toast(e.message, 'error'); } }) },
       ...(single && single.id != null ? dlItem('track', single.id, single.title, artists(single)) : []),
       ...favItem,
       ...radioItem,
@@ -6502,7 +6748,7 @@
   // ("album", "song", never the describer's "other"), and an album's Play says it is the album. On a
   // phone it stays in the line under the title: next to a plays chip a row-end word left the
   // title no room.
-  const discoverRows = (items) => `<div class="list">${items.map((it, i) => { const kind = it.kind && it.kind !== 'other' ? homeKind(it) : ''; return `<div class="list-row clickable" data-ditem="${i}"${it.uri ? ` data-uri="${esc(it.uri)}"` : ''}>${it.image ? `<img class="thumb" src="${esc(it.image)}" alt="" loading="lazy">` : `<div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div>`}<div class="grow"><div class="name">${esc(itemName(it))} ${it.site ? `<span class="src-badge">${esc(it.site.toUpperCase())}</span>` : ''}${it.in_library ? '<span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([it.artist, it.group_size ? `on ${it.group_size} services` : null, it.taggers ? `${it.taggers} tagger${it.taggers === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))}${kind ? `<span class="subkind">${it.artist || it.group_size || it.taggers ? ' · ' : ''}${esc(kind)}</span>` : ''}</div></div>${kind ? `<span class="muted small rowkind">${esc(kind)}</span>` : ''}${playsChip(it)}<span class="row-actions"><button class="icon-btn" data-dplay="${i}" title="Play" aria-label="Play ${it.kind === 'album' ? 'the album ' : ''}${esc(itemName(it))}">${icon('play')}</button><button class="icon-btn" data-dmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></span></div>`; }).join('')}</div>`;
+  const discoverRows = (items) => `<div class="list">${items.map((it, i) => { const kind = it.kind && it.kind !== 'other' ? homeKind(it) : ''; return `<div class="list-row clickable" data-ditem="${i}"${it.uri ? ` data-uri="${esc(it.uri)}"` : ''}>${it.image ? `<img class="thumb" src="${esc(it.image)}" alt="" loading="lazy">` : `<div class="avatar" style="background:hsl(${hue(it.title || it.uri)} 35% 28%)">${esc(initials(it.title || 'M'))}</div>`}<div class="grow"><div class="name">${esc(itemName(it))} ${it.site ? `<span class="src-badge">${esc(it.site.toUpperCase())}</span>` : ''}${it.in_library ? '<span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([it.artist, it.group_size ? `on ${it.group_size} services` : null, it.taggers ? `${it.taggers} tagger${it.taggers === 1 ? '' : 's'}` : null].filter(Boolean).join(' · '))}${kind ? `<span class="subkind">${it.artist || it.group_size || it.taggers ? ' · ' : ''}${esc(kind)}</span>` : ''}</div></div>${kind ? `<span class="muted small rowkind">${esc(kind)}</span>` : ''}${playsChip(it)}<span class="row-actions"><button class="icon-btn" data-dplay="${i}" title="Play" aria-label="Play ${it.kind === 'album' ? 'the album ' : ''}${esc(itemName(it))}">${icon('play')}</button><button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-dmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></span></div>`; }).join('')}</div>`;
   // Charts and search as artwork tiles (Roon-style), with the same play/menu actions as the rows.
   // Service marks for badges: simple monochrome glyphs in the spirit of each
   // service's logo (no trademarked artwork copied), a note for the rest.
@@ -6705,7 +6951,7 @@
   // that is usually one tap.
   const playlistPicker = (add, newName, makeNew) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
-    d.innerHTML = `<h2>Add to playlist</h2><input class="input" id="ppq" placeholder="Find a playlist" aria-label="Find a playlist" autocomplete="off"><div class="list compact picker" id="pplist"></div><div class="dialog-actions"><button class="btn ghost" data-ppclose>Cancel</button></div>`;
+    d.innerHTML = `<h2>Add to collection</h2><input class="input" id="ppq" placeholder="Find a collection" aria-label="Find a collection" autocomplete="off"><div class="list compact picker" id="pplist"></div><div class="dialog-actions"><button class="btn ghost" data-ppclose>Cancel</button></div>`;
     document.body.appendChild(d);
     const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
     const done = (fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(); };
@@ -6713,7 +6959,7 @@
     const draw = () => {
       const q = $('#ppq', d).value.trim().toLowerCase();
       const list = [...state.playlists].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)).filter((p) => !q || p.name.toLowerCase().includes(q));
-      $('#pplist', d).innerHTML = `<button class="list-row" data-ppnew>${icon('plus')}<div class="grow"><div class="name">New playlist${q ? `: “${esc($('#ppq', d).value.trim())}”` : ''}</div></div></button>` + list.map((p, k) => `<button class="list-row" data-ppi="${k}">${icon('playlist')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${plCount(p)}</div></div></button>`).join('');
+      $('#pplist', d).innerHTML = `<button class="list-row" data-ppnew>${icon('plus')}<div class="grow"><div class="name">New collection${q ? `: “${esc($('#ppq', d).value.trim())}”` : ''}</div></div></button>` + list.map((p, k) => `<button class="list-row" data-ppi="${k}">${icon('playlist')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${plCount(p)}</div></div></button>`).join('');
       $('[data-ppnew]', d).onclick = async () => { done(); await makeNew($('#ppq', d) && $('#ppq', d).value.trim() || newName); };
       $$('[data-ppi]', d).forEach((b) => b.onclick = async () => { const pl = list[Number(b.dataset.ppi)]; done(); await add(pl); });
     };
@@ -6739,9 +6985,9 @@
     showMenu(anchorEl, [{ title: o.title || 'Item' },
       { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
-      { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New playlist', async (name) => { try { await api('POST', '/playlists', byIds ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”` + (byIds ? stayNote(libSongs) : '')); } catch (e) { toast(e.message, 'error'); } }) },
+      { label: 'Add to collection…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New collection', async (name) => { try { await api('POST', '/playlists', byIds ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”` + (byIds ? stayNote(libSongs) : '')); } catch (e) { toast(e.message, 'error'); } }) },
       ...(o.dl ? dlItem(o.dl.kind, o.dl.id, o.title, o.dl.sub, o.dl.online, o.dl.songs) : single && single.track_id != null ? dlItem('track', single.track_id, single.title, single.artist) : []),
-      ...(single ? [{ label: singleFav ? 'Remove from favourites' : 'Add to favourites', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav)) render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
+      ...(single ? [{ label: singleFav ? 'Remove from Bookmarks' : 'Add to Bookmarks', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav)) render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
       // (as a song row's Start radio, trackMenu: the radio goes on for the zone whose queue the song
       // replaced, also when you switch zone while it is sent, and the toast then names that zone;
       // before, the zone switched to got the radio and the one playing the song had none)
@@ -6780,8 +7026,8 @@
   // words, and never asked of Pinakes (they are a private playlist's)
   const MB_SEARCH = 'https://musicbrainz.org/search?type=recording&query=';
   const mbSearchWords = (uri) => { if (!String(uri || '').startsWith(MB_SEARCH)) return null; try { return new URL(uri).searchParams.get('query') || null; } catch { return null; } };
-  const searchRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-search><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('search')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Not matched to a song yet</div></div><a class="btn ghost sm" href="${esc(t.page)}" target="_blank" rel="noopener" aria-label="Find “${esc(t.title)}” on MusicBrainz">${icon('external')} Find on MusicBrainz</a>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
-  const cardRow = (t, k, opts) => t.search ? searchRow(t, k, opts) : `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener" aria-label="Open ${esc(t.title)} (new tab)">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
+  const searchRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-search><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('search')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Not matched to a song yet</div></div><a class="btn ghost sm" href="${esc(t.page)}" target="_blank" rel="noopener" aria-label="Find “${esc(t.title)}” on MusicBrainz">${icon('external')} Find on MusicBrainz</a>${opts.extra ? opts.extra(t, k) : ''}<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
+  const cardRow = (t, k, opts) => t.search ? searchRow(t, k, opts) : `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener" aria-label="Open ${esc(t.title)} (new tab)">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-cmore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`;
   // At most two at a time: the node's other calls (play, the zone) must not wait behind them
   const fillCards = (box) => {
     const rows = $$('[data-card]', box); let next = 0;
@@ -6844,14 +7090,14 @@
   // times down a list, names none); the short tooltip stays
   const rowWords = { play: (title) => `Play ${title || 'this song'}`, next: (title) => `Play ${title || 'this song'} next`, add: (title) => `Add ${title || 'this song'} to the queue`, more: (title) => `More for ${title || 'this song'}`,
     // a queue or playlist row's own edits ("Move X up"); data-wd on a playlist row's button says which, so a link row's are renamed with its title (fillCards)
-    up: (title) => `Move ${title || 'this song'} up`, down: (title) => `Move ${title || 'this song'} down`, unqueue: (title) => `Remove ${title || 'this song'} from the queue`, unlist: (title) => `Remove ${title || 'this song'} from this playlist`, drag: (title) => `Drag ${title || 'this song'} to reorder (or Alt+↑/↓)` };
-  const heartWords = (on, title) => `${on ? 'Remove' : 'Add'} ${title || 'this song'} ${on ? 'from' : 'to'} favourites`;
+    up: (title) => `Move ${title || 'this song'} up`, down: (title) => `Move ${title || 'this song'} down`, unqueue: (title) => `Remove ${title || 'this song'} from the queue`, unlist: (title) => `Remove ${title || 'this song'} from this collection`, drag: (title) => `Drag ${title || 'this song'} to reorder (or Alt+↑/↓)` };
+  const heartWords = (on, title) => `${on ? 'Remove' : 'Add'} ${title || 'this song'} ${on ? 'from' : 'to'} Bookmarks`;
   // A song row's heart, the heart a row on Songs has: filled when the song is bookmarked (shown
   // then without hover, on a touch screen too), an outline you reach by hovering the row with a
   // mouse. One click to bookmark where the ⋯ menu used to take two. It says which song it is for.
-  const songHeart = (t, k) => `<button class="icon-btn heart${songFav(t) ? ' on' : ''}" data-sfav="${k}" aria-pressed="${songFav(t)}" title="${songFav(t) ? 'Remove from favourites' : 'Add to favourites'}" aria-label="${esc(heartWords(songFav(t), t.title))}">${icon(songFav(t) ? 'heart-fill' : 'heart')}</button>`;
+  const songHeart = (t, k) => `<button class="icon-btn heart${songFav(t) ? ' on' : ''}" data-sfav="${k}" aria-pressed="${songFav(t)}" title="${songFav(t) ? 'Remove from Bookmarks' : 'Add to Bookmarks'}" aria-label="${esc(heartWords(songFav(t), t.title))}">${icon(songFav(t) ? 'heart-fill' : 'heart')}</button>`;
   // The heart turned over without redrawing anything around it
-  const setHeart = (b, on, title) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.innerHTML = icon(on ? 'heart-fill' : 'heart'); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.setAttribute('aria-label', heartWords(on, title)); };
+  const setHeart = (b, on, title) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.innerHTML = icon(on ? 'heart-fill' : 'heart'); b.title = on ? 'Remove from Bookmarks' : 'Add to Bookmarks'; b.setAttribute('aria-label', heartWords(on, title)); };
   // Under a song row's cover: the song's initials on its gradient, as the mini player and queue draw a
   // song without art, so a cover that doesn't load (a library without artwork: the album cover 404s)
   // leaves the monogram, not an empty slot with a lone badge in it. `badged`: the source badge sits in
@@ -6859,7 +7105,7 @@
   // A hero's picture (item and person pages) lies over its monogram, so a picture that fails to load (removed) leaves the monogram, as on the tiles
   const heroImg = (src, round) => `<img src="${esc(imgSrc(src))}" alt="" style="width:100%;border-radius:${round ? '50%' : '12px'}" data-err="remove">`;
   const rowMono = (title, badged) => { const h = hue(title); return `<span class="thumb mono${badged ? ' badged' : ''}" aria-hidden="true" style="background:linear-gradient(135deg, hsl(${h} 38% 30%), hsl(${(h + 40) % 360} 42% 18%))">${esc(initials(title))}</span>`; };
-  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap">${rowMono(t.title, !t.sources && coverBadge(coverSvc(t)))}<img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="remove">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${songSub(t, k, opts)}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
+  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap">${rowMono(t.title, !t.sources && coverBadge(coverSvc(t)))}<img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="remove">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}" href="${esc(pathFor('item', { kind: 'song', id: t.id }))}"${rowLinkTab()}>${esc(t.title)}</a>` : `<span class="ntext">${esc(t.title)}</span>`}</div>${songSub(t, k, opts)}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}${songHeart(t, k)}<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-smore="${k}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button></div>`).join('')}</div>`;
   // The list being selected from (while the bar is up): its page, its part of the page, each song's
   // key and the ticks. The same list drawn again where it stands (a playlist's sources answering, a
   // pin, the next search source, See all songs) takes Select over with the same songs ticked;
@@ -6918,7 +7164,7 @@
   const plWrite = async (id, run, focus) => {
     if (plHeld(id)) return false;
     const hold = { id, after: Infinity, focus: plFocusOf(document.activeElement) }; plHolds.set(id, hold); plHoldShow();
-    const cut = new AbortController(); const limit = setTimeout(() => { cut.signal.why = new Error('The node didn’t answer in time; the playlist updates once it does'); cut.abort(); }, PL_HOLD_MS);
+    const cut = new AbortController(); const limit = setTimeout(() => { cut.signal.why = new Error('The node didn’t answer in time; the collection updates once it does'); cut.abort(); }, PL_HOLD_MS);
     let ok = false;
     try { await run(cut.signal); ok = true; if (focus) hold.focus = focus; } catch (e) { toast(e.message, 'error'); } finally { clearTimeout(limit); }
     if (plHolds.get(id) === hold) { if (cut.signal.aborted) hold.cut = true; else hold.after = plDraws + 1; setTimeout(() => plHoldEnd(hold), PL_HOLD_MS); }
@@ -6942,7 +7188,7 @@
     const draw = () => {
       if (!selBar) { selBar = document.createElement('div'); selBar.className = 'selbar'; selBar.setAttribute('role', 'toolbar'); selBar.setAttribute('aria-label', 'Selected songs'); document.body.appendChild(selBar); const bar = selBar; bar.ro = new ResizeObserver(() => { if (bar.isConnected) document.documentElement.style.setProperty('--selbar', `${bar.offsetHeight}px`); }); bar.ro.observe(bar); }
       const picked = [...sel].sort((a, b) => a - b).map((k) => songs[k]);
-      selBar.innerHTML = `<span class="selcount">${countOf(sel.size, 'songs')} selected</span><button class="btn sm primary" data-sel="play" ${sel.size ? '' : 'disabled'}>${icon('play')} Play</button><button class="btn sm" data-sel="queue" ${sel.size ? '' : 'disabled'}>${icon('plus')} Add to queue</button><button class="btn sm" data-sel="playlist" ${sel.size ? '' : 'disabled'}>${icon('playlist')} Add to playlist…</button><button class="btn sm" data-sel="tag" ${sel.size ? '' : 'disabled'}>Tag…</button>${opts.remove ? `<button class="btn sm danger" data-sel="remove" ${sel.size ? '' : 'disabled'}>${icon('trash')} Remove</button>` : ''}<button class="btn sm ghost" data-sel="all">${sel.size === shown().length ? 'None' : 'All'}</button><button class="icon-btn" data-sel="cancel" aria-label="Stop selecting">${icon('close')}</button>`;
+      selBar.innerHTML = `<span class="selcount">${countOf(sel.size, 'songs')} selected</span><button class="btn sm primary" data-sel="play" ${sel.size ? '' : 'disabled'}>${icon('play')} Play</button><button class="btn sm" data-sel="queue" ${sel.size ? '' : 'disabled'}>${icon('plus')} Add to queue</button><button class="btn sm" data-sel="playlist" ${sel.size ? '' : 'disabled'}>${icon('playlist')} Add to collection…</button><button class="btn sm" data-sel="tag" ${sel.size ? '' : 'disabled'}>Tag…</button>${opts.remove ? `<button class="btn sm danger" data-sel="remove" ${sel.size ? '' : 'disabled'}>${icon('trash')} Remove</button>` : ''}<button class="btn sm ghost" data-sel="all">${sel.size === shown().length ? 'None' : 'All'}</button><button class="icon-btn" data-sel="cancel" aria-label="Stop selecting">${icon('close')}</button>`;
       $$('[data-sel]', selBar).forEach((b) => b.onclick = async () => {
         const what = b.dataset.sel;
         if (what === 'cancel') return endSelect();
@@ -6956,7 +7202,7 @@
           if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
           const ids = picked.filter((t) => t.track_id != null).map((t) => t.track_id); const uris = picked.filter((t) => t.track_id == null).map((t) => t.page || (t.id && uriOf('song', t.id))).filter(Boolean);
           const add = async (pl) => { try { if (ids.length) await api('POST', `/playlists/${encodeURIComponent(pl.id)}/items`, { track_ids: ids }); if (uris.length) await api('POST', `/playlists/${encodeURIComponent(pl.id)}/items`, { uris }); toast(`${countOf(picked.length, 'songs')} added to “${pl.name}”`); endSelect(); } catch (e) { toast(e.message, 'error'); } };
-          return playlistPicker(add, 'New playlist', async (name) => { try { await api('POST', '/playlists', { name, track_ids: ids, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”`); endSelect(); } catch (e) { toast(e.message, 'error'); } });
+          return playlistPicker(add, 'New collection', async (name) => { try { await api('POST', '/playlists', { name, track_ids: ids, uris }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”`); endSelect(); } catch (e) { toast(e.message, 'error'); } });
         }
         if (what === 'tag') {
           const r = await choiceDialog({ title: `Tag ${countOf(picked.length, 'songs')}`, text: 'One Pubky tag on each of them (public). Songs not matched yet keep it until they are.', field: { label: 'Tag', value: '' }, choices: [{ label: 'Tag them', value: true, primary: true }] });
@@ -7128,7 +7374,7 @@
 
   const SOURCE_RANK = ['library', 'tidal', 'deezer', 'spotify', 'archive', 'audius', 'pubky'];
   // Groups in the order people scan them: who, then what (UX review #4)
-  const SEARCH_KINDS = [['artist', 'Artists'], ['album', 'Albums'], ['song', 'Songs'], ['playlist', 'Playlists'], ['person', 'People'], ['post', 'Posts'], ['podcast', 'Podcasts'], ['concert', 'Concerts']];
+  const SEARCH_KINDS = [['artist', 'Artists'], ['album', 'Albums'], ['song', 'Songs'], ['playlist', 'Collections'], ['person', 'People'], ['post', 'Posts'], ['podcast', 'Podcasts'], ['concert', 'Concerts']];
   // Facets (TASK-pinakes-social-ux A2): chips under the scope chips, counted from the merged
   // results in hand; each facet keeps at most one value on, and the rows and tiles filter by them.
   const SEARCH_FACETS = [['kind', 'Kind'], ['service', 'Source'], ['quality', 'Quality'], ['decade', 'Years'], ['site', 'Site']];
@@ -7320,7 +7566,7 @@
     const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => tagChip(t.label, { own: true, count: t.count, attrs: `data-stag="${esc(t.label)}"`, title: `Your tag · ${countOf(t.count, 'items')}` })).join('')}${(tg.others || []).map((l) => tagChip(l, { attrs: `data-stag="${esc(l)}"` })).join('')}</div></section>`);
     // (an exact copy left without a page is listed below, so this would be untrue)
     if (!top && anyHits && !run.q.includes('#') && !['song', 'album', 'artist'].some((k) => byKind[k].some((x) => x.exact))) sections.push('<p class="muted small" id="snomatch">No exact match. The closest results are below.</p>');
-    if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" data-err="remove">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top"${hrefAttr(pathFor('item', { kind: top.kind, id: top.id }))}>${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Playlist', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div>${top.also && top.also.length ? `<div class="sub" id="stopalso">Also on ${esc(top.also.join(' · '))}</div>` : ''}</div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
+    if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" data-err="remove">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top"${hrefAttr(pathFor('item', { kind: top.kind, id: top.id }))}>${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Collection', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div>${top.also && top.also.length ? `<div class="sub" id="stopalso">Also on ${esc(top.also.join(' · '))}</div>` : ''}</div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
     const songCap = run.allSongs ? 50 : 6;
     for (const [kind, label] of SEARCH_KINDS) {
       const items = byKind[kind];
@@ -7478,6 +7724,11 @@
   // (action: { view, label } opens a page; { id, label } is a button the page binds itself)
   // (songs: the button depends on whether the library has songs; the box notes the count it was drawn
   // with, songsChanged)
+  // A read that failed, said the same way wherever it happens: what went wrong, announced, with
+  // Try again in its place. Never the page's "nothing here" words: nothing was read, so nothing is
+  // known to be missing. (bound by the page's draw, renderPage, to drawing it again; `id`: a
+  // caller's own handle on the button)
+  const failedHtml = (e, id) => `<div class="notice warn" role="alert" data-failed>${esc((e && e.message) || String(e))} <button class="btn sm" type="button" data-retry${id ? ` id="${id}"` : ''}>Try again</button></div>`;
   const emptyState = (iconName, title, text, action, songs) => `<div class="empty"${songs ? ` data-songs="${hasSongs()}"` : ''}>${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" type="button" ${action.id ? `id="${action.id}"` : `data-empty-action="${action.view}"`}>${esc(action.label)}</button>` : ''}</div>`;
   // An empty library's Songs, Albums and Artists: the owner's way in is Add music (folders, shares
   // and drives are on Your library › Node library now; the old "in Settings (Library folders)" led
@@ -7491,7 +7742,7 @@
   const favHowTo = (hs) => {
     const noSongs = !!(state.info && state.info.library) && !(state.info.library.tracks > 0);
     if (noSongs && !isOwner()) return `Once the node’s owner adds music, press the heart on a song, album or artist to keep it here${hs ? ', on your own homeserver' : ''}.`;
-    return hs ? 'Press the heart on a song, album or artist to keep it here, on your own homeserver.' : 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your favourites are also kept in your own Pubky storage.';
+    return hs ? 'Press the heart on a song, album or artist to keep it here, on your own homeserver.' : 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your bookmarks are also kept in your own Pubky storage.';
   };
   const favWayOn = () => (hasSongs() ? { view: 'tracks', label: 'Open Songs' } : isOwner() ? { view: 'add-music', label: 'Add music' } : undefined);
   // Songs' and Albums' heads carry the owner's Add music; on a page whose empty state has the same
@@ -7518,7 +7769,7 @@
     if (dp) dp.onchange = () => { try { if (dp.checked) localStorage.setItem('pm.dense', '1'); else localStorage.removeItem('pm.dense'); } catch { /* no storage */ } applyShell(); };
   };
   // The library's sections as a row of chips above the page title; shown on phones (the desktop has the sidebar)
-  const LIB_TOP = [['library', 'Your library'], ['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
+  const LIB_TOP = [['library', 'Your library'], ['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Collections'], ['favourites', 'Bookmarks'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
   const libNav = () => {
     if (!LIB_TOP.some(([k]) => k === state.view)) return '';
     const off = new Set((state.sources || []).filter((x) => x.enabled === false).map((x) => x.id));
@@ -7662,6 +7913,9 @@
   let plGen = 0;
   // The latest favourites load, so a page that lists favourites can wait for it on a cold start
   let favLoad = null; let favRedraw = null; let favRetryFocus = false;
+  // Songs: each draw's number and the newest one shown (an older draw's answer is not put in over
+  // a newer one's), and the read under way while the page is drawn again where it stands
+  let songsDraw = 0; let songsShown = 0; let songsReading = null;
   // Only the latest load's answer counts: on a cold start a slow first answer that lands after a
   // heart was pressed would otherwise put back the list without that bookmark. An older load
   // waits for the latest and answers with it.
@@ -7713,7 +7967,7 @@
       return false;
     }
     await loadFavourites();
-    toast(on ? 'Added to favourites' + note : 'Removed from favourites');
+    toast(on ? 'Added to Bookmarks' + note : 'Removed from Bookmarks');
     return true;
   };
   // Whether the node holds a Pubky session (menus offer homeserver uploads then). Asked once at a
@@ -7786,7 +8040,9 @@
       try { done = !(await more()); } catch (e) { done = true; toast(e.message, 'error'); }
       busy = false;
       if (done) { io.disconnect(); sentinel.remove(); } else { io.unobserve(sentinel); io.observe(sentinel); }
-    }, { rootMargin: '1200px 0px' });
+      // (measured from the page's own scrolling box: a margin around the window is cut off by that
+      // box, so the next part was only asked for once the list's end was on screen)
+    }, { root: /auto|scroll/.test(getComputedStyle(main).overflowY) ? main : null, rootMargin: '1200px 0px' });
     io.observe(sentinel);
     return () => { done = true; io.disconnect(); sentinel.remove(); };
   };
@@ -7864,15 +8120,18 @@
     } finally { document.removeEventListener('focusin', moved, true); document.removeEventListener('input', typed, true); document.removeEventListener('keydown', typed, true); }
   };
   // Albums with nothing to show: says which choice left it empty (Favourites, a quality, or both)
-  const albumsNone = (fav, focus, anyFav) => (fav && focus && anyFav ? ['No favourite albums of this quality', 'None of your favourite albums has a file of this quality.']
-    : fav ? ['No favourite albums', 'Open an album and press its heart to see it here.']
+  const albumsNone = (fav, focus, anyFav) => (fav && focus && anyFav ? ['No bookmarked albums of this quality', 'None of your bookmarked albums has a file of this quality.']
+    : fav ? ['No bookmarked albums', 'Open an album and press its heart to see it here.']
       : ['No albums of this quality', 'No album has a file of this quality.']);
   // A hearted album MusicBrainz doesn't know yet is kept on this node as album:<id>
   // An album's heart: kept on the node (album:<id>), or on its release or its release group (the
   // album page and Discover heart the group)
   const albumFav = (a) => !!(state.favUris && (state.favUris.has(`album:${a.id}`) || (a.release_mbid && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`)) || (a.release_group_mbid && state.favUris.has(`https://musicbrainz.org/release-group/${a.release_group_mbid}`))));
+  const NAME_ORDER = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
   const sortList = (kind, list, how) => {
-    const by = (f) => [...list].sort((a, b) => String(f(a) || '').localeCompare(String(f(b) || ''), undefined, { sensitivity: 'base', numeric: true }));
+    // (one collator for every comparison: localeCompare with options makes one per call, which was
+    // most of the time Albums and Artists took to open on a big library; each name's key once)
+    const by = (f) => list.map((x) => [String(f(x) || ''), x]).sort((a, b) => NAME_ORDER.compare(a[0], b[0])).map((p) => p[1]);
     if (kind === 'albums') {
       if (how === 'artist') return by((a) => `${a.album_artist || ''}\u0000${a.title}`);
       if (how === 'year') return [...list].sort((a, b) => (b.year || 0) - (a.year || 0));
@@ -7884,7 +8143,7 @@
     return by((a) => a.name);
   };
   const firstLetter = (x) => { const c = String(x || '').trim().charAt(0).toUpperCase().normalize('NFKD').charAt(0); return /[A-Z]/.test(c) ? c : '#'; };
-  const listControls = (kind, pref, letters) => `<div class="listbar"><label class="small muted">Sort <select class="input sm" data-lsort aria-label="Sort">${LIST_SORTS[kind].map(([k, l]) => `<option value="${k}" ${pref.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${kind === 'albums' ? `<button class="chip ${pref.fav ? 'on' : ''}" data-lfav aria-pressed="${!!pref.fav}">${icon(pref.fav ? 'heart-fill' : 'heart')} Favourites</button>` : ''}${letters.length > 1 ? `<span class="azbar" role="group" aria-label="Jump to a letter">${letters.map((l) => `<button class="az" data-az="${l}" aria-pressed="false">${l}</button>`).join('')}</span>` : ''}</div>`;
+  const listControls = (kind, pref, letters) => `<div class="listbar"><label class="small muted">Sort <select class="input sm" data-lsort aria-label="Sort">${LIST_SORTS[kind].map(([k, l]) => `<option value="${k}" ${pref.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${kind === 'albums' ? `<button class="chip ${pref.fav ? 'on' : ''}" data-lfav aria-pressed="${!!pref.fav}">${icon(pref.fav ? 'heart-fill' : 'heart')} Bookmarks</button>` : ''}${letters.length > 1 ? `<span class="azbar" role="group" aria-label="Jump to a letter">${letters.map((l) => `<button class="az" data-az="${l}" aria-pressed="false">${l}</button>`).join('')}</span>` : ''}</div>`;
   // Off while there is nothing to filter: what was typed stays and applies again once there is
   const filterBox = (placeholder, off = false) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}"${off ? ' disabled' : ''}>`;
   // (a load started before a newer one, or before the albums were let go (the library changed),
@@ -7956,15 +8215,15 @@
         <div class="toolbar"><input class="input" id="setupfolder" placeholder="${suggestions.length ? 'Or another folder' : 'The folder with your music, e.g. /home/you/Music'}" aria-label="Music folder on this computer"><button class="btn primary" id="setupadd">Add folder</button></div>
         <p class="muted small">No music files on this computer? <a class="lnk" href="/sources" data-setup-sources>Play from ${(state.sources || []).some((x) => x.id === 'jamendo' && x.status === 'ready') ? 'Internet Archive, Audius or Jamendo' : 'Internet Archive or Audius'}</a>, no account needed.</p>`;
     const text = {
-      token_config: () => ['Change the node’s token', 'The node’s token was in a saved queue’s links, where everyone who could use that zone could read it. It is set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): change it there and restart the node. Every app then needs the new token.', `<a class="btn sm primary" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`],
-      token: () => ['Make a new token for the node', 'The node’s token was in a saved queue’s links, where everyone who could use that zone could read it. Make a new one in Settings › Access: every app then needs the new token, and your browsers log in again.', '<a class="btn sm primary" href="/settings" data-setup-settings>Open Settings</a>'],
+      token_config: () => ['Change the password for apps', 'The password for apps (the API token) was in a saved queue’s links, where everyone who could use that zone could read it. It is set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): change it there and restart the node. Every app then needs the new one.', `<a class="btn sm primary" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`],
+      token: () => ['Make a new password for apps', 'The password for apps (the API token) was in a saved queue’s links, where everyone who could use that zone could read it. Make a new password in Settings › People & access › Password for apps: every app then needs the new one, and your other browsers log in again.', '<a class="btn sm primary" href="/settings/people" data-setup-settings>Open People &amp; access</a>'],
       music: () => ['Add your music', has.music ? `${countOf(n(info.library.tracks), 'songs')}${info.library.albums ? ` · ${countOf(n(info.library.albums), 'albums')}` : ''}. More folders: Your library › Node library.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody],
       play: () => ['Play something', tracks ? `It plays ${hereIn()}. To play on speakers or another device, ${shellMode() === 'phone' ? 'pick one in Zones, or its name at the top of Now playing' : 'use the zone button at the bottom right'}.` : musicTodo ? 'Once your music is in.' : `Search for a song, or browse your services on Sources. It plays ${hereIn()}, or on a speaker from the zone button.`, tracks ? `<button class="btn sm primary" id="setupplay">${icon('play')} Shuffle my music</button>` : musicTodo ? '' : '<button class="btn sm" data-setup-sources>Open Sources</button>'],
       contact: () => ['See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>'],
       speakers: () => ['Play on your speakers (optional)', 'No speaker found yet. Speakers and streamers on your network show up by themselves; Snapcast and MPD need a line in the node’s config.', `<div class="toolbar"><button class="btn sm" id="setupspeakers">Look for speakers</button><a class="lnk small" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/speakers.md" target="_blank" rel="noopener">Which speakers work</a></div>`],
       pubky: () => (hsHere && !has.pubky
-        ? ['Create your Pubky account here (optional)', 'This node has its own Pubky homeserver. Create your account on it with the Pubky Ring app: your playlists, favourites, tags and files stay on this machine. Or sign in to a homeserver you already use.', '<div class="toolbar"><button class="btn sm primary" id="setupcreate">Create account here</button><button class="btn sm" id="setupsignin">Use an existing homeserver</button></div>']
-        : ['Keep your playlists on Pubky (optional)', has.pubky || user ? 'Signed in: playlists, favourites and tags are kept on your homeserver.' : 'Sign in with the Pubky Ring app: your playlists, favourites and tags are kept in your own Pubky storage and follow you to another node.', '<button class="btn sm" id="setupsignin">Sign in with Pubky Ring</button>']),
+        ? ['Create your Pubky account here (optional)', 'This node has its own Pubky homeserver. Create your account on it with the Pubky Ring app: your collections, bookmarks, tags and files stay on this machine. Or sign in to a homeserver you already use.', '<div class="toolbar"><button class="btn sm primary" id="setupcreate">Create account here</button><button class="btn sm" id="setupsignin">Use an existing homeserver</button></div>']
+        : ['Keep your collections on Pubky (optional)', has.pubky || user ? 'Signed in: collections, bookmarks and tags are kept on your homeserver.' : 'Sign in with the Pubky Ring app: your collections, bookmarks and tags are kept in your own Pubky storage and follow you to another node.', '<button class="btn sm" id="setupsignin">Sign in with Pubky Ring</button>']),
     };
     const step = (x, no) => { const [title, sub, body] = text[x.id](); return `<li class="setup-step ${x.done ? 'done' : ''}" data-step="${x.id}"><span class="stepmark" aria-hidden="true">${x.done ? icon('check') : no}</span><div class="grow"><div class="name">${title}${x.done ? '<span class="sr-only"> (done)</span>' : ''}</div><div class="sub">${sub}</div>${x.done ? '' : body}</div></li>`; };
     const done = fs.steps.filter((x) => x.done).length;
@@ -7977,7 +8236,7 @@
       try { const r = await api('POST', '/library/folders', { path }); toast(r.scan_started ? 'Folder added: reading your files' : 'Folder added'); watchScan({ scanning: true }); renderSetup(); } catch (e) { toast(e.message, 'error'); }
     };
     $$('[data-addfolder]', box).forEach((b) => b.onclick = () => addFolder(b.dataset.addfolder));
-    const fi = $('#setupfolder'); if (fi) { $('#setupadd').onclick = () => addFolder(fi.value.trim()); fi.onkeydown = (e) => { if (e.key === 'Enter') addFolder(fi.value.trim()); }; }
+    const fi = $('#setupfolder'); if (fi) { $('#setupadd').onclick = () => addFolder(fi.value.trim()); fi.onkeydown = (e) => { if (e.key === 'Enter') $('#setupadd').click(); }; }
     $$('[data-setup-sources]', box).forEach((so) => so.onclick = (e) => { e.preventDefault(); setView('sources'); });
     // While the files are read the card counts them; when done, Home shows the albums once
     if (info.scanning) { state.setupScanning = true; again(); } else if (state.setupScanning) { state.setupScanning = false; render(); }
@@ -7986,7 +8245,7 @@
     };
     const ci = $('#setupcontact'); if (ci) {
       const save = async () => { const c = ci.value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; homeCache.clear(); toast('Saved: Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
-      $('#setupcontactsave').onclick = save; ci.onkeydown = (e) => { if (e.key === 'Enter') save(); };
+      $('#setupcontactsave').onclick = save; ci.onkeydown = (e) => { if (e.key === 'Enter') $('#setupcontactsave').click(); };
     }
     const sp = $('#setupspeakers'); if (sp) sp.onclick = () => setView('settings', 'playback');
     const sr = $('#setuprestore'); if (sr) sr.onclick = (e) => { e.preventDefault(); state.focusRestore = true; setView('settings', 'backup'); };
@@ -8025,7 +8284,31 @@
   const NAV_SKELETON = `<div class="navskel" aria-busy="true"><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div>${skelRows(6)}${SLOW}</div>`;
   // Drawn: something of the page's own that isn't a placeholder (a page's own loading() is one)
   const pageDrawn = (before) => { const f = main.firstElementChild; return f !== before && !main.querySelector(':scope > .navskel, :scope > .skeleton, :scope > .sk-grid'); };
-  const navigate = (fresh) => {
+  // Another page opened (not the first one, not a new query): where the focus goes. When it was on
+  // what the new page replaced (a tile, a row's link, the page's Back), it had fallen to the page's
+  // body, so the next Tab started at the sidebar and a screen reader said nothing of the new page: it
+  // goes to the page's heading (else the page). Anywhere else (a sidebar place, the search box, the
+  // player) it stays, and the page's name is said instead. A page that puts the focus somewhere itself
+  // keeps that.
+  let personActed = false;
+  for (const type of ['keydown', 'pointerdown']) document.addEventListener(type, () => { personActed = true; }, { capture: true, once: true });
+  const lostFocus = () => { const a = document.activeElement; return !a || a === document.body; };
+  // (one that is drawn: a phone's Settings has the other panels' titles in the page, hidden)
+  const shown = (el) => el.getClientRects().length > 0;
+  const pageHeading = () => [...main.querySelectorAll(':scope h1, :scope .page-head h2')].find(shown) || [...main.querySelectorAll(':scope h2')].find(shown) || null;
+  // (its words without the count beside them: "Artists", not "Artists2")
+  const headingName = (h) => (h ? [...h.childNodes].filter((n) => n.nodeType === 3 || (n.nodeType === 1 && !n.matches('.count, [aria-hidden="true"]'))).map((n) => n.textContent).join('').trim() : '');
+  const focusPage = () => {
+    const h = pageHeading();
+    if (!h) { main.focus({ preventScroll: true }); return document.activeElement === main ? main : null; }
+    // (only for this: a click on the heading later doesn't take the focus; no ring on a heading that
+    // can't be pressed)
+    if (!h.hasAttribute('tabindex')) { h.setAttribute('tabindex', '-1'); h.dataset.navfocus = ''; h.addEventListener('blur', () => { if (h.dataset.navfocus != null) { h.removeAttribute('tabindex'); delete h.dataset.navfocus; } }, { once: true }); }
+    h.focus({ preventScroll: true });
+    if (document.activeElement === h) return h;
+    main.focus({ preventScroll: true }); return document.activeElement === main ? main : null;
+  };
+  const navigate = (fresh, moveFocus = false) => {
     const gen = ++navGen; navCtl.abort(); navCtl = new AbortController();
     navStop(); const superseded = new Promise((res) => { navStop = res; });
     let bar = document.getElementById('navprog');
@@ -8043,10 +8326,24 @@
     // A fresh page comes in with a short rise (and its first tiles and rows after one another); the
     // class goes after that, so what arrives later on the page doesn't move
     const pageIn = () => { if (!fresh) return; clearTimeout(main.viewInT); main.classList.remove('view-in'); void main.offsetWidth; main.classList.add('view-in'); main.viewInT = setTimeout(() => main.classList.remove('view-in'), 900); };
-    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(() => { capped = true; res(); }, 15000); });
-    const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
+    // (moved: the page's heading had the focus; it is put there again when the page's code is done if
+    // a later draw of the page took it away)
+    let moved = false;
+    const place = () => { if (!moveFocus || gen !== navGen) return; if (lostFocus()) moved = !!focusPage(); };
+    const had = document.activeElement;
+    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); place(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(() => { capped = true; res(); }, 15000); });
+    const end = () => {
+      clearTimeout(skel); clearTimeout(cap); mo.disconnect();
+      if (gen !== navGen) return;
+      bar.hidden = true; said.textContent = '';
+      // (the focus stayed where it was: the page's name is said)
+      // (a moment later, and only if the focus is still where it was: a page that put it in a field
+      // of its own says enough)
+      if (moveFocus && !moved && !capped) setTimeout(() => { if (gen !== navGen || document.activeElement !== had) return; const name = headingName(pageHeading()); if (name) said.textContent = name; }, 60);
+    };
     const t0 = performance.now(); const shown = state.view;
     fromNav = true; let rendering; try { rendering = render(); } finally { fromNav = false; } navRendering = rendering; drawing = lastDrawing;
+    if (moveFocus) drawing.done.then(() => { if (moved && gen === navGen && lostFocus()) focusPage(); });
     // Usage insights: how this page went (drawn, or its code failed or it never drew in 15 s); a
     // newer page first says nothing
     if (window.PM_USAGE) Promise.race([rendering.then(() => 'ok', () => 'failed'), superseded.then(() => null), drawn.then(() => (capped ? 'failed' : 'ok'))]).then((o) => { if (o) PM_USAGE.loaded(shown, o, performance.now() - t0); });
@@ -8084,7 +8381,7 @@
           const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win" ${win !== '7d' || homeCount('w:' + name, undefined, 1) ? '' : 'hidden'}>${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}" ${homeCount('s:' + name, undefined, 1) ? '' : 'hidden'}>See all</button></div><div class="hbody"><div class="skeleton" style="height:${homeCount('h:' + name, undefined, opts.h || 160)}px"></div></div></section>`;
           await pubkyUser();
           // Rows you can hide and reorder (UX review #10): your own layout (Settings › You › Home), over the node's
-          const HOME_ROWS = [['listening', 'Listening now'], ['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
+          const HOME_ROWS = [['listening', 'Listening now'], ['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten bookmarks'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
           // Your Home (Settings › You): your own layout where you set one, else the node's default
           if (!state.homeLayout) {
             const lay = await api('GET', '/me/prefs').then((p) => (p.home_layout && p.home_layout.value) || { order: [], hidden: [] }).catch(() => api('GET', '/home/layout').catch(() => ({ order: [], hidden: [] })));
@@ -8312,9 +8609,9 @@
           const place = again ? keepPlace() : null;
           // (drawn again: the other services' rows stay as they are until their new ones come)
           const oldOther = again ? $('#favother', main) : null; const favMine = state.favDraw = (state.favDraw || 0) + 1;
-          main.innerHTML = pageHead('Favourites', favCount, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play songs</button>` : '')
+          main.innerHTML = pageHead('Bookmarks', favCount, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play songs</button>` : '')
             + hsNote
-            + (none && !(hs && !hs.connected) ? emptyState('heart', 'Nothing hearted yet', favHowTo(hs), favWayOn(), true) : '')
+            + (none && !(hs && !hs.connected) ? emptyState('heart', 'No bookmarks yet', favHowTo(hs), favWayOn(), true) : '')
             + (f.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(f.albums)}</section>` : '')
             + (f.artists.length ? `<section class="section"><div class="section-head"><h3>Artists</h3></div><div class="chips">${f.artists.map((a) => `<button class="chip" data-artist="${a.id}">${esc(a.name)}</button>`).join('')}</div></section>` : '')
             + (f.tracks.length ? `<section class="section"><div class="section-head"><h3>Songs</h3></div>${trackRows(f.tracks, { key: 'fav' })}</section>` : '')
@@ -8362,7 +8659,7 @@
           // They couldn't be read (the node or a listener's homeserver didn't answer): it says so, with
           // Try again and no count ("0 of 45" and "No favourite albums" said none were hearted)
           const failed = !!favFailed && !shown.length;
-          main.innerHTML = pageHead('Albums', waiting || failed || !albums.length ? null : state.focus || lp.fav ? `${fmtCount(shown.length)} of ${fmtCount(albums.length)}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + headAddMusic(albums.length || songs)) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? (waiting ? `<div id="albumswait">${emptyState('disc', 'Getting your favourites…', 'They show here as soon as they are in.')}</div>` : failed ? `<div id="albumsfavfail" role="alert">${emptyState('disc', 'Couldn’t get your favourites', favFailed.message || 'The node didn’t answer.', { id: 'albumsfavretry', label: 'Try again' })}</div>` : emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav)))) : songs ? emptyState('disc', 'No albums yet', `${songs === 1 ? 'The song in the library has no album name in its tags' : `The ${fmtCount(songs)} songs in the library have no album name in their tags`}. Albums come from the tags of scanned files.`, { view: 'tracks', label: 'Open Songs' })
+          main.innerHTML = pageHead('Albums', waiting || failed || !albums.length ? null : state.focus || lp.fav ? `${fmtCount(shown.length)} of ${fmtCount(albums.length)}` : albums.length, (albums.length > 12 ? filterBox('Filter albums', !shown.length) : '') + headAddMusic(albums.length || songs)) + (albums.length ? focusChips(albums) + listControls('albums', lp, letters) : '') + (shown.length ? '<div class="grid" id="albumgrid"></div>' : albums.length ? (waiting ? `<div id="albumswait">${emptyState('disc', 'Getting your bookmarks…', 'They show here as soon as they are in.')}</div>` : failed ? `<div id="albumsfavfail" role="alert">${emptyState('disc', 'Couldn’t get your bookmarks', favFailed.message || 'The node didn’t answer.', { id: 'albumsfavretry', label: 'Try again' })}</div>` : emptyState('disc', ...albumsNone(lp.fav, state.focus, lp.fav && albums.some(albumFav)))) : songs ? emptyState('disc', 'No albums yet', `${songs === 1 ? 'The song in the library has no album name in its tags' : `The ${fmtCount(songs)} songs in the library have no album name in their tags`}. Albums come from the tags of scanned files.`, { view: 'tracks', label: 'Open Songs' })
             : emptyState('disc', 'No albums yet', ...noMusicYet('Albums')));
           $$('[data-focus]', main).forEach((b) => b.onclick = () => { state.focus = b.dataset.focus; return renderSortedList(b, `[data-focus="${b.dataset.focus}"]`); });
           const ls = $('[data-lsort]', main); if (ls) ls.onchange = () => { setListPref('albums', { ...lp, sort: ls.value }); return renderSortedList(ls); };
@@ -8620,11 +8917,57 @@
           break;
         }
         case 'tracks': {
-          loading();
+          // Drawn again where it stands (the library changed: a scan ended, a playlist was edited
+          // on another device): the songs that were listed are read again and put in at once, a
+          // filter's matches too, so the page is neither emptied nor back at its top
+          const again = redrawing('tracks');
+          // One read at a time while it is drawn again: a change that comes during a read is drawn
+          // once that read is in (thrown away for each newer one, a read slower than the changes
+          // come would never show)
+          // (a read of an earlier visit, cut off when another page was opened, never ends: it doesn't count)
+          if (again && songsReading && songsReading.nav === navGen) { songsReading.again = true; return; }
+          if (!again) { loading(); songsReading = null; }
+          const drawn = ++songsDraw; const reading = again ? (songsReading = { again: false, nav: navGen }) : null;
+          drawStale = () => drawn < songsShown || state.view !== 'tracks';
           // Pages from the node as the list scrolls; the filter is a library search on the node.
           const PAGE = 300;
-          const [first, stats] = await Promise.all([api('GET', `/library/tracks?limit=${PAGE}`), api('GET', '/library/stats').catch(() => null)]);
-          if (state.view !== 'tracks') return;
+          const findSongs = (q) => api('GET', `/library/search?${new URLSearchParams({ q, sources: 0, limit: 500 })}`);
+          // (what the page on screen lists and has in its filter, when it is Songs drawn already)
+          const listed = () => (redrawing('tracks') ? $$('#tracklist .track', main).length : 0);
+          const typed = () => (redrawing('tracks') ? ($('#filter', main)?.value || '').trim() : '');
+          const q0 = typed();
+          // (the first `n` songs, a page at least, a thousand per answer, and whether more follow;
+          // `from`: going on from what was read)
+          const readSongs = async (n, from = { tracks: [], more: true }) => {
+            const tracks = from.tracks; let more = from.more;
+            while (more && tracks.length < n && !drawStale()) {
+              const limit = Math.min(1000, Math.max(PAGE, n - tracks.length));
+              const r = await api('GET', `/library/tracks?limit=${limit}${tracks.length ? `&after=${tracks[tracks.length - 1].id}` : ''}`);
+              tracks.push(...r.tracks); more = r.tracks.length === limit;
+            }
+            return { tracks, more };
+          };
+          let first; let stats; let found;
+          try {
+            [first, stats, found] = await Promise.all([readSongs(q0 ? PAGE : Math.max(PAGE, listed())), api('GET', '/library/stats').catch(() => null), q0 ? findSongs(q0).catch(() => null) : null]);
+            // (the list grew on the page while it was read: up to there too, so the new page is not shorter)
+            for (let i = 0; i < 3 && !drawStale() && !typed() && first.more && listed() > first.tracks.length; i++) first = await readSongs(listed(), first);
+          } catch (e) {
+            // Drawn again in place and the read failed: the page stays as it is and says why (the
+            // error page would take the list and its place); a change that waited is read a second later
+            if (!reading || drawStale()) throw e;
+            toast(e.message, 'error');
+            if (reading.again) setTimeout(() => { if (state.view === 'tracks') render(); }, 1000);
+            return;
+          } finally { if (reading && songsReading === reading) songsReading = null; }
+          // (a newer draw is on the page, or another page: this answer is not put in; a change
+          // that waited for this read is drawn by a read of its own)
+          if (drawStale()) { if (reading && reading.again && state.view === 'tracks') setTimeout(() => { if (state.view === 'tracks') render(); }); return; }
+          songsShown = drawn;
+          // (in place whenever Songs is on the page by now, also when an older read drew it meanwhile)
+          const inPlace = redrawing('tracks');
+          const oldFilter = inPlace ? $('#filter', main) : null; const place = inPlace ? keepPlace() : null;
+          const nowTyped = oldFilter ? oldFilter.value.trim() : '';
           const total = Math.max(stats ? stats.tracks : 0, first.tracks.length);
           main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + headAddMusic(total)) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', ...noMusicYet('Songs')));
           const box = $('#tracklist');
@@ -8635,7 +8978,7 @@
             const append = (rows) => { box.insertAdjacentHTML('beforeend', trackRows(rows, { key: 'all', start: shown.length, bare: true })); shown.push(...rows); };
             const browse = () => {
               reset(); append(first.tracks); $('#tracknote').hidden = true;
-              if (first.tracks.length === PAGE) {
+              if (first.more) {
                 const mine = run;
                 stop = growList(box, async () => {
                   const r = await api('GET', `/library/tracks?limit=${PAGE}&after=${shown[shown.length - 1].id}`);
@@ -8644,10 +8987,23 @@
                 });
               }
             };
-            browse();
             const f = $('#filter'); let timer = null;
+            const matched = (r) => {
+              reset(); append(r.tracks);
+              const note = $('#tracknote'); note.hidden = r.tracks.length < 500; note.textContent = 'The first 500 matches: type more to narrow them down.';
+              const c = $('.page-head .count'); if (c) c.dataset.filtered = `${r.tracks.length}${r.tracks.length === 500 ? '+' : ''} shown`;
+            };
+            // (drawn again with a filter typed: its text, and its matches as read with the page)
+            // (the box emptied while they were read: the whole list, not the old matches)
+            const refound = !!(f && found && nowTyped);
+            if (f && oldFilter && oldFilter.value) f.value = oldFilter.value;
+            if (refound) matched(found); else browse();
             if (f) {
               const none = filterNone(box, 'song');
+              if (refound && nowTyped === q0) none(q0, found.tracks.length);
+              // (the matches could not be read again, or the box says something else by now: the
+              // filter asks for what it says, and says so if that fails)
+              if (nowTyped !== (refound ? q0 : '')) setTimeout(() => { if (f.isConnected) f.oninput(); });
               // Each keystroke empties the no-match line and outdates the search in flight, so only the
               // answer for the text in the box can say "No song matches".
               f.oninput = () => {
@@ -8655,31 +9011,42 @@
                 timer = setTimeout(async () => {
                   const q = f.value.trim(); const c = $('.page-head .count');
                   if (!q) { browse(); none('', 0); if (c) c.dataset.filtered = ''; return; }
-                  const r = await api('GET', `/library/search?${new URLSearchParams({ q, sources: 0, limit: 500 })}`).catch((e) => { toast(e.message, 'error'); return null; });
+                  const r = await findSongs(q).catch((e) => { toast(e.message, 'error'); return null; });
                   if (!r && mine === run) none('', 1);
-                  if (!r || mine !== run || state.view !== 'tracks') return;
-                  reset(); append(r.tracks); none(q, r.tracks.length);
-                  const note = $('#tracknote'); note.hidden = r.tracks.length < 500; note.textContent = 'The first 500 matches: type more to narrow them down.';
-                  if (c) c.dataset.filtered = `${r.tracks.length}${r.tracks.length === 500 ? '+' : ''} shown`;
+                  // (the page drawn again meanwhile: this filter box is the old page's)
+                  if (!r || mine !== run || state.view !== 'tracks' || !f.isConnected) return;
+                  matched(r); none(q, r.tracks.length);
                 }, 200);
               };
               f.onkeydown = (e) => { if (e.key === 'Escape') { f.value = ''; f.oninput(); f.blur(); } };
             }
             // Play all: what is shown when filtered, else every track (fetched on the press).
+            // (one load at a time, also across the page drawn again in place while it runs: the new
+            // button is drawn pressed then)
             const sh = $('#shuffle');
+            if (sh && state.playAllLoading) sh.disabled = true;
             if (sh) sh.onclick = async () => {
+              if (state.playAllLoading) return;
               if ((f && f.value.trim()) || shown.length >= total) return playTracks(shown, true, 'end', { shuffle: false });
               // (the message stays while a big library loads, and goes when the songs play; a quick load
               // shows none, as Which song is this?'s lookup)
               // It counts up as each thousand comes (unless another message replaced it), and gives up
               // after 30 s without an answer: Play all can be pressed again
-              let loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true;
+              let loading = `Loading ${countOf(total, 'songs')}…`; sh.disabled = true; state.playAllLoading = true;
               const slow = setTimeout(() => toast(loading, 'wait'), 400);
               const onPage = (n) => { const t = $('#toast'); const was = loading; loading = `Loading ${countOf(total, 'songs')}… ${fmtCount(n)} so far`; if (t.classList.contains('show') && t.textContent === was) toast(loading, 'wait'); };
               try { await playTracks(await pageAll('/library/tracks', (t) => t.id, (r) => r.tracks, { onPage, wait: 30000 }), true, 'end', { shuffle: false }); } catch (e) { toast(e.message, 'error'); }
-              clearTimeout(slow); toastDone(loading); sh.disabled = false;
+              clearTimeout(slow); toastDone(loading); state.playAllLoading = false; sh.disabled = false;
+              { const now = $('#shuffle'); if (now && now !== sh && state.drawnPage === 'tracks') now.disabled = false; }
             };
           }
+          state.drawnPage = 'tracks';
+          if (place) {
+            place(); if (state.placeHold) state.placeHold();
+            const f = $('#filter', main);
+            if (oldFilter && f && f.value && document.activeElement === f) { try { f.setSelectionRange(oldFilter.selectionStart, oldFilter.selectionEnd, oldFilter.selectionDirection || 'none'); } catch { /* no caret */ } }
+          }
+          if (reading && reading.again) setTimeout(() => { if (state.view === 'tracks') render(); });
           break;
         }
         case 'search': {
@@ -8713,13 +9080,13 @@
           // A smart playlist: its songs right now
           loading();
           const sid = state.viewArg;
-          let d; try { d = await api('GET', `/smart/${encodeURIComponent(sid)}/tracks`); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          let d; try { d = await api('GET', `/smart/${encodeURIComponent(sid)}/tracks`); } catch (e) { main.innerHTML = backBtn('playlists', 'Collections') + failedHtml(e); break; }
           if (state.view !== 'smart' || state.viewArg !== sid) return;
           state.itemTitle = d.playlist.name;
           const ts = d.tracks || [];
           const songs = ts.map((t, k) => ({ no: k + 1, title: t.title, artist: artists(t), artists: t.artists, artist_id: t.artists && t.artists[0] && t.artists[0].id != null ? 'lib-' + t.artists[0].id : null, album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t) }));
           const covers = ts.map((t) => (t.album && t.album.id != null ? `/v1/library/albums/${t.album.id}/cover` : null));
-          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(covers, d.playlist.name)}<div><div class="eyebrow">Smart playlist · songs change as your library does</div><h1>${esc(d.playlist.name)}</h1><p class="sub">${countOf(ts.length, 'songs')}${d.matched > ts.length ? ` of ${d.matched} that match` : ''} · ${esc(smartSummary(d.playlist))}</p>
+          main.innerHTML = backBtn('playlists', 'Collections') + `<div class="hero">${mosaic(covers, d.playlist.name)}<div><div class="eyebrow">Smart collection · songs change as your library does</div><h1>${esc(d.playlist.name)}</h1><p class="sub">${countOf(ts.length, 'songs')}${d.matched > ts.length ? ` of ${d.matched} that match` : ''} · ${esc(smartSummary(d.playlist))}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="smplay" ${ts.length ? '' : 'disabled'}>${icon('play')} Play</button><button class="btn" id="smshuffle" ${ts.length ? '' : 'disabled'}>${icon('shuffle')} Shuffle</button><button class="btn ghost" id="smedit">${icon('settings')} Edit rules</button></div></div></div>`
             + `<section class="section" id="smsongs"><div class="section-head"><h3>Songs</h3></div>${ts.length ? songRows(songs, { numbers: 'index' }) : '<p class="muted small">No song matches these rules right now.</p>'}</section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
@@ -8736,9 +9103,9 @@
           if (sid && sid !== 'new') { try { cur = (await api('GET', `/smart/${encodeURIComponent(sid)}/tracks`)).playlist; } catch (e) { toast(e.message, 'error'); } }
           if (state.view !== 'smart-edit') return;
           const draw = () => {
-            main.innerHTML = backBtn('playlists', 'Playlists') + pageHead(sid === 'new' ? 'New smart playlist' : 'Edit smart playlist')
+            main.innerHTML = backBtn('playlists', 'Collections') + pageHead(sid === 'new' ? 'New smart collection' : 'Edit smart collection')
               + `<div class="smartedit"><label class="field"><span>Name</span><input class="input" id="smname" value="${esc(cur.name)}" placeholder="Late-night techno"></label>
-                <div class="field"><span>Start from</span><div class="chips" id="smseeds">${(cur.seeds || []).map((sd, i) => `<span class="chip">${esc(sd.label || `${sd.kind} ${sd.id}`)} <button class="icon-btn" data-smseedrm="${i}" aria-label="Remove ${esc(sd.label || sd.kind)}" title="Remove">${icon('close')}</button></span>`).join('')}<input class="input sm" id="smseedq" placeholder="a song, artist, album or genre…" autocomplete="off" aria-label="Add a seed" style="min-width:220px"></div><div id="smseedhits" class="list"></div><p class="muted small">With seeds, the playlist grows from songs like these (same genres, then the same artists); the rules below then narrow it.</p></div>
+                <div class="field"><span>Start from</span><div class="chips" id="smseeds">${(cur.seeds || []).map((sd, i) => `<span class="chip">${esc(sd.label || `${sd.kind} ${sd.id}`)} <button class="icon-btn" data-smseedrm="${i}" aria-label="Remove ${esc(sd.label || sd.kind)}" title="Remove">${icon('close')}</button></span>`).join('')}<input class="input sm" id="smseedq" placeholder="a song, artist, album or genre…" autocomplete="off" aria-label="Add a seed" style="min-width:220px"></div><div id="smseedhits" class="list"></div><p class="muted small">With seeds, the collection grows from songs like these (same genres, then the same artists); the rules below then narrow it.</p></div>
                 <p class="small">Songs that match <select class="input sm" id="smmatch" aria-label="Match"><option value="all" ${cur.matches !== 'any' ? 'selected' : ''}>all</option><option value="any" ${cur.matches === 'any' ? 'selected' : ''}>any</option></select> of these rules:</p>
                 <div id="smrules">${cur.rules.map((r, i) => smartRuleRow(r, i)).join('')}</div>
                 <button class="btn sm ghost" id="smadd">${icon('plus')} Add a rule</button>
@@ -8763,7 +9130,7 @@
             $('#smadd').onclick = () => { sync(); cur.rules.push({ field: 'genre', op: 'contains', value: '' }); draw(); };
             $$('[data-smrm]', main).forEach((b) => b.onclick = () => { sync(); cur.rules.splice(Number(b.dataset.smrm), 1); draw(); });
             $('#smsave').onclick = async () => { sync(); if (!cur.name.trim()) { toast('Give it a name', 'error'); $('#smname').focus(); return; } try { const saved = sid === 'new' ? await api('POST', '/smart', body()) : await api('PUT', `/smart/${encodeURIComponent(sid)}`, body()); toast(`Saved “${saved.name}”`); setView('smart', saved.id); } catch (e) { toast(e.message, 'error'); } };
-            const del = $('#smdel'); if (del) del.onclick = async () => { if (!del.dataset.armed) { del.dataset.armed = '1'; del.innerHTML = `${icon('trash')} Really delete?`; return; } try { await api('DELETE', `/smart/${encodeURIComponent(sid)}`); toast('Smart playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
+            const del = $('#smdel'); if (del) del.onclick = async () => { if (!del.dataset.armed) { del.dataset.armed = '1'; del.innerHTML = `${icon('trash')} Really delete?`; return; } try { await api('DELETE', `/smart/${encodeURIComponent(sid)}`); toast('Smart collection deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
             preview();
           };
           draw();
@@ -8788,11 +9155,11 @@
             : hs.lost ? `<div class="notice warn" role="alert" id="hsnote"><p>Your homeserver no longer lets this node in. These are the node’s copy; approve it again to change them.</p><button class="btn" data-hsconnect>Approve again</button></div>`
               : hs.pending ? `<p class="muted small" id="hsnote" role="status">${countOf(hs.pending, 'changes')} ${hs.pending === 1 ? 'waits' : 'wait'} on this node until your homeserver answers.</p>`
                 : hs.stale ? '<p class="muted small" id="hsnote" role="status">The node couldn’t read all of your homeserver just now (it didn’t answer, was slow, or has more posts than the node reads at once): this list is the node’s copy.</p>' : '';
-          main.innerHTML = pageHead('Playlists', state.playlists.length) + hsNote + `
-            <div class="toolbar"><input class="input" id="plname" aria-label="New playlist name" placeholder="New playlist name"><button class="btn" id="plcreate">${icon('plus')} Create</button>${mine ? '' : `<label class="btn file-btn">${icon('upload')} Import M3U, CSV or Roon export<input type="file" id="plimport" accept=".m3u,.m3u8,.csv,.xlsx"></label><span id="plimportout" class="sr-only" aria-live="polite"></span>`}</div>
-            <div class="toolbar"><input class="input" id="plshared" aria-label="Shared playlist link" placeholder="Shared playlist: paste its pubky:// link or a Pubky key"><button class="btn" id="plopenshared">${icon('external')} Open</button></div>`
-            + (state.playlists.length ? `<div class="list">${state.playlists.map((p) => `<div class="list-row clickable" data-pl="${esc(p.id)}" tabindex="0" role="button">${mosaic(p.covers, p.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${plCount(p)}${p.description ? ' · ' + esc(p.description) : ''}</div></div><span class="pill ${p.synced ? 'ok' : ''}">${p.synced ? 'synced' : mine ? 'waiting' : 'local'}</span><button class="icon-btn" data-plplay="${esc(p.id)}" title="Play" aria-label="Play ${esc(p.name || 'this playlist')}">${icon('play')}</button></div>`).join('')}</div>` : hs && !hs.connected ? '' : emptyState('playlist', 'No playlists yet', mine ? 'Create one, or add songs from any ⋯ menu. They’re kept on your own homeserver.' : 'Create one, import a file from another player, or add songs from any list.'))
-            + (mine ? '' : `<section class="section"><div class="section-head"><h3>Smart playlists</h3><button class="btn sm" id="smartnew">${icon('plus')} New smart playlist</button></div><p class="muted small">Songs picked by rules over your library and your tags; they change as your library does.</p>${smarts.length ? `<div class="list">${smarts.map((x) => `<div class="list-row clickable" data-smart="${esc(x.id)}">${mosaic([], x.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(x.name)}</div><div class="sub">${esc(smartSummary(x))}</div></div><span class="pill">smart</span></div>`).join('')}</div>` : ''}</section>`);
+          main.innerHTML = pageHead('Collections', state.playlists.length) + hsNote + `
+            <div class="toolbar"><input class="input" id="plname" aria-label="New collection name" placeholder="New collection name"><button class="btn" id="plcreate">${icon('plus')} Create</button>${mine ? '' : `<label class="btn file-btn">${icon('upload')} Import M3U, CSV or Roon export<input type="file" id="plimport" accept=".m3u,.m3u8,.csv,.xlsx"></label><span id="plimportout" class="sr-only" aria-live="polite"></span>`}</div>
+            <div class="toolbar"><input class="input" id="plshared" aria-label="Shared collection link" placeholder="Shared collection: paste its pubky:// link or a Pubky key"><button class="btn" id="plopenshared">${icon('external')} Open</button></div>`
+            + (state.playlists.length ? `<div class="list">${state.playlists.map((p) => `<div class="list-row clickable" data-pl="${esc(p.id)}" tabindex="0" role="button">${mosaic(p.covers, p.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${plCount(p)}${p.description ? ' · ' + esc(p.description) : ''}</div></div><span class="pill ${p.synced ? 'ok' : ''}">${p.synced ? 'synced' : mine ? 'waiting' : 'local'}</span><button class="icon-btn" data-plplay="${esc(p.id)}" title="Play" aria-label="Play ${esc(p.name || 'this collection')}">${icon('play')}</button></div>`).join('')}</div>` : hs && !hs.connected ? '' : emptyState('playlist', 'No collections yet', mine ? 'Create one, or add songs from any ⋯ menu. They’re kept on your own homeserver.' : 'Create one, import a file from another player, or add songs from any list.'))
+            + (mine ? '' : `<section class="section"><div class="section-head"><h3>Smart collections</h3><button class="btn sm" id="smartnew">${icon('plus')} New smart collection</button></div><p class="muted small">Songs picked by rules over your library and your tags; they change as your library does.</p>${smarts.length ? `<div class="list">${smarts.map((x) => `<div class="list-row clickable" data-smart="${esc(x.id)}">${mosaic([], x.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(x.name)}</div><div class="sub">${esc(smartSummary(x))}</div></div><span class="pill">smart</span></div>`).join('')}</div>` : ''}</section>`);
           typed.forEach((t) => { const el = document.getElementById(t.id); if (el) el.value = t.value; });
           const hc = $('[data-hsconnect]', main); if (hc) hc.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) render(); };
           const sn = $('#smartnew'); if (sn) sn.onclick = () => setView('smart-edit', 'new');
@@ -8805,7 +9172,7 @@
           $('#plname').onkeydown = (e) => { if (e.key === 'Enter') $('#plcreate').click(); };
           needsText($('#plname'), $('#plcreate')); needsText($('#plshared'), $('#plopenshared'));
           const openShared = pageAct(async () => { try { const t = await api('GET', `/shared/resolve?link=${encodeURIComponent($('#plshared').value)}`); setView('shared', t.id ? { user: t.user, id: t.id } : { user: t.user }); } catch (e) { toast(e.message, 'error'); } });
-          $('#plopenshared').onclick = openShared; $('#plshared').onkeydown = (e) => { if (e.key === 'Enter' && $('#plshared').value.trim()) openShared(); };
+          $('#plopenshared').onclick = openShared; $('#plshared').onkeydown = (e) => { if (e.key === 'Enter' && $('#plshared').value.trim()) $('#plopenshared').click(); };
           bindPlaylistFile($('#plimport'), 'plimportout');
           $$('[data-pl]', main).forEach((el) => el.onclick = (e) => { if (e.target.closest('[data-plplay]')) return; setView('playlist', el.dataset.pl); });
           $$('[data-plplay]', main).forEach((b) => b.onclick = () => playPlaylist(b.dataset.plplay));
@@ -8817,7 +9184,7 @@
           // A person on Pubky: their own profile.json (via Nexus), the music they tag, what they share
           loading();
           const pid = state.viewArg;
-          let pg; try { pg = await api('GET', `/profiles/${pid}`); } catch (e) { main.innerHTML = backBtn('home', 'Home') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          let pg; try { pg = await api('GET', `/profiles/${pid}`); } catch (e) { main.innerHTML = backBtn('home', 'Home') + failedHtml(e); break; }
           // Their homeserver may not answer: said as such, not as "no shared playlists"
           let sharedErr = null; let sharedPartial = false;
           const shared = await api('GET', `/shared/${pid}/playlists`, undefined, { onHeaders: (h) => { sharedPartial = h.get('x-partial') === '1'; } }).catch((e) => { sharedErr = e.message; return []; });
@@ -8827,11 +9194,11 @@
           const tagged = pg.tagged || [];
           main.innerHTML = backBtn('home', 'Home')
             + `<div class="hero person"><div class="art ${pg.avatar ? 'round' : 'placeholder'} monogram" style="background:linear-gradient(135deg, hsl(${hue(pid)} 35% 34%), hsl(${hue(pid)} 35% 20%));border-radius:50%" aria-hidden="true"><span>${esc(initials(pg.name))}</span>${pg.avatar ? heroImg(pg.avatar, true) : ''}</div><div><div class="eyebrow">${['Person on Pubky', pg.you ? 'you' : '', pg.followed_by ? 'follows you' : ''].filter(Boolean).join(' · ')}</div><h1>${esc(pg.name)}</h1><p class="sub">${keyHtml(pid)}</p>${pg.status ? `<p class="muted">${esc(pg.status)}</p>` : ''}${pg.bio ? `<p class="blurb">${esc(pg.bio)}</p>` : ''}
-              <div class="actions" style="margin-top:12px">${pg.you ? '' : `<button class="btn ${pg.following ? '' : 'primary'}" id="pfollow" aria-pressed="${!!pg.following}">${pg.following ? `${icon('check')} Following` : `${icon('plus')} Follow`}</button>`}<a class="btn ghost" href="${esc(webUrl(pg.profile_url))}" target="_blank" rel="noopener">${icon('external')} Profile on pubky.app</a></div>
+              <div class="actions" style="margin-top:12px">${pg.you || !can('owner_music') ? '' : `<button class="btn ${pg.following ? '' : 'primary'}" id="pfollow" aria-pressed="${!!pg.following}">${pg.following ? `${icon('check')} Following` : `${icon('plus')} Follow`}</button>`}<a class="btn ghost" href="${esc(webUrl(pg.profile_url))}" target="_blank" rel="noopener">${icon('external')} Profile on pubky.app</a></div>
               ${links ? `<div class="chips" style="margin-top:10px">${links}</div>` : ''}<p class="muted small">${countOf(pg.followers || 0, 'followers')} · ${pg.following_count || 0} following</p></div></div>`
             + `<section class="section"><div class="section-head"><h3>Tags they use</h3><span class="muted small">public on Pubky</span></div>${(pg.tags || []).length ? `<div class="chips">${pg.tags.map(([l, c]) => `<button class="chip" data-ptag="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : '<p class="muted small">No music tags from them on Pubky yet.</p>'}</section>`
             + (tagged.length ? `<section class="section"><div class="section-head"><h3>Recently tagged</h3></div><div class="list">${tagged.map((h, k) => `<div class="list-row clickable" data-ptagged="${k}">${h.image ? `<img class="thumb" src="${esc(imgSrc(h.image))}" alt="" loading="lazy" data-err="hide">` : svcBadge('pubky')}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist' }[h.kind] || h.kind, h.subtitle].filter(Boolean).join(' · '))}</div></div></div>`).join('')}</div></section>` : '')
-            + `<section class="section"><div class="section-head"><h3>Playlists they share</h3><span class="muted small">${shared.length || ''}</span></div>${shared.length ? `<div class="list">${shared.map((p) => `<div class="list-row clickable" data-pshared="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${plCount(p)}</div></div></div>`).join('')}</div>` : sharedErr ? `<div class="notice warn small" role="status">${esc(sharedErr)}</div>` : '<p class="muted small">No shared playlists.</p>'}${sharedPartial ? `<p class="muted small" role="status">${esc(SHARED_PARTIAL)}</p>` : ''}</section>`;
+            + `<section class="section"><div class="section-head"><h3>Collections they share</h3><span class="muted small">${shared.length || ''}</span></div>${shared.length ? `<div class="list">${shared.map((p) => `<div class="list-row clickable" data-pshared="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${plCount(p)}</div></div></div>`).join('')}</div>` : sharedErr ? `<div class="notice warn small" role="status">${esc(sharedErr)}</div>` : '<p class="muted small">No shared collections.</p>'}${sharedPartial ? `<p class="muted small" role="status">${esc(SHARED_PARTIAL)}</p>` : ''}</section>`;
           $('[data-back]', main).onclick = () => goBack('home');
           $$('[data-ptag]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.ptag }));
           $$('[data-ptagged]', main).forEach((r) => r.onclick = () => { const h = tagged[Number(r.dataset.ptagged)]; setView('item', { kind: h.kind === 'artist' ? 'artist' : h.kind === 'album' ? 'album' : 'song', id: h.id }); });
@@ -8840,14 +9207,15 @@
           break;
         }
         case 'shared': {
-          // Someone's shared playlists, or one of them: read-only here; "Save a copy" makes it yours.
+          // Someone's shared playlists, or one of them: read-only here; "Save a copy" makes it yours
+          // (shown to who may save one: can('owner_music'), as Follow on a person's page).
           loading();
           const a = state.viewArg || {}; const who = shortKey(a.user);
           if (!a.id) {
-            let list; let partial = false; try { list = await api('GET', `/shared/${a.user}/playlists`, undefined, { onHeaders: (h) => { partial = h.get('x-partial') === '1'; } }); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
+            let list; let partial = false; try { list = await api('GET', `/shared/${a.user}/playlists`, undefined, { onHeaders: (h) => { partial = h.get('x-partial') === '1'; } }); } catch (e) { main.innerHTML = backBtn('playlists', 'Collections') + failedHtml(e); break; }
             if (state.view !== 'shared') return;
             state.itemTitle = `Shared by ${who}`;
-            main.innerHTML = backBtn('playlists', 'Playlists') + pageHead(`Shared by ${who}`, list.length) + (partial ? `<p class="muted small" role="status">${esc(SHARED_PARTIAL)}</p>` : '') + (list.length ? `<div class="list">${list.map((p) => `<div class="list-row clickable" data-shpl="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${plCount(p)}${p.description ? ' · ' + esc(p.description) : ''}</div></div></div>`).join('')}</div>` : emptyState('playlist', 'Nothing shared yet', 'This person has no shared playlists on Pubky.'));
+            main.innerHTML = backBtn('playlists', 'Collections') + pageHead(`Shared by ${who}`, list.length) + (partial ? `<p class="muted small" role="status">${esc(SHARED_PARTIAL)}</p>` : '') + (list.length ? `<div class="list">${list.map((p) => `<div class="list-row clickable" data-shpl="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${plCount(p)}${p.description ? ' · ' + esc(p.description) : ''}</div></div></div>`).join('')}</div>` : emptyState('playlist', 'Nothing shared yet', 'This person has no shared collections on Pubky.'));
             $$('[data-shpl]', main).forEach((r) => r.onclick = () => setView('shared', { user: a.user, id: r.dataset.shpl }));
             break;
           }
@@ -8884,7 +9252,7 @@
               }
               if (!typed && shellMode() === 'phone') { setView('search', undefined, 'replace'); return; }
             }
-            main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break;
+            main.innerHTML = backBtn('playlists', 'Collections') + failedHtml(e); break;
           }
           if (state.view !== 'shared') return;
           state.itemTitle = sp.summary.name;
@@ -8894,13 +9262,13 @@
           const playable = songs.filter((t) => !t.unavailable && !t.card);
           const songCount = songs.filter((t) => !t.card).length; const linkCount = songs.length - songCount;
           const chip = (t) => t.unavailable ? `<span class="chip srcchip none" title="${esc(t.unavailable)}">${icon('close')}<span>Unavailable</span></span>` : t.plays ? `<span class="chip srcchip${t.pinned ? ' pinned' : ''}" title="${esc(t.plays.label)}${t.pinned ? ' · the author’s pick' : ''}">${svcBadge(t.plays.service)}<span>${esc(srcName(t.plays.service))}</span>${t.pinned ? icon('pin') : ''}</span>` : '';
-          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic((sp.play_from.items || []).map((r) => r.image), sp.summary.name)}<div><div class="eyebrow">Shared playlist · by <code>${esc(who)}</code></div><h1>${esc(sp.summary.name)}</h1><p class="sub">${countOf(songCount, 'songs')}${linkCount ? ` · ${countOf(linkCount, 'links')}` : ''} · ${playable.length} play here</p>
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="shplay" ${playable.length ? '' : 'disabled title="None of these songs is on your services"'}>${icon('play')} Play</button><button class="btn" id="shcopy">${icon('plus')} Save a copy</button><button class="btn ghost" id="shlink" title="Copy the pubky:// link">${icon('copy')} Copy link</button></div></div></div>`
-            + `<section class="section" id="shsongs"><div class="section-head"><h3>Songs</h3><span class="muted small">where each plays from on your node</span></div>${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => (t.unavailable ? 'unavail' : ''), extra: (t) => chip(t) }) : emptyState('playlist', 'This playlist is empty', '')}</section>`
+          main.innerHTML = backBtn('playlists', 'Collections') + `<div class="hero">${mosaic((sp.play_from.items || []).map((r) => r.image), sp.summary.name)}<div><div class="eyebrow">Shared collection · by <code>${esc(who)}</code></div><h1>${esc(sp.summary.name)}</h1><p class="sub">${countOf(songCount, 'songs')}${linkCount ? ` · ${countOf(linkCount, 'links')}` : ''} · ${playable.length} play here</p>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="shplay" ${playable.length ? '' : 'disabled title="None of these songs is on your services"'}>${icon('play')} Play</button>${can('owner_music') ? `<button class="btn" id="shcopy">${icon('plus')} Save a copy</button>` : ''}<button class="btn ghost" id="shlink" title="Copy the pubky:// link">${icon('copy')} Copy link</button></div></div></div>`
+            + `<section class="section" id="shsongs"><div class="section-head"><h3>Songs</h3><span class="muted small">where each plays from on your node</span></div>${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => (t.unavailable ? 'unavail' : ''), extra: (t) => chip(t) }) : emptyState('playlist', 'This collection is empty', '')}</section>`
             + (sp.summary.description ? `<section class="section"><div class="section-head"><h3>About</h3></div><p>${esc(sp.summary.description)}</p></section>` : '');
           bindSongRows($('#shsongs'), songs, {});
           $('#shplay').onclick = (e) => playSongs(playable, 0, 'replace', null, e.currentTarget);
-          $('#shcopy').onclick = async () => { try { const d = await api('POST', `/shared/${a.user}/playlists/${a.id}/copy`); state.plPf = null; toast(`Saved “${d.summary.name}” to your playlists`); setView('playlist', d.summary.id); } catch (e) { toast(e.message, 'error'); } };
+          const shc = $('#shcopy'); if (shc) shc.onclick = async () => { try { const d = await api('POST', `/shared/${a.user}/playlists/${a.id}/copy`); state.plPf = null; toast(`Saved “${d.summary.name}” to your collections`); setView('playlist', d.summary.id); } catch (e) { toast(e.message, 'error'); } };
           $('#shlink').onclick = async () => { try { await navigator.clipboard.writeText(sp.summary.link); toast('Link copied'); } catch { toast(sp.summary.link); } };
           break;
         }
@@ -8919,7 +9287,7 @@
           // the node answers, however late, pubkyKnown; Share asks for itself. A first draw whose
           // question gave up after its 15 s draws again on the late answer the same way)
           const plCut = plHolds.has(plId) ? new AbortController() : null; let plCutAt = null;
-          if (plCut) { plCut.signal.why = new Error('Couldn’t load this playlist: the node didn’t answer in time.'); plCutAt = setTimeout(() => plCut.abort(plCut.signal.why), PL_READ_MS); }
+          if (plCut) { plCut.signal.why = new Error('Couldn’t load this collection: the node didn’t answer in time.'); plCutAt = setTimeout(() => plCut.abort(plCut.signal.why), PL_READ_MS); }
           // (the 15 s timer ends with the read, whichever way it ends)
           const plCutDone = () => clearTimeout(plCutAt);
           const drawOnPubky = () => { const stale = drawStale; pubkyKnown(stale).then(() => { if (!stale()) render(); }); };
@@ -9056,15 +9424,15 @@
           const place = again ? keepPlace() : null;
           // (the eyebrow is the kind alone: who sees the playlist and where it is kept is the sharing
           // note's sentence under the buttons, said once, at every width)
-          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}${libNote}</p>
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
-            + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && !t.pending && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" data-wd="up" title="Move up" aria-label="${esc(rowWords.up(t.title))}" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" data-wd="down" title="Move down" aria-label="${esc(rowWords.down(t.title))}" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" data-wd="unlist" title="Remove" aria-label="${esc(rowWords.unlist(t.title))}">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', mine ? 'Add songs from any ⋯ menu.' : 'Add songs from any ⋯ menu, or import a file.')}</section>`
-            + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
-            + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this playlist, shown with it when you share it.</p>'}</section>`;
+          main.innerHTML = backBtn('playlists', 'Collections') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Collection</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}${libNote}</p>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button aria-haspopup="menu" aria-expanded="false" class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
+            + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && !t.pending && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" data-wd="up" title="Move up" aria-label="${esc(rowWords.up(t.title))}" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" data-wd="down" title="Move down" aria-label="${esc(rowWords.down(t.title))}" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" data-wd="unlist" title="Remove" aria-label="${esc(rowWords.unlist(t.title))}">${icon('close')}</button></span>` }) : emptyState('playlist', 'This collection is empty', mine ? 'Add songs from any ⋯ menu.' : 'Add songs from any ⋯ menu, or import a file.')}</section>`
+            + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the collection on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this collection" aria-label="Remove ${esc(t.title)} from this collection">${icon('close')}</button>` })}</section>` : '')
+            + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this collection, shown with it when you share it.</p>'}</section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
           // Phones hide a row's Move up / Move down / Remove buttons (no room next to the title):
           // the row's ⋯ menu offers them and presses the same buttons
-          const rowActs = (k, row) => (row && $('.q-actions', row) && getComputedStyle($('.q-actions', row)).display === 'none' ? [['pup', 'Move up', 'upload'], ['pdown', 'Move down', 'download'], ['rm', 'Remove from playlist', 'trash']].filter(([a]) => { const b = $(`[data-${a}]`, row); return b && !b.disabled; }).map(([a, label, ic]) => ({ label, icon: ic, run: () => $(`[data-${a}]`, row).click() })) : []);
+          const rowActs = (k, row) => (row && $('.q-actions', row) && getComputedStyle($('.q-actions', row)).display === 'none' ? [['pup', 'Move up', 'upload'], ['pdown', 'Move down', 'download'], ['rm', 'Remove from collection', 'trash']].filter(([a]) => { const b = $(`[data-${a}]`, row); return b && !b.disabled; }).map(([a, label, ic]) => ({ label, icon: ic, run: () => $(`[data-${a}]`, row).click() })) : []);
           bindSongRows($('#plsongs'), songs, { rowExtra: rowActs });
           const pfr = $('#pfretry'); if (pfr) pfr.onclick = () => { state.plPf = null; render(); };
           // A change by place still waiting for a read made after it holds this list too (plWrite),
@@ -9106,15 +9474,15 @@
           $('#plzone').onclick = (e) => showMenu(e.currentTarget, [{ title: 'Play on' }, ...zoneList().map((z) => ({ label: z.name, icon: 'zone', run: () => { state.zone = z.id; renderZoneName(); renderBar(); if (isBrowser()) playAll(false); else playPlaylist(d.summary.id); } }))]);
           // Name and description (second review: a playlist couldn't be renamed or described)
           const editField = async (key, label, value) => {
-            const r = await choiceDialog({ title: key === 'name' ? 'Rename playlist' : 'Playlist description', field: { label, value: value || '' }, choices: [{ label: 'Save', value: 'save', primary: true }] });
+            const r = await choiceDialog({ title: key === 'name' ? 'Rename collection' : 'Collection description', field: { label, value: value || '' }, choices: [{ label: 'Save', value: 'save', primary: true }] });
             if (!r || (key === 'name' && !r.text)) return;
             try { await api('PUT', `/playlists/${d.summary.id}`, { [key]: r.text }); state.playlists = await api('GET', '/playlists'); toast(key === 'name' ? `Renamed to “${r.text}”` : 'Description saved'); render(); } catch (er) { toast(er.message, 'error'); }
           };
           $('#pldesc').onclick = () => editField('description', 'Description', d.playlist.description);
           $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, dl: { kind: 'playlist', id: d.summary.id, online: songs.filter((t) => t.track_id == null && !t.card).length }, extra: [{ label: 'Rename…', icon: 'notes', own: true, run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', own: true, run: () => editField('description', 'Description', d.playlist.description) },
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
-            ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
-          if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
+            ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete collection…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this collection?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true, danger: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Collection deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
+          if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Collection deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
           // (Remove chosen from the keyboard in the row's ⋯ menu, as phones offer it: the menu gave the
           // focus back to that ⋯, so it goes on to the next song's ⋯, a card's if that one is a card)
           const viaMenu = (b) => { const fa = document.activeElement; const row = b.closest('[data-srow]'); return keyedLast && fa && row && row.contains(fa) && fa.matches('button[data-smore], button[data-cmore]'); };
@@ -9142,7 +9510,7 @@
             if (!mine && state.pubkyUser === undefined) { toast('Couldn’t check your Pubky sign-in: the node didn’t answer. Try again in a moment.', 'error'); return; }
             const go = await choiceDialog({ title: `Share “${d.summary.name}”?`, text: who
               ? (mine ? 'A public copy goes to your homeserver' : 'A public copy goes to your homeserver with the next sync (in a few minutes)') + ': the songs and their order, never audio. Anyone with the link can open it, and people on Pubky can find it. You can make it private again at any time.'
-              : 'You aren\'t signed in to Pubky yet, so there is nowhere to share it from. Sign in with Pubky Ring first (Settings › My accounts); the playlist stays on this node until then.',
+              : 'You aren\'t signed in to Pubky yet, so there is nowhere to share it from. Sign in with Pubky Ring first (Settings › My accounts); the collection stays on this node until then.',
               choices: who ? [{ label: 'Share', value: 'share', primary: true }] : [{ label: 'Open Accounts', value: 'accounts', primary: true }] });
             if (go === 'share') setVis(true); else if (go === 'accounts') setView('settings', 'accounts');
           };
@@ -9167,8 +9535,11 @@
         case 'sources': {
           // One tab per service with its on/off switch, laid out like Settings (STEWARD-UX-SOURCES.md).
           // Off hides a source everywhere; its tab stays (dimmed) so it can be switched on again.
-          let listed = false; try { state.sources = await api('GET', '/sources'); applySourcesOff(); listed = true; } catch (e) { state.sources = state.sources || []; }
+          let listed = false; let listFailed = null; try { state.sources = await api('GET', '/sources'); applySourcesOff(); listed = true; } catch (e) { listFailed = e; state.sources = state.sources || []; }
           if (state.view !== 'sources') return;
+          // (no list, and none from before: said above the page, with Try again; Your library is still
+          // here, but the page is not a node with no services)
+          const listNote = !listed && !state.sources.length ? failedHtml({ message: `Couldn’t read the services: ${listFailed.message}` }) : '';
           const srcs = state.sources;
           const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
           const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
@@ -9199,18 +9570,18 @@
           let sub = null; let subPls = []; if (active === 'subsonic') { try { sub = await api('GET', '/sources/subsonic/server'); if (sub.connected) subPls = await api('GET', '/sources/subsonic/playlists').catch(() => []); } catch { sub = null; } if (state.view !== 'sources') return; }
           const subAccount = active !== 'subsonic' ? '' : sub && sub.connected
             ? row(`Signed in as ${esc(sub.user || '')}`, `${esc(sub.name || 'Your server')}${sub.version ? ' ' + esc(sub.version) : ''} · ${esc(sub.url || '')} · its music in search, its playlists below`, '<button class="btn ghost sm" id="subforget">Forget this server</button>', 'sg-in')
-              + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz id or ISRC on the server)</span></div>${subPls.length ? `<div class="list">${subPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-subpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No playlists on the server.</p>'}</section>`
+              + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky collection (songs need a MusicBrainz id or ISRC on the server)</span></div>${subPls.length ? `<div class="list">${subPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-subpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No playlists on the server.</p>'}</section>`
             : `<form class="card subform" id="subform"><p class="sg-lead" data-sg="lead">Play your own music server here: Navidrome, Airsonic, Gonic, Ampache, LMS or another Odeion node. Needs its address, a user and password.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://music.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label><div class="toolbar"><button class="btn primary" id="subconnect" type="submit">${icon('zone')} Connect</button></div></form>`;
           let jf = null; let jfPls = []; if (active === 'jellyfin') { try { jf = await api('GET', '/sources/jellyfin/server'); if (jf.connected) jfPls = await api('GET', '/sources/jellyfin/playlists').catch(() => []); } catch { jf = null; } if (state.view !== 'sources') return; }
           const jfAccount = active !== 'jellyfin' ? '' : jf && jf.connected
             ? row(`Signed in as ${esc(jf.user || '')}`, `${esc(jf.server_name || 'Jellyfin')}${jf.version ? ' ' + esc(jf.version) : ''} · its music in search, its playlists below`, '<button class="btn ghost sm" id="jfout">Sign out</button>', 'sg-in')
-              + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz recording id in Jellyfin)</span></div>${jfPls.length ? `<div class="list">${jfPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-jfpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No music playlists.</p>'}</section>`
+              + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky collection (songs need a MusicBrainz recording id in Jellyfin)</span></div>${jfPls.length ? `<div class="list">${jfPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-jfpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No music playlists.</p>'}</section>`
             : `<form class="card subform" id="jfform"><p class="sg-lead" data-sg="lead">Play your Jellyfin or Emby music here and import its playlists. Needs its address, a user and password (used once; only Jellyfin’s token is kept).</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://jellyfin.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password"></label><div class="toolbar"><button class="btn primary" id="jfin" type="submit">${icon('zone')} Sign in</button></div></form>`;
           let jam = null; if (active === 'jamendo') { try { jam = await api('GET', '/sources/jamendo/status'); } catch { jam = null; } if (state.view !== 'sources') return; }
           // Jamendo: a sign-in only where one can be made here (no notice about apps when not)
           const jamAccount = active !== 'jamendo' || !jam || !jam.configured || (!jam.signed_in && !jam.can_sign_in) ? ''
-            : jam.signed_in ? row(`Signed in${jam.name ? ' as ' + esc(jam.name) : ''}`, 'Your Jamendo likes can come to Favourites here.', `<button class="btn sm" id="jamimport">${icon('heart')} Add my likes to Favourites</button><button class="btn ghost sm" id="jamout">Sign out</button>`, 'sg-in')
-            : `<p class="sg-lead" data-sg="lead">Optional: brings your Jamendo likes to Favourites here. Search and full tracks need no account.</p><div class="toolbar"><button class="btn" id="jamin">${icon('zone')} Sign in to Jamendo</button></div>`;
+            : jam.signed_in ? row(`Signed in${jam.name ? ' as ' + esc(jam.name) : ''}`, 'Your Jamendo likes can come to Bookmarks here.', `<button class="btn sm" id="jamimport">${icon('heart')} Add my likes to Bookmarks</button><button class="btn ghost sm" id="jamout">Sign out</button>`, 'sg-in')
+            : `<p class="sg-lead" data-sg="lead">Optional: brings your Jamendo likes to Bookmarks here. Search and full tracks need no account.</p><div class="toolbar"><button class="btn" id="jamin">${icon('zone')} Sign in to Jamendo</button></div>`;
           let spot = null; if (active === 'spotify') { try { spot = await api('GET', '/sources/spotify/status'); } catch { spot = null; } if (state.view !== 'sources') return; }
           const account = active === 'jamendo' ? jamAccount : active === 'subsonic' ? subAccount : active === 'jellyfin' ? jfAccount : '';
 
@@ -9234,7 +9605,7 @@
           // (the last sign-in here failed: why, above the way to try again)
           if (state.signinFailed && cur && state.signinFailed.svc === cur.id && /^signed in\b/.test(String(cur.status || ''))) state.signinFailed = null;
           const failed = state.signinFailed && cur && state.signinFailed.svc === cur.id ? `<p class="notice warn src-failed">Last sign-in failed: ${esc(state.signinFailed.why)}</p>` : '';
-          main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${failed}${body}</section>` : ''}</div></div>`;
+          main.innerHTML = (phone && active ? '' : pageHead('Sources')) + listNote + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${failed}${body}</section>` : ''}</div></div>`;
           // A new try (a sign-in button, or Finish sign-in with a pasted address) puts the note away
           if (failed) $(`#src-${CSS.escape(cur.id)}`, main).addEventListener('click', (e) => { if (!e.target.closest('#tidalin, #tbin, #tbfinish, #tfin, #spotin, #jamin, form[id$="paste"] button[type=submit]')) return; state.signinFailed = null; $$('.src-failed', main).forEach((n) => n.remove()); }, true);
           $$('[data-srctab]', main).forEach((t) => t.onclick = () => setView('sources', { source: t.dataset.srctab }, phone ? 'push' : 'replace'));
@@ -9292,7 +9663,7 @@
             const put = async (body, ok) => { try { await api('PUT', '/sources/bandcamp/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
             $('#bcon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Bandcamp is on' : 'Bandcamp is off');
             const br = $('#bcretry'); if (br) br.onclick = () => put({ enabled: true }, 'Trying Bandcamp again');
-            const bi = $('#bcin'); if (bi) bi.onsubmit = (e) => { e.preventDefault(); put({ identity: String(new FormData(bi).get('identity') || '').trim() }, 'Signed in to Bandcamp'); };
+            const bi = $('#bcin'); if (bi) bi.onsubmit = (e) => { e.preventDefault(); return put({ identity: String(new FormData(bi).get('identity') || '').trim() }, 'Signed in to Bandcamp'); };
             const bo = $('#bcout'); if (bo) bo.onclick = () => put({ identity: '' }, 'Signed out of Bandcamp');
             const bf = $('#bcfmt'); if (bf) bf.onchange = () => put({ format: bf.value }, 'Download format saved');
           };
@@ -9352,10 +9723,10 @@
             $('#slon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Spotify Soloist is on' : 'Spotify Soloist is off');
             const sr = $('#slretry'); if (sr) sr.onclick = () => put({ enabled: true }, 'Starting Spotify Soloist again');
             const srs = $('#slrestart'); if (srs) srs.onclick = () => put({ enabled: true }, 'Restarting Spotify Soloist');
-            const kf = $('#slkey'); if (kf) kf.onsubmit = (e) => { e.preventDefault(); put({ api_key: String(new FormData(kf).get('key') || '').trim() }, 'Soloist API key saved'); };
+            const kf = $('#slkey'); if (kf) kf.onsubmit = (e) => { e.preventDefault(); return put({ api_key: String(new FormData(kf).get('key') || '').trim() }, 'Soloist API key saved'); };
             const kc = $('#slkeychange'); if (kc) kc.onclick = () => { kf.querySelectorAll('[hidden]').forEach((x) => { x.hidden = false; }); kc.hidden = true; kf.querySelector('input').focus(); };
             const kg = $('#slkeyforget'); if (kg) kg.onclick = () => put({ api_key: '' }, 'Soloist API key forgotten');
-            const df = $('#sldev'); if (df) df.onsubmit = (e) => { e.preventDefault(); const f = new FormData(df); put({ device_name: String(f.get('name') || '').trim(), pipewire_device: String(f.get('pw') || '').trim() }, 'Device saved'); };
+            const df = $('#sldev'); if (df) df.onsubmit = (e) => { e.preventDefault(); const f = new FormData(df); return put({ device_name: String(f.get('name') || '').trim(), pipewire_device: String(f.get('pw') || '').trim() }, 'Device saved'); };
             const get = async (btn, msg) => { btn.disabled = true; btn.textContent = 'Downloading…'; try { await api('POST', '/sources/spotify/soloist/binary'); toast(msg); } catch (er) { toast(er.message, 'error'); } render(); };
             const sg = $('#slget'); if (sg) sg.onclick = () => get(sg, 'Soloist downloaded');
             const su = $('#slupdate'); if (su) su.onclick = () => get(su, 'Soloist updated');
@@ -9400,7 +9771,7 @@
             const lo = $('#lsout'); if (lo) lo.onclick = async () => { try { await api('DELETE', `/sources/spotify/signin?way=${encodeURIComponent(lsIn.way)}`); toast('librespot signed out'); } catch (e) { toast(e.message, 'error'); } render(); };
             $('#lson').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'librespot is on' : 'librespot is off');
             const lr = $('#lsretry'); if (lr) lr.onclick = () => put({ enabled: true }, 'Starting librespot again');
-            const ld = $('#lsdev'); if (ld) ld.onsubmit = (e) => { e.preventDefault(); const f = new FormData(ld); const out = String(f.get('out') || 'local'); put({ device_name: String(f.get('name') || '').trim(), output: out === 'local' ? 'local' : 'zone', zone_id: out.startsWith('zone:') ? out.slice(5) : '' }, 'librespot saved'); };
+            const ld = $('#lsdev'); if (ld) ld.onsubmit = (e) => { e.preventDefault(); const f = new FormData(ld); const out = String(f.get('out') || 'local'); return put({ device_name: String(f.get('name') || '').trim(), output: out === 'local' ? 'local' : 'zone', zone_id: out.startsWith('zone:') ? out.slice(5) : '' }, 'librespot saved'); };
           };
           fillLibrespot();
           const scm = $('#scmode');
@@ -9424,10 +9795,10 @@
             const put = async (body, ok) => { try { await api('PUT', '/sources/soundcloud/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
             $('#scon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'SoundCloud is on' : 'SoundCloud is off');
             const sr = $('#scretry'); if (sr) sr.onclick = () => put({ enabled: true }, 'Trying SoundCloud again');
-            const cf = $('#scclient'); if (cf) cf.onsubmit = (e) => { e.preventDefault(); put({ client_id: String(new FormData(cf).get('id') || '').trim() }, 'SoundCloud client saved'); };
+            const cf = $('#scclient'); if (cf) cf.onsubmit = (e) => { e.preventDefault(); return put({ client_id: String(new FormData(cf).get('id') || '').trim() }, 'SoundCloud client saved'); };
             const cc = $('#scclientchange'); if (cc) cc.onclick = () => { cf.hidden = false; cf.querySelector('input').focus(); };
             const cg = $('#scclientforget'); if (cg) cg.onclick = () => put({ client_id: '' }, 'SoundCloud client forgotten');
-            const tf = $('#sctoken'); if (tf) tf.onsubmit = (e) => { e.preventDefault(); put({ token: String(new FormData(tf).get('token') || '').trim() }, 'Signed in to SoundCloud'); };
+            const tf = $('#sctoken'); if (tf) tf.onsubmit = (e) => { e.preventDefault(); return put({ token: String(new FormData(tf).get('token') || '').trim() }, 'Signed in to SoundCloud'); };
             const tg = $('#sctokenforget'); if (tg) tg.onclick = () => put({ token: '' }, 'Signed out of SoundCloud');
           };
           fillSoundCloud();
@@ -9439,10 +9810,10 @@
                 const [likes, pls] = await Promise.all([api('GET', '/sources/soundcloud/likes'), api('GET', '/sources/soundcloud/playlists')]);
                 if (state.view !== 'sources' || state.sourceId !== 'soundcloud' || !box.isConnected) return;
                 const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(h.kind === 'item' ? 'set' : homeKind(h))}</span></div>`;
-                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your likes</h3><span class="muted small">${countOf(likes.tracks.length, 'songs')} · ${countOf(likes.playlists.length, 'sets')}</span><button class="btn sm" id="scfav" title="Favourite them here too, by their SoundCloud link">${icon('heart')} Import as favourites</button></div>${likes.tracks.length || likes.playlists.length ? `<div class="list">${likes.playlists.slice(0, 20).map(hit).join('')}${likes.tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing liked on SoundCloud yet.</p>'}</section>
-                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'songs')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-scpl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No sets of your own on SoundCloud.</p>'}</section>`;
+                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your likes</h3><span class="muted small">${countOf(likes.tracks.length, 'songs')} · ${countOf(likes.playlists.length, 'sets')}</span><button class="btn sm" id="scfav" title="Bookmark them here too, by their SoundCloud link">${icon('heart')} Import as bookmarks</button></div>${likes.tracks.length || likes.playlists.length ? `<div class="list">${likes.playlists.slice(0, 20).map(hit).join('')}${likes.tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing liked on SoundCloud yet.</p>'}</section>
+                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky collection</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'songs')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-scpl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No sets of your own on SoundCloud.</p>'}</section>`;
                 $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'soundcloud', id: b.dataset.sitem }));
-                $('#scfav').onclick = async () => { try { const r = await api('POST', '/sources/soundcloud/likes/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
+                $('#scfav').onclick = async () => { try { const r = await api('POST', '/sources/soundcloud/likes/import'); toast(`${r.imported} bookmarks imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
                 $$('[data-scpl]', box).forEach((b) => b.onclick = () => importPlaylist(b, 'soundcloud', b.dataset.scpl));
               } catch (e) { box.innerHTML = `<p class="muted small">SoundCloud likes: ${esc(e.message)}</p>`; }
             })();
@@ -9461,21 +9832,22 @@
           $$('[data-subpl]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', `/sources/subsonic/playlists/${encodeURIComponent(b.dataset.subpl)}/import`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${countOf(r.imported, 'songs')}${r.skipped ? `, ${r.skipped} without an id skipped` : ''}`); } catch (e) { toast(e.message, 'error'); } b.disabled = false; });
           const ji = $('#jamin'); if (ji) ji.onclick = async () => { try { const r = await api('POST', '/sources/jamendo/login'); location.href = r.url; } catch (e) { toast(e.message, 'error'); } };
           const jo = $('#jamout'); if (jo) jo.onclick = async () => { try { await api('POST', '/sources/jamendo/logout'); toast('Jamendo signed out'); render(); } catch (e) { toast(e.message, 'error'); } };
-          const jm = $('#jamimport'); if (jm) jm.onclick = async () => { jm.disabled = true; try { const r = await api('POST', '/sources/jamendo/collection/import'); toast(`${r.imported} Jamendo song${r.imported === 1 ? '' : 's'} added to Favourites`); } catch (e) { toast(e.message, 'error'); } jm.disabled = false; };
+          const jm = $('#jamimport'); if (jm) jm.onclick = async () => { jm.disabled = true; try { const r = await api('POST', '/sources/jamendo/collection/import'); toast(`${r.imported} Jamendo song${r.imported === 1 ? '' : 's'} added to Bookmarks`); } catch (e) { toast(e.message, 'error'); } jm.disabled = false; };
           if (spot && spot.signed_in && cur.enabled) {
             const box = document.createElement('div'); stillLoading(box, 'Still loading from Spotify… the first time can take a while.', () => !!box.querySelector('[data-loading]')); box.innerHTML = '<p class="muted small" data-loading>Loading your Spotify library…</p>'; ($('#srcmine') || main).appendChild(box);
             (async () => {
               try {
-                const [col, pls, devs] = await Promise.all([api('GET', '/sources/spotify/collection'), api('GET', '/sources/spotify/playlists'), api('GET', '/sources/spotify/devices').catch(() => [])]);
+                const [col, pls, devs] = await Promise.all([api('GET', '/sources/spotify/collection'), api('GET', '/sources/spotify/playlists'), api('GET', '/sources/spotify/devices').catch((e) => ({ failed: e }))]);
                 if (state.view !== 'sources' || state.sourceId !== 'spotify' || !box.isConnected) return;
                 const albums = col.items.filter((h) => h.kind === 'album'); const tracks = col.items.filter((h) => h.kind === 'track');
                 const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}${h.library_track_id || h.library_album_id ? ' <span class="pill ok">in library</span>' : ''}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(homeKind(h))}</span><button class="icon-btn" data-splay="${esc(h.id)}" title="Play on Spotify" aria-label="Play ${h.kind === 'album' ? `the album ${esc(h.title || '')}`.trim() : esc(h.title || 'this')} on Spotify">${icon('play')}</button></div>`;
-                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your devices</h3><span class="muted small">Spotify Connect</span></div>${devs.length ? `<div class="chips">${devs.map((d) => `<span class="chip ${d.is_active ? 'on' : ''}">${esc(d.name)} <span class="muted">${esc(d.type)}${d.is_active ? ' · active' : ''}</span></span>`).join('')}</div>` : '<p class="muted small">No Spotify device online. Open Spotify on a phone, computer or speaker and it appears here.</p>'}</section>
-                  <section class="section"><div class="section-head"><h3>Your library</h3><span class="muted small">${countOf(tracks.length, 'songs')} · ${countOf(albums.length, 'albums')}</span><button class="btn sm" id="spotfav" title="Favourite them here too, by ISRC where Spotify has one">${icon('heart')} Import as favourites</button></div>${albums.length || tracks.length ? `<div class="list">${albums.slice(0, 20).map(hit).join('')}${tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing saved on Spotify yet.</p>'}</section>
-                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row">${p.image ? `<img class="thumb" src="${esc(p.image)}" alt="" loading="lazy">` : ''}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'songs')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-spl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists on Spotify.</p>'}</section>`;
+                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your devices</h3><span class="muted small">Spotify Connect</span></div>${devs.length ? `<div class="chips">${devs.map((d) => `<span class="chip ${d.is_active ? 'on' : ''}">${esc(d.name)} <span class="muted">${esc(d.type)}${d.is_active ? ' · active' : ''}</span></span>`).join('')}</div>` : devs.failed ? failedHtml({ message: `Couldn’t read your Spotify devices: ${devs.failed.message}` }, 'spdevretry') : '<p class="muted small">No Spotify device online. Open Spotify on a phone, computer or speaker and it appears here.</p>'}</section>
+                  <section class="section"><div class="section-head"><h3>Your library</h3><span class="muted small">${countOf(tracks.length, 'songs')} · ${countOf(albums.length, 'albums')}</span><button class="btn sm" id="spotfav" title="Bookmark them here too, by ISRC where Spotify has one">${icon('heart')} Import as bookmarks</button></div>${albums.length || tracks.length ? `<div class="list">${albums.slice(0, 20).map(hit).join('')}${tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing saved on Spotify yet.</p>'}</section>
+                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky collection</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row">${p.image ? `<img class="thumb" src="${esc(p.image)}" alt="" loading="lazy">` : ''}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'songs')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-spl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists on Spotify.</p>'}</section>`;
                 $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'spotify', id: b.dataset.sitem }));
                 $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); spotifyPlay([b.dataset.splay], b); });
-                $('#spotfav').onclick = async () => { try { const r = await api('POST', '/sources/spotify/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
+                { const dr = $('#spdevretry', box); if (dr) dr.onclick = (ev) => busy(dr, () => render(), ev); }
+                $('#spotfav').onclick = async () => { try { const r = await api('POST', '/sources/spotify/collection/import'); toast(`${r.imported} bookmarks imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
                 $$('[data-spl]', box).forEach((b) => b.onclick = () => importPlaylist(b, 'spotify', b.dataset.spl));
               } catch (e) { box.innerHTML = `<p class="muted small">Spotify library: ${esc(e.message)}</p>`; }
             })();
@@ -9489,9 +9861,9 @@
             let kept = null; try { kept = JSON.parse(localStorage.getItem(memo) || 'null'); } catch { kept = null; }
             const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(homeKind(h))}</span></div>`;
             const failed = (what, err) => `<section class="section"><div class="section-head"><h3>${what}</h3></div><p class="muted small">Couldn’t load it: ${esc(err)} <button class="btn sm" type="button" data-tretry>Try again</button></p></section>`;
-            const colHtml = (col) => view.colErr && !col ? failed('Your collection', view.colErr) : col ? `<section class="section"><div class="section-head"><h3>Your collection</h3><span class="muted small">${countOf(col.nTracks, 'songs')} · ${countOf(col.nAlbums, 'albums')}</span><button class="btn sm" id="tidalfav" title="Favourite them here too: by ISRC where TIDAL has one, else by the TIDAL link">${icon('heart')} Import as favourites</button></div>${col.albums.length || col.tracks.length ? `<div class="list">${col.albums.map(hit).join('')}${col.tracks.map(hit).join('')}</div>` : '<p class="muted">Nothing in your TIDAL collection yet.</p>'}</section>`
+            const colHtml = (col) => view.colErr && !col ? failed('Your collection', view.colErr) : col ? `<section class="section"><div class="section-head"><h3>Your collection</h3><span class="muted small">${countOf(col.nTracks, 'songs')} · ${countOf(col.nAlbums, 'albums')}</span><button class="btn sm" id="tidalfav" title="Bookmark them here too: by ISRC where TIDAL has one, else by the TIDAL link">${icon('heart')} Import as bookmarks</button></div>${col.albums.length || col.tracks.length ? `<div class="list">${col.albums.map(hit).join('')}${col.tracks.map(hit).join('')}</div>` : '<p class="muted">Nothing in your TIDAL collection yet.</p>'}</section>`
               : '<section class="section"><div class="section-head"><h3>Your collection</h3></div><p class="muted small" data-loading>Loading your TIDAL collection…</p></section>';
-            const plsHtml = (pls) => view.plsErr && !pls ? failed('Your playlists', view.plsErr) : pls ? `<section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'songs')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-tpl="${esc(p.id)}" ${importing.has(`tidal:${p.id}`) ? 'disabled' : ''}>${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists of your own on TIDAL.</p>'}</section>`
+            const plsHtml = (pls) => view.plsErr && !pls ? failed('Your playlists', view.plsErr) : pls ? `<section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky collection</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'songs')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-tpl="${esc(p.id)}" ${importing.has(`tidal:${p.id}`) ? 'disabled' : ''}>${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists of your own on TIDAL.</p>'}</section>`
               : '<section class="section"><div class="section-head"><h3>Your playlists</h3></div><p class="muted small" data-loading>Loading your TIDAL playlists…</p></section>';
             const view = { col: kept && kept.col, pls: kept && kept.pls, fresh: { col: false, pls: false }, colErr: null, plsErr: null, slow: false, topKey: null };
             const here = () => state.view === 'sources' && state.sourceId === 'tidal' && box.isConnected;
@@ -9509,7 +9881,7 @@
               top.innerHTML = done
                 ? `<span class="warn-text">Couldn’t ${kept ? 'update' : 'load'} your TIDAL collection: ${esc(err)}</span>${kept ? ' Showing the last copy.' : ''} <button class="btn sm" type="button" data-tretry>Try again</button>`
                 : `<span class="spin" aria-hidden="true"></span> ${kept ? 'Updating your TIDAL collection' : 'Loading your TIDAL collection'}${view.slow ? '… the first time after a restart can take a while' : '…'} <a href="#tidalmine" data-jump>${kept ? 'Show the last copy' : 'Show'}</a>`;
-              const j = $('[data-jump]', top); if (j) j.onclick = (e) => { e.preventDefault(); box.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+              const j = $('[data-jump]', top); if (j) j.onclick = (e) => { e.preventDefault(); box.scrollIntoView({ behavior: glide(), block: 'start' }); };
               const t = $('[data-tretry]', top); if (t) t.onclick = () => render();
             };
             // Each part redraws on its own, so focus in the other one stays
@@ -9517,7 +9889,7 @@
               const el = $('#tidalcol', box); if (!el || !here()) return;
               el.innerHTML = colHtml(view.col);
               $$('[data-sitem]', el).forEach((b) => b.onclick = () => setView('source-item', { source: 'tidal', id: b.dataset.sitem }));
-              const fav = $('#tidalfav', el); if (fav) fav.onclick = async () => { try { const r = await api('POST', '/sources/tidal/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
+              const fav = $('#tidalfav', el); if (fav) fav.onclick = async () => { try { const r = await api('POST', '/sources/tidal/collection/import'); toast(`${r.imported} bookmarks imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
               $$('[data-tretry]', el).forEach((b) => b.onclick = () => render());
             };
             const drawPls = () => {
@@ -9566,8 +9938,8 @@
           const qitems = it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms, image: it.image || null }));
           const playFrom = (i, replace = true) => playSourceItems(qitems.slice(i), replace, 'end', replace ? { shuffle: false } : {}); // (Play: in order, shuffle off)
           const canHeart = !!(await (async () => { try { await api('GET', '/favourites?uri=' + encodeURIComponent(it.url)); return true; } catch { return false; } })());
-          main.innerHTML = backBtn('sources', srcName) + `<div class="artist-hero"><div class="portrait" style="border-radius:12px;background:hsl(${hue(it.title)} 35% 28%)">${it.image ? `<img src="${esc(it.image)}" alt="" data-err="remove">` : esc(initials(it.title))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, countOf(it.tracks.length, 'songs')].filter(Boolean).join(' · '))} · <a href="${esc(webUrl(it.url))}" target="_blank" rel="noopener">open</a>${it.licence ? (/^https?:/.test(it.licence) ? ` · <a href="${esc(webUrl(it.licence))}" target="_blank" rel="noopener">licence</a>` : ` · ${esc(it.licence)}`) : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to playlist">${icon('playlist')} Playlist</button>${it.library_album_id ? `<button class="btn ghost" id="ainlib" title="You already have this album">${icon('disc')} In your library</button>` : ''}${canHeart ? `<button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart" aria-pressed="${state.favUris.has(it.url)}">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Favourited' : 'Favourite'}</button>` : ''}</div></div>${it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : ''}</div></div>`
-            + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div class="fmt-col"><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>${t.url ? `<button class="icon-btn" data-act="more" data-amore1="${i}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>` : ''}</div></div>`; }).join('')}</div>`;
+          main.innerHTML = backBtn('sources', srcName) + `<div class="artist-hero"><div class="portrait" style="border-radius:12px;background:hsl(${hue(it.title)} 35% 28%)">${it.image ? `<img src="${esc(it.image)}" alt="" data-err="remove">` : esc(initials(it.title))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, countOf(it.tracks.length, 'songs')].filter(Boolean).join(' · '))} · <a href="${esc(webUrl(it.url))}" target="_blank" rel="noopener">open</a>${it.licence ? (/^https?:/.test(it.licence) ? ` · <a href="${esc(webUrl(it.licence))}" target="_blank" rel="noopener">licence</a>` : ` · ${esc(it.licence)}`) : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to collection">${icon('playlist')} Collection</button>${it.library_album_id ? `<button class="btn ghost" id="ainlib" title="You already have this album">${icon('disc')} In your library</button>` : ''}${canHeart ? `<button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart" aria-pressed="${state.favUris.has(it.url)}">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Bookmarked' : 'Bookmark'}</button>` : ''}</div></div>${it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : ''}</div></div>`
+            + `<div class="tracks src-tracks">${it.tracks.map((t, i) => { const on = !!t.url && t.url === npUri(); return `<div class="track compact${on ? ' cur' : ''}" data-i="${i}" data-np="${esc(t.url || '')}"${on ? ' aria-current="true"' : ''}><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here" aria-label="${esc(rowWords.play(t.title))}">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div class="fmt-col"><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue" aria-label="${esc(rowWords.add(t.title))}">${icon('plus')}</button>${t.url ? `<button aria-haspopup="menu" aria-expanded="false" class="icon-btn" data-act="more" data-amore1="${i}" title="More" aria-label="${esc(rowWords.more(t.title))}">${icon('more')}</button>` : ''}</div></div>`; }).join('')}</div>`;
           $('#aplay').onclick = () => playFrom(0, true); $('#aadd').onclick = () => playFrom(0, false);
           $('#amore').onclick = (e) => { e.stopPropagation(); uriMenu($('#amore'), it.tracks.map((t) => t.url), it.title); };
           const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { if (await setFavourite({ uri: it.url }, !on)) render(); } catch (er) { toast(er.message, 'error'); } };
@@ -9599,7 +9971,7 @@
           $$('[data-amore1]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const i = Number(b.dataset.amore1); const t = it.tracks[i]; showMenu(b, [{ title: t.title },
             { label: 'Play next', icon: 'playnext', run: () => playSourceItems([qitems[i]], false, 'next') },
             { label: 'Add to queue', icon: 'plus', run: () => add1(i) },
-            ...(keepsPlaylists() ? [{ label: 'Add to playlist…', icon: 'playlist', run: () => uriMenu(b, [t.url], t.title) }] : [])]); });
+            ...(keepsPlaylists() ? [{ label: 'Add to collection…', icon: 'playlist', run: () => uriMenu(b, [t.url], t.title) }] : [])]); });
           break;
         }
         case 'radio': {
@@ -9618,7 +9990,7 @@
           const all = [...saved, ...results.stations];
           const byId = (id) => all.find((x) => x.id === id);
           const doSearch = async () => { const q = $('#rq').value.trim(); if (!q) return; $('#rsearch').disabled = true; try { const r = await api('GET', '/radio/search?limit=40&q=' + encodeURIComponent(q)); state.radioResults = { q, stations: r.stations }; render(); } catch (e) { toast(e.message, 'error'); $('#rsearch').disabled = false; } };
-          $('#rsearch').onclick = doSearch; $('#rq').onkeydown = (e) => { if (e.key === 'Enter') doSearch(); }; needsText($('#rq'), $('#rsearch'));
+          $('#rsearch').onclick = doSearch; $('#rq').onkeydown = (e) => { if (e.key === 'Enter') $('#rsearch').click(); }; needsText($('#rq'), $('#rsearch'));
           $$('[data-st-play]', main).forEach((b) => b.onclick = () => playStation(byId(b.dataset.stPlay)));
           // The whole row plays the station, not only the small play button (fresh-eyes review)
           $$('[data-st-row]', main).forEach((r) => r.onclick = (e) => { if (e.target.closest('button, a, input')) return; state.startAnchor = null; playStation(byId(r.dataset.stRow)); });
@@ -9681,7 +10053,7 @@
           if (!again) loading();
           let pg;
           try { [pg] = await Promise.all([api('GET', `/item/${kind}/${encodeURIComponent(id)}${refresh}`), loadSvcRank()]); }
-          catch (e) { if (!live()) return; state.drawnPage = null; if (state.placeHold) state.placeHold(); main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          catch (e) { if (!live()) return; state.drawnPage = null; if (state.placeHold) state.placeHold(); main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + failedHtml(e); break; }
           if (!live()) return;
           // The node leaves empty lists out of its answer.
           for (const k of ['songs', 'albums', 'versions', 'also_on', 'about', 'open_on', 'connect']) pg[k] = pg[k] || [];
@@ -9691,7 +10063,8 @@
           const fallback = { artist: pg.artist && pg.artist.name, album: kind === 'album' ? pg.title : '', image: pg.image };
           const songs = pg.songs || [];
           const target = pg.target;
-          // What comments are about: the song's own link, else this item's (a web link only)
+          // What comments are about: the song's own link, else this item's (a web link only). The
+          // section is drawn, and the comments asked for, only for who may comment: can('owner_music')
           const commentUri = [pg.song_uri, target && target.uri, pg.link].find((u) => /^https?:\/\//.test(u || '')) || '';
           const qs = new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)])).toString();
           // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3),
@@ -9733,7 +10106,7 @@
           else if (!songRef && linkRef) ht.note = `Tags here go on this ${linkName} link only: no MusicBrainz ${kind} is known for it here.`;
           state.heroTagsOpen = { page: `${kind}:${id}`, set: ht.open };
           const favKey = pg.uri; const isFav = () => !!(state.favUris && ((favKey && state.favUris.has(favKey)) || (target.track_id != null && state.favUris.has(`track:${target.track_id}`)) || (target.album_id != null && state.favUris.has(`album:${target.album_id}`)) || (target.artist_id != null && state.favUris.has(`artist:${target.artist_id}`)))); const fav = isFav();
-          const sectionName = { albums: 'Albums', artists: 'Artists', tracks: 'Songs', home: 'Home', playlists: 'Playlists' }[pg.section] || 'Home';
+          const sectionName = { albums: 'Albums', artists: 'Artists', tracks: 'Songs', home: 'Home', playlists: 'Collections' }[pg.section] || 'Home';
           const pf = pg.plays_from;
           const where = pf ? (pf.service === 'library' ? 'your library' : (SERVICE_NAMES[pf.service] || pf.service) + (pf.mode === 'preview' ? ' (previews)' : '')) : null;
           // Honest about both: where this page is from, and how it plays here (STEWARD-UX-INSTANCES 7)
@@ -9825,7 +10198,7 @@
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
             + `<div class="hero item-hero"><div class="art ${pg.image ? (kind === 'artist' ? 'round ' : '') : 'placeholder '}monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${pg.image ? heroImg(pg.image, kind === 'artist') : ''}${heroBadge}</div><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" aria-pressed="${!!fav}" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" aria-pressed="${!!fav}" title="${fav ? 'Remove from Bookmarks' : 'Add to Bookmarks'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button aria-haspopup="menu" aria-expanded="false" class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               ${myReview !== undefined ? reviewRow(myReview) : ''}
               <div class="hmatch-slot" id="hmatch"></div>
               </div></div>`
@@ -9839,7 +10212,7 @@
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}"${hrefAttr(pathFor('item', { kind, id: v.page }))}>${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + '<div id="isimilar-slot"></div>'
             + '<div id="icollections-slot"></div>'
-            + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
+            + (commentUri && can('owner_music') ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + (aboutTop ? aboutDetailsHtml(pg) : aboutHtml(pg));
           $('[data-back]', main).onclick = () => goBack(pg.section);
           // The article's opening is clamped to a few lines; More shows it all. Whether it is cut off
@@ -9953,7 +10326,7 @@
               // (saved for this item; another page opened meanwhile keeps its own heart)
               if (state.view !== 'item' || state.viewArg.kind !== kind || state.viewArg.id !== id) return;
               const b = $('#ifav', main); const on = isFav();
-              if (b) { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.title = on ? 'Remove from favourites' : 'Add to favourites'; b.innerHTML = icon(on ? 'heart-fill' : 'heart'); }
+              if (b) { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.title = on ? 'Remove from Bookmarks' : 'Add to Bookmarks'; b.innerHTML = icon(on ? 'heart-fill' : 'heart'); }
               render();
             } catch (er) { toast(er.message, 'error'); }
           };
@@ -10050,8 +10423,8 @@
             return true;
           };
           const forDrawn = (f) => (...a) => (zoneMoved() ? undefined : f(...a));
-          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || !isListener() || !isBrowser()) ? `<button class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
-            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="${esc(rowWords.drag(itemName(it)))}" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here" aria-label="${esc(rowWords.play(itemName(it)))}">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" aria-label="${esc(rowWords.up(itemName(it)))}" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" aria-label="${esc(rowWords.down(itemName(it)))}" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove" aria-label="${esc(rowWords.unqueue(itemName(it)))}">${icon('close')}</button></span><button class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album, or add a song from its ⋯ menu.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null, true));
+          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private collection from this queue">${icon('playlist')} Save as collection</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : '') + (q.length && (zoneList().some((o) => o.id !== state.zone) || !isListener() || !isBrowser()) ? `<button aria-haspopup="menu" aria-expanded="false" class="btn ghost" id="qmenu" title="More" aria-label="More for this queue">${icon('more')}</button>` : ''))
+            + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"${z && z.queue_index === i ? ' aria-current="true"' : ''}><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="${esc(rowWords.drag(itemName(it)))}" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here" aria-label="${esc(rowWords.play(itemName(it)))}">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" aria-label="${esc(rowWords.up(itemName(it)))}" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" aria-label="${esc(rowWords.down(itemName(it)))}" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove" aria-label="${esc(rowWords.unqueue(itemName(it)))}">${icon('close')}</button></span><button aria-haspopup="menu" aria-expanded="false" class="icon-btn qmore" data-qmore="${i}" title="More" aria-label="More for ${esc(itemName(it))}">${icon('more')}</button></div>`).join('')}</div>` : !isBrowser() && state.queueError && state.queueZone !== state.zone ? failedHtml({ message: `Couldn’t read the queue: ${state.queueError.message}` }) /* (not known to be empty) */ : emptyState('queue', 'The queue is empty', 'Play an album, or add a song from its ⋯ menu.', canShuffleMine() && queueEmpty(state.zone) ? { id: 'qmine', label: 'Shuffle my music' } : null, true));
           $$('[data-qi]', main).forEach((b) => b.onclick = forDrawn(() => transport({ action: 'play', index: Number(b.dataset.qi) })));
           // An empty queue offers the library shuffled here too, on the zone the page is for (before,
           // only words: the bar's Play said the queue was empty, and its note had the button). Only
@@ -10208,11 +10581,13 @@
             if (to) to.focus();
           }
           state.queueKey = queueKey(); state.qPage = main.firstElementChild;
+          // (the queue could not be read: Try again asks again, the button busy meanwhile)
+          { const fr = $('[data-failed] [data-retry]', main); if (fr) fr.onclick = (ev) => busy(fr, () => render(), ev); }
           const moveItems = () => zoneList().filter((o) => o.id !== drawnZone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: forDrawn(() => moveTo(o.id)) }));
           // (for the zone the page was drawn for; one save at a time, a second tap while the first is
           // on its way made a second playlist, and one the node hasn't answered yet says so)
           const saveQueue = async (zid) => {
-            if (queueSaving) { toast('Still saving the queue as a playlist…'); return; } queueSaving = true;
+            if (queueSaving) { toast('Still saving the queue as a collection…'); return; } queueSaving = true;
             const body = zid === BROWSER ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: zid };
             try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); } finally { queueSaving = false; }
           };
@@ -10233,7 +10608,7 @@
               if (qmn.isConnected) qmn.focus();
               return zoneMoved() ? undefined : f(drawnZone);
             };
-            const own = [...(qsv ? [{ label: 'Save as playlist', icon: 'playlist', run: back(saveQueue) }] : []), ...(qc ? [{ label: 'Clear queue', icon: 'trash', run: back(clearQueue) }] : [])];
+            const own = [...(qsv ? [{ label: 'Save as collection', icon: 'playlist', run: back(saveQueue) }] : []), ...(qc ? [{ label: 'Clear queue', icon: 'trash', run: back(clearQueue) }] : [])];
             const moves = moveItems().map((it) => ({ ...it, run: back(it.run) }));
             // (the other devices gone since the page was drawn, with nothing else here: no ⋯ any more)
             if (!own.length && !moves.length) { render(); return; }
@@ -10284,7 +10659,7 @@
             const pick = z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}" aria-label="Play to ${esc(z.name)}">Play to</button>`;
             const wayChips = ways ? `<div class="chips zc-ways" role="group" aria-label="Ways to play to ${esc(familyName(z))}">${ways.map((m) => `<button class="chip ${m.id === state.zone ? 'on' : ''}" data-zsel="${esc(m.id)}" aria-pressed="${m.id === state.zone}" title="Play to ${esc(m.name)}">${esc(PROTO_WORDS[protoOf(m)] || protoOf(m))}</button>`).join('')}</div>` : '';
             const vol = zv ? `<div class="zc-vol"><button class="icon-btn zc-mute" data-volmute="${esc(z.id)}" aria-pressed="${!!zv.muted}" title="${zv.muted ? 'Unmute' : 'Mute'}" aria-label="Mute ${esc(z.name)}">${icon('volume')}</button><input type="range" data-zvol="${esc(z.id)}" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : `<span class="${phone ? 'sr-only' : 'muted small'}">Volume: set on the device</span>`;
-            const ungroup = String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : '';
+            const ungroup = (String(z.id).startsWith('group:') || /^([a-z]+-)?group:/.test(String(z.output || ''))) && can('zone_group') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''; // (only who may change zones: for anyone else the node refuses it)
             // (a wider card's volume and its Play to go together: beside the transport when the slider
             // gets 80 px there, else under it as one, the slider then the line's width. Before, the
             // volume could stay beside the transport with a 56 px slider and Play to went under it
@@ -10346,7 +10721,7 @@
           const head = pageHead('Your library', null, (appDl() ? `<button class="btn" data-dlgo>${icon('download')} Downloads</button>` : '') + (owner ? `<button class="btn primary" id="libadd">${icon('plus')} Add music</button>` : '')) + tabsHtml;
           if (tab === 'mine') {
             if (!owner) {
-              main.innerHTML = head + libPanel(tab, '<div class="card"><p>Your own music lives on your Pubky homeserver: the Odeion app keeps it there and plays it here when this node lets you.</p><p class="muted small">This node’s songs, albums and playlists are under Albums, Artists, Songs and Playlists.</p></div>');
+              main.innerHTML = head + libPanel(tab, '<div class="card"><p>Your own music lives on your Pubky homeserver: the Odeion app keeps it there and plays it here when this node lets you.</p><p class="muted small">This node’s songs, albums and collections are under Albums, Artists, Songs and Collections.</p></div>');
               break;
             }
             const [st, pk, ns] = await Promise.all([api('GET', '/storage').catch(() => null), api('GET', '/pubky').catch(() => null), api('GET', '/node/settings').catch(() => ({}))]);
@@ -10366,7 +10741,7 @@
               + (hs.mode !== 'none' ? '<details class="set-adv"><summary>Or copy a folder from the node’s machine</summary><form class="toolbar" id="impform"><label class="sr-only" for="imppath">Folder to copy</label><input class="input" id="imppath" placeholder="/mnt/usb/Music" autocomplete="off" spellcheck="false"><button class="btn" id="impgo">Check</button></form><div id="impplan"></div></details>' : '')
               + '</section>';
             let body;
-            if (!pk || !pk.user) body = '<div class="card"><p>Sign in with Pubky to keep your music, playlists and favourites on your homeserver.</p><button class="btn primary" data-goto-accounts>Sign in</button></div>';
+            if (!pk || !pk.user) body = '<div class="card"><p>Sign in with Pubky to keep your music, collections and bookmarks on your homeserver.</p><button class="btn primary" data-goto-accounts>Sign in</button></div>';
             else {
               body = '<div id="mmfiles" aria-busy="true"></div>'
                 + sGroup('Copy from this node', sRow('Copy to your homeserver', 'Pick folders, an artist, an album or everything; files already there are skipped. It runs on the node in the background.', `<button class="btn" id="pkcopyall">${icon('upload')} Copy…</button>`))
@@ -10457,14 +10832,14 @@
         case 'downloads': {
           // What this device keeps (STEWARD-DOWNLOADS.md): offline, from the app's local server
           if (!isOffline() && appDl()) { await drawStorage(main); break; }
-          if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Odeion app on your phone or laptop: keep an album or a playlist there with its ⋯ menu, and it plays without the node.</p><p><a class="btn" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/desktop-app.md" target="_blank" rel="noopener">' + icon('external') + ' Get the app</a></p>'; drawJobs(); break; }
-          let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + `<div class="notice">${esc(e.message)}</div>`; break; }
+          if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Odeion app on your phone or laptop: keep an album or a collection there with its ⋯ menu, and it plays without the node.</p><p><a class="btn" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/desktop-app.md" target="_blank" rel="noopener">' + icon('external') + ' Get the app</a></p>'; drawJobs(); break; }
+          let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + failedHtml(e); break; }
           if (state.view !== 'downloads') return;
           const byId = new Map(d.tracks.map((t) => [t.id, t]));
           const songsOf = (ids) => ids.map((i) => byId.get(i)).filter(Boolean);
           const facts = [d.synced_at ? `Last synced ${ago(d.synced_at)}` : '', fileSize(d.bytes), d.queued ? `${countOf(d.queued, 'plays and hearts')} to send when your node is back` : ''].filter(Boolean).join(' · ');
           const head = pageHead('Downloads', d.tracks.length || null) + `<p class="muted small dl-note" role="status">Offline: playing what this device keeps. ${esc(facts)}</p>`;
-          if (!d.tracks.length) { main.innerHTML = head + '<div class="empty">' + icon('download') + '<h3>Nothing on this device yet</h3><p>When your node is back, keep albums and playlists here to play them without it.</p></div>'; break; }
+          if (!d.tracks.length) { main.innerHTML = head + '<div class="empty">' + icon('download') + '<h3>Nothing on this device yet</h3><p>When your node is back, keep albums and collections here to play them without it.</p></div>'; break; }
           // (its lists are render's own: the rows are bound to them after the switch)
           const albumOpen = d.albums.find((a) => a.id === state.dlAlbum);
           const albumTile = (a) => `<button class="tile" data-dlalbum="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true)}<div class="t">${esc(a.title)}</div><div class="a">${countOf(a.track_ids.length, 'songs')}</div>${coverFrom('library')}</button>`;
@@ -10475,15 +10850,15 @@
           }
           if (d.albums.length) html += `<section class="section"><div class="section-head"><h3>Albums <span class="muted small">${d.albums.length}</span></h3></div><div class="grid">${d.albums.map(albumTile).join('')}</div></section>`;
           const pls = d.playlists.filter((p) => p.track_ids.length);
-          if (pls.length) html += `<section class="section"><div class="section-head"><h3>Playlists</h3></div><div class="list">${pls.map((p, k) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name || 'Playlist')}</div><div class="sub">${p.track_ids.length === p.total ? countOf(p.total, 'songs') : `${fmtCount(p.track_ids.length)} of ${countOf(p.total, 'songs')} on this device`}</div></div><button class="btn sm" data-dlpl="${k}">${icon('play')} Play</button></div>`).join('')}</div></section>`;
+          if (pls.length) html += `<section class="section"><div class="section-head"><h3>Collections</h3></div><div class="list">${pls.map((p, k) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name || 'Collection')}</div><div class="sub">${p.track_ids.length === p.total ? countOf(p.total, 'songs') : `${fmtCount(p.track_ids.length)} of ${countOf(p.total, 'songs')} on this device`}</div></div><button class="btn sm" data-dlpl="${k}">${icon('play')} Play</button></div>`).join('')}</div></section>`;
           const favs = songsOf(d.favourites.track_ids || []);
-          if (favs.length) { lists.fav = favs; html += `<section class="section"><div class="section-head"><h3>Favourites</h3><button class="btn sm ghost" data-dlplay="fav">${icon('play')} Play</button></div>${trackRows(favs, { key: 'fav' })}</section>`; }
+          if (favs.length) { lists.fav = favs; html += `<section class="section"><div class="section-head"><h3>Bookmarks</h3><button class="btn sm ghost" data-dlplay="fav">${icon('play')} Play</button></div>${trackRows(favs, { key: 'fav' })}</section>`; }
           lists.all = [...d.tracks].sort((a, b) => String(a.title).localeCompare(String(b.title)));
           html += `<section class="section"><div class="section-head"><h3>All songs <span class="muted small">${d.tracks.length}</span></h3><button class="btn sm ghost" data-dlplay="all">${icon('shuffle')} Shuffle</button></div>${trackRows(lists.all, { key: 'all' })}</section>`;
           main.innerHTML = html;
           $$('[data-dlalbum]', main).forEach((b) => b.onclick = () => { state.dlAlbum = Number(b.dataset.dlalbum); render(); mainTo(0); });
           const dc = $('[data-dlclose]', main); if (dc) dc.onclick = () => { state.dlAlbum = null; render(); };
-          $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = lists[k]; if (ts && ts.length) playTracks(ts, true, 'end', { shuffle: k === 'all' }); });
+          $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = lists[k]; return ts && ts.length ? playTracks(ts, true, 'end', { shuffle: k === 'all' }) : undefined; });
           $$('[data-dlpl]', main).forEach((b) => b.onclick = () => playTracks(songsOf(pls[Number(b.dataset.dlpl)].track_ids), true, 'end', { shuffle: false }));
           break;
         }
@@ -10510,8 +10885,14 @@
             const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
             const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
             const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
-            // null: every zone; []: none right now (the node can't read its list); else the zones named
-            const zonesText = Array.isArray(me.zones) && !me.zones.length ? 'none of its zones right now (ask whoever runs it)' : me.zones && me.zones.length ? me.zones.map((z) => (state.zones[z] ? state.zones[z].name : z)).join(', ') : 'any of its zones';
+            // null: every zone; []: none (the owner opened none, or the node can't read its list); else the zones named
+            // (a node before "no zone" was a choice says it as a list of one zone without a name)
+            const noZones = Array.isArray(me.zones) && (!me.zones.length || noZoneList(me.zones));
+            const zonesText = me.zones && me.zones.length ? `Use ${me.zones.length === 1 ? 'this zone' : 'these zones'}: ${listWords(me.zones.map((z) => (state.zones[z] ? state.zones[z].name : z)))}` : 'Use every zone of this node';
+            // What they can do here, in the words the owner's People & access screen uses, from what
+            // the node says they can (GET /v1/me's `can`); own sign-ins only where the node lets them.
+            // No zone open to them is something they can't do, not a tick under "You can".
+            const canDo = canLists({ has: (cap) => (cap === 'zone_use' && noZones ? false : cap === 'own_sign_in' && !Array.isArray(me.can) && ms ? ms.policy !== 'node' : can(cap)), their: 'your', owners: 'the owner’s', zones: zonesText, noZone: 'Play on a zone: none is open to you right now, ask the node’s owner', canTitle: 'You can', cantTitle: 'You can’t' });
             // Their own homeserver, for their bookmarks (personal.rs)
             const [hs, svcs] = await Promise.all([api('GET', '/me/homeserver').catch(() => null), api('GET', '/me/services').catch(() => null)]);
             const hsRow = !hs ? row('My homeserver', 'The node can’t say right now.', '')
@@ -10522,17 +10903,19 @@
             main.innerHTML = pageHead('Settings', null)
               + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), `<button class="btn" id="lsignout">${icon('logout')} Log out</button>`)
                 + hsRow
-                + row(`On ${esc(info.name)}`, `You can play its music ${hereIn()} and on ${esc(zonesText)}. Your bookmarks are your own; the node’s playlists and settings belong to whoever runs it.`, '')
                 + (ms ? row('Music services', srcNote + (ms.may_choose ? ' You choose; your own sign-ins stay kept either way.' : ''), srcCtl) : ''))
+              + group('What you can do here', `<div class="set-row set-block" id="lcando">${canDo}</div>`)
+              + group('Your sign-ins on this node', '<div id="mysignins" class="pa-rows"></div>')
               // Your own streaming accounts: nobody else on the node plays with them (node apps stay the owner's)
               + group('My streaming accounts', svcs ? svcs.map((v) => `<details class="set-row svc-own" data-svc="${esc(v.source)}"><summary class="set-label"><span class="set-name">${esc(v.name)}</span><span class="set-help">${v.connected ? `Signed in${v.user ? ' as ' + esc(v.user) : ''}.` : v.available ? 'Not signed in. Sign in with your own account to play from it here.' : esc(v.reason || 'Not set up on this node yet.')}</span></summary><div class="svc-body"></div></details>`).join('') : row('Streaming accounts', 'The node can’t say right now.', ''))
-              + group('Play from', row('Your personal source order', 'Applies to every playlist you play.', '<div id="gorder"></div>'))
+              + group('Play from', row('Your personal source order', 'Applies to every collection you play.', '<div id="gorder"></div>'))
               + group('Usage insights', '<div id="usageme"></div>')
               + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
             $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
             loadOrder();
             if (window.PM_USAGE) PM_USAGE.renderPersonal($('#usageme', main));
             $('#lsignout').onclick = logOut;
+            mountSignIns($('#mysignins', main), { kept: keptSignIns() });
             // A service opens its own sign-in ways (the same as the owner's, without the node's setup)
             $$('details[data-svc]', main).forEach((d) => d.addEventListener('toggle', () => {
               const body = $('.svc-body', d); if (!d.open || body.dataset.drawn) return; body.dataset.drawn = '1';
@@ -10547,7 +10930,8 @@
           }
           const info = await api('GET', '/info'); state.info = info;
           const outs0 = await loadOutputs();
-          const ns = await api('GET', '/node/settings').catch(() => ({ contact: '', discovery: false }));
+          // (`unread`: why they could not be read. People & access then says so instead of showing a choice nobody made)
+          const ns = await api('GET', '/node/settings').catch((e) => ({ contact: '', discovery: false, unread: (e && e.message) || 'the node didn’t answer' }));
           // The homeserver bundled with the node (deploy/bundle) and its Cloudflare Tunnel, when there is one
           const bundled = await api('GET', '/homeserver/bundled').catch(() => null);
           const tunnel = await api('GET', '/remote/tunnel').catch(() => null);
@@ -10578,7 +10962,7 @@
           const shownOuts = outs.filter((o) => state.devOutputs || !devOutput(o.id));
           const outList = shownOuts.length ? `<div class="set-list">${shownOuts.map((o) => `<div class="set-item"><div class="grow"><div class="name">${esc(o.name)}</div><div class="sub">${esc(o.id)}</div></div><span class="muted small caps">${o.caps.max_pcm_bits}-bit · ${o.caps.pcm_rates.map((r) => (r / 1000).toFixed(1).replace('.0', '') + 'k').join(' ')}${o.caps.dsd ? ' · DSD' : ''}</span></div>`).join('')}</div>` : '<p class="muted small">No outputs found.</p>';
           const zoneRows = zoneList().map((z) => row(esc(z.name), esc(z.id === BROWSER ? deviceWords(z) : z.output || ''), `${zoneStatePill(z)}${z.id !== BROWSER ? `<button class="btn sm ${state.dspOpen === z.id ? 'primary' : 'ghost'}" data-dsp="${esc(z.id)}">DSP</button>` : ''}${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Remove</button>` : ''}`)).join('');
-          const personalPlayFrom = group('Play from', block('Where songs play from', 'Your personal source order applies to every playlist. A pinned song keeps its source.', '<div id="gordercard"><div id="gorder"><div class="skeleton" style="height:120px"></div></div></div>'));
+          const personalPlayFrom = group('Play from', block('Where songs play from', 'Your personal source order applies to every collection. A pinned song keeps its source.', '<div id="gordercard"><div id="gorder"><div class="skeleton" style="height:120px"></div></div></div>'));
           const playback = group('Playback', ''
             + row('Prefer full tracks', 'On a service\u2019s song page, Play plays that service, even a 30 s preview. With this on, a preview gives way to the full track from your Play from order.', `<label><input type="checkbox" id="preferfull" ${ns.prefer_full ? 'checked' : ''}> On</label>`))
             + group('Speakers and outputs', block('', 'What this node can play to, found on your network. A Raspberry Pi or computer next to a DAC: run squeezelite on it with this node as its server (squeezelite -s and this node\u2019s address). Network speakers (UPnP, Sonos, HEOS, Chromecast, AirPlay, BluOS) are found by themselves; MPD and Snapcast are set in the node\u2019s config. The computer or phone the Odeion app runs on: the app adds its own player, which plays only for this node.', `${outList}<div class="toolbar" style="margin-top:10px"><button class="btn" id="rescan" title="Look again for speakers, streamers and devices on your network">Look for speakers again</button><button class="btn ghost" id="netscan" title="Ask every UPnP and Cast device on the network and explain what answers">${icon('search')} Explain what is on the network</button></div><div id="netscanout"></div>`)
@@ -10587,26 +10971,24 @@
               + block('Group outputs', 'Pick two or more of one kind to play as one zone, in sync; the first one checked leads. Sonos, HEOS and BluOS speakers group with their own kind, squeezelite players with each other, and so do the app\u2019s players on a DAC.', shownOuts.filter(groupKind).length > 1 ? `<div id="groupouts">${GROUP_KINDS.map(([k, label]) => { const os = shownOuts.filter((o) => groupKind(o) === k); return os.length ? `<div class="groupkind"><div class="small muted">${label}</div><div class="chips">${os.map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div></div>` : ''; }).join('')}</div><p class="small muted" id="groupsync" role="status"></p><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>` : '<p class="muted small">No two speakers of one kind yet.</p>'))
             + group('Subsonic apps', row('Jukebox zone', 'The zone Subsonic apps (Symfonium, Feishin…) control with their jukebox mode.', `<select class="input" id="jukeboxzone" aria-label="Subsonic jukebox zone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select>`));
           const accounts = group('Pubky', pk ? (
-              (!pk.user && hsHere ? row('Create your Pubky account on this node\u2019s homeserver', 'Your playlists, favourites, tags and files stay on this machine. Pubky Ring creates the account here and signs this node in.', '<button class="btn primary" id="pkhscreate">Create account here</button>') : '')
-              + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your playlists, favourites and tags in your own Pubky storage.', pk.user ? (pk.needs_resign && !state.token ? '<button class="btn primary" id="pklogin">Approve in Pubky Ring</button>' : '') : `<button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky</button>`)
+              (!pk.user && hsHere ? row('Create your Pubky account on this node\u2019s homeserver', 'Your collections, bookmarks, tags and files stay on this machine. Pubky Ring creates the account here and signs this node in.', '<button class="btn primary" id="pkhscreate">Create account here</button>') : '')
+              + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your collections, bookmarks and tags in your own Pubky storage.', pk.user ? (pk.needs_resign && !state.token ? '<button class="btn primary" id="pklogin">Approve in Pubky Ring</button>' : '') : `<button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky</button>`)
               + (pk.needs_resign ? resignNotice(pk).replace('<div class="notice warn resign"', '<div id="pkresign" class="notice warn resign"') : '')
               + '<div id="pkurl"></div>'
-              + (pk.user ? row('Your music', 'Your files on the homeserver, saving and tagging are in Your library.', '<button class="btn ghost" data-view-go="library">Open Your library</button>') : row('Saving', 'Starts once you sign in: then your playlists, favourites and tags are kept on your homeserver.', ''))
+              + (pk.user ? row('Your music', 'Your files on the homeserver, saving and tagging are in Your library.', '<button class="btn ghost" data-view-go="library">Open Your library</button>') : row('Saving', 'Starts once you sign in: then your collections, bookmarks and tags are kept on your homeserver.', ''))
             ) : row('Pubky', 'Pubky is not set up on this node.', ''))
             + group('ListenBrainz', block('', '', '<div id="lbcard"><div id="lbbody"><div class="skeleton" style="height:80px"></div></div></div>'))
             + group('Last.fm', block('', '', '<div id="lfcard"><div id="lfbody"><div class="skeleton" style="height:80px"></div></div></div>'))
             + group('Streaming services', row('TIDAL, Spotify, Deezer, Jamendo, your own servers', 'Sign in to them on Sources.', '<button class="btn ghost" data-goto-sources>Open Sources</button>'));
           const discover = group('Contact', block('Your email or website', 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it. It goes only to them, and turns on what people on Pubky play.', `<div class="toolbar"><input class="input" id="contact" placeholder="you@example.org or https://your.site" value="${esc(ns.contact)}" aria-label="Your email or website"><button class="btn primary" id="contactsave">Save</button><span class="pill ${ns.discovery ? 'ok' : 'warn'}">${ns.discovery ? 'Discover on' : 'Discover off'}</span></div>`))
             + group('Concerts', block('Your city', 'For concerts near you on Home. Looked up once on OpenStreetMap; it stays on this node.', '<div class="toolbar"><input class="input" id="loccity" placeholder="City" aria-label="Your city"><button class="btn" id="locsave">Save</button><button class="btn ghost" id="locclear">Clear</button><span class="muted small" id="loccur"></span></div>'));
-          const backup = group('Download a backup', block('', 'One file with everything needed to rebuild this node: matches and corrections, playlists, favourites, tags, play history, queues and settings. Never your music files.', `<form id="bkform" class="stack"><label class="small" for="bkpass">Passphrase for your sign-ins (TIDAL, Spotify, ListenBrainz, Pubky…)</label><input class="input" id="bkpass" type="password" autocomplete="new-password" placeholder="Leave empty to leave sign-ins out"><input class="input" id="bkpass2" type="password" autocomplete="new-password" placeholder="The same passphrase again" aria-label="Repeat the passphrase" hidden><p class="muted small">Without it you can restore everything else and sign in to those services again. Nothing opens the sign-ins without it.</p><div class="actions"><button class="btn primary" id="bkdown" type="submit">${icon('download')} Download a backup</button></div></form>`))
+          const backup = group('Download a backup', block('', 'One file with everything needed to rebuild this node: matches and corrections, collections, bookmarks, tags, play history, queues and settings. Never your music files.', `<form id="bkform" class="stack"><label class="small" for="bkpass">Passphrase for your sign-ins (TIDAL, Spotify, ListenBrainz, Pubky…)</label><input class="input" id="bkpass" type="password" autocomplete="new-password" placeholder="Leave empty to leave sign-ins out"><input class="input" id="bkpass2" type="password" autocomplete="new-password" placeholder="The same passphrase again" aria-label="Repeat the passphrase" hidden><p class="muted small">Without it you can restore everything else and sign in to those services again. Nothing opens the sign-ins without it.</p><div class="actions"><button class="btn primary" id="bkdown" type="submit">${icon('download')} Download a backup</button></div></form>`))
             + group('Every day or week, to a folder', block('', '', '<div id="bksched"><div class="skeleton" style="height:60px"></div></div>'))
             + group('Restore', block('', 'Replaces this node’s library and settings with the backup’s. Your music files are not touched.', `<label class="btn file-btn">${icon('upload')} Choose a backup file<input type="file" id="rsfile" accept=".pmbackup,.zip"></label><div id="rsout"></div>`));
           const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'songs')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
-            + group('Access', (state.token ? row(appPlatform() ? 'This app' : 'This browser', `Log out ends ${appPlatform() ? 'this app' : 'this browser'}’s session and brings back the Log in screen. The node’s token for apps stays as it is.`, `<button class="btn ghost" id="logout">${icon('logout')} Log out</button>`) : '')
-              + (ns.token_replaceable
-                ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and every browser of yours is logged out (log in again with Pubky Ring). People you invited stay logged in.', `${ns.api_token_exposed_at ? `<div class="notice warn" role="alert">This token was in a saved queue’s links, where everyone who could use that zone could read it (noticed ${esc(new Date(ns.api_token_exposed_at * 1000).toLocaleString())}). Make a new one.</div>` : ''}<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>`)
-                : row('The node’s token', `Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): it is changed there.${ns.api_token_exposed_at ? `<span class="notice warn" role="alert" style="display:block;margin-top:6px">This token was in a saved queue’s links, where everyone who could use that zone could read it (noticed ${esc(new Date(ns.api_token_exposed_at * 1000).toLocaleString())}). Change <code>PM_TOKEN</code> (or <code>[api] token</code>) and restart the node.</span>` : ''}`, `<a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`)))
+            // (Log out, the browsers and apps signed in as you and the password for apps are on People & access)
+            + group('Access', row('Log in, sign-ins and the password for apps', 'Who can use this node, the browsers and apps signed in as you, Log out and the password for apps are in one place.', '<button class="btn ghost" data-settab="people">Open People &amp; access</button>'))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
           // You › Home: whose layout applies; edit it on Home itself
@@ -10643,10 +11025,9 @@
           // An app whose value lives on its own page (the AcoustID key with Identify): the way there, no form
           const appGo = (a) => a.page === 'library:node' ? ` <button class="btn ghost sm" data-applib="node">Open Node library</button>` : '';
           const appRow = (a) => `<div class="set-row"><div class="set-label"><div class="set-name">${esc(a.name)}</div>${help([appFrom(a), a.note ? esc(a.note) : ''].filter(Boolean).join(' · '))}${a.limits ? (() => { const [x, y] = splitNote(a.limits); return help(esc(x)) + (y ? `<details class="small morenote"><summary>More</summary><p class="set-help">${esc(y)}</p></details>` : ''); })() : ''}${appAdvanced(a)}</div><div class="set-ctl">${a.configured ? `<span class="pill ok">${a.from === 'builtin' ? 'Built in' : 'Set'}</span>` : '<span class="pill">Not set up</span>'}${a.from === 'settings' && a.set && (a.fields || []).length ? ` <button class="btn ghost sm" data-appreset="${esc(a.id)}">${a.builtin ? 'Use built-in' : 'Remove'}</button>` : ''}${appGo(a)}</div></div>`;
-          // Whose TIDAL, Qobuz and Spotify sign-ins listeners play with (owner, 2026-11-03)
-          const SRC_POLICIES = [['node', 'This node’s', 'Everyone plays TIDAL, Qobuz and Spotify through the sign-ins made here. Listeners can’t sign in to their own.'], ['own', 'Each person’s own', 'Everyone signs in to their own accounts; a listener without one gets “Open in” instead.'], ['choice', 'Each person chooses', 'This node’s by default; each listener may switch to their own.']];
-          const curPolicy = ns.sources_policy || 'own';
-          const policyTab = group('Sources for everyone', row('Whose sign-ins people play with', (SRC_POLICIES.find(([v]) => v === curPolicy) || SRC_POLICIES[1])[2] + ' Switching keeps every sign-in, yours and theirs.', `<div class="chips" role="radiogroup" aria-label="Whose sign-ins people play with">${SRC_POLICIES.map(([v, l]) => `<button class="chip scope ${curPolicy === v ? 'on' : ''}" role="radio" aria-checked="${curPolicy === v}" data-srcpolicy="${v}">${l}</button>`).join('')}</div>`));
+          // Whose TIDAL, Qobuz and Spotify sign-ins people play with (owner, 2026-11-03) is chosen on
+          // People & access, with the rest of what the people you add can do: one line points there
+          const policyTab = group('For the people you add', row('Whose music services they play with', 'This node’s TIDAL, Qobuz and Spotify sign-ins or their own: chosen with the rest of what they can do.', '<button class="btn ghost" data-settab="people">Open People &amp; access</button>'));
           const appsTab = policyTab + group('Set once, for everyone on this node', apps && apps.length ? apps.filter(appShown).map(appRow).join('') : block('', 'No list from this node.', ''));
           // This homeserver: the bundled one
           const hsTab = bundled && bundled.configured ? group('The homeserver', row('Address', esc(bundled.icann_domain || ''), bundled.pubky_address ? `<code class="small">${esc(bundled.pubky_address)}</code>` : '')
@@ -10667,8 +11048,11 @@
             + (dacVolumeWords(dv) ? row(esc(dacVolumeWords(dv)), dv.own_volume ? 'The app’s slider, the volume keys and Android’s volume panel set the DAC’s own volume; the music itself stays untouched. The first sound is quiet: the level you last played this DAC at, else a low one.' : 'This DAC has no volume of its own, so the app has no slider for it: set the level on the DAC or the amplifier. The music stays bit-perfect.', '') : '')
             // Android's permission for Exclusive USB (the app's own USB driver) was not given: ask again
             + (dv.usb_permission === false ? row('Exclusive USB', 'This app can drive the DAC itself with its own USB driver: bit-perfect on any Android, at the DAC’s own volume. Android asks you once to allow it.', '<button class="btn ghost sm" id="dvallow">Allow Exclusive USB</button>') : ''));
-          main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}${panel('privacy', group('Usage insights', '<div id="usageme"></div>'))}${panel('usage', group('Usage insights', '<div id="usagenode"></div>'))}`);
-          tabs.wire(main, (k) => { state.settingsTab = k; });
+          main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox" class="pa-box"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}${panel('privacy', group('Usage insights', '<div id="usageme"></div>'))}${panel('usage', group('Usage insights', '<div id="usagenode"></div>'))}`);
+          const showTab = tabs.wire(main, (k) => { state.settingsTab = k; });
+          // A row that points to another tab: the focus goes with it, to that tab's button
+          const goTab = (b) => { b.onclick = () => { const k = b.dataset.settab; showTab(k); const t = $(`#settab-${k}`, main); if (t && !phone) t.focus(); }; };
+          $$('[data-settab]', main).forEach(goTab);
           // Usage insights (usage.js): yours, and the node's switch
           if (window.PM_USAGE) { PM_USAGE.renderPersonal($('#usageme', main)); PM_USAGE.renderNode($('#usagenode', main)); }
           // This phone: "Allow Exclusive USB" goes to the node, which passes it to the app's player,
@@ -10685,7 +11069,6 @@
           const hd = $('#sethomedefault'); if (hd) hd.onclick = async () => { hd.disabled = true; try { await api('PUT', '/home/layout', { order: mine.order || [], hidden: mine.hidden || [] }); toast('Your Home is the default for everyone now'); render(); } catch (e) { hd.disabled = false; toast(e.message, 'error'); } };
           const hr = $('#sethomereset'); if (hr) hr.onclick = async () => { try { await api('PUT', '/me/prefs', { home_layout: null }); state.homeLayout = null; state.homeSaved = null; toast('Home follows the node’s default'); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-qreset]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/me/prefs', { quality: { [b.dataset.qreset]: null } }); toast('Back to the node’s quality'); render(); } catch (e) { toast(e.message, 'error'); } });
-          $$('[data-srcpolicy]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/node/settings', { sources_policy: b.dataset.srcpolicy }); toast({ node: 'Everyone plays through this node’s sign-ins', own: 'Everyone plays with their own sign-ins', choice: 'Each person chooses whose sign-ins they play with' }[b.dataset.srcpolicy]); render(); } catch (e) { toast(e.message, 'error'); } });
           const pff = $('#preferfull'); if (pff) pff.onchange = async () => { try { await api('PUT', '/node/settings', { prefer_full: pff.checked }); toast(pff.checked ? 'Previews give way to full tracks from your Play from order' : 'A song page plays its own service, previews included'); } catch (e) { toast(e.message, 'error'); pff.checked = !pff.checked; } };
           const fst = $('#firststeps'); if (fst) fst.onchange = async () => { try { await api('PUT', '/node/settings', { first_steps_hidden: !fst.checked }); toast(fst.checked ? 'First steps show on Home again' : 'First steps are hidden for everyone'); render(); } catch (e) { toast(e.message, 'error'); fst.checked = !fst.checked; } };
           const dvo = $('#devouts'); if (dvo) dvo.onchange = async () => { try { await api('PUT', '/node/settings', { dev_outputs: dvo.checked }); state.devOutputs = dvo.checked; toast(dvo.checked ? 'Developer outputs are shown' : 'Developer outputs are hidden'); renderZoneName(); } catch (e) { toast(e.message, 'error'); dvo.checked = !dvo.checked; } };
@@ -10712,7 +11095,7 @@
             try { const cfg = await api('GET', `/zones/${encodeURIComponent(state.dspOpen)}/dsp`); $('#dspbox').innerHTML = dspEditor(state.zones[state.dspOpen], cfg); bindDspEditor(state.dspOpen, cfg); } catch (e) { $('#dspbox').innerHTML = `<div class="notice warn">${esc(e.message)}</div>`; }
           }
           const saveContact = async () => { const c = $('#contact').value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; homeCache.clear(); toast('Contact saved; Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
-          $('#contactsave').onclick = saveContact; $('#contact').onkeydown = (e) => { if (e.key === 'Enter') saveContact(); };
+          $('#contactsave').onclick = saveContact; $('#contact').onkeydown = (e) => { if (e.key === 'Enter') $('#contactsave').click(); };
           api('GET', '/home/location').then((l) => { const c = $('#loccur'); if (c) c.textContent = l ? `Now: ${l.label || `${l.lat.toFixed(2)}, ${l.lon.toFixed(2)}`}` : 'Not set'; }).catch(() => {});
           $('#locsave').onclick = async () => { const city = $('#loccity').value.trim(); if (!city) return; try { const l = await api('PUT', '/home/location', { city }); toast(`Concerts near ${l.label}`); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#locclear').onclick = async () => { try { await api('PUT', '/home/location', {}); toast('City cleared'); render(); } catch (e) { toast(e.message, 'error'); } };
@@ -10735,20 +11118,6 @@
                 + (r.cast.length ? `<div class="list">${r.cast.map((d) => `<div class="list-row"><div class="grow"><div class="name">${esc(d.friendly_name)}</div><div class="sub">${esc(d.addr)}</div></div><span class="pill ok">Cast</span></div>`).join('')}</div>` : '');
             } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; }
             sc.disabled = false;
-          };
-          const lo = $('#logout'); if (lo) lo.onclick = logOut;
-          const tn = $('#tokennew'); if (tn) tn.onclick = async () => {
-            const go = await choiceDialog({ title: 'Make a new token?', text: 'The old token stops working at once. Every app and Subsonic app then needs the new one, and your other browsers are logged out; this one switches to the new token now.', choices: [{ label: 'Make a new token', value: true, primary: true }] });
-            if (!go) return;
-            tn.disabled = true;
-            try {
-              const r = await api('POST', '/node/token');
-              // Every later call (and a reconnect of the event socket) uses it
-              // The old token and every Pubky Ring browser session end: this browser takes the new token
-              state.token = r.token; try { localStorage.setItem('pm.token', r.token); } catch { /* this tab keeps it */ }
-              $('#tokenout').innerHTML = `<p class="small" style="margin-top:10px">The new token, shown only now. Copy it to your apps; the page then reloads, so its streams and covers use it too.</p><div class="toolbar"><code class="path">${esc(r.token)}</code><button class="btn sm primary" id="tokendone">Copy and reload</button></div>`;
-              $('#tokendone').onclick = async () => { try { await navigator.clipboard.writeText(r.token); } catch { /* copied by hand */ } location.reload(); };
-            } catch (e) { toast(e.message, 'error'); tn.disabled = false; }
           };
           const jz = $('#jukeboxzone'); if (jz) jz.onchange = async () => { try { await api('PUT', '/node/settings', { jukebox_zone: jz.value }); toast(jz.value ? 'Jukebox zone saved' : 'Jukebox follows the first zone'); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
@@ -10774,7 +11143,7 @@
           };
           loadLb();
           // ---- backup and restore (steward next-4, item 1)
-          const tb = $('#tobackup'); if (tb) tb.onclick = () => $('#backupcard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+          const tb = $('#tobackup'); if (tb) tb.onclick = () => $('#backupcard').scrollIntoView({ behavior: glide(), block: 'start' });
           const authH = () => (state.token ? { authorization: 'Bearer ' + state.token } : {});
           const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); };
           $('#bkpass').oninput = () => { $('#bkpass2').hidden = !$('#bkpass').value; };
@@ -10792,7 +11161,7 @@
           };
           const when = (t) => (t ? new Date(t * 1000).toLocaleString() : 'never');
           const nOf = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-          const countsLine = (c) => `${nOf(c.tracks, 'song', 'songs')} (${c.identified} identified) · ${nOf(c.playlists, 'playlist', 'playlists')} · ${nOf(c.favourites, 'favourite', 'favourites')} · ${nOf(c.tags, 'tag', 'tags')} · ${nOf(c.plays, 'play', 'plays')}`;
+          const countsLine = (c) => `${nOf(c.tracks, 'song', 'songs')} (${c.identified} identified) · ${nOf(c.playlists, 'collection', 'collections')} · ${nOf(c.favourites, 'bookmark', 'bookmarks')} · ${nOf(c.tags, 'tag', 'tags')} · ${nOf(c.plays, 'play', 'plays')}`;
           const loadSched = async () => {
             const box = $('#bksched'); if (!box) return;
             let sc; try { sc = await api('GET', '/backup/schedule'); } catch (er) { box.innerHTML = `<p class="muted small">${esc(er.message)}</p>`; return; }
@@ -10837,99 +11206,436 @@
           if (state.focusRestore) { state.focusRestore = false; $('#backupcard').scrollIntoView({ block: 'start' }); $('#rsfile').focus(); }
           loadOrder();
           const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); syncToast(r); render(); } catch (e) { toast(e.message, 'error'); } };
-          // Settings › People: invites to this node's homeserver and its music, and who has what
-          const ACCESS = { homeserver_music: 'Homeserver + music', homeserver: 'Homeserver only', music: 'Music only' };
-          // Each kind in one line, and what else to know once it is chosen
+          // ---- Settings › People & access (the `people` tab): who can use this node, adding and removing
+          // people, what they can do, the browsers and apps signed in, and the password for apps ----
+          const ACCESS = { homeserver_music: 'Homeserver account and music', homeserver: 'Homeserver account only', music: 'Music only' };
+          // Each kind as a plain choice: what they get, then what happens once it is chosen
+          const HS_READS = 'You run this homeserver, so you can read every file on it, private ones too: tell them.';
           const INVITE_KINDS = {
-            homeserver_music: ['An account on this node’s homeserver, and they play this node’s music.', 'You get a link and a QR code for Pubky Ring. A storage quota is optional. Their playlists and favourites live on their account.'],
-            homeserver: ['An account on this node’s homeserver, without this node’s music.', 'You get a link and a QR code for Pubky Ring. A storage quota is optional.'],
-            music: ['Their Pubky account is elsewhere: they play this node’s music.', 'Added by their key; they sign in with Pubky Ring. Their playlists and favourites stay on their account.'],
+            homeserver_music: ['They get a Pubky account on this node’s homeserver and play this node’s music.', `You get a link and a QR code to send them: Pubky Ring makes their account with it. Their bookmarks and collections live on that account. ${HS_READS}`],
+            homeserver: ['They get a Pubky account on this node’s homeserver. They can’t play this node’s music.', `You get a link and a QR code to send them: Pubky Ring makes their account with it. ${HS_READS}`],
+            music: ['They have a Pubky account elsewhere and play this node’s music.', 'Added by their key; they then log in here with Pubky Ring. Their bookmarks and collections stay on their own account.'],
           };
-          const quotaText = (q) => (q == null ? 'the default quota' : q === 'unlimited' || q === 'Unlimited' ? 'no limit' : `${q} MB`);
-          const inviteQr = (inv, hsKey) => (inv.url ? `<div class="notice qrbox" style="margin-top:10px">${inv.qr_svg ? `<div class="qr">${inv.qr_svg}</div>` : ''}<div><p>Send this to ${inv.name ? esc(inv.name) : 'them'}: they scan it with Pubky Ring (or open the link on their phone), and Ring creates their account on this node’s homeserver.</p><p class="muted small">Older Ring versions can’t open it; they can sign up by hand with the code <code>${esc(inv.token || '')}</code>${hsKey ? ` and this homeserver’s key <code>${esc(hsKey)}</code>` : ''}.</p><a class="btn sm" href="${esc(ringUrl(inv.url))}">Open in Pubky Ring</a> <button class="btn sm ghost" data-copylink="${esc(inv.url)}">Copy link</button></div></div>` : '');
-          const loadPeople = async (keep = false) => {
+          const SRC_POLICIES = [
+            ['node', 'This node’s', 'Everyone plays TIDAL, Qobuz and Spotify through the sign-ins made on this node. The people you add can’t sign in to their own.', 'with this node’s music services', 'Everyone plays through this node’s sign-ins'],
+            ['own', 'Their own', 'Everyone signs in to their own accounts; someone without one gets “Open in” instead.', 'with their own TIDAL, Qobuz or Spotify', 'Everyone plays with their own sign-ins'],
+            ['choice', 'They choose', 'This node’s by default; each person may switch to their own.', 'with this node’s music services or their own', 'Each person chooses whose sign-ins they play with'],
+          ];
+          // A storage limit as the node gives it: MB, "unlimited", or nothing set (the homeserver's own)
+          const limitWords = (q) => (q == null ? 'the homeserver’s usual limit' : /^unlimited$/i.test(String(q)) ? 'no limit' : `a limit of ${fmtBytes(Number(q) * 1e6)}`);
+          const inviteQr = (inv, hsKey) => (inv.url ? `<div class="notice qrbox pa-qr">${inv.qr_svg ? `<div class="qr">${inv.qr_svg}</div>` : ''}<div class="pa-qr-text"><p>Send this to ${inv.name ? esc(inv.name) : 'them'}: they scan it with Pubky Ring (or open the link on their phone), and Ring makes their account on this node’s homeserver.</p><p class="muted small">Older Ring versions can’t open it; they can sign up by hand with the code <code>${esc(inv.token || '')}</code>${hsKey ? ` and this homeserver’s key <code>${esc(hsKey)}</code>` : ''}.</p><div class="actions"><a class="btn sm" href="${esc(ringUrl(inv.url))}">Open in Pubky Ring</a><button class="btn sm ghost" data-copylink="${esc(inv.url)}">Copy link</button></div></div></div>` : '');
+          // A dialog with one field: the field has the focus, and Enter in it is the first choice
+          const askText = (opts) => {
+            const asked = choiceDialog(opts);
+            const f = $$('dialog.dialog [data-field]').pop();
+            if (f) { f.focus(); f.select(); f.onkeydown = (e) => { if (e.key !== 'Enter') return; e.preventDefault(); const go = $('.choice', f.closest('dialog')); if (go) go.click(); }; }
+            return asked;
+          };
+          // What Add someone last answered with (the invite, or what to send them): it stays over a redraw
+          let pinvOut = '';
+          // People whose Remove failed on this visit (key -> who they are and what the node said). A
+          // removal can fail after the node already took their music access away, or took them off
+          // its list: Remove stays there for them, since removing again finishes it.
+          const removeFailed = new Map();
+          // The zones were changed and not saved yet: only then is what is ticked kept over a redraw
+          // (a choice nobody made is never carried into a list the node could not read)
+          let zonesTouched = false;
+          // `fresh`: the form that starts again from the node's answer ('invite' after an add, 'zones'
+          // after a save); every other redraw keeps what was typed and ticked. `focus`: where the focus
+          // goes when the control that had it is gone after the redraw (the first of these that is there).
+          const loadPeople = async ({ fresh = '', focus = null } = {}) => {
             const box = $('#peoplebox'); if (!box) return;
-            let r; try { r = await api('GET', '/people'); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
-            // A list the node can't read keeps listeners off every zone: said here, not shown as "every zone"
-            const zl = await api('GET', '/people/zones').catch((e) => ({ zones: [], error: e.message }));
-            const parties = await api('GET', '/party').catch(() => []);
+            let r = null; let rErr = null;
+            const [pr, zl0, pt0] = await Promise.all([
+              api('GET', '/people').catch((e) => { rErr = e.message; return null; }),
+              // A list the node can't read keeps the people you added off every zone: said here, not shown as "every zone"
+              api('GET', '/people/zones').catch((e) => ({ zones: [], error: e.message })),
+              // (a failed read is said as one, with Retry: not shown as "no parties")
+              api('GET', '/party').catch((e) => ({ error: e.message })),
+            ]);
             if (!box.isConnected) return;
-            const hs = r.homeserver || {};
+            if (pr && Array.isArray(pr.people) && Array.isArray(pr.invites)) r = pr; else if (!rErr) rErr = 'the node’s answer was not a list of people';
+            const zl = zl0 && Array.isArray(zl0.zones) ? zl0 : { zones: [], error: 'the node’s answer was not a list of zones' };
+            const partyErr = Array.isArray(pt0) ? null : (pt0 && pt0.error) || 'the node’s answer was not a list';
+            const parties = partyErr ? [] : pt0;
+            const hs = (r && r.homeserver) || {};
             const onHs = !!(hs.configured && hs.reachable);
             const kinds = onHs ? ['homeserver_music', 'homeserver', 'music'] : ['music'];
-            const open = new Set(zl.zones || []);
             const zones = zoneList().filter((z) => z.id !== BROWSER);
-            const person = (p) => {
-              const bits = [ACCESS[p.access] || p.access];
-              if (p.access !== 'music') bits.push(p.homeserver_enabled === false ? '<span class="warn-text">homeserver account off (can read, can’t write)</span>' : `${p.used_bytes != null ? `uses ${fmtBytes(p.used_bytes)} of ` : ''}${quotaText(p.storage_quota_mb)}`);
-              if (p.music_enabled && p.sessions) bits.push(`signed in on ${countOf(p.sessions, 'devices')}`);
-              const ctl = `<label class="check small"><input type="checkbox" data-pmusic="${esc(p.key)}" ${p.music_enabled ? 'checked' : ''}> Music</label>`
-                + (p.access !== 'music' && onHs ? `<label class="check small"><input type="checkbox" data-phs="${esc(p.key)}" ${p.homeserver_enabled === false ? '' : 'checked'}> Homeserver</label><input class="input sm" type="number" min="1" style="width:9em" data-pquota="${esc(p.key)}" placeholder="Quota, MB" aria-label="Storage quota in MB for ${esc(p.name || shortKey(p.key))} (empty: no limit)" value="${typeof p.storage_quota_mb === 'number' ? p.storage_quota_mb : ''}">` : '');
-              return row(p.name ? esc(p.name) : esc(shortKey(p.key)), `${p.name ? keyHtml(p.key) + ' · ' : ''}${bits.join(' · ')}`, ctl);
-            };
-            const invite = (inv) => row(inv.name ? esc(inv.name) : 'Unnamed invite', `${ACCESS[inv.access] || inv.access} · made ${new Date(inv.created_at * 1000).toLocaleDateString()}${inv.url ? `<details class="small"><summary>Show the invite again</summary>${inviteQr(inv, hs.public_key)}</details>` : ''}`, `<button class="btn sm ghost" data-pinv-del="${esc(inv.id)}" title="An invite that was sent stays usable on the homeserver; this only takes it off the list">Forget</button>`);
-            // On phones each section folds (UX sweep 2026-11-01 S2); what was open stays open when
-            // the page reloads after an action
+            // The zones open to the people you add: none saved is every zone, unless the node says no
+            // zone at all is the choice (`none`, or from a node before that the list of one zone
+            // without a name: they then play in their own browser or app only). One that is saved but
+            // not among the node's zones now stays in the list (and is saved again), said as "not here
+            // now".
+            const noZone = !zl.error && (zl.none === true || noZoneList(zl.zones));
+            const open = zl.zones.filter((id) => id !== '');
+            const zoneName = (id) => { const z = zones.find((x) => x.id === id) || state.zones[id]; return z ? z.name : null; };
+            const gone = open.filter((id) => !zones.some((z) => z.id === id));
+            // (the node's settings could not be read: no choice is known, and none is shown as made)
+            const policyRow = ns.unread ? null : SRC_POLICIES.find(([v]) => v === ns.sources_policy) || SRC_POLICIES[1];
+            const policy = policyRow ? policyRow[0] : '';
+            const settingsErr = (fk) => `<div class="set-row" data-pa-error><div class="set-label"><p class="set-help pa-err" role="alert">Couldn’t read this node’s settings: ${esc(ns.unread)}</p></div><div class="set-ctl"><button class="btn sm" data-pa-reload data-fk="${fk}">Retry</button></div></div>`;
+            const zonesPhrase = zl.error ? 'on no zone until the zones are saved again'
+              : !open.length ? 'on every zone'
+                : `on ${listWords([...open.map(zoneName).filter(Boolean), ...(open.some((id) => !zoneName(id)) ? [`${countOf(open.filter((id) => !zoneName(id)).length, 'zones')} not here now`] : [])])}`;
+            // On phones each section folds (UX sweep 2026-11-01 S2); what was open stays open when the
+            // page is drawn again after an action, and so does a list opened inside a row
             const was = new Map($$('[data-fold]', box).map((d) => [d.dataset.fold, d.open]));
-            const draft = keep ? { kind: ($('input[name="pinvkind"]:checked', box) || {}).value, ...Object.fromEntries(['pinvname', 'pinvquota', 'pinvkey'].map((id) => [id, ($(`#${id}`, box) || {}).value || ''])) } : null;
-            const sec = (id, title, body, open) => (shellMode() === 'phone'
-              ? `<details class="set-group set-fold" data-fold="${id}" ${(was.has(id) ? was.get(id) : open) ? 'open' : ''}><summary><h3 class="set-h">${title}</h3></summary><div class="set-rows">${body}</div></details>`
-              : group(title, body));
-            box.innerHTML = sec('homeserver', 'This node’s homeserver', hs.configured
-                ? row(onHs ? `Pubky homeserver ${esc(hs.version || '')}` : 'Not reachable', onHs ? `${countOf(hs.users || 0, 'accounts')}${hs.disabled_users ? ` (${hs.disabled_users} turned off)` : ''} · ${fmtBytes((hs.disk_used_mb || 0) * 1e6)} used · whoever runs it (you) can read every account’s files, <code>/priv</code> included, so tell the people you invite.` : esc(hs.error || 'The node can’t reach its homeserver’s admin API.'), '')
-                : row('No homeserver on this node', 'Installed without its own homeserver (the bundled install has one). You can still let someone with a Pubky account elsewhere play this node’s music.', ''), false)
-              + sec('invite', 'Invite someone', block('', '', `<div class="ways" role="radiogroup" aria-label="What they get">${kinds.map((k) => `<label class="way ${k === kinds[0] ? 'on' : ''}"><input type="radio" name="pinvkind" value="${k}" ${k === kinds[0] ? 'checked' : ''} aria-describedby="pinv-${k}"><span class="way-text"><span class="way-name">${ACCESS[k]}</span><span class="way-note" id="pinv-${k}">${INVITE_KINDS[k][0]}</span><span class="way-more small" ${k === kinds[0] ? '' : 'hidden'}>${INVITE_KINDS[k][1]}</span></span></label>`).join('')}</div><div class="toolbar invite-fields"><input class="input" id="pinvname" placeholder="Name (optional)" aria-label="Their name"><input class="input" id="pinvquota" type="number" min="1" placeholder="Quota, MB (empty: no limit)" aria-label="Storage quota in MB" ${onHs ? '' : 'hidden'}></div><div class="keyfield" id="pinvkeyrow" ${onHs ? 'hidden' : ''}><input class="input" id="pinvkey" placeholder="Their Pubky key" aria-label="Their Pubky key" aria-describedby="pinvkeyerr" autocomplete="off" autocapitalize="off" spellcheck="false"><button class="btn ghost" type="button" id="pinvpaste" hidden>${icon('paste')} Paste</button><button class="btn ghost" type="button" id="pinvscan" hidden>${icon('scan')} Scan QR</button></div><p class="field-err small" id="pinvkeyerr" role="alert" hidden></p><div class="actions invite-go"><button class="btn primary" id="pinvgo">${icon('plus')} Create invite</button></div><div id="pinvout" aria-live="polite"></div>`), !r.people.length)
-              + (r.invites.length ? sec('invites', 'Not used yet', r.invites.map(invite).join(''), true) : '')
-              + sec('people', 'People', r.people.length ? r.people.map(person).join('') : row('Nobody yet', 'People you invite show here once they have signed up.', ''), r.people.length > 0)
-              + sec('party', 'Party', (parties.map((pt) => row(esc(pt.name), `${pt.zone_name ? `On ${esc(pt.zone_name)} · ` : ''}until ${new Date(pt.expires_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })} · ${countOf(pt.guests.length, 'guests')} · ${countOf(pt.added, 'songs')} added · ${pt.adds_per_hour} per guest per hour, ${pt.waiting_per_guest} waiting at once<details class="small"><summary>Show the guest link</summary><div class="notice qrbox" style="margin-top:10px">${pt.qr_svg ? `<div class="qr">${pt.qr_svg}</div>` : ''}<div><p>Guests scan this or open the link: they give a name and add songs from the library to this zone. No account needed.</p><p><code>${esc(pt.url)}</code></p><button class="btn sm ghost" data-copylink="${esc(pt.url)}">Copy link</button></div></div></details>`, `<button class="btn sm ghost" data-party-end="${esc(pt.id)}">End party</button>`)).join(''))
-                + (zones.length ? block(parties.length ? 'Start another party' : 'Start a party', 'Anyone with the link adds songs from the library to one zone, without an account. Their songs play after the current one, in the order they came; the limits are checked by the node.', `<div class="toolbar"><select class="input" id="ptzone" aria-label="Party zone">${zones.map((z) => `<option value="${esc(z.id)}">${esc(z.name)}</option>`).join('')}</select><input class="input" id="ptname" placeholder="Name (optional)" aria-label="Party name"><select class="input" id="pthours" aria-label="How long the link works">${[[3, '3 hours'], [6, '6 hours'], [12, '12 hours'], [24, 'A day'], [72, '3 days']].map(([h, l]) => `<option value="${h}" ${h === 6 ? 'selected' : ''}>${l}</option>`).join('')}</select></div><div class="toolbar" style="margin-top:8px"><label class="small" for="ptadds">Songs per guest per hour</label><input class="input" id="ptadds" type="number" min="1" max="100" value="5" style="width:6em"><label class="small" for="ptwait">Waiting at once</label><input class="input" id="ptwait" type="number" min="1" max="50" value="3" style="width:6em"><button class="btn primary" id="ptgo">Start party</button></div>`) : row('Start a party', 'Needs a zone to play on.', '')), false)
-              + sec('zones', 'Zones listeners may play on', block('', zl.error ? `<span class="joberr">${esc(zl.error)}</span> Until the list is set again, listeners may play on no zone: tick the zones and save.` : 'People with music access can play on these. None checked: every zone.', (zones.length ? `<div class="chips" id="pzones">${zones.map((z) => `<label class="chip"><input type="checkbox" value="${esc(z.id)}" style="margin:0 6px 0 0" ${open.has(z.id) ? 'checked' : ''}> ${esc(z.name)}</label>`).join('')}</div><div class="actions" style="margin-top:10px"><button class="btn" id="pzsave">Save zones</button></div>` : '<p class="muted small">No zones yet.</p>')), false);
-            // The kind of invite: radio cards, the chosen one's details shown (S1)
-            const kindOf = () => ($('input[name="pinvkind"]:checked', box) || {}).value || kinds[0];
-            const keyIn = $('#pinvkey', box); const keyErr = $('#pinvkeyerr', box);
-            if (draft) {
-              const k = $$('input[name="pinvkind"]', box).find((i) => i.value === draft.kind); if (k) k.checked = true;
-              ['pinvname', 'pinvquota', 'pinvkey'].forEach((id) => { $(`#${id}`, box).value = draft[id]; });
-            }
-            // Turning a desktop window into a phone (or back) folds the sections (or unfolds them)
-            box.reshell = () => loadPeople(true);
-            const fit = () => {
-              const k = kindOf(); const music = k === 'music';
-              $$('.way', box).forEach((w) => { const on = w.querySelector('input').value === k; w.classList.toggle('on', on); w.querySelector('.way-more').hidden = !on; });
-              $('#pinvquota', box).hidden = music; $('#pinvkeyrow', box).hidden = !music; if (!music) keyErr.hidden = true;
+            const wasOpen = new Set($$('details[data-keepopen]', box).filter((d) => d.open).map((d) => d.dataset.keepopen));
+            const draft = {
+              invite: fresh !== 'invite' && $('#pinvname', box) ? { kind: ($('input[name="pinvkind"]:checked', box) || {}).value, ...Object.fromEntries(['pinvname', 'pinvquota', 'pinvkey'].map((id) => [id, ($(`#${id}`, box) || {}).value || ''])) } : null,
+              zones: fresh !== 'zones' && zonesTouched && $('#pzsave', box) ? { mode: ($('input[name="pzmode"]:checked', box) || {}).value, picked: $$('#pzones input:checked', box).map((i) => i.value) } : null,
             };
-            $$('input[name="pinvkind"]', box).forEach((i) => i.onchange = fit); fit();
-            // Their key: typed, pasted or scanned; any of the spellings Pubky apps show
-            const setKey = (raw, quiet) => { const k = keyFrom(raw); if (k) keyIn.value = k; else if (raw != null && !quiet) keyIn.value = String(raw).trim(); checkKey(); return k; };
-            const checkKey = () => { const v = keyIn.value.trim(); const bad = !!v && !keyFrom(v); keyErr.hidden = !bad; keyErr.textContent = bad ? 'That isn’t a Pubky key: it is 52 letters and digits, as Pubky Ring shows it.' : ''; keyIn.setAttribute('aria-invalid', String(bad)); };
-            keyIn.onchange = () => setKey(keyIn.value);
-            keyIn.oninput = () => { if (!keyErr.hidden) checkKey(); };
-            const paste = $('#pinvpaste', box); paste.hidden = !(navigator.clipboard && navigator.clipboard.readText);
-            paste.onclick = async () => { try { const t = await navigator.clipboard.readText(); if (!setKey(t, true)) toast('The clipboard has no Pubky key', 'error'); } catch { toast(`${appPlatform() ? 'The app' : 'The browser'} didn’t allow reading the clipboard: paste into the field instead`, 'error'); } };
-            const scan = $('#pinvscan', box); scan.hidden = !canScan();
-            scan.onclick = async () => { const k = await scanKey(); if (k) setKey(k); };
-            $('#pinvgo', box).onclick = async () => {
-              const kind = kindOf();
-              const body = { access: kind, name: $('#pinvname', box).value.trim() || undefined };
-              if (kind === 'music') { const k = keyFrom(keyIn.value); if (!k) { if (keyIn.value.trim()) checkKey(); else toast('Paste or scan their Pubky key', 'error'); keyIn.focus(); return; } body.key = k; } else { const q = Number($('#pinvquota', box).value); if (q > 0) body.storage_quota_mb = Math.round(q); }
+            if (!draft.zones) zonesTouched = false;
+            const act = document.activeElement;
+            const had = !!act && act !== document.body && box.contains(act);
+            const fkWas = had ? ((act.closest('[data-fk]') || {}).dataset || {}).fk || act.id || null : null;
+            const sec = (id, title, body, openFirst) => (shellMode() === 'phone'
+              ? `<details class="set-group set-fold" data-fold="${id}" ${(was.has(id) ? was.get(id) : openFirst) ? 'open' : ''}><summary><h3 class="set-h">${title}</h3></summary><div class="set-rows">${body}</div></details>`
+              : group(title, body));
+            // A list or a link that opens inside a row (never inside the row's <p>)
+            const fold = (key, summary, body) => `<details class="pa-fold" data-keepopen="${esc(key)}" ${wasOpen.has(key) ? 'open' : ''}><summary data-fk="${esc(key)}">${summary}</summary>${body}</details>`;
+            const errRow = (text, fk) => `<div class="set-row" data-pa-error><div class="set-label"><p class="set-help pa-err" role="alert">${esc(text)}</p></div><div class="set-ctl"><button class="btn sm" data-pa-retry data-fk="${fk}">Retry</button></div></div>`;
+
+            // 1. Who can use this node: you, then each person with what they can do in one sentence
+            const who = (p) => p.name || 'this person';
+            // People whose removal did not finish, as the node remembers them (GET /v1/people `unfinished`)
+            const unfinished = r && Array.isArray(r.unfinished) ? r.unfinished : [];
+            const whoLabel = (p) => p.name || `the person with the key ${shortKey(p.key)}`;
+            const plays = (p) => !!p.music_enabled && p.access !== 'homeserver';
+            const signInsOf = (p) => (Array.isArray(p.sign_ins) ? p.sign_ins : []);
+            const says = (p) => (plays(p) ? `Plays music here${noZone ? ' in their own browser or app only' : `, ${zonesPhrase}`}${policyRow ? `, ${policyRow[3]}` : ''}.` : p.access === 'homeserver' ? 'Has storage on this node’s homeserver. No music.' : 'Music is switched off for them.');
+            const store = (p) => {
+              if (p.access === 'music') return '';
+              const off = p.homeserver_enabled === false ? '<span class="warn-text">Their homeserver account is switched off: they can read and delete, not save.</span> ' : '';
+              const used = p.used_bytes != null ? `${fmtBytes(p.used_bytes)} used` : '';
+              const facts = [used, onHs ? limitWords(p.storage_quota_mb) : ''].filter(Boolean).join(', ');
+              return off || facts ? `<p class="set-help" data-pstore>${off}${facts ? `Storage on this node’s homeserver: ${esc(facts)}.` : ''}</p>` : '';
+            };
+            const signIns = (p) => {
+              const list = signInsOf(p);
+              if (!list.length) return plays(p) ? '<p class="set-help" data-pnone>Not signed in anywhere.</p>' : '';
+              return fold(`si:${p.key}`, `Signed in on ${list.length} ${list.length === 1 ? 'browser or app' : 'browsers or apps'}${plays(p) ? '' : ' (not usable while music is off)'}`,
+                `<div class="pa-silist">${list.map((s) => `<div class="pa-si" data-psi="${esc(s.id)}"><div class="pa-si-text"><div class="pa-si-name">${esc(signInName(s))}</div><div class="set-help">${esc(signInNote(s))}</div></div><button class="btn sm" data-psi-end="${esc(s.id)}" data-pkey="${esc(p.key)}" data-fk="psi:${esc(p.key)}:${esc(s.id)}" aria-label="Sign out ${esc(signInName(s))} of ${esc(whoLabel(p))}, ${esc(signInNote(s))}">Sign out</button></div>`).join('')}<div class="pa-si"><div class="pa-si-text set-help">They log in again with Pubky Ring.</div><button class="btn sm" data-psi-all="${esc(p.key)}" data-fk="psiall:${esc(p.key)}" aria-label="Sign out ${esc(whoLabel(p))} everywhere">Sign out everywhere</button></div></div>`);
+            };
+            const acts = (p) => {
+              const k = esc(p.key); const a = esc(whoLabel(p));
+              const music = plays(p) ? 'Switch music off' : 'Switch music on';
+              const hsOn = p.homeserver_enabled !== false;
+              return `<button class="btn sm" data-prename="${k}" data-fk="rename:${k}" aria-label="Rename ${a}">Rename</button>`
+                + `<button class="btn sm" data-pmusic="${k}" data-to="${plays(p) ? 'off' : 'on'}" data-fk="music:${k}" aria-label="${music} for ${a}">${music}</button>`
+                // (their homeserver account: only for an account on this node's homeserver, while it answers)
+                + (p.access !== 'music' && onHs ? `<button class="btn sm" data-phs="${k}" data-to="${hsOn ? 'off' : 'on'}" data-fk="hs:${k}" aria-label="Switch the homeserver account ${hsOn ? 'off' : 'on'} for ${a}">Switch homeserver account ${hsOn ? 'off' : 'on'}</button><button class="btn sm" data-pquota="${k}" data-fk="quota:${k}" aria-label="Storage limit for ${a}">Storage limit…</button>` : '')
+                // (someone who only has a homeserver account and no sign-in left has nothing here to remove:
+                // the account itself stays on the homeserver either way; unless their last Remove failed)
+                + (p.access === 'homeserver' && !signInsOf(p).length && !removeFailed.has(p.key) && !unfinished.includes(p.key) ? '' : `<button class="btn sm danger" data-premove="${k}" data-fk="remove:${k}" aria-label="Remove ${a}">Remove…</button>`);
+            };
+            // (what the node said on this visit; after a reload the node only says that it did not finish)
+            const failedNote = (key) => (removeFailed.has(key) ? `<p class="set-help pa-err" role="alert" data-premove-err>Removing them did not finish: ${esc(removeFailed.get(key).error)} Remove again to finish it.</p>` : unfinished.includes(key) ? '<p class="set-help pa-err" data-premove-err>Removing them did not finish. Remove again to finish it.</p>' : '');
+            const person = (p) => `<div class="set-row set-block pa-person" data-person="${esc(p.key)}"><div class="set-label"><div class="set-name">${p.name ? esc(p.name) : 'No name yet'}</div><p class="set-help" data-psays>${esc(says(p))}</p>${failedNote(p.key)}${store(p)}${signIns(p)}${fold(`key:${p.key}`, 'Show key', `<div class="pa-keyrow"><code class="pa-code">${esc(p.key)}</code><button class="btn sm ghost" data-copykey="${esc(p.key)}" aria-label="Copy the key of ${esc(whoLabel(p))}">Copy key</button></div>`)}</div><div class="actions pa-acts" role="group" aria-label="Change ${esc(whoLabel(p))}">${acts(p)}</div></div>`;
+            const youRow = row('You', 'Owner: you can change everything on this node.', '');
+            // (someone the node already took off its list while their removal failed: still here, to finish it)
+            const listed = (key) => !!r && r.people.some((p) => p.key === key);
+            const halfGone = [...removeFailed].filter(([key]) => !listed(key)).map(([key, f]) => ({ key, name: f.name, access: f.access, sign_ins: [] }))
+              // (and the ones the node remembers from before this visit: it keeps no name for them)
+              .concat(unfinished.filter((key) => !listed(key) && !removeFailed.has(key)).map((key) => ({ key, name: null, access: 'music', sign_ins: [], gone: true })));
+            const gonePerson = (p) => `<div class="set-row set-block pa-person" data-person="${esc(p.key)}" data-pgone><div class="set-label"><div class="set-name">${p.name ? esc(p.name) : p.gone ? `Someone you removed (key ${esc(shortKey(p.key))})` : 'No name yet'}</div>${failedNote(p.key)}</div><div class="actions pa-acts" role="group" aria-label="Change ${esc(whoLabel(p))}"><button class="btn sm danger" data-premove="${esc(p.key)}" data-fk="remove:${esc(p.key)}" aria-label="Remove ${esc(whoLabel(p))}">Remove…</button></div></div>`;
+            const whoBody = youRow + (rErr ? errRow(`Couldn’t read who else can use this node: ${rErr}`, 'retry-people')
+              : r.people.length || halfGone.length ? r.people.map(person).join('') : row('Nobody else yet', 'The people you add show here.', ''))
+              + halfGone.map(gonePerson).join('');
+
+            // 2. Add someone: the three kinds, then the invites not used yet
+            const hsNote = !r ? '' : !hs.configured ? 'This node has no homeserver of its own, so the people you add need a Pubky account elsewhere.'
+              : !onHs ? `This node’s homeserver isn’t answering${hs.error ? ` (${esc(hs.error)})` : ''}, so only someone with a Pubky account elsewhere can be added right now.` : '';
+            const invite = (inv) => `<div class="set-row pa-top" data-pinv="${esc(inv.id)}"><div class="set-label"><div class="set-name">${inv.name ? esc(inv.name) : 'Invite without a name'}</div><p class="set-help">${esc(ACCESS[inv.access] || inv.access)} · made ${esc(new Date(inv.created_at * 1000).toLocaleDateString())}${inv.storage_quota_mb ? ` · ${esc(limitWords(inv.storage_quota_mb))}` : ''}</p>${inv.url ? fold(`inv:${inv.id}`, 'Show the invite again', inviteQr(inv, hs.public_key)) : ''}</div><div class="set-ctl"><button class="btn sm" data-pinv-del="${esc(inv.id)}" data-fk="invdel:${esc(inv.id)}" aria-label="Take ${inv.name ? `the invite for ${esc(inv.name)}` : 'this invite'} off the list">Take off the list</button></div></div>`;
+            const addBody = !r ? '' : block('', hsNote, `<div class="ways" role="radiogroup" aria-label="What they get">${kinds.map((k) => `<label class="way ${k === kinds[0] ? 'on' : ''}"><input type="radio" name="pinvkind" value="${k}" ${k === kinds[0] ? 'checked' : ''} aria-describedby="pinv-${k}"><span class="way-text"><span class="way-name">${ACCESS[k]}</span><span class="way-note" id="pinv-${k}">${INVITE_KINDS[k][0]}</span><span class="way-more small" ${k === kinds[0] ? '' : 'hidden'}>${INVITE_KINDS[k][1]}</span></span></label>`).join('')}</div><div class="toolbar invite-fields"><input class="input" id="pinvname" placeholder="Their name (optional)" aria-label="Their name"><input class="input" id="pinvquota" type="number" min="1" placeholder="Storage limit in MB (optional)" aria-label="Storage limit in MB (empty: the homeserver’s usual limit)" ${onHs ? '' : 'hidden'}></div><div class="keyfield" id="pinvkeyrow" ${onHs ? 'hidden' : ''}><input class="input" id="pinvkey" placeholder="Their Pubky key" aria-label="Their Pubky key" aria-describedby="pinvkeyerr" autocomplete="off" autocapitalize="off" spellcheck="false"><button class="btn ghost" type="button" id="pinvpaste" hidden>${icon('paste')} Paste</button><button class="btn ghost" type="button" id="pinvscan" hidden>${icon('scan')} Scan QR</button></div><p class="field-err small" id="pinvkeyerr" role="alert" hidden></p><div class="actions invite-go"><button class="btn primary" id="pinvgo">${icon('plus')} <span data-pinvgo-label>Create invite</span></button></div><div id="pinvout" aria-live="polite">${pinvOut}</div>`)
+              + (r.invites.length ? `<div class="set-row set-block" data-pinv-head><div class="set-label"><div class="set-name">Invites not used yet</div><p class="set-help">Taking one off this list doesn’t cancel it: an invite already sent stays usable on the homeserver.</p></div></div>${r.invites.map(invite).join('')}` : '');
+
+            // 3. What the people you add can and can't do, whoever they are
+            const canBody = `<div class="set-row set-block" id="pcando">${canLists({ has: (cap) => LISTENER_CAN.has(cap) && (cap !== 'own_sign_in' || (!!policy && policy !== 'node')) && !(cap === 'zone_use' && noZone), their: 'their', owners: 'your', zones: 'Use the zones you open to them', noZone: noZone ? 'Play on a zone: none is open to them' : '', canTitle: 'They can', cantTitle: 'They can’t' })}</div>`;
+
+            // 4. The zones they can play on: every zone, only the ones ticked (never "only these" with
+            // none ticked), or no zone at all
+            const zoneOpts = [...zones.map((z) => [z.id, z.name]), ...gone.map((id) => [id, zoneName(id) || `${id} (not here now)`])];
+            const zMode = zl.error ? '' : noZone ? 'none' : open.length ? 'some' : 'all';
+            const zonesBody = block('', zl.error ? `<span class="pa-err">Couldn’t read the zones: ${esc(zl.error)}.</span> Until they are saved again, the people you add can play on no zone: choose and save.` : 'The same for everyone you add.',
+              zoneOpts.length
+                ? `<div class="pa-zmode" role="radiogroup" aria-label="Zones the people you add can play on"><label class="check"><input type="radio" name="pzmode" value="all" ${zMode === 'all' ? 'checked' : ''}> Every zone</label><label class="check"><input type="radio" name="pzmode" value="some" ${zMode === 'some' ? 'checked' : ''}> Only these</label><label class="check"><input type="radio" name="pzmode" value="none" aria-describedby="pznonehelp" ${zMode === 'none' ? 'checked' : ''}> No zone</label></div><p class="set-help pa-zhelp" id="pznonehelp" ${zMode === 'none' ? '' : 'hidden'}>They play in their own browser or app only.</p><div class="chips pa-zones" id="pzones" role="group" aria-label="Only these zones" ${zMode === 'some' ? '' : 'hidden'}>${zoneOpts.map(([id, name]) => `<label class="chip"><input type="checkbox" value="${esc(id)}" ${open.includes(id) ? 'checked' : ''}> ${esc(name)}</label>`).join('')}</div><p class="field-err small" id="pzerr" role="alert" hidden></p><div class="actions"><button class="btn" id="pzsave">Save zones</button></div>`
+                : '<p class="muted small">No zones yet.</p>');
+
+            // 5. Whose TIDAL, Qobuz and Spotify sign-ins they play with (owner, 2026-11-03)
+            const srcBody = !policyRow ? settingsErr('reload-services') : block('', `${policyRow[2]} Switching keeps every sign-in, yours and theirs.`, `<div class="chips pa-policy" role="radiogroup" aria-label="Whose music services the people you add play with">${SRC_POLICIES.map(([v, l]) => `<button class="chip scope ${policy === v ? 'on' : ''}" role="radio" aria-checked="${policy === v}" data-srcpolicy="${v}" data-fk="policy:${v}">${l}</button>`).join('')}</div>`);
+
+            // 6. The browsers and apps signed in as the owner; this one first, with Log out
+            const mineBody = '<div id="pmine" class="pa-rows"></div>';
+
+            // 7. Apps with a password of their own, then the password for apps (the node's API token)
+            const appsBody = block('', 'Each app you connect (Home Assistant, a Subsonic app, a script) can have a password of its own. With it the app plays, controls and groups zones and browses the library and your collections; it can’t change settings, people or the library. Removing one stops that app alone.', '<div id="papps" class="pa-rows"></div>');
+            const exposed = ns.api_token_exposed_at ? `<div class="notice warn" role="alert">This password was in a saved queue’s links, where everyone who could use that zone could read it (noticed ${esc(new Date(ns.api_token_exposed_at * 1000).toLocaleString())}). ${ns.token_replaceable ? 'Make a new one.' : 'Change <code>PM_TOKEN</code> (or <code>[api] token</code>) and restart the node.'}</div>` : '';
+            const APPS_USE = 'It can do everything you can. Apps can log in with it, but one with a password of its own (above) can do only what an app needs.';
+            const passBody = ns.unread ? settingsErr('reload-password') : ns.token_replaceable
+              ? block('', `${APPS_USE} A new one stops the old one at once: every app then needs the new one, and your other browsers are logged out (log in again with Pubky Ring). The people you added stay signed in.`, `${exposed}<div class="actions"><button class="btn" id="tokennew">Make a new password</button></div><div id="tokenout" aria-live="polite"></div>`)
+              : block('', `${APPS_USE} Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): it is changed there.`, `${exposed}<div class="actions"><a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a></div>`);
+
+            // 8. Party: a guest link for one zone, no account
+            const partyRow = (pt) => `<div class="set-row pa-top" data-party="${esc(pt.id)}"><div class="set-label"><div class="set-name">${esc(pt.name)}</div><p class="set-help">${pt.zone_name ? `On ${esc(pt.zone_name)} · ` : ''}until ${esc(new Date(pt.expires_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }))} · ${countOf((pt.guests || []).length, 'guests')} · ${countOf(pt.added || 0, 'songs')} added · ${esc(pt.adds_per_hour)} per guest per hour, ${esc(pt.waiting_per_guest)} waiting at once</p>${fold(`party:${pt.id}`, 'Show the guest link', `<div class="notice qrbox pa-qr">${pt.qr_svg ? `<div class="qr">${pt.qr_svg}</div>` : ''}<div class="pa-qr-text"><p>Guests scan this or open the link: they give a name and add songs from the library to this zone. No account needed.</p><p><code class="pa-code">${esc(pt.url)}</code></p><div class="actions"><button class="btn sm ghost" data-copylink="${esc(pt.url)}">Copy link</button></div></div></div>`)}</div><div class="set-ctl"><button class="btn sm" data-party-end="${esc(pt.id)}" data-fk="partyend:${esc(pt.id)}" aria-label="End the party ${esc(pt.name)}">End party</button></div></div>`;
+            const partyBody = (partyErr ? errRow(`Couldn’t read the parties: ${partyErr}`, 'retry-party') : parties.map(partyRow).join(''))
+              + (zones.length ? block(parties.length ? 'Start another party' : 'Start a party', 'Anyone with the link adds songs from the library to one zone, without an account. Their songs play after the current one, in the order they came; the node checks the limits.', `<div class="toolbar"><select class="input" id="ptzone" aria-label="Party zone">${zones.map((z) => `<option value="${esc(z.id)}">${esc(z.name)}</option>`).join('')}</select><input class="input" id="ptname" placeholder="Name (optional)" aria-label="Party name"><select class="input" id="pthours" aria-label="How long the link works">${[[3, '3 hours'], [6, '6 hours'], [12, '12 hours'], [24, 'A day'], [72, '3 days']].map(([h, l]) => `<option value="${h}" ${h === 6 ? 'selected' : ''}>${l}</option>`).join('')}</select></div><div class="toolbar pa-limits"><label class="small" for="ptadds">Songs per guest per hour</label><input class="input pa-num" id="ptadds" type="number" min="1" max="100" value="5"><label class="small" for="ptwait">Waiting at once</label><input class="input pa-num" id="ptwait" type="number" min="1" max="50" value="3"><button class="btn primary" id="ptgo">Start party</button></div>`) : row('Start a party', 'Needs a zone to play on.', ''));
+
+            // 9. What belongs to this screen's subject but is set elsewhere
+            const rt = $('#settab-remote', main); const remoteTab = rt ? rt.textContent.trim() : ''; // (the tab is there only where a tunnel can be set up)
+            const moreBody = (remoteTab ? row('Use this node away from home', 'A tunnel or a domain, so you and the people you add reach it when not on your network.', `<button class="btn ghost" data-settab="remote">Open ${esc(remoteTab)}</button>`) : '')
+              + row('This node’s own Pubky identity', 'The Pubky account this node is signed in as: yours. Your bookmarks, collections and tags are kept on it.', '<button class="btn ghost" data-settab="accounts">Open My accounts</button>');
+
+            box.innerHTML = sec('who', 'Who can use this node', whoBody, true)
+              + (r ? sec('invite', 'Add someone', addBody, !r.people.length || r.invites.length > 0) : '')
+              + sec('cando', 'What people you add can do', canBody, false)
+              + sec('zones', 'Zones they can play on', zonesBody, !!zl.error)
+              + sec('services', 'Whose music services they play with', srcBody, false)
+              + sec('mine', 'Browsers and apps signed in as you', mineBody, false)
+              + sec('apps', 'Apps with their own password', appsBody, false)
+              + sec('password', 'Password for apps (API token)', passBody, !!ns.api_token_exposed_at)
+              + sec('party', 'Party', partyBody, false)
+              + group('Also in Settings', moreBody);
+            box.tabIndex = -1;
+            // Turning a desktop window into a phone (or back) folds the sections (or unfolds them)
+            box.reshell = () => loadPeople();
+            $$('[data-settab]', box).forEach(goTab);
+            $$('[data-pa-retry]', box).forEach((b) => b.onclick = () => loadPeople());
+            // (the node's settings are read with the rest of Settings: the page is drawn again)
+            $$('[data-pa-reload]', box).forEach((b) => b.onclick = () => render());
+            mountAppPasswords($('#papps', box));
+            mountSignIns($('#pmine', box), {
+              control: state.token ? `<button class="btn" id="logout">${icon('logout')} Log out</button>` : '',
+              kept: keptSignIns(),
+              wire: (host) => { const lo = $('#logout', host); if (lo) lo.onclick = logOut; },
+            });
+
+            // ---- the people ----
+            const personOf = (key) => (r && r.people.find((p) => p.key === key)) || halfGone.find((p) => p.key === key) || null;
+            const change = async (p, body, done, to) => { try { await api('PATCH', `/people/${encodeURIComponent(p.key)}`, body); toast(done); } catch (e) { toast(e.message, 'error'); } await loadPeople({ focus: to }); };
+            $$('[data-prename]', box).forEach((b) => b.onclick = async () => {
+              const p = personOf(b.dataset.prename); if (!p) return;
+              const a = await askText({ title: p.name ? `Rename ${p.name}` : 'Give them a name', text: 'The name this screen shows for them.', field: { label: 'Name', value: p.name || '' }, choices: [{ label: 'Save', value: true, primary: true }] });
+              if (!a || a.text === (p.name || '')) return;
+              await change(p, { name: a.text }, a.text ? `Renamed to ${a.text}` : 'Name removed');
+            });
+            $$('[data-pmusic]', box).forEach((b) => b.onclick = async () => {
+              const p = personOf(b.dataset.pmusic); if (!p) return;
+              const on = b.dataset.to === 'on';
+              // Off: the node refuses their sign-ins from now on (their pages go back to Log in) and forgets
+              // their registered devices and what those keep for offline. Nothing here promises more.
+              if (!on && !(await choiceDialog({ title: `Switch music off for ${who(p)}?`, text: `They can’t ${p.access === 'music' ? 'use this node' : 'play music here'} until you switch it back on. Their browsers and apps go back to Log in, and the node forgets their devices and what those keep for offline.${p.access === 'music' ? '' : ' Their homeserver account is not touched.'}`, choices: [{ label: 'Switch music off', value: true, primary: true, danger: true }] }))) return;
+              await change(p, { music: on }, on ? `Music is on for ${who(p)}` : `Music is off for ${who(p)}`);
+            });
+            $$('[data-phs]', box).forEach((b) => b.onclick = async () => {
+              const p = personOf(b.dataset.phs); if (!p) return;
+              const on = b.dataset.to === 'on';
+              if (!on && !(await choiceDialog({ title: `Switch the homeserver account off for ${who(p)}?`, text: 'They can still read and delete what is there, but can’t save anything new, their bookmarks and collections included, until you switch it back on.', choices: [{ label: 'Switch the account off', value: true, primary: true }] }))) return;
+              await change(p, { homeserver_enabled: on }, on ? `The homeserver account is on for ${who(p)}` : `The homeserver account is off for ${who(p)}: they can read and delete, not save`);
+            });
+            // The storage limit: a number, "no limit" or the homeserver's usual one, each chosen in
+            // so many words (an emptied field never means "no limit")
+            $$('[data-pquota]', box).forEach((b) => b.onclick = async () => {
+              const p = personOf(b.dataset.pquota); if (!p) return;
+              let typed = typeof p.storage_quota_mb === 'number' ? String(p.storage_quota_mb) : '';
+              // (what was wrong with the last answer is said in the dialog that asks again, where it is read)
+              let wrong = '';
+              for (;;) {
+                const a = await askText({ title: `Storage limit for ${who(p)}`, text: `${wrong}Now: ${limitWords(p.storage_quota_mb)}. How much they can keep on this node’s homeserver.`, field: { label: 'Limit in MB', value: typed }, choices: [{ label: 'Set this limit', value: 'set', primary: true }, { label: 'No limit', value: 'unlimited', note: 'They can fill this homeserver’s disk' }, { label: 'The homeserver’s usual limit', value: 'usual', note: 'What an account gets when nothing is set for it' }] });
+                if (!a) return;
+                if (a.value === 'unlimited') { await change(p, { storage_quota_mb: 'unlimited' }, `${p.name || 'This person'} has no storage limit now`); return; }
+                if (a.value === 'usual') { await change(p, { storage_quota_mb: null }, `${p.name || 'This person'} has the homeserver’s usual limit now`); return; }
+                const mb = /^\d+$/.test(a.text) ? Number(a.text) : 0;
+                if (mb > 0) { await change(p, { storage_quota_mb: mb }, `Storage limit for ${who(p)}: ${fmtBytes(mb * 1e6)}`); return; }
+                typed = a.text; wrong = `${a.text ? `“${a.text}” is not a limit` : 'No limit was typed'}: type a whole number of MB, like 500, or choose one of the other two. `;
+              }
+            });
+            $$('[data-premove]', box).forEach((b) => b.onclick = async () => {
+              const p = personOf(b.dataset.premove); if (!p) return;
+              const stays = p.access !== 'music';
+              const go = await choiceDialog({ title: `Remove ${who(p)}?`, text: `They are signed out everywhere, and what this node keeps for them goes: their music service sign-ins here, preferences, devices and problem reports. Their Pubky account and what is on their own homeserver are not touched.${stays ? ' Their account on this node’s homeserver stays, so they stay in this list without music.' : ''}`, choices: [{ label: stays ? 'Remove their music access' : 'Remove', value: true, primary: true, danger: true }] });
+              if (!go) return;
+              const keys = r ? r.people.map((x) => x.key) : []; const at = keys.indexOf(p.key);
               try {
-                const v = await api('POST', '/people/invites', body);
-                if (kind === 'music') { toast('Added: they can sign in with Pubky Ring now'); loadPeople(); return; }
+                await api('DELETE', `/people/${encodeURIComponent(p.key)}`);
+                removeFailed.delete(p.key);
+                pinvOut = ''; // (what Add someone said to send them no longer holds)
+                toast(stays ? `${p.name || 'This person'} no longer plays music here. Their homeserver account stays.` : `Removed ${who(p)}`);
+              } catch (e) {
+                if (e.status === 404) {
+                  // Nobody by that key and nothing of theirs left (finished elsewhere meanwhile): done
+                  removeFailed.delete(p.key);
+                  toast(`Nothing of ${who(p)} is left on this node`);
+                } else {
+                  // Kept with the node's words: Remove stays on their row, and removing again finishes it
+                  removeFailed.set(p.key, { name: p.name || null, access: p.access, error: e.message });
+                  toast(`Removing ${who(p)} did not finish: ${e.message}`, 'error');
+                }
+              }
+              await loadPeople({ focus: [`rename:${p.key}`, ...[keys[at + 1], keys[at - 1]].filter(Boolean).map((k) => `rename:${k}`), 'pinvname'] });
+            });
+            $$('[data-psi-end]', box).forEach((b) => b.onclick = async () => {
+              const p = personOf(b.dataset.pkey); if (!p) return;
+              const ids = signInsOf(p).map((s) => s.id); const at = ids.indexOf(b.dataset.psiEnd); const s = signInsOf(p)[at];
+              try { await api('DELETE', `/people/${encodeURIComponent(p.key)}/sign-ins/${encodeURIComponent(b.dataset.psiEnd)}`); toast(`Signed out: ${s ? signInName(s) : 'that sign-in'} of ${who(p)}`); } catch (e) { toast(e.message, 'error'); }
+              await loadPeople({ focus: [...[ids[at + 1], ids[at - 1]].filter(Boolean).map((id) => `psi:${p.key}:${id}`), `rename:${p.key}`] });
+            });
+            $$('[data-psi-all]', box).forEach((b) => b.onclick = async () => {
+              const p = personOf(b.dataset.psiAll); if (!p) return;
+              const go = await choiceDialog({ title: `Sign ${who(p)} out everywhere?`, text: 'Each of their browsers and apps has to log in again with Pubky Ring. What they can do here stays as it is.', choices: [{ label: 'Sign out everywhere', value: true, primary: true, danger: true }] });
+              if (!go) return;
+              try { const d = await api('DELETE', `/people/${encodeURIComponent(p.key)}/sign-ins`); toast(`Signed ${who(p)} out${d && d.ended === 1 ? ' of one browser or app' : d && d.ended != null ? ` of ${d.ended} browsers or apps` : ' everywhere'}`); } catch (e) { toast(e.message, 'error'); }
+              await loadPeople({ focus: [`rename:${p.key}`] });
+            });
+
+            // ---- add someone ----
+            if (r) {
+              // The kind of invite: radio cards, the chosen one's details shown (S1)
+              const kindOf = () => ($('input[name="pinvkind"]:checked', box) || {}).value || kinds[0];
+              const keyIn = $('#pinvkey', box); const keyErr = $('#pinvkeyerr', box);
+              if (draft.invite) {
+                const k = $$('input[name="pinvkind"]', box).find((i) => i.value === draft.invite.kind); if (k) k.checked = true;
+                ['pinvname', 'pinvquota', 'pinvkey'].forEach((id) => { $(`#${id}`, box).value = draft.invite[id]; });
+              }
+              const fit = () => {
+                const k = kindOf(); const music = k === 'music';
+                $$('.way', box).forEach((w) => { const on = w.querySelector('input').value === k; w.classList.toggle('on', on); w.querySelector('.way-more').hidden = !on; });
+                $('#pinvquota', box).hidden = music; $('#pinvkeyrow', box).hidden = !music; if (!music) keyErr.hidden = true;
+                $('[data-pinvgo-label]', box).textContent = music ? 'Add them' : 'Create invite';
+              };
+              $$('input[name="pinvkind"]', box).forEach((i) => i.onchange = fit); fit();
+              // Their key: typed, pasted or scanned; any of the spellings Pubky apps show
+              const checkKey = () => { const v = keyIn.value.trim(); const bad = !!v && !keyFrom(v); keyErr.hidden = !bad; keyErr.textContent = bad ? 'That isn’t a Pubky key: it is 52 letters and digits, as Pubky Ring shows it.' : ''; keyIn.setAttribute('aria-invalid', String(bad)); };
+              const setKey = (raw, quiet) => { const k = keyFrom(raw); if (k) keyIn.value = k; else if (raw != null && !quiet) keyIn.value = String(raw).trim(); checkKey(); return k; };
+              keyIn.onchange = () => { setKey(keyIn.value); };
+              keyIn.oninput = () => { if (!keyErr.hidden) checkKey(); };
+              const paste = $('#pinvpaste', box); paste.hidden = !(navigator.clipboard && navigator.clipboard.readText);
+              paste.onclick = async () => { try { const t = await navigator.clipboard.readText(); if (!setKey(t, true)) toast('The clipboard has no Pubky key', 'error'); } catch { toast(`${appPlatform() ? 'The app' : 'The browser'} didn’t allow reading the clipboard: paste into the field instead`, 'error'); } };
+              const scan = $('#pinvscan', box); scan.hidden = !canScan();
+              scan.onclick = async () => { const k = await scanKey(); if (k) setKey(k); };
+              $('#pinvgo', box).onclick = async () => {
+                const kind = kindOf(); const name = $('#pinvname', box).value.trim();
+                const body = { access: kind, name: name || undefined };
+                if (kind === 'music') { const k = keyFrom(keyIn.value); if (!k) { if (keyIn.value.trim()) checkKey(); else toast('Paste or scan their Pubky key', 'error'); keyIn.focus(); return; } body.key = k; } else { const q = Number($('#pinvquota', box).value); if (q > 0) body.storage_quota_mb = Math.round(q); }
+                let v; try { v = await api('POST', '/people/invites', body); } catch (e) { toast(e.message, 'error'); return; }
+                if (kind === 'music') {
+                  // What to send them: this node's address (the page's own) and how they log in
+                  const at = location.origin; const say = `Open ${at} and log in with Pubky Ring.`;
+                  // (a loopback address reaches the node only from its own machine: nothing to copy then)
+                  const local = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/i.test(location.hostname);
+                  pinvOut = `<div class="notice pa-send" role="status"><p><b>${name ? esc(name) : 'They'} can log in now.</b> ${local
+                    ? `This page is open at <code class="pa-code">${esc(location.host)}</code>, an address that only works on the node’s own machine.</p><p class="pa-msg">Send them the node’s address on your network instead, and tell them to log in there with Pubky Ring.</p>`
+                    : `Send them this:</p><p class="pa-msg">Open <code class="pa-code">${esc(at)}</code> and log in with Pubky Ring.</p><div class="actions"><button class="btn sm" data-copylink="${esc(say)}" data-fk="pinvsent">Copy the message</button></div>`}</div>`;
+                  toast(local ? `Added ${name || 'them'}: they log in at this node’s address on your network` : `Added ${name || 'them'}: send them this node’s address`);
+                } else {
+                  pinvOut = inviteQr(v, hs.public_key);
+                  toast('Invite made: send them the link or the QR code');
+                }
+                await loadPeople({ fresh: 'invite', focus: ['pinvsent', 'pinvname'] });
+                const out = $('#pinvout'); if (out && out.firstElementChild) out.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              };
+              $$('[data-pinv-del]', box).forEach((b) => b.onclick = async () => {
+                const ids = r.invites.map((i) => i.id); const at = ids.indexOf(b.dataset.pinvDel);
+                // (the invite shown under the form may be this one: it goes with it)
+                try { await api('DELETE', `/people/invites/${encodeURIComponent(b.dataset.pinvDel)}`); pinvOut = ''; toast('Invite taken off the list. If it was sent, it still works on the homeserver.'); } catch (e) { toast(e.message, 'error'); }
+                await loadPeople({ focus: [...[ids[at + 1], ids[at - 1]].filter(Boolean).map((id) => `invdel:${id}`), 'pinvname'] });
+              });
+            }
+
+            // ---- zones ----
+            const pzs = $('#pzsave', box);
+            if (pzs) {
+              const err = $('#pzerr', box); const list = $('#pzones', box);
+              const say = (t) => { err.textContent = t; err.hidden = !t; };
+              const mode = () => ($('input[name="pzmode"]:checked', box) || {}).value || '';
+              if (draft.zones) {
+                $$('input[name="pzmode"]', box).forEach((i) => { i.checked = i.value === draft.zones.mode; });
+                $$('input', list).forEach((i) => { i.checked = draft.zones.picked.includes(i.value); });
+              }
+              const fitZones = () => { list.hidden = mode() !== 'some'; $('#pznonehelp', box).hidden = mode() !== 'none'; };
+              $$('input[name="pzmode"]', box).forEach((i) => i.onchange = () => { zonesTouched = true; say(''); fitZones(); }); fitZones();
+              $$('input', list).forEach((i) => i.onchange = () => { zonesTouched = true; say(''); });
+              pzs.onclick = async () => {
+                const m = mode(); const picked = $$('input:checked', list).map((i) => i.value);
+                if (!m) { say('Choose “Every zone”, “Only these” or “No zone” first.'); $('input[name="pzmode"]', box).focus(); return; }
+                // ("Only these" with none ticked would save an empty list, which the node reads as every zone)
+                if (m === 'some' && !picked.length) { say('Tick at least one zone, or choose “Every zone” or “No zone”.'); $('input', list).focus(); return; }
+                say('');
+                const sent = m === 'some' ? picked : [];
+                // No zone goes out as `none` with the list of one zone without a name: a node before
+                // `none` keeps that list, and it opens no zone there either (an empty list would be
+                // every zone: the opposite of what was asked)
+                let saved;
+                try { saved = await api('PUT', '/people/zones', m === 'none' ? { zones: [''], none: true } : { zones: sent }); } catch (e) { toast(e.message, 'error'); return; }
+                if (m === 'none' && !(saved && (saved.none === true || noZoneList(saved.zones)))) {
+                  // The node answered and did not keep it: the screen is drawn again from what the
+                  // node has now, and says so where the choice is
+                  await loadPeople({ fresh: 'zones', focus: ['pzsave'] });
+                  const again = $('#pzerr', $('#peoplebox') || box); if (again) { again.textContent = 'This node did not keep “No zone”. The choice above is what it has now.'; again.hidden = false; }
+                  return;
+                }
+                toast(m === 'none' ? 'The people you add play in their own browser or app only' : sent.length ? `The people you add can play on ${listWords(sent.map((id) => zoneName(id) || id))}` : 'The people you add can play on every zone');
+                await loadPeople({ fresh: 'zones', focus: ['pzsave'] });
+              };
+            }
+
+            // ---- whose music services ----
+            $$('[data-srcpolicy]', box).forEach((b) => b.onclick = async () => {
+              const v = b.dataset.srcpolicy; if (v === policy) return;
+              try { await api('PUT', '/node/settings', { sources_policy: v }); ns.sources_policy = v; toast(SRC_POLICIES.find(([x]) => x === v)[4]); } catch (e) { toast(e.message, 'error'); }
+              await loadPeople();
+            });
+
+            // ---- the password for apps ----
+            const tn = $('#tokennew', box);
+            // The new one is shown once, until the page reloads (also over a redraw of this screen)
+            const showToken = () => {
+              const out = $('#tokenout', box); if (!out || !state.tokenShown) return;
+              out.innerHTML = `<p class="small pa-newpass">The new password for apps, shown only now. Copy it into your apps; the page then reloads, so its streams and covers use it too.</p><div class="toolbar"><code class="pa-code">${esc(state.tokenShown)}</code><button class="btn sm primary" id="tokendone">Copy and reload</button></div>`;
+              $('#tokendone', box).onclick = async () => { try { await navigator.clipboard.writeText(state.tokenShown); } catch { /* copied by hand */ } location.reload(); };
+              if (tn) tn.disabled = true;
+            };
+            if (tn) tn.onclick = async () => {
+              const go = await choiceDialog({ title: 'Make a new password for apps?', text: 'The old one stops working at once. Every app then needs the new one, and your other browsers are logged out; this one goes on with the new one.', choices: [{ label: 'Make a new password', value: true, primary: true, danger: true }] });
+              if (!go) return;
+              try {
+                const made = await api('POST', '/node/token');
+                // Every later call (and a reconnect of the event socket) uses it: the old one and every
+                // Pubky Ring log in of the owner's browsers end, and this browser takes the new one
+                state.token = made.token; try { localStorage.setItem('pm.token', made.token); } catch { /* this tab keeps it */ }
+                state.tokenShown = made.token; showToken();
+                // The node just ended the owner's other browser log ins: the lists are read again
+                // (the new password stays shown: every draw of this screen shows it until the reload)
                 await loadPeople();
-                const out = $('#pinvout'); if (out) { out.innerHTML = inviteQr(v, hs.public_key); out.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+                const done = $('#tokendone', $('#peoplebox') || box); if (done) done.focus();
               } catch (e) { toast(e.message, 'error'); }
             };
-            const patch = async (key, body, done) => { try { await api('PATCH', `/people/${encodeURIComponent(key)}`, body); toast(done); loadPeople(); } catch (e) { toast(e.message, 'error'); loadPeople(); } };
-            $$('[data-pmusic]', box).forEach((c) => c.onchange = () => patch(c.dataset.pmusic, { music: c.checked }, c.checked ? 'Music access on' : 'Music access off: their devices are signed out'));
-            $$('[data-phs]', box).forEach((c) => c.onchange = () => patch(c.dataset.phs, { homeserver_enabled: c.checked }, c.checked ? 'Homeserver account on' : 'Homeserver account off: they can read and delete, not write'));
-            $$('[data-pquota]', box).forEach((i) => i.onchange = () => { const q = Number(i.value); patch(i.dataset.pquota, { storage_quota_mb: q > 0 ? Math.round(q) : 'unlimited' }, q > 0 ? `Quota set to ${Math.round(q)} MB` : 'No storage limit'); });
-            $$('[data-pinv-del]', box).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/people/invites/${encodeURIComponent(b.dataset.pinvDel)}`); toast('Invite taken off the list'); loadPeople(); } catch (e) { toast(e.message, 'error'); } });
+            showToken();
+
+            // ---- party ----
             const ptg = $('#ptgo', box); if (ptg) ptg.onclick = async () => {
               const body = { zone: $('#ptzone', box).value, name: $('#ptname', box).value.trim() || undefined, hours: Number($('#pthours', box).value), adds_per_hour: Number($('#ptadds', box).value) || 5, waiting_per_guest: Number($('#ptwait', box).value) || 3 };
-              try { await api('POST', '/party', body); toast('Party started: share the guest link'); await loadPeople(); const last = $$('#peoplebox details:not(.set-fold)').filter((x) => x.querySelector('[data-copylink*="/party/"]')).pop(); if (last) { last.open = true; last.scrollIntoView({ behavior: 'smooth', block: 'center' }); } } catch (e) { toast(e.message, 'error'); }
+              let made; try { made = await api('POST', '/party', body); } catch (e) { toast(e.message, 'error'); return; }
+              toast('Party started: share the guest link');
+              await loadPeople();
+              // Its guest link, opened: that is what to share now
+              const links = $$('details[data-keepopen^="party:"]', $('#peoplebox') || box);
+              const mine = links.find((d) => made && d.dataset.keepopen === `party:${made.id}`) || links.pop();
+              if (mine) { mine.open = true; mine.scrollIntoView({ behavior: 'smooth', block: 'center' }); $('summary', mine).focus({ preventScroll: true }); }
             };
-            $$('[data-party-end]', box).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/party/${encodeURIComponent(b.dataset.partyEnd)}`); toast('Party ended: the guest link no longer works'); loadPeople(); } catch (e) { toast(e.message, 'error'); } });
-            const pzs = $('#pzsave', box); if (pzs) pzs.onclick = async () => { const zones = $$('#pzones input:checked', box).map((i) => i.value); try { await api('PUT', '/people/zones', { zones }); toast(zones.length ? `Listeners may play on ${countOf(zones.length, 'zones')}` : 'Listeners may play on every zone'); } catch (e) { toast(e.message, 'error'); } };
+            $$('[data-party-end]', box).forEach((b) => b.onclick = async () => {
+              const ids = parties.map((p) => p.id); const at = ids.indexOf(b.dataset.partyEnd);
+              try { await api('DELETE', `/party/${encodeURIComponent(b.dataset.partyEnd)}`); toast('Party ended: the guest link no longer works'); } catch (e) { toast(e.message, 'error'); }
+              await loadPeople({ focus: [...[ids[at + 1], ids[at - 1]].filter(Boolean).map((id) => `partyend:${id}`), 'ptgo'] });
+            });
+
+            // The focus stays where it was; when that control is gone (a removed row), on the nearest one left
+            if (had && !box.contains(document.activeElement)) {
+              const byFk = (k) => $$('[data-fk]', box).find((el) => el.dataset.fk === k) || (/^[\w-]+$/.test(k) ? $(`#${k}`, box) : null);
+              const to = [fkWas, ...(focus || [])].filter(Boolean).map(byFk).find((el) => el && el.getClientRects().length) || box;
+              to.focus({ preventScroll: to === box });
+            }
           };
           // Settings › Remote access: the bundled install's Cloudflare Tunnel
           const loadRemote = async (check = false) => {
@@ -10962,7 +11668,7 @@
             try {
               const r = await api('POST', path);
               $('#pkurl').innerHTML = `<div class="notice qrbox" style="margin-top:12px">${r.qr_svg ? `<div class="qr">${r.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve${what}. This page updates by itself.</p><p class="muted small">Pubky Ring is the free app (iPhone and Android, from your app store) that holds your Pubky identity; this node never sees your keys.</p><a class="btn sm" href="${esc(ringUrl(r.url))}">Open in Pubky Ring</a> <button class="btn sm ghost" id="pkcopy">Copy link</button></div></div>`;
-              $('#pkurl').scrollIntoView({ behavior: 'smooth', block: 'center' }); // the QR, not below the fold
+              $('#pkurl').scrollIntoView({ behavior: glide(), block: 'center' }); // the QR, not below the fold
               const pc = $('#pkcopy'); if (pc) pc.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(r.url).then(() => toast('Link copied')).catch(() => toast(r.url)); };
               const t = setInterval(async () => { try { const st = await api('GET', '/pubky/login'); if (st.status === 'signed_in') { clearInterval(t); forgetPubkyUser(); toast('Signed in as ' + shortKey(st.user)); render(); } } catch (e) { clearInterval(t); toast(e.message, 'error'); } }, 2000);
             } catch (e) { toast(e.message, 'error'); }
@@ -10985,11 +11691,13 @@
 
       $$('[data-crumb-kind]', main).forEach((b) => b.onclick = () => (b.dataset.asBack ? $('.pagebar > [data-back]', main).click() : setView('item', { kind: b.dataset.crumbKind, id: b.dataset.crumbId })));
       bindTrackRows(main, lists);
+      // A read that failed (failedHtml): Try again draws the page from the start, with its loader
+      $$('[data-failed] [data-retry]', main).forEach((b) => { if (!b.onclick) b.onclick = (ev) => busy(b, () => { if (state.drawnPage === v) state.drawnPage = null; return render(); }, ev); });
     } catch (e) {
       if ((listMine && listStale(v, listMine)) || (drawStale && drawStale())) return; // (an older list's or playlist draw's error over a newer one)
       const heldPl = v === 'playlist' ? plHolds.get(state.viewArg) : null; // (its Try again draws it in place, on this visit only: a fresh open is a new navGen)
       if (state.drawnPage === v) state.drawnPage = null; // (Albums, Artists: Try again draws it from the start)
-      main.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)} <button class="btn sm" id="navretry">Try again</button></div>`;
+      main.innerHTML = failedHtml(e, 'navretry');
       $('#navretry', main).onclick = () => { if (heldPl && plHolds.get(heldPl.id) === heldPl) heldPl.retry = navGen; render(); };
     }
   };
@@ -11076,14 +11784,38 @@
   // (favWayOn: Open Songs or Add music, canShuffleMine: Shuffle my music); a new song count from
   // GET /info that turns "no songs" into "songs" or back draws the one on screen again
   const songsChanged = () => { const e = $('#main .empty[data-songs]'); if (e && ['favourites', 'queue'].includes(state.view) && e.dataset.songs !== String(hasSongs())) render(); };
-  const onLibraryChanged = () => {
+  // The library changed. What was kept from it goes at once (libraryForget); the page on screen is
+  // drawn again (libraryRedraw)
+  const libraryForget = () => {
     forgetAlbums(); forgetLibrarySearches();
     // (a playlist change cut after 30 s: the node changed something, so the next read ends its hold, plHolds)
     plHolds.forEach((h) => { if (h.cut) { h.cut = false; h.after = Math.min(h.after, plDraws + 1); } });
+  };
+  const libraryRedraw = () => {
     // (the redraw below comes before the new song count, songsChanged)
     api('GET', '/info').then((i) => { state.info = i; watchScan(i); if (link.up) setConn('ok', nodeLabel()); songsChanged(); }).catch(() => {});
     if (['albums', 'tracks', 'artists', 'home', 'favourites', 'album', 'artist', 'playlists', 'playlist'].includes(state.view)) render();
   };
+  const libraryChangedNow = () => { libraryForget(); libraryRedraw(); };
+  // The node says so after every write to the library (an import: once per file). A hidden tab
+  // draws nothing: once, when it is looked at again. On the library's long lists the first change
+  // is drawn at once and those that follow within a second with one redraw at its end; a
+  // playlist's or an album's own page answers each one (a playlist's rows wait for the read after it)
+  const LIBRARY_LISTS = ['albums', 'tracks', 'artists', 'home', 'favourites'];
+  // (by the page's own clock, which never goes back: a wall clock set back would hold every redraw)
+  let libActed = -1000; let libLater = null; let libMissed = false; let libLastNav = 0;
+  const onLibraryChanged = () => {
+    libraryForget();
+    if (document.visibilityState === 'hidden') { libMissed = true; return; }
+    if (!LIBRARY_LISTS.includes(state.view)) { libraryRedraw(); return; }
+    const wait = libActed + 1000 - performance.now();
+    if (wait <= 0) { libActed = performance.now(); libraryRedraw(); return; }
+    // (another page opened after the last change that waits: that page was drawn after it, nothing
+    // is owed; a change that came once that page was open is still drawn)
+    libLastNav = navGen;
+    if (!libLater) libLater = setTimeout(() => { libLater = null; if (libLastNav !== navGen) return; if (document.visibilityState === 'hidden') { libMissed = true; return; } libActed = performance.now(); libraryRedraw(); }, wait);
+  };
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible' || !libMissed) return; libMissed = false; clearTimeout(libLater); libLater = null; libActed = performance.now(); libraryRedraw(); });
   const applySnapshot = (ev) => {
     const first = link.boot == null;
     const restarted = !first && ev.boot != null && ev.boot !== link.boot;
@@ -11100,7 +11832,7 @@
       refreshQueue(false);
       if (!overlay.hidden) renderNowPlaying();
       if (state.view === 'zones') render();
-      if (libChanged) onLibraryChanged();
+      if (libChanged) libraryChangedNow();
       if (downFor > 5000) toast(restarted ? 'Reconnected: the node restarted' : 'Reconnected');
     }
   };
@@ -11201,7 +11933,7 @@
     const acf = $('#acidform'); if (acf) {
       const saveKey = async (key) => { try { await api('PUT', '/library/identify/settings', { acoustid_key: key }); toast(key ? 'AcoustID key saved: the next Identify also listens to the songs' : 'AcoustID key removed'); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
       needsText($('#acidkey'), $('#acidsave'));
-      acf.onsubmit = (e) => { e.preventDefault(); const k = $('#acidkey').value.trim(); if (k) saveKey(k); };
+      acf.onsubmit = (e) => { e.preventDefault(); const k = $('#acidkey').value.trim(); return k ? saveKey(k) : undefined; };
       // Check: the key typed, else the one in use; nothing is saved
       const chk = $('#acidcheck'); const out = $('#acidout');
       chk.onclick = async () => { chk.disabled = true; out.textContent = 'Checking…'; out.classList.remove('warn-text'); const k = $('#acidkey').value.trim(); try { const r = await api('POST', '/library/identify/key/check', k ? { acoustid_key: k } : {}); out.textContent = r.detail; out.classList.toggle('warn-text', !r.ok); } catch (e) { out.textContent = e.message; out.classList.add('warn-text'); } chk.disabled = false; };
@@ -11262,12 +11994,19 @@
   };
   const connect = async () => {
     try {
+      // The page's first three reads go together: one after another, a slow link (remote access, a
+      // phone's data) waited three round trips before the first page was asked for. (Logged in only:
+      // without a token the first refusal alone opens Log in, with its reason. Each is read where it
+      // was before; one that fails with /info is no unhandled rejection.)
+      const early = state.token ? { me: api('GET', '/me').then((value) => ({ value }), (error) => ({ error })), zones: api('GET', '/zones') } : null;
+      if (early) early.zones.catch(() => {});
       state.info = await api('GET', '/info');
       document.body.classList.toggle('offline', isOffline());
       if (isOffline()) {
         // The app's local server: no zones, no events; the app switches back when the node is reachable
         setConn(true, `Offline · ${countOf(state.info.library.tracks, 'songs')} on this device`);
-        try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
+        if (early) state.me = (await early.me).value || { role: 'owner' };
+        else { try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; } }
         state.sources = []; state.zones = {}; state.zonesSeen = true; state.zone = BROWSER;
         loadFavourites().catch(() => { state.favUris = new Set(); paintHearts(); });
         renderZoneName(); renderBar();
@@ -11277,11 +12016,17 @@
       }
       setConn(true, `${state.info.name} · ${countOf(state.info.library.tracks, 'songs')}`);
       watchScan(state.info);
-      try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
+      // Who this is. Only a backend without the route (404: one with no roles, where everyone is the
+      // owner) is read as the owner. Any other failure is the node out of reach, as for /info above:
+      // it says so and tries again, instead of showing the owner's controls to someone who may not be
+      if (early) {
+        const me = await early.me;
+        if (me.error) { if (me.error.status !== 404) throw me.error; state.me = { role: 'owner' }; } else state.me = me.value;
+      } else { try { state.me = await api('GET', '/me'); } catch (e) { if (e.status !== 404) throw e; state.me = { role: 'owner' }; } }
       document.body.classList.toggle('listener', isListener());
       drawMe().catch(() => {});
       // Usage insights (usage.js): off unless the owner turned them on; asks the node once
-      if (window.PM_USAGE) PM_USAGE.mount({ token: () => state.token, view: () => state.view, shell: shellMode, offline: isOffline, open: () => setView('settings', isListener() ? undefined : 'privacy'), ask: (title, text, label) => choiceDialog({ title, text, choices: [{ label, value: true, primary: true }] }).then((v) => v === true) });
+      if (window.PM_USAGE) PM_USAGE.mount({ token: () => state.token, view: () => state.view, shell: shellMode, offline: isOffline, open: () => setView('settings', isListener() ? undefined : 'privacy'), ask: (title, text, label, danger) => choiceDialog({ title, text, choices: [{ label, value: true, primary: true, danger: !!danger }] }).then((v) => v === true) });
       if (isOwner()) {
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
@@ -11292,7 +12037,7 @@
         // A listener's own bookmarks, from their homeserver (none until they connect it)
         loadFavourites().catch(() => {});
       }
-      const zones = await api('GET', '/zones');
+      const zones = await (early ? early.zones : api('GET', '/zones'));
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z])); state.zonesSeen = true;
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false); refreshAlong();
       {
@@ -11310,6 +12055,7 @@
     } catch (e) {
       if (signedOut()) return;
       main.innerHTML = `<div class="notice warn">Cannot reach the node: ${esc(e.message)} It retries by itself.</div>`;
+      { const said = document.getElementById('navstatus'); if (said && said.textContent === 'Loading…') said.textContent = ''; } // (the first loader's word)
       if (!link.downSince) link.downSince = Date.now();
       scheduleRetry(); showDown();
     }
@@ -11335,8 +12081,11 @@
         if (ev.seq > link.seq) link.seq = ev.seq;
       }
       if (ev.type === 'zone_event' && ev.event && ev.event.type === 'error' && state.starting && ev.zone === state.starting.zone) startFail(ev.event.message, true);
+      // (another zone's event the bar has already heard of changes nothing it shows; the dashboard may be on that zone)
+      let barSame = false;
       if (ev.type === 'zone') {
         const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state; countEvent(ev.state.id);
+        barSame = !!old && ev.state.id !== state.zone && state.view !== 'dashboard';
         syncVolumeSliders(ev.state);
         if (state.starting && ev.state.id === state.starting.zone) {
           const fresh = state.starting.oldItem == null || (ev.state.now_playing && ev.state.now_playing.item.id !== state.starting.oldItem);
@@ -11367,7 +12116,7 @@
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
       else if (ev.type === 'outputs_changed') refreshOutputs(); // a phone's USB DAC came or went
       else if (ev.type === 'jobs') { if (isOwner()) { jobs.eventAt = Date.now(); onJobs(ev.jobs || ev); } } // the owner's jobs, as the polling
-      renderBar();
+      if (!barSame) renderBar();
       if (ev.type === 'zone' || ev.type === 'zone_removed') followZonePop();
     };
   };

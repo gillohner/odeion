@@ -10,7 +10,10 @@
 //! output and DSP.
 //!
 //! The node implements [`Host`] over its zones. These routes take no API token, like any renderer,
-//! so the node serves them to LAN peers only (never through its tunnels) and adds the [`Peer`].
+//! so the node serves them to LAN peers only (never through its tunnels, never to another site's
+//! page through a visitor's browser) and adds the [`Peer`]. A control call must carry
+//! `SOAPACTION` and no form body type, which a browser sends for another site only after a CORS
+//! preflight the node never answers.
 //! The URIs a controller sets and the event callbacks it gives must be addresses that controller
 //! could reach itself ([`reachable_for`]). `[renderer] enabled = false` turns them off.
 
@@ -410,12 +413,48 @@ async fn describe(State(r): State<Arc<Renderer>>, Path((zone, file)): Path<(Stri
     }
 }
 
+/// Whether a control POST is a SOAP call as control points send it: with a `SOAPACTION` header,
+/// and not with a body type a form can send. A page on another site can make a browser post to
+/// the control URL only without that header and with such a type (a "simple" request); otherwise
+/// the browser asks first (a CORS preflight), which the node never answers.
+fn soap_call(headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
+    let simple = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .map(|v| v.to_str().unwrap_or("?"))
+        .and_then(|v| v.split(';').next())
+        .map(|v| v.trim().to_ascii_lowercase())
+        .is_some_and(|v| {
+            matches!(
+                v.as_str(),
+                "text/plain" | "application/x-www-form-urlencoded" | "multipart/form-data" | "?"
+            )
+        });
+    if simple {
+        return Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "a control call is SOAP: text/xml or application/soap+xml",
+        ));
+    }
+    let action = headers
+        .get("soapaction")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| !v.trim().trim_matches('"').is_empty());
+    if !action {
+        return Err((StatusCode::BAD_REQUEST, "a control call names its SOAPACTION"));
+    }
+    Ok(())
+}
+
 async fn control(
     State(r): State<Arc<Renderer>>,
     Path((zone, service)): Path<(String, String)>,
     peer: Option<Extension<Peer>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if let Err(refused) = soap_call(&headers) {
+        return refused.into_response();
+    }
     let peer = peer.map(|Extension(Peer(ip))| ip);
     let soap_fault = |code: u16, msg: &str| {
         (

@@ -121,13 +121,13 @@ const list = (bs) => bs.map((b) => `${b.name} ${b.width.toFixed(0)}×${b.height.
         check(t.name.width >= 150 && t.link.width >= 150, `${at} /playlists: the boxes stay wide enough to type in (${t.name.width.toFixed(0)}, ${t.link.width.toFixed(0)} px)`);
         check(t.link.height === 44 && t.name.height === 44, `${at} /playlists: both boxes are 44 px tall like their buttons (${t.name.height}, ${t.link.height})`);
         check(t.ellipsis === 'ellipsis', `${at} /playlists: a cut-off hint in the link box ends in …`);
-        check(t.link.top - t.name.top < 140 && t.first.top - t.open.top < 120, `${at} /playlists: the controls take three rows, then the playlists (rows at ${[t.name, t.file, t.link, t.first].map((b) => b.top.toFixed(0)).join(', ')})`);
-        check(t.hint.startsWith('Shared playlist') && t.label === 'Shared playlist link', `${at} /playlists: the link box's hint starts with what it is for, and it has a name ("${t.hint}")`);
+        check(t.link.top - t.name.top < 140 && t.first.top - t.open.top < 120, `${at} /playlists: the controls take three rows, then the collections (rows at ${[t.name, t.file, t.link, t.first].map((b) => b.top.toFixed(0)).join(', ')})`);
+        check(t.hint.startsWith('Shared collection') && t.label === 'Shared collection link', `${at} /playlists: the link box's hint starts with what it is for, and it has a name ("${t.hint}")`);
         check(t.open.right <= width && t.create.right <= width && !t.overflow, `${at} /playlists: no sideways overflow`);
         await page.locator('#plname').fill('Road trip');
         await page.locator('#plcreate').tap();
         for (let i = 0; i < 30 && !state.hits.some((h) => h.v === '/playlists' && h.m === 'POST'); i++) await page.waitForTimeout(50);
-        check(state.hits.some((h) => h.v === '/playlists' && h.m === 'POST' && /Road trip/.test(h.body || '')), `${at} /playlists: typing a name and one tap on Create makes the playlist`);
+        check(state.hits.some((h) => h.v === '/playlists' && h.m === 'POST' && /Road trip/.test(h.body || '')), `${at} /playlists: typing a name and one tap on Create makes the collection`);
         await page.screenshot({ path: path.join(SHOTS, `${at}-playlists-toolbar.png`) });
       } finally { await context.close(); }
     }
@@ -149,15 +149,15 @@ const list = (bs) => bs.map((b) => `${b.name} ${b.width.toFixed(0)}×${b.height.
         if (!t.file) check(t.link.top - t.name.top < 80, `${at} /playlists: without Import the link row comes straight under the name row (${t.name.top.toFixed(0)}, ${t.link.top.toFixed(0)})`);
         // Both boxes have a name, and an empty box's button says what to type, by that name.
         const named = await page.evaluate(() => ({ name: document.querySelector('#plname').getAttribute('aria-label'), create: [document.querySelector('#plcreate').disabled, document.querySelector('#plcreate').title], open: [document.querySelector('#plopenshared').disabled, document.querySelector('#plopenshared').title] }));
-        check(named.name === 'New playlist name', `${at} /playlists: the name box is named "New playlist name" (${named.name})`);
-        check(named.create[0] && named.create[1] === 'Type in “New playlist name” first', `${at} /playlists: an empty name box keeps Create off and says why ("${named.create[1]}")`);
-        check(named.open[0] && named.open[1] === 'Type in “Shared playlist link” first', `${at} /playlists: an empty link box keeps Open off and says why by the box's name, not its long hint ("${named.open[1]}")`);
+        check(named.name === 'New collection name', `${at} /playlists: the name box is named "New collection name" (${named.name})`);
+        check(named.create[0] && named.create[1] === 'Type in “New collection name” first', `${at} /playlists: an empty name box keeps Create off and says why ("${named.create[1]}")`);
+        check(named.open[0] && named.open[1] === 'Type in “Shared collection link” first', `${at} /playlists: an empty link box keeps Open off and says why by the box's name, not its long hint ("${named.open[1]}")`);
         // Enter in the name box creates.
         let was = sent('/playlists', 'POST');
         await page.locator('#plname').tap();
         await page.keyboard.type('Night bus');
         await page.keyboard.press('Enter');
-        check(await wait(() => sent('/playlists', 'POST') > was) && /Night bus/.test(state.hits.filter((h) => h.v === '/playlists' && h.m === 'POST').pop().body || ''), `${at} /playlists: a name and Enter makes the playlist`);
+        check(await wait(() => sent('/playlists', 'POST') > was) && /Night bus/.test(state.hits.filter((h) => h.v === '/playlists' && h.m === 'POST').pop().body || ''), `${at} /playlists: a name and Enter makes the collection`);
         // The page is drawn again with an empty name box once the playlist is made.
         await page.waitForFunction(() => { const n = document.querySelector('#plname'); return n && !n.value; });
         // A tap on Open, and Enter in the link box, each look the link up once.

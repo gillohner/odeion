@@ -58,7 +58,7 @@ async function phone(browser, width) {
   const run = await fx.create(browser, width, { mobile: true, tracks, favs: [fx.SONG], fixtures: { '/library/genres/5': { body: genre } } });
   const { page, context, state } = run;
   try {
-    for (const [where, url, list] of [['Songs', '/tracks', 'all'], ['Favourites', '/favourites', 'fav'], ['A genre', '/genre/5', 'genre']]) {
+    for (const [where, url, list] of [['Songs', '/tracks', 'all'], ['Bookmarks', '/favourites', 'fav'], ['A genre', '/genre/5', 'genre']]) {
       await fx.go(page, url); await page.waitForSelector(`[data-list="${list}"] .track`); await sleep(200);
       const rs = await rows(page, list);
       check(rs.length && rs.every((r) => r.num === null), `${at} ${where}: no running number before the titles (${JSON.stringify(rs.map((r) => r.num))})`);

@@ -108,10 +108,6 @@ impl UpnpOutput {
         self
     }
 
-    pub fn stream_kind(&self) -> &StreamKind {
-        &self.kind
-    }
-
     /// The URL for this renderer's stream kind (`…/stream.wav` → `…/stream.l16`; for an OpenHome
     /// renderer `…/sized.wav`, or `…/live.wav` when the stream can't be `sized`).
     fn url(&self, sized: bool) -> String {

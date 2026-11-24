@@ -377,6 +377,33 @@ async fn event_sockets_opened_with_the_old_token_end_when_it_is_replaced() {
     );
 }
 
+/// A call that panics while it holds the library fails alone: the requests after it are answered
+/// as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panic_while_the_library_is_held_does_not_stop_the_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), vec![], just_null());
+    let app = router(s.clone());
+    let (st, _) = call(&app, OWNER, "GET", "/v1/library/stats", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let held = s.clone();
+    let panicked = std::thread::spawn(move || {
+        let _lib = held.library.lock().expect("library poisoned");
+        panic!("a parser tripped over a file's tag");
+    })
+    .join();
+    assert!(panicked.is_err());
+    for path in [
+        "/v1/library/stats",
+        "/v1/info",
+        "/v1/library/tracks?limit=5",
+        "/v1/zones",
+    ] {
+        let (st, r) = call(&app, OWNER, "GET", path, None).await;
+        assert_eq!(st, StatusCode::OK, "{path}: {r}");
+    }
+}
+
 /// A config folder taken out of the config and the node restarted: an ordinary folder now, which
 /// Remove takes out with its songs (what the 409 says to do). And a config folder isn't moved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -932,4 +959,85 @@ async fn search_finds_new_and_renamed_songs_right_after_a_scan_or_an_edit() {
     assert_eq!(songs_found(&app, "one").await, (true, none));
     // Put back: lib.rs a_song_put_back_is_found_by_search_at_once_without_a_scan (it holds the
     // scan slot, so restore's own scan can't drop the kept answer first)
+}
+
+/// Asked to stop, the server returns within its grace period although a connection that never
+/// ends by itself (the event stream) is open, and takes no new one; then the zones are stopped
+/// and the library's write-ahead log is folded into its file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_node_stops_when_asked_with_an_event_socket_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), vec![], just_null());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let (stop, asked) = tokio::sync::oneshot::channel::<()>();
+    let served = tokio::spawn(pm_api::serve_listener_until(s.clone(), l, async move {
+        let _ = asked.await;
+    }));
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/events?token={OWNER}"))
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .unwrap();
+    assert!(
+        matches!(first, Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_)))),
+        "the snapshot"
+    );
+    let info = reqwest::Client::new()
+        .get(format!("http://{addr}/v1/info"))
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(info.status().as_u16(), 200);
+
+    let asked_at = std::time::Instant::now();
+    stop.send(()).unwrap();
+    let ended = tokio::time::timeout(pm_api::STOP_GRACE + std::time::Duration::from_secs(5), served).await;
+    assert!(matches!(ended, Ok(Ok(Ok(())))), "the server returned: {ended:?}");
+    // (the event socket is no request being answered: the stop does not wait for it)
+    assert!(
+        asked_at.elapsed() < pm_api::STOP_GRACE,
+        "an open event socket does not hold the stop: {:?}",
+        asked_at.elapsed()
+    );
+    // No listener of the node takes a request any more (the remote-access one serves the same
+    // routes on a port of its own)
+    assert!(s.is_stopping());
+    let (st, _) = call(&router(s.clone()), OWNER, "GET", "/v1/info", None).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        tokio::net::TcpStream::connect(addr).await.is_err(),
+        "no new connection is taken"
+    );
+
+    let wal = dir.path().join("lib.sqlite-wal");
+    s.library.lock().unwrap().set_setting("stop.test", "1").unwrap();
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+    s.stop_for_exit(std::time::Duration::from_secs(3)).await;
+    assert!(s
+        .zones
+        .list()
+        .iter()
+        .all(|z| z.transport == pm_zones::Transport::Stopped));
+    assert_eq!(std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0), 0);
+
+    // A zone made after the stop began (a player found late, a Squeezebox connecting) is closed
+    // like the others: Play does not reach it (an open zone would try the item and say that
+    // nothing in its queue could be played)
+    let late = s.create_zone("Found late", Arc::new(pm_zones::outputs::NullOutput::new()));
+    late.enqueue(
+        vec![pm_zones::QueueItem::new("/no/such/file.flac")],
+        pm_zones::Insert::End,
+    );
+    late.play();
+    let st = tokio::time::timeout(std::time::Duration::from_secs(5), late.wait_stopped())
+        .await
+        .expect("a closed zone has nothing to wait for");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        (st.transport, late.state().error),
+        (pm_zones::Transport::Stopped, None)
+    );
 }

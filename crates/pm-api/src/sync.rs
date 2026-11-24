@@ -14,13 +14,14 @@
 
 use crate::playlists::{now_micros, store};
 use crate::types::SyncReport;
+use pm_library::posts::PostStamp;
 use pm_library::Library;
 use pm_pubky::homeserver::{HomeserverError, ListBounds, NodeHomeserver};
 use pm_pubky::schemas::post::{TYPE_ACTIVITY, TYPE_PLAYLIST, TYPE_REVIEW};
 use pm_pubky::{v1, Bookmark, MusicContent, MusicPost, Network, Visibility};
 use pubky::PubkySession;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -191,7 +192,10 @@ fn next_sync_id() -> u64 {
 impl PubkySync {
     /// Restore a session from an exported secret and prepare to sync.
     pub async fn connect(network: Network, secret: &str) -> Result<Self, HomeserverError> {
-        Self::connect_with(NodeHomeserver::new(network)?, secret).await
+        let sync = Self::connect_with(NodeHomeserver::new(network)?, secret).await?;
+        // Its own client (the CLI): the signed-in person is its owner
+        sync.homeserver.set_owner(Some(sync.session.public_key()));
+        Ok(sync)
     }
 
     /// The same with the node's shared client ([`crate::state::NodeState::homeserver`]).
@@ -249,7 +253,7 @@ impl PubkySync {
     /// The library for a write by this pass, once this session is still the node's.
     fn lib<'a>(
         &self,
-        library: &'a Arc<Mutex<Library>>,
+        library: &'a Arc<pm_library::LibraryLock>,
     ) -> Result<std::sync::MutexGuard<'a, Library>, SyncError> {
         // The lock first, then the check: a replacement made while this waited for the lock is
         // seen here, not only one made before it
@@ -384,7 +388,7 @@ impl PubkySync {
     /// One sync. A session the homeserver refuses (an old approval) ends with the plain
     /// [`RESIGN_NOTICE`] in the report and [`Self::needs_resign`] set, never a raw 403; the
     /// unsynced objects stay queued.
-    pub async fn sync(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
+    pub async fn sync(&self, library: &Arc<pm_library::LibraryLock>) -> Result<SyncReport, SyncError> {
         let _one_at_a_time = self.pass.lock().await;
         {
             let lib = self.lib(library)?;
@@ -451,7 +455,7 @@ impl PubkySync {
         });
     }
 
-    async fn sync_once(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
+    async fn sync_once(&self, library: &Arc<pm_library::LibraryLock>) -> Result<SyncReport, SyncError> {
         let mut report = SyncReport::default();
         let owner = v1::PubkyId::try_from(raw_key(&self.z32))
             .map_err(|e| SyncError::Store(format!("signed-in key: {e}")))?;
@@ -545,7 +549,9 @@ impl PubkySync {
                 }
                 report.pushed += 1;
             }
-            self.lib(library)?.mark_tag_synced(&row.id, now_micros())?;
+            // (as it was pushed: a tag removed or added again meanwhile stays to be pushed)
+            self.lib(library)?
+                .mark_tag_pushed(&row.id, row.deleted, now_micros())?;
         }
         let (known_tags, not_music) = {
             let lib = self.lib(library)?;
@@ -700,7 +706,7 @@ impl PubkySync {
     /// migration has run on this node.
     async fn pull_legacy(
         &self,
-        library: &Arc<Mutex<Library>>,
+        library: &Arc<pm_library::LibraryLock>,
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
         let remote_favs = self
@@ -734,11 +740,9 @@ impl PubkySync {
                 MusicContent::Playlist(p) => p.updated_at,
                 other => other.created_micros(),
             };
-            let take = match lib.get_music_post(&id)? {
-                None => true,
-                Some(row) => remote_updated > row.updated_at,
-            };
-            if take {
+            // (the same rule as for the new folders: nothing that waits to be pushed, a tombstone
+            // too, is replaced)
+            if pull_takes(remote_updated, lib.music_post_stamp(&id)?) {
                 store(&lib, &post, &id, Visibility::Private).map_err(|e| SyncError::Store(e.message))?;
                 lib.mark_music_post_synced(&id, now_micros())?;
                 report.pulled += 1;
@@ -750,7 +754,7 @@ impl PubkySync {
     /// Push every unsynced post as its v1 object; tombstones delete every copy.
     async fn push_posts(
         &self,
-        library: &Arc<Mutex<Library>>,
+        library: &Arc<pm_library::LibraryLock>,
         owner: &v1::PubkyId,
         heads: &mut Heads,
         report: &mut SyncReport,
@@ -869,7 +873,7 @@ impl PubkySync {
     /// them back from the listing taken before.
     async fn push_bookmarks(
         &self,
-        library: &Arc<Mutex<Library>>,
+        library: &Arc<pm_library::LibraryLock>,
         report: &mut SyncReport,
     ) -> Result<HashSet<String>, SyncError> {
         let mut removed = HashSet::new();
@@ -925,7 +929,8 @@ impl PubkySync {
                 }
                 report.pushed += 1;
             }
-            self.lib(library)?.mark_bookmark_synced(&row.id, now_micros())?;
+            // (as it was pushed: a bookmark removed or added again meanwhile stays to be pushed)
+            self.lib(library)?.mark_bookmark_pushed(&row, now_micros())?;
         }
         Ok(removed)
     }
@@ -937,7 +942,7 @@ impl PubkySync {
     /// before the history was deleted are deleted, not imported.
     async fn pull_v1(
         &self,
-        library: &Arc<Mutex<Library>>,
+        library: &Arc<pm_library::LibraryLock>,
         heads: &Heads,
         report: &mut SyncReport,
     ) -> Result<(), SyncError> {
@@ -948,7 +953,9 @@ impl PubkySync {
             let lib = self.lib(library)?;
             match crate::listens::adopt_cleared(&lib, theirs) {
                 Ok(n) if n > 0 => {
-                    tracing::info!(listens = n, "history deleted on another node: removed here too")
+                    tracing::info!(listens = n, "history deleted on another node: removed here too");
+                    // Their copies on the homeserver go with the next pass's push: more to do
+                    report.pending += n;
                 }
                 Ok(_) => {}
                 Err(e) => report
@@ -971,16 +978,13 @@ impl PubkySync {
                 found.retain(|id, _| heads.has_in(v1::Root::Priv, ns, id));
             }
             // What is new or newer than the node's copy, then fetched 8 at a time
-            let wanted: Vec<(String, v1::Head, bool)> = {
+            let wanted: Vec<(String, v1::Head, bool, Option<PostStamp>)> = {
                 let lib = self.lib(library)?;
                 let mut w = Vec::new();
                 for (id, (head, public)) in found {
-                    let take = match lib.get_music_post(&id)? {
-                        None => true,
-                        Some(row) => head.edited_micros() > row.updated_at.max(row.synced_at.unwrap_or(0)),
-                    };
-                    if take {
-                        w.push((id, head, public));
+                    let mine = lib.music_post_stamp(&id)?;
+                    if pull_takes(head.edited_micros(), mine) {
+                        w.push((id, head, public, mine));
                     }
                 }
                 w
@@ -994,7 +998,7 @@ impl PubkySync {
             use futures_util::StreamExt;
             let this = self;
             let fetched: Vec<Fetched> = futures_util::stream::iter(wanted)
-                .map(move |(id, head, public)| async move {
+                .map(move |(id, head, public, mine)| async move {
                     let r = if public {
                         this.homeserver
                             .get_bytes(&this.z32, &head.path, Visibility::Public, None)
@@ -1004,12 +1008,12 @@ impl PubkySync {
                             .get_bytes(&this.z32, &head.path, Visibility::Private, Some(&this.session))
                             .await
                     };
-                    (id, head, public, r)
+                    (id, head, public, mine, r)
                 })
                 .buffered(pm_pubky::homeserver::FETCH_AT_ONCE)
                 .collect()
                 .await;
-            for (id, head, public, bytes) in fetched {
+            for (id, head, public, mine, bytes) in fetched {
                 self.current()?;
                 let bytes = match bytes {
                     Ok(b) => b,
@@ -1054,6 +1058,11 @@ impl PubkySync {
                     Visibility::Private
                 };
                 let lib = self.lib(library)?;
+                // Chosen against the node's row as it was before the fetch: one edited or
+                // deleted since stays as it is (it is newer, and goes out with the next push)
+                if lib.music_post_stamp(&id)? != mine {
+                    continue;
+                }
                 store(&lib, &post, &id, visibility).map_err(|e| SyncError::Store(e.message))?;
                 lib.mark_music_post_synced(&id, now_micros())?;
                 report.pulled += 1;
@@ -1168,8 +1177,33 @@ impl PubkySync {
     }
 }
 
-/// One post the pull fetched: its id, head, whether it is public, and its bytes.
-type Fetched = (String, v1::Head, bool, Result<Vec<u8>, HomeserverError>);
+/// One post the pull fetched: its id, head, whether it is public, the node's row as it was when
+/// the post was chosen ([`pull_takes`]), and its bytes.
+type Fetched = (
+    String,
+    v1::Head,
+    bool,
+    Option<PostStamp>,
+    Result<Vec<u8>, HomeserverError>,
+);
+
+/// Whether a pull takes the homeserver's version of a post, written at `remote_edited`, over the
+/// node's row `mine` (none: the node does not have the post). A row that waits to be pushed (an
+/// edit, a move to the other folder, a delete: `unsynced_music_posts` lists it) is never
+/// replaced: every pass pushes before it pulls, so the node's change goes out over whatever the
+/// homeserver has, and until the push has reached it the pull must not take it back. The row's
+/// own time does not say enough for that: a review's and a listen's stay what they were when
+/// the review was written and the song was played. A row that was pushed or pulled gives way
+/// to a version written after that.
+fn pull_takes(remote_edited: i64, mine: Option<PostStamp>) -> bool {
+    match mine {
+        None => true,
+        Some((updated_at, synced_at, deleted)) => {
+            let waits = deleted || synced_at.is_none_or(|at| updated_at > at);
+            !waits && remote_edited > updated_at.max(synced_at.unwrap_or(0))
+        }
+    }
+}
 
 /// The newest version of every v1 post, per root (public or not) and namespace.
 #[derive(Default)]
@@ -1693,5 +1727,28 @@ mod tests {
             serde_json::json!({"name": "n", "api_url": "u", "token": fake, "version": "0", "updated_at": 1});
         let read: pm_pubky::homeserver::NodeRecord = serde_json::from_value(written).unwrap();
         assert_eq!(read.token, fake);
+    }
+
+    /// What the pull takes from the homeserver: a post the node has not, and a version newer
+    /// than the node's row; never the copy of a post that was edited or deleted here since.
+    #[test]
+    fn a_pull_does_not_take_what_is_older_than_the_nodes_row() {
+        assert!(pull_takes(10, None));
+        // (the row's time, its last push or pull, tombstone)
+        assert!(
+            pull_takes(40, Some((10, Some(30), false))),
+            "written elsewhere since"
+        );
+        assert!(
+            !pull_takes(30, Some((10, Some(30), false))),
+            "the version this node pushed"
+        );
+        // Waiting to be pushed: never replaced, whatever the times say. An edited review or a
+        // listen moved to the other folder keeps its old time (20), a collection has its edit's
+        assert!(!pull_takes(90, Some((20, None, false))));
+        assert!(!pull_takes(90, Some((40, Some(30), false))));
+        // Deleted here and not pushed yet: the homeserver's copy does not bring it back
+        assert!(!pull_takes(30, Some((50, Some(30), true))));
+        assert!(!pull_takes(90, Some((50, None, true))));
     }
 }

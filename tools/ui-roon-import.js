@@ -147,7 +147,7 @@ const ringOn = (page, id) => page.evaluate((x) => { const l = document.getElemen
         // Playlists' own Import button is in the Tab order too.
         await fx.go(page, '/playlists');
         await page.waitForSelector('#plimport', { state: 'attached', timeout: 8000 }).catch(() => {});
-        check(await tabTo(page, 'plimport'), `${width}: Tab reaches Playlists' Import M3U, CSV or Roon export`);
+        check(await tabTo(page, 'plimport'), `${width}: Tab reaches Collections' Import M3U, CSV or Roon export`);
         // And Settings › Backup's Choose a backup file.
         await fx.go(page, '/settings/backup');
         const rs = await page.waitForSelector('#rsfile', { state: 'attached', timeout: 8000 }).then(() => true, () => false);

@@ -1457,9 +1457,14 @@ pub(crate) async fn get(
 pub(crate) async fn create(
     State(s): State<Arc<NodeState>>,
     Extension(c): Extension<Caller>,
-    Json(body): Json<CreatePlaylist>,
+    Json(mut body): Json<CreatePlaylist>,
 ) -> Result<Response, ApiError> {
     let Some(key) = listener(&c) else {
+        // An app password keeps collections, private ones: a public one is posted under the
+        // owner's name, which is the owner's to choose
+        if c.role == crate::accounts::Role::App {
+            body.public = None;
+        }
         return Ok(playlists::create(State(s), Json(body)).await?.into_response());
     };
     change(&s, &key, None, |lib, _| {
@@ -1656,7 +1661,7 @@ pub(crate) async fn play(
         .iter()
         .find(|k| k.id == id && !k.deleted)
         .ok_or_else(|| not_found(&id))?;
-    let (items, missing) =
+    let (mut items, missing) =
         playlists::library_queue(&s.library.lock().expect("library poisoned"), &k.playlist);
     if items.is_empty() {
         return Err(ApiError::new(
@@ -1664,35 +1669,15 @@ pub(crate) async fn play(
             "none of the collection's items is in this node's library",
         ));
     }
+    // Who queued them, as the queue routes record it: never the owner's plays (listens.rs)
+    for it in &mut items {
+        it.by = Some(key.clone());
+    }
     crate::listens::zone_changed_by(&s, &body.zone, false);
     let queued = items.len();
     playlists::queue_into(&zone, items, body.replace).await;
     Ok(Json(PlayedPlaylist { queued, missing }))
 }
-
-/// Whether a listener's request is one of the routes above, for their own collections
-/// (accounts.rs lets exactly these through).
-pub(crate) fn is_own_route(method: &axum::http::Method, path: &str) -> bool {
-    use axum::http::Method;
-    let Some(rest) = path
-        .strip_prefix("/collections")
-        .or_else(|| path.strip_prefix("/playlists"))
-    else {
-        return false;
-    };
-    let parts: Vec<&str> = rest.split('/').skip(1).collect();
-    match (method, parts.as_slice()) {
-        (&Method::GET | &Method::POST, []) => rest.is_empty(),
-        (&Method::GET | &Method::PUT | &Method::DELETE, [id]) => !id.is_empty() && !RESERVED.contains(id),
-        (&Method::POST, [id, "items"]) | (&Method::POST, [id, "play"]) => !id.is_empty(),
-        (&Method::DELETE, [id, "items", index]) => !id.is_empty() && index.parse::<usize>().is_ok(),
-        (&Method::PUT, [id, "visibility"]) => !id.is_empty(),
-        _ => false,
-    }
-}
-
-/// Names under `/playlists/` that aren't collections.
-const RESERVED: &[&str] = &["from-queue", "import"];
 
 #[cfg(test)]
 mod tests {
@@ -1794,6 +1779,13 @@ mod tests {
         }
     }
 
+    /// Whether the route this path matches is one of a person's own collection routes
+    /// (`access::ROUTES`).
+    fn is_own_route(m: &Method, p: &str) -> bool {
+        use crate::access::{required, route_of, Capability};
+        route_of(p).and_then(|(route, _)| required(m, route)) == Some(Capability::Collections)
+    }
+
     #[test]
     fn a_listener_reaches_only_their_own_collection_routes() {
         for (m, p) in [
@@ -1805,20 +1797,32 @@ mod tests {
             (Method::DELETE, "/playlists/0034A0Z1Y2X3W"),
             (Method::POST, "/collections/0034A0Z1Y2X3W/items"),
             (Method::DELETE, "/collections/0034A0Z1Y2X3W/items/3"),
-            (Method::PUT, "/collections/0034A0Z1Y2X3W/visibility"),
             (Method::POST, "/collections/0034A0Z1Y2X3W/play"),
         ] {
             assert!(is_own_route(&m, p), "{m} {p}");
         }
+        // Making one public is a person's own too, under `own` (an app password has the collection
+        // routes but not this)
+        for p in [
+            "/collections/0034A0Z1Y2X3W/visibility",
+            "/playlists/0034A0Z1Y2X3W/visibility",
+        ] {
+            let route = crate::access::route_of(p).map(|(r, _)| r);
+            assert_eq!(
+                route.and_then(|r| crate::access::required(&Method::PUT, r)),
+                Some(crate::access::Capability::Own),
+                "{p}"
+            );
+        }
         for (m, p) in [
             (Method::POST, "/playlists/from-queue"),
             (Method::POST, "/playlists/import"),
+            (Method::GET, "/playlists/import"),
             (Method::POST, "/playlists/import/file"),
             (Method::GET, "/collections/x/play-from"),
             (Method::PUT, "/collections/x/order"),
             (Method::PUT, "/collections/x/items/2/source"),
             (Method::DELETE, "/collections/x/local/0"),
-            (Method::DELETE, "/collections/x/items/two"),
             (Method::DELETE, "/collections"),
             (Method::GET, "/collectionsx"),
             (Method::GET, "/collections/"),

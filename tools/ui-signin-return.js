@@ -89,8 +89,8 @@ const SHELLS = [['web', 360, null], ['web', 412, null], ['android', 360, APP], [
       await page.goBack();
       // A listener's Home is their Albums (the same page, its address replaced)
       const home = listener ? ['/', '/albums'] : ['/'];
-      await page.waitForFunction((h) => location.origin === 'http://odeion-fixture.test' && h.includes(location.pathname) && !!document.querySelector('#main > *'), home, { timeout: 3000 }).catch(() => {});
-      const back = await page.evaluate(() => ({ url: location.href, drawn: !!document.querySelector('#main > *') }));
+      await page.waitForFunction((h) => location.origin === 'http://odeion-fixture.test' && h.includes(location.pathname) && !!document.querySelector('#main > :not(.navskel)'), home, { timeout: 3000 }).catch(() => {});
+      const back = await page.evaluate(() => ({ url: location.href, drawn: !!document.querySelector('#main > :not(.navskel)') }));
       check(home.some((h) => back.url === fx.ORIGIN + h) && back.drawn, `${at}: Back returns to Home, in the app (${back.url})`);
       // A later visit still says why; pressing Sign in there (a new try) puts the line away
       if (!ok && !listener) {

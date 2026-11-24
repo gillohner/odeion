@@ -25,8 +25,8 @@
 //! - **Bounded.** Batches of [`MAX_BATCH`] and [`MAX_BODY`]; [`PER_ALIAS_PER_MIN`],
 //!   [`PER_PERSON_PER_MIN`] and [`GLOBAL_PER_MIN`]; at most [`MAX_ALIASES`] live aliases; a queue of
 //!   [`QUEUE_MAX`] in memory, written by one writer every [`FLUSH_EVERY`]. On disk
-//!   (`<data>/usage.sqlite`, 0600, never in a backup): raw events [`RAW_RETENTION`], daily counts
-//!   [`AGG_RETENTION`], at most [`MAX_EVENTS`] events and [`MAX_STORE_BYTES`]; over a cap the oldest
+//!   (`<data>/usage.sqlite`, 0600, never in a backup): raw events [`RAW_RETENTION_DAYS`], daily
+//!   counts [`AGG_RETENTION_DAYS`], at most [`MAX_EVENTS`] events and [`MAX_STORE_BYTES`]; over a cap the oldest
 //!   day goes first. What was dropped on the way is counted.
 //! - **Reading it.** The owner's summary (aggregates only) and export (raw events, renamed per
 //!   export) are owner-authenticated; `odeiond usage summary|export` reads the file on the node.
@@ -63,10 +63,6 @@ pub const BINDING_KEEP: Duration = Duration::from_secs(24 * 3600);
 pub const ENDED_MAX: usize = 10_000;
 pub const RAW_RETENTION_DAYS: u64 = 14;
 pub const AGG_RETENTION_DAYS: u64 = 90;
-/// Raw events are kept this long.
-pub const RAW_RETENTION: Duration = Duration::from_secs(RAW_RETENTION_DAYS * 86_400);
-/// Daily counts are kept this long.
-pub const AGG_RETENTION: Duration = Duration::from_secs(AGG_RETENTION_DAYS * 86_400);
 pub const MAX_EVENTS: u64 = 400_000;
 /// Live data in the file (pages in use, not free ones).
 pub const MAX_STORE_BYTES: u64 = 64 << 20;

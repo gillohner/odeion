@@ -194,7 +194,52 @@ fn keep_answer(s: &NodeState, key: (String, String), a: SourceAnswer, epoch: u64
     if is_library(&key.1) && s.search_library_epoch.load(Ordering::SeqCst) != epoch {
         return;
     }
+    make_room(&mut cache, CACHE_MAX, CACHE_TTL);
     cache.insert(key, (Instant::now(), a));
+}
+
+/// How many answers are kept at most. Search as you type asks once per keystroke and source and
+/// an answer holds up to 50 hits; answers past [`CACHE_TTL`] were passed over when read but never
+/// dropped, so the cache grew for as long as the node ran.
+const CACHE_MAX: usize = 512;
+
+/// The longest search text taken (a pasted link with its parameters fits).
+const QUERY_MAX: usize = 2000;
+
+/// What filtering an answer for someone other than the owner needs: the library's folders, the
+/// node's own addresses, and the node (for the sign-ins it knows).
+pub(crate) type Hide = (Vec<String>, Vec<String>, Arc<NodeState>);
+
+/// One answer as one NDJSON line; with `hide`, filtered as a person's JSON answers are
+/// (`accounts::hide_for_listener`).
+pub(crate) fn ndjson_line(a: &SourceAnswer, hide: Option<&Hide>) -> Vec<u8> {
+    let mut line = match hide {
+        Some((roots, origins, s)) => {
+            let mut v = serde_json::to_value(a).unwrap_or_default();
+            let known = crate::accounts::KnownTokens::lazy(s);
+            crate::accounts::hide_for_listener(&mut v, roots, origins, &|t| known.has(t));
+            serde_json::to_vec(&v).unwrap_or_default()
+        }
+        None => serde_json::to_vec(a).unwrap_or_default(),
+    };
+    line.push(b'\n');
+    line
+}
+
+/// Before an answer is added to a full cache: the ones past `ttl` go, and when it is still full
+/// of fresh ones, the older half.
+fn make_room<K: Eq + std::hash::Hash, V>(cache: &mut HashMap<K, (Instant, V)>, max: usize, ttl: Duration) {
+    if cache.len() < max {
+        return;
+    }
+    cache.retain(|_, (at, _)| at.elapsed() < ttl);
+    if cache.len() < max {
+        return;
+    }
+    let mut ages: Vec<Instant> = cache.values().map(|(at, _)| *at).collect();
+    ages.sort_unstable();
+    let cut = ages[ages.len() / 2];
+    cache.retain(|_, (at, _)| *at > cut);
 }
 
 /// Drops one person's cached answers (`Who::tag`): they were removed.
@@ -212,8 +257,15 @@ pub(crate) async fn search(
     axum::Extension(c): axum::Extension<crate::accounts::Caller>,
     Query(p): Query<SearchParams>,
 ) -> Response {
+    // (an app password searches as the people you add do: the library, not the owner's own)
     let owner = c.role == crate::accounts::Role::Owner;
+    // Anyone but the owner reads each answer as their JSON answers are filtered (`auth` leaves
+    // this stream alone, as it is not JSON): file names, not folders, no node sign-in in a link
+    let hide = (!owner).then(|| (crate::accounts::library_roots(&s), s.node_origins(), s.clone()));
     let q = query_with_tags(&p);
+    if q.chars().count() > QUERY_MAX {
+        return crate::ApiError::bad_request("the search text is too long").into_response();
+    }
     let scope = p.scope.clone().unwrap_or_default();
     let limit = p.limit.unwrap_or(20).clamp(1, 50);
     let sources = if q.is_empty() {
@@ -303,11 +355,10 @@ pub(crate) async fn search(
         });
     }
     drop(tx);
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+    let stream = futures_util::stream::unfold((rx, hide), |(mut rx, hide)| async move {
         let a = rx.recv().await?;
-        let mut line = serde_json::to_vec(&a).unwrap_or_default();
-        line.push(b'\n');
-        Some((Ok::<_, std::io::Error>(bytes::Bytes::from(line)), rx))
+        let line = ndjson_line(&a, hide.as_ref());
+        Some((Ok::<_, std::io::Error>(bytes::Bytes::from(line)), (rx, hide)))
     });
     (
         [
@@ -1467,5 +1518,42 @@ mod ident_tests {
         let epoch = s.search_library_epoch.load(Ordering::SeqCst);
         keep_answer(&s, key("library"), SourceAnswer::default(), epoch);
         assert!(kept("library"));
+    }
+
+    /// The answer cache has a size: answers past their time go when it is full, and when it is
+    /// full of fresh ones the older half goes, so the newest are always kept.
+    #[test]
+    fn the_answer_cache_does_not_grow_without_end() {
+        // An answer made at `made` is past this time when it is looked at; one dated later is not
+        let ttl = Duration::from_nanos(1);
+        let made = Instant::now();
+        let fresh = |n: u32| made + Duration::from_secs(3600 + u64::from(n));
+        let mut cache: HashMap<u32, (Instant, ())> = HashMap::new();
+        // Below the limit nothing goes, however old
+        for n in 0..9 {
+            cache.insert(n, (made, ()));
+        }
+        make_room(&mut cache, 10, ttl);
+        assert_eq!(cache.len(), 9);
+        // At the limit: the ones past their time
+        cache.insert(9, (fresh(9), ()));
+        make_room(&mut cache, 10, ttl);
+        assert_eq!(cache.keys().copied().collect::<Vec<_>>(), [9]);
+        // Full of fresh ones: the older half
+        for n in 0..10 {
+            cache.insert(n, (fresh(n), ()));
+        }
+        make_room(&mut cache, 10, ttl);
+        let mut left: Vec<u32> = cache.keys().copied().collect();
+        left.sort_unstable();
+        assert_eq!(left, [6, 7, 8, 9]);
+        // As searches come in, one per key: never more than the limit, the newest always there
+        let mut cache: HashMap<u32, (Instant, ())> = HashMap::new();
+        for n in 0..5000 {
+            make_room(&mut cache, CACHE_MAX, ttl);
+            cache.insert(n, (fresh(n), ()));
+            assert!(cache.len() <= CACHE_MAX);
+        }
+        assert!(cache.contains_key(&4999));
     }
 }

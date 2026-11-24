@@ -216,7 +216,8 @@ impl SourceFactory for Factory {
             } else {
                 SeekKind::Works
             },
-            broken: false,
+            // (`baddecode`: opens, and its first block does not decode)
+            broken: item.uri.contains("baddecode"),
         }))
     }
 
@@ -490,7 +491,7 @@ fn kinds(evs: &[ZoneEvent]) -> Vec<String> {
             ZoneEvent::Paused { position_ms } => format!("pause:{position_ms}"),
             ZoneEvent::Resumed => "resume".into(),
             ZoneEvent::Seeked { position_ms } => format!("seek:{position_ms}"),
-            ZoneEvent::Stopped => "stopped".into(),
+            ZoneEvent::Stopped { .. } => "stopped".into(),
             ZoneEvent::QueueChanged => "queue".into(),
             ZoneEvent::StreamTitle { title } => format!("title:{title}"),
             ZoneEvent::Error { message } => format!("error:{message}"),
@@ -523,6 +524,31 @@ async fn gapless_join_keeps_one_sink_open() {
         kinds(&drain_events(&mut r.events)),
         ["start:a:false", "end:a", "start:b:true", "end:b", "stopped"]
     );
+}
+
+/// A zone closed for the node's exit takes no later command: nothing starts it again, and
+/// waiting for it to be stopped does not wait for what was not taken.
+#[tokio::test]
+async fn a_closed_zone_takes_no_command() {
+    let mut r = rig(&[("a", RATE, 250), ("b", RATE, 150)]);
+    r.gate.allow(1000);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.close();
+    assert_eq!(r.zone.wait_stopped().await.transport, Transport::Stopped);
+    drain_events(&mut r.events);
+    r.zone.play();
+    r.zone.next();
+    r.zone.toggle_pause();
+    let st = tokio::time::timeout(Duration::from_secs(2), r.zone.wait_stopped())
+        .await
+        .expect("nothing to wait for");
+    assert_eq!(st.transport, Transport::Stopped);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(r.zone.state().transport, Transport::Stopped);
+    assert_eq!(*r.rec.opens.lock().unwrap(), 0, "nothing was opened");
+    assert!(r.rec.samples.lock().unwrap().is_empty());
+    assert_eq!(kinds(&drain_events(&mut r.events)), Vec::<String>::new());
 }
 
 /// A sink of fixed size (a Linn's stream offered as a file) takes the next track gaplessly only
@@ -1204,6 +1230,65 @@ async fn repeat_one_and_queue_edits_while_playing() {
     assert_eq!(starts[1], "start:a:true");
     assert_eq!(*starts.last().unwrap(), "start:b:true");
     assert_eq!(*r.rec.opens.lock().unwrap(), 1);
+}
+
+/// With Repeat on, an item that gives no audio (an empty file, a first block that does not
+/// decode) is not started over and over: once Repeat comes round to it with nothing played in
+/// between, the zone stops and says why. A queue that has a song that plays goes on repeating.
+#[tokio::test]
+async fn repeat_does_not_spin_on_items_that_give_no_audio() {
+    let starts = |evs: &[ZoneEvent]| kinds(evs).into_iter().filter(|k| k.starts_with("start:")).count();
+    // One empty item on Repeat One; one that fails at its first block on Repeat All
+    for (uri, repeat) in [("empty", Repeat::One), ("baddecode", Repeat::All)] {
+        let mut r = rig(&[(uri, RATE, if uri == "empty" { 0 } else { 100 })]);
+        r.zone.set_repeat(repeat);
+        r.zone.enqueue(vec![QueueItem::new(uri)], Insert::End);
+        r.zone.play();
+        let st = tokio::time::timeout(Duration::from_secs(5), r.zone.wait_stopped())
+            .await
+            .unwrap_or_else(|_| panic!("{uri}: the zone goes on starting it"));
+        assert_eq!(
+            st.error.as_deref(),
+            Some("stopped at an item that gives no audio"),
+            "{uri}"
+        );
+        assert_eq!(starts(&drain_events(&mut r.events)), 1, "{uri}: started once");
+        assert!(r.rec.samples.lock().unwrap().is_empty());
+    }
+    // A queue of nothing but such items, Repeat All: one round, then the same
+    let mut r = rig(&[("empty", RATE, 0), ("empty2", RATE, 0)]);
+    r.zone.set_repeat(Repeat::All);
+    r.zone.enqueue(
+        vec![QueueItem::new("empty"), QueueItem::new("empty2")],
+        Insert::End,
+    );
+    r.zone.play();
+    let st = tokio::time::timeout(Duration::from_secs(5), r.zone.wait_stopped())
+        .await
+        .expect("the zone goes on starting them");
+    assert_eq!(
+        st.error.as_deref(),
+        Some("stopped at an item that gives no audio")
+    );
+    assert_eq!(starts(&drain_events(&mut r.events)), 2);
+    // Beside a song that plays, the empty item is passed each round and Repeat goes on
+    let mut r = rig(&[("a", RATE, 100), ("empty", RATE, 0)]);
+    r.zone.set_repeat(Repeat::All);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("empty")], Insert::End);
+    r.zone.play();
+    r.gate.allow(3);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+    assert_eq!(r.zone.state().error, None);
+    r.zone.set_repeat(Repeat::Off);
+    r.gate.allow(1000);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    let k = kinds(&drain_events(&mut r.events));
+    assert!(
+        k.iter().filter(|k| k.starts_with("start:empty")).count() >= 3,
+        "{k:?}"
+    );
 }
 
 #[tokio::test]
@@ -3083,4 +3168,48 @@ async fn a_replacement_never_reenables_shuffle_turned_off_by_another_controller(
             .collect::<Vec<_>>(),
         ["a", "b"]
     );
+}
+
+/// `Stopped` says whether the queue ran out: what plays on by itself after the last item (the
+/// node's radio) must not start again after a Stop.
+#[tokio::test]
+async fn stopped_says_whether_the_queue_ran_out() {
+    let stops = |evs: Vec<ZoneEvent>| -> Vec<bool> {
+        evs.into_iter()
+            .filter_map(|e| match e {
+                ZoneEvent::Stopped { queue_ended } => Some(queue_ended),
+                _ => None,
+            })
+            .collect()
+    };
+    // The last item played to its end
+    let mut r = rig(&[("a", RATE, 250)]);
+    r.gate.allow(1000);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.zone.wait_stopped().await;
+    assert_eq!(stops(drain_events(&mut r.events)), [true]);
+
+    // A Stop in the middle of an item
+    let mut r = rig(&[("a", RATE, 100_000)]);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(2);
+    r.gate.blocked().await;
+    r.zone.stop();
+    r.gate.allow(1000);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.queue.len(), 1);
+    assert_eq!(stops(drain_events(&mut r.events)), [false]);
+
+    // Next on the last item: the queue is over, as when it plays out
+    let mut r = rig(&[("a", RATE, 100_000)]);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(2);
+    r.gate.blocked().await;
+    r.zone.next();
+    r.gate.allow(1000);
+    r.zone.wait_stopped().await;
+    assert_eq!(stops(drain_events(&mut r.events)), [true]);
 }
