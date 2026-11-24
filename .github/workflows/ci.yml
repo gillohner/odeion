@@ -448,17 +448,24 @@ jobs:
           if docker compose up -d; then echo "the node started without its share"; exit 1; fi
           test -z "$(docker compose ps -q --status running music)"
           sudo ./start-at-boot.sh
-          sudo systemctl start --no-block odeion-bundle
+          # The start returns at once (a boot doesn't wait for the share), here without --no-block
+          rc=0; timeout 20 sudo systemctl start odeion-bundle || rc=$?
+          [ "$rc" != 124 ]
+          # active (exited) = a try started the node
+          done_() { [ "$(systemctl show -p ActiveState --value odeion-bundle)/$(systemctl show -p SubState --value odeion-bundle)" = active/exited ]; }
           # It fails while the share is away, and tries again by itself
           for i in $(seq 60); do [ "$(systemctl show -p NRestarts --value odeion-bundle)" -ge 1 ] && break; sleep 2; done
           [ "$(systemctl show -p NRestarts --value odeion-bundle)" -ge 1 ]
-          if systemctl is-active -q odeion-bundle; then echo "the unit gave up or passed without the share"; exit 1; fi
+          if done_; then echo "the unit passed without the share"; exit 1; fi
           test -z "$(docker compose ps -q --status running music)"
+          # A restore refuses while the unit is on (its retries would start the bundle half-way)
+          if ./restore.sh "$(ls -d $RUNNER_TEMP/backups/2*/)" 2> $RUNNER_TEMP/unit-refused.log; then echo "restore.sh ran with the unit on"; exit 1; fi
+          grep -q 'odeion-bundle.service (the start at boot) is on' $RUNNER_TEMP/unit-refused.log
           # The share answers: the next try starts the node
           mkdir -p "$SHARE"
-          for i in $(seq 60); do systemctl is-active -q odeion-bundle && break; sleep 2; done
+          for i in $(seq 60); do done_ && break; sleep 2; done
           systemctl status --no-pager odeion-bundle || true
-          systemctl is-active -q odeion-bundle
+          done_
           test -n "$(docker compose ps -q --status running music)"
           # Taking the unit out leaves the containers running
           sudo ./start-at-boot.sh --remove

@@ -96,16 +96,20 @@ r = subprocess.run(["sh", str(BUNDLE / "start-at-boot.sh"), "--print"], capture_
                    env={"PATH": "/usr/bin:/bin"})
 check(r.returncode == 0, f"start-at-boot.sh --print ({r.stderr.strip()[:200]})")
 boot_text = r.stdout
+script = (BUNDLE / "start-at-boot.sh").read_text()
 boot = directives(boot_text)
 check(boot.get("WorkingDirectory") == [str(BUNDLE.resolve())], f"the bundle unit runs in the bundle's folder ({boot.get('WorkingDirectory')})")
 check(boot.get("ExecStart") == ["/bin/sh ./start-at-boot.sh --run"], "the bundle unit runs start-at-boot.sh --run")
 check({"network-online.target", "docker.service"} <= set(words(boot, "After")) and "network-online.target" in words(boot, "Wants"),
       "the bundle unit starts after the network is online and after Docker")
-check(boot.get("Type") == ["oneshot"] and boot.get("Restart") == ["on-failure"] and boot.get("StartLimitIntervalSec") == ["0"],
-      "the bundle unit tries again without a limit")
+check(boot.get("Restart") == ["on-failure"] and boot.get("StartLimitIntervalSec") == ["0"] and boot.get("RemainAfterExit") == ["yes"],
+      "the bundle unit tries again without a limit, and stays active once the node runs")
+# A oneshot unit's start job stays open through its restarts: the boot (multi-user.target) and
+# `systemctl start` would wait until the share answers.
+check(boot.get("Type") == ["exec"], f"the bundle unit's start job ends at once, not after the retries (Type={boot.get('Type')})")
+check("timeout 15m docker compose up -d --no-recreate" in script, "one try of compose has a time limit")
 check(not boot.get("ExecStop") and not boot.get("ExecStopPost"), "stopping the bundle unit leaves the containers alone")
 check(boot.get("WantedBy") == ["multi-user.target"], "the bundle unit is enabled for every boot")
-script = (BUNDLE / "start-at-boot.sh").read_text()
 run_branch = script[script.find("--run)"):script.find(";;", script.find("--run)"))]
 check("docker compose up -d --no-recreate" in run_branch, "a boot only starts the bundle's containers (up -d --no-recreate), it applies no pending update")
 check(script.count("env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin docker compose") >= 2,

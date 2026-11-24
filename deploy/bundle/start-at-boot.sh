@@ -31,13 +31,14 @@ After=network-online.target docker.service
 StartLimitIntervalSec=0
 
 [Service]
-Type=oneshot
+# exec, not oneshot: the start job ends once the script runs, so a boot (and systemctl start) never
+# waits for the share; the retries happen after it. --run gives compose 15 minutes per try.
+Type=exec
 RemainAfterExit=yes
 WorkingDirectory=$DIR
 ExecStart=/bin/sh ./start-at-boot.sh --run
 Restart=on-failure
 RestartSec=30
-TimeoutStartSec=15min
 
 [Install]
 WantedBy=multi-user.target
@@ -58,7 +59,7 @@ case ${1:-} in
   # after it also catches a node that stopped again at once. --no-recreate: a boot only starts what
   # is there, as Docker's own restart does; an update stays for `docker compose up -d` by hand. No
   # --pull never: an image that is missing (never pulled) is fetched rather than failing every try.
-  docker compose up -d --no-recreate
+  timeout 15m docker compose up -d --no-recreate
   if [ -z "$(docker compose ps -q --status running music)" ]; then
     echo "The music container isn't running yet; trying again." >&2
     exit 1
@@ -83,7 +84,7 @@ case ${1:-} in
   # The unit runs as root: root's Docker must be the one that runs this bundle (not rootless Docker)
   [ -n "$(env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin docker compose ps -aq 2>/dev/null)" ] ||
     { echo "Root's Docker has no containers of this bundle: run docker compose up -d first (rootless Docker isn't covered)." >&2; exit 1; }
-  # Type=oneshot with Restart= needs systemd 244 (Debian 11, Ubuntu 20.04)
+  # Restart= on a unit that stays active after its run, as here, needs systemd 244 (Debian 11, Ubuntu 20.04)
   v=$(systemctl --version | sed -n '1s/^systemd \([0-9]*\).*/\1/p')
   [ "${v:-0}" -ge 244 ] || { echo "This needs systemd 244 or newer (this machine has ${v:-an unknown version})." >&2; exit 1; }
   tmp=$(mktemp "$UNIT_FILE.XXXXXX")
@@ -93,7 +94,7 @@ case ${1:-} in
   systemctl daemon-reload
   systemctl enable "$UNIT"
   echo "Installed $UNIT: after every boot it starts the bundle in $DIR and retries until the node runs."
-  echo "Run it now with: sudo systemctl start odeion-bundle. See it with: systemctl status odeion-bundle"
+  echo "Run it now with: sudo systemctl start odeion-bundle. It has started the node when systemctl status odeion-bundle says active (exited)."
   ;;
 *)
   echo "Usage: sudo $0 [--remove] | $0 --print | $0 --run" >&2

@@ -6,7 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-24
 
-- **The bundle comes back after a reboot when a network share answers late.** Docker starts the bundle's containers again after a boot, but tries each only once: when a share the node mounts as a Docker volume (a NAS on SMB or NFS) was not reachable yet, the node stayed down until someone started it, while the homeserver ran. `sudo ./start-at-boot.sh` in `deploy/bundle` now installs `odeion-bundle.service`, which starts the bundle's containers there (`docker compose up -d --no-recreate`) once the network is up and tries again every 30 seconds until the node runs. It stops nothing at shutdown and applies no pending update, and `--remove` takes it out. `setup.sh` points to it.
+- **The bundle comes back after a reboot when a network share answers late.** Docker starts the bundle's containers again after a boot, but tries each only once: when a share the node mounts as a Docker volume (a NAS on SMB or NFS) was not reachable yet, the node stayed down until someone started it, while the homeserver ran. `sudo ./start-at-boot.sh` in `deploy/bundle` now installs `odeion-bundle.service`, which starts the bundle's containers there (`docker compose up -d --no-recreate`) once the network is up and tries again every 30 seconds until the node runs. It stops nothing at shutdown and applies no pending update, and `--remove` takes it out; `restore.sh` refuses to run while it is on. `setup.sh` points to it.
 
 ### 2026-11-23
 
