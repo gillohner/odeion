@@ -13858,10 +13858,11 @@ exec sleep 300
         assert_eq!(ids(&zone), had);
         let over = pm_zones::MAX_QUEUE_ITEMS + 1;
 
-        // A move of 100,001 items
+        // A move of 100,001 items (short ones: the request stays under the body limit, 2 MiB)
         let items: Vec<serde_json::Value> = (0..over)
-            .map(|i| serde_json::json!({"id": 0, "uri": format!("https://radio.example/m{i}")}))
+            .map(|i| serde_json::json!({"uri": format!("x{i}")}))
             .collect();
+        assert!(serde_json::to_vec(&items).unwrap().len() < 2 << 20);
         let (st, e) = call(
             &app,
             "POST",
