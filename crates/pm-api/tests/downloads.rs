@@ -519,6 +519,61 @@ async fn a_share_file_is_fetched_once_and_seeks_come_from_the_cache() {
     );
 }
 
+/// A share with a password alone (a token, `http://:tok@host/` as typed) gets it on a download
+/// fetch too, with an empty user: before, the fetch sent no credentials without a user.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_password_only_share_gets_its_password_on_a_download_fetch() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = listener.local_addr().unwrap().to_string();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
+    let share = axum::Router::new().route(
+        "/dav/{name}",
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let tx = tx.clone();
+            async move {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                let _ = tx.send(auth);
+                vec![5u8; 4096]
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, share).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lib.sqlite");
+    Library::open(&db)
+        .unwrap()
+        .set_setting(
+            "webdav.shares",
+            &serde_json::json!([{"id": "tok", "name": "Token", "url": format!("http://:tok@{host}/dav/")}])
+                .to_string(),
+        )
+        .unwrap();
+    let s = node(dir.path());
+    let id = add_track(&s, std::path::Path::new("webdav://tok/07 Token.flac"), "flac");
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(pm_api::downloads::CACHE_MB_SETTING, "64")
+        .unwrap();
+    let app = router(s.clone());
+    let got = get(&app, OWNER, &format!("/v1/library/tracks/{id}/file"), &[]).await;
+    assert_eq!(
+        (got.status, got.body.as_slice()),
+        (StatusCode::OK, &[5u8; 4096][..]),
+        "{}",
+        String::from_utf8_lossy(&got.body)
+    );
+    let want = format!(
+        "Basic {}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ":tok")
+    );
+    assert_eq!(rx.try_recv().ok(), Some(Some(want)));
+}
+
 /// Every transcode waits for one of the node's slots (one per CPU), so a burst of requests never
 /// runs more ffmpegs than that at once (#9).
 #[cfg(unix)]
