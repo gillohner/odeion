@@ -833,7 +833,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     // A listener: My music only, no edit controls
     // (the node's own answer is the owner's, `can` included: a person's list goes with the role)
     c = await ctx(); p = await c.newPage();
-    await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null, can: ['artwork', 'session', 'library', 'zone_list', 'zone_use', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in'] } }); });
+    await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null, can: ['artwork', 'session', 'library', 'zone_list', 'zone_use', 'collections', 'own', 'own_play', 'own_sign_in_state', 'own_sign_in'] } }); });
     await p.goto(BASE + '/library'); await p.waitForSelector('#main [data-libtab]');
     check(JSON.stringify(await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()))) === '["My music"]' && !(await p.$('#libadd')), 'a listener gets My music only, without Add music');
     await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');

@@ -20,13 +20,6 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "flac", "m4a", "mp4", "alac", "wav", "wave", "aif", "aiff", "dsf", "dff", "mp3", "ogg", "oga",
 ];
 
-pub fn is_supported_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| SUPPORTED_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
-        .unwrap_or(false)
-}
-
 pub fn probe_file(path: impl AsRef<Path>) -> Result<FileInfo, AudioError> {
     let path = path.as_ref();
     if is_dsd_file(path)? {
