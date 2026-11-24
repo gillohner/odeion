@@ -1061,6 +1061,10 @@ html[data-shell="phone"] .list-row > .plays a::after { content: ""; position: ab
 /* The legend's "N unsure" opens the review: a button (keys and screen readers reach it) that reads as
    a link; on a phone an invisible layer makes it a 44 px tap, so nothing on the card moves */
 .idkey .lnk, #libreview, #liberrs { text-decoration: underline; }
+/* Settings › Zones and outputs: the guide link at the end of the card's one line (one line itself; on a phone a 44 px tall tap area) */
+#spkguide { text-decoration: underline; white-space: nowrap; }
+html[data-shell="phone"] #spkguide { position: relative; }
+html[data-shell="phone"] #spkguide::before { content: ''; position: absolute; left: -6px; right: -6px; top: calc(50% - 22px); height: 44px; }
 html[data-shell="phone"] :is(.idkey .lnk, #libreview, #liberrs) { position: relative; }
 html[data-shell="phone"] :is(.idkey .lnk, #libreview, #liberrs)::before { content: ''; position: absolute; inset: -14px -6px; }
 .idswatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
