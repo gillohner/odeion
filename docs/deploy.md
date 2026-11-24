@@ -71,7 +71,8 @@ sudo ./start-at-boot.sh                     # once, on a machine with systemd: s
   machine). `sudo ./start-at-boot.sh` installs `odeion-bundle.service`, which runs
   `docker compose up -d --no-recreate` in the bundle's folder once the network is up and tries again
   every 30 seconds until the node runs (it starts the containers there are; an update you haven't
-  applied yet stays for your own `docker compose up -d`), so it starts by itself as soon as the share answers. It doesn't
+  applied yet stays for your own `docker compose up -d`, unless the containers were removed with
+  `docker compose down`: then it makes them from the tag in `.env`), so it starts by itself as soon as the share answers. It doesn't
   stop anything at shutdown. It also starts a node you stopped on purpose, at the next boot:
   `sudo systemctl disable --now odeion-bundle` keeps it off (also before a restore), `sudo ./start-at-boot.sh --remove` takes it out.
   While such a share is away the node can't start at all, because Docker needs every volume. The

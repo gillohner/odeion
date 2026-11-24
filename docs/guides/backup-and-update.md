@@ -194,6 +194,7 @@ With the bundle:
 
 ```sh
 cd ~/pubky-music-node/deploy/bundle
+sudo systemctl stop odeion-bundle 2>/dev/null   # no start at boot try while the library is put back
 docker compose stop music
 docker run --rm -i -v pubky-music_music-node:/v alpine:3.22 sh -c \
   'cp /v/library.db /v/library.db.newer && cat > /v/library.db && rm -f /v/library.db-wal /v/library.db-shm && chown "$(stat -c %u:%g /v)" /v/library.db' \
@@ -205,6 +206,8 @@ Then restore that backup's `node/library.pmbackup` in **Settings › Backup › 
 with the passphrase from `node/passphrase`: it puts the sign-ins back. Everyone logs in to the
 node again afterwards (the library file holds no log-ins). Anything you changed after
 that backup is gone (the newer library stays next to it as `library.db.newer`). A homeserver that won't start after `git pull`: go back to the bundle you had
-with `git checkout <the commit in the backup's config/git-commit>` and `docker compose up -d`. If
+with `git checkout <the commit in the backup's config/git-commit>` and `docker compose up -d`
+(with the start at boot installed, run `sudo ./start-at-boot.sh --remove` before the checkout: an
+older bundle has no `start-at-boot.sh`, and its unit would fail every 30 seconds). If
 it still fails, [ask for help](troubleshooting.md#still-stuck) before removing anything; the
 backup folder stays as it is.
