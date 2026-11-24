@@ -456,6 +456,11 @@ html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44p
 .section-head > h3 + .muted { margin: 0 auto 0 var(--sp-3); }
 .section-head > .btn { align-items: baseline; }
 .section-head > .btn > .ic { align-self: center; }
+/* A small one (New smart collection, offline Downloads' Play and Shuffle) is 40 px tall on a phone
+   or a touch screen: with its words on the baseline they sat at its top, 5.5 px above its middle and
+   its icon. The words' line is the button's height instead (as Select's, below): in its middle. */
+html[data-shell="phone"] .section-head > .btn.sm:not(.selstart) { min-height: 0; padding-top: 0; padding-bottom: 0; line-height: 38px; }
+@media (pointer: coarse) { .section-head > .btn.sm:not(.selstart) { min-height: 0; padding-top: 0; padding-bottom: 0; line-height: 38px; } }
 /* A text button inside a sentence (a playlist's "Couldn’t find where these songs play. Try again",
    forget beside a saved speaker address, an artist page's in your library) reads as a link, like
    Restore from a backup, and keeps a native button's height; a section head's text button keeps its
