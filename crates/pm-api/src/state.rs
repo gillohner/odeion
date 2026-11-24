@@ -910,6 +910,16 @@ impl NodeState {
             return;
         }
         let n = saved.items.len();
+        if n > pm_zones::MAX_QUEUE_ITEMS {
+            // Saved by a version without the limit: the rest is left out, and the next save
+            // replaces this one
+            tracing::warn!(
+                zone = %zone.id(),
+                saved = n,
+                kept = pm_zones::MAX_QUEUE_ITEMS,
+                "the saved queue is longer than a queue holds: only the first items are restored"
+            );
+        }
         zone.enqueue(saved.items, pm_zones::Insert::End);
         zone.set_repeat(saved.repeat);
         zone.set_radio(saved.radio);
