@@ -73,7 +73,9 @@ class PubkyMusicApi:
                 headers=self.headers if same_origin(url, self.base) else {},
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
-                if resp.status in (401, 403):
+                # 401: the token itself is refused. 403 is the node saying no to this one call (an app
+                # password can't do everything): its reason, not a sign-in to redo
+                if resp.status == 401:
                     raise AuthError("the node refused the API token")
                 if resp.status >= 400:
                     try:
