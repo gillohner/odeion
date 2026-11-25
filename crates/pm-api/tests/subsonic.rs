@@ -177,6 +177,22 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     assert_eq!(r["error"]["code"], 40);
     let r = call(&app, "/rest/ping?u=bob&p=pw&v=1.16.1&c=test&f=json").await;
     assert_eq!(r["error"]["code"], 40);
+    // The token in capitals still signs in (hex is any case); one off, short or long does not
+    let upper = format!("u=alice&t={}&s={salt}&v=1.16.1&c=test&f=json", tok.to_uppercase());
+    assert_eq!(call(&app, &format!("/rest/ping?{upper}")).await["status"], "ok");
+    let flipped = format!("{}{}", &tok[..31], if tok.ends_with('0') { '1' } else { '0' });
+    for t in [flipped, tok[..31].to_string(), format!("{tok}0")] {
+        let r = call(
+            &app,
+            &format!("/rest/ping?u=alice&t={t}&s={salt}&v=1.16.1&c=test&f=json"),
+        )
+        .await;
+        assert_eq!(r["error"]["code"], 40, "{t}");
+    }
+    for pw in ["pX", "p", "pw0", "enc:70", "enc:707700"] {
+        let r = call(&app, &format!("/rest/ping?u=alice&p={pw}&v=1.16.1&c=test&f=json")).await;
+        assert_eq!(r["error"]["code"], 40, "{pw}");
+    }
 
     // Without f=json the answer is XML (Subsonic's default), with the same auth.
     let (st, h, bytes) = get(&app, "/rest/ping.view?u=alice&p=pw&v=1.16.1&c=test", None).await;

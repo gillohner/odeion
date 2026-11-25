@@ -1269,7 +1269,7 @@ fn token_ok(
         .map(str::to_string)
         // Browsers cannot set headers on WebSocket upgrades: allow `?token=`.
         .or_else(|| query.get("token").cloned());
-    bearer.as_deref() == Some(token.as_str())
+    bearer.is_some_and(|b| crate::state::same_secret(&token, &b))
 }
 
 // ---- web UI ----
@@ -1537,7 +1537,7 @@ async fn pull_stream(
     headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
-    let keyed = q.get("k").is_some_and(|k| *k == s.stream_key(&name));
+    let keyed = q.get("k").is_some_and(|k| s.stream_key_ok(&name, k));
     if !keyed && !token_ok(&s, &headers, &q) {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
@@ -3440,7 +3440,10 @@ async fn keyed_cover(
     Path(id): Path<i64>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
-    if q.get("k") != Some(&s.stream_key(&format!("art:{id}"))) {
+    if !q
+        .get("k")
+        .is_some_and(|k| s.stream_key_ok(&format!("art:{id}"), k))
+    {
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong key"));
     }
     album_cover(State(s), Path(id)).await
@@ -30134,5 +30137,115 @@ exec sleep 300
             );
         }
         assert_eq!(make(serde_json::json!("one more")).await.0, StatusCode::CONFLICT);
+    }
+
+    /// A renderer's cover and pull-stream URLs open with their own key only, and the API token
+    /// signs in only when it is the token: a key of another album, one character off, one
+    /// character more or less, or none is refused. (That the comparison takes the same time
+    /// wherever they differ, `state::same_secret`, is not something a test here can see.)
+    #[tokio::test]
+    async fn keyed_urls_open_with_their_own_key_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let album = {
+            let lib = s.library.lock().unwrap();
+            let mut t = untagged_track(dir.path().join("a.flac"), "a", "Someone");
+            t.album = Some(pm_model::Album {
+                id: None,
+                title: "Album a".into(),
+                album_artist: None,
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            let id = lib.upsert_track(&t).unwrap();
+            let album = lib.get_track(id).unwrap().unwrap().album.unwrap().id.unwrap();
+            let file = dir.path().join("a.cover");
+            std::fs::write(&file, b"\x89PNG\r\n\x1a\n-picture").unwrap();
+            lib.set_album_art(&pm_library::db::AlbumArt {
+                album_id: album,
+                file,
+                mime: "image/png".into(),
+                source: "embedded".into(),
+            })
+            .unwrap();
+            album
+        };
+        let app = router(s.clone());
+        let get = |uri: String| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+                app.oneshot(req).await.unwrap().status()
+            }
+        };
+        let key = s.stream_key(&format!("art:{album}"));
+        assert_eq!(key.len(), 32);
+        assert_eq!(get(format!("/v1/art/{album}?k={key}")).await, StatusCode::OK);
+        let flip = |k: &str| {
+            let mut b = k.as_bytes().to_vec();
+            let last = b.len() - 1;
+            b[last] = if b[last] == b'0' { b'1' } else { b'0' };
+            String::from_utf8(b).unwrap()
+        };
+        for wrong in [
+            flip(&key),
+            s.stream_key(&format!("art:{}", album + 1)),
+            format!("{key}0"),
+            key[..31].to_string(),
+            String::new(),
+        ] {
+            assert!(!s.stream_key_ok(&format!("art:{album}"), &wrong), "{wrong}");
+            assert_eq!(
+                get(format!("/v1/art/{album}?k={wrong}")).await,
+                StatusCode::UNAUTHORIZED,
+                "{wrong}"
+            );
+        }
+        assert_eq!(get(format!("/v1/art/{album}")).await, StatusCode::UNAUTHORIZED);
+        // A pull stream's key opens that stream only (its own is not asked for here: it waits for
+        // a zone to play into it)
+        let pull = s.stream_key("den");
+        assert!(s.stream_key_ok("den", &pull));
+        for wrong in [flip(&pull), s.stream_key("kitchen"), format!("{pull}0")] {
+            assert_eq!(
+                get(format!("/v1/outputs/pull/den/stream.wav?k={wrong}")).await,
+                StatusCode::UNAUTHORIZED,
+                "{wrong}"
+            );
+        }
+        // The API token: as a bearer token and as `?token=` (WebSocket upgrades, pull streams)
+        let bearer = |t: String| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .uri("/v1/zones")
+                    .header("authorization", format!("Bearer {t}"))
+                    .body(Body::empty())
+                    .unwrap();
+                app.oneshot(req).await.unwrap().status()
+            }
+        };
+        assert_eq!(bearer("s3cret".into()).await, StatusCode::OK);
+        // The right `?token=` gets past the check (no output of that name here: 404, not 401)
+        assert_eq!(
+            get("/v1/outputs/pull/den/stream.wav?token=s3cret".into()).await,
+            StatusCode::NOT_FOUND
+        );
+        for wrong in ["s3crex", "s3cre", "s3cret0", ""] {
+            assert_eq!(bearer(wrong.into()).await, StatusCode::UNAUTHORIZED, "{wrong}");
+            assert_eq!(
+                get(format!("/v1/outputs/pull/den/stream.wav?token={wrong}")).await,
+                StatusCode::UNAUTHORIZED,
+                "{wrong}"
+            );
+        }
+        assert!(crate::state::same_secret("s3cret", "s3cret"));
+        assert!(
+            !crate::state::same_secret("", ""),
+            "an empty secret matches nothing"
+        );
     }
 }

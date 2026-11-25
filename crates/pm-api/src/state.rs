@@ -1240,6 +1240,11 @@ impl NodeState {
         h.to_hex()[..32].to_string()
     }
 
+    /// Whether `given` is [`Self::stream_key`] of `name`, compared in constant time.
+    pub fn stream_key_ok(&self, name: &str, given: &str) -> bool {
+        same_secret(&self.stream_key(name), given)
+    }
+
     /// Create (or reuse) a pull output under `name`, registered for the HTTP route: for a
     /// renderer the node tells when to fetch ([`pm_zones::outputs::PullOutput::controlled`]).
     pub fn pull_output(self: &Arc<Self>, name: &str) -> Arc<pm_zones::outputs::PullOutput> {
@@ -2829,4 +2834,11 @@ fn stream_secret(lib: &Library) -> [u8; 32] {
         tracing::warn!(error = %e, "saving the stream secret");
     }
     secret
+}
+
+/// Whether `given` is the secret `want`, in time that does not depend on where they differ (a
+/// secret is sent by whoever asks, over and over; [`crate::app_passwords::same`]). A different
+/// length is no match; an empty `want` matches nothing.
+pub(crate) fn same_secret(want: &str, given: &str) -> bool {
+    !want.is_empty() && crate::app_passwords::same(want.as_bytes(), given.as_bytes())
 }

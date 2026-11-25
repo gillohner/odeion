@@ -1153,7 +1153,7 @@ fn listener_of(s: &NodeState, token: &str) -> Option<String> {
 /// music membership, or unreadable state. A restore cannot put the token and roster reads on
 /// opposite sides of a replacement. No roster lock: feedback also calls this inside an inbox write.
 pub(crate) fn listener_report_membership(s: &NodeState, token: &str, key: &str) -> Option<Option<String>> {
-    if !token.starts_with("pml_") || token == s.token()?.as_str() {
+    if !token.starts_with("pml_") || crate::state::same_secret(&s.token()?, token) {
         return None;
     }
     let key = key.trim_start_matches("pubky");
@@ -1257,7 +1257,7 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
 /// used today ([`PersonToken::last_used`]). The API token and party guests have no such note.
 pub fn caller_seen(s: &NodeState, token: Option<&str>) -> Option<Caller> {
     let c = caller(s, token)?;
-    if let Some(t) = token.filter(|t| s.token().as_deref() != Some(*t)) {
+    if let Some(t) = token.filter(|t| !s.token().is_some_and(|api| crate::state::same_secret(&api, t))) {
         // Once a day per sign-in: the day already noted costs one look at a map, nothing else,
         // and a day that could not be written is tried again with the next request
         let (h, today) = (hash(t), today());
@@ -1298,7 +1298,7 @@ pub fn caller(s: &NodeState, token: Option<&str>) -> Option<Caller> {
         });
     };
     let t = token?;
-    if t == api.as_str() {
+    if crate::state::same_secret(&api, t) {
         return Some(Caller {
             role: Role::Owner,
             key: owner_key(),
@@ -1883,7 +1883,10 @@ impl KnownSet {
     }
 
     fn has(&self, t: &str) -> bool {
-        self.api.as_deref() == Some(t) || self.hashes.contains(&hash(t))
+        self.api
+            .as_deref()
+            .is_some_and(|a| crate::state::same_secret(a, t))
+            || self.hashes.contains(&hash(t))
     }
 }
 
@@ -2030,7 +2033,7 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
     let mut listeners = Vec::new();
     for t in &found {
         let h = hash(t);
-        if api.as_deref() == Some(t.as_str()) {
+        if api.as_deref().is_some_and(|a| crate::state::same_secret(a, t)) {
             out.api_token_found = true;
         } else if owners.contains(&h) {
             out.owner_sessions_ended = true;
