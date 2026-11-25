@@ -71,7 +71,9 @@ async function phone(browser, width, android) {
   await page.screenshot({ path: path.join(SHOTS, `playlist-header-${android ? 'android' : 'browser'}-${width}.png`) });
   await page.setViewportSize({ width, height: 900 }); await page.waitForTimeout(100);
   // still one tap: ⋯ opens the playlist's menu
-  await page.locator('#plmore').tap(); await page.waitForTimeout(200);
+  // the menu opens once the sign-in check is back (and the collections list, if not loaded yet), so wait
+  // for it (up to 5 s) rather than a fixed 200 ms, which a busy machine can miss
+  await page.locator('#plmore').tap(); await page.locator('.popover.menu:not([hidden])').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
   check(await page.locator('.popover.menu:not([hidden])').count() === 1, `${at}: one tap on ⋯ opens the collection's menu`);
   await page.keyboard.press('Escape');
 
@@ -153,7 +155,9 @@ async function narrow(browser, width, android, k, zoom) {
   check(look.gap === want[0] && look.play === want[1] && look.shuffle === shuffle && look.pad === pad && look.shufPad === pad, `${at}: gap ${look.gap} px (want ${want[0]}), Play's and Shuffle's sides ${look.pad}/${look.shufPad} px (want ${pad}), Play's icon ${look.play ? 'shown' : 'hidden'} (want ${want[1] ? 'shown' : 'hidden'}), Shuffle's icon ${look.shuffle ? 'shown' : 'hidden'} (want ${shuffle ? 'shown' : 'hidden'})`);
   if (k !== 1.15) await page.locator('#main > .hero').screenshot({ path: path.join(SHOTS, `playlist-row-${android ? 'android' : 'browser'}-${width}-${Math.round(k * 100)}${zoom ? '-textzoom' : ''}.png`) });
   // still one tap: ⋯ opens the playlist's menu
-  await page.locator('#plmore').tap(); await page.waitForTimeout(200);
+  // the menu opens once the sign-in check is back (and the collections list, if not loaded yet), so wait
+  // for it (up to 5 s) rather than a fixed 200 ms, which a busy machine can miss
+  await page.locator('#plmore').tap(); await page.locator('.popover.menu:not([hidden])').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
   check(await page.locator('.popover.menu:not([hidden])').count() === 1, `${at}: one tap on ⋯ opens the collection's menu`);
   await context.close();
 }
