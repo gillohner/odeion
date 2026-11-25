@@ -331,7 +331,7 @@ def run(h):
     except Exception:
         # (what the screen offered, for the next attempt)
         try:
-            (out / "ui-nodes-fail.txt").write_text("\n".join(ui_nodes()))
+            (out / "ui-nodes-fail.txt").write_text("\n".join(ui_nodes(evidence=True)))
         except Exception:  # noqa: BLE001
             pass
         raise

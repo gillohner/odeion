@@ -157,7 +157,7 @@ def connect_app():
     adb("shell", "input", "keyevent", "66")
     try:
         until("the node's page in the app", lambda: any("Now playing" in n for n in ui_nodes()), timeout=120, every=3)
-    except RuntimeError:
+    except (RuntimeError, ep.AppNotResponding):
         # What the screen showed instead (kept with the run's artifacts)
         subprocess.run(["adb", "exec-out", "screencap", "-p"], stdout=open(out / "connect-timeout.png", "wb"), check=False)
         (out / "connect-timeout-ui.txt").write_text("\n".join(ui_nodes(evidence=True)))
@@ -286,7 +286,7 @@ def away(seconds, screen_off=False, during=None):
 
 def ui_dump(name):
     """The screen's nodes, kept in the out dir (what B looked for and didn't find)."""
-    nodes = ui_nodes()
+    nodes = ui_nodes(evidence=True)
     (out / f"ui-{name}.xml").write_text("\n".join(nodes))
     return nodes
 
@@ -301,7 +301,7 @@ def tap_text(words, what, timeout=30):
         return None
     try:
         n = until(what, find, timeout=timeout, every=2)
-    except RuntimeError:
+    except (RuntimeError, ep.AppNotResponding):
         ui_dump(what.replace(" ", "-"))
         raise
     x, y = center(n)

@@ -214,6 +214,14 @@ class ThisPhoneTests(unittest.TestCase):
             finally:
                 self.calls = pick.call_count
 
+    def test_the_apps_own_dialog_on_the_pick_keeps_the_screen(self):
+        with patch.object(ep, "logcat", return_value=""), patch.object(ep, "until", side_effect=RuntimeError("no zone said")), \
+                patch.object(ep, "pick", side_effect=ep.AppNotResponding("the app itself is not responding")), \
+                patch.object(ep, "diagnose") as diagnose, patch.object(ep, "log"):
+            with self.assertRaises(ep.AppNotResponding):
+                ep.to_this_phone("this-phone-test")
+        diagnose.assert_called_once_with("this-phone-test")
+
     def test_already_on_this_phone_taps_nothing(self):
         self.run_with("browser", [])
         self.assertEqual(self.calls, 0)
@@ -254,6 +262,55 @@ class ThisPhoneTests(unittest.TestCase):
         taps = [c.args for c in adb.call_args_list if c.args[:3] == ("shell", "input", "tap")]
         self.assertEqual(taps, [("shell", "input", "tap", "160", "404")])
 
+
+
+class NotRespondingTests(unittest.TestCase):
+    """ui_nodes() against "isn't responding" dialogs, with adb stubbed: the app's own dialog is a
+    failure that no RuntimeError fallback swallows, its screen is kept as evidence, and another
+    app's dialog is answered with Wait."""
+
+    def dialog(self, title):
+        return ep._ui(("android", "android:id/alertTitle", title, ""), ("android", "android:id/aerr_close", "Close app", ""),
+                      ("android", "android:id/aerr_wait", "Wait", ""))
+
+    def screens(self, *dumps):
+        dumps = list(dumps)
+
+        def adb(*args, **_):
+            if args[:2] == ("exec-out", "cat"):
+                return dumps.pop(0) if len(dumps) > 1 else dumps[0]
+            return ""
+        return patch.object(ep, "adb", side_effect=adb)
+
+    def test_the_apps_own_dialog_raises_and_is_no_runtime_error(self):
+        with self.screens(self.dialog("Odeion isn't responding")), patch.object(ep, "log"), patch.object(ep.time, "sleep"):
+            with self.assertRaises(ep.AppNotResponding) as raised:
+                ep.ui_nodes()
+        self.assertNotIsInstance(raised.exception, RuntimeError)
+
+    def test_with_evidence_the_dialog_is_returned_as_the_screen(self):
+        with self.screens(self.dialog("Odeion isn't responding")), patch.object(ep, "log"), patch.object(ep.time, "sleep"):
+            nodes = ep.ui_nodes(evidence=True)
+        self.assertTrue(any("Odeion isn't responding" in n for n in nodes))
+
+    def test_a_runtime_error_fallback_does_not_hide_it(self):
+        # (as type_into, to_this_phone and the probes' "tap another control" fallbacks do)
+        def fallback():
+            try:
+                ep.until("a control", lambda: "Library" in "".join(ep.ui_nodes()), timeout=30)
+            except RuntimeError:
+                return "went on behind the dialog"
+        with self.screens(self.dialog("Odeion isn't responding")), patch.object(ep, "log"), patch.object(ep.time, "sleep"):
+            with self.assertRaises(ep.AppNotResponding):
+                fallback()
+
+    def test_another_apps_dialog_is_answered_with_wait(self):
+        with self.screens(self.dialog("Pixel Launcher isn't responding"), ep.SAMPLE_APP_HOME) as adb, \
+                patch.object(ep, "log"), patch.object(ep.time, "sleep"):
+            nodes = ep.ui_nodes()
+        self.assertTrue(any('text="Home"' in n for n in nodes))
+        taps = [c.args for c in adb.call_args_list if c.args[:3] == ("shell", "input", "tap")]
+        self.assertEqual(len(taps), 1)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
