@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **"Group outputs…" on Zones opens right at the group form.** It opened Settings › Zones and outputs at the top, so on a phone the Group outputs form was more than two screens down, past the speaker list, Add a renderer and your zones. Now the page opens at the form, ready to pick the first speaker. Its help is shorter too (two lines on a phone instead of five): the speakers are already listed under it by kind (Sonos, BluOS, Squeezelite players …), and when there is nothing to group yet, its message says which speakers group together. Settings › Zones and outputs opened any other way still starts at the top.
+
 ### 2026-11-26
 
 - **Try again on a page that could not be read keeps the keyboard in the page.** When a page such as an album, Albums or a speaker's queue could not be read, pressing its Try again with the keyboard drew the page again and left nothing focused, so pressing Enter again did nothing and a screen reader said nothing about what came back. Now, if the page still can't be read, the focus is on the new Try again, and once it can be read the focus goes to the page's title. If you click somewhere else while it loads, the focus stays where you put it.
