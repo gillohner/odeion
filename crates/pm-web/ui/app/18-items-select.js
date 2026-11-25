@@ -281,6 +281,10 @@
     const sel = a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
     return { box: box.id, sel, i: $$(sel, box).indexOf(a) };
   };
+  // (a focus taken by a draw the person didn't cause, a late answer for where the songs play: one
+  // passed on to another song lands on its ⋯ or the row, never its × or Move, so a key already on
+  // its way changes no other song; plFocusIn)
+  const plCalm = (f) => (f ? { ...f, calm: true } : f);
   // (a hold still on: the next draw of its playlist ends it)
   const plHoldEnd = (hold) => { if (plHolds.get(hold.id) !== hold) return; hold.cut = false; hold.after = Math.min(hold.after, plDraws + 1); if (state.view === 'playlist' && state.viewArg === hold.id) render(); };
   // Runs `run(signal)` (the change) under the hold, then draws the playlist again; false when it
