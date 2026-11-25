@@ -54,7 +54,7 @@ const DATA = dataAt > 0 && dataAt < sep ? args[dataAt + 1] : null;
 const REPO = path.resolve(__dirname, '..');
 const BRAND = JSON.parse(fs.readFileSync(path.join(REPO, 'docs', 'brand', 'odeion', 'sources.json'), 'utf8'));
 const sha256 = (b) => require('crypto').createHash('sha256').update(b).digest('hex');
-const PAGES = new RegExp(fs.readFileSync(path.join(REPO, 'crates', 'pm-api', 'static', 'sw.js'), 'utf8').match(/^const PAGES = \/(.+)\/;$/m)[1]); // the worker's own list
+const PAGES = new RegExp(fs.readFileSync(path.join(REPO, 'crates', 'pm-web', 'static', 'sw.js'), 'utf8').match(/^const PAGES = \/(.+)\/;$/m)[1]); // the worker's own list
 const CMD = args.slice(sep + 1);
 if (!TOKEN || !BASE || !OUT || sep < 0 || !CMD.length) { console.error('usage: ui-pwa-browser.js <token> <base> <out> [--lan url] -- <node command…>'); process.exit(2); }
 fs.mkdirSync(OUT, { recursive: true });
@@ -664,7 +664,7 @@ ${checks - failures.length}/${checks} browser checks passed (launch safety only)
     await page.goto(BASE + '/', { waitUntil: 'load' }); await sleep(1000);
     const links = await page.evaluate(() => ({ icon: document.querySelector('link[rel="icon"]').getAttribute('href'), apple: document.querySelector('link[rel="apple-touch-icon"]').getAttribute('href'), manifest: document.querySelector('link[rel="manifest"]').getAttribute('href') }));
     const man = JSON.parse(await (await page.request.get(BASE + links.manifest)).text());
-    const want = (rel) => BRAND.installed[`crates/pm-api/static${rel}`];
+    const want = (rel) => BRAND.installed[`crates/pm-web/static${rel}`];
     const served = {};
     for (const src of [links.icon, links.apple, ...man.icons.map((i) => i.src)]) { const r = await page.request.get(BASE + src); served[src] = { status: r.status(), type: r.headers()['content-type'], cacheControl: r.headers()['cache-control'], sha256: sha256(await r.body()) }; }
     save('icons', { links, served, approved: BRAND.installed });

@@ -3951,7 +3951,7 @@ mod tests {
     /// the whole batch).
     #[test]
     fn the_browsers_lists_are_all_in_the_schema() {
-        let js = include_str!("../static/usage.js");
+        let js = pm_web::USAGE_JS;
         let list = |name: &str| -> Vec<String> {
             let start = format!("const {name} = Object.freeze([");
             let body = js
@@ -3997,7 +3997,7 @@ mod tests {
     /// control (a new page or tab without one fails here, not as a refused batch).
     #[test]
     fn every_page_and_settings_tab_of_the_app_is_in_the_schema() {
-        let app = include_str!("../static/app.js");
+        let app = pm_web::APP_JS;
         let pages = app
             .split_once("const renderPage = async")
             .and_then(|(_, rest)| rest.split_once("\n  // ---- "))

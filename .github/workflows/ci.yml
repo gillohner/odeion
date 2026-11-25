@@ -710,11 +710,11 @@ jobs:
       # <shots>, not the list's <repo> <shots>
       - name: Identify and confirm matches (own loopback server)
         if: matrix.shard == 2
-        run: cd /tmp/pw && node "$GITHUB_WORKSPACE/tools/ui-identify-fixture.js" "$GITHUB_WORKSPACE/crates/pm-api/static" /tmp/pm/identify-fixture-shots < /dev/null
+        run: cd /tmp/pw && node "$GITHUB_WORKSPACE/tools/ui-identify-fixture.js" "$GITHUB_WORKSPACE/crates/pm-web/static" /tmp/pm/identify-fixture-shots < /dev/null
       # ui-unskip-limit.js serves the page's files itself too (<static> <shots>)
       - name: Bringing skipped songs back gives up on a node that stops answering (own loopback server)
         if: matrix.shard == 3
-        run: cd /tmp/pw && node "$GITHUB_WORKSPACE/tools/ui-unskip-limit.js" "$GITHUB_WORKSPACE/crates/pm-api/static" /tmp/pm/unskip-limit-shots < /dev/null
+        run: cd /tmp/pw && node "$GITHUB_WORKSPACE/tools/ui-unskip-limit.js" "$GITHUB_WORKSPACE/crates/pm-web/static" /tmp/pm/unskip-limit-shots < /dev/null
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

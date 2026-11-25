@@ -34,6 +34,7 @@ on:
       - crates/pm-out-local/**
       - crates/pm-usb-audio/**
       - crates/pm-api/**
+      - crates/pm-web/**
       - crates/pm-zones/**
       - crates/pm-node/**
       - crates/pm-pubky/**
@@ -122,7 +123,7 @@ jobs:
             if [ "$all" = true ]; then echo true; return; fi
             if printf '%s\n' "$files" | grep -Eq "^(\.github/workflows/android\.yml$|$1)"; then echo true; else echo false; fi
           }
-          zone=$(covers 'crates/(pm-offline|pm-app-player|pm-audio|pm-desktop|pm-endpoint|pm-stream|pm-out-net|pm-out-local|pm-usb-audio|pm-api|pm-zones|pm-node)/|Cargo\.(toml|lock)$|tools/android-(endpoint|ui-tour|native-pages)(-test)?\.py$|tools/fixtures/android-ui-tour/|tools/release/android-patch\.py$|tools/release/android/')
+          zone=$(covers 'crates/(pm-offline|pm-app-player|pm-audio|pm-desktop|pm-endpoint|pm-stream|pm-out-net|pm-out-local|pm-usb-audio|pm-api|pm-web|pm-zones|pm-node)/|Cargo\.(toml|lock)$|tools/android-(endpoint|ui-tour|native-pages)(-test)?\.py$|tools/fixtures/android-ui-tour/|tools/release/android-patch\.py$|tools/release/android/')
           ring=$(covers 'crates/(pm-desktop|pm-pubky)/|tools/android-ring-probe\.py$|tools/release/android-patch\.py$')
           update=$(covers 'crates/pm-desktop/|tools/android-update-probe\.py$|tools/release/(android-patch\.py|android/|updater-manifest\.py|aab-check\.py|android-sign\.sh)|\.github/workflows/release\.yml$')
           background=$(covers 'crates/(pm-desktop|pm-app-player|pm-audio)/|tools/release/android/|tools/release/android-patch\.py$|tools/android-background-probe\.py$|tools/android-endpoint\.py$')
@@ -201,7 +202,7 @@ jobs:
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           npm ci --no-audit --no-fund
           npx tauri android init --ci --skip-targets-install
-          npx tauri icon ../pm-api/static/icon.svg
+          npx tauri icon ../pm-web/static/icon.svg
           python3 -I ../../tools/release/android-patch.py .
       # The Gradle wrapper fetches its distribution once, with a 10 s timeout and no second try: run
       # 42567812866 failed there ("Downloading ... gradle-9.6.1-bin.zip failed: timeout (10000ms)").

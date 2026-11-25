@@ -11,7 +11,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
-const STATIC = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-api', 'static');
+const STATIC = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-web', 'static');
 const SHOTS = path.resolve(process.argv[3] || path.join(process.env.TMPDIR || '.', 'unskip-limit-shots'));
 fs.mkdirSync(SHOTS, { recursive: true });
 let failed = 0;

@@ -410,7 +410,6 @@ pub const OPEN: &[(&str, &str)] = &[
         "/v1/auth/pubky/owner/avatar",
         "the owner's picture on the Log in screen",
     ),
-    ("/party/{code}", "a party's page, by its link"),
     ("/v1/party/join", "joining a party with its link's code"),
     (
         pm_discovery::DESCRIPTION_PATH,

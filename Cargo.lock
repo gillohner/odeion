@@ -3842,7 +3842,6 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "bytes",
- "flate2",
  "futures-util",
  "hex",
  "hound",
@@ -3871,6 +3870,7 @@ dependencies = [
  "pm-remote",
  "pm-renderer",
  "pm-stream",
+ "pm-web",
  "pm-zones",
  "pubky 0.16.2",
  "pubky-app-specs",
@@ -4063,6 +4063,7 @@ dependencies = [
  "pm-pubky",
  "pm-remote",
  "pm-renderer",
+ "pm-web",
  "pm-zones",
  "qrcode",
  "rand 0.8.8",
@@ -4303,6 +4304,20 @@ version = "0.2.4"
 dependencies = [
  "libc",
  "serde",
+]
+
+[[package]]
+name = "pm-web"
+version = "0.2.4"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "flate2",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

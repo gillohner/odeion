@@ -14,7 +14,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..', '..');
-const STATIC = path.join(ROOT, 'crates', 'pm-api', 'static');
+const STATIC = path.join(ROOT, 'crates', 'pm-web', 'static');
 const PAGE_FILES = ['index.html', 'party.html', 'app.js', 'feedback.js', 'usage.js', 'pwa.js'].map((f) => path.join(STATIC, f));
 const OLD = /\b(?:un)?favou?rit(?:es?|ed|ing)\b|\bplaylists?\b|\bheart(?:ed|ing)\b/gi;
 

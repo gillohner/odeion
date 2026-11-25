@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
-const DIR = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-api', 'static');
+const DIR = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-web', 'static');
 const LIB = path.join(DIR, '..', 'src', 'lib.rs');
 const problems = [];
 const fail = (m) => problems.push(m);

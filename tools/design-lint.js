@@ -14,7 +14,7 @@
 //   node tools/design-lint.js [static dir]
 const fs = require('fs');
 const path = require('path');
-const DIR = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-api', 'static');
+const DIR = process.argv[2] || path.join(__dirname, '..', 'crates', 'pm-web', 'static');
 const files = fs.readdirSync(DIR).filter((f) => /\.(js|html)$/.test(f)).map((f) => [f, fs.readFileSync(path.join(DIR, f), 'utf8')]);
 const css = fs.readdirSync(DIR).filter((f) => f.endsWith('.css')).map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\n');
 const problems = [];

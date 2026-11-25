@@ -382,12 +382,13 @@ pub fn ws_origin_ok(h: &HeaderMap, uri: &axum::http::Uri, public_url: &str) -> b
         || public.is_some_and(|p| p == origin.origin())
 }
 
-/// Serve the API for the iroh tunnel on its own loopback listener, every request marked
-/// [`Remote`]; the tunnel's target. Returns the listener's address.
-pub async fn serve_remote(state: Arc<NodeState>) -> std::io::Result<SocketAddr> {
+/// Serve the API and `pages` (the web UI, `pm_web::router()`: the app away from home opens the
+/// same page) for the iroh tunnel on its own loopback listener, every request marked [`Remote`];
+/// the tunnel's target. Returns the listener's address.
+pub async fn serve_remote(state: Arc<NodeState>, pages: axum::Router) -> std::io::Result<SocketAddr> {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let addr = listener.local_addr()?;
-    let app = crate::router(state).layer(axum::Extension(Remote));
+    let app = crate::router_with_pages(state, pages).layer(axum::Extension(Remote));
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await {
             tracing::warn!("the remote-access listener stopped: {e}");

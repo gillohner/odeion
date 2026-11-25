@@ -18,7 +18,7 @@ let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 
 (async () => {
-  const css = fs.readFileSync(path.join(REPO, 'crates', 'pm-api', 'static', 'app.css'), 'utf8');
+  const css = fs.readFileSync(path.join(REPO, 'crates', 'pm-web', 'static', 'app.css'), 'utf8');
   const r = tokens.check(css);
   check(!r.problems.length, `the stylesheet is on its tokens (${r.problems.length ? r.problems[0] : `${r.on} values`})`);
   check(r.on > 900, `spacing, layer and weight values on tokens: ${r.on}`);

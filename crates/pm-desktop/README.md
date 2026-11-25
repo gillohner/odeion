@@ -42,4 +42,4 @@ npx tauri build --bundles deb       # or appimage, dmg, msi, nsis
 npx tauri android init && npx tauri android build --apk   # needs the Android SDK and NDK
 ```
 
-Icons in `icons/` come from `crates/pm-api/static/icon.svg` (`npx tauri icon ../pm-api/static/icon.svg`).
+Icons in `icons/` come from `crates/pm-web/static/icon.svg` (`npx tauri icon ../pm-web/static/icon.svg`).

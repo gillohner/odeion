@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use id3::TagLike;
-use pm_api::{router, NodeSettings, NodeState};
+use pm_api::{NodeSettings, NodeState};
 use pm_audio::PipelineConfig;
 use pm_library::Library;
 use pm_zones::outputs::NullOutput;
@@ -13,6 +13,11 @@ use pm_zones::OutputRegistry;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
+
+/// The API with the web UI's pages next to it, as the node serves them (a guest's link is a page).
+fn router(state: Arc<NodeState>) -> axum::Router {
+    pm_api::router_with_pages(state, pm_web::router())
+}
 
 const OWNER: &str = "owner-token";
 
