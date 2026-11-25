@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **Removing a music folder, a WebDAV share or a cloud drive folder asks the same way as every other removal.** In Your library › Node library, a share's and a drive folder's Remove asked with the browser's own pop-up, and a music folder's Remove turned into "Really remove?" for three seconds, so a second tap in the same spot removed it. All three now open the app's own dialog, which names what goes (a long path wraps inside it) and says the files stay, with a red Remove and Cancel.
+
 ### 2026-11-25
 
 - **Closing a finished copy with the keyboard keeps your place in the player bar.** When a copy to your homeserver had finished, pressing Close or Dismiss on its card (with Enter or Space) hid the card and the copy's button in the bar, and left nothing focused, so the keyboard had to find its way back. The focus now moves on to the next button in the bar (usually Sound). A copy still running keeps its button after Hide, and the focus goes back on it as before.
