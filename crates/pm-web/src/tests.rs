@@ -301,3 +301,41 @@ async fn the_web_app_is_called_odeion() {
     );
     assert!(js.contains("‹ Odeion</a>"));
 }
+
+/// The apps keep a copy of the page for offline use (pm-offline). Every script and style sheet
+/// the page loads from the node is in that copy's list: one that is not would be missing
+/// offline, and the app would answer the page itself in its place.
+#[tokio::test]
+async fn the_apps_keep_every_file_the_page_loads() {
+    let kept: Vec<&str> = pm_offline::sync::UI_FILES.iter().map(|(path, _)| *path).collect();
+    // Every `<script src=…>` and every `<link …>` that is a style sheet, however its attributes
+    // are ordered
+    let mut loaded = Vec::new();
+    for (tag, attr) in [("<script ", "src=\""), ("<link ", "href=\"")] {
+        for (i, _) in INDEX_HTML.match_indices(tag) {
+            let rest = &INDEX_HTML[i..];
+            let rest = &rest[..rest.find('>').unwrap()];
+            if tag == "<link " && !rest.contains("rel=\"stylesheet\"") {
+                continue;
+            }
+            if let Some((_, url)) = rest.split_once(attr) {
+                loaded.push(url.split('"').next().unwrap());
+            }
+        }
+    }
+    assert!(
+        loaded.len() >= 6 && loaded.contains(&"/app.js") && loaded.contains(&"/app.css"),
+        "{loaded:?}"
+    );
+    for url in loaded {
+        assert!(url.starts_with('/'), "the page loads {url} from somewhere else");
+        assert!(
+            kept.contains(&url),
+            "{url} is not kept for offline use (pm-offline UI_FILES)"
+        );
+    }
+    // And each kept file is one the node serves
+    for path in kept {
+        assert_eq!(get_page(path).await.status(), StatusCode::OK, "{path}");
+    }
+}

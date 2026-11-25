@@ -51,7 +51,9 @@ const DOWNLOAD_WAIT: Duration = Duration::from_secs(15 * 60);
 
 /// The web UI's files, kept for offline use: the node's path and the file name in `ui/`.
 /// A node without one of them (older than the install script) leaves it out; the rest are kept.
-pub(crate) const UI_FILES: [(&str, &str); 7] = [
+/// Every script and style sheet the page loads has to be here (pm-web's tests compare this list
+/// with the page): one that is missing would not be there offline.
+pub const UI_FILES: [(&str, &str); 10] = [
     ("/", "index.html"),
     ("/app.js", "app.js"),
     ("/app.css", "app.css"),
@@ -59,6 +61,9 @@ pub(crate) const UI_FILES: [(&str, &str); 7] = [
     ("/manifest.webmanifest", "manifest.webmanifest"),
     ("/pwa.js", "pwa.js"),
     ("/pwa.css", "pwa.css"),
+    ("/usage.js", "usage.js"),
+    ("/feedback.js", "feedback.js"),
+    ("/feedback.css", "feedback.css"),
 ];
 
 /// The node, with this device's token.

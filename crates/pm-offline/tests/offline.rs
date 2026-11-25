@@ -668,7 +668,7 @@ async fn a_slow_transcode_fails_only_its_song() {
     assert_eq!(r.downloaded, [1]);
 }
 
-/// The page names the install script and its styles (pm-api pwa.js, pwa.css): the device keeps
+/// The page names the install script and its styles (pm-web pwa.js, pwa.css): the device keeps
 /// them with the page, so its offline copy loads them as what they are, not as the page.
 #[tokio::test]
 async fn the_offline_page_keeps_its_install_script() {
@@ -691,6 +691,43 @@ async fn the_offline_page_keeps_its_install_script() {
         );
         assert!(r.ends_with(body), "{path}: {r}");
     }
+}
+
+/// The page also loads the usage and help scripts and the help's styles (index.html): they are
+/// kept and served as what they are. One of the page's files that is not kept yet (the last
+/// sync was with an older app) is not found, never answered with the page itself.
+#[tokio::test]
+async fn the_offline_page_keeps_every_file_it_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    std::fs::write(dir.path().join("ui/index.html"), "<html>the web UI</html>").unwrap();
+    let (addr, _task) = pm_offline::server::serve(store).await.unwrap();
+    let me = format!("127.0.0.1:{}", addr.port());
+    let files = [
+        ("/usage.js", "window.PM_USAGE = {}", "text/javascript"),
+        ("/feedback.js", "window.PM_FEEDBACK = {}", "text/javascript"),
+        ("/feedback.css", ".fb-open{}", "text/css"),
+    ];
+    for (path, _, _) in files {
+        let r = raw_get(addr, path, &me).await;
+        assert!(r.starts_with("HTTP/1.1 404"), "{path} before it is kept: {r}");
+        assert!(!r.contains("the web UI"), "{path}: {r}");
+    }
+    for (path, body, _) in files {
+        std::fs::write(dir.path().join("ui").join(&path[1..]), body).unwrap();
+    }
+    for (path, body, mime) in files {
+        let r = raw_get(addr, path, &me).await;
+        assert!(r.starts_with("HTTP/1.1 200"), "{path}: {r}");
+        assert!(
+            r.to_lowercase().contains(&format!("content-type: {mime}")),
+            "{path}: {r}"
+        );
+        assert!(r.ends_with(body), "{path}: {r}");
+    }
+    // A path of the app (not a file of it) is still the page
+    let r = raw_get(addr, "/albums", &me).await;
+    assert!(r.ends_with("<html>the web UI</html>"), "{r}");
 }
 
 /// The limit the person set: a sync downloads what fits, stops before the next song, says why
