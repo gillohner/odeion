@@ -72,6 +72,8 @@
   ];
   const SETTINGS_TABS = settingsTabs({ bundled: true, tunnel: true, dac: 'This phone' }).filter(Array.isArray); // every tab, for routes
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
+  // Which speakers the node finds and how to add squeezelite, MPD and Snapcast (Home's setup card, Settings › Zones and outputs)
+  const SPEAKERS_GUIDE = 'https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/speakers.md';
   const NAV_VIEWS = ['library', 'home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music', 'downloads'];
   const VIEW_LABELS = { library: 'Your library', downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Bookmarks', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Songs', playlists: 'Collections', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Collection', shared: 'Shared collection' };
   const b64u = (x) => btoa(unescape(encodeURIComponent(x))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
