@@ -163,6 +163,7 @@ ui-progress-toast.js progress-toast-shots
 ui-move-toast.js move-toast-shots 2
 ui-phone-libnav-focus.js phone-libnav-focus-shots 2
 ui-queue-head-phone.js queue-head-phone-shots
+ui-queue-row-height.js queue-row-height-shots
 ui-phone-select-redraw.js phone-select-redraw-shots
 ui-page-title.js page-title-shots
 ui-row-focus-redraw.js row-focus-redraw-shots

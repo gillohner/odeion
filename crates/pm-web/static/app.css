@@ -833,6 +833,9 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
 .list.queue .list-row { padding: var(--sp-1h) var(--sp-2h) var(--sp-1h) var(--sp-1h); }
 .list.queue .num { font-size: var(--fs-sm); color: var(--muted); font-variant-numeric: tabular-nums; }
 .list.queue .list-row.cur .name { color: var(--accent-strong); }
+/* A song's artist · album line is cut with "…" at every width, as on Songs: a long album name no
+   longer wraps and makes its row taller than the rest */
+.list.queue .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list.queue .q-actions { opacity: 0; display: inline-flex; gap: var(--sp-0h); transition: opacity var(--dur-fast); }
 .list.queue .list-row:hover .q-actions, .list.queue .list-row:focus-within .q-actions { opacity: 1; }
 .list.queue .q-actions .icon-btn { width: 30px; height: 30px; }
@@ -850,7 +853,6 @@ html[data-shell="phone"] .list.queue .qgrip::before { content: ''; position: abs
    8 px, not 14, so the title gets 20 px more. The grip is 4 px wider and it and Play from here share
    the gap between them, so each is still a 44 px tap (6 + 34 + 4; 4 + 36 + 4); ⋯ keeps its 6 px. */
 html[data-shell="phone"] .list.queue .list-row { gap: var(--sp-2); }
-html[data-shell="phone"] .list.queue .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 html[data-shell="phone"] .list.queue .qgrip { min-width: 34px; }
 html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
 @media (pointer: coarse) { html[data-shell="phone"] .list.queue [data-qi]::before { inset: -6px -4px; } }
