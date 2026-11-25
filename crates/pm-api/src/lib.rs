@@ -20725,17 +20725,63 @@ exec sleep 300
     // The test holds the door on purpose while the copy's request waits on another worker
     #[allow(clippy::await_holding_lock)]
     async fn files_jobs_are_let_in_one_at_a_time() {
+        /// The fake homeserver with its size checks and uploads held while `hold` is set: an
+        /// import let in stays running (its file is checked there first) until the test lets go.
+        struct Held {
+            hs: Arc<FakeHomeserver>,
+            hold: std::sync::atomic::AtomicBool,
+        }
+        impl Held {
+            async fn pass(&self) {
+                while self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
+            fn set(&self, on: bool) {
+                self.hold.store(on, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        #[async_trait::async_trait]
+        impl copy_guard::Target for Held {
+            async fn list(&self) -> Result<Vec<pm_pubky::homeserver::RemoteFile>, String> {
+                self.hs.list().await
+            }
+            async fn upload(
+                &self,
+                remote: &str,
+                bytes: Vec<u8>,
+                rate: Option<u64>,
+            ) -> Result<(), copy_guard::UploadError> {
+                self.pass().await;
+                self.hs.upload(remote, bytes, rate).await
+            }
+            async fn stat(&self, remote: &str) -> Result<Option<Option<u64>>, String> {
+                self.pass().await;
+                self.hs.stat(remote).await
+            }
+            async fn delete(&self, remote: &str) -> Result<(), String> {
+                self.hs.delete(remote).await
+            }
+            fn account(&self) -> String {
+                self.hs.account()
+            }
+        }
         let hs = Arc::new(FakeHomeserver {
             delay: Some(std::time::Duration::from_millis(100)),
             ..Default::default()
         });
         let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let held = Arc::new(Held {
+            hs,
+            hold: false.into(),
+        });
+        s.copy_seams.lock().unwrap().0 = Some(held.clone());
         songs_at(&s, &[src.join("A/01 one.wav"), src.join("A/02 two.wav")]);
         tone_wav(&src.join("B.wav"), 1);
         std::fs::create_dir_all(src.join("B")).unwrap();
         tone_wav(&src.join("B/01 b.wav"), 1);
         // While another start holds the door, a copy waits instead of checking and starting
-        let held = copy_jobs::admit(&s);
+        let door = copy_jobs::admit(&s);
         let copy = {
             let app = app.clone();
             let body = serde_json::json!({"paths": [src.join("A")]});
@@ -20743,13 +20789,61 @@ exec sleep 300
         };
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(copy_jobs::busy(&s).is_none(), "the copy went in past the lock");
-        drop(held);
+        drop(door);
         let (st, job) = copy.await.unwrap();
         assert_eq!(st, StatusCode::ACCEPTED, "{job}");
         copy_ended(&app, job["id"].as_str().unwrap()).await;
 
-        // Started side by side, many times: never both running
+        let copy_a = || Some(serde_json::json!({"paths": [src.join("A")]}));
+        let import_b = || Some(serde_json::json!({"path": src.join("B")}));
+        // An import running: a copy asked for then waits in line
+        held.set(true);
+        let (st, i) = call(&app, "POST", "/v1/library/imports", import_b()).await;
+        assert_eq!(st, StatusCode::OK, "{i}");
+        let (st, c) = call(&app, "POST", "/v1/pubky/files/upload", copy_a()).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{c}");
+        assert_eq!(
+            c["state"], "queued",
+            "a copy started while an import ran: {c} {i}"
+        );
+        let iid = i["id"].as_str().unwrap();
+        let cid = c["id"].as_str().unwrap();
+        call(&app, "POST", &format!("/v1/pubky/files/jobs/{iid}/cancel"), None).await;
+        held.set(false);
+        copy_finished(&app, iid).await;
+        call(
+            &app,
+            "POST",
+            &format!("/v1/pubky/files/upload/{cid}/cancel"),
+            None,
+        )
+        .await;
+        copy_ended(&app, cid).await;
+        // A copy running: an import asked for then is refused
+        held.set(true);
+        let (st, c) = call(&app, "POST", "/v1/pubky/files/upload", copy_a()).await;
+        assert_eq!(c["state"], "running", "{st} {c}");
+        let (st, i) = call(&app, "POST", "/v1/library/imports", import_b()).await;
+        assert_eq!(
+            st,
+            StatusCode::CONFLICT,
+            "an import started while a copy ran: {i} {c}"
+        );
+        let cid = c["id"].as_str().unwrap();
+        call(
+            &app,
+            "POST",
+            &format!("/v1/pubky/files/upload/{cid}/cancel"),
+            None,
+        )
+        .await;
+        held.set(false);
+        copy_ended(&app, cid).await;
+
+        // Started side by side, many times: never both running. The homeserver is held until
+        // both have answered, so an import let in is still running when the copy is let in.
         for _ in 0..10 {
+            held.set(true);
             let (c, i) = tokio::join!(
                 call(
                     &app,
@@ -20765,10 +20859,16 @@ exec sleep 300
                 ),
             );
             let import_in = i.0 == StatusCode::OK;
+            if import_in {
+                let id = i.1["id"].as_str().unwrap();
+                let (_, now) = call(&app, "GET", &format!("/v1/pubky/files/upload/{id}"), None).await;
+                assert_eq!(now["finished"], false, "the import ended before the copy: {now}");
+            }
             assert!(
                 !(import_in && c.1["state"] == "running"),
                 "both started: {c:?} {i:?}"
             );
+            held.set(false);
             if import_in {
                 call(
                     &app,
