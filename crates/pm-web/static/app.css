@@ -456,6 +456,8 @@ html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44p
 .section-head > h3 + .muted { margin: 0 auto 0 var(--sp-3); }
 .section-head > .btn { align-items: baseline; }
 .section-head > .btn > .ic { align-self: center; }
+/* Busy, its spinner takes the icon's place: in the middle too (on the words' baseline it sat 3-4 px high) */
+.section-head > .btn.is-spinning::after { align-self: center; }
 /* A small one (New smart collection, offline Downloads' Play and Shuffle) is 40 px tall on a phone
    or a touch screen: with its words on the baseline they sat at its top, 5.5 px above its middle and
    its icon. The words' line is the button's height instead (as Select's, below): in its middle. */
@@ -1077,6 +1079,8 @@ html[data-shell="phone"] .list-row > .plays a::after { content: ""; position: ab
 #spkguide { text-decoration: underline; white-space: nowrap; }
 html[data-shell="phone"] #spkguide { position: relative; }
 html[data-shell="phone"] #spkguide::before { content: ''; position: absolute; left: -6px; right: -6px; top: calc(50% - 22px); height: 44px; }
+/* That tap layer reaches 14.5 px below the link: 4 px more room under the help keeps it off the speaker list */
+html[data-shell="phone"] .set-label:has(#spkguide) { margin-bottom: var(--sp-1); }
 html[data-shell="phone"] :is(.idkey .lnk, #libreview, #liberrs) { position: relative; }
 html[data-shell="phone"] :is(.idkey .lnk, #libreview, #liberrs)::before { content: ''; position: absolute; inset: -14px -6px; }
 .idswatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
