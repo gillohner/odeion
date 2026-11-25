@@ -1,8 +1,9 @@
-// The copy's popup, closed with the keyboard (desktop and tablet, 768-1280 px). Close on a finished
-// copy hides its chip as well, and Dismiss does too: the focus goes on to the next control in the bar
-// (Sound), and Tab goes on in the bar. Before, it was given back to the chip just as the chip was
-// hidden and fell to the page, with nothing focused. A copy still running: Hide keeps
-// its chip, and the focus goes back on it. With the mouse the focus is left as it was.
+// The copy's popup, closed with the keyboard (desktop and tablet, 768-1280 px, and a phone, 412 and
+// 360 px). Close on a finished copy hides its chip as well, and Dismiss does too: the focus goes on to
+// the next control in the bar (Sound; on a phone, whose bar shows no Sound, Volume or Zone, Play).
+// Before, it was given back to the chip just as the chip was hidden and fell to the page, with nothing
+// focused (on a phone still so after the first fix). A copy still running: Hide keeps its chip, and
+// the focus goes back on it. With the mouse the focus is left as it was.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-job-close-focus.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -20,7 +21,9 @@ const running = () => ({ current: { ...base, state: 'running', done: 9, bytes_do
 
 async function run(browser, width) {
   const fixtures = { '/pubky/files/jobs': { body: finished() }, '/pubky/files/jobs/last': { body: {} } };
-  const { context, page, state } = await fx.create(browser, width, { fixtures });
+  const { context, page, state } = await fx.create(browser, width, { fixtures, mobile: width < 600 });
+  // (the next control shown after the chip: Sound, or on a phone Play)
+  const phone = width < 600; const NEXT = phone ? 'toggle' : 'quality'; const NEXT_NAME = phone ? 'Play' : 'Sound';
   const focusId = () => page.evaluate(() => { const a = document.activeElement; return !a || a === document.body ? 'body' : a.id || a.tagName; });
   const shown = (sel) => page.locator(sel).isVisible();
   // A fresh page with this job, its chip shown, the popup opened with Enter on the chip
@@ -38,12 +41,16 @@ async function run(browser, width) {
     let was = await openWith(finished(), 'Done');
     await page.locator('#jobpop [data-jobclose]').focus(); await page.keyboard.press('Enter'); await page.waitForTimeout(300);
     let f = await focusId();
-    check(was && !await shown('#jobpop') && !await shown('#jobchip') && !await shown('#scrim') && f === 'quality',
-      `${width} finished copy: Close with the keyboard hides the popup and the chip, the focus goes on to Sound (${f})`);
+    check(await page.evaluate(() => document.documentElement.dataset.shell) === (phone ? 'phone' : 'desktop'), `${width}: the ${phone ? 'phone' : 'desktop'} layout`);
+    check(was && !await shown('#jobpop') && !await shown('#jobchip') && !await shown('#scrim') && f === NEXT,
+      `${width} finished copy: Close with the keyboard hides the popup and the chip, the focus goes on to ${NEXT_NAME} (${f})`);
     await page.screenshot({ path: path.join(shots, `close-${width}.png`) });
-    await page.keyboard.press('Tab'); await page.waitForTimeout(100);
-    const next = await page.evaluate(() => !!document.activeElement && !!document.activeElement.closest('.player-right'));
-    check(next, `${width} finished copy: then Tab goes on in the bar, not from the page's top`);
+    // (a guard: Chromium goes on from the hidden chip's place on main as well)
+    if (!phone) {
+      await page.keyboard.press('Tab'); await page.waitForTimeout(100);
+      const next = await page.evaluate(() => !!document.activeElement && !!document.activeElement.closest('.player-right'));
+      check(next, `${width} finished copy: then Tab goes on in the bar, not from the page's top (guard)`);
+    }
 
     // Dismiss on a finished copy, with the keyboard: the node forgets it, the focus on Sound
     was = await openWith(finished(), 'Done');
@@ -52,8 +59,8 @@ async function run(browser, width) {
     await page.waitForFunction(() => document.getElementById('jobpop').hidden && document.getElementById('jobchip').hidden, null, { timeout: 4000 }).catch(() => {});
     await page.waitForTimeout(200);
     f = await focusId();
-    check(was && state.hits.some((h) => h.v === '/pubky/files/jobs/last' && h.m === 'DELETE') && !await shown('#jobpop') && !await shown('#jobchip') && f === 'quality',
-      `${width} finished copy: Dismiss with the keyboard, popup and chip gone, the focus goes on to Sound (${f})`);
+    check(was && state.hits.some((h) => h.v === '/pubky/files/jobs/last' && h.m === 'DELETE') && !await shown('#jobpop') && !await shown('#jobchip') && f === NEXT,
+      `${width} finished copy: Dismiss with the keyboard, popup and chip gone, the focus goes on to ${NEXT_NAME} (${f})`);
 
     // A copy still running: Hide keeps the chip, the focus back on it. (Its popup is drawn again with
     // every look at the job, every 2 s: the key, the focus on Hide and the press go in one step, so a
@@ -68,7 +75,7 @@ async function run(browser, width) {
     was = await openWith(finished(), 'Done', 'mouse');
     await page.locator('#jobpop [data-jobclose]').click(); await page.waitForTimeout(300);
     f = await focusId();
-    const inBar = await page.evaluate(() => !!document.activeElement && !!document.activeElement.closest('.player-right'));
+    const inBar = await page.evaluate(() => !!document.activeElement && !!document.activeElement.closest('.player'));
     check(was && !await shown('#jobpop') && !await shown('#jobchip') && !inBar, `${width} finished copy: Close with the mouse hides both, the focus not moved to the bar (${f})`);
     check(state.errors.length === 0, `${width}: no page errors ${state.errors.join('; ')}`);
   } finally { await context.close(); }
@@ -76,7 +83,7 @@ async function run(browser, width) {
 
 (async () => {
   const browser = await chromium.launch();
-  try { for (const w of [1280, 1024, 768]) await run(browser, w); }
+  try { for (const w of [1280, 1024, 768, 412, 360]) await run(browser, w); }
   finally { await browser.close(); }
   console.log(`\n${ok} ok, ${fail} failed`);
   process.exit(fail ? 1 : 0);

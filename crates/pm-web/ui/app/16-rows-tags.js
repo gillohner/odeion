@@ -532,14 +532,15 @@
   const reviewRow = (r) => { const v = r ? r.rating : null; return `<div class="reviewrow"><span class="eyebrow">My rating</span><span class="stars" id="stars" role="group" aria-label="My rating, in half stars">${[1, 2, 3, 4, 5].map((n) => `<span class="star f${starFill(v, n)}"><span class="glyph" aria-hidden="true">★</span><button class="half l" data-rate="${2 * n - 1}" aria-pressed="${v === 2 * n - 1}" aria-label="${n - 1 ? `${n - 1} and a half stars` : 'Half a star'}" title="${starsText(2 * n - 1)}"></button><button class="half r" data-rate="${2 * n}" aria-pressed="${v === 2 * n}" aria-label="${n} star${n === 1 ? '' : 's'}" title="${n}"></button></span>`).join('')}</span><span class="ratingval" id="ratingval">${v ? `${starsText(v)} of 5` : ''}</span><button class="btn sm ghost" id="notesbtn">${r && r.text ? 'Edit notes' : 'Add notes'}</button>${r && r.text ? `<div class="notes clamp" id="notes">${esc(r.text)}</div><button type="button" class="lnk small notes-more" id="notesmore" aria-controls="notes" aria-expanded="false" hidden>More</button>` : ''}<div class="notes-edit" id="notesedit" hidden><textarea class="input" id="notestext" rows="3" placeholder="Notes, kept privately on your homeserver">${esc(r ? r.text : '')}</textarea><div class="actions" style="margin-top:8px"><button class="btn primary sm" id="notessave">Save</button><button class="btn sm ghost" id="notescancel">Cancel</button></div></div></div>`; }; // lint-allow-glyph: the stars are the rating component's own styled glyphs
   const bindReviewRow = (ref, r) => {
     const stars = $('#stars'); if (!stars) return;
-    const save = async (rating, text) => { try { if (rating == null && !text) await api('DELETE', '/reviews?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString()); else await api('PUT', '/reviews', { ...ref, rating, text }); toast('Review saved'); render(); } catch (e) { toast(e.message, 'error'); } };
+    const save = async (rating, text) => { try { if (rating == null && !text) await api('DELETE', '/reviews?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString()); else await api('PUT', '/reviews', { ...ref, rating, text }); toast('Review saved'); } catch (e) { toast(e.message, 'error'); return; } await Promise.resolve(render()).catch(() => {}); };
     const cur = r ? r.rating : null;
     const paint = (v) => $$('.star', stars).forEach((s, i) => { s.className = `star f${starFill(v, i + 1)}`; });
     $$('[data-rate]', stars).forEach((b) => {
       b.onmouseenter = () => paint(Number(b.dataset.rate));
       b.onfocus = () => paint(Number(b.dataset.rate));
       // The same value again clears the rating
-      // (busy until it is saved: a quick second press on the same star sends nothing)
+      // (busy until it is saved and the page drawn again with it: a quick second press on the same
+      // star sends nothing, and the next one, on the new star, clears it)
       b.onclick = () => { const v = Number(b.dataset.rate); return save(cur === v ? null : v, r ? r.text : ''); };
     });
     stars.onmouseleave = () => paint(cur);

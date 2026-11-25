@@ -731,15 +731,22 @@ html:not([data-shell="phone"]) .zone-card .zc-mute ~ input[type=range] { min-wid
 /* On a wider card the volume and Play to (or "selected") are one group: beside the transport while
    the slider gets its 80 px there (the group's own width, Play to's included, decides), else under it
    together, where the slider takes the line. Never the volume squeezed beside the transport with
-   Play to alone under it */
+   Play to alone under it. (Only with a much larger font size, where even under the transport the
+   line has no room for both, Play to goes under the volume: below) */
 .zone-card .zc-tail { display: flex; align-items: center; gap: var(--sp-1h); flex: 1 1 auto; min-width: 0; }
 .zone-card .zc-tail > .zc-vol { flex: 1 1 auto; min-width: 0; }
 .zone-card .zc-tail > [data-zsel], .zone-card .zc-tail > .pill { flex: none; }
 .zone-card .zc-tail input[type=range] { flex: 1 1 auto; width: 80px; }
 /* A card's level has one width whatever it reads ("40 %", "Muted", "Level unknown" on two short
    lines, 30 px, under the 40 px Play), so a level going known, unknown or muted never moves the
-   card's slider or its volume between beside and under the transport */
-html:not([data-shell="phone"]) .zone-card .zc-vol > .vol-level { flex: none; width: 56px; line-height: 1.25; }
+   card's slider or its volume between beside and under the transport. (In ch as well: Android's font
+   size reaches the app's page as text zoom, which grows the words but not a px box.) The volume is
+   never squeezed below Mute (36 px, an .icon-btn's width), the slider's 56 px and the level: where the line has no room
+   for that and Play to (or "selected"), they go under it, not over the level. The volume's own text
+   size is the level's, so its ch is the level's ch */
+html:not([data-shell="phone"]) .zone-card .zc-vol > .vol-level { flex: none; width: max(56px, 8ch); line-height: 1.25; }
+html:not([data-shell="phone"]) .zone-card .zc-tail { flex-wrap: wrap; }
+html:not([data-shell="phone"]) .zone-card .zc-tail > .zc-vol { flex: 1 1 0; font-size: var(--fs-xs); min-width: calc(36px + 56px + max(56px, 8ch) + 2 * var(--sp-1h)); }
 html[data-shell="phone"] .zone-card .zc-mute { display: none; }
 /* A Home row that didn't answer: its words and Try again on one line of whole pixels, so the
    height kept for its next placeholder is the height it draws (no jump when Home opens again) */
@@ -2352,6 +2359,10 @@ body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 .np-qitem:hover { background: var(--surface-2); }
 .np-qitem .grow { display: flex; flex-direction: column; min-width: 0; }
 .np-qitem .name, .np-qitem .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A pressed row's spinner takes its length's place, so the length doesn't move left while it waits */
+.np-qitem.is-spinning::after { content: none; }
+.np-qitem.is-spinning > :last-child { position: relative; color: transparent; }
+.np-qitem.is-spinning > :last-child::after { content: ''; position: absolute; top: 50%; left: 50%; width: 12px; height: 12px; margin: -8px 0 0 -8px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; pointer-events: none; }
 .np-facts { margin-top: var(--sp-3h); }
 .np-output { overflow-wrap: anywhere; }
 .np-output-why { display: block; margin-top: var(--sp-0h); }
