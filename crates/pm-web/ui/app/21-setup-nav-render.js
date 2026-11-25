@@ -132,6 +132,25 @@
     if (document.activeElement === h) return h;
     main.focus({ preventScroll: true }); return document.activeElement === main ? main : null;
   };
+  // Try again on a page that could not be read (failedHtml) draws the page again, so the focus on it
+  // fell to the body (Enter did nothing more, and a screen reader said nothing of what came back): it
+  // goes to the new Try again when the read failed again, else to the page's heading. (only when the
+  // focus was in the page and nothing else took it meanwhile; not after another page opened, or after
+  // a click or key of theirs meanwhile)
+  const retryPage = (draw) => {
+    const had = main.contains(document.activeElement); const gen = navGen;
+    let acted = false; const mine = () => { acted = true; };
+    for (const e of ['pointerdown', 'keydown']) document.addEventListener(e, mine, { capture: true, passive: true });
+    const out = draw();
+    const place = () => {
+      for (const e of ['pointerdown', 'keydown']) document.removeEventListener(e, mine, { capture: true });
+      if (!had || acted || gen !== navGen || !lostFocus()) return;
+      const b = [...main.querySelectorAll('[data-failed] [data-retry]')].find(shown);
+      if (b) b.focus({ preventScroll: true }); else focusPage();
+    };
+    Promise.resolve(out).then(place, place);
+    return out;
+  };
   const navigate = (fresh, moveFocus = false) => {
     const gen = ++navGen; navCtl.abort(); navCtl = new AbortController();
     navStop(); const superseded = new Promise((res) => { navStop = res; });
