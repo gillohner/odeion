@@ -195,3 +195,4 @@ ui-dialog-keys.js dialog-keys-shots
 ui-dsd-modes.js dsd-modes-shots
 ui-playlist-local-only.js playlist-local-only-shots
 ui-songs-empty-az.js songs-empty-az-shots
+ui-job-close-focus.js job-close-focus-shots
