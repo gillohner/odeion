@@ -8,6 +8,7 @@
 use crate::error::AudioError;
 use crate::pipeline::{PipelineConfig, Plan};
 use crate::play::Source;
+use pm_model::text::percent_decode;
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, SignalPath};
 use pm_zones::{FrameSource, Processor, QueueItem, SourceError, SourceFactory};
 use std::path::{Path, PathBuf};
@@ -132,28 +133,6 @@ impl LocalFiles {
             None => PathBuf::from(uri),
         }
     }
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        // (bytes, not a slice of the text: the two after a `%` may be half of a character)
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (
-                (bytes[i + 1] as char).to_digit(16),
-                (bytes[i + 2] as char).to_digit(16),
-            ) {
-                out.push((hi * 16 + lo) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn open_err(path: &Path, e: AudioError) -> SourceError {
@@ -287,16 +266,5 @@ mod tests {
             PathBuf::from("/m/My Album/01.flac")
         );
         assert_eq!(LocalFiles::path_of("file:///x%2"), PathBuf::from("/x%2"));
-    }
-
-    /// `%` followed by anything that is not two hex digits is kept as it is, also when the
-    /// bytes after it are part of a longer character; a queue item's `file://` link is any text.
-    #[test]
-    fn percent_decoding_takes_any_text() {
-        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
-        assert_eq!(percent_decode("%C3%A9t%c3%a9"), "été");
-        for kept in ["%aé", "%é1", "100%", "%2", "%zz", "%+f", "50%é", "%"] {
-            assert_eq!(percent_decode(kept), kept);
-        }
     }
 }

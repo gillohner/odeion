@@ -14,6 +14,7 @@ use crate::{ApiError, ApiResult};
 use axum::extract::{Path as AxPath, State};
 use axum::http::StatusCode;
 use axum::Json;
+use pm_model::text::percent_decode;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -199,26 +200,6 @@ pub fn is_key(key: &Path) -> bool {
 
 fn find(shared: &Shared, id: &str) -> Option<Share> {
     shared.read().ok()?.iter().find(|s| s.id == id).cloned()
-}
-
-/// `%XX` in a URL path, decoded.
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        // (bytes, not a slice of the text: the two after a `%` may be half of a character)
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(hi), Some(lo)) = ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16)) {
-                out.push((hi * 16 + lo) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 // ---- listing ----
@@ -794,17 +775,6 @@ mod tests {
             Some(("ab12cd".into(), "Queen & Co/01 Song.flac".into()))
         );
         assert!(!format!("{sh:?}").contains("not-shown"));
-    }
-
-    /// `%` followed by anything that is not two hex digits is kept as it is, also when the
-    /// bytes after it are part of a longer character (the text was cut inside it).
-    #[test]
-    fn percent_decoding_takes_any_text() {
-        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
-        assert_eq!(percent_decode("%C3%A9t%c3%a9"), "été");
-        for kept in ["%aé", "%é1", "100%", "%2", "%zz", "%+f", "50%é", "%"] {
-            assert_eq!(percent_decode(kept), kept);
-        }
     }
 
     /// A share's password never shows in what a failed playback says (the zone's state and its

@@ -226,7 +226,7 @@ fn commons_name(url: &str) -> Option<String> {
         rest.get(2)?
     };
     // A path, not a form: `+` stays `+`
-    Some(about::percent_decode(name))
+    Some(pm_model::text::percent_decode(name))
 }
 
 async fn fetch(s: &NodeState, artist_id: i64, mbid: Mbid, name: &str, lang: &str) -> ArtistInfo {

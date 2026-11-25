@@ -96,31 +96,6 @@ pub(crate) async fn get_json(s: &NodeState, url: &str) -> Option<Value> {
     resp.json().await.ok()
 }
 
-/// `%XX` in a URL path, decoded (`+` stays `+`: a path is not a form).
-pub(crate) fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let hex = (b[i] == b'%')
-            .then(|| b.get(i + 1..i + 3))
-            .flatten()
-            .and_then(|h| std::str::from_utf8(h).ok())
-            .and_then(|h| u8::from_str_radix(h, 16).ok());
-        match hex {
-            Some(v) => {
-                out.push(v);
-                i += 3;
-            }
-            None => {
-                out.push(b[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 pub(crate) fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -194,7 +169,11 @@ pub(crate) fn relations(v: &Value) -> Relations {
                     .unwrap_or("")
                     .to_string();
                 // The path is encoded; the title is kept as text (encoded once when asked)
-                if let Some(title) = u.path().strip_prefix("/wiki/").map(percent_decode) {
+                if let Some(title) = u
+                    .path()
+                    .strip_prefix("/wiki/")
+                    .map(pm_model::text::percent_decode)
+                {
                     r.wikipedia.push((lang, title.replace(' ', "_")));
                 }
             }
@@ -839,7 +818,6 @@ mod tests {
         );
         // Asked encoded once
         assert_eq!(urlencode("Die_Ärzte"), "Die_%C3%84rzte");
-        assert_eq!(percent_decode("A%2BB+C%"), "A+B+C%");
     }
 
     #[test]
