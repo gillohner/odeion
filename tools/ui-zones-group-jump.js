@@ -84,6 +84,12 @@ const where = (page) => page.evaluate(() => {
       check(!!w.help && /^Pick two or more of one kind/.test(w.help.text), `${tag}: the help says to pick two or more of one kind ("${w.help && w.help.text}")`);
       const kinds = await page.$$eval('#groupouts .groupkind > .small', (ls) => ls.map((l) => l.textContent.trim()));
       check(kinds.includes('Sonos') && kinds.includes('Squeezelite players'), `${tag}: the speakers are in rows by kind (${kinds.join(' / ')})`);
+      // A screen reader names the focused speaker with its form and its kind ("Group outputs", "Sonos"), not alone
+      const groups = await page.evaluate(() => { const out = []; for (let g = document.activeElement?.closest('[role="group"]'); g; g = g.parentElement?.closest('[role="group"]')) out.push(g.getAttribute('aria-label') || document.getElementById(g.getAttribute('aria-labelledby') || '')?.textContent.trim() || ''); return out; });
+      check(groups.length === 2 && groups[0] === kinds[0] && groups[1] === 'Group outputs', `${tag}: the focused speaker is read inside its kind and the Group outputs form (${groups.join(' < ') || 'no group'})`);
+      const named = await page.getByRole('group', { name: 'Group outputs', exact: true }).getByRole('checkbox').count();
+      const all = await page.locator('#groupouts input[type="checkbox"]').count();
+      check(all > 1 && named === all && await page.getByRole('group', { name: 'Sonos', exact: true }).getByRole('checkbox').count() > 0, `${tag}: every speaker is in the named Group outputs group (${named} of ${all}), Sonos ones in a Sonos group`);
       await page.screenshot({ path: path.join(SHOTS, `group-${tag}.png`) });
       await fx.cleanCopy(page).then(() => check(true, `${tag}: no undefined text, no horizontal overflow`), (e) => check(false, `${tag}: ${e.message}`));
       // The same tab opened another way starts at its top, focus not taken
