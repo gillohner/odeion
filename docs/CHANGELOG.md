@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **A music service's own library reads cleanly on a phone.** On Spotify, TIDAL and SoundCloud, the head of Your library (Your collection, Your likes) put its title, its count and Import as bookmarks on one row, so on a phone, and on a tablet beside the sidebar, the title and the count each broke onto two lines ("0 songs · 0 / albums"). Import as bookmarks now goes under them when the row is too narrow. The parts of that library (devices, library, playlists) also had no space between them, so one part's last line ran into the next title; they are now spaced like the rest of the page.
+
 ### 2026-11-26
 
 - **Try again on a page that could not be read keeps the keyboard in the page.** When a page such as an album, Albums or a speaker's queue could not be read, pressing its Try again with the keyboard drew the page again and left nothing focused, so pressing Enter again did nothing and a screen reader said nothing about what came back. Now, if the page still can't be read, the focus is on the new Try again, and once it can be read the focus goes to the page's title. If you click somewhere else while it loads, the focus stays where you put it.

@@ -102,8 +102,8 @@ async function buttons(page, tag, sels, tall, touch, baseline = true) {
           await buttons(page, `${tag} Home`, ['#hdone'], tall, mobile);
           await fx.go(page, '/sources/spotify');
           await page.waitForSelector('#spotfav');
-          // At 360 this head is crowded (its title wraps beside the count and the button), so its words
-          // aren't on the title's last line; the rest holds
+          // At 360 the button goes under the title and count (ui-service-library-head.js), so its words
+          // aren't on the title's baseline; the rest holds
           await buttons(page, `${tag} Spotify`, ['#spotfav'], tall, mobile, width > 360);
           await page.screenshot({ path: path.join(shots, `${tag}-spotify.png`) });
           await fx.cleanCopy(page);
