@@ -253,7 +253,8 @@ const keyOf = (uri) => Object.keys(SONGS).find((k) => SONGS[k].canonical_uri ===
         if (mobile) await page.click('#navretry'); else { await page.focus('#navretry'); await page.keyboard.press('Enter'); }
         await until(async () => (await order()) === 'Bravo,Charlie' && !(await inert()), 3000);
         check((await order()) === 'Bravo,Charlie' && !(await inert()), `${width}: Try again draws the list and it takes presses (${await order()})`);
-        if (!mobile) { await sleep(200); const f7 = await page.evaluate(() => { const a = document.activeElement; return a && a.dataset && a.dataset.rm != null ? `${a.dataset.rm}|${a.getAttribute('aria-label')}` : String(a && a.tagName); }); check(/^0\|.*Bravo/.test(f7), `${width}: after Try again from the keyboard the focus is on the next song's x (${f7})`); }
+        // (Try again is a second press: the focus handed on goes to the next song's ⋯, not its ×, so a held Enter removes nothing more)
+        if (!mobile) { await sleep(200); const f7 = await page.evaluate(() => { const a = document.activeElement; return a && a.dataset && a.dataset.smore != null ? `${a.dataset.smore}|${a.getAttribute('aria-label')}` : a && a.dataset && a.dataset.rm != null ? `rm|${a.getAttribute('aria-label')}` : String(a && a.tagName); }); check(/^0\|.*Bravo/.test(f7), `${width}: after Try again from the keyboard the focus is on the next song's ⋯ (${f7})`); }
         releaseHung(); await sleep(400); // (the read cut at 15 s answers now, with the list as it was then)
         check((await order()) === 'Bravo,Charlie' && !(await inert()), `${width}: the cut read's late answer draws nothing (${await order()})`);
         await pressRm('Charlie');

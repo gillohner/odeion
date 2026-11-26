@@ -268,25 +268,28 @@
   const plSongFocus = (box, keys, k, kind, alt) => (k >= 0 && k < keys.length ? { box, song: keys[k], copy: keys.slice(0, k).filter((u) => u === keys[k]).length, kind, alt } : null);
   // (a song's × from the keyboard: the focus goes on to the song after it, else the one before.
   // `hid`: the places a source chip hides; it skips those (the next song that shows, else the shown
-  // one before). When none shows any more the chip goes off, and it's the next song again)
+  // one before). When none shows any more the chip goes off, and it's the next song again.
+  // `on`: handed on to a song the focus wasn't on: only the read that ends that press's own hold
+  // gives it this kind, plSettle)
   const plNextFocus = (box, keys, k, kind, alt, hid) => {
     const rest = keys.map((_, i) => i).filter((i) => i !== k); const shows = (i) => !hid || !hid.has(i);
     let j = rest.findIndex((i) => i > k && shows(i)); if (j < 0) j = rest.findLastIndex((i) => i < k && shows(i)); if (j < 0) j = k < rest.length ? k : k - 1;
-    return plSongFocus(box, rest.map((i) => keys[i]), j, kind, alt);
+    const f = plSongFocus(box, rest.map((i) => keys[i]), j, kind, alt); if (f) f.on = true; return f;
   };
+  // (a song's ⋯, or a link card's: where the focus lands on a song it wasn't on, plFocusIn)
+  const PL_MORE = 'button[data-smore], button[data-cmore]';
+  // (a focus handed on by a press, given back other than by the read that ends that press's own hold
+  // (a read again, Try again, the hold's 30 s running out): that song's ⋯ too)
+  const plSettle = (f) => (f && f.on ? { ...f, kind: PL_MORE, alt: undefined, on: false } : f);
   const plFocusOf = (a) => {
     const box = a && a.closest ? a.closest('#plsongs, #pllocal') : null; if (!box) return null;
     const row = a.closest('[data-srow]');
-    if (row && box.contains(row)) { const f = plSongFocus(box.id, plKeysOf(box.id), Number(row.dataset.srow), a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => (x.value === row.dataset.srow ? `[${x.name}]` : `[${x.name}="${CSS.escape(x.value)}"]`)).join(''), a.dataset.pup != null ? 'button[data-pdown]' : a.dataset.pdown != null ? 'button[data-pup]' : undefined); if (f) { if (a === row) f.row = true; return f; } } // (Move up at the top: Move down; f.row: the row itself)
+    if (row && box.contains(row)) { const f = plSongFocus(box.id, plKeysOf(box.id), Number(row.dataset.srow), a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => (x.value === row.dataset.srow ? `[${x.name}]` : `[${x.name}="${CSS.escape(x.value)}"]`)).join(''), a.dataset.pup != null ? 'button[data-pdown]' : a.dataset.pdown != null ? 'button[data-pup]' : undefined); if (f) return f; } // (Move up at the top: Move down)
     const sel = a.tagName.toLowerCase() + [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
     return { box: box.id, sel, i: $$(sel, box).indexOf(a) };
   };
-  // (a focus taken by a draw the person didn't cause, a late answer for where the songs play: one
-  // passed on to another song lands on its ⋯ or the row, never its × or Move, so a key already on
-  // its way changes no other song; plFocusIn)
-  const plCalm = (f) => (f ? { ...f, calm: true } : f);
   // (a hold still on: the next draw of its playlist ends it)
-  const plHoldEnd = (hold) => { if (plHolds.get(hold.id) !== hold) return; hold.cut = false; hold.after = Math.min(hold.after, plDraws + 1); if (state.view === 'playlist' && state.viewArg === hold.id) render(); };
+  const plHoldEnd = (hold) => { if (plHolds.get(hold.id) !== hold) return; hold.cut = false; hold.focus = plSettle(hold.focus); hold.after = Math.min(hold.after, plDraws + 1); if (state.view === 'playlist' && state.viewArg === hold.id) render(); };
   // Runs `run(signal)` (the change) under the hold, then draws the playlist again; false when it
   // failed or another change of this playlist still holds it. `focus`: where the focus goes in the
   // list that ends the hold once the change is made (Move: the moved song's button), else (and when
