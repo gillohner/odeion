@@ -827,7 +827,7 @@ fn token_blocking(
 }
 
 /// Open the full track through the private playback endpoint (`pm_sources::tidal::full::open_as`)
-/// with this person's sign-in, renewed by [`token_blocking`] first when it needs it. `Ok(None)`:
+/// with this person's sign-in, renewed by `token_blocking` first when it needs it. `Ok(None)`:
 /// the mode is off or not signed in (use the official path).
 pub fn open_blocking(
     library: &pm_library::LibraryLock,
