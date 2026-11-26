@@ -204,7 +204,7 @@
           }
           state.queueKey = queueKey(); state.qPage = main.firstElementChild;
           // (the queue could not be read: Try again asks again, the button busy meanwhile)
-          { const fr = $('[data-failed] [data-retry]', main); if (fr) fr.onclick = (ev) => busy(fr, () => render(), ev); }
+          { const fr = $('[data-failed] [data-retry]', main); if (fr) fr.onclick = (ev) => busy(fr, () => retryPage(render), ev); }
           const moveItems = () => zoneList().filter((o) => o.id !== drawnZone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: forDrawn(() => moveTo(o.id)) }));
           // (for the zone the page was drawn for; one save at a time, a second tap while the first is
           // on its way made a second playlist, and one the node hasn't answered yet says so)

@@ -9,14 +9,15 @@
 
       $$('[data-crumb-kind]', main).forEach((b) => b.onclick = () => (b.dataset.asBack ? $('.pagebar > [data-back]', main).click() : setView('item', { kind: b.dataset.crumbKind, id: b.dataset.crumbId })));
       bindTrackRows(main, lists);
-      // A read that failed (failedHtml): Try again draws the page from the start, with its loader
-      $$('[data-failed] [data-retry]', main).forEach((b) => { if (!b.onclick) b.onclick = (ev) => busy(b, () => { if (state.drawnPage === v) state.drawnPage = null; return render(); }, ev); });
+      // A read that failed (failedHtml): Try again draws the page from the start, with its loader (and
+      // puts the focus on the new Try again or the heading, retryPage)
+      $$('[data-failed] [data-retry]', main).forEach((b) => { if (!b.onclick) b.onclick = (ev) => busy(b, () => retryPage(() => { if (state.drawnPage === v) state.drawnPage = null; return render(); }), ev); });
     } catch (e) {
       if ((listMine && listStale(v, listMine)) || (drawStale && drawStale())) return; // (an older list's or playlist draw's error over a newer one)
       const heldPl = v === 'playlist' ? plHolds.get(state.viewArg) : null; // (its Try again draws it in place, on this visit only: a fresh open is a new navGen)
       if (state.drawnPage === v) state.drawnPage = null; // (Albums, Artists: Try again draws it from the start)
       main.innerHTML = failedHtml(e, 'navretry');
-      $('#navretry', main).onclick = () => { if (heldPl && plHolds.get(heldPl.id) === heldPl) heldPl.retry = navGen; render(); };
+      $('#navretry', main).onclick = () => { if (heldPl && plHolds.get(heldPl.id) === heldPl) heldPl.retry = navGen; retryPage(render); };
     }
   };
 
