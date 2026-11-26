@@ -1,6 +1,7 @@
-// Albums and Artists on a phone: the Sort row under the Filter field keeps a 12 px gap, as the
-// Quality chips under it do (it touched the field: 0 px); under the Quality chips it keeps its 16 px,
-// and nothing runs past the screen. Desktop keeps its spacing.
+// Albums and Artists: the Sort row under the Filter field keeps a 12 px gap, as the Quality chips
+// under it do (it touched the field: 0 px); under the Quality chips it keeps its 16 px, and nothing
+// runs past the screen. The same on a desktop (1280, 1024, 768), where the Sort row and the Quality
+// chips sat right on the heading's row (0 px) too.
 // An album tile's second line (artist · year, then the quality badge) keeps the badge whole: a long
 // artist name is shortened with "…" instead of the badge being cut off behind a bare "…", the line
 // keeps its height with or without a badge, and a tile with no badge still shortens its text.
@@ -32,7 +33,11 @@ const gaps = (page) => page.evaluate(() => {
   const above = bar.previousElementSibling;
   const aboveBox = above.matches('.qualchips') ? [...above.querySelectorAll('.chip')].reduce((b, c) => Math.max(b, c.getBoundingClientRect().bottom), 0) : Math.max(...[...above.querySelectorAll('#filter, h2, .btn')].map((el) => el.getBoundingClientRect().bottom));
   const top = Math.min(...[...bar.querySelectorAll('select, [data-lfav]')].map((el) => el.getBoundingClientRect().top));
-  return { above: above.matches('.qualchips') ? 'Quality chips' : 'Filter row', gap: top - aboveBox, fits: document.documentElement.scrollWidth <= innerWidth };
+  // and from the head's lowest control to the Quality chips, when they show
+  const head = document.querySelector('.main > .page-head');
+  const headBox = Math.max(...[...head.querySelectorAll('#filter, h2, .btn')].map((el) => el.getBoundingClientRect().bottom));
+  const chips = above.matches('.qualchips') ? Math.min(...[...above.querySelectorAll('.chip')].map((c) => c.getBoundingClientRect().top)) - headBox : null;
+  return { above: above.matches('.qualchips') ? 'Quality chips' : 'Filter row', gap: top - aboveBox, chips, fits: document.documentElement.scrollWidth <= innerWidth };
 });
 
 // Each tile's second line: its box, its text's box and whether the text is shortened, the badge's box.
@@ -57,8 +62,8 @@ async function heads(browser, width, android, mixed) {
       const g = await gaps(page);
       // (under the Quality chips it was 16 px already, and stays)
       const want = g.above === 'Quality chips' ? 16 : 12;
-      if (width < 600) check(Math.abs(g.gap - want) <= 0.5, `${at} ${route}: ${g.above} to the Sort row ${g.gap.toFixed(1)} px (${want})`);
-      else check(g.gap >= 0, `${at} ${route}: ${g.above} to the Sort row ${g.gap.toFixed(1)} px (not overlapping)`);
+      check(Math.abs(g.gap - want) <= 0.5, `${at} ${route}: ${g.above} to the Sort row ${g.gap.toFixed(1)} px (${want})`);
+      if (g.chips != null) check(Math.abs(g.chips - 12) <= 0.5, `${at} ${route}: the Filter row to the Quality chips ${g.chips.toFixed(1)} px (12)`);
       check(g.fits, `${at} ${route}: nothing past the screen`);
       await page.screenshot({ path: path.join(SHOTS, `head-${route.slice(1)}-${width}${android ? '-android' : ''}${mixed ? '-quality' : ''}.png`) });
     }
@@ -94,7 +99,7 @@ async function heads(browser, width, android, mixed) {
 (async () => {
   const browser = await chromium.launch();
   try {
-    for (const [w, android] of [[360, false], [360, true], [412, false], [1280, false]]) {
+    for (const [w, android] of [[360, false], [360, true], [412, false], [1280, false], [1024, false], [768, false]]) {
       await heads(browser, w, android, false);
       await heads(browser, w, android, true);
     }
