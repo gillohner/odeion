@@ -2,7 +2,7 @@
 // and ends in "…" when it is long (it wrapped to 3-4 lines, so a 360 × 900 screen showed 7 whole rows
 // instead of 11), and the row's gaps are 8 px, not 14, so the title has about 20 px more room.
 // The drag grip, Play from here and ⋯ stay 44 px taps along the row's middle and don't take each
-// other's taps. Desktop keeps its rows (14 px gaps, the line may wrap).
+// other's taps. Desktop keeps its 14 px gaps; its line ends in "…" too (one height for every row).
 // Real candidate assets, isolated responses: node tools/ui-phone-queue-rows.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs');
@@ -74,7 +74,7 @@ async function desktop(browser, width) {
   await context.addInitScript((q) => { localStorage.setItem('pm.browserQueue', JSON.stringify(q)); }, QUEUE);
   await fx.go(page, '/queue'); await page.waitForSelector('.list.queue .list-row'); await page.waitForTimeout(300);
   const r = await rows(page);
-  check(r.every((x) => x.gap === 14) && r.every((x) => x.ellipsis !== 'ellipsis' && x.wrap === 'normal'), `desktop ${width}: rows keep their 14 px gaps and the line may wrap (${r[0].gap} px, ${r[0].wrap}, ${r[0].ellipsis})`);
+  check(r.every((x) => x.gap === 14) && r.every((x) => x.ellipsis === 'ellipsis' && x.wrap === 'nowrap'), `desktop ${width}: rows keep their 14 px gaps and the line ends in "…" (${r[0].gap} px, ${r[0].wrap}, ${r[0].ellipsis})`);
   await page.screenshot({ path: path.join(SHOTS, `queue-desktop-${width}.png`) });
   await context.close();
 }
