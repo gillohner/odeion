@@ -407,6 +407,8 @@ html:not([data-shell="phone"]) .lyric-lines { overscroll-behavior: contain; }
 .dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 .dialog h2 { margin-bottom: var(--sp-1h); }
 .dialog p { margin-bottom: var(--sp-4); }
+/* (a name it quotes, a folder's path or a share's name, can be one long word: it wraps inside) */
+.dialog h2, .dialog p { overflow-wrap: anywhere; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-4); }
 /* Phone dialog actions stay easy to tap, including when larger text needs another row. Tab onto
    one scrolls it a pixel clear of the dialog's edge (whole-pixel scroll on fractional rows). */
@@ -456,6 +458,8 @@ html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44p
 .section-head > h3 + .muted { margin: 0 auto 0 var(--sp-3); }
 .section-head > .btn { align-items: baseline; }
 .section-head > .btn > .ic { align-self: center; }
+/* Busy, its spinner takes the icon's place: in the middle too (on the words' baseline it sat 3-4 px high) */
+.section-head > .btn.is-spinning::after { align-self: center; }
 /* A small one (New smart collection, offline Downloads' Play and Shuffle) is 40 px tall on a phone
    or a touch screen: with its words on the baseline they sat at its top, 5.5 px above its middle and
    its icon. The words' line is the button's height instead (as Select's, below): in its middle. */
@@ -731,15 +735,22 @@ html:not([data-shell="phone"]) .zone-card .zc-mute ~ input[type=range] { min-wid
 /* On a wider card the volume and Play to (or "selected") are one group: beside the transport while
    the slider gets its 80 px there (the group's own width, Play to's included, decides), else under it
    together, where the slider takes the line. Never the volume squeezed beside the transport with
-   Play to alone under it */
+   Play to alone under it. (Only with a much larger font size, where even under the transport the
+   line has no room for both, Play to goes under the volume: below) */
 .zone-card .zc-tail { display: flex; align-items: center; gap: var(--sp-1h); flex: 1 1 auto; min-width: 0; }
 .zone-card .zc-tail > .zc-vol { flex: 1 1 auto; min-width: 0; }
 .zone-card .zc-tail > [data-zsel], .zone-card .zc-tail > .pill { flex: none; }
 .zone-card .zc-tail input[type=range] { flex: 1 1 auto; width: 80px; }
 /* A card's level has one width whatever it reads ("40 %", "Muted", "Level unknown" on two short
    lines, 30 px, under the 40 px Play), so a level going known, unknown or muted never moves the
-   card's slider or its volume between beside and under the transport */
-html:not([data-shell="phone"]) .zone-card .zc-vol > .vol-level { flex: none; width: 56px; line-height: 1.25; }
+   card's slider or its volume between beside and under the transport. (In ch as well: Android's font
+   size reaches the app's page as text zoom, which grows the words but not a px box.) The volume is
+   never squeezed below Mute (36 px, an .icon-btn's width), the slider's 56 px and the level: where the line has no room
+   for that and Play to (or "selected"), they go under it, not over the level. The volume's own text
+   size is the level's, so its ch is the level's ch */
+html:not([data-shell="phone"]) .zone-card .zc-vol > .vol-level { flex: none; width: max(56px, 8ch); line-height: 1.25; }
+html:not([data-shell="phone"]) .zone-card .zc-tail { flex-wrap: wrap; }
+html:not([data-shell="phone"]) .zone-card .zc-tail > .zc-vol { flex: 1 1 0; font-size: var(--fs-xs); min-width: calc(36px + 56px + max(56px, 8ch) + 2 * var(--sp-1h)); }
 html[data-shell="phone"] .zone-card .zc-mute { display: none; }
 /* A Home row that didn't answer: its words and Try again on one line of whole pixels, so the
    height kept for its next placeholder is the height it draws (no jump when Home opens again) */
@@ -833,6 +844,9 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
 .list.queue .list-row { padding: var(--sp-1h) var(--sp-2h) var(--sp-1h) var(--sp-1h); }
 .list.queue .num { font-size: var(--fs-sm); color: var(--muted); font-variant-numeric: tabular-nums; }
 .list.queue .list-row.cur .name { color: var(--accent-strong); }
+/* A song's artist · album line is cut with "…" at every width, as on Songs: a long album name no
+   longer wraps and makes its row taller than the rest */
+.list.queue .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .list.queue .q-actions { opacity: 0; display: inline-flex; gap: var(--sp-0h); transition: opacity var(--dur-fast); }
 .list.queue .list-row:hover .q-actions, .list.queue .list-row:focus-within .q-actions { opacity: 1; }
 .list.queue .q-actions .icon-btn { width: 30px; height: 30px; }
@@ -850,7 +864,6 @@ html[data-shell="phone"] .list.queue .qgrip::before { content: ''; position: abs
    8 px, not 14, so the title gets 20 px more. The grip is 4 px wider and it and Play from here share
    the gap between them, so each is still a 44 px tap (6 + 34 + 4; 4 + 36 + 4); ⋯ keeps its 6 px. */
 html[data-shell="phone"] .list.queue .list-row { gap: var(--sp-2); }
-html[data-shell="phone"] .list.queue .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 html[data-shell="phone"] .list.queue .qgrip { min-width: 34px; }
 html[data-shell="phone"] .list.queue .qgrip::before { inset: 0 -4px 0 -6px; }
 @media (pointer: coarse) { html[data-shell="phone"] .list.queue [data-qi]::before { inset: -6px -4px; } }
@@ -1077,6 +1090,8 @@ html[data-shell="phone"] .list-row > .plays a::after { content: ""; position: ab
 #spkguide { text-decoration: underline; white-space: nowrap; }
 html[data-shell="phone"] #spkguide { position: relative; }
 html[data-shell="phone"] #spkguide::before { content: ''; position: absolute; left: -6px; right: -6px; top: calc(50% - 22px); height: 44px; }
+/* That tap layer reaches 14.5 px below the link: 4 px more room under the help keeps it off the speaker list */
+html[data-shell="phone"] .set-label:has(#spkguide) { margin-bottom: var(--sp-1); }
 html[data-shell="phone"] :is(.idkey .lnk, #libreview, #liberrs) { position: relative; }
 html[data-shell="phone"] :is(.idkey .lnk, #libreview, #liberrs)::before { content: ''; position: absolute; inset: -14px -6px; }
 .idswatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
@@ -2363,6 +2378,10 @@ body.no-collections :is(.nav-item[data-view="playlists"], .selbar [data-sel="pla
 .np-qitem:hover { background: var(--surface-2); }
 .np-qitem .grow { display: flex; flex-direction: column; min-width: 0; }
 .np-qitem .name, .np-qitem .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A pressed row's spinner takes its length's place, so the length doesn't move left while it waits */
+.np-qitem.is-spinning::after { content: none; }
+.np-qitem.is-spinning > :last-child { position: relative; color: transparent; }
+.np-qitem.is-spinning > :last-child::after { content: ''; position: absolute; top: 50%; left: 50%; width: 12px; height: 12px; margin: -8px 0 0 -8px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; pointer-events: none; }
 .np-facts { margin-top: var(--sp-3h); }
 .np-output { overflow-wrap: anywhere; }
 .np-output-why { display: block; margin-top: var(--sp-0h); }

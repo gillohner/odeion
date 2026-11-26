@@ -299,7 +299,7 @@
     // (the page opened replaces the one the focus came from: it goes to the mini player, as in setView)
     bindNpLinks(overlay, it, () => { npReturn = null; toggleNowPlaying(); });
     // (the row is busy until the zone answers, so a second press sends nothing; drawn again after it)
-    $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.npqi) }).then(() => { setTimeout(renderNowPlaying, 500); }));
+    $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.npqi) }).then(() => { setTimeout(() => { if (!overlay.hidden) renderNowPlaying(); }, 500); }));
     const qf = $('#npqfull'); if (qf) qf.onclick = () => setView('queue');
     overlay.dataset.sheet = sheet || ''; overlay.dataset.npuri = it.uri || ''; overlay.dataset.layout = `${shellMode()}-${npCompact()}`;
     state.npWant = { gen, at: Date.now(), scroll: sheet && keep.sheet === sheet ? keep.scroll : null, lyric: sheet === 'lyrics' && keep.sheet === 'lyrics' ? keep.lyric : null, focus: keep.focus };

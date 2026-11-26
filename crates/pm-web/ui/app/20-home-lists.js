@@ -179,6 +179,10 @@
     if (state.placeHold) state.placeHold();
     const at = (s) => { try { return $$(s, main); } catch { return []; } };
     let inside = !!a && a !== main && main.contains(a); let sel = ''; let i = -1; let alt = null;
+    // (a heading that has the focus only because the page was opened (focusPage: data-navfocus, a
+    // tabindex until it is left) is the same place on the new page: found without that mark, and
+    // made focusable the same way there)
+    let nav = inside && a.hasAttribute('data-navfocus');
     if (inside) {
       // Looked for within its part (the nearest box with an id), so a tile in Similar isn't taken
       // for the same tile in a release section
@@ -186,7 +190,7 @@
       const within = box && box !== main && main.contains(box) ? `#${CSS.escape(box.id)} ` : '';
       // (an empty state's button is the same place when the new one names another way in: Add
       // music became Open Songs once the first songs came)
-      sel = a.matches('.empty > .btn') ? '.empty > .btn' : a.id ? `#${CSS.escape(a.id)}` : within + a.tagName.toLowerCase() + [...a.attributes].filter((x) => (x.name.startsWith('data-') && x.name !== 'data-uri') || x.name === 'href').map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
+      sel = a.matches('.empty > .btn') ? '.empty > .btn' : a.id ? `#${CSS.escape(a.id)}` : within + a.tagName.toLowerCase() + [...a.attributes].filter((x) => (x.name.startsWith('data-') && x.name !== 'data-uri' && x.name !== 'data-navfocus') || x.name === 'href').map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('');
       i = at(sel).indexOf(a);
       // A row that names its song (data-uri; Favourites' other services) is found by that song, so
       // a favourite gone or added above it doesn't move the focus onto another one. When that song
@@ -202,7 +206,7 @@
         // one half off the edge stays where it is)
         alt.seen = inSight(a);
       }
-    } else if (was && (!a || a === document.body || a === main)) { ({ sel, i, alt } = was); inside = true; }
+    } else if (was && (!a || a === document.body || a === main)) { ({ sel, i, alt, nav } = was); inside = true; }
     return () => {
       // The parts drawn after the page (Similar, concerts, comments) come back a moment later: until
       // they do (6 s at most, 20 s across redraws; opening a page ends it) the page keeps its
@@ -217,7 +221,11 @@
         const now = document.activeElement; if (now && now !== document.body && now !== main) return true;
         const b = at(sel)[i] || (alt && (at(alt.sel)[alt.i] || at(alt.last).pop())); if (!b || b.disabled) return false;
         if (b.matches(UNTAGGED)) keyable(b);
-        b.focus({ preventScroll: true }); if (document.activeElement !== b) return false;
+        const mark = nav && !b.hasAttribute('tabindex');
+        if (mark) { b.setAttribute('tabindex', '-1'); b.dataset.navfocus = ''; }
+        b.focus({ preventScroll: true });
+        if (document.activeElement !== b) { if (mark) { b.removeAttribute('tabindex'); delete b.dataset.navfocus; } return false; }
+        if (mark) b.addEventListener('blur', () => { if (b.dataset.navfocus != null) { b.removeAttribute('tabindex'); delete b.dataset.navfocus; } }, { once: true });
         if (alt && alt.seen && !inSight(b)) b.scrollIntoView({ block: 'nearest', behavior: 'instant' });
         return true;
       };
@@ -242,7 +250,7 @@
         const since = began || Date.now();
         const t = setTimeout(() => state.placeHold(), Math.max(0, Math.min(Date.now() + 6000, since + 20000) - Date.now()));
         state.placeHold = () => { mo.disconnect(); clearTimeout(t); acts.forEach((e) => document.removeEventListener(e, mine, true)); main.style.removeProperty('--hold'); delete main.dataset.hold; state.placeHold = null; };
-        state.placeHold.wants = () => (want ? { sel, i, alt } : null); state.placeHold.began = since;
+        state.placeHold.wants = () => (want ? { sel, i, alt, nav } : null); state.placeHold.began = since;
       }
     };
   };

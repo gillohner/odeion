@@ -123,12 +123,27 @@
       $$('[data-dr-add]').forEach((b) => b.onclick = async () => { const r = await driveFolderDialog(b.dataset.drAdd, b.dataset.drName); if (r) { toast(`${r.name} added; scanning`); render(); } });
       $$('[data-dr-out]').forEach((b) => b.onclick = async () => { try { await api('DELETE', `/library/drives/${b.dataset.drOut}/account`); render(); } catch (e) { toast(e.message, 'error'); } });
       $$('[data-dr-scan]').forEach((b) => b.onclick = async () => { try { await api('POST', `/library/drives/roots/${b.dataset.drScan}/scan`); toast('Reading the folder again'); } catch (e) { toast(e.message, 'error'); } });
-      $$('[data-dr-del]').forEach((b) => b.onclick = async () => { if (!confirm('Remove this folder and its songs from the library? The files on the drive stay.')) return; try { const r = await api('DELETE', `/library/drives/roots/${b.dataset.drDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
+      // A folder's, share's or drive folder's Remove asks as every removal does: the page's dialog,
+      // naming it by its row, with Remove drawn as deleting (no browser confirm, no armed button).
+      // Cancelled after the page drew again (every 3 s while scanning), the keyboard goes back to
+      // the same Remove in the new rows.
+      const askRemove = async (b, kind, stays) => {
+        const n = (b.closest('.set-row') || b).querySelector('.set-name');
+        const name = n ? n.textContent.trim() : '';
+        const v = await choiceDialog({ title: `Remove this ${kind}?`, text: `${name ? `“${name}” and its` : 'Its'} songs leave the library. ${stays}`, choices: [{ label: 'Remove', value: true, primary: true, danger: true }] });
+        if (v !== true && !b.isConnected && (!document.activeElement || document.activeElement === document.body)) {
+          const a = [...b.attributes].find((x) => /^data-[a-z]+-del$/.test(x.name));
+          const again = a && $(`[${a.name}="${CSS.escape(a.value)}"]`, main);
+          if (again) again.focus();
+        }
+        return v === true;
+      };
+      $$('[data-dr-del]').forEach((b) => b.onclick = async () => { if (!(await askRemove(b, 'drive folder', 'The files on the drive stay.'))) return; try { const r = await api('DELETE', `/library/drives/roots/${b.dataset.drDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
       $('#wdopen').onclick = async () => { const sh = await webdavDialog(); if (sh) { toast(`${sh.name} added; scanning`); render(); } };
       $$('[data-wd-scan]').forEach((b) => b.onclick = async () => { try { await api('POST', `/library/webdav/${b.dataset.wdScan}/scan`); toast('Reading the share again'); } catch (e) { toast(e.message, 'error'); } });
-      $$('[data-wd-del]').forEach((b) => b.onclick = async () => { if (!confirm('Remove this share and its songs from the library? The files on the share stay.')) return; try { const r = await api('DELETE', `/library/webdav/${b.dataset.wdDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
+      $$('[data-wd-del]').forEach((b) => b.onclick = async () => { if (!(await askRemove(b, 'share', 'The files on the share stay.'))) return; try { const r = await api('DELETE', `/library/webdav/${b.dataset.wdDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
       $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') $('#folderbtn').click(); };
-      $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${countOf(r.removed_tracks, 'songs')} gone`); render(); } catch (e) { toast(e.message, 'error'); } });
+      $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!(await askRemove(b, 'folder', 'The files in it stay where they are.'))) return; try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${countOf(r.removed_tracks, 'songs')} gone`); render(); } catch (e) { toast(e.message, 'error'); } });
     renderIdentify(idSt);
   };
   // Choose a playlist file (Your library › Import) and Playlists' Import: one file at a time. While it
