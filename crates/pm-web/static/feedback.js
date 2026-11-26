@@ -77,7 +77,7 @@
     return close;
   };
 
-  // "?": a small menu of the two things Help does
+  // Help: a small menu of the two things it does
   const menu = () => {
     const items = [
       h('button', { class: 'btn fb-item', type: 'button', role: 'menuitem', text: 'Report a problem…', onclick: () => { if (closeMenu) closeMenu(); report(); } }),
@@ -85,7 +85,8 @@
     ];
     const m = h('div', { class: 'fb-menu', role: 'menu', 'aria-label': 'Help' }, items);
     closeMenu = () => { m.remove(); helpBtn.setAttribute('aria-expanded', 'false'); document.removeEventListener('pointerdown', outside, true); closeMenu = null; };
-    const outside = (e) => { if (!m.contains(e.target) && e.target !== helpBtn) closeMenu(); };
+    // A press on Help itself (its icon included) is left to Help's own click, which closes the menu
+    const outside = (e) => { if (!m.contains(e.target) && !helpBtn.contains(e.target)) closeMenu(); };
     m.addEventListener('keydown', (e) => {
       const i = items.indexOf(document.activeElement);
       if (e.key === 'Escape') { e.preventDefault(); if (closeMenu) closeMenu(); helpBtn.focus(); }
@@ -218,8 +219,10 @@
     mount(host, o) {
       opts = o || {};
       if (!document.querySelector('link[rel="stylesheet"][href="/feedback.css"]')) document.head.append(h('link', { rel: 'stylesheet', href: '/feedback.css' }));
-      helpBtn = h('button', { class: 'btn fb-help', type: 'button', 'aria-label': 'Help and problem reports', 'aria-haspopup': 'menu', 'aria-expanded': 'false', text: '?',
+      // A bare icon button, as Install beside it (pwa.js); only the account button is a filled disc
+      helpBtn = h('button', { class: 'icon-btn fb-help', type: 'button', 'aria-label': 'Help and problem reports', title: 'Help and problem reports', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
         onclick: () => (closeMenu ? closeMenu() : menu()) });
+      helpBtn.innerHTML = '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 16.8v.2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
       host.append(h('span', { class: 'fb-anchor' }, helpBtn));
       return helpBtn;
     },
