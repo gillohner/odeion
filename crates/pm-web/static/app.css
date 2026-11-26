@@ -1946,10 +1946,10 @@ html[data-shell="phone"] .bottomnav { border-top: 0; }
    40-44 px buttons. Only the row's items line up (a head that wraps keeps its rows), and the head
    keeps its height, so nothing under it moves. */
 html[data-shell="phone"] .page-head { align-items: center; }
-/* Library: the filter row and the quality chips under it had no space between them */
-html[data-shell="phone"] .main > .page-head + .chips { margin-top: var(--sp-3); }
-/* Albums and Artists: the Sort row under the filter row had no space between them either */
-html[data-shell="phone"] .main > .page-head + .listbar { margin-top: var(--sp-3); }
+/* A row of chips or the Sort row right under a page's heading row (Albums' Quality chips and Sort
+   row, Artists' Sort row, Your library's tabs, Trending's week/month chips, a tag page's chosen
+   tags) had no space above it: 12 px on every layout (a desktop's sat right on the heading's row) */
+.main > .page-head + .chips, .main > .page-head + .listbar { margin-top: var(--sp-3); }
 /* Songs and Albums: the filter takes the row's free width, so Play all and Add music (its icon on a
    phone) sit beside it instead of Add music wrapping onto a row of its own. A filter on its own
    (Artists) keeps its place beside the heading. */
