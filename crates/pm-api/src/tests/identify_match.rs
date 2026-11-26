@@ -190,15 +190,15 @@ async fn identified_files_get_versions_from_their_musicbrainz_hub() {
     )
     .unwrap();
     // The hub card: the MusicBrainz URL with the group's service links.
-    let all = card["details"]["also_on"].as_array().unwrap().clone();
+    // A flat read (api_shape 2): its one `also_on` list is the card's.
+    let all = card["also_on"].as_array().unwrap().clone();
     let mut links = vec![
         serde_json::json!({"uri": "https://tidal.com/track/534050211", "site": "TIDAL", "id": "a14a55b508a614dd965baefb8c4587cc"}),
     ];
     links.extend(all);
     card["uri"] = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69".into();
     card["site"] = "MusicBrainz".into();
-    card["also_on"] = serde_json::json!(links.clone());
-    card["details"]["also_on"] = serde_json::json!(links);
+    card["also_on"] = serde_json::json!(links);
     let card = card.to_string();
     let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let s2 = seen.clone();

@@ -23,7 +23,7 @@ async fn pinakes_and_nexus_live() {
     let nexus = NexusClient::new(&cfg).unwrap();
 
     let info = pinakes.info().await.unwrap();
-    assert!(info.counts.resources > 0);
+    assert_eq!(info.api_shape, Some(2), "a flat card per read");
 
     let search = pinakes
         .search(&SearchQuery {
@@ -44,6 +44,13 @@ async fn pinakes_and_nexus_live() {
     assert_eq!(cards[0].type_.as_deref(), Some("MusicRecording"));
     let detail = pinakes.resource(&cards[0].id).await.unwrap();
     assert_eq!(detail.card.id, cards[0].id);
+    // A music read carries its identities at the top level (api_shape 2)
+    let bo = pinakes
+        .resource_by_uri("https://tidal.com/track/534050211")
+        .await
+        .unwrap()
+        .expect("Pinakes knows the link");
+    assert!(bo.mbid().is_some() && !bo.isrcs().is_empty(), "{bo:?}");
     let changes = pinakes
         .changes_lookup(&[cards[0].id.clone()], "now-30d", None, None)
         .await

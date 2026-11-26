@@ -699,26 +699,27 @@ async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) -> Option<InCollections> 
             .map(|c| crate::discover::card_item(&acc, &lib, c))
             .collect()
     };
-    // What this Pinakes ships (one probe, cached), then the page's card once for both uses
-    let (wants_related, wants_collections) = match &pg.uri {
-        Some(_) => tokio::time::timeout(budget, async {
-            (
-                crate::home::pinakes_has_related(s).await,
-                crate::home::pinakes_has_collections(s).await,
-            )
-        })
-        .await
-        .unwrap_or((false, false)),
-        None => (false, false),
+    // Related items when this Pinakes ships them (one probe, cached), then the page's card
+    // once for both uses: the card counts the public collections that hold its link
+    let wants_related = match &pg.uri {
+        Some(_) => tokio::time::timeout(budget, crate::home::pinakes_has_related(s))
+            .await
+            .unwrap_or(false),
+        None => false,
     };
-    let card_id = match &pg.uri {
-        Some(u) if wants_related || wants_collections => tokio::time::timeout(budget, d.resource_for(u))
+    let card = match &pg.uri {
+        Some(u) => tokio::time::timeout(budget, d.resource_for(u))
             .await
             .ok()
             .and_then(|r| r.ok().flatten())
-            .map(|r| r.card.id),
-        _ => None,
+            .map(|r| r.card),
+        None => None,
     };
+    let card_id = card.as_ref().map(|c| c.id.clone());
+    // `Some(0)`: in no collection, no need to ask. `None` (a daemon that does not count
+    // them): ask, and show nothing if the list is missing or empty
+    let held_by = card.as_ref().and_then(|c| c.collections);
+    let wants_collections = card.is_some() && held_by != Some(0);
     let related = async {
         if !wants_related {
             return None;
@@ -774,7 +775,7 @@ async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) -> Option<InCollections> 
             .resource_collections(card_id.as_deref()?, viewer.as_deref(), IN_COLLECTIONS_SHOWN)
             .await
             .ok()?;
-        Some(in_collections(&page, viewer.as_deref()))
+        Some(in_collections(&page, held_by, viewer.as_deref())).filter(|c| !c.items.is_empty())
     };
     // All at once, each within the budget: what is not ready is left out
     let (related, concerts, collections) = tokio::join!(
@@ -806,9 +807,15 @@ async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) -> Option<InCollections> 
 }
 
 /// The "In collections" row from a Pinakes page: the lines that are public post links, the
-/// viewer's own marked, and a count of the collections the node can open (Pinakes's total less
-/// the lines that aren't posts). Names come later.
-fn in_collections(page: &pm_pubky::pinakes::CollectionsPage, viewer: Option<&str>) -> InCollections {
+/// viewer's own marked, and a count of the collections the node can open: the page's length
+/// when it is the whole list (no next cursor), else the card's `collections` count (else a
+/// page total an older daemon sent, else the page's length), less the lines that aren't
+/// posts. Names come later.
+fn in_collections(
+    page: &pm_pubky::pinakes::CollectionsPage,
+    held_by: Option<u64>,
+    viewer: Option<&str>,
+) -> InCollections {
     let posts: Vec<CollectionItem> = page
         .items
         .iter()
@@ -824,10 +831,14 @@ fn in_collections(page: &pm_pubky::pinakes::CollectionsPage, viewer: Option<&str
         })
         .collect();
     let dropped = (page.items.len() - posts.len()) as u64;
-    let count = page
-        .total
-        .unwrap_or(page.items.len() as u64)
-        .saturating_sub(dropped);
+    let listed = page.items.len() as u64;
+    // A page without a next cursor is the whole list: count it, whatever a cached card said
+    let count = if page.cursor.is_none() {
+        listed
+    } else {
+        held_by.or(page.total).unwrap_or(listed).max(listed)
+    }
+    .saturating_sub(dropped);
     InCollections {
         count,
         items: posts.into_iter().take(IN_COLLECTIONS_SHOWN).collect(),
@@ -1632,7 +1643,7 @@ mod in_collections_tests {
     use pm_pubky::pinakes::{CollectionRef, CollectionsPage};
 
     /// The owner's own is marked, a line that isn't a post is left out of the rows and the count,
-    /// and the count is Pinakes's total less what was left out.
+    /// and the count is the card's count less what was left out.
     #[test]
     fn the_rows_mark_the_owners_and_count_what_the_node_can_open() {
         const A: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
@@ -1652,20 +1663,39 @@ mod in_collections_tests {
                     author: B.into(),
                 },
             ],
-            total: Some(5),
-            next_cursor: None,
+            total: None,
+            cursor: Some("next".into()),
         };
         // The node's own key comes as `pubky<z32>` from the session: the bare key is compared
         let session_key = format!("pubky{A}");
         assert_eq!(crate::sync::raw_key(&session_key), A);
-        let ic = in_collections(&page, Some(crate::sync::raw_key(&session_key)));
+        let ic = in_collections(&page, Some(5), Some(crate::sync::raw_key(&session_key)));
         assert_eq!(ic.count, 4, "five in all, one line the node can't open");
         assert_eq!(ic.items.len(), 2);
         assert!(ic.items[0].mine && ic.items[0].author == A && ic.items[0].id == "0035WKVKQDHSM");
         assert!(!ic.items[1].mine && ic.items[1].name.is_none());
-        let none = in_collections(&page, None);
+        let none = in_collections(&page, Some(5), None);
         assert!(none.items.iter().all(|c| !c.mine));
-        let empty = in_collections(&CollectionsPage::default(), Some(A));
+        // No count on the card (an older daemon): a page total if one came, else what is listed
+        assert_eq!(
+            in_collections(&page, None, None).count,
+            2,
+            "never an invented total"
+        );
+        let old = CollectionsPage {
+            total: Some(5),
+            ..page.clone()
+        };
+        assert_eq!(in_collections(&old, None, None).count, 4);
+        // A card count behind the page never shows fewer than are listed
+        assert_eq!(in_collections(&page, Some(1), None).count, 2);
+        // The whole list (no next cursor) is counted as listed, whatever the card said
+        let whole = CollectionsPage {
+            cursor: None,
+            ..page.clone()
+        };
+        assert_eq!(in_collections(&whole, Some(5), None).count, 2);
+        let empty = in_collections(&CollectionsPage::default(), Some(0), Some(A));
         assert_eq!((empty.count, empty.items.len()), (0, 0));
     }
 }

@@ -462,8 +462,9 @@ async fn geocode(s: &NodeState, city: &str) -> Result<HomeLocation, ApiError> {
     })
 }
 
-/// What Pinakes ships beyond search (related items, collections holding a link): the names of
-/// its `/v1/info` limits, kept on the node ten minutes.
+/// What Pinakes ships beyond search (related items): the names of its `/v1/info` limits,
+/// kept on the node ten minutes. The "In collections" row needs no flag: every card counts
+/// its collections.
 async fn pinakes_limits(s: &NodeState) -> Vec<String> {
     if let Some((at, v)) = s.pinakes_caps.lock().expect("caps lock").as_ref() {
         if at.elapsed() < Duration::from_secs(600) {
@@ -485,15 +486,6 @@ async fn pinakes_limits(s: &NodeState) -> Vec<String> {
 /// Pinakes ships related items (`related*` among its limits).
 pub(crate) async fn pinakes_has_related(s: &NodeState) -> bool {
     pinakes_limits(s).await.iter().any(|k| k.starts_with("related"))
-}
-
-/// Pinakes lists the public collections that hold a link (`collection*` among its limits;
-/// TASK-in-collections-client). Without it the item pages show no "In collections" row.
-pub(crate) async fn pinakes_has_collections(s: &NodeState) -> bool {
-    pinakes_limits(s)
-        .await
-        .iter()
-        .any(|k| k.starts_with("collection"))
 }
 
 /// A title as people compare songs: no "(Remastered 2011)", "- Live", "| Music Video".

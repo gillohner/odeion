@@ -18,6 +18,11 @@
 //! * `boost=wot_2` (with `viewer`) ranks what the viewer's network referenced higher
 //!   and leaves nothing out; it needs a Nexus that serves the reach set, and an
 //!   instance without one refuses the query (the caller repeats it without);
+//! * a full read (`GET /v1/resources/{id}`, `by-uri`, `POST /v1/resolve`) is one flat
+//!   object (`api_shape: 2`): `facts`, `aliases`, `updated_at`, … sit beside the card's own
+//!   fields; an older daemon nested them under `details`, which [`ResourceDetail`] still reads;
+//! * every card counts the public collections that hold its link (`collections`);
+//!   `GET /v1/resources/{id}/collections` pages them as `{items, cursor}`;
 //! * join with Nexus by **URL**, never by id;
 //! * text is plain text: escape before rendering as HTML.
 //!
@@ -28,7 +33,7 @@
 
 use crate::config::PmPubkyConfig;
 use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -185,6 +190,10 @@ pub struct Card {
     pub duration: Option<Value>,
     #[serde(default)]
     pub also_on: Vec<AlsoOn>,
+    /// How many public collection posts hold the card's link (`1000` means 1,000 or more);
+    /// `None` from a daemon that does not count them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collections: Option<u64>,
     /// Events: up to 3 listings that are possibly the same event (a hint,
     /// never a merge).
     #[serde(default)]
@@ -208,7 +217,7 @@ pub struct MaybeSame {
     pub score: Option<f64>,
 }
 
-/// `details.facts` of a music card (music step): exact identities and the
+/// `facts` of a music card's full read (music step): exact identities and the
 /// few catalogue facts Pinakes carries. Everything else comes from
 /// MusicBrainz by `mbid` / `isrc`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -292,7 +301,8 @@ impl Card {
     }
 }
 
-/// `details` on the full read.
+/// What a full read adds to the card. Pinakes sends these fields beside the card's own
+/// (`api_shape: 2`); an older daemon nested them under `details`. Both land here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Details {
     #[serde(default)]
@@ -318,26 +328,77 @@ pub struct Details {
     #[serde(default)]
     pub updated_at: Option<String>,
     /// Music step: exact identities and catalogue facts.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_facts")]
     pub facts: Option<Facts>,
-    /// Every other link of the group, not only the one-per-service list on
-    /// the card.
+    /// Old nested shape only: every other link of the group, not only the
+    /// one-per-service list on the card. A flat read's single list stays on the card.
     #[serde(default)]
     pub also_on: Vec<AlsoOn>,
-    /// Events: up to 10 possibly-same listings.
+    /// Old nested shape only: events' up to 10 possibly-same listings.
     #[serde(default)]
     pub maybe_same: Vec<MaybeSame>,
     #[serde(flatten, default)]
     pub extra: Map<String, Value>,
 }
 
-/// `GET /v1/resources/{id}` and `POST /v1/resolve`: the card plus details.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The fields a flat read (`api_shape: 2`) carries at the top level that the older shape
+/// nested under `details` (the last four land in [`Details::extra`], as they did there).
+/// `also_on` and `maybe_same` are not among them: the card owns those.
+const FLAT_DETAIL_FIELDS: [&str; 16] = [
+    "aliases",
+    "category",
+    "address",
+    "bbox",
+    "tz",
+    "all_day",
+    "event_status",
+    "attendance",
+    "venue",
+    "organizer",
+    "updated_at",
+    "facts",
+    "from",
+    "keys",
+    "related",
+    "related_total",
+];
+
+/// `facts` that don't read as [`Facts`] (a name that is not text) are dropped, not the read.
+fn lenient_facts<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Facts>, D::Error> {
+    Ok(Option::<Value>::deserialize(d)?.and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// `GET /v1/resources/{id}`, `GET /v1/resources/by-uri` and `POST /v1/resolve`: the card
+/// plus what a full read adds. Reads the flat shape (`api_shape: 2`) and the older one with
+/// a nested `details` object; serializes nested.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResourceDetail {
     #[serde(flatten)]
     pub card: Card,
     #[serde(default)]
     pub details: Details,
+}
+
+impl<'de> Deserialize<'de> for ResourceDetail {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let mut top = Map::<String, Value>::deserialize(deserializer)?;
+        let details = match top.remove("details") {
+            Some(Value::Object(nested)) => nested,
+            Some(Value::Null) | None => FLAT_DETAIL_FIELDS
+                .iter()
+                .filter_map(|k| top.remove(*k).map(|v| (k.to_string(), v)))
+                .collect(),
+            Some(other) => {
+                return Err(D::Error::custom(format!(
+                    "details: expected an object, got {other}"
+                )))
+            }
+        };
+        let details = serde_json::from_value(Value::Object(details)).map_err(D::Error::custom)?;
+        let card = serde_json::from_value(Value::Object(top)).map_err(D::Error::custom)?;
+        Ok(Self { card, details })
+    }
 }
 
 impl ResourceDetail {
@@ -369,7 +430,8 @@ impl ResourceDetail {
             .or_else(|| self.card.upc.clone())
     }
 
-    /// The full `also_on` list: details first, else the card's.
+    /// The full `also_on` list: the old nested `details` list when there is one, else the
+    /// card's (a flat read's only list, up to 256 links).
     pub fn also_on(&self) -> &[AlsoOn] {
         if self.details.also_on.is_empty() {
             &self.card.also_on
@@ -472,16 +534,18 @@ pub struct CollectionRef {
     pub author: String,
 }
 
-/// One page of [`CollectionRef`]s.
+/// One page of [`CollectionRef`]s: Pinakes sends `{items, cursor}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CollectionsPage {
     #[serde(default, alias = "collections")]
     pub items: Vec<CollectionRef>,
-    /// How many hold it in all, when Pinakes says (else the page's length).
+    /// How many hold it in all, only if a daemon sends it (Pinakes does not: its cards
+    /// carry the count, [`Card::collections`]).
     #[serde(default, alias = "count")]
     pub total: Option<u64>,
-    #[serde(default)]
-    pub next_cursor: Option<String>,
+    /// The next page's cursor; `None` on the last page.
+    #[serde(default, alias = "next_cursor")]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -491,11 +555,19 @@ pub struct InfoCounts {
     pub occurrences: i64,
 }
 
+/// `GET /v1/info`. The public listener sends `api_shape` and `limits`; `counts` and
+/// `ingestion` only come from the admin listener's info.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Info {
     #[serde(default)]
     pub version: Option<String>,
-    pub counts: InfoCounts,
+    /// `2`: one flat object per card.
+    #[serde(default)]
+    pub api_shape: Option<u32>,
+    #[serde(default)]
+    pub limits: Map<String, Value>,
+    #[serde(default)]
+    pub counts: Option<InfoCounts>,
     #[serde(default)]
     pub ingestion: Vec<Value>,
     #[serde(flatten, default)]

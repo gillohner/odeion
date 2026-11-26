@@ -175,10 +175,11 @@ async fn play_plan_resolves_through_connected_services() {
     assert!(d["item"]["plays_from"].is_null());
     assert_eq!(d["item"]["connect"][0], "tidal");
     assert_eq!(d["item"]["page"], "https://tidal.com/track/534050211");
-    // Own the recording: the library wins.
+    // Own the recording: the library wins. The MBID is the one in the flat read's top-level
+    // `facts` (api_shape 2), so this fails if the node can't read them.
     let tid = {
         let lib = s.library.lock().unwrap();
-        let mbid = pm_model::Mbid::parse("b1a9c0e9-d987-4042-ae91-78d6a3267d69").unwrap();
+        let mbid = pm_model::Mbid::parse("759d23d2-f48b-4197-a364-d9e00aa27bed").unwrap();
         let t = pm_model::Track {
             id: None,
             title: "Bohemian Rhapsody".into(),
@@ -2412,86 +2413,111 @@ async fn library_pages_say_what_open_sources_know_in_the_readers_language() {
 
 /// "In collections" (TASK-in-collections-client): the public collections Pinakes says hold
 /// the page's link, as a count and the first few, each pointing at its shared-collection
-/// page; absent while Pinakes doesn't list them. Nothing about bookmarks.
+/// page. The card's `collections` count turns the row on (no `/v1/info` flag): a card in no
+/// collection never asks for the list, and a card without the count (an older Pinakes) asks
+/// and shows nothing when the list is missing. Nothing about bookmarks.
 #[tokio::test]
 async fn item_pages_name_the_public_collections_holding_them() {
-    let fixture = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../pm-pubky/tests/fixtures/pinakes/music/detail-tidal-track-bohemian.json"
-    ))
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-pubky/tests/fixtures/pinakes/music/detail-tidal-track-bohemian.json"
+        ))
+        .unwrap(),
+    )
     .unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let ships = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    assert_eq!(fixture["collections"], 0, "the live read: in no collection yet");
+    // What the mocked Pinakes's card says: `null` drops the field (an older daemon)
+    let held_by = Arc::new(std::sync::Mutex::new(serde_json::json!(0)));
+    let lists = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let has_route = Arc::new(std::sync::atomic::AtomicBool::new(true));
     const A: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
     const B: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
     let mock = Router::new()
         .route(
             "/v1/info",
+            // The live limits: no `collection*` key, which must not matter
+            get(|| async { Json(serde_json::json!({"version": "test", "api_shape": 2, "limits": {"lookup": 500}})) }),
+        )
+        .route(
+            "/v1/resources/by-uri",
             get({
-                let ships = ships.clone();
+                let held_by = held_by.clone();
                 move || {
-                    let ships = ships.clone();
-                    async move {
-                        let limits = if ships.load(std::sync::atomic::Ordering::SeqCst) {
-                            serde_json::json!({"search": 50, "collections": 20})
-                        } else {
-                            serde_json::json!({"search": 50})
-                        };
-                        Json(serde_json::json!({"version": "test", "limits": limits}))
+                    let mut card = fixture.clone();
+                    match held_by.lock().unwrap().clone() {
+                        serde_json::Value::Null => {
+                            card.as_object_mut().unwrap().remove("collections");
+                        }
+                        n => card["collections"] = n,
                     }
+                    async move { Json(card) }
                 }
             }),
         )
         .route(
-            "/v1/resources/by-uri",
-            get(move || {
-                let fixture = fixture.clone();
-                async move { ([(header::CONTENT_TYPE, "application/json")], fixture) }
-            }),
-        )
-        .route(
             "/v1/resources/{id}/collections",
-            get(|Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
-                assert!(!id.is_empty());
-                assert_eq!(q.get("limit").map(String::as_str), Some("3"), "{q:?}");
-                Json(serde_json::json!({"items": [
-                    {"uri": format!("pubky://{A}/pub/social/v1/posts/0035WKVKQDHSM"), "author": A, "indexed_at": 1700000000000i64},
-                    {"uri": format!("pubky://{B}/pub/social/v1/posts/00351MT54YS9G"), "author": B, "indexed_at": 1690000000000i64},
-                    {"uri": "not a post", "author": ""},
-                ], "total": 5}))
+            get({
+                let lists = lists.clone();
+                let has_route = has_route.clone();
+                move |Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let lists = lists.clone();
+                    let has_route = has_route.clone();
+                    async move {
+                        lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        assert!(!id.is_empty());
+                        assert_eq!(q.get("limit").map(String::as_str), Some("3"), "{q:?}");
+                        if !has_route.load(std::sync::atomic::Ordering::SeqCst) {
+                            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"})));
+                        }
+                        // Pinakes's page: `{items, cursor}`, no total
+                        (StatusCode::OK, Json(serde_json::json!({"items": [
+                            {"uri": format!("pubky://{A}/pub/social/v1/posts/0035WKVKQDHSM"), "author": A, "indexed_at": 1700000000000i64},
+                            {"uri": format!("pubky://{B}/pub/social/v1/posts/00351MT54YS9G"), "author": B, "indexed_at": 1690000000000i64},
+                            {"uri": "not a post", "author": "", "indexed_at": 1680000000000i64},
+                        ], "cursor": "next-page"})))
+                    }
+                }
             }),
         );
     tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
-    let dir = tempfile::tempdir().unwrap();
-    let pubky = pm_pubky::config::PmPubkyConfig {
-        pinakes_base: format!("http://127.0.0.1:{port}"),
-        nexus_base: format!("http://127.0.0.1:{port}/nexus"),
-        user_agent_contact: "test@example.org".into(),
-        ..Default::default()
-    };
-    let s = state_with(dir.path(), None, pubky).await;
-    s.set_contact("test@example.org").unwrap();
-    let app = router(s.clone());
     let id = discover::page_id("https://tidal.com/track/534050211");
-    // Pinakes without the route: no row at all (the page never says "0 collections")
-    let (st, v) = call(&app, "GET", &format!("/v1/item/song/{id}/extras"), None).await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    assert!(v.get("collections").is_none(), "{v}");
-    // The feature probe is cached: a fresh node sees the route
-    ships.store(true, std::sync::atomic::Ordering::SeqCst);
-    let dir2 = tempfile::tempdir().unwrap();
-    let pubky2 = pm_pubky::config::PmPubkyConfig {
-        pinakes_base: format!("http://127.0.0.1:{port}/"),
-        nexus_base: format!("http://127.0.0.1:{port}/nexus"),
-        user_agent_contact: "test@example.org".into(),
-        ..Default::default()
+    let mut dirs = Vec::new();
+    // A fresh node per case, so nothing is cached between them
+    let mut extras = || {
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let path = dir.path().to_path_buf();
+        dirs.push(dir);
+        let id = id.clone();
+        async move {
+            let s = state_with(&path, None, pubky).await;
+            s.set_contact("test@example.org").unwrap();
+            let app = router(s.clone());
+            let (st, v) = call(&app, "GET", &format!("/v1/item/song/{id}/extras"), None).await;
+            assert_eq!(st, StatusCode::OK, "{v}");
+            (app, v)
+        }
     };
-    let s2 = state_with(dir2.path(), None, pubky2).await;
-    s2.set_contact("test@example.org").unwrap();
-    let app2 = router(s2.clone());
-    let (st, v) = call(&app2, "GET", &format!("/v1/item/song/{id}/extras"), None).await;
-    assert_eq!(st, StatusCode::OK, "{v}");
+    // In no collection: no row (the page never says "0 collections") and no list asked for
+    let (_, v) = extras().await;
+    assert!(v.get("collections").is_none(), "{v}");
+    assert_eq!(
+        lists.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a 0 count asks nothing"
+    );
+    // In five: the row, counted from the card, less the line that isn't a post
+    *held_by.lock().unwrap() = serde_json::json!(5);
+    let (app, v) = extras().await;
+    assert_eq!(lists.load(std::sync::atomic::Ordering::SeqCst), 1);
     let c = &v["collections"];
     assert_eq!(c["count"], 4, "five in all, one line that isn't a post: {v}");
     let items = c["items"].as_array().unwrap();
@@ -2507,12 +2533,20 @@ async fn item_pages_name_the_public_collections_holding_them() {
         !v.to_string().contains("bookmark"),
         "nothing about bookmarks: {v}"
     );
-    let (st, pg) = call(&app2, "GET", &format!("/v1/item/song/{id}"), None).await;
+    let (st, pg) = call(&app, "GET", &format!("/v1/item/song/{id}"), None).await;
     assert_eq!(st, StatusCode::OK, "{pg}");
     assert!(
         !pg.to_string().contains("bookmark"),
         "the page itself carries no bookmark count either: {pg}"
     );
+    // A card without the count (an older Pinakes): the list is asked for, and counted as listed
+    *held_by.lock().unwrap() = serde_json::Value::Null;
+    let (_, v) = extras().await;
+    assert_eq!(v["collections"]["count"], 2, "never an invented total: {v}");
+    // ...and on a Pinakes without the route, no row
+    has_route.store(false, std::sync::atomic::Ordering::SeqCst);
+    let (_, v) = extras().await;
+    assert!(v.get("collections").is_none(), "{v}");
 }
 
 #[tokio::test]
