@@ -1,10 +1,10 @@
-// The phone top bar keeps every control on screen (#248 review of 5545f546): with Help "?" beside
+// The phone top bar keeps every control on screen (#248 review of 5545f546): with Help beside
 // the account button, a running scan and the "outside parts" warning can crowd a 320 px bar. Real
 // candidate assets on the fixture origin (tools/ui-fixture.js): no node, no network. At 320, 360,
 // 375 and 390 px, signed in, each of: nothing showing, a scan running, a part not answering (with
 // two more), and both at once:
 //   * the page doesn't scroll sideways;
-//   * the search, "?", the warning, Install and the account button are each wholly on screen, none under
+//   * the search, Help, the warning, Install and the account button are each wholly on screen, none under
 //     another;
 //   * the search keeps its magnifier (44 px);
 //   * what gives way stays: a screen reader still reads "Scanning library…", and the warning's dot
@@ -18,6 +18,9 @@
 // reach down past its box, and the buttons are drawn 44 px as before. The search (drawn 38 px tall)
 // takes the bar's height inside the bar and the 14 px to the screen's left edge. With a mouse Help
 // has no reach of its own.
+// Help and Install look alike at every width (bare icon buttons, light and dark); only the account
+// button is a filled disc. A second press on Help (on its icon, by mouse at 1280 px and by touch
+// at 412 px) closes the menu the first one opened.
 // Screenshots of the crowded bar go to the shots folder.
 //   node tools/ui-topbar.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -166,6 +169,44 @@ const STATES = [
     const c = await page.evaluate(() => ({ fine: !matchMedia('(pointer: coarse)').matches, help: getComputedStyle(document.querySelector('#help button.fb-help'), '::before').content }));
     check(c.fine && c.help === 'none', `mouse 360 px: Help has no reach (${c.fine ? 'fine' : 'coarse'} pointer, ::before ${c.help})`);
     await context.close();
+  }
+  // One look for the bar's two tools: Help and Install are bare icon buttons (no fill, no outline,
+  // the same size, ink and round shape, an icon rather than a bold "?"); only the account button is a
+  // filled disc. At 1280, 1024 and 768 px with a mouse and 412 px on a phone, light and dark.
+  for (const [width, mobile] of [[1280, false], [1024, false], [768, false], [412, true]]) {
+    for (const scheme of ['light', 'dark']) {
+      const { context, page } = await fx.create(browser, width, { mobile, fixtures: { '/info': info(false), '/health': { body: ok } } });
+      await page.emulateMedia({ colorScheme: scheme });
+      await fx.go(page, '/');
+      await page.locator('#help button.fb-help').waitFor();
+      await page.locator('#installbtn:not([hidden])').waitFor();
+      const l = await page.evaluate(() => Object.fromEntries([['help', '#help button.fb-help'], ['install', '#installbtn'], ['me', '#me']].map(([k, s]) => {
+        const e = document.querySelector(s), c = getComputedStyle(e), r = e.getBoundingClientRect();
+        return [k, { w: Math.round(r.width), h: Math.round(r.height), bg: c.backgroundColor, border: c.borderTopWidth, ink: c.color, round: c.borderTopLeftRadius, icon: !!e.querySelector(':scope > svg.ic'), text: e.textContent.trim() }];
+      })));
+      const where = `${width} px ${scheme}`;
+      const bare = (b) => b.bg === 'rgba(0, 0, 0, 0)' && b.border === '0px';
+      check(bare(l.help) && bare(l.install), `${where}: Help and Install are bare (Help ${l.help.bg} border ${l.help.border}; Install ${l.install.bg} border ${l.install.border})`);
+      check(l.help.w === l.install.w && l.help.h === l.install.h && l.help.ink === l.install.ink && l.help.round === l.install.round, `${where}: Help looks as Install (${l.help.w}x${l.help.h} ${l.help.ink} ${l.help.round} vs ${l.install.w}x${l.install.h} ${l.install.ink} ${l.install.round})`);
+      check(l.help.icon && !l.help.text, `${where}: Help is an icon (${l.help.icon ? 'svg' : 'no svg'}, text ${JSON.stringify(l.help.text)})`);
+      check(!bare(l.me) && l.me.bg !== 'rgba(0, 0, 0, 0)', `${where}: the account button stays a filled disc (${l.me.bg})`);
+      if (scheme === 'light' && (width === 1280 || width === 412)) {
+        // Help opens and closes its menu: the press lands on the icon inside the button
+        const help = page.locator('#help button.fb-help');
+        const hb = await help.boundingBox();
+        const press = () => (mobile ? page.touchscreen.tap(hb.x + hb.width / 2, hb.y + hb.height / 2) : page.mouse.click(hb.x + hb.width / 2, hb.y + hb.height / 2));
+        const hit = await page.evaluate(([x, y]) => document.elementFromPoint(x, y)?.tagName.toLowerCase(), [hb.x + hb.width / 2, hb.y + hb.height / 2]);
+        await press();
+        await page.locator('.fb-menu').waitFor({ timeout: 3000 }).catch(() => {});
+        const opened = await help.getAttribute('aria-expanded');
+        await press();
+        await page.waitForTimeout(150);
+        const after = { exp: await help.getAttribute('aria-expanded'), menus: await page.locator('.fb-menu').count() };
+        check(opened === 'true' && after.exp === 'false' && after.menus === 0, `${where}: a press on Help (on its ${hit}) opens the menu, a second closes it (${opened} then ${after.exp}, ${after.menus} menu)`);
+      }
+      await page.screenshot({ path: path.join(SHOTS, `topbar-look-${width}-${scheme}.png`), clip: { x: Math.max(0, width - 420), y: 0, width: Math.min(420, width), height: 64 } });
+      await context.close();
+    }
   }
   await browser.close();
   console.log(failed ? `${failed} failed` : 'all passed');

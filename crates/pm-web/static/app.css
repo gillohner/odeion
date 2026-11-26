@@ -1871,19 +1871,18 @@ html[data-shell="phone"] .me-btn { display: inline-flex; flex: none; width: 44px
 html[data-shell="phone"] .topbar { padding: 0 var(--sp-1h) 0 var(--sp-3h); gap: var(--sp-1h); }
 /* Phone: the top bar's Help and Install buttons are full 44 px targets like the account button
    beside them (they were 36 px, and Install shrank to 33 px wide in a crowded bar). */
-html[data-shell="phone"] .topbar :is(.fb-help, .install-btn) { flex: none; min-width: 44px; height: 44px; min-height: 44px; justify-content: center; }
-html[data-shell="phone"] .topbar .install-btn { width: 44px; }
+html[data-shell="phone"] .topbar :is(.fb-help, .install-btn) { flex: none; width: 44px; min-width: 44px; height: 44px; min-height: 44px; justify-content: center; }
 /* On a touch screen the bar's buttons sit 6 px apart and each icon button reached 6 px round, so the
    later one took the whole gap (a tap just right of Help opened Install, just right of Install the
    account menu). Help, the "not answering" warning, Install and the account button share each gap
    half and half; the account button keeps its 6 px to the screen edge, also with your picture in it
    (the picture is round and fits the button, so the button needn't clip, which cut its reach off).
-   Help is already 44 px tall: it reaches sideways only, from inside its 1 px border. The warning is
+   Help is already 44 px tall: it reaches sideways only (3 px, as the others). The warning is
    a 25 px line: it reaches 10 px up and down (45 px), still inside the bar. Nothing drawn moves. */
 @media (pointer: coarse) {
   html[data-shell="phone"] .topbar :is(.fb-help, .upstreams) { position: relative; isolation: isolate; }
   html[data-shell="phone"] .topbar :is(.fb-help, .upstreams, .icon-btn)::before { content: ''; position: absolute; inset: -6px -3px; z-index: var(--z-below); }
-  html[data-shell="phone"] .topbar .fb-help::before { inset: -1px -4px; }
+  html[data-shell="phone"] .topbar .fb-help::before { inset: 0 -3px; }
   /* The search box is drawn 38 px tall in the 60 px bar: it takes the bar's height above and below
      it (the whole bar is its tap, no further), the 14 px to the screen edge, and half the gap to the
      next button (from inside its 1 px border). A tap there focuses the search, as the label does. */
