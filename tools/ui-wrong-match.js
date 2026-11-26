@@ -166,7 +166,7 @@ const menuLabels = async (page) => page.$$eval('.popover.menu:not([hidden]) .pop
         check(await page.locator('#idauto').isChecked(), `${at}: on, as the node says`);
         check(await page.locator('#idby [data-auto]').count() === 1 && /5 picked automatically/.test(await page.locator('#idby').textContent()), `${at}: the automatic picks are counted with their mark`);
         check(/4 unsure songs picked automatically/.test(await page.locator('#idbox').textContent()), `${at}: the last run says what it settled`);
-        check(/only after you confirm them/.test(await page.locator('#idautohelp').textContent()), `${at}: the help line says when IDs are written`);
+        check(/only after you confirm it/.test(await page.locator('#idbox .set-row:has(#idwrite) .set-help').textContent()), `${at}: Write IDs' help line says when an automatic match's IDs are written`);
         check(/^3 more unsure songs’ files are out of reach/.test((await page.locator('#idmissing').textContent()).trim()), `${at}: unsure songs whose files are out of reach are said apart`);
         await page.locator('#idauto').uncheck();
         check(await until(async () => state.hits.some((h) => h.v === '/library/identify/settings' && h.m === 'PUT')), `${at}: turning it off is sent`);

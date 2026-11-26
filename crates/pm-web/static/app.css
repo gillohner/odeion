@@ -1599,6 +1599,8 @@ html[data-shell="phone"] :is(label.check, .genre-pub) { min-height: 44px; }
 .set-list .set-item .sub { color: var(--muted); font-size: var(--fs-xs); }
 .set-rows > #pkurl:not(:empty), .set-rows > #dspbox:not(:empty), .set-rows > .set-note { padding: 0 var(--sp-4) var(--sp-3h); }
 .set-rows > .notice { margin: 0 var(--sp-4) var(--sp-3h); }
+/* Identify's rows (the AcoustID key and the two switches) line up with the card's own text and buttons */
+#idbox > .set-row { padding-inline: 0; }
 .set-panel > .src-failed { margin: 0 0 var(--sp-3h); overflow-wrap: anywhere; }
 .set-rows #pkfiles .list { margin-top: var(--sp-1h); }
 .nowrap { white-space: nowrap; }

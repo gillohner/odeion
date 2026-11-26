@@ -401,7 +401,7 @@
       ];
     },
     after: (si, h, el) => {
-      const sw = el.querySelector('[data-lf="submit"]'); if (sw) sw.onchange = async (e) => { try { await api('PUT', '/lastfm', { submit: e.target.checked }); toast(e.target.checked ? 'Plays go to Last.fm' : 'Plays stay on this node'); } catch (er) { toast(er.message, 'error'); } };
+      const sw = el.querySelector('[data-lf="submit"]'); if (sw) sw.onchange = async (e) => { try { await api('PUT', '/lastfm', { submit: e.target.checked }); toast(e.target.checked ? 'Plays go to Last.fm' : 'Plays stay on this node'); } catch (er) { toast(er.message, 'error'); e.target.checked = !e.target.checked; } };
       const ag = el.querySelector('[data-lf="again"]'); if (ag) ag.onclick = async () => { try { const r = await api('GET', '/lastfm/login'); location.href = r.url; } catch (er) { toast(er.message, 'error'); } };
     },
   });
