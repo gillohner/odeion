@@ -407,6 +407,8 @@ html:not([data-shell="phone"]) .lyric-lines { overscroll-behavior: contain; }
 .dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 .dialog h2 { margin-bottom: var(--sp-1h); }
 .dialog p { margin-bottom: var(--sp-4); }
+/* (a name it quotes, a folder's path or a share's name, can be one long word: it wraps inside) */
+.dialog h2, .dialog p { overflow-wrap: anywhere; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-4); }
 /* Phone dialog actions stay easy to tap, including when larger text needs another row. Tab onto
    one scrolls it a pixel clear of the dialog's edge (whole-pixel scroll on fractional rows). */

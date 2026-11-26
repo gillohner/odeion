@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **Removing a music folder, a WebDAV share or a cloud drive folder asks the same way as every other removal.** In Your library › Node library, a share's and a drive folder's Remove asked with the browser's own pop-up, and a music folder's Remove turned into "Really remove?" for three seconds, so a second tap in the same spot removed it. All three now open the app's own dialog, which names what goes (a long path wraps inside it) and says the files stay, with a red Remove and Cancel.
+
 ### 2026-11-25
 
 - **Try again on a page that could not be read keeps the keyboard in the page.** When a page such as an album, Albums or a speaker's queue could not be read, pressing its Try again with the keyboard drew the page again and left nothing focused, so pressing Enter again did nothing and a screen reader said nothing about what came back. Now, if the page still can't be read, the focus is on the new Try again, and once it can be read the focus goes to the page's title. If you click somewhere else while it loads, the focus stays where you put it.
