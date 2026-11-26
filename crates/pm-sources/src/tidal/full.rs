@@ -809,6 +809,11 @@ pub struct Endpoints<'a> {
 
 /// This person's session and the `audioquality` to ask for, renewed first when it is about to
 /// run out. `Ok(None)`: the mode is off or not signed in.
+///
+/// The phone's (one person, their own sign-ins). It knows nothing of [`Session::unconfirmed`] or
+/// whose account a renewal names: the node has those per-person rules and its own token step
+/// (pm-api `tidal_unofficial::token_blocking`, on [`renew_answer`]), so the node never calls this
+/// or [`open`].
 pub fn token(
     store: &dyn SessionStore,
     client: &reqwest::blocking::Client,
