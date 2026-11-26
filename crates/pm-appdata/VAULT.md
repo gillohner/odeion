@@ -90,9 +90,14 @@ below). An edit made without the lock can drop a registration or a sign-out made
 **Revocation is remembered by each client.** The `revoked` list is not tamper-proof. Every client
 listed in `index.json` can write it, a signed-out one too (its homeserver grant still allows that),
 and the homeserver can serve an older copy. So:
-- each client keeps its own append-only record: the sign-outs it made itself, never dropped, and the
-  well-formed `revoked` entries it has seen (naming a key, or a grant id of the SDK's form), up to a bound
-  (4096 in the node) so a flood of made-up ones only fills what is left;
+- each client keeps its own append-only record: the sign-outs it made itself, never dropped; the devices
+  it has seen listed with a proof that verifies and a grant not signed out (a few keys per grant: the
+  holder of a grant can list any number of keys under it; 4 in the node); the well-formed `revoked`
+  entries (naming a key, or a grant id of the SDK's form) that sign out such a device's key or grant,
+  never dropped and bounded only by the devices; and, while there is room (4096 in the node), entries
+  about devices it never saw listed, so made-up ones fill only that part. A client that would have to
+  leave a newly listed device out (4096 devices in the node) refuses to trust the list instead (a vault
+  problem);
 - it doesn't remember records that name itself: it follows the list while the list says so, so a writer
   can't sign it out for good;
 - it trusts nobody in the union of that record and the list as served;

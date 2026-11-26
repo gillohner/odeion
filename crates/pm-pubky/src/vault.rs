@@ -192,9 +192,18 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.sync_all()
 }
 
-/// The most signed-out clients a node remembers from device lists (its own sign-outs are kept
-/// apart and never dropped).
+/// The most sign-outs a node keeps apart from the ones of devices it saw listed (its own, and those
+/// of devices it never saw; see [`LocalRevoked`]).
 const MAX_LOCAL_REVOKED: usize = 4096;
+
+/// The most devices a node remembers as seen in the device list. Past it the node refuses a list
+/// that lists one more, rather than forget it.
+const MAX_LOCAL_DEVICES: usize = 4096;
+
+/// The most keys of one grant a node remembers as devices. A grant is the owner's, signed in Pubky
+/// Ring, but its holder can list any number of keys under it; a device has one or two (a restored
+/// node makes a new key under its grant).
+const MAX_KEYS_PER_GRANT: usize = 4;
 
 /// A node's own record of signed-out clients (`<data>/vault/revoked.json`).
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -202,15 +211,35 @@ struct LocalRevoked {
     /// Sign-outs this node made: never dropped.
     #[serde(default)]
     made: Vec<Revoked>,
-    /// Sign-outs it saw in device lists, up to [`MAX_LOCAL_REVOKED`]: a flood of made-up ones
-    /// only fills what is left.
+    /// Sign-outs it saw in device lists that sign out a device in [`LocalRevoked::devices`] (not
+    /// signed out yet by a record held), and sign-outs it kept before it remembered devices. Never
+    /// dropped and not bounded by a count: each one signs out a remembered device's key or grant,
+    /// so there are at most twice as many as devices.
     #[serde(default)]
     seen: Vec<Revoked>,
+    /// Sign-outs it saw of devices it never saw listed (it was added later, or was away), up to
+    /// [`MAX_LOCAL_REVOKED`]: kept while there is room, so made-up ones fill only this.
+    #[serde(default)]
+    unlisted: Vec<Revoked>,
+    /// The devices it saw in the device list with a proof that verified and a grant no record held
+    /// signs out, up to [`MAX_KEYS_PER_GRANT`] keys per grant and [`MAX_LOCAL_DEVICES`] in all:
+    /// their sign-out is kept even when it is read after they left the list.
+    #[serde(default)]
+    devices: Vec<Seen>,
+}
+
+/// A device seen in the device list with a proof that verified: its key and its grant id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Seen {
+    /// Its key.
+    pub client_key: ClientKey,
+    /// Its grant id (`jti`), from its proof.
+    pub grant_id: String,
 }
 
 impl LocalRevoked {
     fn all(&self) -> impl Iterator<Item = &Revoked> {
-        self.made.iter().chain(&self.seen)
+        self.made.iter().chain(&self.seen).chain(&self.unlisted)
     }
 }
 
@@ -234,6 +263,7 @@ fn read_local_revoked(path: &Path) -> std::io::Result<LocalRevoked> {
                 return Ok(LocalRevoked {
                     made: Vec::new(),
                     seen: serde_json::from_slice(&b).map_err(bad)?,
+                    ..LocalRevoked::default()
                 });
             }
             serde_json::from_slice(&b).map_err(bad)
@@ -243,29 +273,96 @@ fn read_local_revoked(path: &Path) -> std::io::Result<LocalRevoked> {
     }
 }
 
-/// Add the well-formed records of `revoked` to the seen records in the file at `path`, except
-/// those naming this client (`me`, `my_grant`: a list that signs this node out is followed while
-/// it says so, never remembered). Returns every record the file holds.
+/// Remember the devices of `listed` (the listed entries whose proof verified, with their grant
+/// ids) and the records of `revoked` in the file at `path`; returns every record the file holds.
+///
+/// - A listed device is remembered unless a record held signs out its grant, up to
+///   `MAX_KEYS_PER_GRANT` keys per grant (keys past that are left out, without an error).
+/// - A record that signs out the key or the grant of a remembered device, where no record held
+///   does yet, is always kept: never dropped, and no bound can leave it out.
+/// - A record that names no remembered device (a device this node never saw, or a made-up one) is
+///   kept while there is room for those (`MAX_LOCAL_REVOKED`); the list as served is followed either way.
+/// - Records naming this client (`me`, `my_grant`) aren't kept: a list that signs this node out
+///   is followed while it says so, never remembered. Nor are records that add nothing.
+///
+/// A device that should be remembered but no longer fits (`MAX_LOCAL_DEVICES`) is an error, on
+/// every read that lists it: the list isn't trusted then, rather than trusting a device whose
+/// sign-out could be missed.
 pub fn remember_revoked(
     path: &Path,
     revoked: &[Revoked],
+    listed: &[Seen],
     me: &ClientKey,
     my_grant: Option<&str>,
 ) -> std::io::Result<Vec<Revoked>> {
+    use std::collections::{HashMap, HashSet};
     let _l = revoked_file_lock();
     let mut local = read_local_revoked(path)?;
-    let mut added = false;
-    for r in revoked {
-        if local.seen.len() >= MAX_LOCAL_REVOKED {
+    let mut changed = false;
+    let mut full = false;
+    // What the records held sign out
+    let mut keys_out: HashSet<ClientKey> = local.all().filter_map(|x| x.client_key).collect();
+    let mut grants_out: HashSet<String> = local.all().filter_map(|x| x.grant_id.clone()).collect();
+    // The listed devices, first: a record in this same list that signs one out is then kept
+    let mut known: HashSet<Seen> = local.devices.iter().cloned().collect();
+    let mut per_grant: HashMap<String, usize> = HashMap::new();
+    for d in &local.devices {
+        *per_grant.entry(d.grant_id.clone()).or_default() += 1;
+    }
+    for d in listed {
+        if d.client_key == *me || known.contains(d) || grants_out.contains(&d.grant_id) {
+            continue;
+        }
+        let n = per_grant.entry(d.grant_id.clone()).or_default();
+        if *n >= MAX_KEYS_PER_GRANT {
+            continue;
+        }
+        if local.devices.len() >= MAX_LOCAL_DEVICES {
+            full = true;
             break;
         }
-        if r.is_well_formed() && !r.names(me, my_grant) && !local.all().any(|x| x.same_client(r)) {
-            local.seen.push(r.clone());
-            added = true;
-        }
+        *n += 1;
+        known.insert(d.clone());
+        local.devices.push(d.clone());
+        changed = true;
     }
-    if added {
+    let mut by_key: HashMap<ClientKey, Vec<String>> = HashMap::new();
+    let mut grants: HashSet<String> = HashSet::new();
+    for d in &local.devices {
+        by_key.entry(d.client_key).or_default().push(d.grant_id.clone());
+        grants.insert(d.grant_id.clone());
+    }
+    for r in revoked {
+        if !r.is_well_formed() || r.names(me, my_grant) {
+            continue;
+        }
+        let key_new = r.client_key.is_some_and(|k| !keys_out.contains(&k));
+        let grant_new = r.grant_id.as_deref().is_some_and(|g| !grants_out.contains(g));
+        // It signs out the key of a remembered device whose grant isn't out yet, or the grant of
+        // one: kept for good
+        let of_a_device = (key_new
+            && r.client_key
+                .and_then(|k| by_key.get(&k))
+                .is_some_and(|gs| gs.iter().any(|g| !grants_out.contains(g))))
+            || (grant_new && r.grant_id.as_deref().is_some_and(|g| grants.contains(g)));
+        if of_a_device {
+            local.seen.push(r.clone());
+        } else if (key_new || grant_new) && local.unlisted.len() < MAX_LOCAL_REVOKED {
+            local.unlisted.push(r.clone());
+        } else {
+            continue;
+        }
+        keys_out.extend(r.client_key);
+        grants_out.extend(r.grant_id.clone());
+        changed = true;
+    }
+    if changed {
         write_local_revoked(path, &local)?;
+    }
+    if full {
+        return Err(std::io::Error::other(
+            "it remembers as many devices as it can, so the device list isn't trusted until that is looked into",
+        ));
     }
     Ok(local.all().cloned().collect())
 }
@@ -700,15 +797,16 @@ impl<'a> Vault<'a> {
         }
     }
 
-    /// Record the well-formed records of `revoked` in this client's own list (not those naming
-    /// this client), and return every record that list holds.
-    pub async fn remember(&self, revoked: &[Revoked]) -> Result<Vec<Revoked>> {
+    /// Record the records of `revoked` that sign out a device seen in the list (`listed`: the
+    /// listed entries whose proof verified, or one seen before) in this client's own list (not
+    /// those naming this client), and return every record that list holds ([`remember_revoked`]).
+    pub async fn remember(&self, revoked: &[Revoked], listed: &[Seen]) -> Result<Vec<Revoked>> {
         let Some(path) = self.revocations else {
             return Ok(Vec::new());
         };
         let me = self.client_key();
         let mine = self.my_grant().await;
-        Ok(remember_revoked(path, revoked, &me, mine.as_deref())?)
+        Ok(remember_revoked(path, revoked, listed, &me, mine.as_deref())?)
     }
 
     /// Record a sign-out this client made, for good (nothing to do without a local record).
@@ -908,7 +1006,7 @@ impl<'a> Vault<'a> {
         // it is dropped here (and the key rotates past it) whatever list the caller had. A list
         // that can't be read doesn't stop the write: this node's own record still applies
         let mut out: Vec<ClientKey> = self
-            .remember(&[])
+            .remember(&[], &[])
             .await?
             .iter()
             .filter_map(|r| r.client_key)
@@ -1217,7 +1315,19 @@ impl Vault<'_> {
             Some(b) => Index::parse(&b)?,
             None => Index::default(),
         };
-        let local = self.remember(&ix.revoked).await?;
+        // The listed devices whose proof verifies (signed out or not): a record that signs one of
+        // them out is remembered, and so is the device, for a sign-out that comes after it left
+        let listed: Vec<Seen> = ix
+            .clients
+            .iter()
+            .filter_map(|e| {
+                self.proven(e).map(|grant_id| Seen {
+                    client_key: e.client_key,
+                    grant_id,
+                })
+            })
+            .collect();
+        let local = self.remember(&ix.revoked, &listed).await?;
         // Only the remembered records that name a listed entry change anyone's trust, so only
         // those go back into the list (and it stays small)
         let named: Vec<(ClientKey, Option<String>)> = ix
@@ -1238,6 +1348,24 @@ impl Vault<'_> {
             .collect();
         ix.add_revoked(back);
         Ok(ix)
+    }
+
+    /// An entry's grant id when its proof verifies as one of the owner's vault clients, whether
+    /// or not it was signed out.
+    fn proven(&self, e: &ClientEntry) -> Option<String> {
+        let creds = pubky::custom_pop::CustomPop {
+            grant: e.proof.grant.clone(),
+            pop: e.proof.pop.clone(),
+        };
+        let v = pubky::custom_pop::verify_custom_grant_pop(
+            &creds,
+            pubky::custom_pop::DEFAULT_CUSTOM_POP_CLOCK_SKEW,
+        )
+        .ok()?;
+        let caps: Vec<String> = v.grant_claims().caps.iter().map(|c| c.to_string()).collect();
+        spec::client_entry_problem(e, &self.owner, &v.identity().z32(), &caps, v.data())
+            .is_none()
+            .then(|| v.grant_claims().jti.to_string())
     }
 
     /// Why an entry isn't trusted (`None` = trusted), with its grant id when the proof verified.
@@ -2408,7 +2536,12 @@ mod tests {
             grant_id: Some(g.into()),
             at: 1,
         };
-        let remember = |list: &[Revoked]| remember_revoked(&path, list, &me, Some("mine")).unwrap();
+        let dev = |n: u8, g: &str| Seen {
+            client_key: ClientKey([n; 32]),
+            grant_id: g.into(),
+        };
+        let listed = [dev(1, "d"), dev(2, "e"), dev(4, "ours"), dev(9, "mine")];
+        let remember = |list: &[Revoked]| remember_revoked(&path, list, &listed, &me, Some("mine")).unwrap();
         // Nothing yet
         assert!(remember(&[]).is_empty());
         // The list signs out D: remembered
@@ -2453,20 +2586,192 @@ mod tests {
             },
         ];
         assert_eq!(remember(&junk).len(), 2);
-        // A flood fills only what is left for seen records; a sign-out this node makes is still
-        // recorded, and kept
-        let flood: Vec<Revoked> = (0..MAX_LOCAL_REVOKED + 10)
-            .map(|i| r(3, &i.to_string()))
-            .collect();
-        assert_eq!(remember(&flood).len(), MAX_LOCAL_REVOKED);
+        // A sign-out this node makes is recorded, and kept, apart from those it saw
         remember_made(&path, &r(4, "ours")).unwrap();
-        let all = remember(&flood);
-        assert_eq!(all.len(), MAX_LOCAL_REVOKED + 1);
-        assert_eq!(all[0], r(4, "ours"));
-        assert_eq!(&all[1..3], [r(1, "d"), r(2, "e")]);
+        let all = remember(&[]);
+        assert_eq!(all, [r(4, "ours"), r(1, "d"), r(2, "e")]);
         // The first form of the file (a plain list) still reads
         std::fs::write(&path, serde_json::to_vec(&[r(1, "d")]).unwrap()).unwrap();
         assert_eq!(remember(&[]), [r(1, "d")]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn test_key(i: usize, fill: u8) -> pm_appdata::vault::ClientKey {
+        let mut k = [fill; 32];
+        k[..8].copy_from_slice(&(i as u64).to_le_bytes());
+        pm_appdata::vault::ClientKey(k)
+    }
+
+    /// Sign-outs that name no device seen in the list fill only their own bounded part of the
+    /// record: a sign-out of a device seen listed is still kept after any number of them, and
+    /// stays when the list drops it.
+    #[test]
+    fn a_sign_out_of_a_listed_device_is_kept_after_any_number_naming_none() {
+        use pm_appdata::vault::{ClientKey, Revoked};
+        let dir = std::env::temp_dir().join(format!("pm-vault-flood-{}", rand_suffix()));
+        let path = dir.join("vault-revoked.json");
+        let me = ClientKey([9; 32]);
+        let phone = Seen {
+            client_key: ClientKey([1; 32]),
+            grant_id: "phone".into(),
+        };
+        // More records than are kept of devices never seen (keys and grant ids of no device),
+        // while the phone is listed
+        let flood: Vec<Revoked> = (0..MAX_LOCAL_REVOKED + 10)
+            .map(|i| Revoked {
+                client_key: Some(test_key(i, 7)),
+                grant_id: Some(format!("g{i}")),
+                at: 1,
+            })
+            .collect();
+        let listed = [phone.clone()];
+        let got = remember_revoked(&path, &flood, &listed, &me, Some("mine")).unwrap();
+        assert_eq!(got.len(), MAX_LOCAL_REVOKED);
+        let held = read_local_revoked(&path).unwrap();
+        assert!(held.seen.is_empty());
+        assert_eq!(held.unlisted.len(), MAX_LOCAL_REVOKED);
+        assert_eq!(held.devices, std::slice::from_ref(&phone));
+        // The phone is signed out: the list drops its entry and has its record, after the others
+        let out = Revoked {
+            client_key: Some(phone.client_key),
+            grant_id: Some(phone.grant_id.clone()),
+            at: 2,
+        };
+        let mut list = flood.clone();
+        list.push(out.clone());
+        remember_revoked(&path, &list, &[], &me, Some("mine")).unwrap();
+        assert_eq!(
+            read_local_revoked(&path).unwrap().seen,
+            std::slice::from_ref(&out)
+        );
+        // The phone writes the list back with its entry and without its record: still signed out
+        let got = remember_revoked(&path, &flood, &listed, &me, Some("mine")).unwrap();
+        let mut ix = Index::default();
+        ix.add_revoked(&got);
+        assert!(ix.is_revoked(&phone.client_key, Some(&phone.grant_id)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// One grant can carry any number of keys: at most a few are remembered as devices, so the
+    /// sign-outs kept for good stay bounded. Keys under a grant signed out already add nothing.
+    #[test]
+    fn keys_listed_under_one_grant_are_remembered_up_to_a_bound() {
+        use pm_appdata::vault::{ClientKey, Revoked};
+        let dir = std::env::temp_dir().join(format!("pm-vault-grant-{}", rand_suffix()));
+        let path = dir.join("vault-revoked.json");
+        let me = ClientKey([9; 32]);
+        let under = |g: &str, n: usize| -> Vec<Seen> {
+            (0..n)
+                .map(|i| Seen {
+                    client_key: test_key(i, g.as_bytes()[0]),
+                    grant_id: g.into(),
+                })
+                .collect()
+        };
+        let key_only = |ds: &[Seen]| -> Vec<Revoked> {
+            ds.iter()
+                .map(|d| Revoked {
+                    client_key: Some(d.client_key),
+                    grant_id: None,
+                    at: 1,
+                })
+                .collect()
+        };
+        // 50 keys under the tablet's grant, and a key-only sign-out of each
+        let tablet = under("tablet", 50);
+        remember_revoked(&path, &key_only(&tablet), &tablet, &me, None).unwrap();
+        let held = read_local_revoked(&path).unwrap();
+        assert_eq!(held.devices, &tablet[..MAX_KEYS_PER_GRANT]);
+        assert_eq!(held.seen, key_only(&tablet[..MAX_KEYS_PER_GRANT]));
+        assert_eq!(held.unlisted.len(), 50 - MAX_KEYS_PER_GRANT);
+        // The grant signed out: more keys under it are neither devices nor records for good
+        let gone = Revoked {
+            client_key: None,
+            grant_id: Some("tablet".into()),
+            at: 2,
+        };
+        remember_revoked(&path, &[gone], &[], &me, None).unwrap();
+        let more = under("tablet", 80);
+        remember_revoked(&path, &key_only(&more[50..]), &more[50..], &me, None).unwrap();
+        let held = read_local_revoked(&path).unwrap();
+        assert_eq!(held.devices.len(), MAX_KEYS_PER_GRANT);
+        assert_eq!(held.seen.len(), MAX_KEYS_PER_GRANT + 1);
+        // A grant signed out before any of its keys was listed: its keys aren't devices either
+        let watch = Revoked {
+            client_key: None,
+            grant_id: Some("watch".into()),
+            at: 3,
+        };
+        remember_revoked(&path, &[watch], &[], &me, None).unwrap();
+        let watch_keys = under("watch", 3);
+        remember_revoked(&path, &key_only(&watch_keys), &watch_keys, &me, None).unwrap();
+        let held = read_local_revoked(&path).unwrap();
+        assert_eq!(held.devices.len(), MAX_KEYS_PER_GRANT);
+        assert_eq!(held.seen.len(), MAX_KEYS_PER_GRANT + 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A node that never saw a device listed (added after it was signed out, or away meanwhile)
+    /// still keeps its sign-out while there is room for those.
+    #[test]
+    fn a_sign_out_of_a_device_never_seen_is_kept_while_there_is_room() {
+        use pm_appdata::vault::{ClientKey, Revoked};
+        let dir = std::env::temp_dir().join(format!("pm-vault-unseen-{}", rand_suffix()));
+        let path = dir.join("vault-revoked.json");
+        let me = ClientKey([9; 32]);
+        let old = Revoked {
+            client_key: Some(ClientKey([3; 32])),
+            grant_id: Some("old-phone".into()),
+            at: 1,
+        };
+        assert_eq!(
+            remember_revoked(&path, std::slice::from_ref(&old), &[], &me, None).unwrap(),
+            std::slice::from_ref(&old)
+        );
+        // The list drops it later: kept
+        assert_eq!(
+            remember_revoked(&path, &[], &[], &me, None).unwrap(),
+            std::slice::from_ref(&old)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A device that should be remembered but doesn't fit refuses the list (an error, shown as a
+    /// vault problem), on every read that lists it; sign-outs of remembered devices are kept
+    /// however many there are.
+    #[test]
+    fn a_full_record_refuses_a_list_with_one_more_device() {
+        use pm_appdata::vault::{ClientKey, Revoked};
+        let dir = std::env::temp_dir().join(format!("pm-vault-full-{}", rand_suffix()));
+        let path = dir.join("vault-revoked.json");
+        let me = ClientKey([9; 32]);
+        let dev = |i: usize| Seen {
+            client_key: test_key(i, 5),
+            grant_id: format!("g{i}"),
+        };
+        let out = |d: &Seen| Revoked {
+            client_key: Some(d.client_key),
+            grant_id: Some(d.grant_id.clone()),
+            at: 1,
+        };
+        let listed: Vec<Seen> = (0..MAX_LOCAL_DEVICES + 1).map(dev).collect();
+        let e = remember_revoked(&path, &[], &listed, &me, None).unwrap_err();
+        assert!(e.to_string().contains("isn't trusted"), "{e}");
+        assert_eq!(
+            read_local_revoked(&path).unwrap().devices.len(),
+            MAX_LOCAL_DEVICES
+        );
+        // Every read that lists the one more device refuses the list, its sign-out in it or not
+        let last = &listed[MAX_LOCAL_DEVICES..];
+        assert!(remember_revoked(&path, &[], last, &me, None).is_err());
+        assert!(remember_revoked(&path, &[out(&last[0])], last, &me, None).is_err());
+        // A sign-out of every remembered device is kept
+        let all: Vec<Revoked> = listed[..MAX_LOCAL_DEVICES].iter().map(out).collect();
+        remember_revoked(&path, &all, &[], &me, None).unwrap();
+        let held = read_local_revoked(&path).unwrap();
+        assert_eq!(held.seen, all);
+        // A list without the one more device reads
+        assert!(remember_revoked(&path, &[], &listed[..10], &me, None).is_ok());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

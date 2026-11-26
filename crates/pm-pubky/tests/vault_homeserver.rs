@@ -952,6 +952,81 @@ async fn a_signed_out_device_that_rewrites_the_list_stays_signed_out() {
     let _ = std::fs::remove_file(&file);
 }
 
+/// A node that saw the phone listed keeps the phone's sign-out (made on another node) after more
+/// sign-outs naming no device than it keeps of those, and still when the list lists the phone
+/// again without its record.
+#[tokio::test]
+async fn a_sign_out_of_a_seen_device_is_kept_after_many_others() {
+    use pm_appdata::vault::{Index, Revoked, INDEX_PATH};
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 3).await;
+    let (ka, kb, kp) = (
+        ClientSecret::generate(),
+        ClientSecret::generate(),
+        ClientSecret::generate(),
+    );
+    let file = std::env::temp_dir().join(format!("pm-revoked-{}.json", &kb.public().to_hex()[..12]));
+    let node_a = Vault::new(&sessions[0], &ka);
+    let node_b = Vault::new(&sessions[1], &kb).remember_revocations(&file);
+    let phone = Vault::new(&sessions[2], &kp);
+    node_a.register("Node A").await.unwrap();
+    node_b.register("Node B").await.unwrap();
+    phone.register("Phone").await.unwrap();
+    // Node B reads the list while the phone is in it
+    let full: Index = node_b.index().await.unwrap();
+    assert!(node_b
+        .trusted(&full)
+        .iter()
+        .any(|t| t.client_key == phone.client_key()));
+
+    // The list gets more sign-outs naming no device than a node keeps of those (grant ids only)
+    let mut many = full.clone();
+    many.revoked = (0..4200)
+        .map(|i| Revoked {
+            client_key: None,
+            grant_id: Some(format!("g{i}")),
+            at: 1,
+        })
+        .collect();
+    sessions[2]
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&many).unwrap())
+        .await
+        .unwrap();
+    node_b.index().await.unwrap();
+
+    // Node A signs the phone out; node B reads the list with the sign-out in it
+    node_a
+        .sign_out_device(&phone.client_key(), |_, _| async {})
+        .await
+        .unwrap();
+    let ix = node_b.index().await.unwrap();
+    assert!(!node_b
+        .trusted(&ix)
+        .iter()
+        .any(|t| t.client_key == phone.client_key()));
+
+    // The list as it was before, the phone's entry in and no record: node B still doesn't trust it
+    sessions[2]
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&full).unwrap())
+        .await
+        .unwrap();
+    let ix = node_b.index().await.unwrap();
+    assert!(ix.clients.iter().any(|e| e.client_key == phone.client_key()));
+    assert!(!node_b
+        .trusted(&ix)
+        .iter()
+        .any(|t| t.client_key == phone.client_key()));
+    // The phone's sign-out is kept for good, apart from the others
+    let held: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(held["seen"].as_array().map(Vec::len), Some(1), "{held}");
+    let _ = std::fs::remove_file(&file);
+}
+
 /// VAULT.md v2: a blob is taken only when one of the person's devices signed it, as its index
 /// entry proves; a copy older than one seen, or unsigned where a signed one was seen, is stale.
 #[tokio::test]
