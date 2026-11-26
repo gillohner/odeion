@@ -117,8 +117,8 @@
   // Songs' and Albums' heads carry the owner's Add music; on a page whose empty state has the same
   // button (no music at all) the head leaves it out (one Add music on the page). Albums with songs but
   // no album tags keeps it: its empty state offers Open Songs
-  const headAddMusic = (n) => (isOwner() && n ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '');
-  const noMusicYet = (what) => (isOwner() ? ['Add the folder with your music, or upload files from this device.', { view: 'add-music', label: 'Add music' }] : [`${what} show up here once the node’s owner adds music.`]);
+  const headAddMusic = (n) => (phoneMode() ? '' : isOwner() && n ? `<button class="btn iconic" data-addmusic aria-label="Add music">${icon('plus')}<span class="btn-label">Add music</span></button>` : '');
+  const noMusicYet = (what) => (phoneMode() ? [`${what} show up here once you add songs to this phone${offers('add-songs') ? ' with Add songs' : ''}.`] : isOwner() ? ['Add the folder with your music, or upload files from this device.', { view: 'add-music', label: 'Add music' }] : [`${what} show up here once the node’s owner adds music.`]);
   const LAYOUTS = [['auto', 'Automatic', 'Phone under 600 px wide, desktop from there (tablets too)'], ['phone', 'Phone', 'Tabs and a mini player, at any width'], ['desktop', 'Desktop', 'The sidebar and the full player bar, also in windows from 480 px']];
   const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
     + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<input type="checkbox" class="switch" role="switch" id="densepick" ${densePref() ? 'checked' : ''} aria-label="Dense lists">`));
@@ -351,7 +351,7 @@
   const pubkyHeard = () => { if (state.pubkyUser === undefined) return; const w = pubkyWaiting; pubkyWaiting = []; w.forEach((x) => x.res()); };
   const forgetPubkyUser = () => { state.pubkyUser = undefined; pubkyAsking = null; pubkyForgot++; };
   const pubkyUser = async () => {
-    if (isListener()) return null;
+    if (isListener() || !offers('pubky')) return null;
     if (state.pubkyUser === undefined) {
       if (!pubkyAsking) {
         const asked = pubkyForgot; const gen = ++pubkyGen;

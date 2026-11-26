@@ -53,6 +53,16 @@
   // app says where it is in `pmdesktop:native` events. What it can't play (a playlist stream,
   // another codec) the page plays itself (`nativerefused`).
   const tauriInvoke = () => (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) || null;
+  // A phone-mode command to the app (Add songs, Connect to a node): busy at once, sent once (keep:
+  // still busy after it went, as the app is leaving this page)
+  const phoneCmd = (b, cmd, keep = false) => {
+    if (!b || b.disabled || b.getAttribute('aria-busy') === 'true') return Promise.resolve(false);
+    const f = tauriInvoke(); if (!f) { toast('That needs the Odeion app', 'error'); return Promise.resolve(false); }
+    b.disabled = true; b.setAttribute('aria-busy', 'true'); b.classList.add('is-busy', 'is-spinning');
+    const done = () => { b.disabled = false; b.removeAttribute('aria-busy'); b.classList.remove('is-busy', 'is-spinning'); };
+    return Promise.resolve().then(() => f(cmd, {})).then(() => { if (!keep) done(); return true; }, (e) => { done(); toast(String((e && e.message) || e || 'That didn’t work; try again.'), 'error'); return false; });
+  };
+  // Add songs (phone mode): the app picks them; the library page shows them after
   const nativeOk = () => !!(window.pmDesktop && window.pmDesktop.nativePlayer && tauriInvoke());
   const nat = (() => {
     const ev = new EventTarget(); const fire = (t, detail) => ev.dispatchEvent(new CustomEvent(t, { detail }));
@@ -253,7 +263,7 @@
   // The app keeps them (pm-offline) and says what it has (`pmdesktop:downloads`); online, the
   // Downloads view is its storage screen. Only the library's own files: a streaming service's
   // songs get no Download.
-  const appDl = () => nativeOk() && !isOffline();
+  const appDl = () => nativeOk() && !isOffline() && offers('downloads');
   const dlCall = (cmd, args) => { const f = tauriInvoke(); return f ? f(cmd, args || {}) : Promise.reject(new Error('the app’s downloads are off')); };
   let dlRevision = 0; let dlRead = 0;
   const dlSet = (d) => { dlRevision += 1; state.dl = d || null; state.dlTracks = new Set((d && d.track_ids) || []); state.dlAlbums = new Set((d && d.album_ids) || []); };

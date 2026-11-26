@@ -25,7 +25,7 @@
           const target = pg.target;
           // What comments are about: the song's own link, else this item's (a web link only). The
           // section is drawn, and the comments asked for, only for who may comment: can('owner_music')
-          const commentUri = [pg.song_uri, target && target.uri, pg.link].find((u) => /^https?:\/\//.test(u || '')) || '';
+          const commentUri = offers('pubky') ? [pg.song_uri, target && target.uri, pg.link].find((u) => /^https?:\/\//.test(u || '')) || '' : '';
           const qs = new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)])).toString();
           // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3),
           // each on its own URI: without a MusicBrainz identity there is only the link, never a guess
@@ -35,10 +35,10 @@
           const hereName = pg.source === 'Your library' ? 'your library' : pg.source;
           const refQs = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
           // An item with no identity yet (needs_match) takes no tags: the hero says so and leads to a match
-          const ownTags = (ref) => (!ref || isListener() ? Promise.resolve({ tags: null }) : api('GET', `/tags?${refQs(ref)}`).then((r) => ({ tags: r.needs_match ? null : r.tags || [], needsMatch: !!r.needs_match, uri: r.uri || null })).catch(() => ({ tags: null })));
+          const ownTags = (ref) => (!ref || isListener() || !offers('tags') ? Promise.resolve({ tags: null }) : api('GET', `/tags?${refQs(ref)}`).then((r) => ({ tags: r.needs_match ? null : r.tags || [], needsMatch: !!r.needs_match, uri: r.uri || null })).catch(() => ({ tags: null })));
           const [songOwn, linkOwn, myReview] = await Promise.all([
             ownTags(songRef), ownTags(linkRef),
-            isListener() ? Promise.resolve(undefined) : api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
+            isListener() || !offers('reviews') ? Promise.resolve(undefined) : api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
           ]);
           if (!live()) return;
           // The hero's tag groups. Public tags and people come from Pubky for each group's own URI: for a
@@ -54,7 +54,7 @@
           const keptOf = (scope, ref) => { const k = kept.get(pubKey({ scope, ref })); return k && k.p; };
           const pubFrom = (uri, scope, ref) => (uri && pg.on_pubky && pg.on_pubky.uri === uri ? { state: 'ok', tags: pg.on_pubky.tags || [], faces: pg.on_pubky.faces || {} } : keptOf(scope, ref) ? { ...keptOf(scope, ref), kept: true } : { state: 'loading', tags: [], faces: {} });
           const linkName = pg.source || 'source';
-          const tagGroups = [
+          const tagGroups = !offers('tags') ? [] : [
             ...(shownSong ? [{ scope: 'song', name: `On this ${kind}`, ref: songRef, own: songOwn.tags, pub: pubFrom(songUri, 'song', songRef) }] : []),
             ...(linkRef ? [{ scope: 'link', name: `On the ${linkName} link`, ref: linkRef, own: linkOwn.tags, pub: pubFrom(linkRef.uri, 'link', linkRef) }] : []),
           ];
@@ -241,7 +241,7 @@
             const cs = $('#iconcerts-slot'); if (cs) { cs.outerHTML = (pg.concerts && pg.concerts.length ? `<section class="section" id="iconcerts"><div class="section-head"><h3>Upcoming concerts</h3></div><div class="list">${pg.concerts.map((c, k) => `<div class="list-row clickable" data-iconcert="${k}"><div class="grow"><div class="name">${esc(itemName(c))}</div><div class="sub">${esc([c.description, c.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div></section>` : ''); }
             $$('[data-iconcert]', main).forEach((r) => r.onclick = () => { const c = pg.concerts[Number(r.dataset.iconcert)]; openWeb(c.page || c.uri); });
           }).catch(() => { /* extras are a bonus */ });
-          drawHeroTags(ht);
+          if (offers('tags')) drawHeroTags(ht);
           for (const g of tagGroups) {
             if (g.pub.state !== 'loading' && !g.pub.kept) continue;
             const was = g.pub; const at = heroPub.by; const ask = ++heroPubAsk;

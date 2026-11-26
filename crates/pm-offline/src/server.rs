@@ -50,7 +50,7 @@ pub fn router(store: Arc<Store>) -> Router {
 /// Whether a request is for this server by its own name: `Host` is `127.0.0.1:<port>` or
 /// `localhost:<port>`, and an `Origin`, when sent, is that same server. A page that rebinds its
 /// own name to 127.0.0.1, or posts from another site, is refused.
-fn is_local(headers: &HeaderMap, port: u16) -> bool {
+pub(crate) fn is_local(headers: &HeaderMap, port: u16) -> bool {
     let ours = |host: &str| host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}");
     let host_ok = headers
         .get(header::HOST)
@@ -232,7 +232,7 @@ async fn track(State(s): State<Arc<Store>>, Path(id): Path<i64>) -> Response {
     }
 }
 
-fn content_type(path: &std::path::Path) -> &'static str {
+pub(crate) fn content_type(path: &std::path::Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).unwrap_or_default() {
         "flac" => "audio/flac",
         "mp3" => "audio/mpeg",
@@ -276,7 +276,7 @@ fn parse_range(h: &str, len: u64) -> Option<(u64, u64)> {
 }
 
 /// A file, with ranges (the audio element seeks with them).
-async fn send_file(path: &std::path::Path, headers: &HeaderMap) -> Response {
+pub(crate) async fn send_file(path: &std::path::Path, headers: &HeaderMap) -> Response {
     let Ok(meta) = tokio::fs::metadata(path).await else {
         return err(StatusCode::NOT_FOUND, "not on this device");
     };

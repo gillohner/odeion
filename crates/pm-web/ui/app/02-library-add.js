@@ -51,6 +51,7 @@
       drawUploads();
     }
     up.running = false; drawUploads();
+    if (phoneMode() && state.view === 'downloads') render();
     const t = upTotals(); toast(t.failed ? `${countOf(t.done, 'files')} added, ${fmtCount(t.failed)} failed` : `${countOf(t.done, 'files')} added to your library`, t.failed ? 'error' : undefined);
   };
   const addUploads = (files) => {

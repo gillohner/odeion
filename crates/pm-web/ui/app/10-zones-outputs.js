@@ -122,6 +122,7 @@
   // answer older than the newest installed is never installed
   const outputsLoad = { seq: 0, applied: 0, inflight: null, again: false };
   const loadOutputs = () => {
+    if (!offers('zones')) return Promise.resolve(state.outputs = []); // (a phone has no outputs but itself)
     if (outputsLoad.inflight) { outputsLoad.again = true; return outputsLoad.inflight; }
     const seq = ++outputsLoad.seq;
     outputsLoad.inflight = api('GET', '/outputs')
@@ -282,7 +283,7 @@
     renderZoneName(); renderBar(); refreshQueue();
   };
   const refreshAlong = async () => {
-    if (!state.me || isOffline() || document.hidden) return;
+    if (!state.me || isOffline() || !offers('along') || document.hidden) return;
     try {
       const ls = await api('GET', '/presence');
       state.along = ls.find((l) => l.mine) || null; state.hosting = ls.find((l) => l.you && l.hosting) || null; state.presence = ls;
@@ -379,7 +380,7 @@
       // is each device's Move here above, one way only (UX sweep A14); the Queue page has Move to…
       + `<div class="pop-title">This zone</div>`
       + `<button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`
-      + (isOffline() ? '' : `<div class="pop-title">Listening together</div><button class="pop-item" id="zpvisible">${icon('artist')}<span><span class="name">Who sees what you play</span><span class="sub">${esc((VISIBLE.find((x) => x[0] === (state.presenceVisible || 'hidden')) || VISIBLE[0])[1])}</span></span></button>`);
+      + (isOffline() || !offers('along') ? '' : `<div class="pop-title">Listening together</div><button class="pop-item" id="zpvisible">${icon('artist')}<span><span class="name">Who sees what you play</span><span class="sub">${esc((VISIBLE.find((x) => x[0] === (state.presenceVisible || 'hidden')) || VISIBLE[0])[1])}</span></span></button>`);
   };
   const renderZonePop = (err) => {
     zonePopErr = err || null;

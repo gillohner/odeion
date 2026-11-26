@@ -1,6 +1,6 @@
 [package]
 name = "pm-offline"
-description = "Offline music for the apps: the index of what a phone or laptop keeps, its downloads, the queue of plays and favourites made offline, and a local server for the web UI"
+description = "Offline music for the apps: the index of what a phone or laptop keeps, its downloads, the queue of plays and favourites made offline, a local server for the web UI, and phone mode (the app without a node)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,8 +8,23 @@ license.workspace = true
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "query"] }
+base64 = "0.22"
+futures-util = { workspace = true }
+# Phone mode (src/phone): TIDAL and Qobuz, the same code the node runs
+pm-sources = { workspace = true }
+# Phone mode's Pubky account and its sources vault (src/phone/account.rs, vault.rs)
+pm-appdata = { workspace = true }
+pm-pubky = { workspace = true }
+pm-model = { workspace = true }
+# Songs added to the phone: their tags, read as the node reads them (src/phone/songs.rs)
+pm-library = { workspace = true }
+# The web UI phone mode serves: the node's own (src/phone/ui.rs)
+pm-web = { workspace = true }
+blake3 = { workspace = true }
+sha2 = "0.10"
+url = { workspace = true }
 getrandom = "0.3"
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -23,4 +38,9 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { workspace = true }
+# The phone's vault sync against the bundled homeserver (tests/phone_vault.rs, CI's bundle job):
+# a test signer and the local relays the node's vault tests use
+pubky = { workspace = true }
+http-relay = { version = "0.7", default-features = false, features = ["server"] }
+# Paused time for the never-answering homeserver tests (phone/stalled.rs)
+tokio = { workspace = true, features = ["test-util"] }

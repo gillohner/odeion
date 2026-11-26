@@ -170,6 +170,21 @@ const TAGS_NOT_MUSIC: &str = "pubky.tags_not_music";
 /// What the owner reads when the session cannot reach every folder the node uses.
 pub const RESIGN_NOTICE: &str = "This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.";
 
+/// The bundled homeserver's key for the node record, from its admin API's `/info`; while that
+/// doesn't answer, the key the record had (phones pick their default from it).
+fn bundled_key(info: Result<serde_json::Value, crate::ApiError>, had: Option<String>) -> Option<String> {
+    match info {
+        Ok(v) => crate::bundled::status_from_info(&v).public_key,
+        Err(e) => {
+            tracing::warn!(
+                "the bundled homeserver's key is not known now, the node record keeps the one it had: {}",
+                e.message
+            );
+            had
+        }
+    }
+}
+
 /// The record that tells the owner's devices where this node is (ADR 0008): name, addresses and
 /// version. Never a credential.
 pub fn node_record(
@@ -177,6 +192,7 @@ pub fn node_record(
     api_url: &str,
     version: &str,
     iroh: Option<&str>,
+    bundled_homeserver: Option<&str>,
 ) -> pm_pubky::homeserver::NodeRecord {
     pm_pubky::homeserver::NodeRecord {
         name: name.to_string(),
@@ -185,6 +201,7 @@ pub fn node_record(
         version: version.to_string(),
         updated_at: now_micros(),
         iroh: iroh.unwrap_or("").to_string(),
+        bundled_homeserver: bundled_homeserver.map(str::to_string),
     }
 }
 
@@ -303,15 +320,31 @@ impl PubkySync {
         let _one = ONE.lock().await;
         let iroh = s.ensure_remote().await;
         // Read first: the old record is overwritten only once what it held is noted
-        if let Some(old) = self.homeserver.read_node_record(&self.session).await? {
+        let old = self.homeserver.read_node_record(&self.session).await?;
+        if let Some(old) = &old {
             if !old.token.is_empty() {
                 self.current()?;
                 crate::access_token::note_published(s, &old.token)?;
             }
         }
+        // The homeserver installed with the node, when it runs one (its key, from its admin API;
+        // the record's until then when that doesn't answer now)
+        let bundled = match s.bundled_homeserver() {
+            Some(_) => bundled_key(
+                crate::bundled::admin(s, reqwest::Method::GET, "/info", None).await,
+                old.and_then(|o| o.bundled_homeserver),
+            ),
+            None => None,
+        };
         self.current()?;
-        self.publish_node(&s.name, &s.public_url, &s.version, iroh.as_deref())
-            .await?;
+        self.publish_node(
+            &s.name,
+            &s.public_url,
+            &s.version,
+            iroh.as_deref(),
+            bundled.as_deref(),
+        )
+        .await?;
         // Also after a failure or a restart since the note was made
         crate::access_token::retire_published(s).await;
         Ok(())
@@ -325,8 +358,9 @@ impl PubkySync {
         api_url: &str,
         version: &str,
         iroh: Option<&str>,
+        bundled_homeserver: Option<&str>,
     ) -> Result<(), SyncError> {
-        let record = node_record(name, api_url, version, iroh);
+        let record = node_record(name, api_url, version, iroh, bundled_homeserver);
         Ok(self
             .homeserver
             .publish_node_record(&self.session, &record)
@@ -1886,10 +1920,48 @@ mod tests {
     /// The node record says where the node is and never holds a credential: what the
     /// homeserver stores has no token, even when the record value carries one (ADR 0008).
     #[test]
+    fn the_record_keeps_its_bundled_key_while_the_homeserver_doesnt_answer() {
+        let key = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
+        let answered = serde_json::json!({ "public_key": "anotherkey" });
+        assert_eq!(
+            bundled_key(Ok(answered), Some(key.into())).as_deref(),
+            Some("anotherkey"),
+            "what the homeserver says now"
+        );
+        let down = crate::ApiError::new(
+            axum::http::StatusCode::BAD_GATEWAY,
+            "the bundled homeserver isn't answering",
+        );
+        assert_eq!(bundled_key(Err(down), Some(key.into())).as_deref(), Some(key));
+        let down = crate::ApiError::new(axum::http::StatusCode::BAD_GATEWAY, "down");
+        assert_eq!(bundled_key(Err(down), None), None);
+    }
+
+    #[test]
     fn the_node_record_holds_no_credential() {
-        let r = node_record("Living room", "http://192.168.1.10:7788", "0.3.0", Some("abc"));
+        let r = node_record(
+            "Living room",
+            "http://192.168.1.10:7788",
+            "0.3.0",
+            Some("abc"),
+            None,
+        );
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("token"), "{json}");
+        assert!(
+            !json.contains("bundled_homeserver"),
+            "only with a homeserver of its own: {json}"
+        );
+        let with = node_record(
+            "n",
+            "u",
+            "0",
+            None,
+            Some("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo"),
+        );
+        assert!(serde_json::to_string(&with)
+            .unwrap()
+            .contains("\"bundled_homeserver\":\"8pinx"));
         let fake = ["node", "api", "credential"].join("-");
         let mut old = r.clone();
         old.token = fake.clone();

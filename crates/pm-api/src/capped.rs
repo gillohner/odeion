@@ -112,14 +112,10 @@ fn bytes_blocking_within(
     Ok(out)
 }
 
-/// The whole-body wait of [`text_blocking`] and [`json_blocking`]: the stream clients' wait
+/// The whole-body wait of [`json_blocking`] (HLS playlists, read as text, have the same reader in
+/// pm-sources: `capped.rs` there): the stream clients' wait
 /// (`sources::STREAM_WAIT`), which reqwest's blocking `text()`/`json()` gave the whole body.
 const BLOCKING_WAIT: std::time::Duration = crate::sources::STREAM_WAIT;
-
-/// [`text`] for the blocking client.
-pub(crate) fn text_blocking(resp: reqwest::blocking::Response, max: usize) -> Result<String, Error> {
-    bytes_blocking(resp, max).map(|b| String::from_utf8_lossy(&b).into_owned())
-}
 
 /// [`json`] for the blocking client.
 pub(crate) fn json_blocking<T: serde::de::DeserializeOwned>(
@@ -236,7 +232,7 @@ mod tests {
         let url = serve_endless();
         let r = client.get(&url).send().unwrap();
         assert_eq!(
-            super::text_blocking(r, 100 << 10),
+            super::bytes_blocking(r, 100 << 10),
             Err(super::Error::TooLong(100 << 10))
         );
         let r = client.get(&url).send().unwrap();
@@ -246,14 +242,14 @@ mod tests {
         );
         let url = serve(OPEN_ENDED, b"#EXTM3U\n".to_vec());
         let r = reqwest::blocking::get(&url).unwrap();
-        assert_eq!(super::text_blocking(r, 100 << 10).unwrap(), "#EXTM3U\n");
+        assert_eq!(super::bytes_blocking(r, 100 << 10).unwrap(), b"#EXTM3U\n");
         let url = serve(
             "HTTP/1.1 200 OK\r\nContent-Length: 4294967296\r\nConnection: close\r\n\r\n",
             Vec::new(),
         );
         let r = reqwest::blocking::get(&url).unwrap();
         assert_eq!(
-            super::text_blocking(r, 1 << 20),
+            super::bytes_blocking(r, 1 << 20),
             Err(super::Error::TooLong(1 << 20))
         );
     }

@@ -2343,11 +2343,11 @@ async fn a_persons_tidal_sign_in_ways_are_held_to_one_account_each() {
     // Sign in with TIDAL and the code sign-in read the account as renewals do: a number or
     // text, and the token's own when the answer names none
     assert_eq!(
-        tidal_unofficial::answer_account(&serde_json::json!({"user_id": "0043"})),
+        pm_sources::tidal::full::answer_account(&serde_json::json!({"user_id": "0043"})),
         Some("43".to_string())
     );
     assert_eq!(
-        tidal_unofficial::answer_account(&serde_json::json!({"user": {"userId": 44}})),
+        pm_sources::tidal::full::answer_account(&serde_json::json!({"user": {"userId": 44}})),
         Some("44".to_string())
     );
     let named_by_its_token = tidal_unofficial::Session {

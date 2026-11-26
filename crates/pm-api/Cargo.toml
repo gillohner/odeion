@@ -16,6 +16,8 @@ pm-remote = { workspace = true }
 uuid = { workspace = true }
 pm-audio = { workspace = true }
 pm-library = { workspace = true }
+# TIDAL and Qobuz, shared with the app's phone mode
+pm-sources = { workspace = true }
 reqwest = { workspace = true, features = ["blocking", "query", "stream"] }
 symphonia = { workspace = true }
 pm-pubky = { workspace = true }
@@ -69,7 +71,7 @@ libc = "0.2"
 
 [features]
 # Pause and fault points for this crate's own tests (`test_hooks`); never in a release build
-test-hooks = []
+test-hooks = ["pm-sources/test-hooks"]
 
 [dev-dependencies]
 # This crate's own tests turn its test hooks on (dev-dependencies don't reach normal builds)

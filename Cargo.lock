@@ -3869,6 +3869,7 @@ dependencies = [
  "pm-pubky",
  "pm-remote",
  "pm-renderer",
+ "pm-sources",
  "pm-stream",
  "pm-web",
  "pm-zones",
@@ -4081,16 +4082,29 @@ name = "pm-offline"
 version = "0.2.4"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "blake3",
+ "futures-util",
  "getrandom 0.3.4",
+ "http-relay",
  "libc",
+ "pm-appdata",
+ "pm-library",
+ "pm-model",
+ "pm-pubky",
+ "pm-sources",
+ "pm-web",
+ "pubky 0.16.2",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4284,6 +4298,28 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "pm-sources"
+version = "0.2.4"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "blake3",
+ "futures-util",
+ "md-5",
+ "pm-appdata",
+ "pm-model",
+ "quick-xml",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

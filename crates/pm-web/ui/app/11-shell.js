@@ -1,11 +1,12 @@
   // The tabs' Library: the library page last open. The tabs' Search focuses the field, except in
   // the Android app: its WebView doesn't open the keyboard for a focus set by script, so the field
   // showed focused with no keyboard (owner's recording); there a tap on the field opens it.
-  const libHome = () => state.lastLib || 'library';
-  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); if (appPlatform() !== 'android') search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? libHome() : k); });
+  const libHome = () => state.lastLib || (phoneMode() ? 'tracks' : 'library');
+  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); if (appPlatform() !== 'android') search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (phoneMode() && !offers('library') && offers('songs') ? 'downloads' : libHome()) : k); });
   // The account menu: who you are here, Settings and Log out (on every shell). A node that needs
   // no token has nothing to log out of.
   $('#me').onclick = async () => {
+    if (phoneMode()) { setView('settings'); return; } // (no node account here: this phone's Settings)
     const me = state.me || {}; const [who] = me.key ? await loadProfiles([me.key]) : [];
     const name = (who && who.name) || (isListener() ? 'Listener' : 'Owner');
     // What you are here, in words (UX sweep 11-01, A8): how this browser is logged in, and whether

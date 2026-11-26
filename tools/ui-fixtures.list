@@ -200,3 +200,6 @@ ui-zone-card-level-width.js zone-card-level-width-shots
 ui-upnext-rating-busy.js upnext-rating-busy-shots
 ui-speakers-help.js speakers-help-shots
 ui-section-head-button.js section-head-button-shots
+ui-connect-phone.js connect-phone-shots
+ui-phone-mode.js phone-mode-shots
+ui-phone-songs.js phone-songs-shots
