@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **In a collection, a change made on another device no longer moves the keyboard onto another song.** With the focus on a song's remove button, move button, row or ⋯ menu, another device removing or moving a song above it put the focus on whatever song now sat in that place, so the next Enter removed, moved or played a song you hadn't picked. The focus now stays on the same song wherever it went. If that song itself was removed, the focus goes to the next song's ⋯ menu (or the one before, if it was the last). And when the focus moves on to another song after you have scrolled away from it, the page no longer jumps back to it.
+
 ### 2026-11-26
 
 - **Try again on a page that could not be read keeps the keyboard in the page.** When a page such as an album, Albums or a speaker's queue could not be read, pressing its Try again with the keyboard drew the page again and left nothing focused, so pressing Enter again did nothing and a screen reader said nothing about what came back. Now, if the page still can't be read, the focus is on the new Try again, and once it can be read the focus goes to the page's title. If you click somewhere else while it loads, the focus stays where you put it.

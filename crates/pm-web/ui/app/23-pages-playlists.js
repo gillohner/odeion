@@ -285,9 +285,17 @@
           const sharingNote = d.summary.visibility === 'public'
             ? (d.summary.synced ? 'Public on Pubky. Anyone with the link can open it.' : mine ? 'Public copy pending: shared once your homeserver answers.' : 'Public copy pending: shared on the next sync with your homeserver.')
             : (d.summary.synced ? 'Private on your homeserver.' : mine ? 'Private; it waits on this node until your homeserver answers.' : 'Private on this node; saved to your homeserver on the next sync.');
-          const place = again ? keepPlace() : null;
-          // (a song's control that had focus before this draw: a row the chip now hides passes it on, plFocusIn)
+          // (a song's control that had focus before this draw: put back on that same song wherever it
+          // is now, or passed on, plFocusIn, never by its place in the list (keepPlace's way): another
+          // device removing or moving a song above it would put it on another song's ×, Move or row)
           const rowWas = again ? plFocusOf(document.activeElement) : null;
+          const place = again ? keepPlace(!!rowWas && rowWas.song != null) : null;
+          // (whether that song's row, or under a change's hold the row pressed (else the one the hold
+          // gives the focus to), was wholly in sight before this draw: only then is the song the focus
+          // goes on to scrolled into sight; one they scrolled away from on purpose stays where it is.
+          // Drawn afresh (Try again), there were no rows to scroll away from: it follows)
+          const seenWas = (f) => { if (!f || f.song == null) return false; const j = plPlaceOf(plKeysOf(f.box), f.song, f.copy); const row = j < 0 ? null : $(`#${f.box} [data-srow="${j}"]`, main); return !!row && row.getClientRects().length > 0 && inSight(row); };
+          const rowSeen = seenWas(rowWas); const heldWas = plHolds.get(plId); const heldSeen = !again || (!!heldWas && seenWas(heldWas.from || heldWas.focus));
           // (the eyebrow is the kind alone: who sees the playlist and where it is kept is the sharing
           // note's sentence under the buttons, said once, at every width)
           main.innerHTML = backBtn('playlists', 'Collections') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Collection</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}${libNote}</p>
@@ -404,13 +412,20 @@
             const box = $(`#${f.box}`, main); if (!box) return null;
             const can = (x) => !!x && !x.disabled && !x.closest('[inert]') && x.getClientRects().length > 0;
             if (f.song == null) { let b = $$(f.sel, box)[f.i]; if (!can(b) && f.alt) b = $(f.alt, box); return can(b) ? { b, moved: false } : null; }
-            const keys = f.box === 'pllocal' ? localKeys : d.playlist.items.map((it) => it.uri); let j = -1;
-            for (let k = 0, c = 0; k < keys.length && j < 0; k++) if (keys[k] === f.song && c++ === f.copy) j = k;
+            const keys = f.box === 'pllocal' ? localKeys : d.playlist.items.map((it) => it.uri);
+            let j = plPlaceOf(keys, f.song, f.copy); let gone = false;
+            // (the song itself gone, another device removing it: on to the song after it in the list it
+            // was in that is still here, else the one before, its ⋯)
+            if (j < 0 && f.was) {
+              const w = f.was; const at = plPlaceOf(w, f.song, f.copy);
+              const near = at < 0 ? [] : [...w.keys()].filter((i) => i > at).concat([...w.keys()].filter((i) => i < at).reverse());
+              for (const i of near) { const n = plPlaceOf(keys, w[i], w.slice(0, i).filter((u) => u === w[i]).length); if (n >= 0) { j = n; gone = true; break; } }
+            }
             if (j < 0) return null;
             const order = [...keys.keys()].filter((i) => i >= j).concat([...keys.keys()].filter((i) => i < j).reverse());
             for (const i of order) {
               const row = $(`[data-srow="${i}"]`, box); if (!row || !row.getClientRects().length) continue;
-              if (i !== j) { const m = $(PL_MORE, row); if (can(m)) return { b: m, moved: true }; continue; }
+              if (i !== j || gone) { const m = $(PL_MORE, row); if (can(m)) return { b: m, moved: true }; continue; }
               let b = row.matches(f.kind) ? row : $(f.kind, row); if (b === row && row.matches(UNTAGGED)) keyable(row);
               if (!can(b) && f.alt) b = $(f.alt, row); if (!can(b)) b = $(PL_MORE, row);
               if (can(b)) return { b, moved: false };
@@ -419,7 +434,8 @@
           };
           const nowhere = () => { const now = document.activeElement; return !now || now === document.body || now === main; };
           const give = heldFocus || (rowWas && rowWas.song != null ? rowWas : null);
-          // (passed on to another song, it is scrolled into sight: preventScroll keeps the place otherwise)
-          if (give && nowhere()) { const to = plFocusIn(give); if (to) { to.b.focus({ preventScroll: true }); if (to.moved && !inSight(to.b)) to.b.scrollIntoView({ block: 'nearest', behavior: 'instant' }); } }
+          // (passed on to another song, it is scrolled into sight when the one it was on was in sight:
+          // preventScroll keeps the place otherwise)
+          if (give && nowhere()) { const to = plFocusIn(give); if (to) { to.b.focus({ preventScroll: true }); if (to.moved && (heldFocus ? heldSeen : rowSeen) && !inSight(to.b)) to.b.scrollIntoView({ block: 'nearest', behavior: 'instant' }); } }
           break;
         }
