@@ -379,11 +379,12 @@
   // before it hides; focus elsewhere stays. After a mouse it stays as it was, as a ⋯ menu's does, so
   // Space still plays or pauses (on the button it would open the panel again). (A button no longer
   // shown takes none. The copy's chip, gone with its copy after Close or Dismiss, hands it to the next
-  // control shown in the bar (Sound, or Zone when Sound is hidden): before, the focus fell to the page, with nothing focused)
+  // control shown in the bar: Sound, or the one after it shown; on a phone, whose bar shows none of
+  // them, Play. Before, the focus fell to the page, with nothing focused)
   const focusWasIn = (panel) => { const a = document.activeElement; return !!panel && keyedLast && (panel.contains(a) || !a || a === document.body); };
   const focusBack = (had, btn) => { if (had && btn && btn.isConnected && btn.getClientRects().length) btn.focus({ preventScroll: true }); };
   const jobPop = () => $('#jobpop');
-  const jobChipOrNext = () => { const c = $('#jobchip'); if (!c || !c.hidden) return c; return $$('.player-right button, .player-right input').find((b) => b !== c && !b.disabled && b.getClientRects().length) || null; };
+  const jobChipOrNext = () => { const c = $('#jobchip'); if (!c || !c.hidden) return c; return [...$$('.player-right button, .player-right input'), $('#toggle')].find((b) => b && b !== c && !b.disabled && b.getClientRects().length) || null; };
   const closeJobPop = (fromBack) => { const jp = jobPop(); if (!jp || jp.hidden) return; const had = focusWasIn(jp); jp.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); focusBack(had, jobChipOrNext()); };
   const hideJobChip = () => { const c = $('#jobchip'); if (c) c.hidden = true; };
   // An error line, as the node sends it: text, or {path, reason}
