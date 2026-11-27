@@ -223,6 +223,7 @@ ui-phone-mode.js phone-mode-shots
 ui-phone-songs.js phone-songs-shots
 ui-control-shortcuts.js control-shortcuts-shots
 ui-play-starting.js play-starting-shots
+ui-word-button-spin.js word-button-spin-shots
 ui-settings-jump-once.js settings-jump-once-shots
 ui-card-row-align.js card-row-align-shots
 ui-song-row-text-zoom.js song-row-text-zoom-shots

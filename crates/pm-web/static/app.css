@@ -497,9 +497,9 @@ html[data-shell="phone"] .hero-zone .lbl { display: none; }
 html[data-shell="phone"] .actions > .btn { min-height: 44px; }
 html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore, #qmenu) { min-width: 44px; padding-left: var(--sp-2h); padding-right: var(--sp-2h); justify-content: center; }
 /* (the narrowest phones: a playlist's Shuffle is its word, as on an album, so ⋯ stays on the row) */
-@media (max-width: 379px) { html[data-shell="phone"] .actions > #plshuffle > .ic { display: none; } }
+@media (max-width: 379px) { html[data-shell="phone"] .actions > #plshuffle > .ic { display: none; } html[data-shell="phone"] .actions > #plshuffle:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } html[data-shell="phone"] .actions > #plshuffle:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
 /* (and Songs' Play all is its word there, so the filter, Play all and + keep one row with a larger font size) */
-@media (max-width: 379px) { html[data-shell="phone"] .page-head .actions > #shuffle > .ic { display: none; } }
+@media (max-width: 379px) { html[data-shell="phone"] .page-head .actions > #shuffle > .ic { display: none; } html[data-shell="phone"] .page-head .actions > #shuffle:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } html[data-shell="phone"] .page-head .actions > #shuffle:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
 /* (and wherever the row is short for its words, on a narrow phone or with a larger font size: Shuffle drops its
    icon, then the row's gaps and Play's and Shuffle's sides tighten, then Play drops its icon, so ⋯ stays on the row;
    the rule above stays for WebViews without container queries. The steps count the words' width in ch, not em: the
@@ -517,13 +517,13 @@ html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) > div:not
 html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) h1 { font-size: var(--fs-xl); line-height: 1.2; overflow-wrap: anywhere; }
 html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) .sub { font-size: var(--fs-md); }
 html[data-shell="phone"] #main > .hero:has(> div > .actions > #plplay) .eyebrow { font-size: var(--fs-2xs); }
-@container plhero (width < calc(276px + 9.7ch)) { #plshuffle > .ic { display: none; } }
+@container plhero (width < calc(276px + 9.7ch)) { #plshuffle > .ic { display: none; } #plshuffle:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } #plshuffle:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
 @container plhero (width < calc(250px + 9.7ch)) {
   .actions:has(> #plplay) { gap: var(--sp-1); }
   :is(#plplay, #plshuffle) { padding-left: var(--sp-2h); padding-right: var(--sp-2h); }
   #plplay { gap: var(--sp-1h); }
 }
-@container plhero (width < calc(216px + 9.7ch)) { #plplay > .ic { display: none; } }
+@container plhero (width < calc(216px + 9.7ch)) { #plplay > .ic { display: none; } #plplay:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } #plplay:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
 /* (Android's font size in Chrome, as page zoom: 130 % on a 360 px phone lays the page out 277 px wide) */
 @container plhero (width < calc(190px + 9.7ch)) {
   .actions:has(> #plplay) { gap: var(--sp-0h); }
@@ -2329,6 +2329,12 @@ body.listener .np-tags, body.listener [data-sel="tag"], body.listener [data-sel=
 .starting::after, .is-spinning::after { content: ''; display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
 /* (in a button with words, as big as the icon it stands for: the button keeps its width) */
 .btn.starting::after, .btn.is-spinning::after { width: 14px; height: 14px; }
+/* (on a filled button its turning part is in the button's text colour: in the accent it vanished on the accent,
+   leaving a faint ring, which is all a words-only Play showed while the music started) */
+.btn.primary:is(.starting, .is-spinning)::after { border-color: color-mix(in srgb, var(--on-accent) 35%, transparent); border-top-color: var(--on-accent); }
+/* (and in a button that shows only its words, its icon left out for room on a narrow phone or with a larger
+   font size: the spinner stands over its words, which wait unseen, so the button keeps its width there too; it
+   was 26 px wider and pushed ⋯ to a line of its own. Beside each rule that leaves an icon out.) */
 .np-title.np-wait { display: flex; align-items: center; gap: var(--sp-1h); }
 /* A navigation on its way (navigate() in app.js): a thin bar along the top, then the page's skeleton */
 .navprog { position: fixed; z-index: var(--z-progress); top: env(safe-area-inset-top, 0px); left: 0; right: 0; height: 3px; overflow: hidden; pointer-events: none; }
@@ -2907,7 +2913,7 @@ html[data-shell="phone"] #main > .hero.item-hero .actions { gap: var(--sp-1); }
 html[data-shell="phone"] #main > .hero.item-hero .actions > #iplay { padding: 0 18px 0 var(--sp-3h); }
 html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle { padding: 0 var(--sp-3h); margin-left: var(--sp-1); }
 /* (the narrowest phones: Shuffle is its word, so the three icons keep their 48 px) */
-@media (max-width: 379px) { html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle > .ic { display: none; } }
+@media (max-width: 379px) { html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle > .ic { display: none; } html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
 /* (and wherever an album's or artist's row is short for its words, on a narrow phone or with a larger font
    size: Shuffle drops its icon, then Play's and Shuffle's sides tighten and the three icons go 48 → 44 px
    (three of them, so this frees more than a playlist's tighter gaps), then Play drops its icon, then the
@@ -2916,13 +2922,13 @@ html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle { padding:
    app's WebView applies Android's font size as text zoom (Chrome as page zoom, below), which grows the text and
    ch but leaves em as it was; 9.2ch is about 5.12em in Arial or Roboto.) */
 html[data-shell="phone"] #main > .hero.item-hero { container: ihero / inline-size; }
-@container ihero (width < calc(284px + 9.2ch)) { html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #ishuffle > .ic { display: none; } }
+@container ihero (width < calc(284px + 9.2ch)) { html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #ishuffle > .ic { display: none; } html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #ishuffle:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #ishuffle:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
 @container ihero (width < calc(258px + 9.2ch)) {
   html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > :is(#iplay, #ishuffle) { padding-left: var(--sp-2h); padding-right: var(--sp-2h); }
   html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #ishuffle { margin-left: 0; }
   html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > :is(#izone, #ifav, #imore) { width: 44px; min-width: 44px; height: 44px; }
 }
-@container ihero (width < calc(224px + 9.2ch)) { html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #iplay > .ic { display: none; } }
+@container ihero (width < calc(224px + 9.2ch)) { html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #iplay > .ic { display: none; } html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #iplay:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) > #iplay:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
 /* (Android's font size in Chrome, as page zoom: 130 % on a 360 px phone lays the page out 277 px wide) */
 @container ihero (width < calc(196px + 9.2ch)) {
   html[data-shell="phone"] #main > .hero.item-hero .actions:has(> #ishuffle) { gap: var(--sp-0h); }
