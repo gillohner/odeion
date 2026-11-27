@@ -168,7 +168,9 @@
     const r = el.getBoundingClientRect(); const m = main.getBoundingClientRect(); const cs = getComputedStyle(main);
     return r.top >= m.top + (parseFloat(cs.scrollPaddingTop) || 0) - 1 && r.bottom <= m.bottom - (parseFloat(cs.scrollPaddingBottom) || 0) + 1;
   };
-  const keepPlace = () => {
+  // `own`: the page's own draw puts the focus back (a collection's song control: on that song, not
+  // its place in the list, plFocusIn); here only the scroll and the height are kept
+  const keepPlace = (own) => {
     const a = document.activeElement; const top = main.scrollTop; const tall = main.scrollHeight;
     // (focus an earlier hold still waits to put back, its part not drawn yet, is wanted here too)
     const was = state.placeHold && state.placeHold.wants ? state.placeHold.wants() : null;
@@ -178,7 +180,7 @@
     const began = state.placeHold && state.placeHold.began;
     if (state.placeHold) state.placeHold();
     const at = (s) => { try { return $$(s, main); } catch { return []; } };
-    let inside = !!a && a !== main && main.contains(a); let sel = ''; let i = -1; let alt = null;
+    let inside = !own && !!a && a !== main && main.contains(a); let sel = ''; let i = -1; let alt = null;
     // (a heading that has the focus only because the page was opened (focusPage: data-navfocus, a
     // tabindex until it is left) is the same place on the new page: found without that mark, and
     // made focusable the same way there)

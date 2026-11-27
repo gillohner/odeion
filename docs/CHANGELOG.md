@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **In a collection, a change made on another device no longer moves the keyboard onto another song.** With the focus on a song's remove button, move button, row or ⋯ menu, another device removing or moving a song above it put the focus on whatever song now sat in that place, so the next Enter removed, moved or played a song you hadn't picked. The focus now stays on the same song wherever it went. If that song itself was removed, the focus goes to the next song's ⋯ menu (or the one before, if it was the last). And when the focus moves on to another song after you have scrolled away from it, the page no longer jumps back to it.
+
 ### 2026-11-26
 
 - **Song, album and artist pages use Pinakes's identities again, and show which public collections hold them.** Pinakes now sends a card's full read as one flat object (its facts, such as a song's MusicBrainz ID, ISRCs or an album's UPC, beside the card's other fields), while the node still looked for them in a nested `details` object it no longer gets. So a song or album link was not matched to the same recording in your library by MusicBrainz ID or ISRC, an album's UPC and an artist's MusicBrainz ID were missing from their pages, and an artist page found no upcoming concerts. The node reads both shapes now. The "In collections" row on an item page also never showed, because the node waited for a flag Pinakes does not send; it now shows when the card counts at least one public collection, and counts them from the card. Pinakes's collections pages (`{items, cursor}`) are read as Pinakes sends them, and `pm-node pinakes info` reads Pinakes's public `/v1/info` again.

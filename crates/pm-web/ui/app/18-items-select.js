@@ -262,10 +262,14 @@
   // list gives it back. In a song's row, to that song's row wherever the new list has it (its uri,
   // or a local song's id, and which copy of it: a hold means the node may have another song at
   // that place now, and a second Enter there would change that song), the same kind of control;
-  // nowhere if the song is gone. Elsewhere in the list, by its data attributes and its place
+  // the song gone, on to the next song still there, its ⋯ (plFocusIn). Elsewhere in the list, by its data attributes and its place
   // among its likes)
   const plKeysOf = (box) => (plShown && (box === 'pllocal' ? plShown.local : plShown.uris)) || [];
-  const plSongFocus = (box, keys, k, kind, alt) => (k >= 0 && k < keys.length ? { box, song: keys[k], copy: keys.slice(0, k).filter((u) => u === keys[k]).length, kind, alt } : null);
+  // (`was`: the list the song was in, so when it is gone the focus goes on to the next song of that
+  // list still there, plFocusIn)
+  const plSongFocus = (box, keys, k, kind, alt) => (k >= 0 && k < keys.length ? { box, song: keys[k], copy: keys.slice(0, k).filter((u) => u === keys[k]).length, kind, alt, was: keys } : null);
+  // (the place of a song's `copy`-th copy in `keys`, -1 when there is none)
+  const plPlaceOf = (keys, song, copy) => { for (let k = 0, c = 0; k < keys.length; k++) if (keys[k] === song && c++ === copy) return k; return -1; };
   // (a song's × from the keyboard: the focus goes on to the song after it, else the one before.
   // `hid`: the places a source chip hides; it skips those (the next song that shows, else the shown
   // one before). When none shows any more the chip goes off, and it's the next song again.
@@ -296,7 +300,8 @@
   // it failed) back where it was
   const plWrite = async (id, run, focus) => {
     if (plHeld(id)) return false;
-    const hold = { id, after: Infinity, focus: plFocusOf(document.activeElement) }; plHolds.set(id, hold); plHoldShow();
+    // (`from`: the song pressed, whose row decides whether the song the focus goes on to is scrolled into sight)
+    const hold = { id, after: Infinity, focus: plFocusOf(document.activeElement) }; hold.from = hold.focus; plHolds.set(id, hold); plHoldShow();
     const cut = new AbortController(); const limit = setTimeout(() => { cut.signal.why = new Error('The node didn’t answer in time; the collection updates once it does'); cut.abort(); }, PL_HOLD_MS);
     let ok = false;
     try { await run(cut.signal); ok = true; if (focus) hold.focus = focus; } catch (e) { toast(e.message, 'error'); } finally { clearTimeout(limit); }
