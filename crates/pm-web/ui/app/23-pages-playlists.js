@@ -359,6 +359,8 @@
           $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, dl: { kind: 'playlist', id: d.summary.id, online: songs.filter((t) => t.track_id == null && !t.card).length }, extra: [{ label: 'Rename…', icon: 'notes', own: true, run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', own: true, run: () => editField('description', 'Description', d.playlist.description) },
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
             ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete collection…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this collection?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true, danger: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Collection deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
+          // (a held Enter arms it once: its repeats don't say Really delete? yes)
+          if ($('#pldel')) $('#pldel').onkeydown = (e) => { if (e.repeat && (e.key === 'Enter' || e.key === ' ')) e.preventDefault(); };
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Collection deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
           // (Remove chosen from the keyboard in the row's ⋯ menu, as phones offer it: the menu gave the
           // focus back to that ⋯, so it goes on to the next song's ⋯, a card's if that one is a card)
@@ -368,6 +370,10 @@
             const onward = () => (localKeys.length ? plSongFocus('pllocal', localKeys, 0, PL_MORE) : null);
             const next = kb ? plNextFocus('plsongs', keys, k, 'button[data-rm]', undefined, hid) || onward() : menu ? plNextFocus('plsongs', keys, k, 'button[data-smore]', 'button[data-cmore]', hid) || onward() : null;
             return plWrite(plId, async (signal) => { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`, undefined, { signal }); state.plPf = null; }, next); });
+          // A held Enter or Space acts once: the focus handed on to the next song's × or ⋯ (either
+          // box) doesn't go on removing songs or open that song's menu (as Identify's Bring back all;
+          // a menu or dialog it opens ignores the repeats itself)
+          $$('#plsongs, #pllocal', main).forEach((box) => box.onkeydown = (e) => { if (e.repeat && (e.key === 'Enter' || e.key === ' ') && e.target.closest('button[data-rm], button[data-lrm], button[data-smore], button[data-cmore]')) e.preventDefault(); });
           // (pressed from the keyboard, the focus follows the song to its new place, so a second
           // press moves it on rather than moving the song that took its place back; not when the
           // focus went elsewhere while the move was saved; the list that ends the hold takes it there, heldFocus)
