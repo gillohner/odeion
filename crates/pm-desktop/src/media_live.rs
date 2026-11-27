@@ -3,7 +3,8 @@
 //! * The zone the page controls (`OdeionAndroid.controlling`) is followed on the node's
 //!   `/v1/events` WebSocket (a 3 s zone poll for an https node), and its state goes to the app's
 //!   side (`MediaControl.kt`) whenever it changes: metadata, state, position, volume; the cover is
-//!   fetched here (the node's own with the app's token; another site's over https only).
+//!   fetched here ([`media::fetch_art`]: the node's own with the app's token; another site's over
+//!   https only, never from a local address, each redirect checked the same way, size-capped).
 //! * The session's buttons (notification, lock screen, headset, Bluetooth) and the volume keys
 //!   call the node as the page does (`POST /v1/zones/{id}/transport`, `/volume`); for the page's
 //!   native player transport reaches the engine directly; next/previous still use the page's
@@ -361,28 +362,10 @@ impl Media {
         };
         let s = self.state().settings.clone();
         tauri::async_runtime::spawn(async move {
-            let bytes = async {
-                let s = s?;
-                let (url, auth) = media::art_request(&art, s.base())?;
-                let mut req = client()?.get(url);
-                if auth {
-                    req = req.bearer_auth(&s.token);
-                }
-                let mut resp = req.send().await.ok()?.error_for_status().ok()?;
-                if resp.content_length().is_some_and(|n| n > ART_MAX) {
-                    return None;
-                }
-                // Read up to the cap, whatever the length header says (or without one)
-                let mut b = Vec::new();
-                while let Some(chunk) = resp.chunk().await.ok()? {
-                    if (b.len() + chunk.len()) as u64 > ART_MAX {
-                        return None;
-                    }
-                    b.extend_from_slice(&chunk);
-                }
-                Some(b)
+            let bytes = match s {
+                Some(s) => media::fetch_art(&art, s.base(), &s.token).await,
+                None => None,
             }
-            .await
             .unwrap_or_default();
             native.art(&art, &bytes);
         });
@@ -1081,6 +1064,3 @@ impl Media {
         Ok(())
     }
 }
-
-/// The largest cover fetched.
-const ART_MAX: u64 = 2 * 1024 * 1024;

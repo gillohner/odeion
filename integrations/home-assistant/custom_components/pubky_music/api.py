@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
+from yarl import URL
 
 _LOGGER = logging.getLogger(__name__)
+
+# The largest cover taken from another site, and the most redirects one cover may take
+ART_MAX = 2 * 1024 * 1024
+ART_HOPS = 5
+# The longest one cover fetch takes, its redirects and body included (seconds)
+ART_WAIT = 20
+_REDIRECTS = (301, 302, 303, 307, 308)
 
 
 class NodeError(Exception):
@@ -48,6 +57,55 @@ def same_origin(url: str, base: str) -> bool:
     the node's."""
     a = _origin(url)
     return a is not None and a == _origin(base)
+
+
+def off_node_art_allowed(url: str) -> bool:
+    """Whether a cover may come from `url` when it is not the node's: over https only, without
+    user info, and never from an address of Home Assistant's own networks (loopback, private,
+    link-local, shared/CGNAT and the like) written in the URL. The host is read as aiohttp will
+    connect to it (yarl's, after IDNA mapping), not as it is written. A name is fetched only from
+    a server whose certificate holds it."""
+    try:
+        if "@" in urlsplit(url).netloc:
+            return False
+        u = URL(url)
+        u.port
+        host = u.raw_host
+    except (ValueError, TypeError, UnicodeError):
+        return False
+    if u.scheme.lower() != "https" or not host or u.raw_user is not None or u.raw_password is not None:
+        return False
+    host = host.lower().rstrip(".")
+    if not host or not host.isascii() or host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # A name. One whose last part is a number is an address in another spelling
+        # (`2130706433`, `0x7f.1`), which the system's resolver would take as such
+        last = host.rsplit(".", 1)[-1]
+        return ":" not in host and "%" not in host and not last.isdigit() and not last.startswith("0x")
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        elif ip in ipaddress.ip_network("64:ff9b::/96"):
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        elif int(ip) >> 32 == 0 or ip.is_site_local or ip in ipaddress.ip_network("64:ff9b:1::/48"):
+            # `::/96` (with the old IPv4-compatible form), site-local, local-use NAT64
+            return False
+    return ip.is_global and not ip.is_multicast
+
+
+async def _read_capped(resp: Any, cap: int) -> bytes | None:
+    """The body, or `None` once it is longer than `cap` (by its length header or as read)."""
+    if resp.content_length is not None and resp.content_length > cap:
+        return None
+    body = bytearray()
+    async for chunk in resp.content.iter_chunked(64 * 1024):
+        body += chunk
+        if len(body) > cap:
+            return None
+    return bytes(body)
 
 
 class PubkyMusicApi:
@@ -104,16 +162,38 @@ class PubkyMusicApi:
         return await self.request("DELETE", path)
 
     async def image(self, path: str) -> tuple[bytes | None, str | None]:
-        """An image from the node (covers need the token) or from anywhere else."""
+        """An image from the node (covers need the token), or another site's where
+        `off_node_art_allowed` lets it, at most `ART_MAX` bytes. Redirects are followed here, each
+        checked the same way: within the node while it has not left it, else only where another
+        site's cover may come from."""
         url = path if path.startswith("http") else f"{self.base}{path}"
-        headers = self.headers if same_origin(url, self.base) else {}
+        at_node = True
         try:
-            async with self._session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            async with asyncio.timeout(ART_WAIT):
+                return await self._image(url, at_node)
+        except (aiohttp.ClientError, TimeoutError, ValueError):
+            return None, None
+
+    async def _image(self, url: str, at_node: bool) -> tuple[bytes | None, str | None]:
+        for _ in range(ART_HOPS + 1):
+            at_node = at_node and same_origin(url, self.base)
+            if not at_node and not off_node_art_allowed(url):
+                return None, None
+            # Another site's cover as it is sent (no compression), so the cap counts its bytes
+            headers = self.headers if at_node else {"Accept-Encoding": "identity"}
+            async with self._session.get(
+                url, headers=headers, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=ART_WAIT)
+            ) as resp:
+                if resp.status in _REDIRECTS and resp.headers.get("Location"):
+                    url = urljoin(url, resp.headers["Location"])
+                    continue
                 if resp.status != 200:
                     return None, None
-                return await resp.read(), resp.content_type
-        except (aiohttp.ClientError, TimeoutError):
-            return None, None
+                if at_node:
+                    return await resp.read(), resp.content_type
+                body = await _read_capped(resp, ART_MAX)
+                return (body, resp.content_type) if body is not None else (None, None)
+        return None, None
 
 
 class NodeEvents:

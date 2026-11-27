@@ -619,8 +619,14 @@ pub fn page_allowed(origin: &str, allowed: &[String]) -> bool {
             .any(|a| !a.is_empty() && a == origin.trim_end_matches('/'))
 }
 
+/// The largest cover the app takes (the length header or, without one, the bytes read so far).
+pub const ART_MAX: u64 = 2 * 1024 * 1024;
+/// The most redirects one cover may take.
+const ART_HOPS: usize = 5;
+
 /// The cover's address as the app fetches it: the node's own (relative, or at its origin) with the
-/// app's token; another site's only over https, without it. `None`: not fetched.
+/// app's token; another site's only where [`off_node_art_allowed`] lets it, without the token.
+/// `None`: not fetched.
 pub fn art_request(art: &str, base: &str) -> Option<(String, bool)> {
     let base = base.trim_end_matches('/');
     if art.starts_with('/') && !art.starts_with("//") {
@@ -631,7 +637,144 @@ pub fn art_request(art: &str, base: &str) -> Option<(String, bool)> {
     if u.origin() == node.origin() {
         return Some((art.to_string(), true));
     }
-    (u.scheme() == "https").then(|| (art.to_string(), false))
+    off_node_art_allowed(&u).then(|| (art.to_string(), false))
+}
+
+/// Whether a cover may come from `u` when it is not the node's: over https only, without user
+/// info, and never from an address of the phone's own networks (loopback, private, link-local,
+/// shared/CGNAT and the like). A name is fetched only from a server whose certificate holds it.
+pub fn off_node_art_allowed(u: &url::Url) -> bool {
+    if u.scheme() != "https" || !u.username().is_empty() || u.password().is_some() {
+        return false;
+    }
+    match u.host() {
+        Some(url::Host::Domain(d)) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            !d.is_empty() && d != "localhost" && !d.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(a)) => public_v4(a),
+        Some(url::Host::Ipv6(a)) => public_v6(a),
+        None => false,
+    }
+}
+
+fn public_v4(a: std::net::Ipv4Addr) -> bool {
+    let [first, second, third, _] = a.octets();
+    !(first == 0
+        || a.is_loopback()
+        || a.is_private()
+        || a.is_link_local()
+        || (first == 100 && second & 0xc0 == 64)
+        || (first == 198 && second & 0xfe == 18)
+        || (first, second, third) == (192, 0, 0)
+        || a.is_documentation()
+        || a.is_multicast()
+        || first >= 240)
+}
+
+fn public_v6(a: std::net::Ipv6Addr) -> bool {
+    if let Some(v4) = a.to_ipv4_mapped() {
+        return public_v4(v4);
+    }
+    let s = a.segments();
+    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        // NAT64: the IPv4 address it stands for
+        return public_v4(std::net::Ipv4Addr::from(
+            (u32::from(s[6]) << 16) | u32::from(s[7]),
+        ));
+    }
+    // `::/96` (unspecified, loopback and the old IPv4-compatible form), unique local, link-local,
+    // site-local and local-use NAT64
+    !(s[..6] == [0; 6]
+        || a.is_multicast()
+        || s[0] & 0xfe00 == 0xfc00
+        || s[0] & 0xffc0 == 0xfe80
+        || s[0] & 0xffc0 == 0xfec0
+        || s[..3] == [0x64, 0xff9b, 1])
+}
+
+/// Where one more redirect of a cover fetch may go: `Some(true)` within the node while the fetch
+/// has not left it (`at_node`; the token goes with it), `Some(false)` to another site where
+/// [`off_node_art_allowed`] lets it (without the token), `None` nowhere: the fetch ends. Once a
+/// fetch has left the node it never comes back to it with the token.
+pub fn art_hop(at_node: bool, next: &url::Url, base: &str) -> Option<bool> {
+    hop(at_node, next, base, off_node_art_allowed)
+}
+
+/// [`art_hop`] with the rule for another site's address (tests stand a local server in for one).
+fn hop(at_node: bool, next: &url::Url, base: &str, elsewhere: fn(&url::Url) -> bool) -> Option<bool> {
+    let node = url::Url::parse(base.trim_end_matches('/')).ok()?;
+    if at_node && next.origin() == node.origin() {
+        return Some(true);
+    }
+    elsewhere(next).then_some(false)
+}
+
+/// The client covers are fetched with. It follows no redirect itself: [`fetch_art`] does, one by
+/// one, so that each is checked and the token is sent only while the fetch is at the node.
+pub fn art_client() -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(4))
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent(concat!("pubky-music-desktop/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()
+}
+
+/// The cover at `art` (the queue item's art: a node path or an address), at most [`ART_MAX`]
+/// bytes, within [`ART_WAIT`] in all. Redirects are followed here (at most [`ART_HOPS`]), each
+/// checked with [`art_hop`]. `None`: not fetched, refused, or not the cover.
+pub async fn fetch_art(art: &str, base: &str, token: &str) -> Option<Vec<u8>> {
+    tokio::time::timeout(ART_WAIT, fetch_art_now(art, base, token, off_node_art_allowed))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The longest one cover fetch takes, its redirects and body included.
+const ART_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn fetch_art_now(
+    art: &str,
+    base: &str,
+    token: &str,
+    elsewhere: fn(&url::Url) -> bool,
+) -> Option<Vec<u8>> {
+    let (first, mut at_node) = art_request(art, base)?;
+    let client = art_client()?;
+    let mut url = url::Url::parse(&first).ok()?;
+    let mut hops = 0;
+    let mut resp = loop {
+        let mut req = client.get(url.clone());
+        if at_node {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await.ok()?;
+        if !resp.status().is_redirection() {
+            break resp;
+        }
+        hops += 1;
+        if hops > ART_HOPS {
+            return None;
+        }
+        let location = resp.headers().get(reqwest::header::LOCATION)?.to_str().ok()?;
+        let next = url.join(location).ok()?;
+        at_node = hop(at_node, &next, base, elsewhere)?;
+        url = next;
+    };
+    if !resp.status().is_success() || resp.content_length().is_some_and(|n| n > ART_MAX) {
+        return None;
+    }
+    // Read up to the cap, whatever the length header says (or without one)
+    let mut b = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if (b.len() + chunk.len()) as u64 > ART_MAX {
+            return None;
+        }
+        b.extend_from_slice(&chunk);
+    }
+    Some(b)
 }
 
 /// What one audio focus change does to the phone's own players. `ducks`: Android lowers this
@@ -1054,6 +1197,230 @@ mod tests {
         assert_eq!(art_request("http://other.example/x.jpg", base), None);
         assert_eq!(art_request("//other.example/x.jpg", base), None);
         assert_eq!(art_request("file:///etc/passwd", base), None);
+    }
+
+    #[test]
+    fn covers_from_elsewhere_never_come_from_an_address_on_the_phones_networks() {
+        let base = "http://192.168.1.10:7788";
+        for art in [
+            "https://127.0.0.1/x.jpg",
+            "https://127.1/x.jpg",
+            "https://2130706433/x.jpg",
+            "https://0x7f.1/x.jpg",
+            "https://0.0.0.0/x.jpg",
+            "https://10.0.0.1/x.jpg",
+            "https://172.16.0.1/x.jpg",
+            "https://192.168.1.1/x.jpg",
+            "https://169.254.169.254/x.jpg",
+            "https://100.64.0.1/x.jpg",
+            "https://100.127.255.254/x.jpg",
+            "https://224.0.0.1/x.jpg",
+            "https://255.255.255.255/x.jpg",
+            "https://[::1]/x.jpg",
+            "https://[::]/x.jpg",
+            "https://[fe80::1]/x.jpg",
+            "https://[fd00::1]/x.jpg",
+            "https://[::ffff:127.0.0.1]/x.jpg",
+            "https://[::ffff:192.168.1.1]/x.jpg",
+            "https://[64:ff9b::a00:1]/x.jpg",
+            "https://[64:ff9b:1::1]/x.jpg",
+            "https://[::7f00:1]/x.jpg",
+            "https://[fec0::1]/x.jpg",
+            "https://198.18.0.1/x.jpg",
+            "https://192.0.0.1/x.jpg",
+            "https://１２７．０．０．１/x.jpg",
+            "https://127。0。0。1/x.jpg",
+            "https://ｌｏｃａｌｈｏｓｔ/x.jpg",
+            "https://localhost/x.jpg",
+            "https://LOCALHOST./x.jpg",
+            "https://printer.localhost/x.jpg",
+            "https://user@images.example/x.jpg",
+            "https://user:pw@images.example/x.jpg",
+        ] {
+            assert_eq!(art_request(art, base), None, "{art}");
+        }
+        for art in [
+            "https://8.8.8.8/x.jpg",
+            "https://100.128.0.1/x.jpg",
+            "https://[2606:4700::1111]/x.jpg",
+            "https://coverartarchive.org/release/x/front-250",
+        ] {
+            assert_eq!(art_request(art, base), Some((art.into(), false)), "{art}");
+        }
+    }
+
+    #[test]
+    fn a_cover_redirect_is_followed_only_where_a_cover_may_come_from() {
+        let base = "http://192.168.1.10:7788";
+        let u = |s: &str| url::Url::parse(s).unwrap();
+        // Within the node (with the token), or out to another site over https (without it)
+        assert_eq!(
+            art_hop(true, &u("http://192.168.1.10:7788/v1/art/7"), base),
+            Some(true)
+        );
+        assert_eq!(
+            art_hop(true, &u("https://ia800.us.archive.org/x.jpg"), base),
+            Some(false)
+        );
+        assert_eq!(
+            art_hop(false, &u("https://ia800.us.archive.org/x.jpg"), base),
+            Some(false)
+        );
+        // Never to plain http elsewhere, nor to an address on the phone's networks
+        for to in [
+            "http://images.example/x.jpg",
+            "http://192.168.1.10:7789/x",
+            "https://127.0.0.1/x",
+            "https://192.168.1.1/x",
+            "https://[::1]/x",
+        ] {
+            assert_eq!(art_hop(true, &u(to), base), None, "{to}");
+            assert_eq!(art_hop(false, &u(to), base), None, "{to}");
+        }
+        // Once it has left the node, it does not come back to it
+        assert_eq!(art_hop(false, &u("http://192.168.1.10:7788/v1/x"), base), None);
+    }
+
+    /// A small HTTP server on 127.0.0.1: answers each request by its path with `answer`, and counts
+    /// the connections it took.
+    fn serve(
+        answer: impl Fn(&str, &str) -> Vec<u8> + Send + Sync + 'static,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        let answer = std::sync::Arc::new(answer);
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { continue };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let answer = answer.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(conn.try_clone().unwrap());
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_err() {
+                        return;
+                    }
+                    let path = line.split(' ').nth(1).unwrap_or("").to_string();
+                    let mut auth = String::new();
+                    loop {
+                        let mut h = String::new();
+                        if reader.read_line(&mut h).unwrap_or(0) == 0 || h == "\r\n" {
+                            break;
+                        }
+                        if h.to_ascii_lowercase().starts_with("authorization:") {
+                            auth = h[14..].trim().to_string();
+                        }
+                    }
+                    let _ = conn.write_all(&answer(&path, &auth));
+                });
+            }
+        });
+        (base, hits)
+    }
+
+    fn ok(body: &[u8]) -> Vec<u8> {
+        let mut r = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: image/jpeg\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        r.extend_from_slice(body);
+        r
+    }
+
+    fn moved(to: &str) -> Vec<u8> {
+        format!("HTTP/1.1 302 Found\r\nlocation: {to}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn the_nodes_cover_comes_with_the_token_and_redirects_within_the_node() {
+        let (base, _) = serve(|path, auth| match (path, auth) {
+            ("/v1/library/albums/7/cover", "Bearer t") => ok(b"img"),
+            ("/v1/moved", "Bearer t") => moved("/v1/library/albums/7/cover"),
+            _ => b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
+        });
+        assert_eq!(
+            fetch_art("/v1/library/albums/7/cover", &base, "t")
+                .await
+                .as_deref(),
+            Some(&b"img"[..])
+        );
+        assert_eq!(
+            fetch_art("/v1/moved", &base, "t").await.as_deref(),
+            Some(&b"img"[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cover_redirect_to_plain_http_or_a_local_address_is_not_followed() {
+        // Another server on the phone's network, which would answer with a picture
+        let (other, other_hits) = serve(|_, _| ok(b"local"));
+        let other_port = other.rsplit(':').next().unwrap().to_string();
+        let to_http = format!("{other}/x.jpg");
+        let to_https = format!("https://127.0.0.1:{other_port}/x.jpg");
+        let (base, _) = serve(move |path, _| match path {
+            "/v1/to-http" => moved(&to_http),
+            "/v1/to-local" => moved(&to_https),
+            _ => ok(b"img"),
+        });
+        assert_eq!(fetch_art("/v1/to-http", &base, "t").await, None);
+        assert_eq!(fetch_art("/v1/to-local", &base, "t").await, None);
+        assert_eq!(
+            other_hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "never asked"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_token_never_follows_a_cover_off_the_node() {
+        // Another site that redirects once more on itself; here a local server stands in for it
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let (other, _) = serve(move |path, auth| {
+            log.lock().unwrap().push(format!("{path} {auth}"));
+            if path == "/a" {
+                moved("/b")
+            } else {
+                ok(b"art")
+            }
+        });
+        let to = format!("{other}/a");
+        let (base, _) = serve(move |path, _| match path {
+            "/v1/away" => moved(&to),
+            _ => ok(b"img"),
+        });
+        let elsewhere = |u: &url::Url| u.host_str() == Some("127.0.0.1");
+        let got = fetch_art_now("/v1/away", &base, "t", elsewhere).await;
+        assert_eq!(got.as_deref(), Some(&b"art"[..]));
+        assert_eq!(*seen.lock().unwrap(), ["/a ", "/b "], "no token on either hop");
+    }
+
+    #[tokio::test]
+    async fn a_cover_over_the_size_cap_is_refused() {
+        let big = vec![0u8; ART_MAX as usize + 1];
+        let fits = vec![0u8; ART_MAX as usize];
+        let (base, _) = serve(move |path, _| match path {
+            "/v1/big" => ok(&big),
+            "/v1/fits" => ok(&fits),
+            // No length header: the body ends when the connection closes
+            _ => {
+                let mut r =
+                    b"HTTP/1.1 200 OK\r\ncontent-type: image/jpeg\r\nconnection: close\r\n\r\n".to_vec();
+                r.extend(std::iter::repeat_n(0u8, ART_MAX as usize + 1));
+                r
+            }
+        });
+        assert_eq!(fetch_art("/v1/big", &base, "t").await, None);
+        assert_eq!(fetch_art("/v1/unsized", &base, "t").await, None);
+        assert_eq!(
+            fetch_art("/v1/fits", &base, "t").await.map(|b| b.len()),
+            Some(ART_MAX as usize)
+        );
     }
 
     #[test]
