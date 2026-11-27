@@ -42,8 +42,8 @@ async function run(browser, width) {
       const open = async () => {
         await reset();
         await page.locator(btn).click(); await page.locator(pop).waitFor({ timeout: 3000 }).catch(() => {});
-        // (the key goes to the button that opened it. The volume popover puts the focus on its slider,
-        // which owns the keys as before: there, the popover closes on these keys only once the focus left it)
+        // (the key goes to the button that opened it. The volume popover puts the focus on its slider:
+        // the keys pressed there are tools/ui-control-shortcuts.js's)
         await page.locator(btn).focus();
         return shown(pop);
       };
