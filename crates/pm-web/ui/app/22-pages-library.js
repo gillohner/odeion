@@ -219,6 +219,12 @@
           const f = await loadFavourites();
           if (state.view !== 'favourites') return;
           const none = !f.albums.length && !f.tracks.length && !f.artists.length && !f.other.length;
+          // (an empty page says whether the owner's are kept on their homeserver: opened first, before
+          // the node was asked whether it is signed in with Pubky, it asks, for 1.5 s at most)
+          if (none && !isListener() && state.pubkyUser === undefined) {
+            await Promise.race([pubkyUser(), new Promise((r) => setTimeout(r, 1500))]);
+            if (state.view !== 'favourites') return;
+          }
           // A listener's are on their own homeserver: connect it, approve it again, or what waits
           const hs = f.homeserver;
           const hsNote = !hs ? '' : !hs.connected ? `<div class="notice" id="hsnote"><p>Your bookmarks are kept on your own homeserver. Connect it once (one approval in Pubky Ring), then the hearts here are yours.</p><button class="btn primary" data-hsconnect>Connect your homeserver</button></div>`
