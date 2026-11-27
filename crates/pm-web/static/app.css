@@ -494,6 +494,8 @@ html[data-shell="phone"] .actions > .btn { min-height: 44px; }
 html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore, #qmenu) { min-width: 44px; padding-left: var(--sp-2h); padding-right: var(--sp-2h); justify-content: center; }
 /* (the narrowest phones: a playlist's Shuffle is its word, as on an album, so ⋯ stays on the row) */
 @media (max-width: 379px) { html[data-shell="phone"] .actions > #plshuffle > .ic { display: none; } }
+/* (and Songs' Play all is its word there, so the filter, Play all and + keep one row with a larger font size) */
+@media (max-width: 379px) { html[data-shell="phone"] .page-head .actions > #shuffle > .ic { display: none; } }
 /* (and wherever the row is short for its words, on a narrow phone or with a larger font size: Shuffle drops its
    icon, then the row's gaps and Play's and Shuffle's sides tighten, then Play drops its icon, so ⋯ stays on the row;
    the rule above stays for WebViews without container queries. The steps count the words' width in ch, not em: the
