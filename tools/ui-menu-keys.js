@@ -317,7 +317,7 @@ async function npPanels(browser, width) {
     if (!await onQueue()) { await fx.go(page, '/queue'); await page.locator('.list.queue .list-row').nth(2).waitFor(); await page.waitForTimeout(300); }
   };
   const openNp = async () => { if (!await npShown(page)) { await page.keyboard.press('n'); await page.locator('#nowplaying').waitFor({ timeout: 3000 }).catch(() => {}); await page.waitForTimeout(300); } return npShown(page); };
-  // (opened by a click, the key pressed on the button that opened it: the volume's slider owns the keys)
+  // (opened by a click, the key pressed on the button that opened it; on the volume's slider, see ui-control-shortcuts.js)
   const openPanel = async (btn, pop) => { await page.locator(btn).click(); await page.locator(pop).waitFor({ timeout: 3000 }).catch(() => {}); await page.locator(btn).focus(); return vis(pop); };
   try {
     await fx.go(page, '/queue');

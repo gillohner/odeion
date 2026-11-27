@@ -265,7 +265,11 @@
   });
   document.addEventListener('keydown', (e) => {
     if (e.defaultPrevented) return;
-    const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
+    // A field you type in keeps every key. A slider, switch or tick box takes no typed characters, so
+    // there /, N and ? are still Search, Now playing and Help (the volume popover opens with the focus
+    // on its slider: they did nothing there). Space and the arrows stay the control's own
+    const noText = e.target.tagName === 'INPUT' && ['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file', 'image'].includes(e.target.type);
+    const typing = (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) && !(noText && (e.key === '/' || e.key === '?' || e.key.toLowerCase() === 'n'));
     // Escape closes what is on top: a panel or menu, else the phone's sheet, else Now playing
     if (e.key === 'Escape') {
       if (document.querySelector('dialog[open]')) return; // (it closes itself, and only itself)
