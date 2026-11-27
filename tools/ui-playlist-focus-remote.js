@@ -14,6 +14,20 @@
 // 3b. The same when every read after the Remove is overtaken by the next library change for longer
 //    than the hold's 30 s (an import, a busy node): the hold's end draws it, the focus on Delta's ⋯.
 //    (A computer only: phones hand on to the ⋯ in any case. The hold's 30 s run as 3 s here.)
+// 4. Another device moves the focused song far down the list: the focus stays on that song's control
+//    and, as its row was in sight, the page follows it there (it was left off screen). Moved back up
+//    while they had scrolled away from it, the page stays where they put it.
+// 5. Another device shortens the list below (the page keeps its height a moment, a spacer at the
+//    foot), then removes the focused song, whose row they had scrolled just past: the focus goes on to
+//    the next song's ⋯ and the page stays put. (Whether the row was in sight was judged after the
+//    spacer went, on a page that had scrolled, so the page jumped to that song.)
+// 6. Another device removes the last song on this node only: the section goes, and the focus goes to
+//    the Songs card's last song, its ⋯ (it fell to the page). The Songs card's last song removed while
+//    songs on this node only are left (the card hides): to the first of those, its ⋯.
+// 6b. Another device replaces the whole list at once (none of the songs around it left): the focus goes
+//    to the song now at its place, its ⋯, not to the page.
+// (Part 1's `row` cases pass without the fix in #905 too: a row already found its song by its
+// data-np there; the ×, ⋯ and Move cases are the ones that guard it.)
 // At 360 (browser and the Android app), 412 and 1280 px.
 //   node tools/ui-playlist-focus-remote.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -30,9 +44,11 @@ const song = (id, title) => ({ ...fx.track, id, title, canonical_uri: `https://m
 // Alpha, Charlie and Echo play from the library, Bravo and Delta from TIDAL
 const SONGS = { A: song(1, 'Alpha'), B: song(2, 'Bravo'), C: song(3, 'Charlie'), D: song(4, 'Delta'), E: song(5, 'Echo') };
 const FROM = { A: 'library', B: 'tidal', C: 'library', D: 'tidal', E: 'library' };
-const NAMES = { r1: 'Changed above', r3: 'Removed itself', r5: 'Scrolled away', r6: 'Asked again' };
+const NAMES = { r1: 'Changed above', r3: 'Removed itself', r5: 'Scrolled away', r6: 'Asked again', r7: 'Moved far', r8: 'Spacer below', r9: 'Node only' };
+// Songs on this node only (not identified yet): found by their own id
+const LOCAL = { L: { ...fx.track, id: 91, title: 'Lima', canonical_uri: null, mbid: null }, M: { ...fx.track, id: 92, title: 'Mike', canonical_uri: null, mbid: null } };
 const sum = (id, n) => ({ ...fx.summary, id, name: NAMES[id], items: n });
-const detailOf = (id, keys) => ({ summary: sum(id, keys.length), playlist: { ...sum(id, keys.length), items: keys.map((k) => ({ uri: SONGS[k].canonical_uri })) }, tracks: keys.map((k) => (FROM[k] === 'library' ? SONGS[k] : null)), entries: keys.map((k) => ({ kind: 'track', uri: SONGS[k].canonical_uri })), local_tracks: [] });
+const detailOf = (id, keys, local = []) => ({ summary: sum(id, keys.length + local.length), playlist: { ...sum(id, keys.length + local.length), items: keys.map((k) => ({ uri: SONGS[k].canonical_uri })) }, tracks: keys.map((k) => (FROM[k] === 'library' ? SONGS[k] : null)), entries: keys.map((k) => ({ kind: 'track', uri: SONGS[k].canonical_uri })), local_tracks: local.map((k) => LOCAL[k]) });
 const pfOf = (keys) => ({ order: { order: ['library', 'tidal'], services: [{ id: 'library', name: 'Your library', connected: true }, { id: 'tidal', name: 'TIDAL', connected: true }] }, own_order: false, items: keys.map((k, i) => ({ index: i, uri: SONGS[k].canonical_uri, title: SONGS[k].title, artist: 'Sefa', duration_ms: 240000, track_id: FROM[k] === 'library' ? SONGS[k].id : null, stream_uri: FROM[k] === 'tidal' ? `tidal:track:${SONGS[k].id}` : null, plays_from: { service: FROM[k], label: FROM[k] === 'library' ? 'Your library' : 'TIDAL' }, sources: [] })) });
 const json = (r, body) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
 
@@ -42,7 +58,8 @@ async function run(browser, width, android) {
   if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android' }; });
   // (window.__fastHold: a 30 s timer (a collection change's hold) runs 3 s)
   await context.addInitScript(() => { const st = window.setTimeout; window.setTimeout = (f, ms, ...a) => st(f, window.__fastHold && ms === 30000 ? 3000 : ms, ...a); });
-  const lists = { r1: ['A', 'B', 'C', 'D'], r3: ['A', 'B', 'C', 'D'], r5: [...Array(20).fill('C'), 'A', 'B', ...Array(24).fill('D')], r6: ['A', 'B', 'C', 'D'] };
+  const lists = { r1: ['A', 'B', 'C', 'D'], r3: ['A', 'B', 'C', 'D'], r5: [...Array(20).fill('C'), 'A', 'B', ...Array(24).fill('D')], r6: ['A', 'B', 'C', 'D'], r7: ['A', ...Array(24).fill('C'), 'E'], r8: [...Array(10).fill('D'), 'A', 'B', ...Array(20).fill('C')], r9: ['A', 'B'] };
+  const locals = { r9: ['L'] };
   // pfSlow: the next play-from answers wait; pfStale: the next ones (pfStaleN, 1 by default) are for
   // this list, not the node's;
   // detailWait: the next reads of the list wait this long each (one entry per read)
@@ -57,7 +74,7 @@ async function run(browser, width, android) {
     if (m === 'DELETE' && sub.startsWith('items/')) { asks.push(`${id} DELETE`); lists[id].splice(Number(sub.split('/')[1]), 1); return json(r, {}); }
     if (m !== 'GET') return r.fallback();
     if (sub === 'play-from') { asks.push(`${id} play-from`); const keys = pfStale || [...lists[id]]; if (--pfStaleN <= 0) { pfStale = null; pfStaleN = 1; } const wait = pfSlow; if (wait) await sleep(wait); return json(r, pfOf(keys)); }
-    if (!sub) { asks.push(`${id} read`); const wait = detailWait.shift(); if (wait) await sleep(wait); return json(r, detailOf(id, lists[id])); }
+    if (!sub) { asks.push(`${id} read`); const wait = detailWait.shift(); if (wait) await sleep(wait); return json(r, detailOf(id, lists[id], locals[id])); }
     return r.fallback();
   });
   await page.route('**/v1/playlists', (r) => (r.request().method() === 'GET' ? json(r, Object.keys(NAMES).map((id) => sum(id, lists[id].length))) : r.fallback()));
@@ -74,6 +91,16 @@ async function run(browser, width, android) {
   // (in sight: wholly inside the page's own scrolling part)
   const inSight = () => page.evaluate(() => { const a = document.activeElement; const m = document.querySelector('main'); if (!a || !m) return false; const r = a.getBoundingClientRect(); const b = m.getBoundingClientRect(); return r.height > 0 && r.top >= b.top - 1 && r.bottom <= Math.min(b.bottom, innerHeight) + 1; });
   const kind = phone ? 'smore' : 'rm';
+  // (either box: "box:Name:kind")
+  const where = () => page.evaluate(() => {
+    const a = document.activeElement; const row = a && a.closest && a.closest('#plsongs .srow, #pllocal .srow');
+    if (!row) return a ? `${a.tagName.toLowerCase()}${a.id ? '#' + a.id : ''}` : 'none';
+    const n = row.querySelector('.name'); const k = a === row ? 'row' : a.dataset.smore != null ? 'smore' : a.dataset.lrm != null ? 'lrm' : a.dataset.rm != null ? 'rm' : a.tagName.toLowerCase();
+    return `${row.closest('section').id}:${n.textContent.trim().split(/\s/)[0]}:${k}`;
+  });
+  const scrollTop = () => page.evaluate(() => document.querySelector('main').scrollTop);
+  // (a control focused where it is, the page not scrolled to it)
+  const focusStill = (sel) => page.evaluate((x) => document.querySelector(x).focus({ preventScroll: true }), sel);
   const open = async (id, want) => {
     await page.evaluate((x) => { const st = { v: 'playlist', arg: x }; history.pushState(st, '', `/playlist/${x}`); dispatchEvent(new PopStateEvent('popstate', { state: st })); }, id);
     return until(async () => (await page.textContent('main h1').catch(() => '')) === NAMES[id] && (await all()) === want && !(await pending()), 5000);
@@ -195,6 +222,83 @@ async function run(browser, width, android) {
       await until(async () => (await focused()) === 'Delta:smore', 2000);
       check((await focused()) === 'Delta:smore', `${t2}: the focus is on Delta, its ⋯, not its × (${await focused()})`);
       await page.evaluate(() => { window.__fastHold = false; });
+    }
+
+    // 4. Alpha, at the top and in sight, moved to the foot by another device: the focus stays on its
+    // control, and the page follows it; moved back up while they had scrolled away: the page stays
+    {
+      const t2 = `${tag} (moved far)`; lists.r7 = ['A', ...Array(24).fill('C'), 'E'];
+      check(await open('r7', lists.r7.map((k) => SONGS[k].title).join(',')), `${t2}: the collection opens`);
+      await focusOn(0, kind);
+      check((await focused()) === `Alpha:${kind}` && (await inSight()), `${t2}: the focus is on Alpha's ${kind}, in sight (${await focused()})`);
+      check(await remote('r7', [...Array(24).fill('C'), 'E', 'A'], [...Array(24).fill('Charlie'), 'Echo', 'Alpha'].join(',')), `${t2}: another device moves Alpha to the foot`);
+      await sleep(300);
+      check((await focused()) === `Alpha:${kind}`, `${t2}: the focus stays on Alpha's ${kind} (${await focused()})`);
+      check(await inSight(), `${t2}: the page follows it to the foot, Alpha's ${kind} in sight (scrollTop ${await scrollTop()})`);
+      await page.screenshot({ path: path.join(SHOTS, `after-moved-far-${tag}.png`) });
+      await page.evaluate(() => document.querySelector('#plsongs .srow[data-srow="12"]').scrollIntoView({ block: 'start', behavior: 'instant' }));
+      check(!(await inSight()), `${t2}: they scroll up to the middle, Alpha out of sight`);
+      const before = await scrollTop();
+      check(await remote('r7', ['C', 'A', ...Array(23).fill('C'), 'E'], ['Charlie', 'Alpha', ...Array(23).fill('Charlie'), 'Echo'].join(',')), `${t2}: another device moves Alpha back near the top`);
+      await sleep(300);
+      const after = await scrollTop();
+      check((await focused()) === `Alpha:${kind}` && Math.abs(after - before) <= 2, `${t2}: the focus stays on Alpha and the page where they scrolled it (${await focused()}; scrollTop ${before} → ${after})`);
+    }
+
+    // 5. A spacer below (another device removed the 20 songs at the foot), Alpha's row scrolled just
+    // past at the top; then another device removes Alpha: on to Bravo's ⋯, the page stays put
+    {
+      const t2 = `${tag} (spacer below)`; lists.r8 = [...Array(10).fill('D'), 'A', 'B', ...Array(20).fill('C')];
+      check(await open('r8', lists.r8.map((k) => SONGS[k].title).join(',')), `${t2}: the collection opens`);
+      // (Bravo's row, the one after Alpha, also wholly above the page's top edge and its sticky head)
+      await page.evaluate(() => { const m = document.querySelector('main'); const row = document.querySelector('#plsongs .srow[data-srow="11"]'); const r = row.getBoundingClientRect(); m.scrollTop = Math.round(r.bottom - m.getBoundingClientRect().top + m.scrollTop + 70); });
+      await focusStill(`#plsongs .srow[data-srow="10"] [data-${kind}]`);
+      check((await focused()) === `Alpha:${kind}` && !(await inSight()), `${t2}: the focus is on Alpha's ${kind}, scrolled just past (${await focused()})`);
+      const top0 = await scrollTop();
+      check(await remote('r8', [...Array(10).fill('D'), 'A', 'B'], [...Array(10).fill('Delta'), 'Alpha', 'Bravo'].join(',')), `${t2}: another device removes the 20 songs at the foot`);
+      await sleep(300);
+      const spacer = await page.evaluate(() => document.querySelector('main').hasAttribute('data-hold'));
+      check(spacer && Math.abs((await scrollTop()) - top0) <= 2 && (await focused()) === `Alpha:${kind}`, `${t2}: the page keeps its height and place, the focus on Alpha (spacer ${spacer}; scrollTop ${top0} → ${await scrollTop()}; ${await focused()})`);
+      check(await remote('r8', [...Array(10).fill('D'), 'B'], [...Array(10).fill('Delta'), 'Bravo'].join(',')), `${t2}: another device removes Alpha`);
+      await until(async () => (await focused()) === 'Bravo:smore', 2000);
+      await sleep(200);
+      const top1 = await scrollTop();
+      check((await focused()) === 'Bravo:smore', `${t2}: the focus goes on to Bravo, its ⋯ (${await focused()})`);
+      check(Math.abs(top1 - top0) <= 2 && !(await inSight()), `${t2}: the page stays where they scrolled it, not to Bravo (scrollTop ${top0} → ${top1})`);
+      await page.screenshot({ path: path.join(SHOTS, `after-spacer-below-${tag}.png`) });
+    }
+
+    // 6. On this node only: its last song removed by another device, then the Songs card's last one
+    {
+      const t2 = `${tag} (node only)`; const lk = phone ? 'smore' : 'lrm';
+      lists.r9 = ['A', 'B']; locals.r9 = ['L'];
+      check(await open('r9', 'Alpha,Bravo') && await until(() => page.locator('#pllocal .srow').first().isVisible().catch(() => false), 3000), `${t2}: the collection opens, Lima on this node only`);
+      await page.locator(`#pllocal .srow[data-srow="0"] [data-${lk}]`).focus();
+      check((await where()) === `pllocal:Lima:${lk}`, `${t2}: the focus is on Lima's ${lk} (${await where()})`);
+      locals.r9 = []; socket.send(JSON.stringify({ type: 'library_changed' }));
+      check(await until(() => page.evaluate(() => !document.querySelector('#pllocal')), 4000), `${t2}: another device removes Lima, the section goes`);
+      await until(async () => (await where()) === 'plsongs:Bravo:smore', 2000);
+      check((await where()) === 'plsongs:Bravo:smore', `${t2}: the focus goes to Bravo, the Songs card's last song, its ⋯ (${await where()})`);
+      await page.screenshot({ path: path.join(SHOTS, `after-node-only-gone-${tag}.png`) });
+      lists.r9 = ['A']; locals.r9 = ['L', 'M'];
+      check(await open('r9', 'Alpha') && await until(async () => (await page.locator('#pllocal .srow').count()) === 2, 3000), `${t2}: Alpha in Songs, Lima and Mike on this node only`);
+      await focusOn(0, kind);
+      check((await where()) === `plsongs:Alpha:${kind}`, `${t2}: the focus is on Alpha's ${kind} (${await where()})`);
+      lists.r9 = []; socket.send(JSON.stringify({ type: 'library_changed' }));
+      check(await until(() => page.evaluate(() => { const b = document.querySelector('#plsongs'); return !!b && b.hidden; }), 4000), `${t2}: another device removes Alpha, the Songs card hides`);
+      await until(async () => (await where()) === 'pllocal:Lima:smore', 2000);
+      check((await where()) === 'pllocal:Lima:smore', `${t2}: the focus goes to Lima, the first song on this node only, its ⋯ (${await where()})`);
+    }
+
+    // 6b. The whole list replaced at once, the focus on Bravo (the second song): on to Delta, now second, its ⋯
+    {
+      const t2 = `${tag} (replaced)`; lists.r9 = ['A', 'B', 'C']; locals.r9 = [];
+      check(await open('r9', 'Alpha,Bravo,Charlie'), `${t2}: the collection opens (${await all()})`);
+      await focusOn(1, kind);
+      check((await focused()) === `Bravo:${kind}`, `${t2}: the focus is on Bravo's ${kind} (${await focused()})`);
+      check(await remote('r9', ['E', 'D'], 'Echo,Delta'), `${t2}: another device replaces the whole list (${await all()})`);
+      await until(async () => (await focused()) === 'Delta:smore', 2000);
+      check((await focused()) === 'Delta:smore', `${t2}: the focus goes to Delta, the song now at Bravo's place, its ⋯ (${await focused()})`);
     }
 
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${tag}: no sideways overflow`);
