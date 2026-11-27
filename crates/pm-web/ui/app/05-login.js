@@ -136,6 +136,10 @@
   // while the menu's runs) joins it instead of asking the node a second time
   let loggingOut = null;
   const logOut = () => loggingOut || (loggingOut = logOutNow().finally(() => { loggingOut = null; }));
+  // A Log out button drawn again while one runs (Settings' sign-ins list answering, the page drawn
+  // again at a scan's end) is busy at once, as the one pressed was: its loader, and a press on it is
+  // dropped (the node is asked once). A failure is said once, by the press that started it.
+  const wireLogOut = (b) => { if (!b) return; b.onclick = logOut; if (loggingOut) busy(b, () => loggingOut.catch(() => {}), { type: 'redrawn' }); };
   const logOutNow = async () => {
     const until = Date.now() + LOGOUT_MS;
     // Asked while still logged in: the node gives a code only to the owner, and only when needed

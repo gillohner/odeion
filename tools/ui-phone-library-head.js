@@ -101,6 +101,9 @@ async function importButton(browser, width, k) {
   try {
     for (const width of [320, 360, 412]) for (const android of [false, true]) await phone(browser, width, android);
     await phone(zoomed, 320, true, 1.3);
+    // Above 380 px Play all shows its icon too: at 412 px with a large Android font size the row still holds
+    await phone(zoomed, 412, true, 1.5);
+    await phone(zoomed, 412, true, 2);
     await importButton(zoomed, 320, 1.3);
     await importButton(zoomed, 360, 1.3);
 
