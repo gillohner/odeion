@@ -33,6 +33,13 @@
       </div>
     </section>
 
+    <!-- Phone mode started with sign-ins it couldn't read (set aside: src/phone.rs open); Continue opens it -->
+    <section id="aside" hidden>
+      <h2>Some sign-ins couldn't be read</h2>
+      <p id="aside-msg" class="small"></p>
+      <button id="aside-go" class="primary" type="button">Continue</button>
+    </section>
+
     <section id="connect" hidden>
       <p>Sign in with Pubky Ring. The app finds your node by itself.</p>
       <button id="ring" class="primary">Sign in with Pubky Ring</button>
@@ -59,6 +66,11 @@
           <button class="primary" type="submit">Connect</button>
         </form>
       </details>
+      <section id="phone" class="lan" hidden>
+        <div class="lan-head"><h2>No node?</h2></div>
+        <p class="small">Use Odeion on this phone with your own TIDAL and Qobuz. You sign in with Pubky Ring: your streaming sign-ins, Bookmarks and listens are kept on your homeserver, so a node you add later has them too.</p>
+        <button id="phone-go" class="secondary" type="button">Use without a node</button>
+      </section>
     </section>
 
     <p id="err" class="err" role="alert" hidden></p>

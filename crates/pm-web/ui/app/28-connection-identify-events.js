@@ -52,6 +52,7 @@
   // Someone is waiting on the node: retry now rather than at the end of a long backoff.
   const linkHint = () => { if (link.ever && !link.up && link.retry && link.retryAt - Date.now() > 1000) retryNow(); };
   const showDown = () => {
+    if (phoneMode()) return; // the app's own backend on the phone: no node to lose
     clearInterval(link.tick);
     const paint = () => {
       if (link.up) { clearInterval(link.tick); return; }
@@ -76,6 +77,7 @@
   };
   const goneDown = () => {
     if (signedOut()) return; // the Log in screen, not a dropped link
+    if (phoneMode()) return; // (the phone's own backend has no events socket to drop)
     link.up = false; clearInterval(link.ping); link.awaiting = false;
     if (!link.downSince) link.downSince = Date.now();
     scheduleRetry(); showDown();
@@ -87,6 +89,8 @@
   let reconnectGen = 0; // only the latest attempt may report its result
   const reconnect = async () => {
     if (!link.loaded) return connect();
+    // Phone mode (a network change, a tap on the status): no events socket to open, nothing to retry
+    if (phoneMode()) return;
     const gen = ++reconnectGen;
     let info = null; try { info = await api('GET', '/info'); } catch { if (gen === reconnectGen && !link.up) goneDown(); return; }
     if (link.up) return; // a success from an older attempt still counts
@@ -338,6 +342,24 @@
         renderZoneName(); renderBar();
         link.loaded = true;
         if (!OFFLINE_VIEWS.has(state.view)) setView('downloads', undefined, 'replace'); else render();
+        return;
+      }
+      document.body.classList.toggle('phone', phoneMode());
+      if (phoneMode()) {
+        // The app's own backend, no node: what it lists only (PHONE_CAPS); no zones, no events
+        for (const c of PHONE_CAPS) document.body.classList.toggle(`no-${c}`, !offers(c));
+        // The on-device list is the phone's own songs here
+        $$('.nav-offline span').forEach((x) => { x.textContent = 'My songs'; });
+        setConn(true, state.info.name || 'This phone');
+        search.placeholder = 'Search your music services'; search.setAttribute('aria-label', search.placeholder);
+        try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
+        state.zones = {}; state.zonesSeen = true; state.zone = BROWSER; state.pubkyUser = null; state.favUris = new Set();
+        if (offers('sources')) api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {}); else state.sources = [];
+        if (offers('bookmarks')) loadFavourites().catch(() => {});
+        dlLoad(); renderZoneName(); renderBar(); refreshQueue(false);
+        link.loaded = true;
+        const r = routeFromPath();
+        if (r && r.v === 'search' && r.arg && r.arg.q) { search.value = r.arg.q; runSearch('replace', r.arg.in || 'everywhere'); } else if (r) setView(r.v, r.arg, 'replace'); else setView(phoneHome(), undefined, 'replace');
         return;
       }
       setConn(true, `${state.info.name} · ${countOf(state.info.library.tracks, 'songs')}`);

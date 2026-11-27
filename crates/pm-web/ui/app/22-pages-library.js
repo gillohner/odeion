@@ -680,7 +680,7 @@
           if (!a.q) {
             $('#sprog').hidden = true; searchKeys.reset();
             search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls');
-            main.innerHTML = emptyState('search', 'Search', 'Type in the box above: your library, your services and Pubky at once. Paste a link to open it.'); break;
+            main.innerHTML = emptyState('search', 'Search', phoneMode() ? 'Type in the box above: your music services at once. Paste a link to open it.' : 'Type in the box above: your library, your services and Pubky at once. Paste a link to open it.'); break;
           }
           const scope = a.in || 'everywhere'; state.searchScope = scope;
           if (search.value.trim() !== a.q) search.value = a.q;

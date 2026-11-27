@@ -90,7 +90,7 @@
     chips.setAttribute('role', 'group'); chips.setAttribute('aria-label', 'Search in');
     const { scrollLeft, focused, focusWasVisible } = before;
     const services = (state.sources || []).filter((x) => x.enabled !== false && (!x.features || x.features.includes('search')) && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
-    const scopes = new Map([['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])]);
+    const scopes = new Map([['everywhere', 'Everywhere'], ...(offers('library') ? [['library', 'Library']] : []), ...(offers('pubky') ? [['pubky', 'Pubky']] : []), ...services.map((x) => [x.id, x.name])]);
     // A listener does not read the owner's /sources. A requested service uses its public name,
     // even for tag searches (whose replies come from Library/Pubky). Keep it available after
     // choosing another source, but never reintroduce a service explicitly switched off.
@@ -225,7 +225,7 @@
     const failure = $('#sfailure', box);
     if (run.error && !failure) box.insertAdjacentHTML('afterbegin', '<div class="snotes" id="sfailure"><div class="notice" role="status"><div class="row"><span class="grow">Search couldn’t finish.</span><button class="btn sm" data-sretry>Retry</button></div></div></div>');
     else if (!run.error && failure) failure.remove();
-    const rest = facetBar + (nothingAtAll && !run.error ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
+    const rest = facetBar + (nothingAtAll && !run.error ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? (phoneMode() ? 'Not on your music services.' : 'Not in your library, your services or on Pubky.') : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
     // The same goes for a source's own Retry: its line stays put while it says the same thing
     const kept = $(':scope > .snotes', content);
     if (notes && kept && kept.pmNotes === notes) { [...content.childNodes].forEach((n) => { if (n !== kept) n.remove(); }); kept.insertAdjacentHTML('afterend', rest); }

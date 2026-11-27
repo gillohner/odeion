@@ -103,7 +103,7 @@
     searchRuns.set(key, run);
     // Tag labels as you type (yours first), beside the results: STEWARD-FIX-search-tags.md
     const word = (/(?:#|\btag:)(\S+)$/.exec(q.trim()) || [])[1] || (/#|\btag:/.test(q) ? '' : q.trim().toLowerCase().replace(/\s+/g, '-'));
-    if (word && word.length <= 20) api('GET', `/search/tags?prefix=${encodeURIComponent(word)}`).then((t) => { run.tags = t; searchChanged(run); }).catch(() => {});
+    if (word && word.length <= 20 && offers('tags')) api('GET', `/search/tags?prefix=${encodeURIComponent(word)}`).then((t) => { run.tags = t; searchChanged(run); }).catch(() => {});
     (async () => {
       try {
         await readSearch(q, scope, run.ctrl.signal, (srcs) => {
@@ -221,14 +221,14 @@
     if (isLink(q)) { setView('item', { kind: linkKind(q), id: idOf(q) }, how === 'replace' ? 'replace' : 'push'); return; }
     // A pasted Pubky key (with or without pubky:// or the pubky prefix) opens that person
     const pk = /^(?:pubky:\/\/|pubky)?([a-z0-9]{52})\/?$/.exec(q);
-    if (pk) { setView('person', pk[1], how === 'replace' ? 'replace' : 'push'); return; }
+    if (pk && offers('pubky')) { setView('person', pk[1], how === 'replace' ? 'replace' : 'push'); return; }
     const scope = savedScope || (state.viewArg && state.view === 'search' && state.viewArg.in) || state.searchScope || 'everywhere';
     // A pasted playlist link (what a playlist's Copy link gives: pubky://<key>/pub/social/v1/posts/<id>)
     // opens that playlist, as the Playlists page's shared-link box does. (q, in: a post that is no
     // playlist, a comment or an ordinary post, is searched as text instead, on the shared page; one
     // known to be none is searched at once, notPlaylists. A reload of its search takes its entry)
     const post = /^(?:pubky:\/\/)?(?:pubky)?([a-zA-Z0-9]{52})\/pub\/social\/v1\/posts\/([0-9A-HJKMNP-TV-Z]{13})\/?$/.exec(q);
-    if (post && !notPlaylist(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope, ...(how === 'pop' || how === 'replace' ? { here: 1 } : {}) }, how === 'pop' || how === 'replace' ? 'replace' : 'push'); return; }
+    if (post && offers('pubky') && !notPlaylist(`${post[1].toLowerCase()}/${post[2]}`)) { setView('shared', { user: post[1].toLowerCase(), id: post[2], q, in: scope, ...(how === 'pop' || how === 'replace' ? { here: 1 } : {}) }, how === 'pop' || how === 'replace' ? 'replace' : 'push'); return; }
     startSearch(q, scope);
     setView('search', { q, in: scope }, how === 'pop' || how === 'replace' ? how : 'push');
   };

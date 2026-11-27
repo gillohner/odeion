@@ -213,3 +213,6 @@ ui-playlist-focus-remote.js playlist-focus-remote-shots
 ui-logout-failed.js logout-failed-shots
 ui-identify-switches.js identify-switches-shots
 ui-group-outputs-why.js group-outputs-why-shots
+ui-connect-phone.js connect-phone-shots
+ui-phone-mode.js phone-mode-shots
+ui-phone-songs.js phone-songs-shots

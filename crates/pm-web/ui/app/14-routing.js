@@ -215,6 +215,7 @@
     const asked = v; // (usage insights: a page sent elsewhere below is a redirect)
     if (isListener() && LISTENER_VIEWS_OFF.has(v)) { v = 'albums'; arg = undefined; }
     if (isOffline() && !OFFLINE_VIEWS.has(v)) { v = 'downloads'; arg = undefined; }
+    if (phoneMode() && !phoneView(v)) { v = phoneHome(); arg = undefined; }
     // (a drive's sign-in answer for a page that isn't Node library, or a listener's: the message, as before)
     if (driveBack && (isListener() || !(v === 'library' && arg === 'node'))) { const b = driveBack; driveBack = null; toast(b.text, b.kind); }
     { const sb = document.getElementById('search'); if (sb && NAV_VIEWS.includes(v) && document.activeElement !== sb) sb.value = ''; }

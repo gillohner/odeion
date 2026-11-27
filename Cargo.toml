@@ -29,6 +29,7 @@ members = [
     "crates/pm-offline",
     "crates/pm-usb-audio",
     "crates/pm-app-player",
+    "crates/pm-sources",
 ]
 # The desktop shell needs WebKitGTK on Linux; built on its own in CI/release.
 exclude = ["crates/pm-desktop"]
@@ -65,6 +66,7 @@ pm-out-mpd = { path = "crates/pm-out-mpd" }
 pm-discovery = { path = "crates/pm-discovery" }
 pm-remote = { path = "crates/pm-remote" }
 pm-renderer = { path = "crates/pm-renderer" }
+pm-sources = { path = "crates/pm-sources" }
 
 anyhow = "1.0"
 async-trait = "0.1"

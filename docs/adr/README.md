@@ -15,12 +15,13 @@ One file per decision, numbered. Handoff §11 asks for open questions to be reso
 | [0009](0009-group-sync.md) | Grouped outputs stay in time by sample slip; a `sync` stage keeps the signal path honest |
 | [0010](0010-favourites-as-bookmarks.md) | Favourites are v1 `PubkyAppBookmark`s of canonical music URLs, private by default |
 | [0011](0011-tags-are-public.md) | Tags are public v1 `PubkyAppTag`s on canonical URLs, written only on explicit action |
-| [0012](0012-one-client-tauri-shell.md) | One client: the node's web UI in a Tauri 2 shell for desktops and Android; the egui app is retired (owner, 2026-10-21) |
+| [0012](0012-one-client-tauri-shell.md) | One client: the node's web UI in a Tauri 2 shell for desktops and Android; the egui app is retired (owner, 2026-10-21); amended by 0018 |
 | [0013](0013-remote-access-over-iroh.md) | Remote access over iroh: the node dialed by its own key (found through the private node record), a tunnel to its HTTP API, relay fallback |
 | [0014](0014-music-on-social-v1.md) | Music data on pubky-social-specs v1: social tags, bookmarks and collections, plus music `review` and `listen` kinds in a separate `pubky-music-specs` crate (supersedes 0006, and 0010 for paths) |
 | [0015](0015-where-playlist-songs-play-from.md) | Where playlist songs play from: per-item pins (`ext.music.source`), the playlist's and the node's play order, one resolution for chip, queue and browser |
 | [0016](0016-many-people-one-node.md) | One node, many people. A library each (files on their homeserver, data and interface their own), shared with listen or listen+download permissions; node apps set by the admin, personal sign-ins in each person's vault |
 | [0017](0017-vault-blobs-signed-by-writer.md) | Vault sign-ins are signed by the device that wrote them: a derived Ed25519 key per client, bound by a second grant proof; a reader takes only what one of the person's devices signed, and refuses copies older than it has seen |
+| [0018](0018-phone-mode-one-client-two-backends.md) | Phone mode: one client, two backends. On Android the app also works without a node; the same page is served by a backend in the app (`pm-offline::phone`, shared code in `pm-sources`), with TIDAL and Qobuz, songs added to the phone, and the person's data on their homeserver (amends 0012) |
 
 Open (handoff §11), not yet decided: live Pubky transport / relay for M5; app namespace name (`pubky.music` is a
 placeholder constant); homeserver private-data support and quotas; relay design; streaming-service

@@ -188,10 +188,10 @@
   // (or the control to open it at instead: the same song's ⋯ on the queue drawn again);
   // guard: wraps each item's action, e.g. a queue row's: nothing for another zone than the page's)
   const trackMenu = async (anchor, tracks, { head = [], live = () => true, guard = (f) => f } = {}) => {
-    if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
+    if (offers('collections') && !state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     await pubkyUser();
     const single = tracks.length === 1 ? tracks[0] : null;
-    const favItem = single ? [{ label: isFav(single) ? 'Remove from Bookmarks' : 'Add to Bookmarks', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite({ track_id: single.id }, !isFav(single))) render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
+    const favItem = single && offers('bookmarks') ? [{ label: isFav(single) ? 'Remove from Bookmarks' : 'Add to Bookmarks', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite({ track_id: single.id }, !isFav(single))) render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     // Start radio: from the single track, or from a random track of a set (album page menu).
     // (the radio goes on for the zone whose queue the seed replaced, also when you switch zone while
     // the seed is sent: before, that queue was replaced and its radio silently left off; the toast
@@ -205,24 +205,26 @@
     const nav = single ? [
       // (the song's own page first, as in itemMenu)
       { label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: trackPageId(single) }) },
-      ...(goArtists(artistCredits({ ...single, track_id: single.id })) || (single.artists && single.artists[0] && single.artists[0].id != null ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: 'lib-' + single.artists[0].id }) }] : [])),
+      // (a phone without a node has no artist pages: its songs' artists are a search there)
+      ...(phoneMode() && !offers('library') ? (single.artists || []).slice(0, 1).map((a) => ({ label: `Search “${a.name}”`, icon: 'artist', run: () => { search.value = a.name; runSearch(); } }))
+        : goArtists(artistCredits({ ...single, track_id: single.id })) || (single.artists && single.artists[0] && single.artists[0].id != null ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: 'lib-' + single.artists[0].id }) }] : [])),
       ...(single.album && single.album.id != null ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: 'lib-' + single.album.id }) }] : []),
     ] : [];
     const items = [
       // The same order and words as a song's ⋯ on its page, an album or search (itemMenu)
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
-      { label: 'Add to collection…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New collection')) || 'New collection', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”` + stayNote(tracks)); } catch (e) { toast(e.message, 'error'); } }) },
+      ...(offers('collections') ? [{ label: 'Add to collection…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New collection')) || 'New collection', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”` + stayNote(tracks)); } catch (e) { toast(e.message, 'error'); } }) }] : []),
       ...(single && single.id != null ? dlItem('track', single.id, single.title, artists(single)) : []),
       ...favItem,
       ...radioItem,
       ...nav,
       ...versionItems,
       // The owner's library: edit tags on the node, take the song out (Your library › Node library)
-      ...(single && single.id != null && isOwner() ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.id, single.title) }] : []),
+      ...(single && single.id != null && isOwner() && offers('library-admin') ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.id, single.title) }] : []),
       // Phones hide the "Match" chip in song rows (no room), so matching is offered here too
-      ...(single && single.id != null && !trackHasId(single) && isOwner() ? [{ label: 'Which song is this?…', icon: 'search', run: async () => { const done = await whichSong(single); if (done) { toast(`Identified: ${done.title}`); render(); } } }] : []),
-      ...(single && canFixMatch(single) ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: [single.id] }) }] : []),
+      ...(single && single.id != null && !trackHasId(single) && isOwner() && offers('library-admin') ? [{ label: 'Which song is this?…', icon: 'search', run: async () => { const done = await whichSong(single); if (done) { toast(`Identified: ${done.title}`); render(); } } }] : []),
+      ...(single && offers('library-admin') && canFixMatch(single) ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: [single.id] }) }] : []),
       ...(single ? [{ label: 'Copy link', icon: 'copy', run: () => copyLink(`/song/${trackPageId(single)}`) }] : []),
       ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(tracks.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: tracks.map((t) => t.id) }) }] : []),
     ];

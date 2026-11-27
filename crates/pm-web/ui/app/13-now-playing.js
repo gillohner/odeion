@@ -102,7 +102,7 @@
   const NP_PART = { details: 'Details', sources: 'Sources', tags: 'Tags' };
   const NP_COMPACT = [['queue', 'Up next', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['more', 'More', 'info']];
   const NP_SHEETS_ALL = [['queue', 'Queue', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['details', 'Details', 'info'], ['sources', 'Sources', 'archive'], ['tags', 'Tags', 'compass']];
-  const npSheets = () => NP_SHEETS_ALL.filter(([k]) => k !== 'tags' || isOwner()); // listeners cannot tag
+  const npSheets = () => NP_SHEETS_ALL.filter(([k]) => k !== 'tags' || (isOwner() && offers('tags'))); // listeners cannot tag
   // Compact: the phone arrangement (sheets over the player), also in a desktop window narrower than two columns need
   const npCompact = () => shellMode() === 'phone' || window.innerWidth <= 720;
   // (on a phone Details, Sources and Tags are parts of More: asking for one opens More at it; More
@@ -179,7 +179,7 @@
             + `<dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd>${(() => { const o = outputFacts(z); return o ? `<dt>Output</dt><dd class="np-output">${esc(o[0])}${o[1] ? `<span class="muted small np-output-why">${esc(o[1])}</span>` : ''}</dd>` : ''; })()}</dl>`;
       }
       // More (phones): Details, Sources and Tags, one heading each, and the song's page once at the end
-      if (k === 'more') return Object.keys(NP_PART).filter((x) => x !== 'tags' || isOwner()).map((x) => `<section class="np-part" id="nppart-${x}" aria-labelledby="nppart-h-${x}"><h3 id="nppart-h-${x}">${NP_PART[x]}</h3>${sheetBody(x)}</section>`).join('')
+      if (k === 'more') return Object.keys(NP_PART).filter((x) => x !== 'tags' || (isOwner() && offers('tags'))).map((x) => `<section class="np-part" id="nppart-${x}" aria-labelledby="nppart-h-${x}"><h3 id="nppart-h-${x}">${NP_PART[x]}</h3>${sheetBody(x)}</section>`).join('')
         + (songPage ? `<div class="np-sheet-foot"><button class="btn sm ghost" id="nppage">${icon('compass')} Go to song page</button></div>` : '');
       if (k === 'sources') return `<div id="npsources">${songPage ? '<div class="skeleton" style="height:80px"></div>' : '<p class="muted">This song has no page of its own yet, so its other sources are not known.</p>'}</div>`;
       return '<div class="np-pubky" id="nppubky" aria-live="polite"></div>';

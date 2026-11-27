@@ -202,6 +202,16 @@
   // Offline (the app's local server, pm-offline): only what this device keeps, played here
   const isOffline = () => !!(state.info && state.info.offline);
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
+  // Phone mode (the app's own backend, no node): /v1/info lists what it can do. A node lists no
+  // capabilities and can do everything; a name the phone doesn't list (zones, home, pubky…) is off
+  const phoneMode = () => !!(state.info && state.info.mode === 'phone');
+  // What this backend offers (/v1/info capabilities: a node has none listed and offers all; the
+  // phone's own backend lists what it does). Not `can`, which is what this person may do (state.me)
+  const offers = (cap) => !state.info || !Array.isArray(state.info.capabilities) || state.info.capabilities.includes(cap);
+  const PHONE_CAPS = ['search', 'items', 'sources', 'library', 'songs', 'bookmarks', 'collections', 'listens', 'reviews', 'tags', 'add-songs', 'homeserver-files'];
+  const PHONE_VIEWS = { search: ['search'], items: ['item', 'releases', 'source-item', 'source-artist'], sources: ['sources'], library: ['albums', 'artists', 'tracks', 'genres', 'genre'], songs: ['downloads'], bookmarks: ['favourites'], collections: ['playlists', 'playlist'] };
+  const phoneView = (v) => v === 'queue' || v === 'settings' || Object.entries(PHONE_VIEWS).some(([c, vs]) => offers(c) && vs.includes(v));
+  const phoneHome = () => (offers('search') ? 'search' : offers('library') ? 'tracks' : 'settings');
   const LISTENER_VIEWS_OFF = new Set(['home', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
   // "No zone" as a node before that choice keeps it: a list of one zone without a name
   const noZoneList = (l) => Array.isArray(l) && l.length > 0 && l.every((id) => id === '');

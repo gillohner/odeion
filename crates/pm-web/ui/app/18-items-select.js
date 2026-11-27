@@ -96,7 +96,7 @@
   });
   const itemMenu = async (anchorEl, o) => {
     await pubkyUser();
-    if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
+    if (offers('collections') && !state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     const uris = (o.songs || []).map((t) => t.page || (t.id && (uriOf('song', t.id) || null))).filter(Boolean);
     // A library song's page id is lib-<n> until it is matched (trackPageId)
     const libSongs = (o.songs || []).filter((t) => t.track_id != null).map((t) => ({ id: t.track_id, local: !t.id || /^lib-\d+$/.test(String(t.id)) }));
@@ -111,9 +111,9 @@
     showMenu(anchorEl, [{ title: o.title || 'Item' },
       { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
-      { label: 'Add to collection…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New collection', async (name) => { try { await api('POST', '/playlists', byIds ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”` + (byIds ? stayNote(libSongs) : '')); } catch (e) { toast(e.message, 'error'); } }) },
+      ...(offers('collections') ? [{ label: 'Add to collection…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New collection', async (name) => { try { await api('POST', '/playlists', byIds ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”` + (byIds ? stayNote(libSongs) : '')); } catch (e) { toast(e.message, 'error'); } }) }] : []),
       ...(o.dl ? dlItem(o.dl.kind, o.dl.id, o.title, o.dl.sub, o.dl.online, o.dl.songs) : single && single.track_id != null ? dlItem('track', single.track_id, single.title, single.artist) : []),
-      ...(single ? [{ label: singleFav ? 'Remove from Bookmarks' : 'Add to Bookmarks', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav)) render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
+      ...(single && offers('bookmarks') ? [{ label: singleFav ? 'Remove from Bookmarks' : 'Add to Bookmarks', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav)) render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
       // (as a song row's Start radio, trackMenu: the radio goes on for the zone whose queue the song
       // replaced, also when you switch zone while it is sent, and the toast then names that zone;
       // before, the zone switched to got the radio and the one playing the song had none)
@@ -136,10 +136,10 @@
       ...(o.alsoHere && o.alsoHere.length ? [{ label: 'Also on…', icon: 'compass', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl.isConnected ? anchorEl : ($('#imore') || anchorEl), [{ title: 'Also on' }, ...o.alsoHere.map((x) => ({ label: x.label, svc: x.svc, run: () => o.switchTo(x.k) }))]); }, 0); } }] : []),
       ...(o.extra || []),
       // The owner's library: edit tags on the node, take a song out (Your library › Node library)
-      ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title, anchorEl) }] : []),
-      ...(isOwner() && /^\/album\/lib-\d+$/.test(o.path || '') ? [{ label: 'Rename album…', icon: 'disc', run: () => editAlbumTags(Number(o.path.split('-').pop()), o.title) }] : []),
+      ...(isOwner() && offers('library-admin') && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title, anchorEl) }] : []),
+      ...(isOwner() && offers('library-admin') && /^\/album\/lib-\d+$/.test(o.path || '') ? [{ label: 'Rename album…', icon: 'disc', run: () => editAlbumTags(Number(o.path.split('-').pop()), o.title) }] : []),
       // A library song's or album's match corrected: the Confirm matches view for its songs
-      ...(isOwner() && trackIds.length && /^\/(song|album)\//.test(o.path || '') ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: trackIds.slice(0, 500) }) }] : []),
+      ...(isOwner() && offers('library-admin') && trackIds.length && /^\/(song|album)\//.test(o.path || '') ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: trackIds.slice(0, 500) }) }] : []),
       ...(o.path ? [{ label: 'Copy link', icon: 'copy', run: () => copyLink(o.path) }] : []),
       // Library files only: services' songs are not the user's files
       ...(state.pubkyUser && trackIds.length ? [{ label: trackIds.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(trackIds.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: trackIds }) }] : []),
