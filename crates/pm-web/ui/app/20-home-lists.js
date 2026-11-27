@@ -106,12 +106,17 @@
   // artist" row, GET /library/artists)
   // Nothing hearted yet: Songs, where the hearts are (an empty library: the owner's Add music; a
   // listener has nowhere to go yet)
-  // What the empty Favourites page says: how to heart something; a listener on a node with no
-  // songs yet is told first that there is nothing to heart until the owner adds music
+  // What the empty Bookmarks page says: how to heart something; a listener on a node with no
+  // songs yet is told first that there is nothing to heart until the owner adds music. Where they
+  // are kept only when they are on a homeserver: the listener's own, or the owner's signed in with
+  // Pubky (before, everyone not on one was told "Signed in with Pubky, your bookmarks are also kept
+  // in your own Pubky storage", also when not signed in; Settings says how to sign in)
   const favHowTo = (hs) => {
     const noSongs = !!(state.info && state.info.library) && !(state.info.library.tracks > 0);
-    if (noSongs && !isOwner()) return `Once the node’s owner adds music, press the heart on a song, album or artist to keep it here${hs ? ', on your own homeserver' : ''}.`;
-    return hs ? 'Press the heart on a song, album or artist to keep it here, on your own homeserver.' : 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your bookmarks are also kept in your own Pubky storage.';
+    // (not while the homeserver no longer lets the node in, nor while the owner must log in again)
+    const kept = hs ? !hs.lost : !isListener() && !!state.pubkyUser && !(state.pubkyStatus && state.pubkyStatus.needs_resign);
+    if (noSongs && !isOwner()) return `Once the node’s owner adds music, press the heart on a song, album or artist to keep it here${kept ? ', on your own homeserver' : ''}.`;
+    return `Press the heart on a song, album or artist to keep it here${kept ? ', on your own homeserver' : ''}.`;
   };
   const favWayOn = () => (hasSongs() ? { view: 'tracks', label: 'Open Songs' } : isOwner() ? { view: 'add-music', label: 'Add music' } : undefined);
   // Songs' and Albums' heads carry the owner's Add music; on a page whose empty state has the same

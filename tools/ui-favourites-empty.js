@@ -4,7 +4,12 @@
 // the listener's own homeserver connected). With an empty library the owner gets Add music (Your
 // library), as on the other empty pages, and a listener gets no button and is told the hearts
 // come once the node's owner adds music (not to press a heart with nothing to press). A listener whose
-// homeserver isn't connected still sees only Connect your homeserver (no empty state). At 1280,
+// homeserver isn't connected still sees only Connect your homeserver (no empty state). The owner not
+// signed in with Pubky is told only how to heart something (before, also "Signed in with Pubky, your
+// bookmarks are also kept in your own Pubky storage"); signed in, that they are kept on their own
+// homeserver, as a listener with theirs connected is (Bookmarks opened first waits up to 1.5 s for
+// that answer); not while the node must be approved again, nor a listener's homeserver that no longer
+// lets the node in. At 1280,
 // 1024 and 768 px. Real candidate assets, isolated API fixtures; no node or network.
 //   node tools/ui-favourites-empty.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -17,7 +22,15 @@ const check = (ok, what) => { if (ok) { passed++; console.log(`ok   ${what}`); }
 
 const fav = (o) => ({ '/favourites': { body: { uris: [], albums: [], artists: [], tracks: [], other: [], ...o } } });
 const cases = [
-  { name: 'owner-songs', opts: { fixtures: fav({}) }, button: 'Open Songs', goes: 'Songs', url: '/tracks' },
+  { name: 'owner-songs', opts: { fixtures: fav({}) }, text: 'Press the heart on a song, album or artist to keep it here.', exact: true, button: 'Open Songs', goes: 'Songs', url: '/tracks' },
+  // (opened from Home, which asks the node whether it is signed in with Pubky, and opened first)
+  { name: 'owner-home', opts: { fixtures: fav({}) }, fromHome: true, text: 'Press the heart on a song, album or artist to keep it here.', exact: true, button: 'Open Songs', goes: 'Songs', url: '/tracks' },
+  { name: 'owner-pubky', opts: { fixtures: { ...fav({}), '/pubky': { body: { user: 'pk:fixtureowner' } } } }, fromHome: true, text: 'Press the heart on a song, album or artist to keep it here, on your own homeserver.', exact: true, button: 'Open Songs', goes: 'Songs', url: '/tracks' },
+  { name: 'owner-pubky-first', opts: { fixtures: { ...fav({}), '/pubky': { body: { user: 'pk:fixtureowner' } } } }, text: 'Press the heart on a song, album or artist to keep it here, on your own homeserver.', exact: true, button: 'Open Songs', goes: 'Songs', url: '/tracks' },
+  // (signed in, but the node must be approved again: nothing is saved there until then)
+  { name: 'owner-pubky-resign', opts: { fixtures: { ...fav({}), '/pubky': { body: { user: 'pk:fixtureowner', needs_resign: true } } } }, text: 'Press the heart on a song, album or artist to keep it here.', exact: true, button: 'Open Songs', goes: 'Songs', url: '/tracks' },
+  // (a listener's homeserver that no longer lets the node in: its notice says so, the text doesn't promise it)
+  { name: 'listener-homeserver-lost', opts: { role: 'listener', fixtures: fav({ homeserver: { connected: true, lost: true } }) }, text: 'Press the heart on a song, album or artist to keep it here.', exact: true, button: 'Open Songs', goes: 'Songs', url: '/tracks' },
   { name: 'listener-songs', opts: { role: 'listener', fixtures: fav({}) }, button: 'Open Songs', goes: 'Songs', url: '/tracks' },
   { name: 'listener-homeserver', opts: { role: 'listener', fixtures: fav({ homeserver: { connected: true } }) }, text: 'on your own homeserver', button: 'Open Songs', goes: 'Songs', url: '/tracks' },
   { name: 'owner-no-songs', opts: { tracks: [], fixtures: fav({}) }, button: 'Add music', goes: 'Your library', url: '/library' },
@@ -33,7 +46,12 @@ const cases = [
       for (const c of cases) {
         const { page, context, state } = await fx.create(browser, width, c.opts);
         try {
-          await fx.go(page, '/favourites');
+          if (c.fromHome) {
+            await fx.go(page, '/');
+            // (Home is drawn once the node has answered)
+            await page.waitForSelector('.main .section[id^="h-"]', { timeout: 8000 });
+            await page.locator('.nav-item[data-view="favourites"]').click();
+          } else await fx.go(page, '/favourites');
           if (c.noEmpty) {
             const note = await page.waitForSelector('.main #hsnote [data-hsconnect]', { timeout: 8000 }).then(() => true, () => false);
             check(note, `${width} ${c.name}: Connect your homeserver is shown`);
