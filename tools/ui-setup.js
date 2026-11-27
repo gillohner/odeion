@@ -65,6 +65,9 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
 (async () => {
   const browser = await chromium.launch();
   const ctx = async () => { const c = await browser.newContext({ viewport: { width: 1280, height: 900 } }); await c.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN); return c; };
+  // A context closes with its routes dropped first: a request still in a route handler (one that goes on to the
+  // node, or waits) would otherwise reject after the close, unhandled, and end the run after its checks passed.
+  const shut = async (cx) => { for (const pg of cx.pages()) await pg.unrouteAll({ behavior: 'ignoreErrors' }); await cx.unrouteAll({ behavior: 'ignoreErrors' }); await cx.close(); };
   const before = await api('GET', '/node/settings');
   try {
     // ---- Get started ----
@@ -79,7 +82,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await p.click('#setuphide');
       check(await gone(p, '#h-setup .setup-card'), 'Hide these steps hides them');
       check((await api('GET', '/node/settings')).first_steps_hidden === true, 'kept on the node');
-      await c.close(); c = await ctx(); p = await c.newPage();
+      await shut(c); c = await ctx(); p = await c.newPage();
       await p.goto(BASE + '/'); await p.waitForSelector('#h-setup', { state: 'attached' }); await p.waitForTimeout(1500);
       check(!(await p.$('#h-setup .setup-card')), 'still hidden in another browser');
       await p.goto(BASE + '/settings/nodehome');
@@ -94,7 +97,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/'); await p.waitForSelector('#h-setup', { state: 'attached' }); await p.waitForTimeout(1500);
     check(!(await p.$('#h-setup .setup-card')), 'no card once only optional steps are left');
     await p.unroute(/\/v1\/me\/first-steps$/);
-    await c.close();
+    await shut(c);
 
     // ---- Your library › Node library: folders ----
     c = await ctx(); p = await c.newPage();
@@ -134,7 +137,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await box('net:192.168.1.20:7790/alsa:hw:1,0').check(); await box('net:192.168.1.21:7790/alsa:hw:0,0').check();
     check(/In sync: the node keeps them in time/.test(await p.textContent('#groupsync')), 'two of the app\u2019s players on a DAC: the node keeps them in time');
     check(await box('slim:00:04:20:00:00:01').isDisabled(), 'squeezelite players are not offered with them');
-    await c.close();
+    await shut(c);
 
     // ---- People & access: Log out and the password for apps (the API token); About points there ----
     c = await ctx(); p = await c.newPage();
@@ -157,7 +160,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await p.evaluate(() => localStorage.getItem('pm.token')) === 'f'.repeat(64), 'this browser uses it');
     await Promise.all([p.waitForNavigation({ timeout: 10000 }).catch(() => null), p.click('#tokendone')]);
     check(await p.evaluate(() => performance.getEntriesByType('navigation')[0].type) === 'reload', 'Copy and reload reloads the page');
-    await c.close();
+    await shut(c);
 
     // ---- Every sidebar place on tablets and phones (TASK-tablet-nav; tablets have the desktop layout since 2026-11-04) ----
     // Desktop's sidebar destinations online (Downloads is the offline app's), each reached within two taps (the sidebar or tabs, else the
@@ -226,7 +229,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           check(new URL(p.url()).pathname === '/library', `phone then tablet: Your library opens the library (${new URL(p.url()).pathname})`);
         }
         if (OUT_SHOTS && (layout || w === 834)) { await p.goto(BASE + '/albums'); await p.waitForTimeout(1500); await p.screenshot({ path: `${OUT_SHOTS}/tablet-${w}x${h}.png` }); }
-        await c.close();
+        await shut(c);
       }
     }
 
@@ -247,7 +250,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(links.some(([t, h]) => t === 'Read more on Wikipedia' && h === 'https://de.wikipedia.org/wiki/Credit_Test') && links.some(([t, h]) => t === 'CC BY-SA 4.0' && /creativecommons/.test(h)), 'the text links its article and CC BY-SA');
     check(/Picture: <b>Jane<\/b> Doe · CC BY 2\.0 · Wikimedia Commons/.test(credit) && links.some(([t, h]) => t === 'Wikimedia Commons' && /File:Credit\.jpg/.test(h)), 'the picture names its author, licence and file page, as text');
     check(links.every(([, h]) => /^https?:/.test(h || '')), 'a credit link is only ever a web link');
-    await c.close();
+    await shut(c);
     // ---- Provider badges on covers ----
     // A mocked TIDAL artist page: a TIDAL album and a library album as tiles, a streamed and a
     // library song as rows; then album pages from TIDAL and from the library.
@@ -322,7 +325,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await visible(p, '.np-big .src-badge.cover[aria-label="From your library"]'), 'and so does the Now playing cover');
     const big = await badge('.np-big .art');
     check(big && big.inside && big.absolute, 'in its corner, over the cover');
-    await c.close();
+    await shut(c);
     // ---- Move to, in the Play to menu ----
     // A paused library song in This browser moves to the Null output zone (a developer output,
     // switched on for this) at its position, paused, and back; the device line is in words; the
@@ -370,7 +373,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await p.waitForTimeout(1500); await p.click('.nav-item[data-view="queue"]'); // the developer zone shows once the settings arrived
       await p.waitForSelector('#qtransfer');
       check((await p.textContent('#qtransfer')).trim() === 'Move to…', 'the Queue page offers Move to… for This browser too');
-      await c.close();
+      await shut(c);
     } else check(false, 'the node should have a Null output zone for this');
     await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
 
@@ -543,7 +546,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(/Moving to/.test(await p.textContent('#toast')), `Move to… says “Moving to …” at once (${(await p.textContent('#toast')).trim()})`);
       await p.waitForTimeout(1800);
       await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
-      await c.close();
+      await shut(c);
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/queue`).catch(() => {});
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/dsp`).catch(() => {});
       await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
@@ -620,7 +623,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.click('#main [data-unhide]');
     const backN = await (async () => { const end = Date.now() + 20000; for (;;) { const n = (await api('GET', '/library/tracks?limit=50')).tracks.length; if (n === before || Date.now() > end) return n; await p.waitForTimeout(300); } })();
     check(backN === before, `Bring back returns it (${backN} of ${before})`);
-    await c.close();
+    await shut(c);
     // Node library › Identify: the AcoustID key lives here with its state and a Check (owner
     // addendum to TASK-qobuz-tidal-setup-ux); Settings › Service apps only points here
     c = await ctx(); p = await c.newPage();
@@ -647,7 +650,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await (async () => { const end = Date.now() + 5000; for (;;) { if (new URL(p.url()).pathname === '/library/node') return true; if (Date.now() > end) return false; await p.waitForTimeout(100); } })(), 'which opens Node library');
     // Node library asks for the identify state with its other parts: a reply still in the route
     // when the page closes must not end the run
-    await p.unrouteAll({ behavior: 'ignoreErrors' }); await c.close();
+    await shut(c);
     // Item pages: the back button and the breadcrumb line up (owner addendum to TASK-tablet-nav).
     // Both show when a page is opened from another one in the app; a deep link hides the button on
     // wide screens where it would repeat a crumb, so it is shown here for the measurement: the
@@ -674,7 +677,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         await pp.goto(BASE + '/artist/lib-7'); await pp.waitForSelector('.pagebar .back', { state: 'attached', timeout: 20000 });
         const n = await pp.evaluate(() => { const bar = document.querySelector('.pagebar'); return { crumbs: !!bar.querySelector('.crumbs'), barMb: getComputedStyle(bar).marginBottom, backMb: getComputedStyle(bar.querySelector('.back')).marginBottom }; });
         check(!n.crumbs && n.barMb === '14px' && n.backMb === '0px', `${w}: without a trail the bar keeps the same gap below (${JSON.stringify(n)})`);
-        await cc.close();
+        await shut(cc);
       }
     }
     // ---- UX sweep 11-01: Sources on phones, and the player bar keeps room for what plays ----
@@ -717,7 +720,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         }
       }
       check(errs.length === 0, `${w}: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
-      await cc.close();
+      await shut(cc);
     }
     // An item the Internet Archive restricts: the page says so where the songs would be, with a
     // link to the item, and Play and Shuffle are off (TASK-archive-restricted)
@@ -736,7 +739,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check((await pp.getAttribute('#isongs a[href="https://archive.org/details/locked-set"]', 'target')) === '_blank', 'with a link to the item on the archive');
       check(await pp.isDisabled('#iplay') && await pp.isDisabled('#ishuffle') && /Restricted/.test(await pp.getAttribute('#iplay', 'title')), 'Play and Shuffle are off, saying why');
       check(errs.length === 0, `restricted item: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
-      await cc.close();
+      await shut(cc);
     }
     // Identify's bar: one segment per state, as wide as its share, the legend in its colours, no
     // wider than the text; the key field a field's width (TASK-identify-bar-and-key)
@@ -771,7 +774,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       }
       if (w === 390) check(m.bar >= 300 && !m.overflow, `${w}: full width on a phone (${m.bar}), no overflow`);
       check(errs.length === 0, `${w}: Identify: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
-      await cc.close();
+      await shut(cc);
     }
     // Play to › Sleep timer (and Who sees what you play): the menu has its own Back step, so Back
     // closes it and the page stays where it was
@@ -790,7 +793,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         check(t === title && await pp.$eval('.popover.menu', (m) => m.hidden) && new URL(pp.url()).pathname === '/tracks', `Play to › ${title}: Back closes the menu and the page stays (${new URL(pp.url()).pathname})`);
       }
       check(errs.length === 0, `Play to menus: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
-      await cc.close();
+      await shut(cc);
     }
     // The kiosk dashboard fills the screen without a scroll; a playlist whose sources can't be
     // found says so, with Try again, and drops "Still finding…"
@@ -828,7 +831,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(note('Spotify') && !note('Spotify').retry, `a 403 names Spotify, without Retry (${JSON.stringify(note('Spotify'))})`);
       check(note('TIDAL') && note('TIDAL').retry && note('Deezer') && note('Deezer').retry, `a network failure and a timeout keep Retry (${JSON.stringify(notes)})`);
       check(errs.length === 0, `dashboard, collection and search notes: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
-      await cc.close();
+      await shut(cc);
     }
     // A listener: My music only, no edit controls
     // (the node's own answer is the owner's, `can` included: a person's list goes with the role)
@@ -840,7 +843,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
     const lItems = await p.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim()));
     check(lItems.includes('Play next') && !lItems.includes('Edit tags…') && !lItems.includes('Remove from library'), `no edit controls for a listener (${lItems.join(', ')})`);
-    await c.close();
+    await shut(c);
     // ---- Search: groups, facets, tag:, keyboard ----
     // A mocked /v1/search stream (the real sources are pm-api's tests): the page groups, narrows
     // by facets, sends tag: as the node expects, and walks the results from the keyboard.
@@ -902,7 +905,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.fill('#search', 'tag:chill'); await p.press('#search', 'Enter'); await p.waitForSelector('#sresults [data-skind="song"]');
     check(seen.includes('tag:chill'), `tag:chill is sent as typed (${seen.join(' | ')})`);
     await p.unroute(/\/v1\/search\?/); await p.unroute(/\/v1\/search\/tags\?/);
-    await c.close();
+    await shut(c);
 
     // ---- About comes in the background: only About and the portrait are redrawn ----
     c = await ctx(); p = await c.newPage();
@@ -916,7 +919,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await p.evaluate(() => document.querySelector('#main .hero')?.dataset.mark === 'same'), 'without drawing the page again');
     check(await p.evaluate(() => { const b = document.querySelector('#iblurbmore'); return !!document.querySelector('#iblurb.clamp') && !!b && typeof b.onclick === 'function'; }), 'the article that arrived is clamped, with its More button working');
     check(asked === 2, `the page is asked again once About is due (asked ${asked} times, want 2)`);
-    await c.close();
+    await shut(c);
 
     // ---- Home: Listening now (L3) ----
     if (nz) {
@@ -959,7 +962,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(ok && (await p.textContent('#zonename')).trim() === GROUP.name, `joined: a toast and the group zone in use (${(await p.textContent('#zonename')).trim()})`);
       check(await waitText(p, '#h-listening .list-row:first-child .pill', 'Listening along'), 'the row says you listen along now');
       await p.unroute(/\/v1\/presence$/); await p.unroute(/\/v1\/me\/presence$/); await p.unroute(/\/v1\/presence\/along$/);
-      await c.close();
+      await shut(c);
       await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
     }
 
@@ -1005,7 +1008,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await waitText(p, '#tokerr', 'The node doesn\u2019t take that token.') && await p.isVisible('#loginpage'), 'a wrong token is said on the screen');
       await p.fill('#tok', TOKEN); await p.click('#tokform button[type=submit]');
       check(await p.locator('#loginpage').waitFor({ state: 'hidden', timeout: 15000 }).then(() => true).catch(() => false) && await visible(p, '#me'), 'the right token logs in');
-      await c.close();
+      await shut(c);
 
       // A Log out the node didn't confirm: still logged in, saying why, with Try again
       c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
@@ -1024,7 +1027,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await p.click('#me');
       await p.locator('.popover.menu .pop-item', { hasText: 'Log out' }).click();
       check(await loginShown(15000), 'once the node ends the session, Log in');
-      await c.close();
+      await shut(c);
 
       // Phone (and tablet): Open in Pubky Ring first, the QR code on request
       for (const [w, h] of [[390, 844], [834, 1194]]) {
@@ -1037,7 +1040,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         await p.click('#loginqrbtn');
         check(await visible(p, '#loginbody .loginqr'), `${w}: Show QR code shows it`);
         check(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${w}: nothing wider than the screen`);
-        if (w !== 390) { await c.close(); continue; }
+        if (w !== 390) { await shut(c); continue; }
         // Another identity approved: said plainly, with both people, and Try again
         poll = { status: 'denied', reason: 'not_owner', user: OTHER_K, approver: { id: OTHER_K, name: 'Bob' }, owner_face: { id: OWNER_K, name: 'Alice' } };
         check(await waitText(p, '#loginrefused', 'This node belongs to Alice. You approved as Bob. Pick Alice in Pubky Ring and try again.'), 'a wrong identity is named: whose node, who approved, what to do');
@@ -1051,7 +1054,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         poll = { status: 'ok', token: TOKEN, role: 'owner', user: OWNER_K };
         check(await p.locator('#loginpage').waitFor({ state: 'hidden', timeout: 15000 }).then(() => true).catch(() => false), 'an approval logs in by itself');
         check(await visible(p, '#me') && await p.evaluate((t) => localStorage.getItem('pm.token') === t, TOKEN), 'and the app is there, with the session kept');
-        await c.close();
+        await shut(c);
       }
 
       // A service refusing a sign-in (a 401 of its own) isn't the node refusing this browser
@@ -1059,7 +1062,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await c.route(/\/v1\/health$/, (r) => r.fulfill({ status: 401, json: { error: 'ListenBrainz refused this token' } }));
       await p.goto(BASE + '/'); await visible(p, '#me', 20000); await p.waitForTimeout(3000);
       check(!(await p.isVisible('#loginpage')) && await p.evaluate((t) => localStorage.getItem('pm.token') === t, TOKEN), 'a service\u2019s 401 leaves you logged in');
-      await c.close();
+      await shut(c);
 
       // A session that ended: the same Log in screen, saying so
       c = await loginCtx({ viewport: { width: 1280, height: 900 } }, 'pml_' + 'x'.repeat(43)); p = await c.newPage();
@@ -1068,7 +1071,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await visible(p, '#loginpage', 20000), 'an ended session brings the Log in screen');
       check(await waitText(p, '#loginwhy', 'Your session ended. Log in again.'), 'saying the session ended');
       check(await p.evaluate(() => localStorage.getItem('pm.token') === null), 'and the old token is gone');
-      await c.close();
+      await shut(c);
 
       // The node's own session lacks folders: a Log out line in Settings, no banner on Home
       c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
@@ -1089,12 +1092,12 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       renewPoll = { status: 'denied', reason: 'not_owner', user: OTHER_K, approver: { id: OTHER_K, name: 'Bob' }, owner_face: { id: OWNER_K, name: 'Alice' } };
       await visible(p, '#loginagain', 10000); renewPoll = { status: 'pending' }; await p.click('#loginagain'); await p.waitForTimeout(800);
       check(renewBodies.length === 2 && JSON.parse(renewBodies[1] || '{}').renewal === 'code-from-the-node', 'Try again after a wrong identity still asks for the renewal');
-      await c.close();
+      await shut(c);
       c = await ctx(); p = await c.newPage();
       await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.', sync: null } }));
       await p.goto(BASE + '/'); await p.waitForSelector('#h-setup', { timeout: 20000 }).catch(() => {}); await p.waitForTimeout(800);
       check(!(await p.$('#main .notice.resign')), 'Home has no sign-in banner');
-      await c.close();
+      await shut(c);
     }
   } finally {
     await api('PUT', '/node/settings', { first_steps_hidden: !!before.first_steps_hidden }).catch(() => {});
