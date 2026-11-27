@@ -599,7 +599,7 @@
           const nowTyped = oldFilter ? oldFilter.value.trim() : '';
           // (a count with no songs in the answer is nothing to list or play: the empty state)
           const total = first.tracks.length ? Math.max(stats ? stats.tracks : 0, first.tracks.length) : 0;
-          main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn" id="shuffle">Play all</button>` : '') + headAddMusic(total)) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', ...noMusicYet('Songs')));
+          main.innerHTML = pageHead('Songs', total, (total > 12 ? filterBox('Filter songs') : '') + (total ? `<button class="btn primary" id="shuffle">${icon('play')} Play all</button>` : '') + headAddMusic(total)) + (total ? '<div class="tracks" data-list="all" id="tracklist"></div><p class="muted small" id="tracknote" hidden></p>' : emptyState('notes', 'No songs yet', ...noMusicYet('Songs')));
           const box = $('#tracklist');
           if (box) {
             const shown = []; lists.all = shown;

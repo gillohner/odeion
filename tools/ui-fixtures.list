@@ -199,6 +199,7 @@ ui-dialog-keys.js dialog-keys-shots
 ui-dsd-modes.js dsd-modes-shots
 ui-playlist-local-only.js playlist-local-only-shots
 ui-songs-empty-az.js songs-empty-az-shots
+ui-play-all-look.js play-all-look-shots
 ui-job-close-focus.js job-close-focus-shots
 ui-zone-card-level-width.js zone-card-level-width-shots
 ui-upnext-rating-busy.js upnext-rating-busy-shots
