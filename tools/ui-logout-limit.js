@@ -4,7 +4,10 @@
 //    in." with Try again, which asks again with the same limit (before, Log out waited for good).
 // 2. A reason that ends in ?, ! or … gets no full stop after it ("Is the disk full? You are …").
 // 3. A node that never answers the renewal question but ends the session: after 5 s Log out goes
-//    on without the code, and the page starts over at Log in.
+//    on without the code, and the page starts over at Log in ("You logged out."), the saved
+//    session gone.
+// 4. Log out pressed again while it waits (the account menu's again; Settings' Log out, then the
+//    menu's): the button pressed shows its loader, and the node is asked once, not twice.
 // The waits are skipped with Playwright's clock. Checks at 360, 360 in the Android app, 412 and
 // 1280 px; no browser dialog, no page errors.
 //   node tools/ui-logout-limit.js [repo] [shots]
@@ -26,6 +29,13 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
     let mode = 'hang'; const deletes = []; const renewals = [];
     const { context, page, state } = await fx.create(browser, width, { mobile: phone });
     if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
+    // The fixture saves its token at every load: a page that starts over keeps what the last one
+    // left (a Log out has removed it), so the Log in page can be seen
+    await context.addInitScript(() => {
+      const had = sessionStorage.getItem('fx.token');
+      if (had === '') localStorage.removeItem('pm.token'); else if (had) localStorage.setItem('pm.token', had);
+      addEventListener('pagehide', () => sessionStorage.setItem('fx.token', localStorage.getItem('pm.token') || ''));
+    });
     const native = []; page.on('dialog', (d) => { native.push(d.message()); d.dismiss().catch(() => {}); });
     await page.route(/\/v1\/me\/token$/, (r) => {
       if (r.request().method() !== 'DELETE') return r.fallback();
@@ -97,13 +107,63 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
       } else check(false, `${at}: a refusal ("${why}") asks in the page's dialog`);
     }
 
+    // 4. Pressed again while it waits: one Log out, not two
+    const waitBoth = async (what, r0, d0) => {
+      await page.clock.fastForward(5500);
+      check(await until(() => deletes.length === d0 + 1), `${at}: ${what}: one session end asked (${deletes.length - d0})`);
+      await page.waitForTimeout(300);
+      check(renewals.length === r0 + 1 && deletes.length === d0 + 1, `${at}: ${what}: the node is asked once (${renewals.length - r0} renewal asks, ${deletes.length - d0} session ends)`);
+      await page.clock.fastForward(10000);
+      const late = await asked(3000);
+      check(late && await dlg.count() === 1, `${at}: ${what}: it asks in the page's dialog (${await dlg.count()})`);
+      if (late) { await page.keyboard.press('Escape'); await page.waitForTimeout(200); }
+      // (a second Log out's question would come after the first: each is closed, so the next part starts clean)
+      for (let i = 0; i < 4; i++) { await page.clock.fastForward(16000); await page.waitForTimeout(300); if (!(await dlg.count())) break; await page.keyboard.press('Escape'); await page.waitForTimeout(200); }
+      check(await dlg.count() === 0 && await stillIn(), `${at}: ${what}: Escape leaves the person logged in`);
+    };
+    const spins = (sel) => page.evaluate((q) => { const b = document.querySelector(q); return !!b && b.getAttribute('aria-busy') === 'true' && b.classList.contains('is-spinning'); }, sel);
+    mode = 'hang';
+    {
+      const r0 = renewals.length; const d0 = deletes.length;
+      await logOut(); await page.clock.fastForward(300); await page.waitForTimeout(100);
+      check(await spins('#me'), `${at}: menu twice: the account button shows its loader while Log out waits`);
+      await logOut(); await page.clock.fastForward(300); await page.waitForTimeout(100);
+      check(await spins('#me'), `${at}: menu twice: after the second press the account button still shows its loader`);
+      await waitBoth('menu twice', r0, d0);
+    }
+    {
+      await fx.go(page, '/settings/people'); await page.evaluate(() => { window.__sameLoad = true; });
+      const there = await page.waitForSelector('#logout', { state: 'attached', timeout: 8000 }).then(() => true).catch(() => false);
+      check(there, `${at}: Settings › People has Log out`);
+      if (there) {
+        await page.$eval('#logout', (b) => { for (let d = b.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) d.open = true; b.scrollIntoView({ block: 'center' }); });
+        const r0 = renewals.length; const d0 = deletes.length;
+        await page.click('#logout'); await page.clock.fastForward(300); await page.waitForTimeout(100);
+        check(await spins('#logout'), `${at}: Settings: its Log out shows its loader while it waits`);
+        await page.screenshot({ path: path.join(SHOTS, `${at}-settings-busy.png`) });
+        // (a second click on Settings' own Log out is dropped while it is busy, as before; the
+        // menu's Log out is the second press that reached the node)
+        await page.click('#logout', { force: true }); await logOut(); await page.clock.fastForward(300); await page.waitForTimeout(100);
+        check(await spins('#me') && await spins('#logout'), `${at}: Settings, then the menu: the account button shows its loader too, and Settings' still does`);
+        await waitBoth('Settings, then the menu', r0, d0);
+      }
+    }
+
     // 3. The renewal question is never answered: after 5 s Log out goes on, and ends the session
     mode = 'renewal'; const before = deletes.length;
+    // (as the node does: a page with no token is refused, so it shows Log in)
+    await page.route(/\/v1\/(info|me|zones)$/, (r) => (r.request().headers().authorization ? r.fallback() : r.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: 'missing or wrong bearer token' }) })));
     await logOut();
     check(await until(() => renewals.includes('renewal')) && deletes.length === before, `${at}: the renewal question is asked, the session end not yet (${deletes.length - before} ends)`);
     const nav = page.waitForEvent('load', { timeout: 6000 }).then(() => true).catch(() => false);
     await page.clock.fastForward(5500);
-    check(await nav && deletes.length === before + 1, `${at}: after 5 s with no renewal answer it ends the session, and the page starts over at Log in (${deletes.length - before} ends)`);
+    check(await nav && deletes.length === before + 1, `${at}: after 5 s with no renewal answer it ends the session, and the page starts over (${deletes.length - before} ends)`);
+    // (the page's timers run on Playwright's clock: they are moved on until Log in shows)
+    let atLogIn = false;
+    for (let i = 0; i < 20 && !atLogIn; i++) { await page.clock.fastForward(500).catch(() => {}); atLogIn = await page.isVisible('#loginpage').catch(() => false); if (!atLogIn) await page.waitForTimeout(100); }
+    const left = await page.evaluate(() => ({ token: localStorage.getItem('pm.token'), why: (document.querySelector('#loginwhy') || {}).textContent || '' }));
+    check(atLogIn && left.why === 'You logged out.', `${at}: it starts over at Log in, saying "You logged out." (${atLogIn}, ${left.why})`);
+    check(left.token === null, `${at}: and this browser's saved session is gone (${left.token})`);
 
     check(native.length === 0, `${at}: never a browser box (${JSON.stringify(native)})`);
     check(state.errors.length === 0, `${at}: no page errors (${state.errors.join(' | ')})`);

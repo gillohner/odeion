@@ -132,7 +132,11 @@
     const c = new AbortController(); const t = setTimeout(() => c.abort(), Math.max(0, ms));
     try { const r = await fetch(url, { ...opts, signal: c.signal }); return { r, body: await r.json().catch(() => null) }; } finally { clearTimeout(t); }
   };
-  const logOut = async () => {
+  // One Log out at a time: a second press while one waits (the account menu's again, or Settings'
+  // while the menu's runs) joins it instead of asking the node a second time
+  let loggingOut = null;
+  const logOut = () => loggingOut || (loggingOut = logOutNow().finally(() => { loggingOut = null; }));
+  const logOutNow = async () => {
     const until = Date.now() + LOGOUT_MS;
     // Asked while still logged in: the node gives a code only to the owner, and only when needed
     let renewal = null;
@@ -154,7 +158,7 @@
         const said = String(why).replace(/[.\s]+$/, '') || 'The node refused';
         const end = /[?!…]$/.test(said) ? '' : '.';
         const again = await choiceDialog({ title: 'Couldn’t log out', text: `${said[0].toUpperCase()}${said.slice(1)}${end} You are still logged in.`, choices: [{ label: 'Try again', value: true, primary: true }] });
-        if (again) return logOut();
+        if (again) return logOutNow();
         return;
       }
     }
