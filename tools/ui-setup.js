@@ -1009,15 +1009,17 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
 
       // A Log out the node didn't confirm: still logged in, saying why, with Try again
       c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
-      let refusals = 1; const asked = [];
+      let refusals = 1; const native = [];
       await c.route(/\/v1\/me\/token$/, (r) => (refusals-- > 0 ? r.fulfill({ status: 500, json: { error: 'database is locked' } }) : r.fallback()));
-      p.on('dialog', (d) => { asked.push(d.message()); return asked.length === 1 ? d.dismiss() : d.accept(); });
+      p.on('dialog', (d) => { native.push(d.message()); return d.dismiss(); });
       await p.goto(BASE + '/');
       await visible(p, '#me', 20000);
       await p.click('#me');
       await p.locator('.popover.menu .pop-item', { hasText: 'Log out' }).click();
-      await p.waitForTimeout(800);
-      check(asked.length === 1 && /Couldn’t log out: database is locked\. You are still logged in\./.test(asked[0]) && /Try again/.test(asked[0]), `a failed Log out says why, with Try again (${asked[0]})`);
+      const ask = p.locator('dialog.dialog[open]');
+      const asked = await ask.waitFor({ timeout: 5000 }).then(() => ask.evaluate((d) => ({ title: d.querySelector('h2').textContent, text: (d.querySelector('p') || {}).textContent || '', go: [...d.querySelectorAll('.choice')].map((b) => b.textContent.trim()) }))).catch(() => null);
+      check(native.length === 0 && asked && asked.title === 'Couldn’t log out' && asked.text === 'Database is locked. You are still logged in.' && asked.go.join() === 'Try again', `a failed Log out says why in the page's dialog, with Try again (${JSON.stringify(asked || native)})`);
+      if (asked) { await ask.locator('[data-ci="-1"]').click(); await p.waitForTimeout(300); }
       check(!(await p.isVisible('#loginpage')) && await p.evaluate((t) => localStorage.getItem('pm.token') === t, TOKEN), 'and the browser stays logged in');
       await p.click('#me');
       await p.locator('.popover.menu .pop-item', { hasText: 'Log out' }).click();

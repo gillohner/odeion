@@ -210,3 +210,4 @@ ui-zones-group-jump.js zones-group-jump-shots
 ui-service-library-head.js service-library-head-shots
 ui-settings-switches.js settings-switches-shots
 ui-playlist-focus-remote.js playlist-focus-remote-shots
+ui-logout-failed.js logout-failed-shots

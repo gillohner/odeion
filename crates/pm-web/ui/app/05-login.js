@@ -140,7 +140,11 @@
       } catch { why = 'the node didn’t answer'; }
       if (why) {
         popTransient(); if (popPending) await popPending;
-        if (confirm(`Couldn’t log out: ${why}. You are still logged in.\n\nTry again?`)) logOut();
+        // The page's own dialog, as every other question in the app (no browser box)
+        // (the node's own reason may already be a sentence: one full stop)
+        const said = String(why).replace(/[.\s]+$/, '') || 'The node refused';
+        const again = await choiceDialog({ title: 'Couldn’t log out', text: `${said[0].toUpperCase()}${said.slice(1)}. You are still logged in.`, choices: [{ label: 'Try again', value: true, primary: true }] });
+        if (again) return logOut();
         return;
       }
     }
