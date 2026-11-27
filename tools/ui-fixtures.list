@@ -133,6 +133,7 @@ ui-sticky-focus.js sticky-focus-shots 3
 ui-select-bar-focus.js select-bar-focus-shots 2
 ui-row-line-focus.js row-line-focus-shots
 ui-phone-library-head.js phone-library-head-shots
+ui-text-zoom-fit.js text-zoom-fit-shots
 ui-song-menus.js song-menus-shots
 ui-search-remove-song.js search-remove-song-shots
 ui-row-names.js row-names-shots
