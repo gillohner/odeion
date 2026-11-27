@@ -1392,6 +1392,13 @@ html[data-shell="phone"] :is(.track:has(.row-actions .heart.on) .title, .srow:ha
 .q-actions .icon-btn .ic { width: 16px; height: 16px; }
 @media (hover: hover) { .srow .q-actions { opacity: 0; transition: opacity var(--dur-fast); } .srow:hover .q-actions, .srow:focus-within .q-actions { opacity: 1; } }
 @media (max-width: 600px) { #plsongs .srow .thumb, #plsongs .srow .thumbwrap { display: none; } #plsongs .srow { gap: var(--sp-1h); } #plsongs .srow .q-actions { display: none; } }
+/* A narrow window gives a collection song's title its room: Move up, Move down and Remove keep
+   ~110 px even while hidden, which left the title 39-186 px at 601-768 px (one letter and "…",
+   the artist and album wrapped onto 2-3 lines). The row's ⋯ menu offers them while they're hidden
+   (23-pages-playlists.js rowActs). From 821 px the title has ~240 px beside them. Artist and
+   album stay on one line there, cut with "…", as below 600 px (.srow .sub.subv keeps its own),
+   with room around the words so a focused artist or album link's ring isn't cut. */
+@media (max-width: 820px) { #plsongs .srow .q-actions { display: none; } :where(#plsongs) .srow .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: var(--sp-1); margin: -4px; } }
 .porder-row .grow { flex: 1; min-width: 0; }
 /* Choice dialog (playlist import) */
 .choices { display: flex; flex-direction: column; gap: var(--sp-2); }

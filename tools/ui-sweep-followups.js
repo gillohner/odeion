@@ -4,7 +4,7 @@
 //   * A7: a slow TIDAL collection says so under the page's title, draws its playlists as they come,
 //     and shows the last good copy at once next time;
 //   * A10: touch layouts give a playlist's Move and Remove, a song row's actions, Select and the
-//     play-from order's grips 40 px;
+//     play-from order's grips 40 px (up to 820 px Move and Remove are in the row's ⋯, also 40 px);
 //   * A16: an album's and a playlist's hero buttons stay on one row on touch screens, and a
 //     playlist's Delete is in its ⋯ menu up to 1024 px;
 //   * A17: phones have the back link only, the desktop layout (tablets too) the trail; a song opened
@@ -49,7 +49,24 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
           check(await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Delete collection' }).count() === 1, `${w}: Delete collection… is in ⋯`);
           await p.keyboard.press('Escape'); await sleep(200);
           const q = await boxes(p, '#plsongs .q-actions .icon-btn');
-          if (w >= 600) check(q.length && q.every(([bw, bh]) => bw >= 40 && bh >= 40), `${w}: Move and Remove are 40 px (${JSON.stringify(q.slice(0, 3))})`);
+          if (w > 820) check(q.length && q.every(([bw, bh]) => bw >= 40 && bh >= 40), `${w}: Move and Remove are 40 px (${JSON.stringify(q.slice(0, 3))})`);
+          else if (w >= 600) {
+            // Up to 820 px they give the title their room and are in the row's ⋯ menu instead
+            check(q.length === 0, `${w}: Move and Remove are in the row's ⋯, not on the row (${JSON.stringify(q.slice(0, 3))})`);
+            // (2 rows: the first has no Move up, the last no Move down, so read both menus)
+            const items = []; const sizes = [];
+            const n = await p.locator('#plsongs [data-srow]').count();
+            check(n >= 2, `${w}: the collection has its 2 rows (${n})`);
+            for (const k of n >= 2 ? [0, 1] : []) {
+              const more = p.locator('#plsongs [data-srow]').nth(k).locator('[data-smore], [data-cmore]');
+              const mb = await more.boundingBox(); sizes.push(mb ? [Math.round(mb.width), Math.round(mb.height)] : null);
+              await more.click(); await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+              items.push(...await p.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim())));
+              await p.keyboard.press('Escape'); await p.waitForSelector('.popover.menu:not([hidden])', { state: 'detached', timeout: 3000 }).catch(() => {}); await sleep(200);
+            }
+            check(sizes.length === 2 && sizes.every((s) => s && s[0] >= 40 && s[1] >= 40), `${w}: each row's ⋯ is 40 px (${JSON.stringify(sizes)})`);
+            check(['Move up', 'Move down', 'Remove from collection'].every((t) => items.some((i) => i.includes(t))), `${w}: the rows' ⋯ menus have Move up, Move down and Remove (${JSON.stringify(items)})`);
+          }
           const sel = await boxes(p, '[data-selstart]');
           check(sel.length && sel.every(([, bh]) => bh >= 40), `${w}: Select is 40 px tall (${JSON.stringify(sel)})`);
         } else check(await p.locator('#pldel').isVisible(), `${w}: the desktop keeps Delete beside Play`);

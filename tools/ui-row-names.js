@@ -144,9 +144,11 @@ const pages = [
               check(x.up === `Move ${x.name} up` && x.down === `Move ${x.name} down`, `${width} collection rows: "${x.name}" has Move ${x.name} up / down (${x.up} / ${x.down})`);
               check(x.rm === `Remove ${x.name} from this collection`, `${width} collection rows: "${x.name}" has Remove ${x.name} from this collection (${x.rm})`);
               check(x.tips === 'Move up|Move down|Remove', `${width} collection rows: "${x.name}"'s tooltips unchanged (${x.tips})`);
-              // (and what the browser computes: one button so named, on this row)
+              // (and what the browser computes: one button so named, on this row; none up to 820 px,
+              // where the row's Move and Remove give their room to the title and its ⋯ menu has them)
               const c = await page.getByRole('button', { name: `Remove ${x.name} from this collection`, exact: true }).count();
-              check(c === 1, `${width} collection rows: exactly one button is named "Remove ${x.name} from this collection" (${c})`);
+              const want = width <= 820 ? 0 : 1;
+              check(c === want, `${width} collection rows: ${want ? 'exactly one button is' : 'no button is (it is in the ⋯ menu)'} named "Remove ${x.name} from this collection" (${c})`);
             }
           }
           check(!state.errors.length, `${width} collection rows: no page errors (${state.errors.join(' | ')})`);
