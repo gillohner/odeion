@@ -1,7 +1,8 @@
 // An unmatched song's Match shows only while the row is under the mouse or focused. Hidden, it still
 // kept its ~60 px beside the title, so a long title was cut that much early on every unmatched row
 // (a quarter of the title at 768 px). Now the hidden Match takes no room: the title gets its whole
-// cell, and the row under the mouse or the keyboard shows Match right after the title, as before.
+// cell, and the row under the mouse (after a moment) or the keyboard shows Match right after the
+// title, as before. A quick click on the end of a long title opens the song, not Match.
 // A touch screen (no hover) always shows it in its place.
 // Real UI in Chromium against fixtures (no node), 1280, 1024 and 768 px.
 //   node tools/ui-match-pill-room.js [repo] [shots]
@@ -79,6 +80,7 @@ async function desktop(browser, width) {
 
     // A click on the visible Match still opens matching (it is a real button in its place)
     await page.locator('#tracklist .track').nth(0).locator('.dur').hover();
+    await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('#tracklist .track .idmark')).opacity) === 1);
     const target = await page.locator('#tracklist .track').nth(0).locator('.idmark').evaluate((p) => { const b = p.getBoundingClientRect(); const e = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return e === p || p.contains(e); });
     check(target, `${width}: the visible Match is what a click there hits`);
 
@@ -109,6 +111,65 @@ async function desktop(browser, width) {
   } finally { await context.close(); }
 }
 
+// The mouse moves onto the last letters of a long unmatched title and clicks at once: the song's page
+// opens. Match takes its room only after the mouse has been on the row a moment, so it doesn't slide in
+// under the pointer just before the click (with reduced motion too: the wait isn't motion). Nor while
+// the title is pressed: a press that begins before the wait ends and lets go after it opens the song
+// too (else the click would land on the row and play it). A mouse that stays on those letters sees
+// Match come in after the wait.
+async function quickClick(browser, width, motion) {
+  const { context, page, state } = await fx.create(browser, width, { tracks });
+  const errs = []; page.on('pageerror', (e) => errs.push(e.message));
+  const label = `${width} ${motion === 'reduce' ? 'reduced motion' : 'motion on'}`;
+  const songs = async () => {
+    await fx.go(page, '/tracks');
+    await page.locator('#tracklist .track .title > .idmark').first().waitFor({ state: 'attached' });
+    await drawn(page);
+    await page.evaluate(() => { window.__hit = null; document.addEventListener('click', (e) => { window.__hit = e.target.closest('.idmark') ? 'Match' : e.target.closest('.title > .lnk') ? 'title' : String(e.target.className || e.target.tagName); }, true); });
+    await page.mouse.move(2, 2); await page.waitForTimeout(400);
+    return page.evaluate(() => { const b = document.querySelector('#tracklist .track .title > .lnk').getBoundingClientRect(); return { x: b.right - 8, y: b.top + b.height / 2 }; });
+  };
+  const under = (p) => page.evaluate(({ x, y }) => { const e = document.elementFromPoint(x, y); return e && e.closest('.idmark') ? 'Match' : e && e.closest('.title > .lnk') ? 'title' : 'other'; }, p);
+  const outcome = async (what) => {
+    await page.waitForFunction(() => window.__hit, null, { timeout: 3000 }).catch(() => {});
+    const hit = await page.evaluate(() => window.__hit);
+    check(hit === 'title', `${label}: ${what} clicks the title, not Match (${hit})`);
+    await page.waitForFunction(() => location.pathname.startsWith('/song/'), null, { timeout: 3000 }).catch(() => {});
+    const at = await page.evaluate(() => location.pathname);
+    check(at.startsWith('/song/'), `${label}: …and the song's page opens (${at})`);
+  };
+  try {
+    await page.emulateMedia({ reducedMotion: motion });
+    // At once: the press comes right as the mouse arrives
+    let end = await songs();
+    await page.mouse.move(end.x, end.y); await page.mouse.down();
+    const first = await under(end);
+    check(first === 'title', `${label}: right as the mouse arrives, the title's last letters are still under it (${first})`);
+    await page.mouse.up();
+    await outcome('a quick click on the end of a long title');
+
+    // A press that begins before the wait ends and lets go after it
+    end = await songs();
+    await page.mouse.move(end.x, end.y); await page.waitForTimeout(150); await page.mouse.down(); await page.waitForTimeout(450);
+    const held = await measure(page, 1); const heldOn = await under(end);
+    check(held.pill.w < 1 && heldOn === 'title', `${label}: while the title is pressed Match stays out of its way (${Math.round(held.pill.w)} px, ${heldOn} under the mouse)`);
+    await page.mouse.up();
+    await outcome('a press on the end of a title across the wait');
+    const history = state.hits.filter((h) => h.m === 'POST' && /\/history\b/.test(h.v));
+    check(history.length === 0, `${label}: neither click plays the song (${history.length} plays)`);
+
+    // The mouse stays on those letters: the title has its whole cell, then after the wait Match shows beside it
+    end = await songs();
+    await page.mouse.move(end.x, end.y);
+    const early = await measure(page, 1);
+    check(early.pill.w < 1 && Math.abs(early.link - early.content) <= 1, `${label}: right as the mouse arrives, the title still has its whole cell (Match ${Math.round(early.pill.w)} px)`);
+    await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('#tracklist .track .idmark')).opacity) === 1, null, { timeout: 3000 }).catch(() => {});
+    const late = await measure(page, 1);
+    check(late.pill.op === 1 && late.pill.w > 30 && late.pill.left >= late.linkRight - 0.5, `${label}: after the wait Match shows beside the title (${Math.round(late.pill.w)} px)`);
+    check(errs.length === 0, `${label}: no page errors ${errs.join(' | ')}`);
+  } finally { await context.close(); }
+}
+
 // A touch screen has no hover: Match always shows, in its place beside the title
 async function touch(browser, width) {
   const { context, page } = await fx.create(browser, width, { tracks, touch: true });
@@ -131,6 +192,7 @@ async function touch(browser, width) {
   const browser = await chromium.launch();
   try {
     for (const w of [1280, 1024, 768]) await desktop(browser, w);
+    for (const w of [1280, 1024]) for (const m of ['reduce', 'no-preference']) await quickClick(browser, w, m);
     await touch(browser, 1024);
   } finally { await browser.close(); }
   console.log(failed ? `${failed} FAIL` : 'all ok');

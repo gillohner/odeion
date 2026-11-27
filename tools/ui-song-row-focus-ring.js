@@ -102,6 +102,8 @@ const OFF = '.track .title, .track .by, .track .album-col { padding: 0 !importan
         const shell = await page.evaluate(() => document.documentElement.dataset.shell);
         const row = page.locator('#main .track').first();
         await row.hover();
+        // (with a mouse, the row shows its Match a moment after the mouse arrives)
+        if (shell !== 'phone') await row.locator('.title > .idmark').waitFor({ state: 'visible' });
         let seen = 0;
         for (const [name, sel] of Object.entries(TARGETS)) {
           const loc = row.locator(`${sel} >> visible=true`).first();
