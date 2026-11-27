@@ -1511,6 +1511,10 @@ html[data-shell="phone"] :is(label.check, .genre-pub) { min-height: 44px; }
 .setup-step.done .stepmark .ic { width: 16px; height: 16px; }
 .setup-suggest { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-2h); }
 .groupkind .chips { margin: var(--sp-1) 0 var(--sp-2h); }
+/* A speaker that can't join the ones picked (another kind, no sample rate in common) looks off, as a disabled file button does */
+.groupkind .chip:has(input:disabled) { opacity: 0.45; cursor: not-allowed; }
+.groupkind .chip:has(input:disabled):active { transform: none; }
+.groupkind .chips .chip:has(input:disabled):hover { color: var(--fg-2); }
 .setup-suggest .btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .setup-step .lnk { color: var(--accent-strong); text-decoration: underline; }
 .setup-card > p .lnk { color: var(--accent-strong); text-decoration: underline; }

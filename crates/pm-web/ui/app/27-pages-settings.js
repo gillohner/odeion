@@ -222,8 +222,11 @@
               const picked = order.map((id) => byId[id]);
               const rates = picked.length ? picked.reduce((r, o) => r.filter((x) => o.caps.pcm_rates.includes(x)), picked[0].caps.pcm_rates) : null;
               const kind = picked.length ? groupKind(picked[0]) : null;
-              $$('input', groupBox).forEach((i) => { const o = byId[i.value]; const other = !i.checked && !!kind && groupKind(o) !== kind; const off = other || (!i.checked && (kind === 'node' || kind === 'net') && !o.caps.pcm_rates.some((x) => rates.includes(x))); i.disabled = off; i.closest('label').title = other ? 'Another kind: speakers group with their own kind' : off ? 'Shares no sample rate with the ones picked' : ''; });
-              $('#groupsync').textContent = groupSync(picked);
+              const noRate = []; // of the picked kind but no sample rate in common: said under the speakers, not only in a title a touch screen never shows
+              $$('input', groupBox).forEach((i) => { const o = byId[i.value]; const other = !i.checked && !!kind && groupKind(o) !== kind; const off = other || (!i.checked && (kind === 'node' || kind === 'net') && !o.caps.pcm_rates.some((x) => rates.includes(x))); if (off && !other) noRate.push(o.name); i.disabled = off; i.closest('label').title = other ? 'Another kind: speakers group with their own kind' : off ? 'Shares no sample rate with all of the ones picked' : ''; });
+              const many = noRate.length > 1;
+              const why = noRate.length ? `${listWords(noRate)} ${many ? 'share' : 'shares'} no sample rate with ${picked.length === 1 ? picked[0].name : 'all of the ones picked'}, so ${many ? 'they' : 'it'} can’t join.` : '';
+              $('#groupsync').textContent = [groupSync(picked), why].filter(Boolean).join(' ');
             };
             $$('input', groupBox).forEach((i) => i.onchange = () => { const at = order.indexOf(i.value); if (i.checked && at < 0) order.push(i.value); if (!i.checked && at >= 0) order.splice(at, 1); update(); });
           }
