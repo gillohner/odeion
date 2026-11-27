@@ -224,7 +224,9 @@ const server = http.createServer(async (req, res) => {
       const match = page.locator('[data-act="identify"]').first();
       // The Match button shows where there is room for it (phones reach "Which song is this?"
       // through the song's menu instead: not driven here)
-      if (await until(async () => (await match.count()) > 0, 8000) && !(await match.isVisible())) {
+      // (with a mouse, Match shows and takes its room only with the row under the mouse, as a user finds it)
+      if (await until(async () => (await match.count()) > 0, 8000)) await page.locator('.track').first().hover();
+      if ((await match.count()) > 0 && !(await match.isVisible())) {
         console.log(`note ${W} the Match button is hidden at this width by design; "Which song is this?" checked at the wider ones`);
       } else if (await match.count()) {
         await match.click();
