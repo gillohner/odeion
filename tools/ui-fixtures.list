@@ -219,3 +219,4 @@ ui-connect-phone.js connect-phone-shots
 ui-phone-mode.js phone-mode-shots
 ui-phone-songs.js phone-songs-shots
 ui-control-shortcuts.js control-shortcuts-shots
+ui-play-starting.js play-starting-shots
