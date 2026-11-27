@@ -177,6 +177,8 @@
     transients.push(tr); pushTransient(!!layer);
     $$('[data-ci]', d).forEach((b) => b.onclick = () => { const i = Number(b.dataset.ci); if (i < 0) return done(null); const v = choices[i].value; done(field ? { value: v, text: $('[data-field]', d).value.trim() } : v); });
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
+    // (a held Enter or Space that opened the dialog presses none of its choices: it focuses the first, a Delete too)
+    d.addEventListener('keydown', (e) => { if (e.repeat && (e.key === 'Enter' || e.key === ' ') && e.target.closest('button')) e.preventDefault(); });
     nameDialog(d, true); if (d.showModal) d.showModal(); else d.setAttribute('open', ''); const first = $('.choice', d); if (first) first.focus();
   });
   // Comments (TASK-pinakes-social-ux.md B1): social v1 notes whose parent is the item's link, read

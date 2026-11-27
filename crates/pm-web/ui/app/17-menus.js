@@ -73,6 +73,8 @@
   // (only after a key: a clicked item keeps the focus where the mouse left it)
   const menuBack = () => { const a = menuAnchor; if (keyedLast && a && a.isConnected && menuEl.contains(document.activeElement)) a.focus({ preventScroll: true }); };
   menuEl.addEventListener('keydown', (e) => {
+    // (a held Enter or Space that opened the menu presses none of its items: the menu focuses its first)
+    if (e.repeat && (e.key === 'Enter' || e.key === ' ') && e.target.closest('.pop-item')) { e.preventDefault(); return; }
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.stopPropagation(); return; }
     if (e.key === 'Tab') { closeMenu(); return; }
     const items = $$('.pop-item:not([disabled])', menuEl); const i = items.indexOf(document.activeElement); const n = items.length;
