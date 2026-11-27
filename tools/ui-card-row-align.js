@@ -8,7 +8,9 @@
 // slot as wide as Play, so it lines up there too. And in the other arrangements: while selecting
 // (a narrow window hides Play then, so it hides the card's Play-sized picture too), in the desktop
 // layout chosen on a window under 600 px (songs keep Play there, so the card keeps its picture),
-// and in the phone layout chosen on a wide window (neither shows Play or a picture).
+// and in the phone layout chosen on a wide window (neither shows Play or a picture). A collection
+// someone shared (#shsongs: songs and links, no import lines) lines up the same way, also on a
+// phone, where its songs keep their covers and the card its picture.
 // Isolated API fixtures; no node needed.
 //   node tools/ui-card-row-align.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -37,7 +39,7 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
 
 // lead: what starts the row after its number (a song's Play, a card's picture or its empty slot);
 // pic: the picture (a song's cover, a card's picture), when it isn't the lead
-const rows = () => [...document.querySelectorAll('#plsongs .list > .list-row')].map((r) => {
+const rows = (list) => [...document.querySelectorAll(`${list} .list > .list-row`)].map((r) => {
   const box = r.getBoundingClientRect(); const name = r.querySelector('.grow .name').getBoundingClientRect();
   const geo = (el) => { if (!el || !el.getClientRects().length) return null; const b = el.getBoundingClientRect(); return { x: Math.round(b.x), w: Math.round(b.width), h: Math.round(b.height), mid: Math.round(b.y + b.height / 2 - box.y) }; };
   const lead = r.querySelector(':scope > [data-splay], :scope > .playslot, :scope > .thumb');
@@ -71,6 +73,19 @@ const noPlay = (c) => !!(c.mobile || c.layout === 'phone' || (c.select && c.widt
 // keeps the covers)
 const noPic = (c) => c.width <= 600;
 
+// A collection someone shared: the fixture's song and its link (on a service, with a cover)
+const KEY = 'zswn37ir9t8ge4r4posn4r7ow3eh384c8ud4kkxm585igt38x31o'; const SHARED_ID = '0035WKVKQDHSM';
+const sharedOf = (covers) => ({
+  summary: { id: SHARED_ID, name: 'Night drives', items: 2, link: `pubky://${KEY}/pub/social/v1/posts/${SHARED_ID}`, description: '' },
+  entries: [{ kind: 'track', uri: fx.SONG }, { kind: 'link', uri: fx.LINK }],
+  play_from: { order: { order: ['library'], services: [] }, own_order: false, items: [covers ? served : pf.items[0], pf.items[1]] },
+});
+const SHARED_CASES = [
+  { width: 1280 }, { width: 1024 }, { width: 768 }, { width: 700 }, { width: 1024, image: true }, { width: 1024, touch: true },
+  { width: 412, mobile: true }, { width: 360, mobile: true }, { width: 560, layout: 'desktop' }, { width: 1024, layout: 'phone' },
+  { width: 1024, covers: true }, { width: 1024, covers: true, touch: true }, { width: 700, covers: true }, { width: 412, covers: true, mobile: true }, { width: 560, layout: 'desktop', covers: true }, { width: 1024, layout: 'phone', covers: true },
+];
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -96,7 +111,7 @@ const noPic = (c) => c.width <= 600;
           await page.locator('#plsongs [data-selstart]').click();
           await page.locator('#plsongs .card-row .selbox input').first().waitFor();
         }
-        const [song, link, search] = await page.evaluate(rows);
+        const [song, link, search] = await page.evaluate(rows, '#plsongs');
         check(song.kind === 'song' && link.kind === 'card' && search.kind === 'search', `${tag}: song, link card, unmatched line (${song.kind}, ${link.kind}, ${search.kind})`);
         if (!noPic(c)) check(!!song.pic === !!c.covers, `${tag}: the song ${c.covers ? 'shows' : 'has no'} cover (${say(song.pic)})`);
         check(!song.lead === noPlay(c), `${tag}: the song ${noPlay(c) ? 'has no' : 'shows'} Play (${say(song.lead)})`);
@@ -104,8 +119,8 @@ const noPic = (c) => c.width <= 600;
         for (const r of [link, search]) {
           const what = `${tag}: ${r.kind === 'card' ? 'the link' : 'the unmatched line'}`;
           check(Math.abs(r.nameX - song.nameX) <= 1, `${what}'s title starts where the song's does (${r.nameX} vs ${song.nameX})`);
-          // At 700 px the song's artist and album take two lines (its own room, beside its source
-          // chip): its row is taller there for that, so only the titles' start is compared
+          // (if the song's artist and album ever take two lines, its row is taller for that, so
+          // only the titles' start is compared then)
           if (!song.wraps) check(Math.abs(r.h - song.h) <= 2, `${what}'s row is as tall as the song's (${r.h} vs ${song.h})`);
           if (phoneLayout) {
             // No Play and no Play-sized picture; on a wide window the songs' covers stay, and the
@@ -135,6 +150,41 @@ const noPic = (c) => c.width <= 600;
         check(sw <= 0, `${tag}: nothing wider than the screen (${sw})`);
         check(!state.errors.length, `${tag}: no page errors ${state.errors.join(' | ')}`);
         await page.locator('#plsongs').screenshot({ path: path.join(SHOTS, `collection-${tag.replace(/ /g, '-')}.png`) });
+      } finally { await context.close(); }
+    }
+
+    // A shared collection: a song and a link, on desktop, tablet and phone widths and in both chosen layouts
+    for (const c of SHARED_CASES) {
+      const tag = `shared ${c.width}${c.image ? ' picture' : ''}${c.touch ? ' touch' : ''}${c.mobile ? ' phone' : ''}${c.covers ? ' covers' : ''}${c.layout ? ` ${c.layout}-layout` : ''}`;
+      const { page, context, state } = await fx.create(browser, c.width, { touch: c.touch, mobile: c.mobile, fixtures: { [`/shared/${KEY}/playlists/${SHARED_ID}`]: { body: sharedOf(c.covers) }, '/cards': { body: card(c.image) } } });
+      try {
+        if (c.layout) await context.addInitScript((v) => localStorage.setItem('pm.layout', v), c.layout);
+        await context.route(IMG, (r) => r.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
+        await context.route(COVER, (r) => r.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
+        await fx.go(page, `/shared/${KEY}/${SHARED_ID}`);
+        await page.locator('#shsongs .card-row .name', { hasText: 'Liner notes' }).waitFor();
+        await page.waitForFunction(() => ![...document.querySelectorAll('#shsongs .card-sub')].some((e) => /Reading the page/.test(e.textContent)));
+        const phoneLayout = !!(c.mobile || c.layout === 'phone');
+        if (c.image && !phoneLayout) check(await page.waitForFunction(() => { const i = document.querySelector('#shsongs .card-row > img.thumb'); return i && i.complete && i.naturalWidth > 0; }).then(() => true, () => false), `${tag}: the link's own picture loads`);
+        if (c.covers) await page.waitForFunction(() => { const i = document.querySelector('#shsongs .srow:not(.card-row) > .thumbwrap > img.thumb'); return i && i.complete; });
+        const shell = await page.evaluate(() => document.documentElement.dataset.shell);
+        check(shell === (phoneLayout ? 'phone' : 'desktop'), `${tag}: the ${shell} layout`);
+        const all = await page.evaluate(rows, '#shsongs'); const [song, link] = all;
+        check(all.length === 2 && song.kind === 'song' && link.kind === 'card', `${tag}: a song and a link card (${all.map((r) => r.kind).join(', ')})`);
+        check(!!song.pic === !!c.covers, `${tag}: the song ${c.covers ? 'shows' : 'has no'} cover (${say(song.pic)})`);
+        check(!song.lead === phoneLayout, `${tag}: the song ${phoneLayout ? 'has no' : 'shows'} Play (${say(song.lead)})`);
+        if (c.image && !phoneLayout) check(link.img, `${tag}: the link's own picture is shown`);
+        check(Math.abs(link.nameX - song.nameX) <= 1, `${tag}: the link's title starts where the song's does (${link.nameX} vs ${song.nameX})`);
+        if (!song.wraps) check(Math.abs(link.h - song.h) <= 2, `${tag}: the link's row is as tall as the song's (${link.h} vs ${song.h})`);
+        if (phoneLayout) check(!link.lead && !song.lead, `${tag}: no Play and no Play-sized picture in the phone layout (${say(link.lead)} vs ${say(song.lead)})`);
+        else if (c.covers) check(link.lead && song.lead && link.lead.x === song.lead.x && link.lead.w === song.lead.w, `${tag}: the link has an empty slot as wide as Play first (${say(link.lead)} vs ${say(song.lead)})`);
+        else check(!link.pic && link.lead && song.lead && same(link.lead, song.lead, !song.wraps) && link.lead.h === song.lead.h, `${tag}: the link's picture stands in Play's place, as big (${say(link.lead)} vs ${say(song.lead)})`);
+        // (a shared collection keeps its covers on a phone, and the card's picture with them)
+        if (c.covers) check(!!link.pic && same(link.pic, song.pic, !song.wraps) && link.pic.h === song.pic.h, `${tag}: the link's picture is where the song's cover is, as big (${say(link.pic)} vs ${say(song.pic)})`);
+        const sw = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+        check(sw <= 0, `${tag}: nothing wider than the screen (${sw})`);
+        check(!state.errors.length, `${tag}: no page errors ${state.errors.join(' | ')}`);
+        await page.locator('#shsongs').screenshot({ path: path.join(SHOTS, `collection-${tag.replace(/ /g, '-')}.png`) });
       } finally { await context.close(); }
     }
   } finally { await browser.close(); }
