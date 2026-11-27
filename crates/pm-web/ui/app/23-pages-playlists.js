@@ -289,13 +289,14 @@
           // is now, or passed on, plFocusIn, never by its place in the list (keepPlace's way): another
           // device removing or moving a song above it would put it on another song's ×, Move or row)
           const rowWas = again ? plFocusOf(document.activeElement) : null;
-          const place = again ? keepPlace(!!rowWas && rowWas.song != null) : null;
           // (whether that song's row, or under a change's hold the row pressed (else the one the hold
           // gives the focus to), was wholly in sight before this draw: only then is the song the focus
           // goes on to scrolled into sight; one they scrolled away from on purpose stays where it is.
-          // Drawn afresh (Try again), there were no rows to scroll away from: it follows)
+          // Drawn afresh (Try again), there were no rows to scroll away from: it follows. Looked at
+          // before keepPlace, which ends an earlier redraw's hold: its spacer going can scroll the page)
           const seenWas = (f) => { if (!f || f.song == null) return false; const j = plPlaceOf(plKeysOf(f.box), f.song, f.copy); const row = j < 0 ? null : $(`#${f.box} [data-srow="${j}"]`, main); return !!row && row.getClientRects().length > 0 && inSight(row); };
           const rowSeen = seenWas(rowWas); const heldWas = plHolds.get(plId); const heldSeen = !again || (!!heldWas && seenWas(heldWas.from || heldWas.focus));
+          const place = again ? keepPlace(!!rowWas && rowWas.song != null) : null;
           // (the eyebrow is the kind alone: who sees the playlist and where it is kept is the sharing
           // note's sentence under the buttons, said once, at every width)
           main.innerHTML = backBtn('playlists', 'Collections') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Collection</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}${libNote}</p>
@@ -415,9 +416,21 @@
           // (plNextFocus), and there to its ⋯ (a card's), never its row, × or Move: a key already on its
           // way changes no song the person didn't pick. (A row without a ⋯ that takes it is passed over)
           const plFocusIn = (f) => {
-            const box = $(`#${f.box}`, main); if (!box) return null;
             const can = (x) => !!x && !x.disabled && !x.closest('[inert]') && x.getClientRects().length > 0;
-            if (f.song == null) { let b = $$(f.sel, box)[f.i]; if (!can(b) && f.alt) b = $(f.alt, box); return can(b) ? { b, moved: false } : null; }
+            const shown = (id) => $$(`#${id} [data-srow]`, main).filter((row) => row.getClientRects().length);
+            // (no song to hand it on to found: never to the page. Its box still shows songs (the whole
+            // list replaced at once): the song now at its old place, else the last, its ⋯. None shows
+            // any more, another device removing the last song on this node only (the section goes) or
+            // the Songs card's last one (it hides): to the other box, as × does, the Songs card's last
+            // song that shows, or the first song on this node only, its ⋯)
+            const across = () => {
+              if (f.song == null) return null;
+              let rows = shown(f.box); let row;
+              if (rows.length) { const at = f.was ? plPlaceOf(f.was, f.song, f.copy) : -1; row = rows[Math.min(Math.max(at, 0), rows.length - 1)]; } else { rows = shown(f.box === 'pllocal' ? 'plsongs' : 'pllocal'); row = f.box === 'pllocal' ? rows[rows.length - 1] : rows[0]; }
+              const m = row && $(PL_MORE, row); return can(m) ? { b: m } : null;
+            };
+            const box = $(`#${f.box}`, main); if (!box) return across();
+            if (f.song == null) { let b = $$(f.sel, box)[f.i]; if (!can(b) && f.alt) b = $(f.alt, box); return can(b) ? { b } : null; }
             const keys = f.box === 'pllocal' ? localKeys : d.playlist.items.map((it) => it.uri);
             let j = plPlaceOf(keys, f.song, f.copy); let gone = false;
             // (the song itself gone, another device removing it: on to the song after it in the list it
@@ -427,21 +440,22 @@
               const near = at < 0 ? [] : [...w.keys()].filter((i) => i > at).concat([...w.keys()].filter((i) => i < at).reverse());
               for (const i of near) { const n = plPlaceOf(keys, w[i], w.slice(0, i).filter((u) => u === w[i]).length); if (n >= 0) { j = n; gone = true; break; } }
             }
-            if (j < 0) return null;
+            if (j < 0) return across();
             const order = [...keys.keys()].filter((i) => i >= j).concat([...keys.keys()].filter((i) => i < j).reverse());
             for (const i of order) {
               const row = $(`[data-srow="${i}"]`, box); if (!row || !row.getClientRects().length) continue;
-              if (i !== j || gone) { const m = $(PL_MORE, row); if (can(m)) return { b: m, moved: true }; continue; }
+              if (i !== j || gone) { const m = $(PL_MORE, row); if (can(m)) return { b: m }; continue; }
               let b = row.matches(f.kind) ? row : $(f.kind, row); if (b === row && row.matches(UNTAGGED)) keyable(row);
               if (!can(b) && f.alt) b = $(f.alt, row); if (!can(b)) b = $(PL_MORE, row);
-              if (can(b)) return { b, moved: false };
+              if (can(b)) return { b };
             }
-            return null;
+            return across();
           };
           const nowhere = () => { const now = document.activeElement; return !now || now === document.body || now === main; };
           const give = heldFocus || (rowWas && rowWas.song != null ? rowWas : null);
-          // (passed on to another song, it is scrolled into sight when the one it was on was in sight:
-          // preventScroll keeps the place otherwise)
-          if (give && nowhere()) { const to = plFocusIn(give); if (to) { to.b.focus({ preventScroll: true }); if (to.moved && (heldFocus ? heldSeen : rowSeen) && !inSight(to.b)) to.b.scrollIntoView({ block: 'nearest', behavior: 'instant' }); } }
+          // (passed on to another song, or its song moved far up or down the list by another device, it
+          // is scrolled into sight when the row it was on was in sight: preventScroll keeps the place
+          // otherwise. Not a control of the list itself, a chip: it was never followed)
+          if (give && nowhere()) { const to = plFocusIn(give); if (to) { to.b.focus({ preventScroll: true }); if (give.song != null && (heldFocus ? heldSeen : rowSeen) && !inSight(to.b)) to.b.scrollIntoView({ block: 'nearest', behavior: 'instant' }); } }
           break;
         }
