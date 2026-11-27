@@ -167,6 +167,8 @@ fn write_track(
     keep_on: &dyn Fn() -> bool,
 ) -> Result<PathBuf, String> {
     use std::io::Write;
+    // Android may empty the app's cache while it runs (Clear cache, low storage): the folder comes back
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let part = dir.join(part_name(name));
     let done = dir.join(format!("{name}.{ext}"));
     let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
@@ -547,6 +549,18 @@ mod tests {
             tokio::time::sleep(short * 3).await;
         }
         assert_eq!(got, b"fLaC....");
+    }
+
+    #[test]
+    fn a_track_is_written_after_the_cache_folder_was_emptied() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("streams");
+        let s = Streams::open(&dir).unwrap();
+        // Android's Clear cache (or low storage) takes the folder while the app runs
+        std::fs::remove_dir_all(&dir).unwrap();
+        let mut r: &[u8] = b"fLaC....";
+        write_track(&s.dir, "tidal-1", "flac", &mut r, &|_, _| {}, &|| true).unwrap();
+        assert!(s.kept("tidal-1").is_some(), "the track is in the cache again");
     }
 
     #[test]
