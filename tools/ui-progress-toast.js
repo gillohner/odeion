@@ -23,7 +23,7 @@ const FINDING = /Finding where these songs play/;
 const shown = (page) => page.evaluate(() => { const t = document.querySelector('#toast'); return t.classList.contains('show') ? t.textContent : ''; });
 const whichSong = async (page, width) => {
   if (width < 600) { await page.locator('.track [data-act="more"]').first().click(); await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Which song is this?' }).first().click(); }
-  else await page.locator('.track .idmark').first().click();
+  else { await page.locator('.track').first().hover(); await page.locator('.track .idmark').first().click(); } // (Match shows, and takes its room, with the row under the mouse)
 };
 
 (async () => {

@@ -2228,6 +2228,30 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 .track .title:has(> .lnk) { display: flex; align-items: center; min-width: 0; }
 .track .title:has(> .lnk) > .lnk { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .track .title:has(> .lnk) > .idmark, .track .title:has(> .lnk) > .dl-mark { flex: none; }
+/* An unmatched song's Match takes its room only while it shows (the row under the mouse or focused):
+   hidden, it kept ~60 px beside the title, so a long title was cut that much early on every unmatched row.
+   Hidden, it is now 0 px wide in its place: still a Tab stop and read out (a touch screen always shows it).
+   Under the mouse it takes its room only after 300 ms on the row, and never while the mouse is on the title
+   itself, so a click on the end of a long title opens the song and not Match, which would otherwise slide in
+   under the pointer; it goes at once on leave, and comes at once for the keyboard. That wait isn't motion, so
+   it stays with reduced motion too */
+@media (hover: hover) {
+  /* (steps(1, start): the room comes all at once when the wait ends, it doesn't slide open) */
+  .track .title > .idmark { max-width: 12em; overflow: hidden; transition: opacity var(--dur-fast) 300ms, max-width var(--dur-fast) steps(1, start) 300ms, margin-left var(--dur-fast) steps(1, start) 300ms, padding-inline var(--dur-fast) steps(1, start) 300ms, border-inline-width var(--dur-fast) steps(1, start) 300ms; }
+  .track:has(:focus-visible) .title > .idmark { transition: opacity var(--dur-fast); }
+  .track:not(:hover):not(:focus-within) .title > .idmark { max-width: 0; margin-left: 0; padding-inline: 0; border-inline-width: 0; transition: none; }
+  /* (nor while the mouse is on the title, or the title is pressed: Match would take the room of the title's
+     last letters under a pointer that never moved, and a press that began before the wait ended and lets go
+     after it would end on Match, and the click would go to the row, which plays the song. Match then shows
+     once the mouse is on the rest of the row; a row the keyboard is on shows it at once, as above) */
+  .track:not(:has(:focus-visible)) .title:has(> .lnk:hover) > .idmark, .track .title:has(> .lnk:active) > .idmark { max-width: 0; margin-left: 0; padding-inline: 0; border-inline-width: 0; transition: none; }
+}
+@media (hover: hover) and (prefers-reduced-motion: reduce) {
+  .track .title > .idmark { transition: opacity var(--dur-fast) 300ms, max-width var(--dur-fast) steps(1, start) 300ms, margin-left var(--dur-fast) steps(1, start) 300ms, padding-inline var(--dur-fast) steps(1, start) 300ms, border-inline-width var(--dur-fast) steps(1, start) 300ms !important; }
+  .track:not(:hover):not(:focus-within) .title > .idmark { transition: none !important; }
+  .track:has(:focus-visible) .title > .idmark { transition: none !important; }
+  .track:not(:has(:focus-visible)) .title:has(> .lnk:hover) > .idmark, .track .title:has(> .lnk:active) > .idmark { transition: none !important; }
+}
 /* (a playing row's bars keep their 12 px beside a long title) */
 .track .title:has(> .lnk)::before { flex: none; }
 /* A listener (#46) plays the shared library; the owner's tags and settings aren't theirs (their bookmarks and collections are their own) */

@@ -44,7 +44,7 @@ const atContact = (page) => page.waitForFunction(() => location.pathname === '/s
         await fx.go(page, '/tracks');
         // (phones hide the Match chip for room: the row's menu offers "Which song is this?" there)
         if (width < 600) { await page.locator('.track [data-act="more"]').first().click(); await page.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Which song is this?' }).first().click(); }
-        else await page.locator('.track .idmark').first().click();
+        else { await page.locator('.track').first().hover(); await page.locator('.track .idmark').first().click(); } // (Match shows, and takes its room, with the row under the mouse)
         const dlg = page.locator('dialog.dialog[open]');
         await dlg.waitFor();
         const text = (await dlg.innerText()).replace(/\s+/g, ' ');

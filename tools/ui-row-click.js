@@ -94,7 +94,9 @@ async function desktop(browser, width) {
       await page.evaluate(() => getSelection().removeAllRanges());
       // the row's controls keep their own click and play nothing: ⋯ (its menu) and the heart
       await reset(page); await row.hover();
+      // (waits for the menu: on a busy CI runner it can take longer than a fixed 300 ms)
       await row.locator('[data-act="more"]').click(); await page.waitForTimeout(300);
+      await page.locator('.popover.menu:not([hidden])').first().waitFor({ timeout: 3000 }).catch(() => {});
       check(await page.locator('.popover.menu:not([hidden])').count() > 0, `${label}: ⋯ still opens the row's menu`);
       await page.keyboard.press('Escape'); await page.waitForTimeout(200);
       await row.hover(); await row.locator('[data-act="more"]').dblclick(); await page.waitForTimeout(300); await page.keyboard.press('Escape');
