@@ -213,8 +213,9 @@ async function collection(browser, width) {
     assert.equal(shape.beforeMore, true, `${width}: the heart sits right before ⋯ here too`);
     assert.equal(shape.last, true, `${width}: the row still ends with ⋯`);
     assert.equal(shape.on, true, `${width}: a collection shows which of its songs you have bookmarked`);
-    // The fullest row there is: number, play, cover, two lines, length, where it plays from, three
-    // move buttons, the new heart and ⋯ — all of it on a 700 px window, with the move buttons out
+    // The fullest row there is: number, play, cover, two lines, length, where it plays from, the
+    // new heart and ⋯ — all of it on a 700 px window, hovered (up to 820 px the three move buttons
+    // are in ⋯, app.css #plsongs .q-actions)
     await page.locator('#plsongs .srow').first().hover();
     await page.waitForTimeout(150);
     const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -222,7 +223,7 @@ async function collection(browser, width) {
     await page.screenshot({ path: path.join(shots, `collection-${width}.png`) });
     await fx.cleanCopy(page);
     assert.deepEqual(state.errors, []);
-    ok(`${width} px: a collection's song rows keep their move buttons, gain the heart before ⋯ and still fit`);
+    ok(`${width} px: a collection's song rows gain the heart before ⋯ and still fit`);
   } finally { await context.close(); }
 }
 
