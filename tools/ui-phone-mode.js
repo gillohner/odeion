@@ -7,7 +7,8 @@
 //     shows the TIDAL hit, with Everywhere and the phone's sources as its scopes only; Settings has
 //     "This phone" with its streaming accounts and "Connect to a node" (busy at once, sent once);
 //     no request went to zones (but the boot's own first read, once a load), events, Home, tags,
-//     reviews, Pubky, playlists or favourites;
+//     reviews, Pubky, playlists or favourites; a network change or a tap on the status opens no
+//     events socket and shows no "Node offline" (it stays connected);
 //   * a service's album page (however it is reached) offers no Playlist button on the phone;
 //   * a node (its /v1/info without mode): nothing of that is hidden, it reads its zones, and the
 //     album page has its Playlist button.
@@ -111,6 +112,15 @@ const forbidden = (reqs) => reqs.filter((r) => FORBIDDEN.some((re) => re.test(r.
     check(JSON.stringify(scopes) === JSON.stringify(['everywhere', 'tidal', 'qobuz']), `${at}: phone: the search scopes are Everywhere and the phone's sources (${scopes.join(', ')})`);
     check(!(await p.$('#stags')), `${at}: phone: no tags section in the results`);
     await p.screenshot({ path: path.join(SHOTS, `phone-search-${w}.png`) });
+    // A network change (offline, then online) and a tap on the status: the phone's own backend has no
+    // events socket and is never a node gone down, so it stays connected with no "Node offline" bar
+    const linkNow = () => p.evaluate(() => { const c = document.querySelector('#conn'); const b = document.querySelector('#connbar'); return { state: c && c.dataset.state, bar: !b || b.hidden, ws: window.__ws.length }; });
+    await p.evaluate(() => { window.dispatchEvent(new Event('offline')); window.dispatchEvent(new Event('online')); }); await sleep(1500);
+    const afterNet = await linkNow();
+    check(afterNet.state === 'connected' && afterNet.bar && !afterNet.ws, `${at}: phone: a network change keeps it connected, no events socket, no "Node offline" bar (${JSON.stringify(afterNet)})`);
+    await p.evaluate(() => document.querySelector('#conn').click()); await sleep(1500);
+    const afterTap = await linkNow();
+    check(afterTap.state === 'connected' && afterTap.bar && !afterTap.ws, `${at}: phone: a tap on the status keeps it connected, no events socket, no "Node offline" bar (${JSON.stringify(afterTap)})`);
     // Settings, opened as its own page
     await fx.go(p, '/settings');
     await p.waitForFunction(() => /running on this phone/i.test((document.querySelector('#main') || {}).innerText || ''), null, { timeout: 5000 }).catch(() => {});

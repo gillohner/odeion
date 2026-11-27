@@ -52,6 +52,7 @@
   // Someone is waiting on the node: retry now rather than at the end of a long backoff.
   const linkHint = () => { if (link.ever && !link.up && link.retry && link.retryAt - Date.now() > 1000) retryNow(); };
   const showDown = () => {
+    if (phoneMode()) return; // the app's own backend on the phone: no node to lose
     clearInterval(link.tick);
     const paint = () => {
       if (link.up) { clearInterval(link.tick); return; }
@@ -76,6 +77,7 @@
   };
   const goneDown = () => {
     if (signedOut()) return; // the Log in screen, not a dropped link
+    if (phoneMode()) return; // (the phone's own backend has no events socket to drop)
     link.up = false; clearInterval(link.ping); link.awaiting = false;
     if (!link.downSince) link.downSince = Date.now();
     scheduleRetry(); showDown();
@@ -87,6 +89,8 @@
   let reconnectGen = 0; // only the latest attempt may report its result
   const reconnect = async () => {
     if (!link.loaded) return connect();
+    // Phone mode (a network change, a tap on the status): no events socket to open, nothing to retry
+    if (phoneMode()) return;
     const gen = ++reconnectGen;
     let info = null; try { info = await api('GET', '/info'); } catch { if (gen === reconnectGen && !link.up) goneDown(); return; }
     if (link.up) return; // a success from an older attempt still counts
