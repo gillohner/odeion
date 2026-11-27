@@ -531,8 +531,10 @@
   const AZ_BASE = { Æ: 'A', Ɓ: 'B', Đ: 'D', Ð: 'D', Ɗ: 'D', Ə: 'E', Ħ: 'H', Ɨ: 'I', Ł: 'L', Ŋ: 'N', Œ: 'O', Ø: 'O', Ŧ: 'T', Ƶ: 'Z' };
   const firstLetter = (x) => { let c = String(x || '').trim().charAt(0).toUpperCase().normalize('NFKD').charAt(0); c = AZ_BASE[c] || c; return /[A-Z]/.test(c) ? c : '#'; };
   const listControls = (kind, pref, letters) => `<div class="listbar"><label class="small muted">Sort <select class="input sm" data-lsort aria-label="Sort">${LIST_SORTS[kind].map(([k, l]) => `<option value="${k}" ${pref.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>${kind === 'albums' ? `<button class="chip ${pref.fav ? 'on' : ''}" data-lfav aria-pressed="${!!pref.fav}">${icon(pref.fav ? 'heart-fill' : 'heart')} Bookmarks</button>` : ''}${letters.length > 1 ? `<span class="azbar" role="group" aria-label="Jump to a letter">${letters.map((l) => `<button class="az" data-az="${l}" aria-pressed="false">${l}</button>`).join('')}</span>` : ''}</div>`;
-  // Off while there is nothing to filter: what was typed stays and applies again once there is
-  const filterBox = (placeholder, off = false) => `<input class="input filter" id="filter" type="search" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}"${off ? ' disabled' : ''}>`;
+  // Off while there is nothing to filter: what was typed stays and applies again once there is.
+  // On a phone it shows only "Filter" (the heading above names the list; its name stays whole):
+  // "Filter songs" didn't fit beside Play all and + with a larger font size
+  const filterBox = (name, off = false) => `<input class="input filter" id="filter" type="search" placeholder="${esc(shellMode() === 'phone' ? 'Filter' : name)}" aria-label="${esc(name)}"${off ? ' disabled' : ''}>`;
   // (a load started before a newer one, or before the albums were let go (the library changed),
   // doesn't keep its answer: forgetAlbums)
   let albumsLoad = null;

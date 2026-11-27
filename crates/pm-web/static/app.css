@@ -465,6 +465,10 @@ html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44p
    its icon. The words' line is the button's height instead (as Select's, below): in its middle. */
 html[data-shell="phone"] .section-head > .btn.sm:not(.selstart) { min-height: 0; padding-top: 0; padding-bottom: 0; line-height: 38px; }
 @media (pointer: coarse) { .section-head > .btn.sm:not(.selstart) { min-height: 0; padding-top: 0; padding-bottom: 0; line-height: 38px; } }
+/* On a phone New smart collection goes under Smart collections when the row has no room for both
+   (with a larger font size it ran past the screen and slid the page sideways); with room they share
+   the row as before */
+html[data-shell="phone"] .section-head:has(> #smartnew) { flex-wrap: wrap; column-gap: var(--sp-2); }
 /* A text button inside a sentence (a playlist's "Couldn’t find where these songs play. Try again",
    forget beside a saved speaker address, an artist page's in your library) reads as a link, like
    Restore from a backup, and keeps a native button's height; a section head's text button keeps its
@@ -1961,8 +1965,9 @@ html[data-shell="phone"] .page-head { align-items: center; }
 .main > .page-head + .chips, .main > .page-head + .listbar { margin-top: var(--sp-3); }
 /* Songs and Albums: the filter takes the row's free width, so Play all and Add music (its icon on a
    phone) sit beside it instead of Add music wrapping onto a row of its own. A filter on its own
-   (Artists) keeps its place beside the heading. */
-html[data-shell="phone"] .page-head > .actions:has(> #filter):has(> .btn) { flex: 1 1 auto; justify-content: flex-end; }
+   (Artists) keeps its place beside the heading. The row may be narrower than its items' widest
+   sizes: with Android's font size at 200 % on a 360 px phone it kept 360 px, so + ran past the screen. */
+html[data-shell="phone"] .page-head > .actions:has(> #filter):has(> .btn) { flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
 html[data-shell="phone"] .page-head > .actions:has(> .btn) > #filter { flex: 1 1 120px; width: auto; min-width: 0; max-width: 360px; }
 /* A file button with a long label (Playlists' Import) wraps rather than running off the screen at a
    large font size */
