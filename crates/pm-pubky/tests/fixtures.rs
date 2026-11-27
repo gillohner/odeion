@@ -1,10 +1,13 @@
 //! Deserialization against responses captured from the live Pinakes dev
-//! instance and staging Nexus on 2026-10-19 (tests/fixtures/*.json).
+//! instance and staging Nexus on 2026-10-19 (tests/fixtures/*.json). The Pinakes
+//! full reads and `/v1/info` were captured again on 2026-11-26 (flat reads,
+//! `api_shape: 2`); `music/detail-tidal-track-bohemian-v1.json` keeps the older
+//! nested `details` shape.
 
 use pm_model::MusicEntity;
 use pm_pubky::discovery::items_from_cards;
 use pm_pubky::nexus::{HotTag, ResourceView, Taggers};
-use pm_pubky::pinakes::{Card, ChangePage, Info, ResourceDetail, SearchResponse};
+use pm_pubky::pinakes::{Card, ChangePage, CollectionsPage, Info, ResourceDetail, SearchResponse};
 
 fn fixture(name: &str) -> String {
     std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).expect(name)
@@ -13,8 +16,11 @@ fn fixture(name: &str) -> String {
 #[test]
 fn pinakes_info() {
     let info: Info = serde_json::from_str(&fixture("pinakes/info.json")).unwrap();
-    assert!(info.counts.resources > 0);
-    assert!(!info.ingestion.is_empty());
+    assert_eq!(info.api_shape, Some(2));
+    assert!(info.limits.contains_key("lookup"));
+    assert!(info.limits.keys().any(|k| k.starts_with("related")));
+    // The public listener's info has no counts (only the admin listener's does)
+    assert!(info.counts.is_none());
 }
 
 #[test]
@@ -68,13 +74,87 @@ fn pinakes_resource_detail_and_resolve() {
         assert_eq!(d.card.id.len(), 32);
         assert!(d.details.updated_at.is_some(), "{f}");
         assert!(d.details.aliases.is_empty());
+        assert!(!d.card.extra.contains_key("updated_at"), "{f}");
         // Round-trip keeps unknown fields.
         let back = serde_json::to_value(&d).unwrap();
         assert_eq!(
             back["details"]["updated_at"],
             serde_json::json!(d.details.updated_at)
         );
+        let again: ResourceDetail = serde_json::from_value(back).unwrap();
+        assert_eq!(again, d, "{f}");
     }
+}
+
+/// A full read is one flat object (`api_shape: 2`): the facts, aliases and
+/// `updated_at` sit beside the card's own fields, and the identities come from them.
+#[test]
+fn flat_read_has_its_identities_at_the_top_level() {
+    let raw: serde_json::Value =
+        serde_json::from_str(&fixture("pinakes/music/detail-tidal-track-bohemian.json")).unwrap();
+    assert!(
+        raw.get("details").is_none(),
+        "the live read has no details object"
+    );
+    let r: ResourceDetail = serde_json::from_value(raw).unwrap();
+    assert_eq!(r.card.type_.as_deref(), Some("MusicRecording"));
+    assert_eq!(r.mbid().as_deref(), Some("759d23d2-f48b-4197-a364-d9e00aa27bed"));
+    assert_eq!(r.isrcs().len(), 7);
+    assert!(r.isrcs().contains(&"GBUM71029604".to_string()));
+    let f = r.facts();
+    assert_eq!(f.duration_secs(), Some(354));
+    assert_eq!(f.artist.as_deref(), Some("Queen"));
+    assert_eq!(r.details.aliases, ["https://tidal.com/track/534050211/u"]);
+    assert!(r.details.updated_at.is_some());
+    for k in ["facts", "aliases", "updated_at"] {
+        assert!(
+            !r.card.extra.contains_key(k),
+            "{k} read as a detail, not kept on the card"
+        );
+    }
+    // One list on a flat read, the card's: one link per service, never the card's own
+    let sites: Vec<&str> = r.also_on().iter().filter_map(|a| a.site.as_deref()).collect();
+    assert_eq!(
+        sites,
+        ["Spotify", "YouTube", "Deezer", "MusicBrainz", "Apple Music"]
+    );
+    assert_eq!(r.also_on(), r.card.also_on.as_slice());
+    assert_eq!(r.card.collections, Some(0));
+    // An album's UPC
+    let a: ResourceDetail = serde_json::from_str(&fixture(
+        "pinakes/music/card-deezer-album-cut-to-the-feeling.json",
+    ))
+    .unwrap();
+    assert_eq!(a.upc().as_deref(), Some("0602557656527"));
+    assert!(a.mbid().is_some());
+    // `from`/`keys` land in the details, as under the older `details` object
+    assert!(r.details.extra.contains_key("keys") && !r.card.extra.contains_key("keys"));
+    // Facts that don't read as facts drop the facts, not the read
+    let mut bad: serde_json::Value =
+        serde_json::from_str(&fixture("pinakes/music/detail-tidal-track-bohemian.json")).unwrap();
+    bad["facts"]["artist"] = serde_json::json!(["Queen"]);
+    let bad: ResourceDetail = serde_json::from_value(bad).unwrap();
+    assert!(bad.details.facts.is_none() && bad.mbid().is_none());
+    // A card that is in collections says how many
+    let v: ResourceDetail = serde_json::from_str(&fixture("pinakes/resource.json")).unwrap();
+    assert_eq!(v.card.collections, Some(2));
+}
+
+/// `GET /v1/resources/{id}/collections` answers `{items, cursor}`; the older names still read.
+#[test]
+fn collections_page_reads_cursor_and_the_older_names() {
+    let p: CollectionsPage = serde_json::from_value(serde_json::json!({"items": [
+        {"uri": "pubky://a/pub/social/v1/posts/0035WKVKQDHSM", "author": "a", "indexed_at": 1700000000000i64}
+    ], "cursor": "c2"}))
+    .unwrap();
+    assert_eq!(
+        (p.items.len(), p.cursor.as_deref(), p.total),
+        (1, Some("c2"), None)
+    );
+    let old: CollectionsPage =
+        serde_json::from_value(serde_json::json!({"collections": [], "count": 4, "next_cursor": "n"}))
+            .unwrap();
+    assert_eq!((old.total, old.cursor.as_deref()), (Some(4), Some("n")));
 }
 
 #[test]
@@ -109,19 +189,22 @@ fn nexus_resource_by_uri_and_tags() {
     assert!(hot.iter().any(|h| h.label == "music"));
 }
 
-// ---- Pinakes music step (fixtures re-recorded 2026-10-20 from pubky/pinakes#21) ----
+// ---- Pinakes music step (fixtures re-recorded 2026-10-20 from pubky/pinakes#21, the
+// full reads again 2026-11-26) ----
 
 use pm_pubky::pinakes::GroupDetail;
 
+/// The older nested shape (a `details` object, recorded 2026-10-20) still reads.
 #[test]
-fn music_track_card_has_facts_and_one_link_per_service() {
+fn nested_details_read_still_has_facts_and_one_link_per_service() {
     let r: ResourceDetail =
-        serde_json::from_str(&fixture("pinakes/music/card-tidal-track-bohemian.json")).unwrap();
+        serde_json::from_str(&fixture("pinakes/music/detail-tidal-track-bohemian-v1.json")).unwrap();
     assert_eq!(r.card.type_.as_deref(), Some("MusicRecording"));
     assert_eq!(r.card.site.as_deref(), Some("TIDAL"));
     assert_eq!(r.card.group.as_ref().map(|g| g.size), Some(5));
     let f = r.facts();
     assert_eq!(f.mbid.as_deref(), Some("b1a9c0e9-d987-4042-ae91-78d6a3267d69"));
+    assert_eq!(r.mbid(), f.mbid);
     assert_eq!(f.isrcs().len(), 7);
     assert!(f.isrcs().contains(&"GBUM71029604".to_string()));
     assert_eq!(f.duration_secs(), Some(355));
@@ -208,7 +291,9 @@ fn music_key_search_and_charts_parse() {
         "card-bandcamp-radiohead",
         "card-deezer-album-cut-to-the-feeling",
         "card-spotify-track",
+        "card-tidal-track-bohemian",
         "detail-tidal-track-bohemian",
+        "detail-tidal-track-bohemian-v1",
     ] {
         let r: ResourceDetail =
             serde_json::from_str(&fixture(&format!("pinakes/music/{name}.json"))).unwrap();
