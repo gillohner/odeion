@@ -2446,6 +2446,12 @@ html:not([data-shell="phone"]) .np2.compact .np-player { min-height: calc(100dvh
 /* Phones: the section chips stay at the top while a list scrolls under them */
 html:not([data-shell="desktop"]) .main > .libnav { position: sticky; top: -24px; z-index: var(--z-libnav); margin-top: -8px; padding: var(--sp-2) 0; background: var(--bg); }
 @media (max-width: 720px) { html:not([data-shell="desktop"]) .main > .libnav { top: -18px; } }
+/* Its fade is drawn over the chips in the page colour, not cut out with a mask: a mask also made the
+   row's background see-through there, so the page scrolled under it showed through. The overlay sticks
+   to the row's right edge and adds no scroll width (its 28 px and the gap before it are taken back). */
+html:not([data-shell="desktop"]) .main > .libnav.more-right { mask-image: none; -webkit-mask-image: none; }
+html:not([data-shell="desktop"]) .main > .libnav::after { content: ''; flex: none; align-self: stretch; position: sticky; right: 0; z-index: var(--z-above); width: 28px; margin: calc(-1 * var(--sp-2)) 0 calc(-1 * var(--sp-2)) calc(-28px - var(--sp-2)); background: linear-gradient(to right, transparent, var(--bg)); pointer-events: none; opacity: 0; }
+html:not([data-shell="desktop"]) .main > .libnav.more-right::after { opacity: 1; }
 /* the Sources page's side list sticks below the pinned chips */
 html:not([data-shell="desktop"]) .main:has(> .libnav) .set-nav { top: 46px; }
 /* a row the keyboard (or scrollIntoView) moves to stops 8 px below the pinned chips, not under them

@@ -74,6 +74,7 @@ ui-head-count-separators.js head-count-separators-shots
 ui-musicbrainz-contact.js musicbrainz-contact-shots
 ui-add-music-ask.js add-music-ask-shots
 ui-phone-library-nav.js phone-library-nav-shots
+ui-phone-chip-fade.js phone-chip-fade-shots
 ui-phone-action-rows.js phone-action-rows-shots 2
 ui-phone-queue-rows.js phone-queue-rows-shots
 ui-phone-item-hero-row.js phone-item-hero-row-shots
