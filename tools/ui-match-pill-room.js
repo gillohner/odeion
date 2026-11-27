@@ -2,7 +2,8 @@
 // kept its ~60 px beside the title, so a long title was cut that much early on every unmatched row
 // (a quarter of the title at 768 px). Now the hidden Match takes no room: the title gets its whole
 // cell, and the row under the mouse (after a moment) or the keyboard shows Match right after the
-// title, as before. A quick click on the end of a long title opens the song, not Match.
+// title, as before (not while the mouse is on the title). A click on the end of a long title opens the
+// song, not Match, however long the mouse rested there first.
 // A touch screen (no hover) always shows it in its place.
 // Real UI in Chromium against fixtures (no node), 1280, 1024 and 768 px.
 //   node tools/ui-match-pill-room.js [repo] [shots]
@@ -115,8 +116,9 @@ async function desktop(browser, width) {
 // opens. Match takes its room only after the mouse has been on the row a moment, so it doesn't slide in
 // under the pointer just before the click (with reduced motion too: the wait isn't motion). Nor while
 // the title is pressed: a press that begins before the wait ends and lets go after it opens the song
-// too (else the click would land on the row and play it). A mouse that stays on those letters sees
-// Match come in after the wait.
+// too (else the click would land on the row and play it). Nor while the mouse is on the title at all:
+// a mouse that rests on those letters and clicks after 400 ms or 1000 ms still opens the song. Match
+// shows once the mouse is on the rest of the row.
 async function quickClick(browser, width, motion) {
   const { context, page, state } = await fx.create(browser, width, { tracks });
   const errs = []; page.on('pageerror', (e) => errs.push(e.message));
@@ -158,14 +160,43 @@ async function quickClick(browser, width, motion) {
     const history = state.hits.filter((h) => h.m === 'POST' && /\/history\b/.test(h.v));
     check(history.length === 0, `${label}: neither click plays the song (${history.length} plays)`);
 
-    // The mouse stays on those letters: the title has its whole cell, then after the wait Match shows beside it
-    end = await songs();
-    await page.mouse.move(end.x, end.y);
-    const early = await measure(page, 1);
-    check(early.pill.w < 1 && Math.abs(early.link - early.content) <= 1, `${label}: right as the mouse arrives, the title still has its whole cell (Match ${Math.round(early.pill.w)} px)`);
+    // The mouse stays on those letters and clicks after a normal point-and-click time (400 ms), or a slow one
+    // (1000 ms), past the row's wait: Match never takes the room under it, the song's page opens
+    for (const wait of [400, 1000]) {
+      end = await songs();
+      await page.mouse.move(end.x, end.y);
+      const early = await measure(page, 1);
+      check(early.pill.w < 1 && Math.abs(early.link - early.content) <= 1, `${label}: right as the mouse arrives, the title still has its whole cell (Match ${Math.round(early.pill.w)} px)`);
+      await page.waitForTimeout(wait);
+      const still = await measure(page, 1); const stillOn = await under(end);
+      check(still.pill.w < 1 && Math.abs(still.link - still.content) <= 1 && stillOn === 'title', `${label}: ${wait} ms on the title's last letters, the title keeps its whole cell (Match ${Math.round(still.pill.w)} px, ${stillOn} under the mouse)`);
+      await page.mouse.down(); await page.mouse.up();
+      await outcome(`a click ${wait} ms after the mouse came to rest on the end of a long title`);
+    }
+
+    // Off the title, on the rest of the row: Match shows beside the title after the wait, and the mouse
+    // moved onto it keeps it there (it doesn't fold away under the pointer)
+    await songs();
+    await page.locator('#tracklist .track').nth(0).locator('.dur').hover();
     await page.waitForFunction(() => Number(getComputedStyle(document.querySelector('#tracklist .track .idmark')).opacity) === 1, null, { timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(400);
     const late = await measure(page, 1);
-    check(late.pill.op === 1 && late.pill.w > 30 && late.pill.left >= late.linkRight - 0.5, `${label}: after the wait Match shows beside the title (${Math.round(late.pill.w)} px)`);
+    check(late.pill.op === 1 && late.pill.w > 30 && late.pill.left >= late.linkRight - 0.5, `${label}: the mouse on the rest of the row, Match shows beside the title (${Math.round(late.pill.w)} px)`);
+    const mid = await page.locator('#tracklist .track').nth(0).locator('.idmark').evaluate((p) => { const b = p.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; });
+    await page.mouse.move(mid.x, mid.y, { steps: 4 }); await page.waitForTimeout(400);
+    const onMatch = await under(mid); const kept = await measure(page, 1);
+    check(onMatch === 'Match' && kept.pill.w > 30, `${label}: the mouse on Match, Match stays (${onMatch} under the mouse, ${Math.round(kept.pill.w)} px)`);
+
+    // The keyboard on the row while the mouse rests on the title: Match shows at once all the same
+    end = await songs();
+    await page.mouse.move(end.x, end.y); await page.waitForTimeout(400);
+    await page.locator('#tracklist .track').nth(0).locator('.title > .lnk').focus();
+    await page.keyboard.press('Shift+Tab'); await page.keyboard.press('Tab');
+    const kOn = await measure(page, 1);
+    check(kOn.pill.op === 1 && kOn.pill.w > 30, `${label}: the keyboard on the title, the mouse resting on it, Match shows (${Math.round(kOn.pill.w)} px)`);
+    await page.keyboard.press('Tab');
+    const kPill = await measure(page, 1);
+    check(kPill.pill.w > 30 && await page.evaluate(() => document.activeElement.classList.contains('idmark')), `${label}: …and Tab reaches Match, shown in its place`);
     check(errs.length === 0, `${label}: no page errors ${errs.join(' | ')}`);
   } finally { await context.close(); }
 }
