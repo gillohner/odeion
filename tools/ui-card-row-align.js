@@ -5,7 +5,10 @@
 // page's own picture loaded, and on a touch screen (Play is 40 px there). On a phone neither row
 // shows Play or a picture, and both titles still start together. In a list whose songs show covers
 // (songs a service plays), the card keeps a cover's size, where the covers are, after an empty
-// slot as wide as Play, so it lines up there too.
+// slot as wide as Play, so it lines up there too. And in the other arrangements: while selecting
+// (a narrow window hides Play then, so it hides the card's Play-sized picture too), in the desktop
+// layout chosen on a window under 600 px (songs keep Play there, so the card keeps its picture),
+// and in the phone layout chosen on a wide window (neither shows Play or a picture).
 // Isolated API fixtures; no node needed.
 //   node tools/ui-card-row-align.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -54,38 +57,76 @@ const CASES = [
   { width: 412, mobile: true }, { width: 360, mobile: true },
   { width: 1280, covers: true }, { width: 1024, covers: true }, { width: 768, covers: true }, { width: 700, covers: true },
   { width: 1024, covers: true, image: true }, { width: 1024, covers: true, touch: true }, { width: 412, covers: true, mobile: true },
+  // Selecting: up to 720 px a row shows its tick box instead of Play
+  { width: 1024, select: true }, { width: 720, select: true }, { width: 700, select: true }, { width: 700, select: true, touch: true },
+  { width: 700, select: true, covers: true }, { width: 1024, select: true, covers: true },
+  // The desktop layout on a 480-600 px window (Settings, Layout: Desktop; Automatic at exactly 600)
+  { width: 560, layout: 'desktop' }, { width: 560, layout: 'desktop', image: true }, { width: 560, layout: 'desktop', covers: true }, { width: 560, layout: 'desktop', select: true }, { width: 560, layout: 'desktop', touch: true }, { width: 600 },
+  // The phone layout on a wide window (Settings, Layout: Phone)
+  { width: 700, layout: 'phone' }, { width: 1024, layout: 'phone' }, { width: 1024, layout: 'phone', covers: true }, { width: 1024, layout: 'phone', image: true },
 ];
+// No Play on the row: the phone layout, or selecting in a window up to 720 px
+const noPlay = (c) => !!(c.mobile || c.layout === 'phone' || (c.select && c.width <= 720));
+// No song cover or card picture: a collection up to 600 px wide (on a wider window the phone layout
+// keeps the covers)
+const noPic = (c) => c.width <= 600;
 
 (async () => {
   const browser = await chromium.launch();
   try {
     for (const c of CASES) {
-      const tag = `${c.width}${c.image ? ' picture' : ''}${c.touch ? ' touch' : ''}${c.mobile ? ' phone' : ''}${c.covers ? ' covers' : ''}`;
+      const tag = `${c.width}${c.image ? ' picture' : ''}${c.touch ? ' touch' : ''}${c.mobile ? ' phone' : ''}${c.covers ? ' covers' : ''}${c.layout ? ` ${c.layout}-layout` : ''}${c.select ? ' selecting' : ''}`;
       const { page, context, state } = await fx.create(browser, c.width, { touch: c.touch, mobile: c.mobile, fixtures: { '/playlists/c1': { body: detail }, '/playlists/c1/play-from': { body: c.covers ? { ...pf, items: [served, ...pf.items.slice(1)] } : pf }, '/cards': { body: card(c.image) } } });
       try {
+        if (c.layout) await context.addInitScript((v) => localStorage.setItem('pm.layout', v), c.layout);
         await context.route(IMG, (r) => r.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
         await context.route(COVER, (r) => r.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
         await fx.go(page, '/playlist/c1');
         await page.locator('#plsongs .card-row .name', { hasText: 'Liner notes' }).waitFor();
         await page.locator('#plsongs [data-search] .name', { hasText: 'Nobody Missing' }).waitFor();
-        if (c.image) await page.waitForFunction(() => { const i = document.querySelector('#plsongs .card-row:not([data-search]) > img.thumb'); return i && i.complete && i.naturalWidth > 0; });
+        // (where the picture is shown it loads; a hidden one may never load, so a timeout is a FAIL)
+        const phoneLayout = c.mobile || c.layout === 'phone';
+        if (c.image && !phoneLayout) check(await page.waitForFunction(() => { const i = document.querySelector('#plsongs .card-row:not([data-search]) > img.thumb'); return i && i.complete && i.naturalWidth > 0; }).then(() => true, () => false), `${tag}: the link's own picture loads`);
         // The cards have read their pages (the link's words below its title are final)
         await page.waitForFunction(() => ![...document.querySelectorAll('#plsongs .card-sub')].some((e) => /Reading the page/.test(e.textContent)));
-        if (c.covers && !c.mobile) await page.waitForFunction(() => { const i = document.querySelector('#plsongs .srow:not(.card-row) > .thumbwrap > img.thumb'); return i && i.complete; });
+        if (c.covers && !noPic(c)) await page.waitForFunction(() => { const i = document.querySelector('#plsongs .srow:not(.card-row) > .thumbwrap > img.thumb'); return i && i.complete; });
+        const shell = await page.evaluate(() => document.documentElement.dataset.shell);
+        check(shell === (c.mobile || c.layout === 'phone' ? 'phone' : 'desktop'), `${tag}: the ${shell} layout`);
+        if (c.select) {
+          await page.locator('#plsongs [data-selstart]').click();
+          await page.locator('#plsongs .card-row .selbox input').first().waitFor();
+        }
         const [song, link, search] = await page.evaluate(rows);
         check(song.kind === 'song' && link.kind === 'card' && search.kind === 'search', `${tag}: song, link card, unmatched line (${song.kind}, ${link.kind}, ${search.kind})`);
-        if (!c.mobile) check(!!song.pic === !!c.covers, `${tag}: the song ${c.covers ? 'shows' : 'has no'} cover (${say(song.pic)})`);
-        if (c.image) check(link.img, `${tag}: the link's own picture is shown`);
+        if (!noPic(c)) check(!!song.pic === !!c.covers, `${tag}: the song ${c.covers ? 'shows' : 'has no'} cover (${say(song.pic)})`);
+        check(!song.lead === noPlay(c), `${tag}: the song ${noPlay(c) ? 'has no' : 'shows'} Play (${say(song.lead)})`);
+        if (c.image && !phoneLayout) check(link.img, `${tag}: the link's own picture is shown`);
         for (const r of [link, search]) {
           const what = `${tag}: ${r.kind === 'card' ? 'the link' : 'the unmatched line'}`;
           check(Math.abs(r.nameX - song.nameX) <= 1, `${what}'s title starts where the song's does (${r.nameX} vs ${song.nameX})`);
           // At 700 px the song's artist and album take two lines (its own room, beside its source
           // chip): its row is taller there for that, so only the titles' start is compared
           if (!song.wraps) check(Math.abs(r.h - song.h) <= 2, `${what}'s row is as tall as the song's (${r.h} vs ${song.h})`);
-          if (c.mobile) { check(!r.lead && !song.lead && !r.pic && !song.pic, `${what}: no picture and no Play on a phone`); continue; }
-          if (c.covers) {
+          if (phoneLayout) {
+            // No Play and no Play-sized picture; on a wide window the songs' covers stay, and the
+            // card's picture with them
+            const pics = c.covers && !noPic(c);
+            check(!r.lead && !song.lead, `${what}: no Play and no Play-sized picture in the phone layout (${say(r.lead)} vs ${say(song.lead)})`);
+            check(pics ? !!r.pic && same(r.pic, song.pic, !song.wraps) && r.pic.h === song.pic.h : !r.pic && !song.pic, `${what}'s picture ${pics ? 'is where the song\'s cover is' : 'is not shown'} (${say(r.pic)} vs ${say(song.pic)})`);
+            continue;
+          }
+          if (noPlay(c)) {
+            // Selecting in a narrow window: no Play and no Play-sized picture or slot; a cover stays
+            check(!r.lead && !song.lead, `${what}: no Play-sized picture or slot while the songs have no Play (${say(r.lead)} vs ${say(song.lead)})`);
+            check(c.covers ? !!r.pic && same(r.pic, song.pic, !song.wraps) && r.pic.h === song.pic.h : !r.pic && !song.pic, `${what}'s picture ${c.covers ? 'is where the song\'s cover is' : 'is not shown'} (${say(r.pic)} vs ${say(song.pic)})`);
+            continue;
+          }
+          if (c.covers && noPic(c)) {
+            // Under 600 px the covers go: the slot stays as wide as Play, the card's picture goes
+            check(r.lead && song.lead && r.lead.x === song.lead.x && r.lead.w === song.lead.w && !r.pic && !song.pic, `${what}: an empty slot as wide as Play, and no picture (${say(r.lead)} vs ${say(song.lead)}, ${say(r.pic)})`);
+          } else if (c.covers) {
             check(r.lead && song.lead && r.lead.x === song.lead.x && r.lead.w === song.lead.w, `${what}: an empty slot as wide as Play first (${say(r.lead)} vs ${say(song.lead)})`);
-            check(same(r.pic, song.pic, !song.wraps) && r.pic.h === song.pic.h, `${what}'s picture is where the song's cover is, as big (${say(r.pic)} vs ${say(song.pic)})`);
+            check(!!r.pic && same(r.pic, song.pic, !song.wraps) && r.pic.h === song.pic.h, `${what}'s picture is where the song's cover is, as big (${say(r.pic)} vs ${say(song.pic)})`);
           } else {
             check(!r.pic && same(r.lead, song.lead, !song.wraps) && r.lead.h === song.lead.h, `${what}'s picture stands in Play's place, as big (${say(r.lead)} vs ${say(song.lead)})`);
           }
