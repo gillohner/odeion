@@ -1308,6 +1308,13 @@ html[data-shell="phone"] .wikilink::before { content: ''; position: absolute; in
 .list-row.unavail .grow .name, .list-row.unavail .grow .name .lnk:not(:hover) { color: var(--muted); }
 /* A collection item that doesn't play (a web page, a post): its card in the list (B3) */
 .card-row .card-thumb { display: grid; place-items: center; color: var(--muted); }
+/* A card's picture stands where a song's Play stands and is as big, so its words start where a
+   song's do and the row is as tall (it was 44 px and a margin: the words 18 px further in). In a
+   list whose songs show covers, an empty slot as wide as Play comes first (cardLead) and the
+   picture keeps a cover's size and place. */
+.card-row:not(:has(> .playslot)) > .thumb { width: 36px; height: 36px; margin-right: 0; }
+.card-row > .playslot { width: 36px; flex: none; }
+@media (pointer: coarse) { html:not([data-shell="phone"]) :is(.card-row:not(:has(> .playslot)) > .thumb, .card-row > .playslot) { width: 40px; height: 40px; } }
 .card-row .card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-row.filtered { display: none; }
 .plsummary { margin-bottom: var(--sp-3); }
@@ -2186,7 +2193,7 @@ html[data-shell="phone"] .selbar :is(.btn, .icon-btn) { min-height: 44px; min-wi
 /* (on the tint the secondary colour falls under 4.5:1 on a card) */
 .selecting .srow:has(.selbox input:checked) :is(.sub, .muted, .vmark:not(:hover, :focus-visible)), .selecting .srow.unavail:has(.selbox input:checked) .grow .name, .selecting .srow.unavail:has(.selbox input:checked) .grow .name .lnk:not(:hover) { color: var(--fg-2); }
 /* (the source chip's "finding" placeholder too, so nothing spins and vanishes beside the ticks) */
-@media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow .srcchip.wait, .selecting .srow [data-sfav], .selecting .srow [data-smore] { display: none; } }
+@media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow > .playslot, .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow .srcchip.wait, .selecting .srow [data-sfav], .selecting .srow [data-smore] { display: none; } }
 /* One way back (UX review, sweep A17): phones have the back link only; the desktop layout (tablets
    too) has the trail, and Back only where it goes somewhere the trail doesn't */
 html[data-shell="desktop"] .pagebar > .dupback { display: none; }
@@ -2777,7 +2784,7 @@ html[data-shell="phone"] #nowplaying .np-quality { display: inline-flex; }
    target; a tap on the row plays it, so no play triangle of its own. Track numbers on album pages
    only. The playing song: its title in the accent with a small equaliser. */
 html[data-shell="phone"] .srow { min-height: 60px; padding: var(--sp-1h) 0 var(--sp-1h) var(--sp-3); gap: var(--sp-3); }
-html[data-shell="phone"] .srow > [data-splay] { display: none; }
+html[data-shell="phone"] .srow > :is([data-splay], .playslot) { display: none; }
 html[data-shell="phone"] .srow > :is([data-smore], [data-cmore]) { width: 48px; height: 48px; flex: none; margin-left: -4px; }
 html[data-shell="phone"] .srow > .muted.small { flex: none; font-variant-numeric: tabular-nums; }
 html[data-shell="phone"] .list.nums .srow .num { display: block; width: 20px; margin-right: -4px; }
