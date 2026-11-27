@@ -2276,6 +2276,8 @@ body.listener .np-tags, body.listener [data-sel="tag"], body.listener [data-sel=
 .is-busy { cursor: progress; }
 .starting .ic, .is-spinning > .ic { display: none; }
 .starting::after, .is-spinning::after { content: ''; display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
+/* (in a button with words, as big as the icon it stands for: the button keeps its width) */
+.btn.starting::after, .btn.is-spinning::after { width: 14px; height: 14px; }
 .np-title.np-wait { display: flex; align-items: center; gap: var(--sp-1h); }
 /* A navigation on its way (navigate() in app.js): a thin bar along the top, then the page's skeleton */
 .navprog { position: fixed; z-index: var(--z-progress); top: env(safe-area-inset-top, 0px); left: 0; right: 0; height: 3px; overflow: hidden; pointer-events: none; }
