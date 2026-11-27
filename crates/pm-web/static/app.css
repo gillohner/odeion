@@ -2231,6 +2231,11 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 .track .title:has(> .lnk) { display: flex; align-items: center; min-width: 0; }
 .track .title:has(> .lnk) > .lnk { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .track .title:has(> .lnk) > .idmark, .track .title:has(> .lnk) > .dl-mark { flex: none; }
+/* (the title link is as tall as the hidden Match beside it, and a song on this phone has its mark, with its
+   gap, over the whole line: a mouse resting just above or under the title's last letters, or on the mark, is
+   on them, so Match waits there too, below) */
+.track .title:has(> .lnk) > .lnk { padding-block: 1px; }
+.track .title:has(> .lnk) > .dl-mark { align-self: stretch; margin-left: 0; padding-left: var(--sp-1h); }
 /* An unmatched song's Match takes its room only while it shows (the row under the mouse or focused):
    hidden, it kept ~60 px beside the title, so a long title was cut that much early on every unmatched row.
    Hidden, it is now 0 px wide in its place: still a Tab stop and read out (a touch screen always shows it).
@@ -2245,15 +2250,15 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
   .track:not(:hover):not(:focus-within) .title > .idmark { max-width: 0; margin-left: 0; padding-inline: 0; border-inline-width: 0; transition: none; }
   /* (nor while the mouse is on the title, or the title is pressed: Match would take the room of the title's
      last letters under a pointer that never moved, and a press that began before the wait ended and lets go
-     after it would end on Match, and the click would go to the row, which plays the song. Match then shows
-     once the mouse is on the rest of the row; a row the keyboard is on shows it at once, as above) */
-  .track:not(:has(:focus-visible)) .title:has(> .lnk:hover) > .idmark, .track .title:has(> .lnk:active) > .idmark { max-width: 0; margin-left: 0; padding-inline: 0; border-inline-width: 0; transition: none; }
+     after it would end on Match, and the click would go to the row, which plays the song; nor on a song's
+     "On this phone" mark, whose room Match would take. Match then shows once the mouse is on the rest of the row; a row the keyboard is on shows it at once, as above) */
+  .track:not(:has(:focus-visible)) .title:has(> .lnk:hover, > .dl-mark:hover) > .idmark, .track .title:has(> .lnk:active) > .idmark { max-width: 0; margin-left: 0; padding-inline: 0; border-inline-width: 0; transition: none; }
 }
 @media (hover: hover) and (prefers-reduced-motion: reduce) {
   .track .title > .idmark { transition: opacity var(--dur-fast) 300ms, max-width var(--dur-fast) steps(1, start) 300ms, margin-left var(--dur-fast) steps(1, start) 300ms, padding-inline var(--dur-fast) steps(1, start) 300ms, border-inline-width var(--dur-fast) steps(1, start) 300ms !important; }
   .track:not(:hover):not(:focus-within) .title > .idmark { transition: none !important; }
   .track:has(:focus-visible) .title > .idmark { transition: none !important; }
-  .track:not(:has(:focus-visible)) .title:has(> .lnk:hover) > .idmark, .track .title:has(> .lnk:active) > .idmark { transition: none !important; }
+  .track:not(:has(:focus-visible)) .title:has(> .lnk:hover, > .dl-mark:hover) > .idmark, .track .title:has(> .lnk:active) > .idmark { transition: none !important; }
 }
 /* (a playing row's bars keep their 12 px beside a long title) */
 .track .title:has(> .lnk)::before { flex: none; }
