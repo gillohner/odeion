@@ -5,8 +5,8 @@
 // Top result's Play in search and a radio station's Play gave no sign that the press was taken.
 // The album's Play and Shuffle are checked too (they spun before as well). Only the Play pressed
 // spins, and a Play with an icon keeps its width: the spinner takes the icon's place and is as big
-// (it was 2 px smaller, so the button and the ones beside it moved). Songs' Play all has no icon
-// (its head is full on a phone): its spinner comes after its words, as on any button without one.
+// (it was 2 px smaller, so the button and the ones beside it moved). Songs' Play all has its play
+// icon, as every page-wide Play (below 380 px in the phone layout only its words: a spinner after them).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-play-starting.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));

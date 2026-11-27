@@ -67,7 +67,7 @@ const picker = (page) => page.evaluate(() => {
         if (!v) {
           const w = await where(page); const k = await picker(page);
           check(!!k && k.seen, `${at}: Choose a backup file is in sight, above the bottom bars (${k && `${k.top}-${k.bottom}, visible to ${k.floor}`})`);
-          if (!phone) check(w.card !== null && w.card < 200, `${at}: the Restore card is at the top (${w.card})`);
+          if (!phone) check(w.card !== null && w.card >= 0 && w.card < 200, `${at}: the Restore card is at the top (${w.card})`);
         }
         await page.screenshot({ path: path.join(SHOTS, `${tag}-${btn.slice(1)}${hs === hsHere ? '-hs' : ''}-press.png`) });
         // 1b. The press's draw failed (the node didn't answer): its Try again still does what the press asked
@@ -128,6 +128,27 @@ const picker = (page) => page.evaluate(() => {
           await page.waitForSelector(v ? '#pklogin' : '#rsfile', { state: 'attached', timeout: 15000 }); await page.waitForTimeout(800);
           const n3 = await now();
           check(n3 === b3, `${at}: after that, Settings › ${tab} does nothing by itself (${n3 - b3} ${did})`);
+        }
+        // 4. The tab asked for drew without the control (this node is already signed in to Pubky), then
+        //    drew again in the same navigation with it (a library scan ended): that draw starts nothing
+        if (v) {
+          const info = (scanning) => ({ body: { name: 'Fixture node', scanning, library: { tracks: 1, albums: 1, artists: 2, files: 1, missing_files: 0 } } });
+          state.fixtures['/info'] = info(true);
+          await fx.go(page, '/');
+          await page.waitForSelector(btn, { timeout: 15000 });
+          state.fixtures['/pubky'] = { body: { user: 'fixturekey' } };
+          const b4 = posts(state, v);
+          await press(page, phone, btn);
+          await page.waitForFunction((t) => location.pathname === `/settings/${t}`, tab);
+          await page.waitForSelector('#pkurl', { state: 'attached', timeout: 15000 });
+          const without = await page.evaluate(() => !document.querySelector('#pklogin') && !document.querySelector('#pkhscreate'));
+          delete state.fixtures['/pubky'];
+          state.fixtures['/info'] = info(false);
+          const drew = await page.waitForSelector('#pklogin', { state: 'attached', timeout: 8000 }).then(() => true).catch(() => false);
+          await page.waitForTimeout(800);
+          check(without && drew, `${at}: the tab drew without ${what === 'Create account here' ? 'Create account here' : 'Sign in'}, then with it at a scan's end (${without}, ${drew})`);
+          check(posts(state, v) === b4, `${at}: that later draw starts nothing by itself (${posts(state, v) - b4} POST ${v})`);
+          delete state.fixtures['/info'];
         }
         await page.screenshot({ path: path.join(SHOTS, `${tag}-${btn.slice(1)}${hs === hsHere ? '-hs' : ''}-later.png`) });
         check(!errors.length, `${at}: no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);

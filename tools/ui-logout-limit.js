@@ -8,6 +8,9 @@
 //    session gone.
 // 4. Log out pressed again while it waits (the account menu's again; Settings' Log out, then the
 //    menu's): the button pressed shows its loader, and the node is asked once, not twice.
+// 5. Settings drawn again while its Log out waits (the sign-ins list's Retry, the page at a library
+//    scan's end): the new Log out is busy at once, as the one pressed (its loader; a press on it is
+//    dropped), and the node is still asked once.
 // The waits are skipped with Playwright's clock. Checks at 360, 360 in the Android app, 412 and
 // 1280 px; no browser dialog, no page errors.
 //   node tools/ui-logout-limit.js [repo] [shots]
@@ -27,7 +30,7 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
     // what the node does: 'hang' (answers nothing), 'renewal' (never answers the renewal
     // question, then ends the session), or a reason it refuses the session end with
     let mode = 'hang'; const deletes = []; const renewals = [];
-    const { context, page, state } = await fx.create(browser, width, { mobile: phone });
+    const { context, page, state } = await fx.create(browser, width, { mobile: phone, fixtures: {} });
     if (android) await context.addInitScript(() => { window.pmDesktop = { platform: 'android', version: 'fixture' }; });
     // The fixture saves its token at every load: a page that starts over keeps what the last one
     // left (a Log out has removed it), so the Log in page can be seen
@@ -147,6 +150,49 @@ const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if
         check(await spins('#me') && await spins('#logout'), `${at}: Settings, then the menu: the account button shows its loader too, and Settings' still does`);
         await waitBoth('Settings, then the menu', r0, d0);
       }
+    }
+
+    // 5. Settings drawn again while its Log out waits (the sign-ins list's Retry; the whole page at a
+    //    library scan's end): the new Log out is busy at once, as the one pressed; a press on it is dropped
+    mode = 'hang';
+    {
+      const info = (scanning) => ({ body: { name: 'Fixture node', scanning, library: { tracks: 1, albums: 1, artists: 2, files: 1, missing_files: 0 } } });
+      state.fixtures['/info'] = info(true);
+      await fx.go(page, '/settings/people'); await page.evaluate(() => { window.__sameLoad = true; });
+      const there = await page.waitForSelector('#logout', { state: 'attached', timeout: 8000 }).then(() => true).catch(() => false);
+      check(there, `${at}: drawn again: Settings › People has Log out`);
+      if (there) {
+        const open = () => page.$eval('#logout', (b) => { for (let d = b.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) d.open = true; b.scrollIntoView({ block: 'center' }); });
+        // (the button drawn now is marked: a draw again is a button without the mark)
+        const mark = () => page.$eval('#logout', (b) => { b.dataset.fxOld = '1'; });
+        const fresh = () => page.evaluate(() => { const b = document.querySelector('#logout'); return !!b && !b.dataset.fxOld; });
+        await open();
+        const r0 = renewals.length; const d0 = deletes.length;
+        await page.click('#logout'); await page.clock.fastForward(300); await page.waitForTimeout(100);
+        check(await spins('#logout'), `${at}: drawn again: Settings' Log out shows its loader while it waits`);
+        // the sign-ins list drawn again (its Retry: the fixture has no sign-ins list, so it says it couldn't read it)
+        await mark();
+        const retry = await page.evaluate(() => { const b = document.querySelector('[data-si-retry]'); if (b) b.click(); return !!b; });
+        for (let i = 0; i < 30 && !(await fresh()); i++) await page.waitForTimeout(100);
+        check(retry && await fresh(), `${at}: drawn again: the sign-ins list's Retry draws Log out again (${retry})`);
+        check(await page.evaluate(() => { const b = document.querySelector('#logout'); return !!b && b.getAttribute('aria-busy') === 'true' && b.getAttribute('aria-disabled') === 'true' && b.classList.contains('is-busy'); }), `${at}: drawn again by the sign-ins list: the new Log out is busy at once, as the one pressed (aria-busy, aria-disabled)`);
+        await page.clock.fastForward(300); await page.waitForTimeout(100);
+        check(await spins('#logout'), `${at}: drawn again by the sign-ins list: the new Log out shows its loader`);
+        // the whole page drawn again: the library scan the page started with has ended
+        await mark();
+        state.fixtures['/info'] = info(false);
+        for (let i = 0; i < 6 && !(await fresh()); i++) { await page.clock.fastForward(1000); await page.waitForTimeout(200); }
+        check(await fresh(), `${at}: drawn again: a scan's end draws Settings again, Log out too`);
+        await page.clock.fastForward(300); await page.waitForTimeout(100);
+        check(await spins('#logout'), `${at}: drawn again at a scan's end: the new Log out shows its loader`);
+        await open(); await page.waitForTimeout(100);
+        await page.screenshot({ path: path.join(SHOTS, `${at}-settings-drawn-again.png`) });
+        // a press on the new one is dropped, as a second press on the one pressed: the node is asked once
+        await open(); await page.click('#logout', { force: true }); await page.waitForTimeout(100);
+        await waitBoth('Settings drawn again, then its new Log out', r0, d0);
+        check(await page.evaluate(() => { const b = document.querySelector('#logout'); return !!b && !b.hasAttribute('aria-busy') && !b.classList.contains('is-busy') && !b.classList.contains('is-spinning'); }), `${at}: drawn again: once Log out has ended, Log out is idle again`);
+      }
+      delete state.fixtures['/info'];
     }
 
     // 3. The renewal question is never answered: after 5 s Log out goes on, and ends the session

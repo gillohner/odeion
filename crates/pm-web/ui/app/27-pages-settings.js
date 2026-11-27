@@ -90,7 +90,7 @@
             $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
             loadOrder();
             if (window.PM_USAGE) PM_USAGE.renderPersonal($('#usageme', main));
-            $('#lsignout').onclick = logOut;
+            wireLogOut($('#lsignout'));
             mountSignIns($('#mysignins', main), { kept: keptSignIns() });
             // A service opens its own sign-in ways (the same as the owner's, without the node's setup)
             $$('details[data-svc]', main).forEach((d) => d.addEventListener('toggle', () => {
@@ -591,7 +591,7 @@
             mountSignIns($('#pmine', box), {
               control: state.token ? `<button class="btn" id="logout">${icon('logout')} Log out</button>` : '',
               kept: keptSignIns(),
-              wire: (host) => { const lo = $('#logout', host); if (lo) lo.onclick = logOut; },
+              wire: (host) => wireLogOut($('#logout', host)),
             });
 
             // ---- the people ----
@@ -858,8 +858,10 @@
           };
           const pl = $('#pklogin'); if (pl) pl.onclick = () => ringFlow('/pubky/login', '');
           const hc = $('#pkhscreate'); if (hc) hc.onclick = () => ringFlow('/homeserver/bundled/owner-signup', ': it creates your account on this node\u2019s homeserver');
-          if (hc && jumpHere('create')) { hc.click(); hc.scrollIntoView({ block: 'center' }); }
+          // (asked first: a note whose control this draw doesn't have ends here, so a later draw that has it
+          // in the same navigation, a library scan's end, starts no sign-in by itself)
+          if (jumpHere('create') && hc) { hc.click(); hc.scrollIntoView({ block: 'center' }); }
           loadPeople(); loadRemote();
-          if (pl && jumpHere('resign')) { pl.click(); pl.scrollIntoView({ block: 'center' }); }
+          if (jumpHere('resign') && pl) { pl.click(); pl.scrollIntoView({ block: 'center' }); }
           break;
         }
