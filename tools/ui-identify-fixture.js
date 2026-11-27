@@ -227,8 +227,11 @@ const server = http.createServer(async (req, res) => {
       // (with a mouse, Match shows and takes its room only with the row under the mouse, as a user finds
       // it, and a moment after the mouse arrives)
       if (await until(async () => (await match.count()) > 0, 8000)) { await page.locator('.track').first().hover(); await until(() => match.isVisible(), 1500); }
+      // (only a phone hides it: a tablet or desktop whose Match never shows under the mouse fails here,
+      // it doesn't skip "Which song is this?" quietly)
       if ((await match.count()) > 0 && !(await match.isVisible())) {
-        console.log(`note ${W} the Match button is hidden at this width by design; "Which song is this?" checked at the wider ones`);
+        if (name === 'phone') console.log(`note ${W} the Match button is hidden at this width by design; "Which song is this?" checked at the wider ones`);
+        else check(false, `${W} Match shows with the row under the mouse (it stayed hidden)`);
       } else if (await match.count()) {
         await match.click();
         const second = page.locator('dialog [data-ci="1"]');

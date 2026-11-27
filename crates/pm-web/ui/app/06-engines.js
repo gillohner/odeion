@@ -274,7 +274,9 @@
   // when what the phone has changes
   const markDownloads = (root = document) => {
     if (!state.dl) return;
-    const put = (el, on) => { const m = el && $('.dl-mark', el); if (on && el && !m) el.insertAdjacentHTML('beforeend', dlMark()); else if (!on && m) m.remove(); };
+    // (on a song row before its Match, as the row draws it: Match, which comes a moment after the mouse,
+    // takes the title's room and not the mark's)
+    const put = (el, on) => { const m = el && $('.dl-mark', el); if (on && el && !m) { const id = $(':scope > .idmark', el); if (id) id.insertAdjacentHTML('beforebegin', dlMark()); else el.insertAdjacentHTML('beforeend', dlMark()); } else if (!on && m) m.remove(); };
     for (const r of $$('.track[data-tid]', root)) put($('.title', r), dlHas(r.dataset.tid));
     for (const r of $$('[data-srow][data-tid]', root)) put($('.name', r), dlHas(r.dataset.tid));
     for (const b of $$('.tile[data-album]', root)) put($('.t', b), dlAlbum(b.dataset.album));

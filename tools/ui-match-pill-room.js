@@ -30,7 +30,7 @@ const measure = (page, n) => page.evaluate((n) => {
   const cs = getComputedStyle(t); const c = t.getBoundingClientRect(); const l = a.getBoundingClientRect();
   const content = c.width - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
   const pb = p && p.getBoundingClientRect();
-  return { content, cellLeft: c.left, cellRight: c.right, link: l.width, linkRight: l.right, full: a.scrollWidth, pill: p ? { left: pb.left, right: pb.right, w: pb.width, op: Number(getComputedStyle(p).opacity) } : null, height: r.getBoundingClientRect().height };
+  return { content, cellLeft: c.left, cellRight: c.right, link: l.width, linkRight: l.right, linkTop: l.top, linkBottom: l.bottom, full: a.scrollWidth, pill: p ? { left: pb.left, right: pb.right, top: pb.top, bottom: pb.bottom, w: pb.width, op: Number(getComputedStyle(p).opacity) } : null, height: r.getBoundingClientRect().height };
 }, n);
 
 // Wait until two frames have drawn the rows (song rows are content-visibility: auto)
@@ -57,6 +57,10 @@ async function desktop(browser, width) {
     check(Math.abs(long.link - matched.link) <= 1, `${width}: an unmatched title is cut where a matched one is (${Math.round(long.link)} vs ${Math.round(matched.link)} px)`);
     check(long.pill.left >= long.cellLeft - 0.5 && long.pill.right <= long.cellRight + 0.5, `${width}: the hidden Match stays inside the title's cell`);
     check(short.link < short.content - 60, `${width}: the short title keeps its own width`);
+    // The link is as tall as the hidden Match beside it: no strip above or under the title where the
+    // mouse is on the row but not on the title (Match would come in there under a resting mouse)
+    check(long.linkTop <= long.pill.top + 0.05 && long.linkBottom >= long.pill.bottom - 0.05, `${width}: the title link covers the hidden Match's height (link ${long.linkTop.toFixed(2)}-${long.linkBottom.toFixed(2)}, Match ${long.pill.top.toFixed(2)}-${long.pill.bottom.toFixed(2)})`);
+    check(Math.abs(long.height - matched.height) < 0.5, `${width}: an unmatched row is as tall as a matched one (${long.height} vs ${matched.height} px)`);
     await page.screenshot({ path: path.join(SHOTS, `songs-rest-${width}.png`), clip: { x: 0, y: 0, width, height: 340 } });
 
     // Under the mouse: Match shows right after the cut title, inside the cell, beside it (not over it)
@@ -172,6 +176,57 @@ async function quickClick(browser, width, motion) {
       check(still.pill.w < 1 && Math.abs(still.link - still.content) <= 1 && stillOn === 'title', `${label}: ${wait} ms on the title's last letters, the title keeps its whole cell (Match ${Math.round(still.pill.w)} px, ${stillOn} under the mouse)`);
       await page.mouse.down(); await page.mouse.up();
       await outcome(`a click ${wait} ms after the mouse came to rest on the end of a long title`);
+    }
+
+    // Nor just above or under those letters, inside the title's line: the hidden Match is a little taller
+    // than the title's text, and a mouse resting in that thin strip got Match under it and opened it
+    for (const edge of ['under', 'above']) {
+      for (const wait of [400, 1000]) {
+        await songs();
+        const g = await measure(page, 1);
+        const spot = { x: g.linkRight - 20, y: edge === 'under' ? g.pill.bottom - 0.5 : g.pill.top + 0.5 };
+        await page.mouse.move(spot.x, spot.y); await page.waitForTimeout(wait);
+        const st = await measure(page, 1); const on = await under(spot);
+        check(st.pill.w < 1 && on !== 'Match', `${label}: ${wait} ms in the strip just ${edge} the title's last letters, Match stays out of the way (Match ${Math.round(st.pill.w)} px, ${on} under the mouse)`);
+        await page.mouse.down(); await page.mouse.up();
+        await outcome(`a click ${wait} ms after the mouse came to rest just ${edge} the end of a long title`);
+      }
+    }
+
+    // A song on this phone (the Android app with a mouse, desktop layout) has its mark between the title
+    // and Match, as the row draws it: a mouse resting on the mark, the gap before it or just under it
+    // doesn't get Match either
+    // (also a mark the app adds once the row is drawn, when the song has just come onto the phone: the
+    // app's own event, so its own code places the mark, before Match too)
+    for (const late of [false, true]) for (const where of ['mark', 'gap', 'under the mark']) {
+      await songs();
+      await page.evaluate((late) => {
+        const t = document.querySelector('#tracklist .track .title');
+        if (late) window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: { items: [{ kind: 'track', id: '1', title: 'x', here: 1, bytes: 1, songs: 1 }], songs: 1, bytes: 1, track_ids: [1], album_ids: [], playlist_ids: [], favourites: false } }));
+        else t.querySelector(':scope > .idmark').insertAdjacentHTML('beforebegin', '<span class="dl-mark" role="img" aria-label="On this phone" title="On this phone"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg></span>');
+      }, late);
+      await page.waitForTimeout(50);
+      const order = await page.evaluate(() => [...document.querySelector('#tracklist .track .title').children].map((e) => e.className.split(' ')[0]).join(','));
+      check(order === 'lnk,dl-mark,idmark', `${label}: ${late ? 'a mark that came later' : 'the mark'} is between the title and Match in the page (${order})`);
+      const m = await page.evaluate(() => { const t = document.querySelector('#tracklist .track .title'); const k = t.querySelector(':scope > .dl-mark').getBoundingClientRect(); const i = t.querySelector(':scope > .idmark').getBoundingClientRect(); const a = t.querySelector(':scope > .lnk').getBoundingClientRect(); return { k: { left: k.left, right: k.right, top: k.top, bottom: k.bottom }, i: { top: i.top, bottom: i.bottom }, a: { right: a.right } }; });
+      const ic = await page.evaluate(() => document.querySelector('#tracklist .track .title > .dl-mark .ic').getBoundingClientRect().toJSON());
+      const spot = where === 'mark' ? { x: (ic.left + ic.right) / 2, y: (ic.top + ic.bottom) / 2 }
+        : where === 'gap' ? { x: (m.a.right + ic.left) / 2, y: (ic.top + ic.bottom) / 2 }
+          : { x: (ic.left + ic.right) / 2, y: m.i.bottom - 0.5 };
+      const what = `${late ? 'a mark that came later' : 'the mark'} (${where})`;
+      check(spot.x > m.a.right, `${label}: ${what} sits after the title (${Math.round(spot.x)} > ${Math.round(m.a.right)})`);
+      await page.mouse.move(spot.x, spot.y); await page.waitForTimeout(1000);
+      const st = await measure(page, 1); const on = await under(spot);
+      check(st.pill.w < 1 && on !== 'Match', `${label}: 1000 ms on ${what}, Match stays out of the way (Match ${Math.round(st.pill.w)} px, ${on} under the mouse)`);
+      await page.mouse.down(); await page.mouse.up();
+      await page.waitForTimeout(300);
+      const hit = await page.evaluate(() => window.__hit);
+      check(hit !== 'Match', `${label}: a click on ${what} doesn't open Match (${hit})`);
+      // The mouse back on the rest of the row: Match shows after the mark, not between it and the title
+      await page.locator('#tracklist .track').nth(0).locator('.dur').hover();
+      await page.waitForFunction(() => document.querySelector('#tracklist .track .idmark').getBoundingClientRect().width > 30, null, { timeout: 3000 }).catch(() => {});
+      const after = await page.evaluate(() => { const t = document.querySelector('#tracklist .track .title'); const i = t.querySelector(':scope > .idmark').getBoundingClientRect(); return { k: t.querySelector(':scope > .dl-mark .ic').getBoundingClientRect().right, i: i.left, w: i.width }; });
+      check(after.w > 30 && after.i >= after.k, `${label}: with ${what}, Match shows after the mark (${Math.round(after.w)} px, ${Math.round(after.i)} >= ${Math.round(after.k)})`);
     }
 
     // Off the title, on the rest of the row: Match shows beside the title after the wait, and the mouse
