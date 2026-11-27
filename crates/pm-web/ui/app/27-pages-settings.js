@@ -1,6 +1,9 @@
         case 'settings': {
-          // (Zones' "Group outputs…": read once, so a page left before it drew doesn't jump a later visit)
-          const toGroup = state.focusGroup; state.focusGroup = false;
+          // A press that opens a tab at one of its controls (settingsAt): done once, when this tab draws in
+          // the navigation the press started (the press's own draw, or its Try again after a failed one), so
+          // a page left before it drew doesn't jump or start a sign-in on a later visit, nor on another tab
+          // (a draw of another tab in that navigation ends it: a redraw later on the tab asked for does nothing)
+          const jumpHere = (k) => { const j = state.jump; if (!j || j.gen !== navGen) return false; if (j.tab !== active) { state.jump = null; return false; } if (j.k !== k) return false; state.jump = null; return true; };
           if (isOffline()) {
             const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
             const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
@@ -380,8 +383,10 @@
             };
           };
           // Zones' "Group outputs…" opens this tab at its Group outputs form, the focus on its first speaker
-          if (toGroup && active === 'playback') { const gc = $('#groupcard'); if (gc) { gc.scrollIntoView({ block: 'start', behavior: 'instant' }); const f = $('#groupouts input:not(:disabled)'); if (f) f.focus({ preventScroll: true }); else { gc.tabIndex = -1; gc.focus({ preventScroll: true }); } } }
-          if (state.focusRestore) { state.focusRestore = false; $('#backupcard').scrollIntoView({ block: 'start' }); $('#rsfile').focus(); }
+          if (jumpHere('group')) { const gc = $('#groupcard'); if (gc) { gc.scrollIntoView({ block: 'start', behavior: 'instant' }); const f = $('#groupouts input:not(:disabled)'); if (f) f.focus({ preventScroll: true }); else { gc.tabIndex = -1; gc.focus({ preventScroll: true }); } } }
+          // Get started's Restore: the Backup card at the top, and the file picker (its last block) in sight too
+          // (on a short screen it wins: on a phone, above the bottom bars), the focus on it
+          if (jumpHere('restore')) { $('#backupcard').scrollIntoView({ block: 'start', behavior: 'instant' }); const rf = $('#rsfile'); rf.closest('label').scrollIntoView({ block: 'nearest', behavior: 'instant' }); rf.focus({ preventScroll: true }); }
           loadOrder();
           const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); syncToast(r); render(); } catch (e) { toast(e.message, 'error'); } };
           // ---- Settings › People & access (the `people` tab): who can use this node, adding and removing
@@ -853,8 +858,8 @@
           };
           const pl = $('#pklogin'); if (pl) pl.onclick = () => ringFlow('/pubky/login', '');
           const hc = $('#pkhscreate'); if (hc) hc.onclick = () => ringFlow('/homeserver/bundled/owner-signup', ': it creates your account on this node\u2019s homeserver');
-          if (state.autoCreate && hc) { state.autoCreate = false; hc.click(); hc.scrollIntoView({ block: 'center' }); }
+          if (hc && jumpHere('create')) { hc.click(); hc.scrollIntoView({ block: 'center' }); }
           loadPeople(); loadRemote();
-          if (state.autoResign && pl) { state.autoResign = false; pl.click(); pl.scrollIntoView({ block: 'center' }); }
+          if (pl && jumpHere('resign')) { pl.click(); pl.scrollIntoView({ block: 'center' }); }
           break;
         }

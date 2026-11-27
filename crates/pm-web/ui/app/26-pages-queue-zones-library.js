@@ -311,7 +311,7 @@
           });
           $$('[data-zsel]', main).forEach((b) => b.onclick = () => { state.zone = b.dataset.zsel; localStorage.setItem('pm.zone', state.zone); renderZoneName(); renderBar(); refreshQueue(); render(); });
           $$('[data-zone-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(b.dataset.zoneDel)}`); toast('Group removed'); if (state.zone === b.dataset.zoneDel) { ensureZone(); renderZoneName(); } render(); } catch (e) { toast(e.message, 'error'); } });
-          $('#zgroup').onclick = () => { state.focusGroup = true; setView('settings', 'playback'); };
+          $('#zgroup').onclick = () => settingsAt('playback', 'group');
           // Zones opened on a phone (a tab, a link, a reload; not Back or Forward): the zone in use
           // is on screen, not under the mini player (five zones put it a screen down). Once, when
           // its card is first drawn, and not after they touched or scrolled the page: a redraw,

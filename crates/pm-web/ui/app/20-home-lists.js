@@ -50,7 +50,7 @@
     $$('[data-hgrid] [data-tileplay]', el).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = tiles[Number(b.dataset.tileplay)]; if (it) discoverPlay(it, null, b); });
     $$('[data-hopen]', el).forEach((r) => r.onclick = () => { const it = events[Number(r.dataset.hopen)]; openWeb(it.page || it.uri); });
     $$('[data-tag-open]', el).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagOpen));
-    $$('[data-home-signin]', el).forEach((b) => b.onclick = () => { state.autoResign = true; setView('settings', 'accounts'); });
+    $$('[data-home-signin]', el).forEach((b) => b.onclick = () => settingsAt('accounts', 'resign'));
     const cs = $('[data-city-save]', el); if (cs) cs.onclick = async () => { const city = $('[data-city]', el).value.trim(); if (!city) return; try { const l = await api('PUT', '/home/location', { city }); toast(`Concerts near ${l.label}`); render(); } catch (e) { toast(e.message, 'error'); } };
   };
   const homeCache = new Map(); // section|window → { at, sec }
@@ -391,7 +391,7 @@
   const resignNotice = (pk = state.pubkyStatus) => pk && pk.needs_resign ? `<div class="notice warn resign" role="status"><span>${esc(pk.notice || RESIGN_TEXT)}</span>${state.token ? `<button class="btn sm" data-resign>${icon('logout')} Log out</button>` : '<button class="btn sm primary" data-resign>Approve in Pubky Ring</button>'}</div>` : '';
   // With a token: Log out, as the next log in asks for the folders. A node without one has no log
   // in, so its notice approves them here (Settings › My accounts, the node's own Pubky sign-in).
-  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = state.token ? logOut : () => { state.autoResign = true; setView('settings', 'accounts'); });
+  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = state.token ? logOut : () => settingsAt('accounts', 'resign'));
   // A sync's answer as one plain line: the re-sign notice instead of a raw 403.
   const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { forgetPubkyUser(); return toast(RESIGN_TEXT, 'error'); } toast(`Saved: ${fmtCount(r.pushed)} sent to your homeserver, ${fmtCount(r.pulled)} received${r.errors.length ? `, ${fmtCount(r.errors.length)} errors` : ''}${r.pending ? `; ${fmtCount(r.pending)} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
   // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).
