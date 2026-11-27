@@ -40,12 +40,18 @@ const rows = (page, list) => page.evaluate((list) => {
     const r = row.getBoundingClientRect();
     const bad = [];
     const shown = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && parseFloat(getComputedStyle(el).opacity) > 0;
-    for (const el of row.querySelectorAll('.title, .sub, .num, .dur, [data-act="more"]')) {
+    for (const el of row.querySelectorAll('.title, .by, .num, .dur, [data-act="more"]')) {
       if (!shown(el)) continue;
       const b = el.getBoundingClientRect();
       if (b.top < r.top - 0.5 || b.bottom > r.bottom + 0.5) bad.push(`${el.className || el.dataset.act} ${b.top.toFixed(0)}..${b.bottom.toFixed(0)} outside ${r.top.toFixed(0)}..${r.bottom.toFixed(0)}`);
-      // the words fit their own box (no length or number running out of its column)
-      if (el.matches('.dur, .num') && el.scrollWidth > el.clientWidth + 1) bad.push(`${el.className} "${el.textContent.trim()}" ${el.scrollWidth} px in ${el.clientWidth}`);
+      // nor out of its side (the list clips its rows, so #main doesn't get wider when a row does)
+      if (b.left < r.left - 0.5 || b.right > r.right + 0.5) bad.push(`${el.className || el.dataset.act} ${b.left.toFixed(0)}..${b.right.toFixed(0)} wider than the row ${r.left.toFixed(0)}..${r.right.toFixed(0)}`);
+      // the length's words fit its own box (no length running out of its column)
+      if (el.matches('.dur') && el.scrollWidth > el.clientWidth + 1) bad.push(`${el.className} "${el.textContent.trim()}" ${el.scrollWidth} px in ${el.clientWidth}`);
+      // the number sits inside its column (the .no box: .num is an item of that flex box, so its own
+      // scrollWidth never exceeds its width; it runs out of the column instead)
+      const no = el.matches('.num') && el.closest('.no');
+      if (no) { const c = no.getBoundingClientRect(); if (b.left < c.left - 0.5 || b.right > c.right + 0.5) bad.push(`number "${el.textContent.trim()}" ${b.left.toFixed(0)}..${b.right.toFixed(0)} outside its column ${c.left.toFixed(0)}..${c.right.toFixed(0)}`); }
     }
     // the length's words end before the ⋯ starts
     const dur = row.querySelector('.dur'); const more = row.querySelector('[data-act="more"]');
@@ -57,7 +63,9 @@ const rows = (page, list) => page.evaluate((list) => {
     out.push({ h: r.height, bad, dur: w('.dur'), no: row.matches('.seq') ? null : w('.no') }); // (a library list's .no is the keyboard's Play over the row's start, not a column)
   }
   window.scrollTo(0, 0); document.querySelector('#main')?.scrollTo?.(0, 0);
-  return { rows: out, fits: document.documentElement.scrollWidth <= innerWidth };
+  // (the page and #main, which scrolls on its own)
+  const main = document.querySelector('#main');
+  return { rows: out, fits: document.documentElement.scrollWidth <= innerWidth && (!main || main.scrollWidth <= main.clientWidth) };
 }, list);
 
 async function phone(browser, width, k) {
