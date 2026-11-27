@@ -1,6 +1,9 @@
         case 'settings': {
-          // (Zones' "Group outputs…": read once, so a page left before it drew doesn't jump a later visit)
-          const toGroup = state.focusGroup; state.focusGroup = false;
+          // A press that opens a tab at one of its controls (Zones' "Group outputs…", Get started's Restore,
+          // Create account here and Sign in, the health menu's Sign in): read once, so a page left before it
+          // drew doesn't jump or start a sign-in on a later visit, and only on the tab it asked for
+          const toGroup = state.focusGroup, toRestore = state.focusRestore, toCreate = state.autoCreate, toResign = state.autoResign;
+          state.focusGroup = false; state.focusRestore = false; state.autoCreate = false; state.autoResign = false;
           if (isOffline()) {
             const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
             const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
@@ -381,7 +384,7 @@
           };
           // Zones' "Group outputs…" opens this tab at its Group outputs form, the focus on its first speaker
           if (toGroup && active === 'playback') { const gc = $('#groupcard'); if (gc) { gc.scrollIntoView({ block: 'start', behavior: 'instant' }); const f = $('#groupouts input:not(:disabled)'); if (f) f.focus({ preventScroll: true }); else { gc.tabIndex = -1; gc.focus({ preventScroll: true }); } } }
-          if (state.focusRestore) { state.focusRestore = false; $('#backupcard').scrollIntoView({ block: 'start' }); $('#rsfile').focus(); }
+          if (toRestore && active === 'backup') { $('#backupcard').scrollIntoView({ block: 'start', behavior: 'instant' }); $('#rsfile').focus({ preventScroll: true }); }
           loadOrder();
           const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); syncToast(r); render(); } catch (e) { toast(e.message, 'error'); } };
           // ---- Settings › People & access (the `people` tab): who can use this node, adding and removing
@@ -853,8 +856,8 @@
           };
           const pl = $('#pklogin'); if (pl) pl.onclick = () => ringFlow('/pubky/login', '');
           const hc = $('#pkhscreate'); if (hc) hc.onclick = () => ringFlow('/homeserver/bundled/owner-signup', ': it creates your account on this node\u2019s homeserver');
-          if (state.autoCreate && hc) { state.autoCreate = false; hc.click(); hc.scrollIntoView({ block: 'center' }); }
+          if (toCreate && hc && active === 'accounts') { hc.click(); hc.scrollIntoView({ block: 'center' }); }
           loadPeople(); loadRemote();
-          if (state.autoResign && pl) { state.autoResign = false; pl.click(); pl.scrollIntoView({ block: 'center' }); }
+          if (toResign && pl && active === 'accounts') { pl.click(); pl.scrollIntoView({ block: 'center' }); }
           break;
         }
