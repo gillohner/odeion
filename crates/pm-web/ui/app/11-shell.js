@@ -51,6 +51,8 @@
     if (changed && state.view) markTabs();
     if (changed) $$('.srow [data-ssong], .srow [data-salbum], .srow:not(.card-row) .sub [data-artist-credit], .track .main-col .lnk').forEach((a) => { if (now === 'phone') a.tabIndex = -1; else a.removeAttribute('tabindex'); });
     if (changed) { const pb = $('#peoplebox'); if (pb && pb.reshell) pb.reshell(); }
+    // (a list's filter box says just "Filter" on a phone and its list's name elsewhere, as filterBox draws it)
+    if (changed) { const f = $('#filter.filter'); if (f && f.getAttribute('aria-label')) f.placeholder = now === 'phone' ? 'Filter' : f.getAttribute('aria-label'); }
     if (changed && state.view === 'zones') render(); // (its cards are laid out for the shell)
     if (changed && state.view === 'search') { const run = displayedSearch(); if (run) renderSearchBody(run); } // (Filters folds only on a phone)
     if (densePref()) document.documentElement.dataset.dense = '1'; else delete document.documentElement.dataset.dense;

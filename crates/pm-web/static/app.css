@@ -619,6 +619,10 @@ html[data-shell="phone"] .notice[data-failed] .btn.sm { min-height: 44px; }
    100 % this is 54 px, as above, and every row still has the same height (the 54 px above stay for
    a WebView without lh). The number and length columns grow with it too (phones, below). */
 .track { height: max(54px, calc(1.86lh + 12px)); contain-intrinsic-size: auto max(54px, calc(1.86lh + 12px)); }
+/* (wider than a phone, as on an Android tablet with a larger font, the number, format and length
+   columns grow with it too, or the format and a length ran under the row's buttons; at 100 % they
+   are the px widths above) */
+.track { grid-template-columns: max(40px, 1.5lh) minmax(0, 2.2fr) minmax(0, 1.4fr) max(92px, 3.3lh) max(64px, 2.3lh) 112px; }
 /* (a row that follows a finger shows its label in the gap it leaves, outside its own box: it is on
    screen then, and paints as it did) */
 .track.swiping { content-visibility: visible; }
@@ -629,7 +633,7 @@ html[data-shell="phone"] .notice[data-failed] .btn.sm { min-height: 44px; }
 /* A click on a library song row (or a service album's) plays from there, as on a playlist's (.list-row.clickable) */
 :is([data-list], .src-tracks) > .track { cursor: pointer; }
 .track.cur .title { color: var(--accent-strong); }
-.track.compact { grid-template-columns: 40px minmax(0, 1fr) 92px 64px 112px; }
+.track.compact { grid-template-columns: 40px minmax(0, 1fr) 92px 64px 112px; grid-template-columns: max(40px, 1.5lh) minmax(0, 1fr) max(92px, 3.3lh) max(64px, 2.3lh) 112px; }
 .track .no { position: relative; display: flex; align-items: center; justify-content: center; color: var(--muted); font-variant-numeric: tabular-nums; font-size: var(--fs-sm); }
 .track .no .num { transition: opacity var(--dur-fast); }
 .track .no .rowplay { position: absolute; inset: 0; margin: auto; width: 32px; height: 32px; border-radius: 50%; border: 0; background: var(--fg); color: var(--bg); display: flex; align-items: center; justify-content: center; opacity: 0; cursor: pointer; }
@@ -661,7 +665,7 @@ html[data-shell="phone"] .notice[data-failed] .btn.sm { min-height: 44px; }
   html[data-shell="desktop"] .track .by-album { display: inline; }
   html[data-shell="desktop"] .track .album-col { display: none; }
 }
-@media (min-width: 720.02px) and (max-width: 900px) { html[data-shell="desktop"] .track:not(.compact) { grid-template-columns: 40px minmax(0, 1fr) 92px 64px 112px; } }
+@media (min-width: 720.02px) and (max-width: 900px) { html[data-shell="desktop"] .track:not(.compact) { grid-template-columns: 40px minmax(0, 1fr) 92px 64px 112px; grid-template-columns: max(40px, 1.5lh) minmax(0, 1fr) max(92px, 3.3lh) max(64px, 2.3lh) 112px; } }
 .fmt { font-size: var(--fs-xs); color: var(--muted); border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 1px var(--sp-1h); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .track .dur { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; font-size: var(--fs-sm); }
 .track .row-actions { display: flex; justify-content: flex-end; gap: var(--sp-0h); opacity: 0; transition: opacity var(--dur-fast); }

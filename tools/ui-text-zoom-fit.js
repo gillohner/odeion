@@ -111,6 +111,30 @@ async function collections(browser, width, k) {
         check(t.ph === 'Filter songs' && t.name === 'Filter songs', `desktop-1280 Songs: the filter still shows "${t.ph}"`);
       } finally { await context.close(); }
     }
+    // A window resized across 600 px (a tablet turned, a split screen) switches the placeholder with
+    // the layout, without a redraw: what was typed and the focus stay
+    for (const [route, name, opts, from, to] of [['/tracks', 'Filter songs', { tracks: many(30) }, 1280, 360], ['/albums', 'Filter albums', { fixtures: { '/library/albums': { body: albums } } }, 412, 768]]) {
+      const { page, context } = await fx.create(browser, from, opts);
+      try {
+        await fx.go(page, route); await page.waitForSelector('#filter'); await page.waitForTimeout(200);
+        await page.locator('#filter').fill('1'); await page.waitForTimeout(400);
+        const before = await page.locator('#filter').elementHandle();
+        const atFrom = await filterText(page);
+        const wide = (w) => w >= 600;
+        check(atFrom.ph === (wide(from) ? name : 'Filter'), `${from} → ${to} ${route}: at ${from} px the filter shows "${atFrom.ph}"`);
+        await page.setViewportSize({ width: to, height: 800 }); await page.waitForTimeout(300);
+        const shell = await page.evaluate(() => document.documentElement.dataset.shell);
+        const t = await filterText(page);
+        check((shell === 'phone') === !wide(to), `${from} → ${to} ${route}: the layout switched (${shell})`);
+        check(t.ph === (wide(to) ? name : 'Filter') && t.name === name, `${from} → ${to} ${route}: at ${to} px the filter shows "${t.ph}", named "${t.name}"`);
+        const same = await page.evaluate((el) => el.isConnected && document.activeElement === el && el.value === '1', before);
+        check(same, `${from} → ${to} ${route}: the same box keeps its focus and "1"`);
+        await page.setViewportSize({ width: from, height: 800 }); await page.waitForTimeout(300);
+        const back = await filterText(page);
+        check(back.ph === atFrom.ph, `${from} → ${to} → ${from} ${route}: back at ${from} px it shows "${back.ph}" again`);
+        check(!(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)), `${from} → ${to} → ${from} ${route}: no sideways scroll`);
+      } finally { await context.close(); }
+    }
   } finally { await browser.close(); }
   console.log(`${passed} ok, ${failed} FAIL`);
   process.exit(failed ? 1 : 0);
