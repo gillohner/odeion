@@ -261,8 +261,16 @@
     // (a page that drew nothing, its code done or failed: at its top then, unless a newer page waits)
     // (not for a change inside the page, 'replace': a tag taken off, a tab, the next page of a list;
     // nor before the person has pressed or typed anything: a page the app opens by itself)
+    // (a press's note to open Settings at one of its controls, settingsAt: it is for this navigation, the
+    // next one navigate numbers, and no other; not for a Back or Forward)
+    if (how !== 'pop' && state.jump && state.jump.gen == null) state.jump.gen = navGen + 1;
     return navigate(fresh, fresh && !firstPage && how !== 'replace' && personActed).finally(() => { if (top && topLater === top) topNow(); });
   };
+  // A press that opens a Settings tab at one of its controls (Zones' "Group outputs…", Get started's
+  // Restore, Create account here and Sign in, the health menu's Sign in): the tab does it once, in the
+  // navigation the press started, on the tab it asked for (a draw that failed and its Try again too). A
+  // page left before it drew, or another tab, never does it later (Settings' jumpHere)
+  const settingsAt = (tab, k) => { state.jump = { k, tab, gen: null }; return setView('settings', tab); };
   // (a post that is no playlist pasted over a search with a query: that search's entry takes its
   // search, as a new query there does, so Back and Escape go where Search was opened from: { q, in, depth
   // (of that search's entry), escaped (Escape pressed meanwhile) }. Ended undecided when the person opens

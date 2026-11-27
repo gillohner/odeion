@@ -72,9 +72,9 @@
       $('#setupcontactsave').onclick = save; ci.onkeydown = (e) => { if (e.key === 'Enter') $('#setupcontactsave').click(); };
     }
     const sp = $('#setupspeakers'); if (sp) sp.onclick = () => setView('settings', 'playback');
-    const sr = $('#setuprestore'); if (sr) sr.onclick = (e) => { e.preventDefault(); state.focusRestore = true; setView('settings', 'backup'); };
-    const si = $('#setupsignin'); if (si) si.onclick = () => { state.autoResign = true; setView('settings', 'accounts'); };
-    const sc = $('#setupcreate'); if (sc) sc.onclick = () => { state.autoCreate = true; setView('settings', 'accounts'); };
+    const sr = $('#setuprestore'); if (sr) sr.onclick = (e) => { e.preventDefault(); settingsAt('backup', 'restore'); };
+    const si = $('#setupsignin'); if (si) si.onclick = () => settingsAt('accounts', 'resign');
+    const sc = $('#setupcreate'); if (sc) sc.onclick = () => settingsAt('accounts', 'create');
     $('#setuphide').onclick = async () => {
       if (owner) {
         try { await api('PUT', '/node/settings', { first_steps_hidden: true }); toast('Hidden for everyone on this node. Settings › Home for everyone shows them again.'); } catch (e) { toast(e.message, 'error'); return; }
