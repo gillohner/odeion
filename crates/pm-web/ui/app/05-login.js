@@ -125,25 +125,35 @@
   // working while the page claims it is over, so it says why, still logged in, with Try again.
   // While the node needs new folders, the owner's next log in from here asks for them (only the
   // owner's page asks: anyone scanning a plain QR code is asked to read, nothing more).
+  // A node that never answers would keep Log out busy for good: 15 s in all, of them at most 5
+  // for the renewal code (then skipped); the session end that gets no answer asks Try again
+  const LOGOUT_MS = 15000; const RENEWAL_MS = 5000;
+  const timedFetch = async (url, opts, ms) => {
+    const c = new AbortController(); const t = setTimeout(() => c.abort(), Math.max(0, ms));
+    try { const r = await fetch(url, { ...opts, signal: c.signal }); return { r, body: await r.json().catch(() => null) }; } finally { clearTimeout(t); }
+  };
   const logOut = async () => {
+    const until = Date.now() + LOGOUT_MS;
     // Asked while still logged in: the node gives a code only to the owner, and only when needed
     let renewal = null;
     if (state.token && !isListener()) {
-      const r = await fetch('/v1/auth/pubky/renewal', { method: 'POST', headers: { authorization: 'Bearer ' + state.token } }).then((x) => (x.ok ? x.json() : null)).catch(() => null);
-      renewal = (r && r.renewal) || null;
+      const a = await timedFetch('/v1/auth/pubky/renewal', { method: 'POST', headers: { authorization: 'Bearer ' + state.token } }, RENEWAL_MS).catch(() => null);
+      renewal = (a && a.r.ok && a.body && a.body.renewal) || null;
     }
     if (state.token) {
       let why = '';
       try {
-        const r = await fetch('/v1/me/token', { method: 'DELETE', headers: { authorization: 'Bearer ' + state.token } });
-        if (!r.ok && r.status !== 401) why = (await r.json().catch(() => ({}))).error || `HTTP ${r.status}`;
+        const { r, body } = await timedFetch('/v1/me/token', { method: 'DELETE', headers: { authorization: 'Bearer ' + state.token } }, until - Date.now());
+        if (!r.ok && r.status !== 401) why = (body && body.error) || `HTTP ${r.status}`;
       } catch { why = 'the node didn’t answer'; }
       if (why) {
         popTransient(); if (popPending) await popPending;
         // The page's own dialog, as every other question in the app (no browser box)
-        // (the node's own reason may already be a sentence: one full stop)
+        // (the node's own reason may already be a sentence: one full stop, and none after its
+        // own ?, ! or …)
         const said = String(why).replace(/[.\s]+$/, '') || 'The node refused';
-        const again = await choiceDialog({ title: 'Couldn’t log out', text: `${said[0].toUpperCase()}${said.slice(1)}. You are still logged in.`, choices: [{ label: 'Try again', value: true, primary: true }] });
+        const end = /[?!…]$/.test(said) ? '' : '.';
+        const again = await choiceDialog({ title: 'Couldn’t log out', text: `${said[0].toUpperCase()}${said.slice(1)}${end} You are still logged in.`, choices: [{ label: 'Try again', value: true, primary: true }] });
         if (again) return logOut();
         return;
       }
