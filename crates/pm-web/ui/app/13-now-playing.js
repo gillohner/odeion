@@ -335,9 +335,6 @@
       down: (o) => { if (o === 'head') closeNpSheet(); else if (!inSheet(o) && !state.npSheet) toggleNowPlaying(); },
     });
   }
-  // The quality sheet (STEWARD-UX-PLAYER-SOURCES §2), from the player's quality label: what is
-  // arriving, what the zone makes of it and why, the service's quality choice, and the way to the
-  // Play from order and the zone's output settings.
   // Put back what the last render had (scroll, focus) once the content it needs is there; for that
   // render only, and only in its first seconds so a late answer never yanks the view
   const npRestore = () => {
