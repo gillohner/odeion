@@ -495,12 +495,14 @@
         + (isOwner() ? `<button class="btn sm ghost" id="qpdsp">${icon('settings')} All DSP settings</button>` : '');
     }
     const srcLabel = np ? (svc === 'library' ? 'Your library' : svc ? srcName(svc) : (np.stream_title ? 'Live stream' : 'Unknown source')) : 'Nothing playing';
+    // The signal path, or what this browser (or the app) does with the file. With nothing playing on
+    // a node zone there is no Signal path part: Source already says "Nothing playing"
+    const sigPath = np && np.signal_path ? pathHtml(zoneNp(z, np), 'compact') : isBrowser() ? `<p class="qp-note">${decodeNote()}</p>` : '';
     qPanel.innerHTML = `<div class="pop-title">Playing on</div>
       <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span></span><span class="state">${zoneStateText(z)}</span></div>
       <div class="pop-title">Source</div>
       <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? decodedBy() : ''))}</span>` : ''}</span></div>
-      <div class="pop-title">Signal path</div>
-      ${np && np.signal_path ? pathHtml(zoneNp(z, np), 'compact') : `<p class="qp-note">${isBrowser() ? decodeNote() : 'Nothing playing.'}</p>`}
+      ${sigPath ? `<div class="pop-title">Signal path</div>${sigPath}` : ''}
       <div class="pop-title">DSP · ${esc(z.name)}</div>
       <div class="qp-dsp">${dsp}</div>`;
     qPanelKey = qpKey();
