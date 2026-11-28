@@ -2267,7 +2267,8 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
   .track:not(:has(:focus-visible)) .title:has(> .lnk:hover, > .dl-mark:hover) > .idmark, .track .title:has(> .lnk:active) > .idmark { transition: none !important; }
 }
 /* A touch screen always shows Match, so on a tablet with a large font (narrow window, the number, format and
-   length columns grown with the text) Match left an unmatched title a few letters ("S…"). When the title's
+   length columns grown with the text), or a narrow one with the sidebar showing names, Match left an unmatched
+   title a few letters ("S…"). When the title's
    cell has room for fewer than 16 characters (with Match the title would keep only ~9-10), Match isn't
    shown there, as on a phone: the row's ⋯ has "Which song is this?". (ch follows Android's font size;
    px and em don't) */
