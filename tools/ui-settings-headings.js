@@ -3,9 +3,11 @@
 // "Usage insights" row (then What is recorded, Clear mine); Usage insights said it three times
 // (title, heading, row; then Stored); a listener's Settings had a "Usage insights" group over a
 // "Usage insights" row. Now Privacy and Usage insights have no group heading (the title names the
-// page), and a listener's group is "Privacy", the owner's tab for the same rows. The usage routes
-// answer as a working node's do (usage insights on, shared), so the pages are the real ones. Every owner tab is checked, at a computer's, a tablet's and a
-// phone's width (each tab its own page there), and a listener's one-page Settings.
+// page), and a listener's group is "Privacy", the owner's tab for the same rows. Play from had a
+// "Play from" heading under its "Play from" title: now its source order sits right under the title. The usage routes
+// answer as a working node's do (usage insights on, shared), so the pages are the real ones.
+// Every owner tab is checked, at a computer's, a tablet's and a phone's width (each tab its own
+// page there), and a listener's one-page Settings.
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-settings-headings.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -17,13 +19,11 @@ fs.mkdirSync(shots, { recursive: true });
 
 let failed = 0; let passed = 0;
 const check = (ok, what) => { if (ok) { passed++; console.log(`ok   ${what}`); } else { failed++; console.log(`FAIL ${what}`); } };
-// Play from still has a "Play from" heading under its "Play from" title: an open change's test
-// reads that heading, so it goes in a later change. Reported, not counted, until then.
-const LATER = new Set(['playfrom']);
-
-// Each group of a scope (a panel, or a listener's page): its heading and its rows' names
+// Each group of a scope (a panel, or a listener's page): its heading and its rows' names. A group
+// that folds on a phone (People & access, .set-fold) carries its heading in its summary.
 const groupsOf = (page, sel) => page.$$eval(`${sel} .set-group`, (gs) => gs.map((g) => ({
-  h: (g.querySelector(':scope > .set-h') || {}).textContent || '',
+  h: (g.querySelector(':scope > .set-h, :scope > summary > .set-h') || {}).textContent || '',
+  fold: g.classList.contains('set-fold'),
   names: [...g.querySelectorAll('.set-name')].map((n) => n.textContent.trim()),
 })));
 const same = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
@@ -63,18 +63,23 @@ const SIZES = [[1280, {}, '1280'], [768, {}, '768'], [412, { mobile: true }, '41
           // Usage insights draws its rows once the node answers (usage.js; a Loading… row before)
           if (t === 'privacy') await page.waitForSelector('#usageme [data-usage="stop"]');
           if (t === 'usage') await page.waitForSelector('#usagenode [data-usage-node]');
+          // Play from draws its order once the node answers; People & access its groups
+          const drawn = { playfrom: '#gorder .porder-row', people: '#peoplebox .set-group' }[t];
+          if (drawn) check(await page.waitForSelector(drawn, { timeout: 8000 }).then(() => true, () => false), `${name} ${t}: its rows are drawn (${drawn})`);
           const title = await page.$eval(`${sel} .set-title`, (e) => e.textContent.trim());
           const groups = await groupsOf(page, sel);
           const bad = repeats(title, groups);
           const what = `${name} ${t} "${title}": no group heading repeats the title or its first row (${JSON.stringify(groups.map((g) => [g.h, g.names.slice(0, 2)]))})`;
-          if (LATER.has(t)) console.log(`note ${what}: ${bad.length ? 'still repeats, left for later' : 'none now'}`);
-          else check(!bad.length, what);
-          if (t === 'privacy' || t === 'usage') {
+          check(!bad.length, what);
+          // A phone folds People & access into groups whose heading is in the summary: those are read too
+          if (t === 'people' && opts.mobile) check(groups.some((g) => g.fold && g.h), `${name} people: its folding groups' headings are read (${JSON.stringify(groups.filter((g) => g.fold).map((g) => g.h))})`);
+          if (t === 'privacy' || t === 'usage' || t === 'playfrom') {
             const g = await page.evaluate((s) => {
               const p = document.querySelector(s); const head = p.querySelector('.set-title').getBoundingClientRect(); const card = p.querySelector('.set-rows').getBoundingClientRect();
-              return { hs: p.querySelectorAll('.set-h').length, gap: Math.round(card.top - head.bottom), row: (p.querySelector('.set-rows .set-name') || {}).textContent, rows: p.querySelectorAll('.set-rows .set-name').length };
+              return { hs: p.querySelectorAll('.set-h').length, gap: Math.round(card.top - head.bottom), row: (p.querySelector('.set-rows .set-name') || {}).textContent, rows: p.querySelectorAll('.set-rows .set-name').length, order: !!p.querySelector('.set-rows #gorder .porder-row') };
             }, sel);
-            check(g.hs === 0 && g.row === 'Usage insights' && g.rows >= 2, `${name} ${t}: the Usage insights rows right under the title, no heading between (${JSON.stringify(g)})`);
+            if (t === 'playfrom') check(g.hs === 0 && g.row === 'Where songs play from' && g.order, `${name} ${t}: the source order right under the title, no "Play from" heading between (${JSON.stringify(g)})`);
+            else check(g.hs === 0 && g.row === 'Usage insights' && g.rows >= 2, `${name} ${t}: the Usage insights rows right under the title, no heading between (${JSON.stringify(g)})`);
             check(g.gap >= 4 && g.gap <= 32, `${name} ${t}: the row sits a heading's gap under the title, not glued to it or a heading's room away (${g.gap} px)`);
             await page.screenshot({ path: path.join(shots, `after-settings-${t}-${w}.png`) });
           }

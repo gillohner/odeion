@@ -48,7 +48,7 @@ const SIZES = [[1280, {}, '1280'], [1024, {}, '1024'], [768, {}, '768'], [412, {
             check(got.path === '/settings/playfrom', `${what}: opens Settings › Play from (${got.path})`);
             // the order's rows, not the loading placeholder #gorder holds before they come
             const order = await page.waitForSelector('#main #gorder .porder-row', { state: 'visible', timeout: 5000 }).then(() => true, () => false);
-            check(order && got.groups.includes('Play from'), `${what}: the source order is on the page it opens (${JSON.stringify(got.groups)})`);
+            check(order && got.title === 'Play from' && !got.groups.includes('Play from'), `${what}: the source order is on the page it opens, right under its title ("${got.title}", ${JSON.stringify(got.groups)})`);
             await page.screenshot({ path: path.join(shots, `play-from-${w}.png`) });
           }
           await page.goBack();
