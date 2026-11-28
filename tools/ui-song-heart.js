@@ -398,7 +398,7 @@ async function nowPlaying(browser) {
 
 // A service's page of its own (SoundCloud here: Sources › SoundCloud › Your likes › the set; the
 // services MusicBrainz maps, like Spotify, open the shared item page instead), its
-// "Favourite"/"Favourited" button
+// heart (an icon: its title says Add to / Remove from Bookmarks)
 async function sourceItem(browser, width) {
   const url = 'https://soundcloud.com/sefa/sets/journey';
   const item = { title: 'Journey', creator: 'Sefa', year: 2020, url, image: null, tracks: [{ url: 'https://soundcloud.com/sefa/first', title: 'First', duration_ms: 200000, format: 'mp3' }] };
@@ -419,16 +419,16 @@ async function sourceItem(browser, width) {
     await fx.go(page, '/sources/soundcloud');
     await page.click('[data-sitem="abc"]');
     await page.waitForSelector('#aheart');
-    const read = () => page.evaluate(() => { const b = document.querySelector('#aheart'); return { pressed: b.getAttribute('aria-pressed'), text: b.textContent.trim() }; });
+    const read = () => page.evaluate(() => { const b = document.querySelector('#aheart'); return { pressed: b.getAttribute('aria-pressed'), text: b.title }; });
     let h = await read();
-    assert.deepEqual(h, { pressed: 'false', text: 'Bookmark' }, `${width} source page: not bookmarked, said as not pressed (${JSON.stringify(h)})`);
+    assert.deepEqual(h, { pressed: 'false', text: 'Add to Bookmarks' }, `${width} source page: not bookmarked, said as not pressed (${JSON.stringify(h)})`);
     await page.click('#aheart');
-    await page.waitForFunction(() => document.querySelector('#aheart') && document.querySelector('#aheart').textContent.trim() === 'Bookmarked');
+    await page.waitForFunction(() => document.querySelector('#aheart') && document.querySelector('#aheart').title === 'Remove from Bookmarks');
     h = await read();
-    assert.deepEqual(h, { pressed: 'true', text: 'Bookmarked' }, `${width} source page: pressed once, bookmarked and said as pressed (${JSON.stringify(h)})`);
+    assert.deepEqual(h, { pressed: 'true', text: 'Remove from Bookmarks' }, `${width} source page: pressed once, bookmarked and said as pressed (${JSON.stringify(h)})`);
     await page.screenshot({ path: path.join(shots, `source-item-${width}.png`) });
     await page.click('#aheart');
-    await page.waitForFunction(() => document.querySelector('#aheart') && document.querySelector('#aheart').textContent.trim() === 'Bookmark');
+    await page.waitForFunction(() => document.querySelector('#aheart') && document.querySelector('#aheart').title === 'Add to Bookmarks');
     h = await read();
     assert.equal(h.pressed, 'false', `${width} source page: pressed again, not pressed (${JSON.stringify(h)})`);
     assert.deepEqual(state.errors, []);

@@ -355,7 +355,7 @@
   // ---- immediate feedback on play (owner, 2026-10-29) ----
   // The play control just pressed: it shows a spinner until the music starts (capture phase, so
   // every play button on every page counts without each call site knowing). One list of them: a
-  // page's Play and Shuffle (an album, a collection, its sticky bar's), a row's or a tile's Play,
+  // page's Play and Shuffle (an album, a service's album, a collection, its sticky bar's), a row's or a tile's Play,
   // Songs' Play all, the Top result's Play, a station's, the bar's
   // The latest press wins: any other control pressed since (a ⋯ and its menu's rows, such as Start
   // radio) takes the press away, so the start it makes spins no Play pressed just before. (A click
@@ -377,7 +377,7 @@
     return found.length === 1 ? found[0] : null;
   };
   // (`pressBefore`: the press as it stood just before this click, for a picker's pick below)
-  document.addEventListener('click', (e) => { if (!e.target.closest) return; state.pressBefore = state.startAnchor; const b = e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #plplay, #plshuffle, [data-plplay], [data-sticky-play], #shuffle, [data-splaytop], [data-st-play], #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now(), key: pressKey(b) }; else if (e.target.closest('button, a, input, select, summary, label, [role="button"], [role="menuitem"], .clickable')) state.startAnchor = null; }, true);
+  document.addEventListener('click', (e) => { if (!e.target.closest) return; state.pressBefore = state.startAnchor; const b = e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #aplay, #ashuffle, #plplay, #plshuffle, [data-plplay], [data-sticky-play], #shuffle, [data-splaytop], [data-st-play], #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now(), key: pressKey(b) }; else if (e.target.closest('button, a, input, select, summary, label, [role="button"], [role="menuitem"], .clickable')) state.startAnchor = null; }, true);
   // A picker a Play opens to finish it (the 30 s preview of a song not on your services): its pick
   // goes on with that Play's press, so the Play pressed spins while the music starts, as with no
   // picker (the pick's own click took the press away). Wrap the picker's run with it as the picker

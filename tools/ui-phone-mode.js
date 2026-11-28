@@ -9,9 +9,9 @@
 //     no request went to zones (but the boot's own first read, once a load), events, Home, tags,
 //     reviews, Pubky, playlists or favourites; a network change or a tap on the status opens no
 //     events socket and shows no "Node offline" (it stays connected);
-//   * a service's album page (however it is reached) offers no Playlist button on the phone;
+//   * a service's album page (however it is reached) has no Add to collection… in its ⋯ on the phone;
 //   * a node (its /v1/info without mode): nothing of that is hidden, it reads its zones, and the
-//     album page has its Playlist button.
+//     album page's ⋯ has it.
 //   node tools/ui-phone-mode.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -48,11 +48,20 @@ const record = async (run) => {
   });
 };
 // A service's own album page (the source-item page: a Qobuz album here), opened from the page's
-// history as Back would open it (phone mode links to none today; it offers no Playlist button
+// history as Back would open it (phone mode links to none today; its ⋯ offers no Add to collection…
 // however it is reached)
 const ALBUM = { title: 'Harbour', creator: 'Phone Fixture Band', year: 2024, url: 'https://www.qobuz.com/album/7', image: null,
   tracks: [{ url: 'https://www.qobuz.com/track/71', title: 'Harbour Lights', track_no: 1, duration_ms: 200000 }] };
 const ALBUM_FIXTURES = { '/sources': { body: SOURCES }, '/sources/qobuz/items/7': { body: ALBUM } };
+// The labels of a service album's ⋯ (Play next, Add to queue, and Add to collection… where collections are kept)
+const albumMenu = async (p) => {
+  const b = await p.$('#main #amenu'); if (!b) return null;
+  await b.click();
+  await p.waitForSelector('.popover.menu:not([hidden]) .pop-item', { timeout: 2000 }).catch(() => {});
+  const items = await p.evaluate(() => [...document.querySelectorAll('.popover.menu:not([hidden]) .pop-item')].map((e) => e.textContent.trim()));
+  await p.keyboard.press('Escape');
+  return items;
+};
 const openAlbum = async (p) => {
   await fx.go(p, '/search'); await sleep(600);
   await p.evaluate(() => {
@@ -152,11 +161,12 @@ const forbidden = (reqs) => reqs.filter((r) => FORBIDDEN.some((re) => re.test(r.
     check(!run.state.errors.length, `${at}: phone: no page errors (${run.state.errors.join(' | ')})`);
     await run.context.close();
 
-    // ---- A service's album page on the phone: no Playlist button (the phone keeps none) ----
+    // ---- A service's album page on the phone: no Add to collection… in its ⋯ (the phone keeps none) ----
     const arun = await phoneRun(browser, w, ALBUM_FIXTURES);
     const opened = await openAlbum(arun.page);
     check(opened, `${at}: phone: a service's album page opens`);
-    check(opened && !(await arun.page.$('#main #amore')), `${at}: phone: the album page offers no Playlist button`);
+    const pmenu = opened ? await albumMenu(arun.page) : null;
+    check(!!pmenu && pmenu.join('|') === 'Play next|Add to queue', `${at}: phone: the album's ⋯ offers no Add to collection… (${JSON.stringify(pmenu)})`);
     check(!arun.reqs.some((r) => / \/playlists/.test(r)), `${at}: phone: the album page asks nothing of playlists`);
     check(!arun.state.errors.length, `${at}: phone: album page: no page errors (${arun.state.errors.join(' | ')})`);
     await arun.context.close();
@@ -175,10 +185,11 @@ const forbidden = (reqs) => reqs.filter((r) => FORBIDDEN.some((re) => re.test(r.
     check(!(await n.locator('#main button', { hasText: 'Connect to a node' }).count()), `${at}: node: no "Connect to a node" in its Settings`);
     check(!node.state.errors.length, `${at}: node: no page errors (${node.state.errors.join(' | ')})`);
     await node.context.close();
-    // A node's album page keeps its Playlist button
+    // A node's album page keeps Add to collection… in its ⋯
     const nalb = await fx.create(browser, w, { mobile: w < 600, fixtures: ALBUM_FIXTURES });
     const nopened = await openAlbum(nalb.page);
-    check(nopened && !!(await nalb.page.$('#main #amore')), `${at}: node: the album page has its Playlist button`);
+    const nmenu = nopened ? await albumMenu(nalb.page) : null;
+    check(!!nmenu && nmenu.includes('Add to collection…'), `${at}: node: the album's ⋯ has Add to collection… (${JSON.stringify(nmenu)})`);
     await nalb.context.close();
   }
   await browser.close();

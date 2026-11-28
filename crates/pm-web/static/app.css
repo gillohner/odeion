@@ -496,8 +496,8 @@ html[data-shell="phone"] .hero-zone .lbl { display: none; }
 @media (max-width: 900px) { .hero-zone .lbl { display: none; } }
 html[data-shell="phone"] .actions > .btn { min-height: 44px; }
 html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore, #qmenu) { min-width: 44px; padding-left: var(--sp-2h); padding-right: var(--sp-2h); justify-content: center; }
-/* (the narrowest phones: a playlist's Shuffle is its word, as on an album, so ⋯ stays on the row) */
-@media (max-width: 379px) { html[data-shell="phone"] .actions > #plshuffle > .ic { display: none; } html[data-shell="phone"] .actions > #plshuffle:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } html[data-shell="phone"] .actions > #plshuffle:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
+/* (the narrowest phones: a playlist's and a service album's Shuffle is its word, as on an album, so ⋯ stays on the row) */
+@media (max-width: 379px) { html[data-shell="phone"] .actions > :is(#plshuffle, #ashuffle) > .ic { display: none; } html[data-shell="phone"] .actions > :is(#plshuffle, #ashuffle):is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } html[data-shell="phone"] .actions > :is(#plshuffle, #ashuffle):is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
 /* (and Songs' Play all is its word there, so the filter, Play all and + keep one row with a larger font size) */
 @media (max-width: 379px) { html[data-shell="phone"] .page-head .actions > #shuffle > .ic { display: none; } html[data-shell="phone"] .page-head .actions > #shuffle:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } html[data-shell="phone"] .page-head .actions > #shuffle:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
 /* (and wherever the row is short for its words, on a narrow phone or with a larger font size: Shuffle drops its
@@ -1773,13 +1773,13 @@ html[data-shell="phone"] .ptag :is(.chiplink, .chipx) { align-self: stretch; hei
    in Zones and outputs) take a 44 px tap. They keep their look; an invisible layer centred on each reaches
    into the empty space around it. Each address added by hand gets a row of its own (46 px, so two forgets'
    layers never meet) with its forget beside it, so a forget never sits under another or away from its address. */
-html[data-shell="phone"] :is(.section-head, .pfnote, #rendsaved) .link { position: relative; }
+html[data-shell="phone"] :is(.section-head, .pfnote, #rendsaved, .artist-hero .muted) .link { position: relative; }
 html[data-shell="phone"] #rendsaved:not(:empty) { margin-top: var(--sp-2h); }
 html[data-shell="phone"] #rendsaved .rendrow { display: flex; align-items: center; gap: var(--sp-2); min-height: 46px; }
 html[data-shell="phone"] #rendsaved .rendrow code { min-width: 0; overflow-wrap: anywhere; }
 html[data-shell="phone"] #rendsaved .rendrow .link { flex: none; }
 html[data-shell="phone"] #rendsaved .rendsep { display: none; }
-html[data-shell="phone"] .switch::before, html[data-shell="phone"] :is(.section-head, .pfnote, #rendsaved) .link::after { content: ""; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: 44px; transform: translate(-50%, -50%); }
+html[data-shell="phone"] .switch::before, html[data-shell="phone"] :is(.section-head, .pfnote, #rendsaved, .artist-hero .muted) .link::after { content: ""; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: 44px; transform: translate(-50%, -50%); }
 .tf-code { font-size: var(--fs-xl); font-weight: var(--fw-bold); letter-spacing: 0.12em; padding: var(--sp-1) var(--sp-2h); border-radius: var(--radius-sm); background: var(--surface-2); }
 /* Guided setup (Sources › Qobuz, TIDAL full tracks): numbered step cards, secret fields with
    Show, a Check's answer in place, and the device code big enough to read across a room */
@@ -2904,6 +2904,23 @@ html[data-shell="phone"] #main > .hero.item-hero .actions > #ifav { order: 1; ma
 html[data-shell="phone"] #main > .hero.item-hero .actions > #izone { order: 2; }
 html[data-shell="phone"] #main > .hero.item-hero .actions > #imore { order: 3; }
 html[data-shell="phone"] #main > .hero.item-hero .actions > #ifav.on { color: var(--accent-strong); }
+/* A service's own album (Sources › an album): Play, Shuffle, then ♡ and ⋯ on the right, as on a library album */
+html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) > :is(#aheart, #amenu) { width: 48px; height: 48px; min-width: 48px; padding: 0; justify-content: center; border: 0; background: none; color: var(--fg-2); border-radius: 50%; }
+html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) > :is(#aheart, #amenu) .ic { width: 24px; height: 24px; }
+html[data-shell="phone"] #main .artist-hero .page-head > .actions:has(> #ashuffle) { flex: 1 0 100%; }
+html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) > :is(#aplay, #ashuffle) { min-height: 48px; }
+html[data-shell="phone"] #main .artist-hero .actions > #ashuffle + * { margin-left: auto; }
+html[data-shell="phone"] #main .artist-hero .actions > #aheart.on { color: var(--accent-strong); }
+/* (with a larger font size, as on a library album: Shuffle drops its icon, then Play, then the gaps tighten and
+   ♡ and ⋯ go 48 → 44 px, so ⋯ stays on the row; two icons here, so each step is 56 px below the library's.
+   The row is Play + Shuffle + ♡ + ⋯ ≈ 232px + 9.2ch with both icons; 9.2ch follows Android's text zoom) */
+html[data-shell="phone"] #main .artist-hero:has(> .grow > .page-head > .actions > #ashuffle) { container: ahero / inline-size; }
+@container ahero (width < calc(232px + 9.2ch)) { html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) > #ashuffle > .ic { display: none; } html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) > #ashuffle:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) > #ashuffle:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
+@container ahero (width < calc(206px + 9.2ch)) { html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) > #aplay > .ic { display: none; } html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) > #aplay:is(.starting, .is-spinning) { position: relative; -webkit-text-fill-color: transparent; } html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) > #aplay:is(.starting, .is-spinning)::after { position: absolute; inset: 0; margin: auto; } }
+@container ahero (width < calc(180px + 9.2ch)) {
+  html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) { gap: var(--sp-1); }
+  html[data-shell="phone"] #main .artist-hero .actions:has(> #ashuffle) > :is(#aheart, #amenu) { width: 44px; min-width: 44px; height: 44px; }
+}
 .htags:not(:has(> :not(datalist))) { display: none; }
 .hmatch-slot:empty { display: none; }
 .hmatch { display: flex; align-items: center; gap: var(--sp-1h); margin: var(--sp-1) 0 0; }
