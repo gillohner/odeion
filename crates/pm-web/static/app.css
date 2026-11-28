@@ -572,8 +572,15 @@ html[data-shell="phone"] .notice[data-failed] .btn.sm { min-height: 44px; }
 .art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
 .art.sm { font-size: var(--fs-md); border-radius: var(--r-sm); }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 20px 18px; }
-.strip { display: flex; gap: 18px; overflow-x: auto; padding: var(--sp-1) var(--sp-1) var(--sp-2h); margin: -4px -4px 0; scroll-snap-type: x proximity; scrollbar-width: thin; }
+/* A row of covers that scrolls sideways. On a phone Search's Artists and Albums are one while songs
+   follow them: as a grid two covers wide, six of each pushed the songs about four screens down. A
+   cover is 40 % of the row (168 px at most, the grid's own size, for the Phone layout on a wide
+   window), so part of the next one always shows that the row goes on. Filtered to one kind, or with
+   no songs, they stay a grid. A cover snaps to where it rests, in line with the heading (the row's
+   padding leaves room for a focus ring); a swipe past the end doesn't move the page */
+.strip, html[data-shell="phone"] #sresults [data-skind]:has(~ [data-skind="song"]) > :is(.grid, .sk-grid) { display: flex; gap: 18px; overflow-x: auto; padding: var(--sp-1) var(--sp-1) var(--sp-2h); margin: -4px -4px 0; scroll-snap-type: x proximity; scroll-padding: 0 var(--sp-1); overscroll-behavior-x: contain; scrollbar-width: thin; }
 .strip .tile { flex: 0 0 160px; scroll-snap-align: start; }
+html[data-shell="phone"] #sresults [data-skind]:has(~ [data-skind="song"]) > :is(.grid, .sk-grid) > :is(.tile, .skeleton) { flex: 0 0 min(40%, 168px); scroll-snap-align: start; }
 .tile { cursor: pointer; border-radius: var(--radius); padding: 0; background: none; border: 0; text-align: left; color: inherit; display: block; width: 100%; min-width: 0; }
 .tile .art { position: relative; transition: transform var(--dur-base) var(--ease), box-shadow var(--dur-base) var(--ease); }
 .tile:hover .art { transform: translateY(-2px); box-shadow: var(--shadow); }
@@ -825,7 +832,8 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
   .hero { grid-template-columns: 1fr; }
   .hero .art { width: 180px; }
   .main > .back + .hero, .main > .pagebar + .hero { margin-top: var(--sp-2); }
-  /* Phones (second review #22): two covers per row, and song titles get the row's width. The number
+  /* Phones (second review #22): two covers per row (Search's Artists and Albums above its songs are a
+     sideways row instead: .strip above), and song titles get the row's width. The number
      and length columns grow with Android's font size (lh; the px template first for a WebView without lh).
      The length column also grows for a length over an hour ("1:02:34", "10:00:00"), so it ends where the
      other lengths end, not on the ⋯; that row's title gives up the room */
