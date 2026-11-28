@@ -80,14 +80,16 @@
     d.innerHTML = `<h2>Add to collection</h2><input class="input" id="ppq" placeholder="Find a collection" aria-label="Find a collection" autocomplete="off"><div class="list compact picker" id="pplist"></div><div class="dialog-actions"><button class="btn ghost" data-ppclose>Cancel</button></div>`;
     document.body.appendChild(d);
     const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
-    const done = (fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(); };
+    // (`then`: the pick's work, started once the dialog is closed; the picker settles when that work
+    // has, so the control that opened it shows the add's progress, not the time spent choosing)
+    const done = (fromBack, then) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(then ? then() : undefined); };
     transients.push(tr); pushTransient();
     const draw = () => {
       const q = $('#ppq', d).value.trim().toLowerCase();
       const list = [...state.playlists].sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)).filter((p) => !q || p.name.toLowerCase().includes(q));
       $('#pplist', d).innerHTML = `<button class="list-row" data-ppnew>${icon('plus')}<div class="grow"><div class="name">New collection${q ? `: “${esc($('#ppq', d).value.trim())}”` : ''}</div></div></button>` + list.map((p, k) => `<button class="list-row" data-ppi="${k}">${icon('playlist')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${plCount(p)}</div></div></button>`).join('');
-      $('[data-ppnew]', d).onclick = async () => { done(); await makeNew($('#ppq', d) && $('#ppq', d).value.trim() || newName); };
-      $$('[data-ppi]', d).forEach((b) => b.onclick = async () => { const pl = list[Number(b.dataset.ppi)]; done(); await add(pl); });
+      $('[data-ppnew]', d).onclick = () => { const name = $('#ppq', d).value.trim() || newName; done(undefined, () => makeNew(name)); };
+      $$('[data-ppi]', d).forEach((b) => b.onclick = () => { const pl = list[Number(b.dataset.ppi)]; done(undefined, () => add(pl)); });
     };
     $('#ppq', d).oninput = draw; draw();
     $('[data-ppclose]', d).onclick = () => done();
