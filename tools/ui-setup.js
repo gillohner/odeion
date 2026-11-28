@@ -264,7 +264,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       const u = new URL(r.request().url()); if (u.pathname.endsWith('/extras')) return r.fulfill({ json: {} });
       const [, , kind, id] = u.pathname.replace('/v1/', '/').split('/');
       if (kind === 'artist') return r.fulfill({ json: pageJson('artist', id, { songs: SONGS, albums: ALBUMS }) });
-      return r.fulfill({ json: pageJson('album', id, id.startsWith('lib-') ? { source: 'Your library', source_id: 'library', songs: [SONGS[1]] } : { songs: [SONGS[0]] }) });
+      return r.fulfill({ json: pageJson('album', id, id.startsWith('lib-') ? { source: 'Your library', source_id: 'library', songs: [SONGS[1]], about: [{ label: 'Format', value: 'FLAC' }] } : { songs: [SONGS[0]] }) });
     });
     // A badge in a button (a tile) is decoration with the words at the end of the button's name; elsewhere it is named itself
     const badge = async (sel) => p.$eval(sel, (el) => { const b = el.querySelector('.src-badge.cover'); if (!b) return null; const cs = getComputedStyle(b); const art = b.closest('.art, .thumbwrap'); const ab = art.getBoundingClientRect(); const bb = b.getBoundingClientRect(); const btn = b.closest('button'); const sr = btn && btn.querySelector('.sr-only'); return { label: b.getAttribute('aria-label') || (sr ? sr.textContent.replace(/^, from /, 'From ') : null), role: b.getAttribute('role'), hidden: b.getAttribute('aria-hidden') === 'true', color: cs.color, bg: cs.backgroundColor, ring: cs.boxShadow, absolute: cs.position === 'absolute', inside: bb.left >= ab.left && bb.bottom <= ab.bottom + 0.5 && bb.left - ab.left < ab.width / 3 && ab.bottom - bb.bottom < ab.height / 3, square: Math.abs(ab.width - ab.height) < 1.5 }; }).catch(() => null);
@@ -314,7 +314,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.unroute(/\/v1\/item\/artist\/lib-900$/);
     await p.unroute(/\/v1\/sources$/);
     await p.unroute(/\/v1\/play-order$/);
-    // without an article, About stays at the end
+    // without an article, About stays at the end (a library album always has facts, as on a node)
     await p.goto(BASE + '/album/lib-1'); await p.waitForSelector('#iabout');
     check(await p.evaluate(() => { const s = [...document.querySelectorAll('#main > section')]; return s[s.length - 1].id === 'iabout'; }), 'without an article, About stays at the end of the page');
     await p.unroute(/\/v1\/item\/(artist|album)\/[a-z0-9-]+(\/extras)?$/);
