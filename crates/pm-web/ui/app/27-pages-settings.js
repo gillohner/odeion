@@ -151,7 +151,8 @@
               + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your collections, bookmarks and tags in your own Pubky storage.', pk.user ? (pk.needs_resign && !state.token ? '<button class="btn primary" id="pklogin">Approve in Pubky Ring</button>' : '') : `<button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky</button>`)
               + (pk.needs_resign ? resignNotice(pk).replace('<div class="notice warn resign"', '<div id="pkresign" class="notice warn resign"') : '')
               + '<div id="pkurl"></div>'
-              + (pk.user ? row('Your music', 'Your files on the homeserver, saving and tagging are in Your library.', '<button class="btn ghost" data-view-go="library">Open Your library</button>') : row('Saving', 'Starts once you sign in: then your collections, bookmarks and tags are kept on your homeserver.', ''))
+              // (signed out, the sign-in row above already says what signing in keeps: no second row to repeat it)
+              + (pk.user ? row('Your music', 'Your files on the homeserver, saving and tagging are in Your library.', '<button class="btn ghost" data-view-go="library">Open Your library</button>') : '')
             ) : row('Pubky', 'Pubky is not set up on this node.', ''))
             + group('ListenBrainz', block('', '', '<div id="lbcard"><div id="lbbody"><div class="skeleton" style="height:80px"></div></div></div>'))
             + group('Last.fm', block('', '', '<div id="lfcard"><div id="lfbody"><div class="skeleton" style="height:80px"></div></div></div>'))
