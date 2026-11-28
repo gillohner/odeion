@@ -83,6 +83,7 @@ ui-phone-rating-redraw.js phone-rating-redraw-shots 3
 ui-phone-home-trending.js phone-home-trending-shots
 ui-search-scopes.js search-scopes-shots
 ui-phone-search-head.js phone-search-head-shots
+ui-phone-search-strips.js phone-search-strips-shots
 ui-search-music.js search-music-shots
 ui-search-leave.js search-leave-shots
 ui-search-shared-link.js search-shared-link-shots 1

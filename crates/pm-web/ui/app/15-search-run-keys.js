@@ -259,6 +259,18 @@
     else if (r.right > hi) line.scrollLeft += r.right - hi;
     line.classList.toggle('slid', line.scrollLeft > 0);
   });
+  // A row of covers that scrolls sideways (a phone's Search: Artists, Albums): the browser leaves a
+  // focused cover where it is once part of it shows, so every other Tab left it cut at the row's edge.
+  // Reached from the keyboard, the row moves just enough to show it whole (inside the row's padding,
+  // with its focus ring)
+  document.addEventListener('focusin', (e) => {
+    const a = e.target; if (focusByPointer || !a.matches || !a.matches('.tile')) return;
+    const row = a.parentElement; if (!row || row.scrollWidth <= row.clientWidth) return;
+    const cs = getComputedStyle(row), b = row.getBoundingClientRect(), r = a.getBoundingClientRect();
+    const lo = b.left + row.clientLeft + (parseFloat(cs.paddingLeft) || 0), hi = b.left + row.clientLeft + row.clientWidth - (parseFloat(cs.paddingRight) || 0);
+    if (r.left < lo) row.scrollLeft += r.left - lo;
+    else if (r.right > hi) row.scrollLeft += r.right - hi;
+  });
   document.addEventListener('focusout', (e) => {
     const line = cutLineOf(e.target);
     if (line && !(e.relatedTarget && line.contains(e.relatedTarget))) { line.scrollLeft = 0; line.classList.remove('slid'); }
