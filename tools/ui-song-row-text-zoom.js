@@ -40,6 +40,12 @@ const rows = (page, list) => page.evaluate((list) => {
     const r = row.getBoundingClientRect();
     const bad = [];
     const shown = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && parseFloat(getComputedStyle(el).opacity) > 0;
+    // (each row shows its artist line, and a service's album its track numbers: a renamed or hidden piece
+    // would otherwise go unchecked, and the checks below pass on what is left)
+    for (const sel of ['.title', '.by', '.dur', '[data-act="more"]', ...(row.closest('.src-tracks') ? ['.num'] : [])]) {
+      // (with its words: an empty artist line still has a box)
+      if (![...row.querySelectorAll(sel)].some((el) => shown(el) && (sel.startsWith('[') ? el.querySelector('svg') : el.textContent.trim()))) bad.push(`no ${sel} shown`);
+    }
     for (const el of row.querySelectorAll('.title, .by, .num, .dur, [data-act="more"]')) {
       if (!shown(el)) continue;
       const b = el.getBoundingClientRect();
@@ -81,6 +87,7 @@ async function phone(browser, width, k) {
       await page.waitForSelector(`${list} .track`);
       if (k !== 1) await textZoom(page, k);
       await page.waitForTimeout(300);
+      await page.mouse.move(1, 1); // (a phone has no hover: a hovered row shows Play in its number's place)
       const got = await rows(page, list);
       const bad = got.rows.flatMap((r, i) => r.bad.map((b) => `row ${i + 1}: ${b}`));
       check(got.rows.length >= 10 && !bad.length, `${at} ${name}: every row holds its title, artist, length and ⋯ (${got.rows.length} rows${bad.length ? `; ${bad.slice(0, 3).join('; ')}` : ''})`);

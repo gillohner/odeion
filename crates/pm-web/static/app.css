@@ -3084,4 +3084,13 @@ body:has(> #nowplaying:not([hidden])) .skip { display: none; } /* (nor over Now 
   .nav-item.on, .bnav.on, .chip.on, .set-tab.on, .pop-item.on, .az.on, .cpitem.on, .np-stab.on { outline: 2px solid Highlight; outline-offset: -2px; }
   .jobbar, .sprog, .dash-progress, .mini-prog { border: 1px solid CanvasText; }
   .jobbar span, .sprog > span, .dash-progress span, .mini-prog span { background: Highlight; forced-color-adjust: none; }
+  /* (a spinner: its ring was one colour all round, so it showed no turning; now its turning part is Highlight.
+     Each of the spinners' own selectors, so this wins over theirs.) */
+  .spin, .chip.scope .spin, .srcchip .spin, .toast.wait::before, .starting::after, .is-spinning::after, .btn.primary:is(.starting, .is-spinning)::after, .np-qitem.is-spinning > :last-child::after { forced-color-adjust: none; border-color: GrayText; border-top-color: Highlight; }
+  /* (Play and Shuffle while they spin: the system painted the words that wait unseen under the spinner of a
+     button showing only its words; the button now keeps the system's button colours itself, so they stay unseen,
+     at once: no fade from the page's own colours) */
+  :is(#iplay, #ishuffle, #plplay, #plshuffle, #shuffle):is(.starting, .is-spinning) { forced-color-adjust: none; color: ButtonText; background-color: ButtonFace; border-color: ButtonBorder; outline-color: ButtonText; box-shadow: none; transition: none; }
+  /* (and a queue item's length, under the spinner that takes its place) */
+  .np-qitem.is-spinning > :last-child { forced-color-adjust: none; color: transparent; }
 }
