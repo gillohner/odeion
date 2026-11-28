@@ -46,8 +46,10 @@ const CASES = [
   { name: 'a ticked row while selecting', needs: ['class="selbox"', "classList.add('selecting')"],
     html: '<div class="selecting"><div class="list"><div class="list-row srow"><label class="selbox"><input type="checkbox" checked></label><div class="grow"><div class="name"><span class="ntext">Low Tide</span></div><div class="sub">Nils Okonkwo</div></div><span class="muted small dur">2:30</span></div></div></div>',
     read: [['.sub', 4.5, 'its artist line'], ['.dur', 4.5, 'its length']] },
-  { name: 'Match on a song row, on a touch screen', touch: true, needs: ['idmark'],
-    html: '<div class="tracks"><div class="track"><div class="main-col"><div class="title"><a class="lnk">Low Tide</a><button class="idmark">Match</button></div></div></div></div>',
+  // (the number cell first, so the title lies in its own wide column as on the page; alone it fell into the
+  // 40 px number column, where a tablet leaves Match out for the title's room)
+  { name: 'Match on a song row, on a touch screen', touch: true, needs: ['idmark', '<div class="no"><span class="num">${numbers === \'track\''],
+    html: '<div class="tracks"><div class="track"><div class="no"><span class="num">1</span></div><div class="main-col"><div class="title"><a class="lnk">Low Tide</a><button class="idmark">Match</button></div></div></div></div>',
     read: [['.idmark', 4.5, 'the word']] },
   ...[['a white', '#ffffff'], ['a yellow', '#ffd60a'], ['a grey', '#808080'], ['a black', '#000000']].map(([n, art]) => ({ name: `the TV screen over ${n} cover`, plain: true, uneven: true, needs: ['class="dash-bg"', "'dash-art'", 'class="dash-home"', 'dash-times', 'dash-brand'], html: dash(art),
     read: [['.dash-home', 4.5, 'the way back'], ['.eyebrow', 4.5, 'the zone line'], ['h1', 3, 'the title'], ['.dash-artist', 3, 'the artist'], ['p.muted', 4.5, 'the album'], ['.dash-times span', 4.5, 'the times'], ['.dash-brand', 4.5, 'the name in the corner']] })),

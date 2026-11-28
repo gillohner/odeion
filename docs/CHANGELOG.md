@@ -7,6 +7,7 @@ Newest first. Dates are when the change landed on `main`.
 ### 2026-11-28
 
 - **The check for clicks at the edge of a long song title now tries where a mouse really lands.** The browser check behind "A click at the edge of a long song title opens the song, too" rested the mouse at a point between screen pixels where the title already was, so it passed even without that fix. It now rests on every whole screen pixel by the top and bottom of the title, on an ordinary screen and on a 2x one (where a mouse lands on half pixels), and fails without the fix. Its "unmatched rows are as tall as matched ones" check now compares the title and artist lines, since the row itself never changes height. Tests only; the app is unchanged.
+- **Android tablets: a song that isn't matched yet keeps its title readable with a larger font size.** On a tablet with Android's font size set large, in a narrow window, the Match button beside a song that isn't matched yet left its title only a few letters ("Jou…"). Where the title has room for fewer than about 16 letters, Match is now left out of the row, as on a phone, and the title gets that room ("Journey Th…"). "Which song is this?" is still in the song's ⋯ menu. With the usual font size, or where there is room, Match shows as before.
 
 ### 2026-11-27
 
