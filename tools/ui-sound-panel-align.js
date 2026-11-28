@@ -4,6 +4,9 @@
 // and the part titles. The DSP switches and the Source name keep that line too.
 // This browser at 1280/1024/768, and a node zone (nothing playing) while its DSP is read, when the
 // read fails, and with its switches.
+// A node zone with nothing playing says so once: Source's "Nothing playing", and no Signal path part
+// (it had a title over a second "Nothing playing."). A playing node zone keeps its Signal path, and
+// this browser keeps its note (what it does with the file).
 // Real candidate assets, isolated API fixtures; no node or external network required.
 //   node tools/ui-sound-panel-align.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -38,6 +41,8 @@ const lefts = (page) => page.evaluate(() => {
   const pathPart = after(named(/^Signal path/));
   return {
     titles: titles.map(at),
+    names: titles.map((x) => x.textContent.trim()),
+    text: p.innerText,
     path: pathPart && pathPart.matches('.qp-note') ? at(pathPart) : null,
     src: at(p.querySelector('.qp-src .name')),
     dspNote: at(p.querySelector('.qp-dsp > .qp-note')),
@@ -89,7 +94,9 @@ async function nodeZone(browser, width) {
     const line = l.titles[0];
     check(/Study/.test(await page.locator('#qpanel').textContent()), `${width} node zone: the panel is the Study zone's`);
     check(/Reading this zone/.test(l.dspText) && same(l.dspNote, line), `${width} node zone, reading: the DSP note starts at the titles' line (${l.dspNote != null ? Math.round(l.dspNote) : 'none'} vs ${Math.round(line)}; "${l.dspText.trim()}")`);
-    check(same(l.path, line), `${width} node zone: the Signal path note ("Nothing playing.") starts there (${Math.round(l.path)})`);
+    check(JSON.stringify(l.names) === JSON.stringify(['Playing on', 'Source', 'DSP · Study']), `${width} node zone, nothing playing: no Signal path part (${JSON.stringify(l.names)})`);
+    check((l.text.match(/nothing playing/gi) || []).length === 1, `${width} node zone, nothing playing: the panel says "Nothing playing" once (${(l.text.match(/nothing playing/gi) || []).length})`);
+    check(same(l.src, line), `${width} node zone: Source's "Nothing playing" starts at the titles' line (${Math.round(l.src)})`);
     await page.screenshot({ path: path.join(SHOTS, `node-reading-${width}.png`) });
     release(); hold = null;
     await closePanel(page);
@@ -115,11 +122,38 @@ async function nodeZone(browser, width) {
   } finally { await context.close(); }
 }
 
+// A node zone that plays: its Signal path part stays, on the same line
+const SRC = { kind: 'pcm', rate_hz: 44100, bits: 16, channels: 2 };
+const PLAYING = { ...ZONE, transport: 'playing', queue: [{ id: 1, uri: 'track:1', title: 'Journey Through Time' }], queue_index: 0,
+  now_playing: { item: { id: 1, uri: 'track:1', title: 'Journey Through Time', artist: 'Sefa', album: 'Journey', duration_ms: 240000 }, index: 0, position_ms: 30000, duration_ms: 240000, source_format: SRC, output_format: SRC,
+    signal_path: { stages: [{ name: 'decode', in_format: SRC, out_format: SRC, quality: 'bit_perfect', note: null }, { name: 'output', in_format: SRC, out_format: SRC, quality: 'bit_perfect', note: null }] },
+    format: { codec: 'FLAC', lossless: true, service: 'library', preview: false } } };
+
+async function nodePlaying(browser, width) {
+  const { context, page, state } = await fx.create(browser, width, { zone: 'study', fixtures: { '/zones': { body: [PLAYING] }, '/outputs': { body: OUTPUTS }, '/zones/study/dsp': { body: DSP } } });
+  try {
+    await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [PLAYING] })); });
+    await fx.go(page, '/library');
+    await page.waitForFunction(() => /Journey Through Time/.test(document.querySelector('#np').textContent), null, { timeout: 8000 });
+    await openPanel(page);
+    await page.locator('#qpanel .path-row').first().waitFor({ timeout: 4000 });
+    const l = await lefts(page);
+    const line = l.titles[0];
+    check(JSON.stringify(l.names) === JSON.stringify(['Playing on', 'Source', 'Signal path', 'DSP · Study']), `${width} node zone, playing: the Signal path part stays (${JSON.stringify(l.names)})`);
+    check(await page.locator('#qpanel .path-row').count() === 2, `${width} node zone, playing: its two stages are listed`);
+    check(!/nothing playing/i.test(l.text), `${width} node zone, playing: no "Nothing playing"`);
+    check(l.titles.every((x) => same(x, line)), `${width} node zone, playing: the part titles start at one line (${l.titles.map(Math.round)})`);
+    await page.screenshot({ path: path.join(SHOTS, `node-playing-${width}.png`) });
+    await fx.cleanCopy(page);
+    check(state.errors.length === 0, `${width} node zone, playing: no page errors (${state.errors.join('; ')})`);
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
     for (const width of [1280, 1024, 768]) {
-      for (const run of [browserZone, nodeZone]) {
+      for (const run of [browserZone, nodeZone, nodePlaying]) {
         try { await run(browser, width); } catch (e) { fail++; console.log(`FAIL ${width} ${run.name}: ${e.message.split('\n')[0]}`); }
       }
     }
