@@ -3101,8 +3101,8 @@ body:has(> #nowplaying:not([hidden])) .skip { display: none; } /* (nor over Now 
   .spin, .chip.scope .spin, .srcchip .spin, .toast.wait::before, .starting::after, .is-spinning::after, .btn.primary:is(.starting, .is-spinning)::after, .np-qitem.is-spinning > :last-child::after { forced-color-adjust: none; border-color: GrayText; border-top-color: Highlight; }
   /* (Play and Shuffle while they spin: the system painted the words that wait unseen under the spinner of a
      button showing only its words; the button now keeps the system's button colours itself, so they stay unseen,
-     at once: no fade from the page's own colours) */
-  :is(#iplay, #ishuffle, #plplay, #plshuffle, #shuffle):is(.starting, .is-spinning) { forced-color-adjust: none; color: ButtonText; background-color: ButtonFace; border-color: ButtonBorder; outline-color: ButtonText; box-shadow: none; transition: none; }
+     at once: no fade from the page's own colours. Its keyboard ring is Highlight, as the system draws every other one) */
+  :is(#iplay, #ishuffle, #plplay, #plshuffle, #shuffle):is(.starting, .is-spinning) { forced-color-adjust: none; color: ButtonText; background-color: ButtonFace; border-color: ButtonBorder; outline-color: Highlight; box-shadow: none; transition: none; }
   /* (and a queue item's length, under the spinner that takes its place) */
   .np-qitem.is-spinning > :last-child { forced-color-adjust: none; color: transparent; }
 }

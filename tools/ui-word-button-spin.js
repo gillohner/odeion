@@ -140,6 +140,31 @@ async function run(browser, width, android, k = 1, { forced = false, noContainer
         await page.emulateMedia({ reducedMotion: 'reduce' });
         check(!fades.length, `${at} ${what}: takes the system's colours at once (${fades.join(', ') || 'no fade'})`);
         check(l1.bg === l0.bg && l1.fg === l0.fg && l1.border === l0.border, `${at} ${what}: the button keeps the system's colours while it spins (${l0.bg}/${l0.fg}/${l0.border} → ${l1.bg}/${l1.fg}/${l1.border})`);
+        // (the emulated system palette has ButtonText, CanvasText and ButtonBorder all one colour, so the
+        // computed colours can't tell them apart: the colours its own forced-colours rule declares do)
+        const own = await page.evaluate((s) => {
+          const el = document.querySelector(s); const got = {};
+          const walk = (rules, forcedOn) => { for (const r of rules) {
+            if (r instanceof CSSMediaRule) walk(r.cssRules, forcedOn || [...r.media].some((m) => /^\(forced-colors:\s*active\)$/.test(m)));
+            else if (forcedOn && r instanceof CSSStyleRule && r.style.getPropertyValue('forced-color-adjust') === 'none' && el.matches(r.selectorText)) {
+              for (const p of ['color', 'background-color', 'border-color', 'outline-color']) { const v = r.style.getPropertyValue(p); if (v) got[p] = v.toLowerCase(); }
+            }
+          } };
+          for (const sh of document.styleSheets) { try { walk(sh.cssRules, false); } catch { /* (another origin's sheet) */ } }
+          return got;
+        }, sel);
+        check(own.color === 'buttontext' && own['background-color'] === 'buttonface' && own['border-color'] === 'buttonborder', `${at} ${what}: its forced-colours rule names the system's button colours (${JSON.stringify(own)})`);
+        // its keyboard ring while it spins: Highlight, as the system draws every other focus ring (Tab to the
+        // next control and back: the ring there, then on this button)
+        await page.keyboard.press('Tab');
+        const ringOf = (s) => page.evaluate((s) => { const el = document.activeElement; const a = getComputedStyle(el);
+          return { mine: !!s && el === document.querySelector(s) && el.matches('.starting, .is-spinning'), visible: el.matches(':focus-visible'), style: a.outlineStyle, color: a.outlineColor }; }, s);
+        const other = await ringOf(null);
+        await page.keyboard.press('Shift+Tab');
+        const ring = await ringOf(sel);
+        ring.visible = ring.visible && ring.mine; ring.plain = other.visible && other.style !== 'none' ? other.color : null;
+        await page.evaluate(() => document.activeElement && document.activeElement.blur());
+        check(ring.visible && ring.style !== 'none' && ring.color === sys.Highlight && ring.color === ring.plain, `${at} ${what}: its keyboard ring while it spins is Highlight, as the next control's (${ring.visible ? `${ring.style} ${ring.color}; the next control's ${ring.plain}` : 'not focused by the keyboard while it spins'})`);
       }
       if (forced && sel === '#iplay') {
         // (and every other spinner: a song's, a toast's, a chip's, a queue item's)
