@@ -8,12 +8,18 @@
           const listNote = !listed && !state.sources.length ? failedHtml({ message: `Couldn’t read the services: ${listFailed.message}` }) : '';
           const srcs = state.sources;
           const phone = !!(window.matchMedia && matchMedia('(max-width: 720px)').matches); // the side tabs' CSS is by width until the Settings step
-          const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
+          // The phone app without a node (phoneMode) has no Your library tab: its Node library and
+          // Settings › Play from aren't pages there
+          const hasLib = !phoneMode();
+          // Working services first, in the owner's play order (STEWARD-UX-PLAYER-SOURCES §1)
+          await loadSvcRank(); if (state.view !== 'sources') return;
+          const on = rankSvc(srcs.filter((x) => x.enabled), (x) => x.id); const off = srcs.filter((x) => !x.enabled);
+          const known = (k) => (k === 'library' ? hasLib : srcs.some((x) => x.id === k));
           // A service this node doesn't have (an old link or bookmark): the address is plain /sources, as
           // the page shown is, so a reload or a copied link doesn't name it (kept when the list didn't load)
           if (listed && state.viewArg && state.viewArg.source && !known(state.viewArg.source)) { state.viewArg = undefined; try { history.replaceState({ ...(history.state || {}), arg: null }, '', '/sources'); } catch { /* sandboxed */ } }
           const asked = state.viewArg && known(state.viewArg.source) ? state.viewArg.source : null;
-          const active = asked || (phone ? null : (known(state.sourceId) ? state.sourceId : 'library'));
+          const active = asked || (phone ? null : (known(state.sourceId) ? state.sourceId : hasLib ? 'library' : ((on[0] || off[0] || {}).id || null)));
           // Another source: its sign-in opens on the recommended way again, not one opened before
           if (active && active !== state.sourceId && state.signin) Object.values(state.signin).forEach((m) => { m.way = null; m.change = false; });
           if (active) state.sourceId = active;
@@ -26,10 +32,7 @@
           const srcSwitch = (x, where) => `<input type="checkbox" class="switch" role="switch" data-src-on="${esc(x.id)}" ${x.enabled ? 'checked' : ''} aria-label="${esc(x.name)}${where}">`;
           const tabRow = (x) => { const st = srcState(x); return `<div class="src-tabrow ${x.enabled ? '' : 'off'}"><button class="set-tab ${active === x.id ? 'on' : ''}" id="srctab-${esc(x.id)}" ${active === x.id ? 'aria-current="page"' : ''} data-srctab="${esc(x.id)}">${mark(x)}<span class="src-tname"><span class="src-t1">${esc(x.name)}</span>${x.sign_in ? `<span class="src-tsub" title="${esc(x.sign_in)}">${esc(x.sign_in)}</span>` : ''}</span><span class="src-dot ${st.cls}" title="${esc(st.label)}"></span><span class="sr-only">${esc(st.label)}</span>${icon('chevron', 'ic chev')}</button>${x.id === 'library' ? '<span class="src-noswitch" aria-hidden="true"></span>' : srcSwitch(x, ' on')}</div>`; };
           const lib = { id: 'library', name: 'Your library', status: 'ready', enabled: true };
-          // Working services first, in the owner's play order (STEWARD-UX-PLAYER-SOURCES §1)
-          await loadSvcRank(); if (state.view !== 'sources') return;
-          const on = rankSvc(srcs.filter((x) => x.enabled), (x) => x.id); const off = srcs.filter((x) => !x.enabled);
-          const nav = `<nav class="set-nav src-nav" aria-label="Sources">${[lib, ...on].map(tabRow).join('')}${off.length ? (off.length > 2 ? `<details class="src-offgroup" ${off.some((x) => x.id === active) ? 'open' : ''}><summary>Turned off · ${off.length}</summary>${off.map(tabRow).join('')}</details>` : off.map(tabRow).join('')) : ''}</nav>`;
+          const nav = `<nav class="set-nav src-nav" aria-label="Sources">${[...(hasLib ? [lib] : []), ...on].map(tabRow).join('')}${off.length ? (off.length > 2 ? `<details class="src-offgroup" ${off.some((x) => x.id === active) ? 'open' : ''}><summary>Turned off · ${off.length}</summary>${off.map(tabRow).join('')}</details>` : off.map(tabRow).join('')) : ''}</nav>`;
           const panelHead = (x) => `${phone ? `<button class="btn ghost set-back" data-src-back>${icon('back')} Sources</button>` : ''}<h2 class="set-title">${esc(x.name)}</h2>${x.description ? `<p class="muted small src-desc">${esc(x.description)}</p>` : ''}`;
           // TIDAL: one request carries the sign-in ways and both status views (STEWARD-CREDENTIALS-REUSE.md)
           let tidal = null; let tidalSi = null; if (active === 'tidal') { try { tidalSi = await api('GET', '/sources/tidal/signin'); tidal = tidalSi.details.status || null; } catch { tidalSi = null; tidal = null; } if (state.view !== 'sources') return; }
