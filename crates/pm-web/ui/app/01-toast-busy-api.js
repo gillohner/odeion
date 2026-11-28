@@ -139,6 +139,7 @@
   let pressing = 0; // a press's handler that returned a promise has not settled yet
   const busy = (el, fn, ev = null) => {
     let out;
+    const dialogsBefore = $$('dialog[open]'); // (open before the press: not one it opened, see the spinner below)
     inHandler++;
     try { out = fn(); } catch (e) { console.error(e); toast((e && e.message) || 'That didn’t work; try again.', 'error'); return undefined; } finally { inHandler--; }
     if (!out || typeof out.then !== 'function') return out;
@@ -154,7 +155,12 @@
     if (!mark) {
       mark = { ev, n: 0, was: [el.getAttribute('aria-busy'), el.getAttribute('aria-disabled')] };
       el.setAttribute('aria-busy', 'true'); if (ev) el.setAttribute('aria-disabled', 'true'); el.classList.add('is-busy');
-      mark.spin = setTimeout(() => el.classList.add('is-spinning'), 150);
+      // (no spinner while a dialog the press opened waits for you, Add to collection… or Edit tags…
+      // from a ⋯: it is waiting on your choice, not the node; it turns again if work goes on after the
+      // dialog. A dialog it sits in, or one open before the press, doesn't count. Taken off the page,
+      // it is no longer looked at.)
+      const spin = () => { if (!el.isConnected) return; el.classList.toggle('is-spinning', !$$('dialog[open]').some((d) => !d.contains(el) && !dialogsBefore.includes(d))); mark.spin = setTimeout(spin, 150); };
+      mark.spin = setTimeout(spin, 150);
       BUSY.set(el, mark);
     }
     mark.n++;
