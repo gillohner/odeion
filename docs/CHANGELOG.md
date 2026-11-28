@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-28
+
+- **Sources › Your library's Play from button opens Play from.** Its row says which source plays a song first, but its button opened Settings › Zones and outputs, where that order isn't, so you had to find the Play from tab yourself. The button now reads "Open Settings › Play from" and opens the order directly: one click on a computer instead of two, one tap on a phone instead of three. Back still returns to Sources.
+
 ### 2026-11-27
 
 - **The setup checks no longer fail after every check passed.** The browser check of setting a node up (Get started, grouping outputs, tokens) could end in an error once all its checks had passed: after "Copy and reload", the reloaded page's requests were still being changed by the test when it closed the browser window. Each window now stops changing requests before it closes. Tests only; the app is unchanged.
