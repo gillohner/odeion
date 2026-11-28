@@ -95,7 +95,8 @@ async function phone(browser, width, k) {
       if (k === 1) {
         check(hs.length === 1 && hs[0] === '54.0', `${at} ${name}: a row is 54 px, as before (${hs.join(', ')})`);
         const durs = [...new Set(got.rows.map((r) => r.dur))]; const nos = [...new Set(got.rows.map((r) => r.no).filter((x) => x != null))];
-        check(durs.length === 1 && durs[0] === 38 && (!nos.length || (nos.length === 1 && nos[0] === 26)), `${at} ${name}: the length column is 38 px${nos.length ? ' and the number column 26 px' : ''}, as before (${durs.join(', ')}${nos.length ? `; ${nos.join(', ')}` : ''})`);
+        // (song 12's "12:34" gets 38.5: the column grows to fit its words, tools/ui-phone-hour-length.js)
+        check(durs.includes(38) && durs.every((d) => d === 38 || d === 38.5) && (!nos.length || (nos.length === 1 && nos[0] === 26)), `${at} ${name}: the length column is 38 px${nos.length ? ' and the number column 26 px' : ''}, as before (${durs.join(', ')}${nos.length ? `; ${nos.join(', ')}` : ''})`);
       }
       else check(hs.length === 1 && Number(hs[0]) > 54, `${at} ${name}: the rows grow with the text, all the same height (${hs.join(', ')} px)`);
       check(got.fits, `${at} ${name}: no sideways overflow`);

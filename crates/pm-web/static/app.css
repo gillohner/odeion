@@ -826,9 +826,11 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
   .hero .art { width: 180px; }
   .main > .back + .hero, .main > .pagebar + .hero { margin-top: var(--sp-2); }
   /* Phones (second review #22): two covers per row, and song titles get the row's width. The number
-     and length columns grow with Android's font size (lh; the px template first for a WebView without lh) */
+     and length columns grow with Android's font size (lh; the px template first for a WebView without lh).
+     The length column also grows for a length over an hour ("1:02:34", "10:00:00"), so it ends where the
+     other lengths end, not on the ⋯; that row's title gives up the room */
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px var(--sp-3); }
-  .track { grid-template-columns: 26px minmax(0, 1fr) 38px 32px; grid-template-columns: max(26px, 1.2lh) minmax(0, 1fr) max(38px, 1.8lh) 32px; gap: var(--sp-2); }
+  .track { grid-template-columns: 26px minmax(0, 1fr) minmax(38px, max-content) 32px; grid-template-columns: max(26px, 1.2lh) minmax(0, 1fr) minmax(max(38px, 1.8lh), max-content) 32px; gap: var(--sp-2); }
   .track .album-col, .track .fmt { display: none; }
   .track .idmark { display: none; }
   .track .dur { padding-right: 0; }
@@ -837,7 +839,7 @@ html[data-shell="phone"] .zone-card .zc-now > [data-zsel], html[data-shell="phon
      without an address has no ⋯, only Add to queue, so it keeps that) */
   .track .row-actions:has([data-act="more"]) .icon-btn:not([data-act="more"]) { display: none; }
   .track .row-actions:has(.heart.on) .icon-btn:not(.heart) { opacity: 1; }
-  .track.compact { grid-template-columns: 26px minmax(0, 1fr) 38px 32px; grid-template-columns: max(26px, 1.2lh) minmax(0, 1fr) max(38px, 1.8lh) 32px; }
+  .track.compact { grid-template-columns: 26px minmax(0, 1fr) minmax(38px, max-content) 32px; grid-template-columns: max(26px, 1.2lh) minmax(0, 1fr) minmax(max(38px, 1.8lh), max-content) 32px; }
   .np-page { padding: var(--sp-4); }
   .kv { grid-template-columns: 1fr; }
 }
@@ -2959,7 +2961,7 @@ html[data-shell="phone"] .track .main-col .lnk { pointer-events: none; }
    720 px, where the row is those four columns; the Phone layout chosen on a wider window keeps the
    album and format columns, and its numbers) */
 @media (max-width: 720px) {
-  html[data-shell="phone"] .track.seq { grid-template-columns: minmax(0, 1fr) 38px 32px; grid-template-columns: minmax(0, 1fr) max(38px, 1.8lh) 32px; position: relative; padding-left: var(--sp-3); }
+  html[data-shell="phone"] .track.seq { grid-template-columns: minmax(0, 1fr) minmax(38px, max-content) 32px; grid-template-columns: minmax(0, 1fr) minmax(max(38px, 1.8lh), max-content) 32px; position: relative; padding-left: var(--sp-3); }
   html[data-shell="phone"] .track.seq > .no { position: absolute; left: 0; top: 0; bottom: 0; width: 40px; pointer-events: none; }
   html[data-shell="phone"] .track.seq .num { display: none; }
   html[data-shell="phone"] .track.seq .rowplay:not(:focus-visible) { opacity: 0; }
