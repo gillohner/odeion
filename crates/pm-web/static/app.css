@@ -2266,6 +2266,15 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
   .track:has(:focus-visible) .title > .idmark { transition: none !important; }
   .track:not(:has(:focus-visible)) .title:has(> .lnk:hover, > .dl-mark:hover) > .idmark, .track .title:has(> .lnk:active) > .idmark { transition: none !important; }
 }
+/* A touch screen always shows Match, so on a tablet with a large font (narrow window, the number, format and
+   length columns grown with the text) Match left an unmatched title a few letters ("S…"). When the title's
+   cell has room for fewer than 16 characters (with Match the title would keep only ~9-10), Match isn't
+   shown there, as on a phone: the row's ⋯ has "Which song is this?". (ch follows Android's font size;
+   px and em don't) */
+@media (hover: none) and (min-width: 720.02px) {
+  .track .title:has(> .idmark) { container: songtitle / inline-size; }
+  @container songtitle (width < 16ch) { .track .title > .idmark { display: none; } }
+}
 /* (a playing row's bars keep their 12 px beside a long title) */
 .track .title:has(> .lnk)::before { flex: none; }
 /* A listener (#46) plays the shared library; the owner's tags and settings aren't theirs (their bookmarks and collections are their own) */

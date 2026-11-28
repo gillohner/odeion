@@ -75,6 +75,10 @@ async function tablet(browser, width, k) {
       if (k !== 1) await textZoom(page, k);
       await page.waitForTimeout(300);
       const shell = await page.evaluate(() => document.documentElement.dataset.shell);
+      // (the zoom took effect: the rows grow with the text, 54 px at 100 %; a zoom that did nothing
+      // would otherwise pass as a 100 % run)
+      const rowH = await page.evaluate((list) => document.querySelector(`${list} .track`).getBoundingClientRect().height, list);
+      check(k === 1 ? Math.abs(rowH - 54) < 0.5 : rowH > 56, `${at} ${name}: the rows are ${k === 1 ? '54 px' : 'taller than at 100 %'} (${rowH.toFixed(1)} px)`);
       const got = await rows(page, list, picks);
       const bad = got.rows.flatMap((r) => r.bad.map((b) => `row ${r.i + 1}: ${b}`));
       check(got.rows.length === picks.length && !bad.length, `${at} ${name} (${shell}): number, format and length stay in their columns, the length before the buttons (${got.rows.length} rows${bad.length ? `; ${bad.slice(0, 3).join('; ')}` : ''})`);

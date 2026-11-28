@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-28
+
+- **Android tablets: a song that isn't matched yet keeps its title readable with a larger font size.** On a tablet with Android's font size set large, in a narrow window, the Match button beside a song that isn't matched yet left its title only a few letters ("Jou…"). Where the title has room for fewer than about 16 letters, Match is now left out of the row, as on a phone, and the title gets that room ("Journey Th…"). "Which song is this?" is still in the song's ⋯ menu. With the usual font size, or where there is room, Match shows as before.
+
 ### 2026-11-27
 
 - **The setup checks no longer fail after every check passed.** The browser check of setting a node up (Get started, grouping outputs, tokens) could end in an error once all its checks had passed: after "Copy and reload", the reloaded page's requests were still being changed by the test when it closed the browser window. Each window now stops changing requests before it closes. Tests only; the app is unchanged.
