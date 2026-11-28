@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-28
+
+- **The check for clicks at the edge of a long song title now tries where a mouse really lands.** The browser check behind "A click at the edge of a long song title opens the song, too" rested the mouse at a point between screen pixels where the title already was, so it passed even without that fix. It now rests on every whole screen pixel by the top and bottom of the title, on an ordinary screen and on a 2x one (where a mouse lands on half pixels), and fails without the fix. Its "unmatched rows are as tall as matched ones" check now compares the title and artist lines, since the row itself never changes height. Tests only; the app is unchanged.
+
 ### 2026-11-27
 
 - **The setup checks no longer fail after every check passed.** The browser check of setting a node up (Get started, grouping outputs, tokens) could end in an error once all its checks had passed: after "Copy and reload", the reloaded page's requests were still being changed by the test when it closed the browser window. Each window now stops changing requests before it closes. Tests only; the app is unchanged.

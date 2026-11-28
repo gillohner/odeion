@@ -5,7 +5,7 @@
 // title, as before (not while the mouse is on the title). A click on the end of a long title opens the
 // song, not Match, however long the mouse rested there first.
 // A touch screen (no hover) always shows it in its place.
-// Real UI in Chromium against fixtures (no node), 1280, 1024 and 768 px.
+// Real UI in Chromium against fixtures (no node), 1280, 1024 and 768 px, on 1x and 2x screens.
 //   node tools/ui-match-pill-room.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -30,7 +30,7 @@ const measure = (page, n) => page.evaluate((n) => {
   const cs = getComputedStyle(t); const c = t.getBoundingClientRect(); const l = a.getBoundingClientRect();
   const content = c.width - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
   const pb = p && p.getBoundingClientRect();
-  return { content, cellLeft: c.left, cellRight: c.right, link: l.width, linkRight: l.right, linkTop: l.top, linkBottom: l.bottom, full: a.scrollWidth, pill: p ? { left: pb.left, right: pb.right, top: pb.top, bottom: pb.bottom, w: pb.width, op: Number(getComputedStyle(p).opacity) } : null, height: r.getBoundingClientRect().height };
+  return { lines: r.querySelector('.main-col').getBoundingClientRect().height, content, cellLeft: c.left, cellRight: c.right, link: l.width, linkRight: l.right, linkTop: l.top, linkBottom: l.bottom, full: a.scrollWidth, pill: p ? { left: pb.left, right: pb.right, top: pb.top, bottom: pb.bottom, w: pb.width, op: Number(getComputedStyle(p).opacity) } : null, height: r.getBoundingClientRect().height };
 }, n);
 
 // Wait until two frames have drawn the rows (song rows are content-visibility: auto)
@@ -60,7 +60,8 @@ async function desktop(browser, width) {
     // The link is as tall as the hidden Match beside it: no strip above or under the title where the
     // mouse is on the row but not on the title (Match would come in there under a resting mouse)
     check(long.linkTop <= long.pill.top + 0.05 && long.linkBottom >= long.pill.bottom - 0.05, `${width}: the title link covers the hidden Match's height (link ${long.linkTop.toFixed(2)}-${long.linkBottom.toFixed(2)}, Match ${long.pill.top.toFixed(2)}-${long.pill.bottom.toFixed(2)})`);
-    check(Math.abs(long.height - matched.height) < 0.5, `${width}: an unmatched row is as tall as a matched one (${long.height} vs ${matched.height} px)`);
+    // (the row itself has a fixed height: its title and artist lines are what a taller title line would move)
+    check(Math.abs(long.lines - matched.lines) < 0.05, `${width}: an unmatched row's lines are as tall as a matched one's (${long.lines.toFixed(2)} vs ${matched.lines.toFixed(2)} px)`);
     await page.screenshot({ path: path.join(SHOTS, `songs-rest-${width}.png`), clip: { x: 0, y: 0, width, height: 340 } });
 
     // Under the mouse: Match shows right after the cut title, inside the cell, beside it (not over it)
@@ -178,21 +179,6 @@ async function quickClick(browser, width, motion) {
       await outcome(`a click ${wait} ms after the mouse came to rest on the end of a long title`);
     }
 
-    // Nor just above or under those letters, inside the title's line: the hidden Match is a little taller
-    // than the title's text, and a mouse resting in that thin strip got Match under it and opened it
-    for (const edge of ['under', 'above']) {
-      for (const wait of [400, 1000]) {
-        await songs();
-        const g = await measure(page, 1);
-        const spot = { x: g.linkRight - 20, y: edge === 'under' ? g.pill.bottom - 0.5 : g.pill.top + 0.5 };
-        await page.mouse.move(spot.x, spot.y); await page.waitForTimeout(wait);
-        const st = await measure(page, 1); const on = await under(spot);
-        check(st.pill.w < 1 && on !== 'Match', `${label}: ${wait} ms in the strip just ${edge} the title's last letters, Match stays out of the way (Match ${Math.round(st.pill.w)} px, ${on} under the mouse)`);
-        await page.mouse.down(); await page.mouse.up();
-        await outcome(`a click ${wait} ms after the mouse came to rest just ${edge} the end of a long title`);
-      }
-    }
-
     // A song on this phone (the Android app with a mouse, desktop layout) has its mark between the title
     // and Match, as the row draws it: a mouse resting on the mark, the gap before it or just under it
     // doesn't get Match either
@@ -256,6 +242,57 @@ async function quickClick(browser, width, motion) {
   } finally { await context.close(); }
 }
 
+// A mouse resting just above or under a long title's last letters: the hidden Match was a little taller
+// than the title link, and a mouse resting in that thin strip got Match under it and opened it. A mouse
+// lands on whole screen pixels (half CSS px on a 2x screen), so every pixel row from one px above to one px
+// below each edge of the hidden Match is tried: after a rest there, Match is not under the mouse; and a
+// click after a rest on the outermost of those rows on the title or Match opens the song.
+async function strips(browser, width, scale, motion) {
+  const { context, page } = await fx.create(browser, width, { tracks, scale });
+  const errs = []; page.on('pageerror', (e) => errs.push(e.message));
+  const label = `${width} at ${scale}x ${motion === 'reduce' ? 'reduced motion' : 'motion on'}`;
+  const songs = async () => {
+    await fx.go(page, '/tracks');
+    await page.locator('#tracklist .track .title > .idmark').first().waitFor({ state: 'attached' });
+    await drawn(page);
+    await page.evaluate(() => { window.__hit = null; document.addEventListener('click', (e) => { window.__hit = e.target.closest('.idmark') ? 'Match' : e.target.closest('.title > .lnk') ? 'title' : String(e.target.className || e.target.tagName); }, true); });
+    await page.mouse.move(2, 2); await page.waitForTimeout(400);
+    return measure(page, 1);
+  };
+  const under = (p) => page.evaluate(({ x, y }) => { const e = document.elementFromPoint(x, y); return e && e.closest('.idmark') ? 'Match' : e && e.closest('.title > .lnk') ? 'title' : 'other'; }, p);
+  try {
+    await page.emulateMedia({ reducedMotion: motion });
+    for (const edge of ['above', 'under']) {
+      const g = await songs();
+      const at = edge === 'above' ? g.pill.top : g.pill.bottom;
+      const rows = []; for (let k = Math.floor(at * scale) - scale; k <= Math.floor(at * scale) + scale; k++) rows.push(k / scale);
+      let outer = null; const seen = [];
+      for (const y of rows) {
+        const spot = { x: g.linkRight - 20, y };
+        await page.mouse.move(2, 2); await page.waitForTimeout(100);
+        await page.mouse.move(spot.x, spot.y); await page.waitForTimeout(1000);
+        const st = await measure(page, 1); const on = await under(spot);
+        seen.push(`${y}: ${on}`);
+        check(on !== 'Match' && (on !== 'title' || st.pill.w < 1), `${label}: 1000 ms at y ${y}, ${edge === 'above' ? 'by the top' : 'by the bottom'} of the title's last letters, Match stays out of the way (Match ${Math.round(st.pill.w)} px, ${on} under the mouse)`);
+        if (on !== 'other' && (outer === null || (edge === 'above' ? y < outer : y > outer))) outer = y;
+      }
+      check(seen.some((r) => r.endsWith(': title')), `${label}: some row by the ${edge === 'above' ? 'top' : 'bottom'} edge is on the title (${seen.join(', ')})`);
+      if (outer === null) continue;
+      const g2 = await songs();
+      check(Math.abs(g2.pill.top - g.pill.top) < 0.01 && Math.abs(g2.pill.bottom - g.pill.bottom) < 0.01 && Math.abs(g2.linkRight - g.linkRight) < 0.01, `${label}: the row is drawn the same after the reload`);
+      const spot = { x: g.linkRight - 20, y: outer };
+      await page.mouse.move(spot.x, spot.y); await page.waitForTimeout(1000);
+      await page.mouse.down(); await page.mouse.up();
+      await page.waitForFunction(() => window.__hit, null, { timeout: 3000 }).catch(() => {});
+      const hit = await page.evaluate(() => window.__hit);
+      await page.waitForFunction(() => location.pathname.startsWith('/song/'), null, { timeout: 3000 }).catch(() => {});
+      const path_ = await page.evaluate(() => location.pathname);
+      check(hit === 'title' && path_.startsWith('/song/'), `${label}: a click 1000 ms after resting at y ${outer}, the outermost row ${edge === 'above' ? 'by the top' : 'by the bottom'} on the title or Match, opens the song (${hit}, ${path_})`);
+    }
+    check(errs.length === 0, `${label}: no page errors ${errs.join(' | ')}`);
+  } finally { await context.close(); }
+}
+
 // A touch screen has no hover: Match always shows, in its place beside the title
 async function touch(browser, width) {
   const { context, page } = await fx.create(browser, width, { tracks, touch: true });
@@ -279,6 +316,8 @@ async function touch(browser, width) {
   try {
     for (const w of [1280, 1024, 768]) await desktop(browser, w);
     for (const w of [1280, 1024]) for (const m of ['reduce', 'no-preference']) await quickClick(browser, w, m);
+    // (the wait isn't motion: reduced motion once is enough here, the rest above tries it all)
+    for (const [w, sc, m] of [[1280, 1, 'no-preference'], [1280, 2, 'no-preference'], [1280, 2, 'reduce'], [1024, 1, 'no-preference'], [1024, 2, 'no-preference']]) await strips(browser, w, sc, m);
     await touch(browser, 1024);
   } finally { await browser.close(); }
   console.log(failed ? `${failed} FAIL` : 'all ok');
