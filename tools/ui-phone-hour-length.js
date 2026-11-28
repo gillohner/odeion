@@ -67,9 +67,13 @@ async function phone(browser, width, k, wide) {
       const mins = col(/^\d:\d\d$/); const tens = col(/^\d\d:\d\d$/);
       if (k === 1) check(mins.length === 1 && mins[0] === '38.0' && tens.length === 1 && Number(tens[0]) <= 39, `${at} ${name}: a length under an hour keeps its 38 px column (${mins.join(', ')}; 12:34 ${tens.join(', ')})`);
       else check(mins.length === 1 && Number(mins[0]) > 38, `${at} ${name}: under ten minutes, the length column is one width, grown with the text (${mins.join(', ')})`);
-      // the long-titled hour-long row keeps most of its title's room (a few px less, not half)
-      const mix = got[2]; const plain = got[0];
-      check(mix.title > plain.title - 30 * k && mix.title > 100, `${at} ${name}: the 1:02:34 row's title keeps its room (${mix.title.toFixed(0)} px; a 4:00 row's ${plain.title.toFixed(0)})`);
+      // the long-titled hour-long row keeps most of its title's room (a few px less, not half). (On a 320 px
+      // phone at 200 % a service album's 4:00 row has only ~104 px of title, so there it keeps three quarters.
+      // A "10:00:00" row there keeps about one letter: the length stays whole rather than cut, as such a
+      // length is rare)
+      const mix = got[2]; const plain = got[0]; const ten = got[4];
+      check(mix.title > plain.title - 30 * k && mix.title > (width <= 320 ? 0.75 * plain.title : 100), `${at} ${name}: the 1:02:34 row's title keeps its room (${mix.title.toFixed(0)} px; a 4:00 row's ${plain.title.toFixed(0)})`);
+      check(ten.title >= 0.5 * plain.title, `${at} ${name}: the 10:00:00 row's title keeps half a 4:00 row's room or more (${ten.title.toFixed(0)} px; a 4:00 row's ${plain.title.toFixed(0)})`);
       const fits = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && (() => { const m = document.querySelector('#main'); return !m || m.scrollWidth <= m.clientWidth; })());
       check(fits, `${at} ${name}: no sideways overflow`);
       await page.evaluate((list) => document.querySelector(`${list} .track`).scrollIntoView({ block: 'start', behavior: 'instant' }), list);
@@ -84,7 +88,7 @@ async function phone(browser, width, k, wide) {
   const zoomed = await chromium.launch({ args: ZOOM_ARGS });
   try {
     for (const w of [360, 412]) await phone(browser, w, 1);
-    for (const [w, k] of [[360, 1.5], [412, 2]]) await phone(zoomed, w, k);
+    for (const [w, k] of [[360, 1.5], [412, 2], [320, 2]]) await phone(zoomed, w, k);
     await phone(browser, 680, 1, true);
   } finally { await browser.close(); await zoomed.close(); }
   console.log(`\n${passed} ok, ${failed} failed`);

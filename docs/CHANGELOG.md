@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-28
+
+- **With high-contrast colours (Windows), the keyboard's focus ring on a starting Play or Shuffle is in the highlight colour, as on every other control.** While the music starts it was drawn in the button text colour instead. The checks now also tell the system's button colours from its text colours, and cover a song over an hour long on a 320 px phone with the largest font size.
+
 ### 2026-11-27
 
 - **The setup checks no longer fail after every check passed.** The browser check of setting a node up (Get started, grouping outputs, tokens) could end in an error once all its checks had passed: after "Copy and reload", the reloaded page's requests were still being changed by the test when it closed the browser window. Each window now stops changing requests before it closes. Tests only; the app is unchanged.
