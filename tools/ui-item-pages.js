@@ -24,7 +24,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ctx.on('console', (m) => { if (m.type() === 'error' && /Content Security Policy/i.test(m.text())) errors.push('CSP: ' + m.text()); });
   const p = await ctx.newPage();
   p.on('pageerror', (e) => errors.push('page error: ' + e.message));
-  const waitPage = async () => { await p.waitForSelector('#main #iabout, #main .notice', { timeout: 30000 }).catch(() => {}); await sleep(300); };
+  const waitPage = async () => { await p.waitForSelector('#main #iabout, #main .notice', { timeout: 30000, state: 'attached' }).catch(() => {}); await sleep(300); };
   // ---- feature matrix ----
   const pages = [
     ['library album', '/album/lib-1'],
@@ -136,7 +136,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     dp.on('pageerror', (e) => errors.push(`${path}: page error: ${e.message}`));
     let asked = false; dp.on('request', (r) => { if (new URL(r.url()).pathname.startsWith('/v1/item/')) asked = true; });
     await dp.goto(BASE + path);
-    await dp.waitForSelector('#main #iabout, #main .notice', { timeout: 30000 }).catch(() => {});
+    await dp.waitForSelector('#main #iabout, #main .notice', { timeout: 30000, state: 'attached' }).catch(() => {});
     const rendered = !!(await dp.$('#main #iabout, #main .notice'));
     const title = await dp.textContent('#main h1').catch(() => null);
     const stayed = new URL(dp.url()).pathname === path;

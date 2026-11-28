@@ -19,7 +19,7 @@ const pf = {order:{order:['library'],services:[{id:'library',name:'Your library'
 // songs, so those pages draw (the page reads its target, and artist/album are { name, id } links).
 // 'lib-<n>' is song, album or artist n (none there: 404, as the node says). Another id (mb-…,
 // deezer-…) is a catalogue page the fixture can't reach (a node would ask the service): a 404 in
-// the same shape, never a library page in its place. No About facts (the page says "Nothing more is known yet.").
+// the same shape, never a library page in its place. No About facts (the page has no About section, only its hidden place at the foot).
 // A test that needs another page passes its own answer in opts.fixtures.
 const cover = (t) => (t.album ? `/v1/library/albums/${t.album.id}/cover` : null);
 const itemRow = (t) => ({no:t.track_no??null,title:t.title,artist:(t.artists||[]).map((a)=>a.name).join(', ')||null,duration_ms:t.duration_ms??null,uri:null,track_id:t.id,page:null,image:cover(t),id:`lib-${t.id}`,artist_id:t.artists?.[0]?`lib-${t.artists[0].id}`:null,album:t.album?.title??null,album_id:t.album?`lib-${t.album.id}`:null,versions:[]});
