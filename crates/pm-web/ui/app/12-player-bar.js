@@ -439,8 +439,6 @@
   // (Enter or Space on the bar itself; on its title, artist or cover the key is that control's own.
   // A link has no Space of its own: there it opens Now playing, as it did)
   $('#np').onkeydown = (e) => { const inner = e.target !== e.currentTarget; if (inner && !(e.key === ' ' && e.target.closest('a'))) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleNowPlaying(); } };
-  // The quality sheet needs to know what is streaming (now_playing.format); without it (This browser,
-  // an older node) the label opens Now playing, where the signal path is
   // ---- the sound panel (owner, 2026-10-29): the pill in full ----
   // Zone and device, the source, the signal path, this zone's DSP with quick switches, volume.
   const qPanel = $('#qpanel');

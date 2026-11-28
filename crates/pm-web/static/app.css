@@ -2327,6 +2327,8 @@ body.listener .np-tags, body.listener [data-sel="tag"], body.listener [data-sel=
 .path.compact .path-row { grid-template-columns: 10px 92px 1fr; gap: var(--sp-2); padding: var(--sp-1h) var(--sp-2h); font-size: var(--fs-xs); }
 .qp-note { font-size: var(--fs-xs); color: var(--muted); padding: var(--sp-0h) var(--sp-2h) var(--sp-2); }
 .qp-dsp { padding: 0 var(--sp-1) var(--sp-1h); }
+/* A note in the DSP part (this browser, reading, an error) starts where the other parts' words do (10 px in), not 4 px further */
+.qp-dsp > .qp-note { padding-inline: var(--sp-1h); }
 .qp-row { display: flex; align-items: center; gap: var(--sp-2h); padding: var(--sp-1h) var(--sp-1h); font-size: var(--fs-sm); color: var(--fg); }
 .qp-row .grow { flex: 1; min-width: 0; }
 .qp-row .name { display: block; }
