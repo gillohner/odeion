@@ -134,9 +134,14 @@ const settledLyricsScroll = (page) => page.$eval('#nplyrics .lyric-lines', (box)
     // Line 38 of 40 cannot reach the usual third-of-panel band: following clamps at the end.
     check(resumed.scrollTop > manualTop && resumed.scrollTop === resumed.maxScroll && resumed.k === 37, `${at}: once the hold is over the panel follows again (at ${resumed.scrollTop} of ${resumed.maxScroll}, line ${resumed.k + 1})`);
     await page.screenshot({ path: path.join(SHOTS, `lyrics-resumed-${w}.png`) });
-    // A pause: the cover settles back and the play icon pops
-    state.send({ ...zone, transport: 'paused' }); await sleep(900);
-    const paused = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const big = ov.querySelector('.np-big'); const m = new DOMMatrix(getComputedStyle(big).transform); const b = ov.querySelector('.np-transport [data-npt="toggle"]'); return { t: ov.dataset.transport, scale: m.a, label: b.getAttribute('aria-label'), swapped: !!b.querySelector('.ic.swap') }; });
+    // A pause: the cover settles back and the play icon pops. The pop is caught as it starts: the app
+    // keeps its mark for 300 ms, so a later redraw (the queue's refresh, on a busy machine) may drop it
+    // before a fixed wait is over
+    state.send({ ...zone, transport: 'paused' });
+    const popped = await page.waitForFunction(() => { const b = document.querySelector('#nowplaying .np-transport [data-npt="toggle"]'); return b?.getAttribute('aria-label') === 'Play' && !!b.querySelector('.ic.swap'); }, null, { timeout: 3000 }).then(() => true, () => false);
+    await sleep(900);
+    const paused = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const big = ov.querySelector('.np-big'); const m = new DOMMatrix(getComputedStyle(big).transform); const b = ov.querySelector('.np-transport [data-npt="toggle"]'); return { t: ov.dataset.transport, scale: m.a, label: b.getAttribute('aria-label') }; });
+    paused.swapped = popped;
     check(paused.t === 'paused' && paused.scale < 0.99 && paused.label === 'Play' && paused.swapped, `${at}: a pause settles the cover back (×${paused.scale.toFixed(2)}) and swaps the icon to Play with a pop`);
     // Under the finger the fill is where the finger is (no glide), and letting go without a change lets go of the drag
     const drag = await page.evaluate(() => { const sk = document.querySelector('#npseek'); sk.dataset.dragging = '1'; const t = getComputedStyle(sk).transitionProperty; sk.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); const bar = document.querySelector('#seek'); bar.dataset.dragging = '1'; bar.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); return new Promise((r) => setTimeout(() => r({ t, cleared: !sk.dataset.dragging, barCleared: !bar.dataset.dragging }), 20)); });
