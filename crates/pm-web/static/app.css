@@ -2559,6 +2559,10 @@ html:not([data-shell="desktop"]) .main:has(> .libnav) .set-nav { top: 46px; }
 html:not([data-shell="desktop"]) .main:has(> .libnav) { scroll-padding-top: calc(var(--libnav-h, 60px) + 8px); }
 /* Dense lists in the desktop layout (tablets too): shorter rows, smaller covers */
 :where(html[data-dense]:not([data-shell="phone"])) .track { height: 42px; contain-intrinsic-size: auto 42px; }
+/* (and grow with Android's font size, as a normal row does, or on a tablet with a larger font the
+   artist line ran under the next row: the title and artist lines take about 1.86lh + 2 px, lh follows text
+   zoom; 42 px at 100 %, the 42 px above stay for a WebView without lh) */
+:where(html[data-dense]:not([data-shell="phone"])) .track { height: max(42px, calc(1.86lh + 4px)); contain-intrinsic-size: auto max(42px, calc(1.86lh + 4px)); }
 :where(html[data-dense]:not([data-shell="phone"])) .list-row { padding-top: var(--sp-2); padding-bottom: var(--sp-2); }
 :where(html[data-dense]:not([data-shell="phone"])) .grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: var(--sp-3h) var(--sp-3); }
 
